@@ -1,0 +1,102 @@
+# Adversarial Code Review Service
+
+Enforces cross-model review of agent-built PRs: the model that builds the code never reviews it.
+
+| Builder | Reviewer |
+|---|---|
+| `[claude-code]` or `[clio-agent]` | Codex / GPT-4o (`codex-reviewer-lacey`) |
+| `[codex]` | Claude Sonnet (`claude-reviewer-lacey`) |
+| No tag | Codex fallback |
+
+## Setup
+
+### 1. Install dependencies
+
+```bash
+npm install
+```
+
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+# Fill in all values
+```
+
+Required env vars:
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_TOKEN` | Read PRs from watched repos |
+| `GH_CODEX_REVIEWER_TOKEN` | PAT for `codex-reviewer-lacey` bot |
+| `GH_CLAUDE_REVIEWER_TOKEN` | PAT for `claude-reviewer-lacey` bot |
+| `OPENAI_API_KEY` | GPT-4o reviewer (codex path) |
+| `ANTHROPIC_API_KEY` | Claude Sonnet reviewer (claude path) |
+| `LINEAR_API_KEY` | Ticket status updates |
+
+### 3. GitHub bot accounts
+
+Create two GitHub accounts and add them to the `laceyenterprises` org with write access to covered repos:
+
+- `codex-reviewer-lacey` — posts reviews on Claude/Clio PRs
+- `claude-reviewer-lacey` — posts reviews on Codex PRs
+
+Generate a PAT for each with `pull_requests: write` scope. Store tokens in 1Password (Cliovault).
+
+### 4. Configure watched repos
+
+Edit `config.json`:
+
+```json
+{
+  "repos": ["laceyenterprises/clio"],
+  "pollIntervalMs": 300000,
+  "fallbackReviewer": "codex",
+  "linear": {
+    "teamKey": "LAC"
+  }
+}
+```
+
+## Usage
+
+### Start the watcher (polls every 5 minutes)
+
+```bash
+npm start
+```
+
+### Run a one-shot review manually
+
+```bash
+node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerModel":"codex","botTokenEnv":"GH_CODEX_REVIEWER_TOKEN","linearTicketId":"LAC-42"}'
+```
+
+## How it works
+
+1. **Watcher** polls configured repos every `pollIntervalMs` ms
+2. Detects PR author tag from PR title (`[claude-code]`, `[codex]`, `[clio-agent]`)
+3. Skips PRs with no tag (unless `fallbackReviewer` is set)
+4. Skips PRs already reviewed (tracked in `data/reviews.db`)
+5. Sets Linear ticket to **In Review** state
+6. Spawns **Reviewer Agent** as a child process
+7. Reviewer fetches diff via `gh pr diff`, sends to AI model with adversarial prompt
+8. Review is posted as a GitHub PR comment by the appropriate bot account
+9. Linear ticket updated to **Review Complete** (Done)
+10. If review contains critical/security issues → comment added to Linear ticket flagging Paul
+
+## PR Title Convention
+
+All agent-built PRs must include a tag at the start of the title:
+
+```
+[claude-code] feat: add payment webhook handler (LAC-42)
+[codex] fix: resolve null pointer in auth middleware (LAC-17)
+[clio-agent] chore: update dependency versions
+```
+
+See `AUTHOR_TAGGING.md` for the full convention.
+
+## Data
+
+Reviewed PRs are tracked in `data/reviews.db` (SQLite). This prevents duplicate reviews across watcher restarts.

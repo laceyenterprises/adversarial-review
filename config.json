@@ -1,0 +1,8 @@
+{
+  "repos": ["laceyenterprises/clio"],
+  "pollIntervalMs": 300000,
+  "fallbackReviewer": "codex",
+  "linear": {
+    "teamKey": "LAC"
+  }
+}

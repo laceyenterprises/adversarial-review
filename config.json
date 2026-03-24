@@ -1,8 +1,17 @@
 {
-  "repos": ["laceyenterprises/clio"],
+  "org": "laceyenterprises",
+  "excludeRepos": [],
   "pollIntervalMs": 300000,
+  "repoRefreshIntervalMs": 3600000,
   "fallbackReviewer": "codex",
   "linear": {
     "teamKey": "LAC"
-  }
+  },
+  "linearStates": {
+    "inReview": "In Review",
+    "done": "Done",
+    "cancelled": "Cancelled"
+  },
+  "prltHq": "/Users/placey/prlt-hq/Laceyenterprises-hq",
+  "prltBin": "/opt/homebrew/bin/prlt"
 }

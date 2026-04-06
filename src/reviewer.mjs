@@ -8,12 +8,91 @@
  *
  * Args JSON shape:
  *   { repo, prNumber, reviewerModel, botTokenEnv, linearTicketId }
+ *
+ * ── Auth Policy (NON-NEGOTIABLE) ────────────────────────────────────────────
+ * Claude reviews MUST use OAuth (claude CLI), never ANTHROPIC_API_KEY.
+ * Codex reviews MUST use OAuth (codex CLI), never OPENAI_API_KEY.
+ * If OAuth credentials are missing or expired → STOP and alert Paul via Clio.
+ * API key fallback is intentionally NOT implemented here.
+ * ────────────────────────────────────────────────────────────────────────────
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+
+// ── CLI paths ────────────────────────────────────────────────────────────────
+
+// Claude Code CLI — runs as the current user; reads OAuth from ~/.claude/.credentials.json
+// Must NOT have ANTHROPIC_API_KEY in env (would override OAuth)
+const CLAUDE_CLI = '/opt/homebrew/bin/claude';
+
+// Codex CLI — runs as placey; reads OAuth from ~/.codex/auth.json
+const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/installation/bin/codex';
+
+// ── OAuth credential checks ──────────────────────────────────────────────────
+
+/**
+ * Verify Claude OAuth credentials exist and are not expired.
+ * Claude Code stores creds in ~/.claude/.credentials.json (host) or
+ * the claude-credentials Docker volume (containers).
+ * Throws with a descriptive message if creds are missing or expired.
+ */
+function assertClaudeOAuth() {
+  const credPath = join(homedir(), '.claude', '.credentials.json');
+  if (!existsSync(credPath)) {
+    throw new OAuthError('claude', `~/.claude/.credentials.json not found — run 'claude' and log in`);
+  }
+  let creds;
+  try {
+    creds = JSON.parse(readFileSync(credPath, 'utf8'));
+  } catch (err) {
+    throw new OAuthError('claude', `Cannot parse ~/.claude/.credentials.json: ${err.message}`);
+  }
+  const oauth = creds?.claudeAiOauth;
+  if (!oauth?.accessToken) {
+    throw new OAuthError('claude', 'No OAuth access token in ~/.claude/.credentials.json');
+  }
+  if (oauth.expiresAt && Date.now() > oauth.expiresAt) {
+    throw new OAuthError('claude', `OAuth token expired at ${new Date(oauth.expiresAt).toISOString()} — run 'claude' to refresh`);
+  }
+  if (!existsSync(CLAUDE_CLI)) {
+    throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
+  }
+}
+
+/**
+ * Verify Codex OAuth credentials exist.
+ * Codex stores auth in ~/.codex/auth.json (owned by placey).
+ * We can't read it as airlock, so we do a lightweight CLI probe instead.
+ */
+async function assertCodexOAuth() {
+  if (!existsSync(CODEX_CLI)) {
+    throw new OAuthError('codex', `codex CLI not found at ${CODEX_CLI}`);
+  }
+  // Probe: run `codex --version` as placey — if it exits cleanly, CLI is functional
+  // A missing/expired OAuth token won't show up here but will fail at inference time
+  try {
+    await execFileAsync(CODEX_CLI, ['--version'], { timeout: 10_000 });
+  } catch (err) {
+    throw new OAuthError('codex', `codex CLI failed version probe: ${err.message}`);
+  }
+}
+
+/**
+ * Custom error class for OAuth failures — triggers Clio alert in main().
+ */
+class OAuthError extends Error {
+  constructor(model, reason) {
+    super(`[OAuth] ${model} credentials unavailable: ${reason}`);
+    this.model = model;
+    this.isOAuthError = true;
+  }
+}
 
 // ── Adversarial prompt (NON-NEGOTIABLE) ──────────────────────────────────────
 
@@ -51,46 +130,88 @@ async function fetchPRDiff(repo, prNumber) {
   return stdout;
 }
 
-// ── AI review ───────────────────────────────────────────────────────────────
+// ── AI review via CLI (OAuth only) ──────────────────────────────────────────
 
+/**
+ * Run adversarial review using Claude Code CLI (OAuth).
+ * ANTHROPIC_API_KEY is explicitly removed from the env so the CLI
+ * uses ~/.claude/.credentials.json OAuth tokens only.
+ */
 async function reviewWithClaude(diff) {
-  const Anthropic = (await import('@anthropic-ai/sdk')).default;
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  assertClaudeOAuth();
 
-  const message = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
-    messages: [
+  const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+
+  // Strip API key from env — Claude CLI falls back to OAuth when it's absent
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+
+  let stdout, stderr;
+  try {
+    ({ stdout, stderr } = await execFileAsync(
+      CLAUDE_CLI,
+      ['--print', '--permission-mode', 'bypassPermissions', prompt],
       {
-        role: 'user',
-        content: `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\n\`\`\``,
-      },
-    ],
-  });
+        env,
+        timeout: 5 * 60 * 1000,
+        maxBuffer: 10 * 1024 * 1024,
+      }
+    ));
+  } catch (err) {
+    // Detect OAuth expiry in error output
+    const msg = (err.message || '') + (err.stderr || '');
+    if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login')) {
+      throw new OAuthError('claude', `CLI returned auth error: ${msg.substring(0, 200)}`);
+    }
+    throw err;
+  }
 
-  return message.content[0].text;
+  if (!stdout?.trim()) {
+    const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
+    throw new Error(`Claude CLI returned empty output.${hint}`);
+  }
+
+  return stdout.trim();
 }
 
+/**
+ * Run adversarial review using Codex CLI (OAuth).
+ * OPENAI_API_KEY is explicitly removed from the env so Codex
+ * uses its stored OAuth credentials only.
+ */
 async function reviewWithCodex(diff) {
-  const OpenAI = (await import('openai')).default;
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  await assertCodexOAuth();
 
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o',
-    max_tokens: 4096,
-    messages: [
-      {
-        role: 'system',
-        content: ADVERSARIAL_PROMPT,
-      },
-      {
-        role: 'user',
-        content: `Here is the PR diff to review:\n\n\`\`\`diff\n${diff}\n\`\`\``,
-      },
-    ],
-  });
+  const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 
-  return response.choices[0].message.content;
+  const env = { ...process.env };
+  delete env.OPENAI_API_KEY;
+
+  let stdout, stderr;
+  try {
+    ({ stdout, stderr } = await execFileAsync(
+      CODEX_CLI,
+      ['--approval-policy', 'never', '--quiet', prompt],
+      {
+        env,
+        timeout: 5 * 60 * 1000,
+        maxBuffer: 10 * 1024 * 1024,
+      }
+    ));
+  } catch (err) {
+    const msg = (err.message || '') + (err.stderr || '');
+    if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login')) {
+      throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
+    }
+    throw err;
+  }
+
+  if (!stdout?.trim()) {
+    const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
+    throw new Error(`Codex CLI returned empty output.${hint}`);
+  }
+
+  return stdout.trim();
 }
 
 // ── GitHub review posting ────────────────────────────────────────────────────
@@ -111,6 +232,36 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv) {
   );
 }
 
+// ── Clio alert (OAuth failure) ───────────────────────────────────────────────
+
+/**
+ * Alert Paul via Clio when OAuth credentials are unavailable.
+ * Uses the OpenClaw wake hook to deliver a Telegram message.
+ */
+async function alertClioOAuthFailure(model, repo, prNumber, reason) {
+  const msg = `🔐 Adversarial reviewer STOPPED — ${model} OAuth credentials unavailable.\n\nRepo: ${repo} PR #${prNumber}\nReason: ${reason}\n\nAction needed: re-authenticate ${model} (run the CLI and log in). PR review is paused until credentials are restored.`;
+
+  console.error(`[reviewer] ALERT: ${msg}`);
+
+  // Try to wake Clio via the OpenClaw hook
+  try {
+    await execFileAsync(
+      'curl',
+      [
+        '-s', '-X', 'POST',
+        'http://127.0.0.1:8787/hooks/wake',
+        '-H', 'Content-Type: application/json',
+        '-d', JSON.stringify({ message: msg }),
+      ],
+      { timeout: 10_000 }
+    );
+    console.log('[reviewer] Clio alert sent via wake hook');
+  } catch (err) {
+    console.error('[reviewer] Failed to send Clio alert:', err.message);
+    // Alert is best-effort — the error is already in watcher logs
+  }
+}
+
 // ── Linear integration (LAC-13) ──────────────────────────────────────────────
 
 async function updateLinearTicket(ticketId, { reviewComplete, critical, reviewSummary }) {
@@ -128,7 +279,6 @@ async function updateLinearTicket(ticketId, { reviewComplete, critical, reviewSu
   }
 
   if (reviewComplete) {
-    // Transition to "Done" / "Review Complete" state
     const team = await issue.team;
     const states = await team.states();
     const doneState = states.nodes.find((s) => {
@@ -141,7 +291,6 @@ async function updateLinearTicket(ticketId, { reviewComplete, critical, reviewSu
     }
   }
 
-  // Flag critical issues for Paul
   if (critical) {
     const flagComment =
       `⚠️ **Adversarial review flagged critical issues** — Paul, please review.\n\n` +
@@ -177,7 +326,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`[reviewer] Starting review: ${repo}#${prNumber} model=${reviewerModel}`);
+  console.log(`[reviewer] Starting review: ${repo}#${prNumber} model=${reviewerModel} (OAuth-only mode)`);
 
   // 1. Fetch diff
   let diff;
@@ -193,17 +342,21 @@ async function main() {
     process.exit(0);
   }
 
-  // 2. Run adversarial review
+  // 2. Run adversarial review (OAuth only — no API key fallback)
   let reviewText;
   try {
     if (reviewerModel === 'claude') {
-      if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
       reviewText = await reviewWithClaude(diff);
     } else {
-      if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not set');
       reviewText = await reviewWithCodex(diff);
     }
   } catch (err) {
+    if (err.isOAuthError) {
+      // OAuth failure — stop work and alert Paul
+      await alertClioOAuthFailure(reviewerModel, repo, prNumber, err.message);
+      console.error(`[reviewer] Stopped: OAuth credentials unavailable for ${reviewerModel}`);
+      process.exit(2); // exit code 2 = auth failure (distinct from other errors)
+    }
     console.error(`[reviewer] AI review failed for ${repo}#${prNumber}:`, err.message);
     process.exit(1);
   }
@@ -214,7 +367,7 @@ async function main() {
   const header =
     reviewerModel === 'claude'
       ? '## Adversarial Review — Claude (claude-reviewer-lacey)\n\n'
-      : '## Adversarial Review — Codex/GPT-4o (codex-reviewer-lacey)\n\n';
+      : '## Adversarial Review — Codex (codex-reviewer-lacey)\n\n';
   const fullComment = header + reviewText;
 
   try {

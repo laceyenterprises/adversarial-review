@@ -1,3 +1,11 @@
+---
+delegation: full
+confidence: 0.9
+last_verified: 2026-04-05
+influence_weight: high
+tags: [adversarial-review-hq, spec]
+staleness_window: 60d
+---
 \# Adversarial Code Review System — Spec
 
 \#\# Problem

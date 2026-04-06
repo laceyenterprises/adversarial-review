@@ -1,3 +1,11 @@
+---
+delegation: full
+confidence: 0.9
+last_verified: 2026-04-05
+influence_weight: medium
+tags: [adversarial-review-hq, documentation, reference]
+staleness_window: 90d
+---
 # Adversarial Code Review Service
 
 Enforces cross-model review of agent-built PRs: the model that builds the code never reviews it.

@@ -1,3 +1,11 @@
+---
+delegation: full
+confidence: 0.9
+last_verified: 2026-04-05
+influence_weight: medium
+tags: [adversarial-review-hq]
+staleness_window: 90d
+---
 # Author Tagging Convention — Agent-Built PRs
 
 All PRs built by AI coding agents MUST include an author tag in the PR title.

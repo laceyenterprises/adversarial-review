@@ -17,19 +17,21 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 
-import { execFile, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
 // ── CLI paths ────────────────────────────────────────────────────────────────
 
-// Claude Code CLI — runs as the current user; reads OAuth from ~/.claude/.credentials.json
+// Claude Code CLI — runs as the current user.
+// In this stack, live OAuth truth for Anthropic is the same Keychain entry
+// the token broker uses: service "Claude Code-credentials", account "Claude Key".
 // Must NOT have ANTHROPIC_API_KEY in env (would override OAuth)
 const CLAUDE_CLI = '/opt/homebrew/bin/claude';
+const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const CLAUDE_KEYCHAIN_ACCOUNT = 'Claude Key';
 
 // Codex CLI — runs as placey; reads OAuth from ~/.codex/auth.json
 const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/installation/bin/codex';
@@ -37,31 +39,62 @@ const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/install
 // ── OAuth credential checks ──────────────────────────────────────────────────
 
 /**
- * Verify Claude OAuth credentials exist and are not expired.
- * Claude Code stores creds in ~/.claude/.credentials.json (host) or
- * the claude-credentials Docker volume (containers).
- * Throws with a descriptive message if creds are missing or expired.
+ * Verify Claude OAuth credentials exist and are usable.
+ *
+ * IMPORTANT: In this stack, the durable auth source of truth is NOT a
+ * host-side ~/.claude/.credentials.json file. The live Anthropic OAuth path
+ * used by the broker reads macOS Keychain:
+ *   service = "Claude Code-credentials"
+ *   account = "Claude Key"
+ *
+ * We mirror that here so the reviewer matches production auth behavior.
  */
-function assertClaudeOAuth() {
-  const credPath = join(homedir(), '.claude', '.credentials.json');
-  if (!existsSync(credPath)) {
-    throw new OAuthError('claude', `~/.claude/.credentials.json not found — run 'claude' and log in`);
-  }
-  let creds;
-  try {
-    creds = JSON.parse(readFileSync(credPath, 'utf8'));
-  } catch (err) {
-    throw new OAuthError('claude', `Cannot parse ~/.claude/.credentials.json: ${err.message}`);
-  }
-  const oauth = creds?.claudeAiOauth;
-  if (!oauth?.accessToken) {
-    throw new OAuthError('claude', 'No OAuth access token in ~/.claude/.credentials.json');
-  }
-  if (oauth.expiresAt && Date.now() > oauth.expiresAt) {
-    throw new OAuthError('claude', `OAuth token expired at ${new Date(oauth.expiresAt).toISOString()} — run 'claude' to refresh`);
-  }
+async function assertClaudeOAuth() {
   if (!existsSync(CLAUDE_CLI)) {
     throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
+  }
+
+  let secretJson;
+  try {
+    const { stdout } = await execFileAsync(
+      'security',
+      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-a', CLAUDE_KEYCHAIN_ACCOUNT, '-w'],
+      { timeout: 10_000 }
+    );
+    secretJson = stdout?.trim();
+  } catch (err) {
+    throw new OAuthError(
+      'claude',
+      `Keychain entry ${CLAUDE_KEYCHAIN_SERVICE}/${CLAUDE_KEYCHAIN_ACCOUNT} not found or unreadable — run 'claude' as airlock and log in`
+    );
+  }
+
+  let creds;
+  try {
+    creds = JSON.parse(secretJson);
+  } catch (err) {
+    throw new OAuthError(
+      'claude',
+      `Cannot parse Keychain token JSON from ${CLAUDE_KEYCHAIN_SERVICE}/${CLAUDE_KEYCHAIN_ACCOUNT}: ${err.message}`
+    );
+  }
+
+  if (!creds?.accessToken) {
+    throw new OAuthError(
+      'claude',
+      `No accessToken found in Keychain entry ${CLAUDE_KEYCHAIN_SERVICE}/${CLAUDE_KEYCHAIN_ACCOUNT}`
+    );
+  }
+
+  const expiresAt = creds.expiresAt ?? creds.expires_at;
+  if (expiresAt) {
+    const expiryMs = typeof expiresAt === 'number' ? expiresAt : Date.parse(expiresAt);
+    if (Number.isFinite(expiryMs) && Date.now() > expiryMs) {
+      throw new OAuthError(
+        'claude',
+        `OAuth token expired at ${new Date(expiryMs).toISOString()} — run 'claude' as airlock to refresh`
+      );
+    }
   }
 }
 
@@ -135,10 +168,11 @@ async function fetchPRDiff(repo, prNumber) {
 /**
  * Run adversarial review using Claude Code CLI (OAuth).
  * ANTHROPIC_API_KEY is explicitly removed from the env so the CLI
- * uses ~/.claude/.credentials.json OAuth tokens only.
+ * uses its native OAuth path only. Preflight auth validation is aligned with
+ * the broker/Keychain path used by the live stack.
  */
 async function reviewWithClaude(diff) {
-  assertClaudeOAuth();
+  await assertClaudeOAuth();
 
   const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 

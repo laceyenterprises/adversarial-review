@@ -107,12 +107,24 @@ async function assertCodexOAuth() {
   if (!existsSync(CODEX_CLI)) {
     throw new OAuthError('codex', `codex CLI not found at ${CODEX_CLI}`);
   }
-  // Probe: run `codex --version` as placey — if it exits cleanly, CLI is functional
-  // A missing/expired OAuth token won't show up here but will fail at inference time
+
   try {
-    await execFileAsync(CODEX_CLI, ['--version'], { timeout: 10_000 });
+    const { stdout, stderr } = await execFileAsync(
+      CODEX_CLI,
+      ['login', 'status'],
+      { timeout: 10_000 }
+    );
+    const text = `${stdout || ''}\n${stderr || ''}`.toLowerCase();
+    if (text.includes('not logged in') || text.includes('logged out') || text.includes('login required')) {
+      throw new OAuthError('codex', 'Codex CLI reports not logged in');
+    }
   } catch (err) {
-    throw new OAuthError('codex', `codex CLI failed version probe: ${err.message}`);
+    if (err?.isOAuthError) throw err;
+    const msg = (err.message || '') + (err.stderr || '') + (err.stdout || '');
+    if (msg.toLowerCase().includes('not logged in') || msg.toLowerCase().includes('login required')) {
+      throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
+    }
+    throw new OAuthError('codex', `codex CLI login-status probe failed: ${msg.substring(0, 200)}`);
   }
 }
 
@@ -225,7 +237,7 @@ async function reviewWithCodex(diff) {
   try {
     ({ stdout, stderr } = await execFileAsync(
       CODEX_CLI,
-      ['--approval-policy', 'never', '--quiet', prompt],
+      ['exec', '-a', 'never', '--sandbox', 'read-only', prompt],
       {
         env,
         timeout: 5 * 60 * 1000,
@@ -233,8 +245,8 @@ async function reviewWithCodex(diff) {
       }
     ));
   } catch (err) {
-    const msg = (err.message || '') + (err.stderr || '');
-    if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login')) {
+    const msg = (err.message || '') + (err.stderr || '') + (err.stdout || '');
+    if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login') || msg.includes('not logged in')) {
       throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
     }
     throw err;

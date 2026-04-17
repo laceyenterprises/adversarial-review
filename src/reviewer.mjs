@@ -26,12 +26,9 @@ const execFileAsync = promisify(execFile);
 // ── CLI paths ────────────────────────────────────────────────────────────────
 
 // Claude Code CLI — runs as the current user.
-// In this stack, live OAuth truth for Anthropic is the same Keychain entry
-// the token broker uses: service "Claude Code-credentials", account "Claude Key".
-// Must NOT have ANTHROPIC_API_KEY in env (would override OAuth)
+// Must NOT have ANTHROPIC_API_KEY in env when validating or invoking,
+// otherwise the CLI may report API-key auth instead of its native login state.
 const CLAUDE_CLI = '/opt/homebrew/bin/claude';
-const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
-const CLAUDE_KEYCHAIN_ACCOUNT = 'Claude Key';
 
 // Codex CLI — runs as placey; reads OAuth from ~/.codex/auth.json
 const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/installation/bin/codex';
@@ -39,62 +36,40 @@ const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/install
 // ── OAuth credential checks ──────────────────────────────────────────────────
 
 /**
- * Verify Claude OAuth credentials exist and are usable.
+ * Verify Claude auth is available through the CLI's native login state.
  *
- * IMPORTANT: In this stack, the durable auth source of truth is NOT a
- * host-side ~/.claude/.credentials.json file. The live Anthropic OAuth path
- * used by the broker reads macOS Keychain:
- *   service = "Claude Code-credentials"
- *   account = "Claude Key"
- *
- * We mirror that here so the reviewer matches production auth behavior.
+ * IMPORTANT: strip ANTHROPIC_API_KEY from env before probing, otherwise
+ * `claude auth status` may report API-key mode and mask the real login state.
  */
 async function assertClaudeOAuth() {
   if (!existsSync(CLAUDE_CLI)) {
     throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
   }
 
-  let secretJson;
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+
+  let stdout = '';
+  let stderr = '';
   try {
-    const { stdout } = await execFileAsync(
-      'security',
-      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-a', CLAUDE_KEYCHAIN_ACCOUNT, '-w'],
-      { timeout: 10_000 }
-    );
-    secretJson = stdout?.trim();
+    ({ stdout, stderr } = await execFileAsync(
+      CLAUDE_CLI,
+      ['auth', 'status'],
+      { env, timeout: 10_000 }
+    ));
   } catch (err) {
-    throw new OAuthError(
-      'claude',
-      `Keychain entry ${CLAUDE_KEYCHAIN_SERVICE}/${CLAUDE_KEYCHAIN_ACCOUNT} not found or unreadable — run 'claude' as airlock and log in`
-    );
-  }
-
-  let creds;
-  try {
-    creds = JSON.parse(secretJson);
-  } catch (err) {
-    throw new OAuthError(
-      'claude',
-      `Cannot parse Keychain token JSON from ${CLAUDE_KEYCHAIN_SERVICE}/${CLAUDE_KEYCHAIN_ACCOUNT}: ${err.message}`
-    );
-  }
-
-  if (!creds?.accessToken) {
-    throw new OAuthError(
-      'claude',
-      `No accessToken found in Keychain entry ${CLAUDE_KEYCHAIN_SERVICE}/${CLAUDE_KEYCHAIN_ACCOUNT}`
-    );
-  }
-
-  const expiresAt = creds.expiresAt ?? creds.expires_at;
-  if (expiresAt) {
-    const expiryMs = typeof expiresAt === 'number' ? expiresAt : Date.parse(expiresAt);
-    if (Number.isFinite(expiryMs) && Date.now() > expiryMs) {
-      throw new OAuthError(
-        'claude',
-        `OAuth token expired at ${new Date(expiryMs).toISOString()} — run 'claude' as airlock to refresh`
-      );
+    stdout = err.stdout || '';
+    stderr = err.stderr || '';
+    const msg = `${err.message || ''}\n${stdout}\n${stderr}`.toLowerCase();
+    if (msg.includes('not logged in') || msg.includes('login required') || msg.includes('unauthorized')) {
+      throw new OAuthError('claude', `Claude CLI reports not logged in: ${(stdout || stderr || err.message).trim()}`);
     }
+    throw new OAuthError('claude', `Claude auth probe failed: ${(stdout || stderr || err.message).trim()}`);
+  }
+
+  const text = `${stdout || ''}\n${stderr || ''}`.toLowerCase();
+  if (text.includes('"loggedin": false') || text.includes('not logged in') || text.includes('login required')) {
+    throw new OAuthError('claude', `Claude CLI reports not logged in: ${(stdout || stderr).trim()}`);
   }
 }
 

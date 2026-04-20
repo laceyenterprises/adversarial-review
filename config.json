@@ -3,7 +3,6 @@
   "excludeRepos": [],
   "pollIntervalMs": 300000,
   "repoRefreshIntervalMs": 3600000,
-  "fallbackReviewer": "codex",
   "linear": {
     "teamKey": "LAC"
   },

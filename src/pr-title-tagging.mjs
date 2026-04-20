@@ -12,7 +12,8 @@ const TAG_ALIASES = {
   'clio-agent': 'clio-agent',
 };
 
-const PREFIX_PATTERN = /^\[(codex|claude-code|clio-agent)\]\s*/i;
+const KNOWN_TAGS = Object.keys(TAG_PREFIXES);
+const PREFIX_PATTERN = new RegExp(`^\\[(${KNOWN_TAGS.join('|')})\\]\\s*`, 'i');
 
 function normalizeTag(tagInput) {
   if (typeof tagInput !== 'string') return null;
@@ -54,6 +55,7 @@ export {
   buildTaggedTitle,
   getPrefixForTag,
   hasKnownPrefix,
+  KNOWN_TAGS,
   normalizeTag,
   TAG_ALIASES,
   TAG_PREFIXES,

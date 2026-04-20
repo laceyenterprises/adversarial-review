@@ -11,6 +11,10 @@ import { promisify } from 'node:util';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import {
+  routePR,
+} from './watcher-title-guardrails.mjs';
+import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -62,33 +66,6 @@ const stmtMarkClosed = db.prepare(
 );
 
 // ── Author tag detection ─────────────────────────────────────────────────────
-
-const TAG_PATTERN = /^\[(claude-code|codex|clio-agent)\]/i;
-
-/**
- * Returns { tag, reviewerModel, botTokenEnv } or null if skipped.
- */
-function routePR(prTitle) {
-  const match = prTitle.match(TAG_PATTERN);
-  const tag = match ? match[1].toLowerCase() : null;
-
-  if (!tag && !config.fallbackReviewer) return null;
-
-  if (tag === 'codex') {
-    return {
-      tag,
-      reviewerModel: 'claude',
-      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-    };
-  }
-
-  // [claude-code], [clio-agent], or no tag (fallback → codex)
-  return {
-    tag: tag ?? 'fallback',
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-  };
-}
 
 // ── Linear ticket extraction ─────────────────────────────────────────────────
 
@@ -317,7 +294,23 @@ async function pollOnce(octokit) {
 
       const route = routePR(prTitle);
       if (!route) {
-        console.log(`[watcher] Skipping ${repoPath}#${prNumber} — no agent tag`);
+        await signalMalformedTitleFailure(octokit, {
+          repoPath,
+          owner,
+          repo,
+          prNumber,
+          prTitle,
+        });
+
+        // Malformed titles are terminal in watcher state to avoid ambiguous retitle retries.
+        stmtMarkReviewed.run(
+          repoPath,
+          prNumber,
+          new Date().toISOString(),
+          'malformed-title',
+          'malformed',
+          null
+        );
         continue;
       }
 
@@ -354,18 +347,36 @@ function requireEnv(name) {
   }
 }
 
-requireEnv('GITHUB_TOKEN');
+function main() {
+  requireEnv('GITHUB_TOKEN');
 
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-const intervalMs = config.pollIntervalMs ?? 300_000;
+  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+  const intervalMs = config.pollIntervalMs ?? 300_000;
 
-const watchMode = config.org
-  ? `org: ${config.org} (dynamic discovery, refresh every ${(config.repoRefreshIntervalMs ?? 3_600_000) / 60_000}m)`
-  : `repos: ${activeRepos.join(', ')}`;
-console.log(`[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s`);
+  if (Object.prototype.hasOwnProperty.call(config, 'fallbackReviewer')) {
+    console.error(
+      '[watcher] config.fallbackReviewer is no longer supported. Remove it from config.json; malformed titles now fail loud and are never auto-routed.'
+    );
+    process.exit(1);
+  }
 
-pollOnce(octokit).catch((err) => console.error('[watcher] Poll error:', err));
+  const watchMode = config.org
+    ? `org: ${config.org} (dynamic discovery, refresh every ${(config.repoRefreshIntervalMs ?? 3_600_000) / 60_000}m)`
+    : `repos: ${activeRepos.join(', ')}`;
+  console.log(`[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s`);
 
-setInterval(() => {
   pollOnce(octokit).catch((err) => console.error('[watcher] Poll error:', err));
-}, intervalMs);
+
+  setInterval(() => {
+    pollOnce(octokit).catch((err) => console.error('[watcher] Poll error:', err));
+  }, intervalMs);
+}
+
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  main();
+}
+
+export {
+  pollOnce,
+};

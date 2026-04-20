@@ -1,0 +1,25 @@
+name: PR Title Prefix Validation
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - edited
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-pr-title-prefix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate adversarial-review title prefix
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node src/pr-title-validate.mjs "$PR_TITLE"

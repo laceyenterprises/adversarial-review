@@ -17,8 +17,9 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 
-import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -30,8 +31,12 @@ const execFileAsync = promisify(execFile);
 // otherwise the CLI may report API-key auth instead of its native login state.
 const CLAUDE_CLI = '/opt/homebrew/bin/claude';
 
-// Codex CLI — runs as placey; reads OAuth from ~/.codex/auth.json
+// Codex CLI binary lives under placey, but the reviewer itself runs as airlock.
 const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/installation/bin/codex';
+
+// Codex OAuth tokens copied from placey to airlock's ~/.codex/auth.json.
+// The reviewer runs as airlock and uses airlock's HOME directly.
+// OPENAI_API_KEY is stripped from env so Codex cannot fall back to API-key auth.
 
 // ── OAuth credential checks ──────────────────────────────────────────────────
 
@@ -74,24 +79,49 @@ async function assertClaudeOAuth() {
 }
 
 /**
- * Verify Codex OAuth credentials exist.
- * Codex stores auth in ~/.codex/auth.json (owned by placey).
- * We can't read it as airlock, so we do a lightweight CLI probe instead.
+ * Verify airlock's Codex OAuth is set up (auth.json exists and is readable).
  */
+function assertCodexAuthReadable() {
+  const authPath = join(process.env.HOME || '/Users/airlock', '.codex', 'auth.json');
+  if (!existsSync(authPath)) {
+    throw new OAuthError('codex', `OAuth auth.json missing: ${authPath}`);
+  }
+  try {
+    readFileSync(authPath, 'utf8');
+  } catch (err) {
+    throw new OAuthError('codex', `cannot read ${authPath}: ${err.message}`);
+  }
+}
+
 async function assertCodexOAuth() {
   if (!existsSync(CODEX_CLI)) {
     throw new OAuthError('codex', `codex CLI not found at ${CODEX_CLI}`);
   }
 
+  assertCodexAuthReadable();
+
+  // Run login status with OPENAI_API_KEY stripped so Codex cannot fall back to API-key auth.
+  const env = {
+    ...process.env,
+    PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+  };
+  delete env.OPENAI_API_KEY;
+
   try {
     const { stdout, stderr } = await execFileAsync(
       CODEX_CLI,
       ['login', 'status'],
-      { timeout: 10_000 }
+      { env, timeout: 10_000 }
     );
     const text = `${stdout || ''}\n${stderr || ''}`.toLowerCase();
+    if (text.includes('api key')) {
+      throw new OAuthError('codex', 'Codex CLI still reports API-key auth');
+    }
     if (text.includes('not logged in') || text.includes('logged out') || text.includes('login required')) {
       throw new OAuthError('codex', 'Codex CLI reports not logged in');
+    }
+    if (!text.includes('chatgpt')) {
+      throw new OAuthError('codex', `unexpected login status output: ${(stdout || stderr).trim()}`);
     }
   } catch (err) {
     if (err?.isOAuthError) throw err;
@@ -201,30 +231,99 @@ async function reviewWithClaude(diff) {
  * uses its stored OAuth credentials only.
  */
 async function reviewWithCodex(diff) {
+  console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
+  console.error('[reviewWithCodex] OAuth OK');
 
   const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 
-  const env = { ...process.env };
+  const env = {
+    ...process.env,
+    PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+  };
   delete env.OPENAI_API_KEY;
 
-  let stdout, stderr;
+  const outputDir = join(process.env.HOME || '/Users/airlock', '.cache', 'codex-review');
+  mkdirSync(outputDir, { recursive: true });
+  const outputFile = join(outputDir, `review-${Date.now()}.txt`);
+
+  const args = [
+    '-a',
+    'never',
+    'exec',
+    '--sandbox',
+    'read-only',
+    '--output-last-message',
+    outputFile,
+    prompt,
+  ];
+
+  console.error(`[reviewWithCodex] spawning codex with outputFile=${outputFile}`);
+
+  const { code, stdout, stderr } = await new Promise((resolve, reject) => {
+    const child = spawn(CODEX_CLI, args, {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let finished = false;
+
+    const timeout = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      child.kill('SIGTERM');
+      reject(new Error(`Codex CLI timed out after 300000ms. stderr: ${stderr.substring(0, 500)}`));
+    }, 5 * 60 * 1000);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (err) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      resolve({ code, stdout, stderr });
+    });
+  });
+
+  console.error(`[reviewWithCodex] codex exited code=${code}; stdout length=${stdout.length}; stderr length=${stderr.length}`);
+
+  let reviewText = '';
   try {
-    ({ stdout, stderr } = await execFileAsync(
-      CODEX_CLI,
-      ['exec', '-a', 'never', '--sandbox', 'read-only', prompt],
-      {
-        env,
-        timeout: 5 * 60 * 1000,
-        maxBuffer: 10 * 1024 * 1024,
-      }
-    ));
-  } catch (err) {
-    const msg = (err.message || '') + (err.stderr || '') + (err.stdout || '');
-    if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login') || msg.includes('not logged in')) {
-      throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
+    if (existsSync(outputFile)) {
+      reviewText = readFileSync(outputFile, 'utf8').trim();
+      console.error(`[reviewWithCodex] read outputFile: ${reviewText.length} bytes`);
+    } else {
+      console.error('[reviewWithCodex] outputFile does not exist');
     }
-    throw err;
+  } finally {
+    if (existsSync(outputFile)) {
+      rmSync(outputFile);
+    }
+  }
+
+  const msg = `${stderr || ''}\n${stdout || ''}`;
+  if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login') || msg.includes('not logged in')) {
+    throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
+  }
+
+  if (code !== 0) {
+    throw new Error(`Codex CLI exited with code ${code}. stderr: ${stderr.substring(0, 500)}`);
+  }
+
+  if (reviewText) {
+    return reviewText;
   }
 
   if (!stdout?.trim()) {
@@ -348,11 +447,14 @@ async function main() {
   }
 
   console.log(`[reviewer] Starting review: ${repo}#${prNumber} model=${reviewerModel} (OAuth-only mode)`);
+  console.error(`[reviewer] DEBUG: args=${JSON.stringify(args)}`);
 
   // 1. Fetch diff
   let diff;
   try {
+    console.error(`[reviewer] DEBUG: fetching diff for ${repo}#${prNumber}...`);
     diff = await fetchPRDiff(repo, prNumber);
+    console.error(`[reviewer] DEBUG: fetched diff (${diff.length} bytes)`);
   } catch (err) {
     console.error(`[reviewer] Failed to fetch diff for ${repo}#${prNumber}:`, err.message);
     process.exit(1);
@@ -364,13 +466,17 @@ async function main() {
   }
 
   // 2. Run adversarial review (OAuth only — no API key fallback)
+  const effectiveModel = reviewerModel;
+
   let reviewText;
   try {
-    if (reviewerModel === 'claude') {
+    console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
+    if (effectiveModel === 'claude') {
       reviewText = await reviewWithClaude(diff);
     } else {
       reviewText = await reviewWithCodex(diff);
     }
+    console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
     if (err.isOAuthError) {
       // OAuth failure — stop work and alert Paul
@@ -379,6 +485,7 @@ async function main() {
       process.exit(2); // exit code 2 = auth failure (distinct from other errors)
     }
     console.error(`[reviewer] AI review failed for ${repo}#${prNumber}:`, err.message);
+    console.error(`[reviewer] ERROR STACK: ${err.stack}`);
     process.exit(1);
   }
 
@@ -386,7 +493,7 @@ async function main() {
 
   // 3. Post to GitHub
   const header =
-    reviewerModel === 'claude'
+    effectiveModel === 'claude'
       ? '## Adversarial Review — Claude (claude-reviewer-lacey)\n\n'
       : '## Adversarial Review — Codex (codex-reviewer-lacey)\n\n';
   const fullComment = header + reviewText;

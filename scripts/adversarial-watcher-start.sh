@@ -12,6 +12,11 @@ set -euo pipefail
 
 # Load 1Password service account token (not present in LaunchAgent env by default)
 source /Users/airlock/agent-os/agents/clio/credentials/local/op-service-account.env
+export OP_SERVICE_ACCOUNT_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
+if [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  echo "[adversarial-watcher] ERROR: OP_SERVICE_ACCOUNT_TOKEN not loaded" >&2
+  exit 1
+fi
 
 # Resolve GitHub token from gh CLI keychain
 export GITHUB_TOKEN=$(/opt/homebrew/bin/gh auth token 2>/dev/null)

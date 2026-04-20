@@ -14,7 +14,7 @@ Enforces cross-model review of agent-built PRs: the model that builds the code n
 |---|---|
 | `[claude-code]` or `[clio-agent]` | Codex / GPT-4o (`codex-reviewer-lacey`) |
 | `[codex]` | Claude Sonnet (`claude-reviewer-lacey`) |
-| No/invalid tag | **Fail-loud guardrail** (PR comment + watcher failure record), no review spawned |
+| No/invalid tag | **Fail-loud guardrail** (PR comment + terminal watcher failure record), no review spawned |
 
 ## Setup
 
@@ -84,13 +84,14 @@ node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerMo
 1. **Watcher** polls configured repos every `pollIntervalMs` ms
 2. Detects PR author tag from PR title (`[claude-code]`, `[codex]`, `[clio-agent]`)
 3. If tag is missing/invalid, triggers fail-loud signaling (PR comment + structured watcher failure log/record) and does **not** spawn review
-4. Skips PRs already reviewed (tracked in `data/reviews.db`)
-5. Sets Linear ticket to **In Review** state
-6. Spawns **Reviewer Agent** as a child process
-7. Reviewer fetches diff via `gh pr diff`, sends to AI model with adversarial prompt
-8. Review is posted as a GitHub PR comment by the appropriate bot account
-9. Linear ticket updated to **Review Complete** (Done)
-10. If review contains critical/security issues → comment added to Linear ticket flagging Paul
+4. Malformed-title records are terminal by design: retitling an existing PR does not retrigger review
+5. Skips PRs already reviewed (tracked in `data/reviews.db`)
+6. Sets Linear ticket to **In Review** state
+7. Spawns **Reviewer Agent** as a child process
+8. Reviewer fetches diff via `gh pr diff`, sends to AI model with adversarial prompt
+9. Review is posted as a GitHub PR comment by the appropriate bot account
+10. Linear ticket updated to **Review Complete** (Done)
+11. If review contains critical/security issues → comment added to Linear ticket flagging Paul
 
 ## PR Title Convention
 

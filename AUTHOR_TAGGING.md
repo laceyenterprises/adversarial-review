@@ -34,7 +34,7 @@ Tag goes at the **start** of the PR title:
 - **prlt workflow**: prlt's `commit` and `pr create` commands must prepend the correct tag
 - **Clio coding-agent dispatches**: Clio includes the tag instruction in every agent task prompt
 - **Canonical helper path**: open PRs with `npm run pr:create:tagged -- --tag <codex|claude-code|clio-agent> --title "<unprefixed title>" -- <gh args...>`
-- **Watcher guardrail**: If tag is missing or malformed, watcher fails loud (comment + failure record) and does not start adversarial review
+- **Watcher guardrail**: If tag is missing or malformed, watcher fails loud (comment + terminal failure record), does not start adversarial review, and does not retrigger on retitle
 
 ## Reviewer Routing
 

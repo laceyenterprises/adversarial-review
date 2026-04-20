@@ -12,9 +12,9 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  buildMalformedTitleFailureComment,
   routePR,
 } from './watcher-title-guardrails.mjs';
+import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -181,32 +181,6 @@ async function runPrltSync() {
   }
 }
 
-// ── Fail-loud malformed-title signaling ─────────────────────────────────────
-
-async function signalMalformedTitleFailure(octokit, { repoPath, owner, repo, prNumber, prTitle }) {
-  const structuredFailure = {
-    repo: repoPath,
-    prNumber,
-    title: prTitle,
-    reason: 'missing-or-invalid-creation-time-reviewer-tag',
-  };
-  console.error(`[watcher] MALFORMED_PR_TITLE ${JSON.stringify(structuredFailure)}`);
-
-  const body = buildMalformedTitleFailureComment({ prTitle });
-
-  try {
-    await octokit.rest.issues.createComment({
-      owner,
-      repo,
-      issue_number: prNumber,
-      body,
-    });
-    console.error(`[watcher] Fail-loud comment posted for ${repoPath}#${prNumber}`);
-  } catch (err) {
-    console.error(`[watcher] Failed to post malformed-title comment for ${repoPath}#${prNumber}:`, err.message);
-  }
-}
-
 // ── Org repo discovery ───────────────────────────────────────────────────────
 
 let activeRepos = config.repos ?? [];
@@ -328,6 +302,7 @@ async function pollOnce(octokit) {
           prTitle,
         });
 
+        // Malformed titles are terminal in watcher state to avoid ambiguous retitle retries.
         stmtMarkReviewed.run(
           repoPath,
           prNumber,
@@ -378,10 +353,11 @@ function main() {
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;
 
-  if (config.fallbackReviewer) {
-    console.warn(
-      '[watcher] config.fallbackReviewer is ignored: malformed/missing title tags now fail loud and do not auto-route.'
+  if (Object.prototype.hasOwnProperty.call(config, 'fallbackReviewer')) {
+    console.error(
+      '[watcher] config.fallbackReviewer is no longer supported. Remove it from config.json; malformed titles now fail loud and are never auto-routed.'
     );
+    process.exit(1);
   }
 
   const watchMode = config.org
@@ -403,5 +379,4 @@ if (isMain) {
 
 export {
   pollOnce,
-  signalMalformedTitleFailure,
 };

@@ -6,7 +6,8 @@ import {
   buildMalformedTitleFailureComment,
   routePR,
 } from '../src/watcher-title-guardrails.mjs';
-import { signalMalformedTitleFailure } from '../src/watcher.mjs';
+import { TAG_PREFIXES } from '../src/pr-title-tagging.mjs';
+import { signalMalformedTitleFailure } from '../src/watcher-fail-loud.mjs';
 
 test('routePR maps known title prefixes to opposite-model reviewers', () => {
   assert.deepEqual(routePR('[codex] LAC-181: tighten watcher'), {
@@ -20,6 +21,12 @@ test('routePR maps known title prefixes to opposite-model reviewers', () => {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   });
+
+  assert.deepEqual(routePR('[clio-agent] LAC-181: tighten watcher'), {
+    tag: 'clio-agent',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  });
 });
 
 test('routePR returns null for malformed titles missing required prefix', () => {
@@ -28,16 +35,21 @@ test('routePR returns null for malformed titles missing required prefix', () => 
   assert.equal(routePR('[other] LAC-181: unknown tag'), null);
 });
 
+test('required prefixes are derived from canonical tag prefixes', () => {
+  assert.deepEqual(REQUIRED_PREFIXES, Object.values(TAG_PREFIXES));
+});
+
 test('buildMalformedTitleFailureComment explains creation-time tag requirement', () => {
-  const body = buildMalformedTitleFailureComment({ prTitle: 'LAC-181: missing tag' });
+  const body = buildMalformedTitleFailureComment({ prTitle: 'LAC-181: missing `tag`' });
 
   assert.match(body, new RegExp(MALFORMED_TITLE_COMMENT_HEADER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   for (const prefix of REQUIRED_PREFIXES) {
     assert.match(body, new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   assert.match(body, /must be present at PR creation time/i);
-  assert.match(body, /Retitling later may not safely retrigger review/i);
+  assert.match(body, /Retitling later will not retrigger review/i);
   assert.match(body, /Safe recovery path: close and recreate the PR/i);
+  assert.match(body, /`LAC-181: missing \\`tag\\``/);
 });
 
 test('signalMalformedTitleFailure posts fail-loud PR comment', async () => {
@@ -66,5 +78,5 @@ test('signalMalformedTitleFailure posts fail-loud PR comment', async () => {
   assert.equal(calls[0].repo, 'clio');
   assert.equal(calls[0].issue_number, 42);
   assert.match(calls[0].body, /Adversarial review did not trigger/i);
-  assert.match(calls[0].body, /Retitling later may not safely retrigger review/i);
+  assert.match(calls[0].body, /Retitling later will not retrigger review/i);
 });

@@ -1,4 +1,6 @@
 import { TAG_PREFIXES, hasKnownPrefix } from './pr-title-tagging.mjs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const REQUIRED_PREFIXES = Object.values(TAG_PREFIXES);
 
@@ -8,6 +10,7 @@ function buildValidationFailureMessage(prTitle) {
   return [
     `Invalid PR title: "${shownTitle}"`,
     `Allowed adversarial-review prefixes: ${REQUIRED_PREFIXES.join(', ')}`,
+    'Prefix matching is case-insensitive.',
     'Why this check exists: reviewer routing depends on creation-time tag correctness.',
     'Retitling later does not retrigger adversarial review for malformed-title PRs.',
     'Recovery path: close and recreate the PR with a valid prefix.',
@@ -36,7 +39,13 @@ function validatePRTitlePrefix(prTitle) {
 }
 
 function runCli(argv = process.argv.slice(2)) {
-  const prTitle = argv.join(' ');
+  if (argv.length !== 1) {
+    console.error('Usage: node src/pr-title-validate.mjs "<PR title>"');
+    process.exitCode = 1;
+    return;
+  }
+
+  const prTitle = argv[0];
   const result = validatePRTitlePrefix(prTitle);
 
   if (!result.valid) {
@@ -48,7 +57,7 @@ function runCli(argv = process.argv.slice(2)) {
   console.log(result.message);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   runCli();
 }
 

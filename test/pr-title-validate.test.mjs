@@ -30,3 +30,13 @@ test('validatePRTitlePrefix fails on empty titles', () => {
   assert.equal(result.valid, false);
   assert.match(result.message, /empty title/i);
 });
+
+test('validatePRTitlePrefix fails on nullish titles', () => {
+  const undefinedResult = validatePRTitlePrefix(undefined);
+  assert.equal(undefinedResult.valid, false);
+  assert.match(undefinedResult.message, /empty title/i);
+
+  const nullResult = validatePRTitlePrefix(null);
+  assert.equal(nullResult.valid, false);
+  assert.match(nullResult.message, /empty title/i);
+});

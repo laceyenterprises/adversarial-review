@@ -11,6 +11,10 @@ import { promisify } from 'node:util';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import {
+  buildMalformedTitleFailureComment,
+  routePR,
+} from './watcher-title-guardrails.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -62,33 +66,6 @@ const stmtMarkClosed = db.prepare(
 );
 
 // ── Author tag detection ─────────────────────────────────────────────────────
-
-const TAG_PATTERN = /^\[(claude-code|codex|clio-agent)\]/i;
-
-/**
- * Returns { tag, reviewerModel, botTokenEnv } or null if skipped.
- */
-function routePR(prTitle) {
-  const match = prTitle.match(TAG_PATTERN);
-  const tag = match ? match[1].toLowerCase() : null;
-
-  if (!tag && !config.fallbackReviewer) return null;
-
-  if (tag === 'codex') {
-    return {
-      tag,
-      reviewerModel: 'claude',
-      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-    };
-  }
-
-  // [claude-code], [clio-agent], or no tag (fallback → codex)
-  return {
-    tag: tag ?? 'fallback',
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-  };
-}
 
 // ── Linear ticket extraction ─────────────────────────────────────────────────
 
@@ -201,6 +178,32 @@ async function runPrltSync() {
   } catch (err) {
     // Non-fatal — log and continue
     console.error(`[watcher] prlt linear sync failed:`, err.message);
+  }
+}
+
+// ── Fail-loud malformed-title signaling ─────────────────────────────────────
+
+async function signalMalformedTitleFailure(octokit, { repoPath, owner, repo, prNumber, prTitle }) {
+  const structuredFailure = {
+    repo: repoPath,
+    prNumber,
+    title: prTitle,
+    reason: 'missing-or-invalid-creation-time-reviewer-tag',
+  };
+  console.error(`[watcher] MALFORMED_PR_TITLE ${JSON.stringify(structuredFailure)}`);
+
+  const body = buildMalformedTitleFailureComment({ prTitle });
+
+  try {
+    await octokit.rest.issues.createComment({
+      owner,
+      repo,
+      issue_number: prNumber,
+      body,
+    });
+    console.error(`[watcher] Fail-loud comment posted for ${repoPath}#${prNumber}`);
+  } catch (err) {
+    console.error(`[watcher] Failed to post malformed-title comment for ${repoPath}#${prNumber}:`, err.message);
   }
 }
 
@@ -317,7 +320,22 @@ async function pollOnce(octokit) {
 
       const route = routePR(prTitle);
       if (!route) {
-        console.log(`[watcher] Skipping ${repoPath}#${prNumber} — no agent tag`);
+        await signalMalformedTitleFailure(octokit, {
+          repoPath,
+          owner,
+          repo,
+          prNumber,
+          prTitle,
+        });
+
+        stmtMarkReviewed.run(
+          repoPath,
+          prNumber,
+          new Date().toISOString(),
+          'malformed-title',
+          'malformed',
+          null
+        );
         continue;
       }
 
@@ -354,18 +372,36 @@ function requireEnv(name) {
   }
 }
 
-requireEnv('GITHUB_TOKEN');
+function main() {
+  requireEnv('GITHUB_TOKEN');
 
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-const intervalMs = config.pollIntervalMs ?? 300_000;
+  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+  const intervalMs = config.pollIntervalMs ?? 300_000;
 
-const watchMode = config.org
-  ? `org: ${config.org} (dynamic discovery, refresh every ${(config.repoRefreshIntervalMs ?? 3_600_000) / 60_000}m)`
-  : `repos: ${activeRepos.join(', ')}`;
-console.log(`[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s`);
+  if (config.fallbackReviewer) {
+    console.warn(
+      '[watcher] config.fallbackReviewer is ignored: malformed/missing title tags now fail loud and do not auto-route.'
+    );
+  }
 
-pollOnce(octokit).catch((err) => console.error('[watcher] Poll error:', err));
+  const watchMode = config.org
+    ? `org: ${config.org} (dynamic discovery, refresh every ${(config.repoRefreshIntervalMs ?? 3_600_000) / 60_000}m)`
+    : `repos: ${activeRepos.join(', ')}`;
+  console.log(`[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s`);
 
-setInterval(() => {
   pollOnce(octokit).catch((err) => console.error('[watcher] Poll error:', err));
-}, intervalMs);
+
+  setInterval(() => {
+    pollOnce(octokit).catch((err) => console.error('[watcher] Poll error:', err));
+  }, intervalMs);
+}
+
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  main();
+}
+
+export {
+  pollOnce,
+  signalMalformedTitleFailure,
+};

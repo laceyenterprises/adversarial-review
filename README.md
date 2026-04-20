@@ -14,7 +14,7 @@ Enforces cross-model review of agent-built PRs: the model that builds the code n
 |---|---|
 | `[claude-code]` or `[clio-agent]` | Codex / GPT-4o (`codex-reviewer-lacey`) |
 | `[codex]` | Claude Sonnet (`claude-reviewer-lacey`) |
-| No tag | Codex fallback |
+| No/invalid tag | **Fail-loud guardrail** (PR comment + watcher failure record), no review spawned |
 
 ## Setup
 
@@ -59,7 +59,6 @@ Edit `config.json`:
 {
   "repos": ["laceyenterprises/clio"],
   "pollIntervalMs": 300000,
-  "fallbackReviewer": "codex",
   "linear": {
     "teamKey": "LAC"
   }
@@ -84,7 +83,7 @@ node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerMo
 
 1. **Watcher** polls configured repos every `pollIntervalMs` ms
 2. Detects PR author tag from PR title (`[claude-code]`, `[codex]`, `[clio-agent]`)
-3. Skips PRs with no tag (unless `fallbackReviewer` is set)
+3. If tag is missing/invalid, triggers fail-loud signaling (PR comment + structured watcher failure log/record) and does **not** spawn review
 4. Skips PRs already reviewed (tracked in `data/reviews.db`)
 5. Sets Linear ticket to **In Review** state
 6. Spawns **Reviewer Agent** as a child process

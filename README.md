@@ -97,6 +97,8 @@ node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerMo
 
 All agent-built PRs must include a tag at the start of the title:
 
+Repo-visible enforcement: GitHub Action `PR Title Prefix Validation` fails PR checks when this prefix is missing or malformed, and explains why creation-time correctness matters and why retitling is not a recovery path.
+
 ```
 [claude-code] feat: add payment webhook handler (LAC-42)
 [codex] fix: resolve null pointer in auth middleware (LAC-17)

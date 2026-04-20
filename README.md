@@ -105,6 +105,20 @@ All agent-built PRs must include a tag at the start of the title:
 
 See `AUTHOR_TAGGING.md` for the full convention.
 
+## Canonical Tagged PR Creation Helper
+
+Use this helper instead of raw `gh pr create` for adversarial-review-tagged PRs:
+
+```bash
+npm run pr:create:tagged -- --tag codex --title "LAC-180: build PR creation helper" -- --body "..." --base main
+```
+
+Rules enforced by the helper:
+- `--tag` is required and must be one of `codex`, `claude-code`, `clio-agent` (aliases: `claude`, `clio`)
+- `--title` is required and must be unprefixed
+- helper prepends the canonical prefix and prints the exact final title before PR creation
+- passing `--title` through to raw `gh` args is blocked so title enforcement cannot be bypassed accidentally
+
 ## Data
 
 Reviewed PRs are tracked in `data/reviews.db` (SQLite). This prevents duplicate reviews across watcher restarts.

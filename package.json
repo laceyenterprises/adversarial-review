@@ -6,7 +6,9 @@
   "main": "src/watcher.mjs",
   "scripts": {
     "start": "node src/watcher.mjs",
-    "review": "node src/reviewer.mjs"
+    "review": "node src/reviewer.mjs",
+    "pr:create:tagged": "node src/pr-create-tagged.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

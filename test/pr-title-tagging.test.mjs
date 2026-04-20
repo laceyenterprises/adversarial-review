@@ -41,4 +41,8 @@ test('buildTaggedTitle rejects missing or already-prefixed titles', () => {
     () => buildTaggedTitle('claude-code', '[codex] already prefixed'),
     /Title must be unprefixed/
   );
+  assert.throws(
+    () => buildTaggedTitle('clio-agent', '[codex]LAC-180 without separator'),
+    /Title must be unprefixed/
+  );
 });

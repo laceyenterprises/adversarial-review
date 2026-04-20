@@ -2,6 +2,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { buildTaggedTitle } from './pr-title-tagging.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -51,14 +52,38 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (arg.startsWith('--tag=')) {
+      tag = arg.slice('--tag='.length);
+      if (!tag) {
+        throw new Error('Missing value for --tag. Use --tag <tag> or --tag=<tag>.');
+      }
+      continue;
+    }
+
     if (arg === '--tag') {
-      tag = argv[i + 1];
+      const next = argv[i + 1];
+      if (!next || next === '--' || next.startsWith('--')) {
+        throw new Error('Missing value for --tag. Use --tag <tag> or --tag=<tag>.');
+      }
+      tag = next;
       i += 1;
       continue;
     }
 
+    if (arg.startsWith('--title=')) {
+      title = arg.slice('--title='.length);
+      if (!title) {
+        throw new Error('Missing value for --title. Use --title "<title>" or --title="<title>".');
+      }
+      continue;
+    }
+
     if (arg === '--title') {
-      title = argv[i + 1];
+      const next = argv[i + 1];
+      if (!next || next === '--' || next.startsWith('--')) {
+        throw new Error('Missing value for --title. Use --title "<title>" or --title="<title>".');
+      }
+      title = next;
       i += 1;
       continue;
     }
@@ -71,16 +96,30 @@ function parseArgs(argv) {
 
 function validatePassthroughArgs(passthrough) {
   for (const arg of passthrough) {
-    if (arg === '--title' || arg === '-t' || arg.startsWith('--title=')) {
+    if (
+      arg === '--title' ||
+      arg === '-t' ||
+      arg.startsWith('--title=') ||
+      (arg.startsWith('-t') && arg.length > 2)
+    ) {
       throw new Error('Do not pass --title to gh. Use --title on this helper so title tagging is enforced.');
     }
   }
 }
 
-async function main() {
+function shellQuote(arg) {
+  if (/^[A-Za-z0-9_./:=@+-]+$/.test(arg)) return arg;
+  return `'${String(arg).replace(/'/g, `'\\''`)}'`;
+}
+
+function formatCommandForLog(command, args) {
+  return [command, ...args].map(shellQuote).join(' ');
+}
+
+async function main(argv = process.argv.slice(2)) {
   let parsed;
   try {
-    parsed = parseArgs(process.argv.slice(2));
+    parsed = parseArgs(argv);
   } catch (err) {
     console.error(`[pr-create-tagged] ${err.message}`);
     console.error(HELP_TEXT);
@@ -107,7 +146,7 @@ async function main() {
   console.log(`[pr-create-tagged] Final PR title: ${finalTitle}`);
 
   const ghArgs = ['pr', 'create', '--title', finalTitle, ...passthrough];
-  console.log(`[pr-create-tagged] Command: gh ${ghArgs.join(' ')}`);
+  console.log(`[pr-create-tagged] Command (shell-escaped): ${formatCommandForLog('gh', ghArgs)}`);
 
   if (dryRun) {
     console.log('[pr-create-tagged] Dry run requested; exiting without creating PR.');
@@ -117,7 +156,7 @@ async function main() {
   try {
     const { stdout, stderr } = await execFileAsync('gh', ghArgs, {
       env: process.env,
-      maxBuffer: 10 * 1024 * 1024,
+      maxBuffer: 1024 * 1024,
     });
     if (stdout?.trim()) console.log(stdout.trim());
     if (stderr?.trim()) console.error(stderr.trim());
@@ -131,4 +170,18 @@ async function main() {
   }
 }
 
-main();
+function isDirectExecution() {
+  if (!process.argv[1]) return false;
+  return import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isDirectExecution()) {
+  main();
+}
+
+export {
+  formatCommandForLog,
+  main,
+  parseArgs,
+  validatePassthroughArgs,
+};

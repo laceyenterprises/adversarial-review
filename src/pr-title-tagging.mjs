@@ -12,7 +12,7 @@ const TAG_ALIASES = {
   'clio-agent': 'clio-agent',
 };
 
-const PREFIX_PATTERN = /^\[(codex|claude-code|clio-agent)\]\s+/i;
+const PREFIX_PATTERN = /^\[(codex|claude-code|clio-agent)\]\s*/i;
 
 function normalizeTag(tagInput) {
   if (typeof tagInput !== 'string') return null;

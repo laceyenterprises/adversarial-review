@@ -155,8 +155,27 @@ Your job is to find problems. Specifically:
 - Performance issues
 - Anything that would fail in production
 
-Do NOT summarize what the code does. Do NOT praise. Be specific and direct.
-For each issue: state the file, line(s), the problem, and the recommended fix.
+Do NOT summarize what the code does. Do NOT praise. Be specific, skeptical, and direct.
+
+Output requirements:
+- Return valid GitHub-flavored Markdown only
+- Use exactly these top-level section headings, in this order:
+  1. ## Summary
+  2. ## Blocking issues
+  3. ## Non-blocking issues
+  4. ## Suggested fixes
+  5. ## Verdict
+- Under issue sections, use bullets
+- For each real issue, include:
+  - File:
+  - Lines:
+  - Problem:
+  - Why it matters:
+  - Recommended fix:
+- If a section has no items, write: - None.
+- In ## Verdict, end with one of:
+  - Request changes
+  - Comment only
 
 If you find nothing substantive, say so plainly — but look hard first.`;
 
@@ -167,6 +186,100 @@ const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 function isCritical(reviewText) {
   const lower = reviewText.toLowerCase();
   return CRITICAL_WORDS.some((w) => lower.includes(w));
+}
+
+function normalizeWhitespace(text) {
+  return String(text ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function titleCaseWords(value) {
+  return String(value ?? '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function ensureSection(text, heading) {
+  const pattern = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}$`, 'mi');
+  if (pattern.test(text)) return text;
+  return `${text}\n\n## ${heading}\n- None.`.trim();
+}
+
+function normalizeIssueBullets(sectionBody) {
+  const lines = sectionBody
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) return '- None.';
+  if (lines.length === 1 && /^[-*]\s*none\.?$/i.test(lines[0])) return '- None.';
+
+  const normalized = [];
+  for (const line of lines) {
+    if (/^[-*]\s+/u.test(line)) {
+      normalized.push(`- ${line.replace(/^[-*]\s+/u, '')}`);
+      continue;
+    }
+    if (/^(file|lines|problem|why it matters|recommended fix|verdict):/i.test(line)) {
+      normalized.push(`  - ${line}`);
+      continue;
+    }
+    normalized.push(`- ${line}`);
+  }
+
+  return normalized.join('\n');
+}
+
+function formatCodexReview(reviewText) {
+  let text = normalizeWhitespace(reviewText);
+
+  text = text
+    .replace(/^#\s+/gm, '## ')
+    .replace(/^###\s+/gm, '## ')
+    .replace(/^####\s+/gm, '## ')
+    .replace(/^##\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim, (_, heading) => `## ${titleCaseWords(heading)}`);
+
+  const canonicalSections = [
+    'Summary',
+    'Blocking issues',
+    'Non-blocking issues',
+    'Suggested fixes',
+    'Verdict',
+  ];
+
+  for (const heading of canonicalSections) {
+    text = ensureSection(text, heading);
+  }
+
+  const sectionRegex = /^##\s+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)\s*$/gim;
+  const matches = [...text.matchAll(sectionRegex)];
+  if (matches.length === 0) return text;
+
+  const rebuilt = [];
+  for (let i = 0; i < matches.length; i += 1) {
+    const heading = titleCaseWords(matches[i][1]);
+    const start = matches[i].index + matches[i][0].length;
+    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+    const rawBody = normalizeWhitespace(text.slice(start, end));
+
+    let body;
+    if (heading === 'Summary' || heading === 'Verdict') {
+      body = rawBody || '- None.';
+      if (heading === 'Verdict' && !/(request changes|comment only)/i.test(body)) {
+        body = `${body}\n\nComment only`.trim();
+      }
+    } else {
+      body = normalizeIssueBullets(rawBody);
+    }
+
+    rebuilt.push(`## ${heading}\n${body}`.trim());
+  }
+
+  return rebuilt.join('\n\n').trim();
 }
 
 // ── PR diff fetch ────────────────────────────────────────────────────────────
@@ -474,7 +587,7 @@ async function main() {
     if (effectiveModel === 'claude') {
       reviewText = await reviewWithClaude(diff);
     } else {
-      reviewText = await reviewWithCodex(diff);
+      reviewText = formatCodexReview(await reviewWithCodex(diff));
     }
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {

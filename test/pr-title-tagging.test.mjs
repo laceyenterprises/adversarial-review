@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTaggedTitle, getPrefixForTag, normalizeTag } from '../src/pr-title-tagging.mjs';
+import {
+  buildTaggedTitle,
+  getPrefixForTag,
+  hasCanonicalTaggedTitle,
+  hasKnownPrefix,
+  normalizeTag,
+} from '../src/pr-title-tagging.mjs';
 
 test('normalizeTag accepts canonical tags and aliases', () => {
   assert.equal(normalizeTag('codex'), 'codex');
@@ -45,4 +51,18 @@ test('buildTaggedTitle rejects missing or already-prefixed titles', () => {
     () => buildTaggedTitle('clio-agent', '[codex]LAC-180 without separator'),
     /Title must be unprefixed/
   );
+});
+
+test('hasKnownPrefix type-guards non-string inputs', () => {
+  assert.equal(hasKnownPrefix(undefined), false);
+  assert.equal(hasKnownPrefix(null), false);
+  assert.equal(hasKnownPrefix({}), false);
+  assert.equal(hasKnownPrefix('[codex] valid'), true);
+});
+
+test('hasCanonicalTaggedTitle enforces single prefix and non-empty suffix', () => {
+  assert.equal(hasCanonicalTaggedTitle('[codex] LAC-180: valid title'), true);
+  assert.equal(hasCanonicalTaggedTitle('[codex]'), false);
+  assert.equal(hasCanonicalTaggedTitle('[codex]   '), false);
+  assert.equal(hasCanonicalTaggedTitle('[codex] [claude-code] stacked'), false);
 });

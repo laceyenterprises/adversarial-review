@@ -1,12 +1,11 @@
 name: PR Title Prefix Validation
 
 on:
-  pull_request:
+  pull_request_target:
     types:
       - opened
       - reopened
       - edited
-      - synchronize
 
 permissions:
   contents: read
@@ -16,10 +15,30 @@ jobs:
   validate-pr-title-prefix:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Validate adversarial-review title prefix
+      - name: Validate adversarial-review title prefix (trusted workflow logic)
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: node src/pr-title-validate.mjs "$PR_TITLE"
+          REQUIRED_PREFIXES: '[codex],[claude-code],[clio-agent]'
+        run: |
+          node <<'NODE'
+          const requiredPrefixes = process.env.REQUIRED_PREFIXES.split(',').map((value) => value.trim()).filter(Boolean);
+          const title = (process.env.PR_TITLE || '').trim();
+          const normalizedTitle = title.toLowerCase();
+
+          const hasKnownPrefix = requiredPrefixes.some((prefix) => normalizedTitle.startsWith(prefix));
+          const matchedPrefix = requiredPrefixes.find((prefix) => normalizedTitle.startsWith(prefix));
+          const remainder = matchedPrefix ? title.slice(matchedPrefix.length).trim() : '';
+          const hasStackedPrefix = requiredPrefixes.some((prefix) => remainder.toLowerCase().startsWith(prefix));
+          const valid = title.length > 0 && hasKnownPrefix && remainder.length > 0 && !hasStackedPrefix;
+
+          if (!valid) {
+            console.error(`Invalid PR title: "${title || '(empty title)'}"`);
+            console.error(`Allowed adversarial-review prefixes: ${requiredPrefixes.join(', ')}`);
+            console.error('Canonical format: "[tag] <title>" with exactly one known tag prefix and non-empty title text.');
+            console.error('Why this check exists: reviewer routing depends on creation-time tag correctness.');
+            console.error('To fix this check: edit the PR title to a canonical tagged form.');
+            process.exit(1);
+          }
+
+          console.log(`PR title prefix is valid. Allowed prefixes: ${requiredPrefixes.join(', ')}`);
+          NODE

@@ -33,8 +33,13 @@ const execFileAsync = promisify(execFile);
 // otherwise the CLI may report API-key auth instead of its native login state.
 const CLAUDE_CLI = '/opt/homebrew/bin/claude';
 
-// Native Codex CLI path. Review execution and login-status probing both use the
-// local Codex CLI directly; the current reviewer no longer invokes ACPX here.
+// ACPX-local Codex adapter path. The reviewer keeps wrapper-owned completion
+// semantics: ACPX/Codex does the work, and the outer wrapper owns parsing /
+// posting / downstream side effects. Today the handoff is ACPX stdout capture;
+// explicit file-artifact handoff remains a valid future refinement.
+const ACPX_CLI = '/Users/airlock/.openclaw/tools/acpx/node_modules/.bin/acpx';
+
+// Raw Codex CLI is still used only for login-status probing.
 const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/installation/bin/codex';
 
 // OPENAI_API_KEY is stripped from env so Codex cannot fall back to API-key auth.
@@ -382,11 +387,9 @@ async function reviewWithCodex(diff) {
   await assertCodexOAuth();
   console.error('[reviewWithCodex] OAuth OK');
 
-  if (!existsSync(CODEX_CLI)) {
-    throw new Error(`Codex CLI not found at ${CODEX_CLI}`);
+  if (!existsSync(ACPX_CLI)) {
+    throw new Error(`ACPX CLI not found at ${ACPX_CLI}`);
   }
-
-  const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 
   const authPath = resolveCodexAuthPath();
   const runtimeHome = process.env.HOME || '/Users/airlock';
@@ -414,23 +417,24 @@ async function reviewWithCodex(diff) {
   };
   delete env.OPENAI_API_KEY;
 
-  mkdirSync(outputDir, { recursive: true });
-  const runId = Date.now();
-  const reviewFile = join(outputDir, `review-${runId}.txt`);
+  const runDir = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-'));
+  const promptFile = join(runDir, 'review-prompt.txt');
+  const reviewFile = join(runDir, 'final-review.md');
+  const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\`\n\n---\n\nImportant execution contract:\n- Write your final review to this exact file path: ${reviewFile}\n- The file content must be valid GitHub-flavored Markdown review output matching the required section contract\n- Do not leave the review only in stdout\n- After writing the file successfully, print a brief confirmation message`; 
+  writeFileSync(promptFile, prompt, 'utf8');
 
   let stdout = '';
   let stderr = '';
   try {
-    console.error(`[reviewWithCodex] invoking native Codex with reviewFile=${reviewFile}`);
+    console.error(`[reviewWithCodex] invoking ACPX with promptFile=${promptFile} reviewFile=${reviewFile}`);
     const result = await execFileAsync(
-      CODEX_CLI,
+      ACPX_CLI,
       [
+        '--cwd', runDir,
+        '--approve-all',
+        'codex',
         'exec',
-        '--skip-git-repo-check',
-        '--sandbox', 'read-only',
-        '--output-last-message', reviewFile,
-        '-c', 'shell_environment_policy.inherit=all',
-        prompt,
+        '-f', promptFile,
       ],
       {
         env,
@@ -450,23 +454,29 @@ async function reviewWithCodex(diff) {
     if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
       throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
     }
-    throw new Error(`Native Codex exec failed: ${msg.substring(0, 800)}`);
+    throw new Error(`ACPX Codex exec failed: ${msg.substring(0, 800)}`);
+  } finally {
+    if (existsSync(promptFile)) {
+      rmSync(promptFile);
+    }
   }
 
   const reviewText = existsSync(reviewFile) ? normalizeWhitespace(readFileSync(reviewFile, 'utf8')) : '';
-  console.error(`[reviewWithCodex] native Codex returned stdout length=${stdout.length}; stderr length=${stderr.length}; reviewFile length=${reviewText.length}`);
+  console.error(`[reviewWithCodex] ACPX returned stdout length=${stdout.length}; stderr length=${stderr.length}; reviewFile length=${reviewText.length}`);
 
   if (reviewText) {
+    rmSync(runDir, { recursive: true, force: true });
     return reviewText;
   }
 
   const combined = normalizeWhitespace(stdout || stderr || '');
+  rmSync(runDir, { recursive: true, force: true });
   if (!combined) {
     const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
-    throw new Error(`Native Codex returned empty output.${hint}`);
+    throw new Error(`ACPX Codex returned empty output and did not write ${reviewFile}.${hint}`);
   }
 
-  return combined;
+  throw new Error(`ACPX Codex did not write review artifact at ${reviewFile}. Fallback stdout/stderr was: ${combined.substring(0, 800)}`);
 }
 
 // ── GitHub review posting ────────────────────────────────────────────────────

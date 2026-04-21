@@ -8,7 +8,7 @@ import { Octokit } from '@octokit/rest';
 import Database from 'better-sqlite3';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, mkdirSync, existsSync, copyFileSync, chmodSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -74,6 +74,30 @@ function extractLinearTicketId(prTitle) {
   return match ? match[1].toUpperCase() : null;
 }
 
+function stageCodexAuthForAirlock() {
+  const sourceDir = process.env.CODEX_SOURCE_HOME || '/Users/placey/.codex';
+  const sourceAuthPath = join(sourceDir, 'auth.json');
+  const sourceConfigPath = join(sourceDir, 'config.toml');
+  const targetDir = join(process.env.HOME || '/Users/airlock', '.codex');
+  const targetAuthPath = join(targetDir, 'auth.json');
+  const targetConfigPath = join(targetDir, 'config.toml');
+
+  if (!existsSync(sourceAuthPath)) {
+    throw new Error(`Codex auth source missing: ${sourceAuthPath}`);
+  }
+
+  mkdirSync(targetDir, { recursive: true });
+  copyFileSync(sourceAuthPath, targetAuthPath);
+  chmodSync(targetAuthPath, 0o600);
+
+  if (existsSync(sourceConfigPath)) {
+    copyFileSync(sourceConfigPath, targetConfigPath);
+    chmodSync(targetConfigPath, 0o600);
+  }
+
+  return { stagedAuthPath: targetAuthPath, stagedConfigPath: existsSync(targetConfigPath) ? targetConfigPath : null };
+}
+
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
 async function spawnReviewer({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId }) {
@@ -83,10 +107,21 @@ async function spawnReviewer({ repo, prNumber, reviewerModel, botTokenEnv, linea
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})`);
 
   try {
+    const reviewerEnv = { ...process.env };
+
+    if (String(reviewerModel || '').toLowerCase().includes('codex')) {
+      const { stagedAuthPath, stagedConfigPath } = stageCodexAuthForAirlock();
+      reviewerEnv.HOME = reviewerEnv.HOME || '/Users/airlock';
+      reviewerEnv.CODEX_AUTH_PATH = stagedAuthPath;
+      reviewerEnv.CODEX_SOURCE_HOME = process.env.CODEX_SOURCE_HOME || '/Users/placey/.codex';
+      delete reviewerEnv.OPENAI_API_KEY;
+      console.log(`[watcher] Staged Codex auth for reviewer at ${stagedAuthPath}${stagedConfigPath ? ` and config at ${stagedConfigPath}` : ''}`);
+    }
+
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       [reviewerPath, args],
-      { env: process.env, timeout: 5 * 60 * 1000 }
+      { env: reviewerEnv, timeout: 5 * 60 * 1000 }
     );
     if (stdout) console.log(`[reviewer:${prNumber}] ${stdout.trim()}`);
     if (stderr) console.error(`[reviewer:${prNumber}] stderr: ${stderr.trim()}`);

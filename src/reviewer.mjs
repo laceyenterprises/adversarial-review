@@ -17,9 +17,9 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 
-import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -31,7 +31,12 @@ const execFileAsync = promisify(execFile);
 // otherwise the CLI may report API-key auth instead of its native login state.
 const CLAUDE_CLI = '/opt/homebrew/bin/claude';
 
-// Codex CLI binary lives under placey, but the reviewer itself runs as airlock.
+// ACPX-local Codex adapter path. The reviewer uses ACPX instead of invoking raw
+// codex directly so Codex execution follows the same harness contract as the
+// rest of the ACPX/OpenClaw stack.
+const ACPX_CLI = '/Users/airlock/.openclaw/tools/acpx/node_modules/.bin/acpx';
+
+// Raw Codex CLI is still used only for login-status probing.
 const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/installation/bin/codex';
 
 // Codex OAuth tokens copied from placey to airlock's ~/.codex/auth.json.
@@ -78,19 +83,43 @@ async function assertClaudeOAuth() {
   }
 }
 
+function resolveCodexAuthPath() {
+  return process.env.CODEX_AUTH_PATH || join(process.env.HOME || '/Users/airlock', '.codex', 'auth.json');
+}
+
 /**
- * Verify airlock's Codex OAuth is set up (auth.json exists and is readable).
+ * Verify the intended Codex auth.json exists, is readable, and is OAuth/chatgpt mode.
+ * This avoids trusting whatever default per-user state `codex login status` may inspect.
  */
 function assertCodexAuthReadable() {
-  const authPath = join(process.env.HOME || '/Users/airlock', '.codex', 'auth.json');
+  const authPath = resolveCodexAuthPath();
   if (!existsSync(authPath)) {
     throw new OAuthError('codex', `OAuth auth.json missing: ${authPath}`);
   }
+
+  let raw;
   try {
-    readFileSync(authPath, 'utf8');
+    raw = readFileSync(authPath, 'utf8');
   } catch (err) {
     throw new OAuthError('codex', `cannot read ${authPath}: ${err.message}`);
   }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new OAuthError('codex', `invalid auth.json at ${authPath}: ${err.message}`);
+  }
+
+  if ((parsed?.auth_mode || '').toLowerCase() !== 'chatgpt') {
+    throw new OAuthError('codex', `Codex auth file is not OAuth/chatgpt mode: ${authPath}`);
+  }
+
+  if (!parsed?.tokens?.access_token || !parsed?.tokens?.refresh_token) {
+    throw new OAuthError('codex', `Codex auth file missing OAuth tokens: ${authPath}`);
+  }
+
+  return authPath;
 }
 
 async function assertCodexOAuth() {
@@ -98,12 +127,16 @@ async function assertCodexOAuth() {
     throw new OAuthError('codex', `codex CLI not found at ${CODEX_CLI}`);
   }
 
-  assertCodexAuthReadable();
+  const authPath = assertCodexAuthReadable();
 
-  // Run login status with OPENAI_API_KEY stripped so Codex cannot fall back to API-key auth.
+  // Run login status with OPENAI_API_KEY stripped and HOME pointed at the auth file's
+  // parent dir so Codex resolves the intended OAuth state instead of the current user's
+  // default ~/.codex directory.
   const env = {
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    CODEX_AUTH_PATH: authPath,
+    HOME: dirname(dirname(authPath)),
   };
   delete env.OPENAI_API_KEY;
 
@@ -115,13 +148,13 @@ async function assertCodexOAuth() {
     );
     const text = `${stdout || ''}\n${stderr || ''}`.toLowerCase();
     if (text.includes('api key')) {
-      throw new OAuthError('codex', 'Codex CLI still reports API-key auth');
+      throw new OAuthError('codex', `Codex CLI still reports API-key auth while probing ${authPath}`);
     }
     if (text.includes('not logged in') || text.includes('logged out') || text.includes('login required')) {
-      throw new OAuthError('codex', 'Codex CLI reports not logged in');
+      throw new OAuthError('codex', `Codex CLI reports not logged in for ${authPath}`);
     }
     if (!text.includes('chatgpt')) {
-      throw new OAuthError('codex', `unexpected login status output: ${(stdout || stderr).trim()}`);
+      throw new OAuthError('codex', `unexpected login status output for ${authPath}: ${(stdout || stderr).trim()}`);
     }
   } catch (err) {
     if (err?.isOAuthError) throw err;
@@ -348,103 +381,66 @@ async function reviewWithCodex(diff) {
   await assertCodexOAuth();
   console.error('[reviewWithCodex] OAuth OK');
 
+  if (!existsSync(ACPX_CLI)) {
+    throw new Error(`ACPX CLI not found at ${ACPX_CLI}`);
+  }
+
   const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 
+  const authPath = resolveCodexAuthPath();
   const env = {
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    CODEX_AUTH_PATH: authPath,
+    HOME: dirname(dirname(authPath)),
   };
   delete env.OPENAI_API_KEY;
 
   const outputDir = join(process.env.HOME || '/Users/airlock', '.cache', 'codex-review');
   mkdirSync(outputDir, { recursive: true });
-  const outputFile = join(outputDir, `review-${Date.now()}.txt`);
+  const promptFile = join(outputDir, `review-prompt-${Date.now()}.txt`);
 
-  const args = [
-    '-a',
-    'never',
-    'exec',
-    '--sandbox',
-    'read-only',
-    '--output-last-message',
-    outputFile,
-    prompt,
-  ];
+  writeFileSync(promptFile, prompt, 'utf8');
 
-  console.error(`[reviewWithCodex] spawning codex with outputFile=${outputFile}`);
-
-  const { code, stdout, stderr } = await new Promise((resolve, reject) => {
-    const child = spawn(CODEX_CLI, args, {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let finished = false;
-
-    const timeout = setTimeout(() => {
-      if (finished) return;
-      finished = true;
-      child.kill('SIGTERM');
-      reject(new Error(`Codex CLI timed out after 300000ms. stderr: ${stderr.substring(0, 500)}`));
-    }, 5 * 60 * 1000);
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on('error', (err) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timeout);
-      reject(err);
-    });
-    child.on('close', (code) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timeout);
-      resolve({ code, stdout, stderr });
-    });
-  });
-
-  console.error(`[reviewWithCodex] codex exited code=${code}; stdout length=${stdout.length}; stderr length=${stderr.length}`);
-
-  let reviewText = '';
+  let stdout = '';
+  let stderr = '';
   try {
-    if (existsSync(outputFile)) {
-      reviewText = readFileSync(outputFile, 'utf8').trim();
-      console.error(`[reviewWithCodex] read outputFile: ${reviewText.length} bytes`);
-    } else {
-      console.error('[reviewWithCodex] outputFile does not exist');
+    console.error(`[reviewWithCodex] invoking ACPX with promptFile=${promptFile}`);
+    const result = await execFileAsync(
+      ACPX_CLI,
+      ['codex', 'exec', '-f', promptFile],
+      {
+        env,
+        cwd: process.cwd(),
+        timeout: 5 * 60 * 1000,
+        maxBuffer: 10 * 1024 * 1024,
+      }
+    );
+    stdout = result.stdout || '';
+    stderr = result.stderr || '';
+  } catch (err) {
+    stdout = err.stdout || '';
+    stderr = err.stderr || '';
+    const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
+    if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
+      throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
     }
+    throw new Error(`ACPX Codex exec failed: ${msg.substring(0, 800)}`);
   } finally {
-    if (existsSync(outputFile)) {
-      rmSync(outputFile);
+    if (existsSync(promptFile)) {
+      rmSync(promptFile);
     }
   }
 
-  const msg = `${stderr || ''}\n${stdout || ''}`;
-  if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login') || msg.includes('not logged in')) {
-    throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
-  }
+  console.error(`[reviewWithCodex] ACPX codex returned stdout length=${stdout.length}; stderr length=${stderr.length}`);
 
-  if (code !== 0) {
-    throw new Error(`Codex CLI exited with code ${code}. stderr: ${stderr.substring(0, 500)}`);
-  }
-
-  if (reviewText) {
-    return reviewText;
-  }
-
-  if (!stdout?.trim()) {
+  const combined = normalizeWhitespace(stdout || stderr || '');
+  if (!combined) {
     const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
-    throw new Error(`Codex CLI returned empty output.${hint}`);
+    throw new Error(`ACPX Codex returned empty output.${hint}`);
   }
 
-  return stdout.trim();
+  return combined;
 }
 
 // ── GitHub review posting ────────────────────────────────────────────────────

@@ -25,6 +25,9 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   exit 1
 fi
 
+# Force Codex CLI to use the shared OAuth auth file rather than airlock's default ~/.codex/auth.json
+export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json
+
 # Scrub direct-provider API keys — reviewers must use OAuth only
 unset ANTHROPIC_API_KEY
 unset OPENAI_API_KEY

@@ -162,10 +162,25 @@ Reviews are posted by dedicated bot accounts — not Clio's personal account —
 \#\# Dependencies
 
 \- \`gh\` CLI configured with \`laceyenterprises\` org access  
-\- Codex available via \`litellm-local/gpt-codex\` (or equivalent model ID — confirm)  
+\- Codex reviewer path available locally (current working implementation uses native Codex CLI / ACPX execution, not just a generic model alias)  
 \- Claude Code available via \`litellm-local/claude-sonnet-4-6\`  
 \- Linear API configured (\`\~/clio/credentials/local/linear.env\`)  
 \- prlt (Proletariat, https://github.com/chrismcdermut/proletariat) — future dependency, not required for v1
+
+\#\#\# Codex reviewer auth contract
+For Codex-backed review workers, OAuth identity selection must be treated as part of the runtime contract.
+
+Required rules:
+\- do not trust ambient \`codex login status\` from the launching user alone
+\- validate the intended \`auth.json\` directly and require \`auth_mode: chatgpt\`
+\- if using a non-default Codex identity, pass \`CODEX_AUTH_PATH\` explicitly
+\- align \`HOME\` with the owning user's home for the Codex subprocess
+\- strip \`OPENAI_API_KEY\` from the subprocess environment so Codex does not silently prefer API-key auth
+
+Observed incident (2026-04-20):
+\- \`airlock\` local Codex state reported \`auth_mode: apikey\`
+\- valid OAuth state existed at \`/Users/placey/.codex/auth.json\`
+\- reviewer initially failed auth probing until the wrapper was changed to carry the intended auth principal explicitly
 
 \---
 

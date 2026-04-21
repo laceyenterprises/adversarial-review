@@ -1,0 +1,5 @@
+{
+  "defaultAgent": "codex",
+  "defaultPermissions": "approve-all",
+  "nonInteractivePermissions": "deny"
+}

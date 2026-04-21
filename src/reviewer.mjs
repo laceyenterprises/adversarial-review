@@ -20,6 +20,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -179,38 +180,10 @@ class OAuthError extends Error {
 
 // ── Adversarial prompt (NON-NEGOTIABLE) ──────────────────────────────────────
 
-const ADVERSARIAL_PROMPT = `You are performing an adversarial code review. You did NOT write this code.
-
-Your job is to find problems. Specifically:
-- Bugs and edge cases the author missed
-- Security vulnerabilities (injections, auth gaps, secret leakage, unsafe deps)
-- Design flaws (wrong abstraction, fragile coupling, missing error handling)
-- Performance issues
-- Anything that would fail in production
-
-Do NOT summarize what the code does. Do NOT praise. Be specific, skeptical, and direct.
-
-Output requirements:
-- Return valid GitHub-flavored Markdown only
-- Use exactly these top-level section headings, in this order:
-  1. ## Summary
-  2. ## Blocking issues
-  3. ## Non-blocking issues
-  4. ## Suggested fixes
-  5. ## Verdict
-- Under issue sections, use bullets
-- For each real issue, include:
-  - File:
-  - Lines:
-  - Problem:
-  - Why it matters:
-  - Recommended fix:
-- If a section has no items, write: - None.
-- In ## Verdict, end with one of:
-  - Request changes
-  - Comment only
-
-If you find nothing substantive, say so plainly — but look hard first.`;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const REVIEWER_PROMPT_PATH = join(__dirname, '..', 'prompts', 'reviewer-prompt.md');
+const ADVERSARIAL_PROMPT = readFileSync(REVIEWER_PROMPT_PATH, 'utf8').trim();
 
 // ── Critical-issue detection ─────────────────────────────────────────────────
 
@@ -267,8 +240,32 @@ function normalizeIssueBullets(sectionBody) {
   return normalized.join('\n');
 }
 
+function fallbackCodexReview(rawText) {
+  const text = normalizeWhitespace(rawText);
+  const summary = text ? text : '- None.';
+  const verdict = /(request changes|comment only)/i.test(summary) ? summary.match(/(request changes|comment only)/i)?.[0] || 'Comment only' : 'Comment only';
+
+  return [
+    '## Summary',
+    summary,
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Suggested fixes',
+    '- None.',
+    '',
+    '## Verdict',
+    verdict,
+  ].join('\n').trim();
+}
+
 function formatCodexReview(reviewText) {
-  let text = normalizeWhitespace(reviewText);
+  const original = normalizeWhitespace(reviewText);
+  let text = original;
 
   text = text
     .replace(/^#\s+/gm, '## ')
@@ -276,6 +273,11 @@ function formatCodexReview(reviewText) {
     .replace(/^####\s+/gm, '## ')
     .replace(/^##\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim, (_, heading) => `## ${titleCaseWords(heading)}`);
 
+  const sectionRegex = /^##\s+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)\s*$/gim;
+  const matches = [...text.matchAll(sectionRegex)];
+  if (matches.length === 0) return fallbackCodexReview(original);
+
+  const headingsFound = new Set(matches.map((m) => titleCaseWords(m[1])));
   const canonicalSections = [
     'Summary',
     'Blocking issues',
@@ -283,14 +285,6 @@ function formatCodexReview(reviewText) {
     'Suggested fixes',
     'Verdict',
   ];
-
-  for (const heading of canonicalSections) {
-    text = ensureSection(text, heading);
-  }
-
-  const sectionRegex = /^##\s+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)\s*$/gim;
-  const matches = [...text.matchAll(sectionRegex)];
-  if (matches.length === 0) return text;
 
   const rebuilt = [];
   for (let i = 0; i < matches.length; i += 1) {
@@ -310,6 +304,18 @@ function formatCodexReview(reviewText) {
     }
 
     rebuilt.push(`## ${heading}\n${body}`.trim());
+  }
+
+  for (const heading of canonicalSections) {
+    if (!headingsFound.has(heading)) {
+      if (heading === 'Summary') {
+        rebuilt.unshift(`## Summary\n${original || '- None.'}`.trim());
+      } else if (heading === 'Verdict') {
+        rebuilt.push('## Verdict\nComment only');
+      } else {
+        rebuilt.push(`## ${heading}\n- None.`);
+      }
+    }
   }
 
   return rebuilt.join('\n\n').trim();

@@ -67,6 +67,17 @@ Edit `config.json`:
 
 ## Usage
 
+### Prompt location
+
+The long-form adversarial reviewer prompt lives in:
+
+```bash
+prompts/reviewer-prompt.md
+```
+
+Design rule: prompt text that humans are expected to tune over time should live in standalone Markdown artifacts, not inline string literals buried in runtime code.
+
+
 ### Start the watcher (polls every 5 minutes)
 
 ```bash

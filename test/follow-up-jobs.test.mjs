@@ -66,3 +66,28 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   assert.deepEqual(persisted, job);
   assert.equal(persisted.recommendedFollowUpAction.priority, 'high');
 });
+
+test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const input = {
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewBody: '## Summary\nCheck auth expiry handling.',
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: true,
+  };
+
+  const first = createFollowUpJob(input);
+  const second = createFollowUpJob(input);
+
+  assert.notEqual(first.jobPath, second.jobPath);
+  assert.notEqual(first.job.jobId, second.job.jobId);
+
+  const firstPersisted = JSON.parse(readFileSync(first.jobPath, 'utf8'));
+  const secondPersisted = JSON.parse(readFileSync(second.jobPath, 'utf8'));
+  assert.equal(firstPersisted.jobId, first.job.jobId);
+  assert.equal(secondPersisted.jobId, second.job.jobId);
+});

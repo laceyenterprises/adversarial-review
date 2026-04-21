@@ -1,6 +1,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+const MAX_CREATE_ATTEMPTS = 100;
+
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 1;
 
 function sanitizeRepo(repo) {
@@ -73,14 +75,33 @@ function buildFollowUpJob({
 }
 
 function createFollowUpJob({ rootDir, ...jobInput }) {
-  const job = buildFollowUpJob(jobInput);
+  const baseJob = buildFollowUpJob(jobInput);
   const queueDir = join(rootDir, 'data', 'follow-up-jobs', 'pending');
-  const jobPath = join(queueDir, `${job.jobId}.json`);
 
   mkdirSync(queueDir, { recursive: true });
-  writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
 
-  return { job, jobPath };
+  for (let attempt = 0; attempt < MAX_CREATE_ATTEMPTS; attempt += 1) {
+    const job = attempt === 0
+      ? baseJob
+      : {
+          ...baseJob,
+          jobId: `${baseJob.jobId}-${attempt + 1}`,
+        };
+    const jobPath = join(queueDir, `${job.jobId}.json`);
+
+    try {
+      writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, {
+        encoding: 'utf8',
+        flag: 'wx',
+      });
+      return { job, jobPath };
+    } catch (err) {
+      if (err?.code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+
+  throw new Error(`Unable to create unique follow-up job file for ${baseJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
 }
 
 export {

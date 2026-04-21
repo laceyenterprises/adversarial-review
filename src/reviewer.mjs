@@ -33,16 +33,10 @@ const execFileAsync = promisify(execFile);
 // otherwise the CLI may report API-key auth instead of its native login state.
 const CLAUDE_CLI = '/opt/homebrew/bin/claude';
 
-// ACPX-local Codex adapter path. The reviewer uses ACPX instead of invoking raw
-// codex directly so Codex execution follows the same harness contract as the
-// rest of the ACPX/OpenClaw stack.
-const ACPX_CLI = '/Users/airlock/.openclaw/tools/acpx/node_modules/.bin/acpx';
-
-// Raw Codex CLI is still used only for login-status probing.
+// Native Codex CLI path. Review execution and login-status probing both use the
+// local Codex CLI directly; the current reviewer no longer invokes ACPX here.
 const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/installation/bin/codex';
 
-// Codex OAuth tokens copied from placey to airlock's ~/.codex/auth.json.
-// The reviewer runs as airlock and uses airlock's HOME directly.
 // OPENAI_API_KEY is stripped from env so Codex cannot fall back to API-key auth.
 
 // ── OAuth credential checks ──────────────────────────────────────────────────
@@ -469,7 +463,7 @@ async function reviewWithCodex(diff) {
   const combined = normalizeWhitespace(stdout || stderr || '');
   if (!combined) {
     const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
-    throw new Error(`ACPX Codex returned empty output.${hint}`);
+    throw new Error(`Native Codex returned empty output.${hint}`);
   }
 
   return combined;

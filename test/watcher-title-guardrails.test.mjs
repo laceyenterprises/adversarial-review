@@ -32,6 +32,8 @@ test('routePR maps known title prefixes to opposite-model reviewers', () => {
 test('routePR returns null for malformed titles missing required prefix', () => {
   assert.equal(routePR('LAC-181: missing reviewer tag'), null);
   assert.equal(routePR('[codex LAC-181 malformed prefix'), null);
+  assert.equal(routePR('[codex]'), null);
+  assert.equal(routePR('[codex] [claude-code] stacked prefix'), null);
   assert.equal(routePR('[other] LAC-181: unknown tag'), null);
 });
 
@@ -47,8 +49,8 @@ test('buildMalformedTitleFailureComment explains creation-time tag requirement',
     assert.match(body, new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   assert.match(body, /must be present at PR creation time/i);
-  assert.match(body, /Retitling later will not retrigger review/i);
-  assert.match(body, /Safe recovery path: close and recreate the PR/i);
+  assert.match(body, /retitling may not retrigger adversarial review/i);
+  assert.match(body, /Safe recovery path: open a new PR/i);
   assert.match(body, /`LAC-181: missing \\`tag\\``/);
 });
 
@@ -78,5 +80,5 @@ test('signalMalformedTitleFailure posts fail-loud PR comment', async () => {
   assert.equal(calls[0].repo, 'clio');
   assert.equal(calls[0].issue_number, 42);
   assert.match(calls[0].body, /Adversarial review did not trigger/i);
-  assert.match(calls[0].body, /Retitling later will not retrigger review/i);
+  assert.match(calls[0].body, /retitling may not retrigger adversarial review/i);
 });

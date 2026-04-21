@@ -1,4 +1,4 @@
-import { TAG_PREFIXES, hasKnownPrefix } from './pr-title-tagging.mjs';
+import { TAG_PREFIXES, hasCanonicalTaggedTitle } from './pr-title-tagging.mjs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,9 +11,9 @@ function buildValidationFailureMessage(prTitle) {
     `Invalid PR title: "${shownTitle}"`,
     `Allowed adversarial-review prefixes: ${REQUIRED_PREFIXES.join(', ')}`,
     'Prefix matching is case-insensitive.',
+    'Canonical format: "[tag] <title>" with exactly one known tag prefix and non-empty title text.',
     'Why this check exists: reviewer routing depends on creation-time tag correctness.',
-    'Retitling later does not retrigger adversarial review for malformed-title PRs.',
-    'Recovery path: close and recreate the PR with a valid prefix.',
+    'To fix this check: edit the PR title to a canonical tagged form.',
   ].join('\n');
 }
 
@@ -25,7 +25,7 @@ function validatePRTitlePrefix(prTitle) {
     };
   }
 
-  if (!hasKnownPrefix(prTitle)) {
+  if (!hasCanonicalTaggedTitle(prTitle)) {
     return {
       valid: false,
       message: buildValidationFailureMessage(prTitle),
@@ -39,13 +39,15 @@ function validatePRTitlePrefix(prTitle) {
 }
 
 function runCli(argv = process.argv.slice(2)) {
-  if (argv.length !== 1) {
-    console.error('Usage: node src/pr-title-validate.mjs "<PR title>"');
+  const envTitle = process.env.PR_TITLE;
+  const prTitle = typeof envTitle === 'string' ? envTitle : argv[0];
+
+  if (typeof prTitle !== 'string' || argv.length > 1) {
+    console.error('Usage: PR_TITLE="<PR title>" node src/pr-title-validate.mjs');
     process.exitCode = 1;
     return;
   }
 
-  const prTitle = argv[0];
   const result = validatePRTitlePrefix(prTitle);
 
   if (!result.valid) {

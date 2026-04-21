@@ -13,16 +13,28 @@ test('validatePRTitlePrefix accepts known prefixes', () => {
   assert.equal(validatePRTitlePrefix('[clio-agent] LAC-182: add repo check').valid, true);
 });
 
-test('validatePRTitlePrefix fails with clear creation-time guidance', () => {
+test('validatePRTitlePrefix fails with clear canonical-format guidance', () => {
   const result = validatePRTitlePrefix('LAC-182: missing adversarial-review prefix');
 
   assert.equal(result.valid, false);
   for (const prefix of REQUIRED_PREFIXES) {
     assert.match(result.message, new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
+  assert.match(result.message, /Canonical format/i);
   assert.match(result.message, /creation-time tag correctness/i);
-  assert.match(result.message, /Retitling later does not retrigger adversarial review/i);
-  assert.match(result.message, /close and recreate the PR/i);
+  assert.match(result.message, /edit the PR title/i);
+});
+
+test('validatePRTitlePrefix rejects stacked-prefix titles', () => {
+  const result = validatePRTitlePrefix('[codex] [claude-code] LAC-182: invalid');
+  assert.equal(result.valid, false);
+  assert.match(result.message, /Canonical format/i);
+});
+
+test('validatePRTitlePrefix rejects prefix-only titles', () => {
+  const result = validatePRTitlePrefix('[codex]');
+  assert.equal(result.valid, false);
+  assert.match(result.message, /Canonical format/i);
 });
 
 test('validatePRTitlePrefix fails on empty titles', () => {

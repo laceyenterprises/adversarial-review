@@ -96,11 +96,13 @@ function parseArgs(argv) {
 
 function validatePassthroughArgs(passthrough) {
   for (const arg of passthrough) {
+    const shortFlags = arg.startsWith('-') && !arg.startsWith('--') ? (arg.slice(1).match(/[A-Za-z]/g) ?? []) : [];
+    const includesShortTitleFlag = shortFlags.includes('t');
     if (
       arg === '--title' ||
       arg === '-t' ||
       arg.startsWith('--title=') ||
-      (arg.startsWith('-t') && arg.length > 2)
+      includesShortTitleFlag
     ) {
       throw new Error('Do not pass --title to gh. Use --title on this helper so title tagging is enforced.');
     }

@@ -13,7 +13,7 @@ const TAG_ALIASES = {
 };
 
 const KNOWN_TAGS = Object.keys(TAG_PREFIXES);
-const PREFIX_PATTERN = new RegExp(`^\\[(${KNOWN_TAGS.join('|')})\\]\\s*`, 'i');
+const CANONICAL_PREFIXES = KNOWN_TAGS.map((tag) => TAG_PREFIXES[tag]);
 
 function normalizeTag(tagInput) {
   if (typeof tagInput !== 'string') return null;
@@ -27,8 +27,39 @@ function getPrefixForTag(tagInput) {
   return TAG_PREFIXES[normalizedTag];
 }
 
+function parseKnownPrefix(rawTitle) {
+  if (typeof rawTitle !== 'string') return null;
+  const title = rawTitle.trim();
+  if (!title) return null;
+
+  const lower = title.toLowerCase();
+  for (let i = 0; i < KNOWN_TAGS.length; i += 1) {
+    const tag = KNOWN_TAGS[i];
+    const prefix = CANONICAL_PREFIXES[i];
+    if (!lower.startsWith(prefix)) continue;
+    return {
+      tag,
+      prefix,
+      title,
+      remainder: title.slice(prefix.length),
+    };
+  }
+
+  return null;
+}
+
 function hasKnownPrefix(title) {
-  return PREFIX_PATTERN.test(title.trim());
+  return parseKnownPrefix(title) !== null;
+}
+
+function hasCanonicalTaggedTitle(rawTitle) {
+  const parsed = parseKnownPrefix(rawTitle);
+  if (!parsed) return false;
+
+  const remainder = parsed.remainder.trim();
+  if (!remainder) return false;
+  if (hasKnownPrefix(remainder)) return false;
+  return true;
 }
 
 function buildTaggedTitle(tagInput, rawTitle) {
@@ -53,9 +84,12 @@ function buildTaggedTitle(tagInput, rawTitle) {
 
 export {
   buildTaggedTitle,
+  CANONICAL_PREFIXES,
   getPrefixForTag,
+  hasCanonicalTaggedTitle,
   hasKnownPrefix,
   KNOWN_TAGS,
+  parseKnownPrefix,
   normalizeTag,
   TAG_ALIASES,
   TAG_PREFIXES,

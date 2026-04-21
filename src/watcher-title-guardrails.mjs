@@ -1,10 +1,6 @@
-import { TAG_PREFIXES } from './pr-title-tagging.mjs';
+import { TAG_PREFIXES, hasCanonicalTaggedTitle, parseKnownPrefix } from './pr-title-tagging.mjs';
 
 const REQUIRED_PREFIXES = Object.values(TAG_PREFIXES);
-const TAG_PATTERN = new RegExp(
-  `^\\[(${Object.keys(TAG_PREFIXES).join('|')})\\]`,
-  'i'
-);
 
 const MALFORMED_TITLE_COMMENT_HEADER = '## Adversarial Review Trigger Failure';
 const ROUTE_BY_TAG = {
@@ -30,9 +26,9 @@ function escapeForInlineCode(input) {
 }
 
 function routePR(prTitle) {
-  const match = prTitle.match(TAG_PATTERN);
-  const tag = match ? match[1].toLowerCase() : null;
-
+  if (!hasCanonicalTaggedTitle(prTitle)) return null;
+  const parsed = parseKnownPrefix(prTitle);
+  const tag = parsed?.tag ?? null;
   if (!tag) return null;
   const route = ROUTE_BY_TAG[tag];
   if (!route) return null;
@@ -54,15 +50,14 @@ function buildMalformedTitleFailureComment({ prTitle }) {
     `Current title: \`${escapedTitle}\``,
     '',
     'Adversarial review did not trigger because the title tag must be present at PR creation time.',
-    'Retitling later will not retrigger review for this PR because malformed titles are recorded as terminal failures.',
-    'Safe recovery path: close and recreate the PR with the correct creation-time tag.',
+    'If this PR was already recorded as malformed, retitling may not retrigger adversarial review.',
+    'Safe recovery path: open a new PR with the correct creation-time tag.',
   ].join('\n');
 }
 
 export {
   MALFORMED_TITLE_COMMENT_HEADER,
   REQUIRED_PREFIXES,
-  TAG_PATTERN,
   buildMalformedTitleFailureComment,
   routePR,
 };

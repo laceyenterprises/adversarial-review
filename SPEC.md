@@ -181,6 +181,22 @@ Reviews are posted by dedicated bot accounts — not Clio's personal account —
 
 \---
 
+\#\# Codex runtime debrief note (2026-04-21)
+
+For this system on laceyent-mbpro, the durable Codex runtime contract is now:
+- long-running watcher runs as `placey`
+- Codex prompt passed as argv, not stdin
+- `codex exec --dangerously-bypass-approvals-and-sandbox --ephemeral --output-last-message <file>`
+- outer wrapper remains responsible for validation + GitHub posting
+
+Explicit anti-patterns from the PR #19 debugging session:
+- mixed-principal `airlock` watcher with borrowed `placey` auth path as the main resident contract
+- stdin-fed prompt transport as the default noninteractive path
+- accepting scary stderr as fatal without checking the output artifact/body
+- appending wrapper template sections after an already-complete Codex review body
+
+See also: `docs/POSTMORTEM-codex-cross-user-invocation-2026-04-21.md` and `docs/RUNBOOK-codex-invocation-contracts.md`.
+
 \#\# Open Questions
 
 1\. \*\*Webhook vs polling?\*\* Webhook is more responsive but requires a public endpoint (or ngrok/Tailscale tunnel). Polling is simpler for now — revisit when prlt is live.  

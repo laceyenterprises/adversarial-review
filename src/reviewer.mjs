@@ -17,14 +17,102 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 
-import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createFollowUpJob } from './follow-up-jobs.mjs';
 
 const execFileAsync = promisify(execFile);
+
+function spawnWithInput(command, args, { env, cwd, input = '', timeout = 0, maxBuffer = 10 * 1024 * 1024 } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      env,
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+
+    const finishReject = (err) => {
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      reject(err);
+    };
+
+    const killTimer = timeout > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill('SIGTERM');
+        }, timeout)
+      : null;
+
+    const appendChecked = (target, chunk) => {
+      const next = target + chunk;
+      if (next.length > maxBuffer) {
+        child.kill('SIGTERM');
+        const err = new Error(`spawnWithInput maxBuffer exceeded (${maxBuffer} bytes)`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        finishReject(err);
+        return null;
+      }
+      return next;
+    };
+
+    child.stdout.on('data', (data) => {
+      if (settled) return;
+      const next = appendChecked(stdout, data.toString());
+      if (next !== null) stdout = next;
+    });
+
+    child.stderr.on('data', (data) => {
+      if (settled) return;
+      const next = appendChecked(stderr, data.toString());
+      if (next !== null) stderr = next;
+    });
+
+    child.on('error', (err) => {
+      if (settled) return;
+      err.stdout = stdout;
+      err.stderr = stderr;
+      finishReject(err);
+    });
+
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      if (code === 0) {
+        resolve({ stdout, stderr, code, signal });
+        return;
+      }
+      const err = new Error(
+        timedOut
+          ? `Command timed out after ${timeout}ms`
+          : `Command failed with code ${code}${signal ? ` signal ${signal}` : ''}`
+      );
+      err.code = code;
+      err.signal = signal;
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    });
+
+    child.stdin.end(input);
+  });
+}
+
+async function spawnCaptured(command, args, { env, cwd, timeout = 0, maxBuffer = 10 * 1024 * 1024 } = {}) {
+  return spawnWithInput(command, args, { env, cwd, input: '', timeout, maxBuffer });
+}
 
 // ── CLI paths ────────────────────────────────────────────────────────────────
 
@@ -154,8 +242,32 @@ class OAuthError extends Error {
 // ── Utility functions ────────────────────────────────────────────────────────
 
 function looksLikeRuntimeJunk(text) {
-  const normalized = text.toLowerCase();
-  return /\[client\]|\[agent\]|running|initializ|session|Reading additional input|error:|timed out/.test(normalized);
+  const normalized = String(text ?? '').toLowerCase();
+  return /\[client\]|\[agent\]|running|initializ|session|reading additional input|reading prompt from stdin|could not update path|operation not permitted|error:|timed out/.test(normalized);
+}
+
+function stripCodexRuntimeNoise(text) {
+  const lines = String(text ?? '')
+    .replace(/\r\n/g, '\n')
+    .split('\n');
+
+  const filtered = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    return !(
+      /^warning:\s+proceeding, even though we could not update path:/i.test(trimmed) ||
+      /^reading prompt from stdin/i.test(trimmed) ||
+      /^reading additional input from stdin/i.test(trimmed) ||
+      /^openai codex v/i.test(trimmed) ||
+      /^model:/i.test(trimmed) ||
+      /^cwd:/i.test(trimmed) ||
+      /^approval:/i.test(trimmed) ||
+      /^sandbox:/i.test(trimmed) ||
+      /^reasoning:/i.test(trimmed)
+    );
+  });
+
+  return filtered.join('\n').trim();
 }
 
 // ── Adversarial prompt (NON-NEGOTIABLE) ──────────────────────────────────────
@@ -268,8 +380,12 @@ function formatCodexReview(reviewText) {
   ];
 
   const rebuilt = [];
+  const seenHeadings = new Set();
   for (let i = 0; i < matches.length; i += 1) {
     const heading = titleCaseWords(matches[i][1]);
+    if (seenHeadings.has(heading)) continue;
+    seenHeadings.add(heading);
+
     const start = matches[i].index + matches[i][0].length;
     const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
     const rawBody = normalizeWhitespace(text.slice(start, end));
@@ -377,26 +493,35 @@ async function reviewWithCodex(diff) {
   }
 
   const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
-
   const authPath = resolveCodexAuthPath();
+  const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
+
   const env = {
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     CODEX_AUTH_PATH: authPath,
-    HOME: '/Users/placey',  // Codex OAuth principal
+    HOME: process.env.HOME || '/Users/placey',
   };
   delete env.OPENAI_API_KEY;
 
   let stdout = '';
   let stderr = '';
   try {
-    console.error(`[reviewWithCodex] invoking native Codex CLI`);
-    const result = await execFileAsync(
+    console.error('[reviewWithCodex] invoking native Codex CLI');
+    const result = await spawnCaptured(
       CODEX_CLI,
-      ['exec', '--output-last-message', '-'],
+      [
+        'exec',
+        '--dangerously-bypass-approvals-and-sandbox',
+        '--ephemeral',
+        '--output-last-message',
+        outputPath,
+        '--',
+        prompt,
+      ],
       {
         env,
-        input: prompt,
+        cwd: process.cwd(),
         timeout: 5 * 60 * 1000,
         maxBuffer: 10 * 1024 * 1024,
       }
@@ -413,13 +538,26 @@ async function reviewWithCodex(diff) {
     throw new Error(`Native Codex exec failed: ${msg.substring(0, 800)}`);
   }
 
-  console.error(`[reviewWithCodex] native Codex returned stdout length=${stdout.length}; stderr length=${stderr.length}`);
+  let fileOutput = '';
+  try {
+    if (existsSync(outputPath)) {
+      fileOutput = readFileSync(outputPath, 'utf8');
+    }
+  } finally {
+    try { unlinkSync(outputPath); } catch {}
+  }
 
-  if (looksLikeRuntimeJunk(stdout)) {
+  console.error(`[reviewWithCodex] native Codex returned stdout length=${stdout.length}; stderr length=${stderr.length}; file length=${fileOutput.length}`);
+
+  const cleanedStdout = stripCodexRuntimeNoise(stdout);
+  const cleanedStderr = stripCodexRuntimeNoise(stderr);
+  const cleanedFile = stripCodexRuntimeNoise(fileOutput);
+  const combined = normalizeWhitespace(cleanedFile || cleanedStdout || cleanedStderr || '');
+
+  if (looksLikeRuntimeJunk(stdout) && !combined) {
     throw new Error(`Native Codex returned runtime/status junk instead of a review: ${stdout.substring(0, 400)}`);
   }
 
-  const combined = normalizeWhitespace(stdout || stderr || '');
   if (!combined) {
     const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
     throw new Error(`Native Codex returned empty output.${hint}`);

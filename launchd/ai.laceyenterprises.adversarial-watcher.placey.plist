@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.laceyenterprises.adversarial-watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/airlock/agent-os/tools/adversarial-review/scripts/adversarial-watcher-start-placey.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/airlock/agent-os/tools/adversarial-review</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/placey</string>
+        <key>CODEX_AUTH_PATH</key>
+        <string>/Users/placey/.codex/auth.json</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/placey/Library/Logs/adversarial-watcher.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/placey/Library/Logs/adversarial-watcher.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

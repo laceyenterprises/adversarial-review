@@ -29,7 +29,10 @@ test('parseArgs throws clear missing-value errors for tag/title', () => {
 test('validatePassthroughArgs blocks short-form title overrides', () => {
   assert.throws(() => validatePassthroughArgs(['-t']), /Do not pass --title/);
   assert.throws(() => validatePassthroughArgs(['-tOverride']), /Do not pass --title/);
+  assert.throws(() => validatePassthroughArgs(['-dt']), /Do not pass --title/);
+  assert.throws(() => validatePassthroughArgs(['-bdt']), /Do not pass --title/);
   assert.throws(() => validatePassthroughArgs(['--title=override']), /Do not pass --title/);
+  assert.doesNotThrow(() => validatePassthroughArgs(['--draft', '--base', 'main']));
 });
 
 test('CLI dry-run path respects equals args and blocks passthrough title override', async () => {
@@ -45,4 +48,3 @@ test('CLI dry-run path respects equals args and blocks passthrough title overrid
     }
   );
 });
-

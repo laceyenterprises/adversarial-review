@@ -119,7 +119,7 @@ Rules enforced by the helper:
 - `--tag` is required and must be one of `codex`, `claude-code`, `clio-agent` (aliases: `claude`, `clio`)
 - `--title` is required and must be unprefixed
 - helper prepends the canonical prefix and prints the exact final title before PR creation
-- passing `--title` through to raw `gh` args is blocked so title enforcement cannot be bypassed accidentally
+- passing `--title` through to raw `gh` args is blocked (including short-flag bundles that include `-t`) so title enforcement cannot be bypassed accidentally
 
 ## Data
 

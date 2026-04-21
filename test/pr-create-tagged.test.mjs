@@ -32,6 +32,7 @@ test('validatePassthroughArgs blocks short-form title overrides', () => {
   assert.throws(() => validatePassthroughArgs(['-dt']), /Do not pass --title/);
   assert.throws(() => validatePassthroughArgs(['-bdt']), /Do not pass --title/);
   assert.throws(() => validatePassthroughArgs(['--title=override']), /Do not pass --title/);
+  assert.doesNotThrow(() => validatePassthroughArgs(['-d']));
   assert.doesNotThrow(() => validatePassthroughArgs(['--draft', '--base', 'main']));
 });
 

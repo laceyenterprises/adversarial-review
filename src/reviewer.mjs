@@ -370,7 +370,6 @@ function formatCodexReview(reviewText) {
   const matches = [...text.matchAll(sectionRegex)];
   if (matches.length === 0) return fallbackCodexReview(original);
 
-  const headingsFound = new Set(matches.map((m) => titleCaseWords(m[1])));
   const canonicalSections = [
     'Summary',
     'Blocking issues',
@@ -379,28 +378,40 @@ function formatCodexReview(reviewText) {
     'Verdict',
   ];
 
-  const rebuilt = [];
-  const seenHeadings = new Set();
-  for (let i = 0; i < matches.length; i += 1) {
-    const heading = titleCaseWords(matches[i][1]);
-    if (seenHeadings.has(heading)) continue;
-    seenHeadings.add(heading);
+  const firstSeen = new Set();
+  const firstPass = [];
+  for (const match of matches) {
+    const heading = titleCaseWords(match[1]);
+    if (firstSeen.has(heading)) break;
+    firstSeen.add(heading);
+    firstPass.push({ heading, index: match.index, raw: match[0] });
+    if (heading === 'Verdict') break;
+  }
 
-    const start = matches[i].index + matches[i][0].length;
-    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+  if (firstPass.length === 0) return fallbackCodexReview(original);
+
+  const headingsFound = new Set(firstPass.map((m) => m.heading));
+  const rebuilt = [];
+
+  for (let i = 0; i < firstPass.length; i += 1) {
+    const heading = firstPass[i].heading;
+    const start = firstPass[i].index + firstPass[i].raw.length;
+    const end = i + 1 < firstPass.length ? firstPass[i + 1].index : text.length;
     const rawBody = normalizeWhitespace(text.slice(start, end));
 
     let body;
     if (heading === 'Summary' || heading === 'Verdict') {
       body = rawBody || '- None.';
-      if (heading === 'Verdict' && !/(request changes|comment only)/i.test(body)) {
-        body = `${body}\n\nComment only`.trim();
+      if (heading === 'Verdict') {
+        const verdictMatch = body.match(/\b(Request changes|Comment only)\b/i);
+        body = verdictMatch ? verdictMatch[1] : 'Comment only';
       }
     } else {
       body = normalizeIssueBullets(rawBody);
     }
 
     rebuilt.push(`## ${heading}\n${body}`.trim());
+    if (heading === 'Verdict') break;
   }
 
   for (const heading of canonicalSections) {

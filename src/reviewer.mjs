@@ -18,10 +18,11 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { createFollowUpJob } from './follow-up-jobs.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -130,14 +131,13 @@ async function assertCodexOAuth() {
 
   const authPath = assertCodexAuthReadable();
 
-  // Run login status with OPENAI_API_KEY stripped and HOME pointed at the auth file's
-  // parent dir so Codex resolves the intended OAuth state instead of the current user's
-  // default ~/.codex directory.
+  // Run login status with OPENAI_API_KEY stripped while preserving the runtime HOME.
+  // CODEX_AUTH_PATH points Codex at the intended OAuth principal directly.
   const env = {
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     CODEX_AUTH_PATH: authPath,
-    HOME: dirname(dirname(authPath)),
+    HOME: process.env.HOME || '/Users/airlock',
   };
   delete env.OPENAI_API_KEY;
 
@@ -182,6 +182,7 @@ class OAuthError extends Error {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const ROOT = join(__dirname, '..');
 const REVIEWER_PROMPT_PATH = join(__dirname, '..', 'prompts', 'reviewer-prompt.md');
 const ADVERSARIAL_PROMPT = readFileSync(REVIEWER_PROMPT_PATH, 'utf8').trim();
 
@@ -387,39 +388,63 @@ async function reviewWithCodex(diff) {
   await assertCodexOAuth();
   console.error('[reviewWithCodex] OAuth OK');
 
-  if (!existsSync(ACPX_CLI)) {
-    throw new Error(`ACPX CLI not found at ${ACPX_CLI}`);
+  if (!existsSync(CODEX_CLI)) {
+    throw new Error(`Codex CLI not found at ${CODEX_CLI}`);
   }
 
   const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 
   const authPath = resolveCodexAuthPath();
+  const runtimeHome = process.env.HOME || '/Users/airlock';
+  const outputDir = join(runtimeHome, '.cache', 'codex-review');
+  const npmCacheDir = join(outputDir, 'npm-cache');
+  const xdgCacheHome = join(outputDir, 'xdg-cache');
+  const xdgStateHome = join(outputDir, 'xdg-state');
+  const xdgConfigHome = join(outputDir, 'xdg-config');
+
+  mkdirSync(outputDir, { recursive: true });
+  mkdirSync(npmCacheDir, { recursive: true });
+  mkdirSync(xdgCacheHome, { recursive: true });
+  mkdirSync(xdgStateHome, { recursive: true });
+  mkdirSync(xdgConfigHome, { recursive: true });
+
   const env = {
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     CODEX_AUTH_PATH: authPath,
-    HOME: dirname(dirname(authPath)),
+    HOME: runtimeHome,
+    npm_config_cache: npmCacheDir,
+    XDG_CACHE_HOME: xdgCacheHome,
+    XDG_STATE_HOME: xdgStateHome,
+    XDG_CONFIG_HOME: xdgConfigHome,
   };
   delete env.OPENAI_API_KEY;
 
-  const outputDir = join(process.env.HOME || '/Users/airlock', '.cache', 'codex-review');
   mkdirSync(outputDir, { recursive: true });
-  const promptFile = join(outputDir, `review-prompt-${Date.now()}.txt`);
-
-  writeFileSync(promptFile, prompt, 'utf8');
+  const runId = Date.now();
+  const reviewFile = join(outputDir, `review-${runId}.txt`);
 
   let stdout = '';
   let stderr = '';
   try {
-    console.error(`[reviewWithCodex] invoking ACPX with promptFile=${promptFile}`);
+    console.error(`[reviewWithCodex] invoking native Codex with reviewFile=${reviewFile}`);
     const result = await execFileAsync(
-      ACPX_CLI,
-      ['codex', 'exec', '-f', promptFile],
+      CODEX_CLI,
+      [
+        'exec',
+        '--skip-git-repo-check',
+        '--sandbox', 'read-only',
+        '--output-last-message', reviewFile,
+        '-c', 'shell_environment_policy.inherit=all',
+        prompt,
+      ],
       {
         env,
         cwd: process.cwd(),
         timeout: 5 * 60 * 1000,
         maxBuffer: 10 * 1024 * 1024,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
       }
     );
     stdout = result.stdout || '';
@@ -431,14 +456,15 @@ async function reviewWithCodex(diff) {
     if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
       throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
     }
-    throw new Error(`ACPX Codex exec failed: ${msg.substring(0, 800)}`);
-  } finally {
-    if (existsSync(promptFile)) {
-      rmSync(promptFile);
-    }
+    throw new Error(`Native Codex exec failed: ${msg.substring(0, 800)}`);
   }
 
-  console.error(`[reviewWithCodex] ACPX codex returned stdout length=${stdout.length}; stderr length=${stderr.length}`);
+  const reviewText = existsSync(reviewFile) ? normalizeWhitespace(readFileSync(reviewFile, 'utf8')) : '';
+  console.error(`[reviewWithCodex] native Codex returned stdout length=${stdout.length}; stderr length=${stderr.length}; reviewFile length=${reviewText.length}`);
+
+  if (reviewText) {
+    return reviewText;
+  }
 
   const combined = normalizeWhitespace(stdout || stderr || '');
   if (!combined) {
@@ -621,8 +647,25 @@ async function main() {
     process.exit(1);
   }
 
-  // 4. Update Linear (LAC-13)
   const critical = isCritical(reviewText);
+  const reviewPostedAt = new Date().toISOString();
+  try {
+    const { jobPath } = createFollowUpJob({
+      rootDir: ROOT,
+      repo,
+      prNumber,
+      reviewerModel: effectiveModel,
+      linearTicketId,
+      reviewBody: reviewText,
+      reviewPostedAt,
+      critical,
+    });
+    console.log(`[reviewer] Follow-up handoff queued at ${jobPath}`);
+  } catch (err) {
+    console.error(`[reviewer] Failed to queue follow-up handoff for ${repo}#${prNumber}:`, err.message);
+  }
+
+  // 4. Update Linear (LAC-13)
   try {
     await updateLinearTicket(linearTicketId, {
       reviewComplete: true,

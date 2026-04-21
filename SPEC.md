@@ -83,6 +83,10 @@ GitHub PR opened
   (via gh CLI or GitHub API)  
         │  
         ▼  
+  Durable follow-up handoff queued  
+  (explicit job artifact, pending consumption)  
+        │  
+        ▼  
   Linear ticket updated: "Review complete"  
 \`\`\`
 
@@ -112,6 +116,32 @@ GitHub PR opened
 \- When a PR is reviewed, update the associated Linear ticket status  
 \- Ticket transitions: \`In Review\` → \`Review Complete\`  
 \- If reviewer finds critical issues: flag ticket for Paul's attention
+
+\#\#\# 5\. Follow-up Handoff Queue (first slice)
+\- After a GitHub review post succeeds, write a durable JSON job under \`data/follow-up-jobs/pending/\`
+\- Record repo, PR number, reviewer model, review summary/body, criticality, and recommended follow-up action
+\- Keep the handoff explicit and append-only; do not hide it behind undocumented local hooks
+\- This queue is the minimal bridge until session-aware continuation exists natively
+
+\#\#\# 6\. Review completion semantics (current vs target)
+
+\*\*Current implementation: A semantics (wrapper-owned completion)\*\*
+\- reviewer runtime generates review text/artifact
+\- outer wrapper captures the final output artifact
+\- wrapper posts the PR review comment itself
+\- wrapper then writes the durable follow-up handoff artifact
+
+This is true whether the substrate is direct CLI, ACPX, or another sessionful runtime. The current production question is operational reliability, not semantic impossibility.
+
+\*\*Target future architecture: B semantics (delegated-worker-owned completion)\*\*
+\- delegated job/session owns the completion side effect directly
+\- outer orchestration layer trusts explicit completion artifacts/events instead of scraping final output and manually replaying the PR comment
+\- session/job ownership, retries, and auditability become first-class contracts rather than wrapper convention
+
+\*\*Operational lesson from 2026-04-20/21 debugging\*\*
+\- we lost time pushing toward B-shaped behavior while debugging ACPX/Codex invocation mechanics
+\- the faster restore path was to preserve the known-good A-style review-post contract and swap only the transport/auth layer underneath it
+\- file-based final-output handoff is a valid A-style bridge when using sessionful Codex/ACPX substrates
 
 \---
 
@@ -147,6 +177,7 @@ Reviews are posted by dedicated bot accounts — not Clio's personal account —
 \- Auto-merge on clean review — Paul merges manually  
 \- Multi-round review cycles — one review pass per PR in v1  
 \- Review of PRs Paul opens himself
+\- Resuming the original build session with full context preservation (target future architecture, not tonight's slice)
 
 \---
 
@@ -170,17 +201,26 @@ Reviews are posted by dedicated bot accounts — not Clio's personal account —
 \#\#\# Codex reviewer auth contract
 For Codex-backed review workers, OAuth identity selection must be treated as part of the runtime contract.
 
-Required rules:
+Required rules (current operational patch):
 \- do not trust ambient \`codex login status\` from the launching user alone
 \- validate the intended \`auth.json\` directly and require \`auth_mode: chatgpt\`
-\- if using a non-default Codex identity, pass \`CODEX_AUTH_PATH\` explicitly
-\- align \`HOME\` with the owning user's home for the Codex subprocess
+\- pass \`CODEX_AUTH_PATH\` explicitly when the intended Codex principal is not the launch user's default local state
+\- keep worker \`HOME\` compatible with the local GitHub/runtime context needed by the wrapper
 \- strip \`OPENAI_API_KEY\` from the subprocess environment so Codex does not silently prefer API-key auth
 
-Observed incident (2026-04-20):
+Observed incident/fix sequence (2026-04-20):
 \- \`airlock\` local Codex state reported \`auth_mode: apikey\`
 \- valid OAuth state existed at \`/Users/placey/.codex/auth.json\`
-\- reviewer initially failed auth probing until the wrapper was changed to carry the intended auth principal explicitly
+\- initial patch path copied/staged auth into \`airlock/.codex\`, which still produced a broken execution path in the watcher
+\- durable operational fix for the watcher/reviewer pipeline was the split contract:
+  \- \`HOME=/Users/airlock\`
+  \- \`CODEX_AUTH_PATH=/Users/placey/.codex/auth.json\`
+\- this allowed \`gh\` to work from the launch user's normal environment while forcing Codex to the correct OAuth principal
+
+Architectural direction:
+\- this split-contract patch should be treated as a compatibility bridge
+\- long term, the spawner/worker should receive a native principal grant/materialized auth view from the routing/broker layer and should not need to care about user-home path trivia
+\- the normal block reason should be principal unavailability / reauth / allowance exhaustion, not incorrect auth-path selection
 
 \---
 
@@ -190,6 +230,7 @@ Observed incident (2026-04-20):
 \- \[ \] Review is substantive (adversarial prompt enforced — no empty approvals)  
 \- \[ \] Author detection works reliably from PR title tags  
 \- \[ \] Linear ticket updated on review completion  
+\- \[ \] Successful review posts create a durable, explicit follow-up handoff artifact  
 \- \[ \] Paul can see all pending/completed reviews from Linear
 
 \---

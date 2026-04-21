@@ -101,8 +101,9 @@ node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerMo
 7. Spawns **Reviewer Agent** as a child process
 8. Reviewer fetches diff via `gh pr diff`, sends to AI model with adversarial prompt
 9. Review is posted as a GitHub PR comment by the appropriate bot account
-10. Linear ticket updated to **Review Complete** (Done)
-11. If review contains critical/security issues → comment added to Linear ticket flagging Paul
+10. After a successful GitHub post, reviewer writes a durable follow-up handoff file under `data/follow-up-jobs/pending/`
+11. Linear ticket updated to **Review Complete** (Done)
+12. If review contains critical/security issues → comment added to Linear ticket flagging Paul
 
 ## PR Title Convention
 
@@ -135,3 +136,26 @@ Rules enforced by the helper:
 ## Data
 
 Reviewed PRs are tracked in `data/reviews.db` (SQLite). This prevents duplicate reviews across watcher restarts.
+
+Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, and the recommended next action: start a follow-up coding session against the reviewed PR.
+
+This is intentionally a narrow first slice. The queue is explicit and durable, but nothing consumes it yet. The long-term direction is to replace file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
+
+## Operational semantics note (2026-04-21)
+
+This service currently uses **A semantics** for review completion:
+- Codex/Claude generates review text
+- the outer reviewer wrapper captures the final artifact
+- the wrapper posts the PR review comment itself via `gh pr review`
+- only after successful post does the wrapper enqueue a durable follow-up handoff job
+
+That means the current service does **not** yet implement delegated-worker-owned completion (**B semantics**). The worker does not own the GitHub side effect directly; the wrapper does.
+
+Important lesson from the ACPX/Codex debugging cycle:
+- ACPX/native Codex can still support this A-style contract
+- the quick operational win is to preserve the known-good wrapper-owned review-post path and swap only invocation/auth plumbing underneath it
+- do not let a larger ambition for B-style delegated completion become the critical path for getting the review pipeline working reliably again
+
+Practical implication:
+- substrate choice (`acpx`, native `codex exec`, file-based output handoff) and completion semantics are separate decisions
+- if we want real B semantics later, that needs an explicit job/session ownership contract rather than wrapper glue that scrapes output and pretends delegated work was an inline free model call

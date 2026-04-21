@@ -100,8 +100,11 @@ node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerMo
 6. Sets Linear ticket to **In Review** state
 7. Spawns **Reviewer Agent** as a child process
 8. Reviewer fetches diff via `gh pr diff`, sends to AI model with adversarial prompt
+   - **Codex path:** Uses native Codex CLI with OAuth credentials (not ACPX) — see `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md` for why
+   - **Claude path:** Uses native Claude CLI with OAuth credentials
 9. Review is posted as a GitHub PR comment by the appropriate bot account
 10. After a successful GitHub post, reviewer writes a durable follow-up handoff file under `data/follow-up-jobs/pending/`
+    - Queue uses exclusive writes with collision-safe retries to prevent overwriting existing jobs
 11. Linear ticket updated to **Review Complete** (Done)
 12. If review contains critical/security issues → comment added to Linear ticket flagging Paul
 

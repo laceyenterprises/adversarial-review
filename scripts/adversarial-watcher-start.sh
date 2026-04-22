@@ -1,7 +1,7 @@
 #!/bin/zsh
 # adversarial-watcher-start.sh
 # Canonical LaunchAgent wrapper for the adversarial review watcher.
-# Resolves secrets from 1Password (op run) and gh keychain, then starts node.
+# Resolves only the exact needed secrets from 1Password, then starts node directly.
 #
 # Auth policy:
 # - Reviewer CLIs must use OAuth credentials only.
@@ -28,12 +28,26 @@ fi
 # Force Codex CLI to use the shared OAuth auth file rather than airlock's default ~/.codex/auth.json
 export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json
 
+# Resolve only the 1Password-backed secrets needed by watcher.mjs + reviewer.mjs.
+export LINEAR_API_KEY=$(/opt/homebrew/bin/op read --cache=false 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
+export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read --cache=false 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
+export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read --cache=false 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+
+if [[ -z "${LINEAR_API_KEY:-}" ]]; then
+  echo "[adversarial-watcher] ERROR: failed to resolve LINEAR_API_KEY from 1Password" >&2
+  exit 1
+fi
+if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then
+  echo "[adversarial-watcher] ERROR: failed to resolve GH_CLAUDE_REVIEWER_TOKEN from 1Password" >&2
+  exit 1
+fi
+if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
+  echo "[adversarial-watcher] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from 1Password" >&2
+  exit 1
+fi
+
 # Scrub direct-provider API keys — reviewers must use OAuth only
 unset ANTHROPIC_API_KEY
 unset OPENAI_API_KEY
 
-# Launch watcher via op run to inject remaining secrets from 1Password
-exec /opt/homebrew/bin/op run \
-  --env-file=/Users/airlock/agent-os/agents/clio/config/openclaw/op.env \
-  -- \
-  /bin/zsh -c 'unset ANTHROPIC_API_KEY OPENAI_API_KEY && exec /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs'
+exec /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs

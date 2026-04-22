@@ -142,7 +142,15 @@ Reviewed PRs are tracked in `data/reviews.db` (SQLite). This prevents duplicate 
 
 Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, and the recommended next action: start a follow-up coding session against the reviewed PR.
 
-This is intentionally a narrow first slice. The queue is explicit and durable, but nothing consumes it yet. The long-term direction is to replace file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
+A one-shot consumer now claims the oldest pending job, moves it into `data/follow-up-jobs/in-progress/`, prepares a PR checkout under `data/follow-up-jobs/workspaces/<jobId>/`, and spawns a detached Codex remediation worker using OAuth-backed Codex CLI auth only. If launch preparation fails, the claimed job is moved into `data/follow-up-jobs/failed/` with the error captured in the JSON record.
+
+Run the consumer manually with:
+
+```bash
+npm run follow-up:consume
+```
+
+This is still intentionally a narrow slice. Launch ownership is explicit and durable, but worker completion is not yet reconciled back into the queue. The long-term direction is to replace file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
 
 ## Operational semantics note (2026-04-21)
 

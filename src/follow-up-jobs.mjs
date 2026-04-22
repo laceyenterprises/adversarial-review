@@ -1,9 +1,62 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, join } from 'node:path';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 1;
+const FOLLOW_UP_JOB_DIRS = Object.freeze({
+  pending: ['data', 'follow-up-jobs', 'pending'],
+  inProgress: ['data', 'follow-up-jobs', 'in-progress'],
+  failed: ['data', 'follow-up-jobs', 'failed'],
+  workspaces: ['data', 'follow-up-jobs', 'workspaces'],
+});
+
+function getFollowUpJobDir(rootDir, key) {
+  const parts = FOLLOW_UP_JOB_DIRS[key];
+  if (!parts) {
+    throw new Error(`Unknown follow-up job directory key: ${key}`);
+  }
+
+  return join(rootDir, ...parts);
+}
+
+function ensureFollowUpJobDirs(rootDir) {
+  Object.keys(FOLLOW_UP_JOB_DIRS).forEach((key) => {
+    mkdirSync(getFollowUpJobDir(rootDir, key), { recursive: true });
+  });
+}
+
+function writeFollowUpJob(jobPath, job) {
+  writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+}
+
+function readFollowUpJob(jobPath) {
+  return JSON.parse(readFileSync(jobPath, 'utf8'));
+}
+
+function listPendingFollowUpJobPaths(rootDir) {
+  const pendingDir = getFollowUpJobDir(rootDir, 'pending');
+  if (!existsSync(pendingDir)) return [];
+
+  return readdirSync(pendingDir)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map((name) => join(pendingDir, name));
+}
+
+function listPendingFollowUpJobs(rootDir) {
+  return listPendingFollowUpJobPaths(rootDir).map((jobPath) => ({
+    job: readFollowUpJob(jobPath),
+    jobPath,
+  }));
+}
 
 function sanitizeRepo(repo) {
   return String(repo ?? '').replace(/\//g, '__').replace(/[^a-zA-Z0-9_.-]/g, '-');
@@ -76,7 +129,7 @@ function buildFollowUpJob({
 
 function createFollowUpJob({ rootDir, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
-  const queueDir = join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  const queueDir = getFollowUpJobDir(rootDir, 'pending');
 
   mkdirSync(queueDir, { recursive: true });
 
@@ -104,9 +157,104 @@ function createFollowUpJob({ rootDir, ...jobInput }) {
   throw new Error(`Unable to create unique follow-up job file for ${baseJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
 }
 
+function claimNextFollowUpJob({
+  rootDir,
+  workerType = 'codex-remediation',
+  claimedAt = new Date().toISOString(),
+  launcherPid = process.pid,
+} = {}) {
+  ensureFollowUpJobDirs(rootDir);
+
+  for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+    const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
+
+    try {
+      renameSync(pendingPath, inProgressPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+
+    const job = readFollowUpJob(inProgressPath);
+    const claimedJob = {
+      ...job,
+      status: 'in_progress',
+      claimedAt,
+      claimedBy: {
+        workerType,
+        launcherPid,
+      },
+    };
+
+    writeFollowUpJob(inProgressPath, claimedJob);
+    return { job: claimedJob, jobPath: inProgressPath };
+  }
+
+  return null;
+}
+
+function markFollowUpJobSpawned({
+  jobPath,
+  worker,
+  spawnedAt = new Date().toISOString(),
+}) {
+  const currentJob = readFollowUpJob(jobPath);
+  const nextJob = {
+    ...currentJob,
+    status: 'in_progress',
+    remediationWorker: {
+      model: 'codex',
+      state: 'spawned',
+      spawnedAt,
+      ...worker,
+    },
+  };
+
+  if (worker?.workspaceDir) {
+    nextJob.workspaceDir = worker.workspaceDir;
+  }
+
+  writeFollowUpJob(jobPath, nextJob);
+  return { job: nextJob, jobPath };
+}
+
+function markFollowUpJobFailed({
+  rootDir,
+  jobPath,
+  error,
+  failedAt = new Date().toISOString(),
+}) {
+  ensureFollowUpJobDirs(rootDir);
+
+  const failedPath = join(getFollowUpJobDir(rootDir, 'failed'), basename(jobPath));
+  const currentJob = readFollowUpJob(jobPath);
+  const nextJob = {
+    ...currentJob,
+    status: 'failed',
+    failedAt,
+    failure: {
+      message: error?.message || String(error),
+    },
+  };
+
+  writeFollowUpJob(jobPath, nextJob);
+  renameSync(jobPath, failedPath);
+  return { job: nextJob, jobPath: failedPath };
+}
+
 export {
+  FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   buildFollowUpJob,
+  claimNextFollowUpJob,
   createFollowUpJob,
+  ensureFollowUpJobDirs,
   extractReviewSummary,
+  getFollowUpJobDir,
+  listPendingFollowUpJobPaths,
+  listPendingFollowUpJobs,
+  markFollowUpJobFailed,
+  markFollowUpJobSpawned,
+  readFollowUpJob,
+  writeFollowUpJob,
 };

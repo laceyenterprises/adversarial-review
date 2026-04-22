@@ -270,6 +270,12 @@ function stripCodexRuntimeNoise(text) {
   return filtered.join('\n').trim();
 }
 
+function previewText(text, limit = 200) {
+  const normalized = String(text ?? '').replace(/\r\n/g, '\n').trim();
+  if (!normalized) return '<empty>';
+  return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized;
+}
+
 // ── Adversarial prompt (NON-NEGOTIABLE) ──────────────────────────────────────
 
 const __filename = fileURLToPath(import.meta.url);
@@ -302,65 +308,8 @@ function titleCaseWords(value) {
     .join(' ');
 }
 
-function ensureSection(text, heading) {
-  const pattern = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}$`, 'mi');
-  if (pattern.test(text)) return text;
-  return `${text}\n\n## ${heading}\n- None.`.trim();
-}
-
-function normalizeIssueBullets(sectionBody) {
-  const lines = sectionBody
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) return '- None.';
-  if (lines.length === 1 && /^[-*]\s*none\.?$/i.test(lines[0])) return '- None.';
-
-  const normalized = [];
-  for (const line of lines) {
-    if (/^[-*]\s+/u.test(line)) {
-      normalized.push(`- ${line.replace(/^[-*]\s+/u, '')}`);
-      continue;
-    }
-    if (/^(file|lines|problem|why it matters|recommended fix|verdict):/i.test(line)) {
-      normalized.push(`  - ${line}`);
-      continue;
-    }
-    normalized.push(`- ${line}`);
-  }
-
-  return normalized.join('\n');
-}
-
-function fallbackCodexReview(rawText) {
-  const text = normalizeWhitespace(rawText);
-  const summary = text ? text : '- None.';
-  const verdict = /(request changes|comment only)/i.test(summary) ? summary.match(/(request changes|comment only)/i)?.[0] || 'Comment only' : 'Comment only';
-
-  return [
-    '## Summary',
-    summary,
-    '',
-    '## Blocking issues',
-    '- None.',
-    '',
-    '## Non-blocking issues',
-    '- None.',
-    '',
-    '## Suggested fixes',
-    '- None.',
-    '',
-    '## Verdict',
-    verdict,
-  ].join('\n').trim();
-}
-
-function formatCodexReview(reviewText) {
-  const original = normalizeWhitespace(reviewText);
-  let text = original;
-
-  text = text
+function sanitizeCodexReviewPayload(reviewText) {
+  let text = normalizeWhitespace(reviewText)
     .replace(/^#\s+/gm, '## ')
     .replace(/^###\s+/gm, '## ')
     .replace(/^####\s+/gm, '## ')
@@ -368,65 +317,41 @@ function formatCodexReview(reviewText) {
 
   const sectionRegex = /^##\s+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)\s*$/gim;
   const matches = [...text.matchAll(sectionRegex)];
-  if (matches.length === 0) return fallbackCodexReview(original);
-
-  const canonicalSections = [
-    'Summary',
-    'Blocking issues',
-    'Non-blocking issues',
-    'Suggested fixes',
-    'Verdict',
-  ];
+  if (matches.length === 0) {
+    if (looksLikeRuntimeJunk(text)) {
+      throw new Error('Codex payload did not contain recognizable review sections and still looked like runtime junk');
+    }
+    throw new Error('Codex payload did not contain recognizable review sections');
+  }
 
   const firstSeen = new Set();
-  const firstPass = [];
+  const kept = [];
   for (const match of matches) {
     const heading = titleCaseWords(match[1]);
     if (firstSeen.has(heading)) break;
     firstSeen.add(heading);
-    firstPass.push({ heading, index: match.index, raw: match[0] });
+    kept.push({ heading, index: match.index, raw: match[0] });
     if (heading === 'Verdict') break;
   }
 
-  if (firstPass.length === 0) return fallbackCodexReview(original);
-
-  const headingsFound = new Set(firstPass.map((m) => m.heading));
-  const rebuilt = [];
-
-  for (let i = 0; i < firstPass.length; i += 1) {
-    const heading = firstPass[i].heading;
-    const start = firstPass[i].index + firstPass[i].raw.length;
-    const end = i + 1 < firstPass.length ? firstPass[i + 1].index : text.length;
-    const rawBody = normalizeWhitespace(text.slice(start, end));
-
-    let body;
-    if (heading === 'Summary' || heading === 'Verdict') {
-      body = rawBody || '- None.';
-      if (heading === 'Verdict') {
-        const verdictMatch = body.match(/\b(Request changes|Comment only)\b/i);
-        body = verdictMatch ? verdictMatch[1] : 'Comment only';
-      }
-    } else {
-      body = normalizeIssueBullets(rawBody);
-    }
-
-    rebuilt.push(`## ${heading}\n${body}`.trim());
-    if (heading === 'Verdict') break;
+  if (!firstSeen.has('Summary') || !firstSeen.has('Verdict')) {
+    throw new Error('Codex payload missing required Summary/Verdict sections');
   }
 
-  for (const heading of canonicalSections) {
-    if (!headingsFound.has(heading)) {
-      if (heading === 'Summary') {
-        rebuilt.unshift(`## Summary\n${original || '- None.'}`.trim());
-      } else if (heading === 'Verdict') {
-        rebuilt.push('## Verdict\nComment only');
-      } else {
-        rebuilt.push(`## ${heading}\n- None.`);
-      }
-    }
+  const trimmedSections = [];
+  for (let i = 0; i < kept.length; i += 1) {
+    const start = kept[i].index;
+    const end = i + 1 < kept.length ? kept[i + 1].index : text.length;
+    trimmedSections.push(normalizeWhitespace(text.slice(start, end)));
+    if (kept[i].heading === 'Verdict') break;
   }
 
-  return rebuilt.join('\n\n').trim();
+  const sanitized = trimmedSections.join('\n\n').trim();
+  if (!sanitized) {
+    throw new Error('Codex payload was empty after sanitation');
+  }
+
+  return sanitized;
 }
 
 // ── PR diff fetch ────────────────────────────────────────────────────────────
@@ -550,15 +475,19 @@ async function reviewWithCodex(diff) {
   }
 
   let fileOutput = '';
+  const outputFileExists = existsSync(outputPath);
   try {
-    if (existsSync(outputPath)) {
+    if (outputFileExists) {
       fileOutput = readFileSync(outputPath, 'utf8');
     }
   } finally {
     try { unlinkSync(outputPath); } catch {}
   }
 
-  console.error(`[reviewWithCodex] native Codex returned stdout length=${stdout.length}; stderr length=${stderr.length}; file length=${fileOutput.length}`);
+  console.error(`[reviewWithCodex] native Codex returned stdout length=${stdout.length}; stderr length=${stderr.length}; file exists=${outputFileExists}; file length=${fileOutput.length}`);
+  console.error(`[reviewWithCodex] stdout preview: ${previewText(stdout)}`);
+  console.error(`[reviewWithCodex] stderr preview: ${previewText(stderr)}`);
+  console.error(`[reviewWithCodex] file preview: ${previewText(fileOutput)}`);
 
   const cleanedStdout = stripCodexRuntimeNoise(stdout);
   const cleanedStderr = stripCodexRuntimeNoise(stderr);
@@ -712,12 +641,22 @@ async function main() {
   const effectiveModel = reviewerModel;
 
   let reviewText;
+  let rawReviewText;
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
     if (effectiveModel === 'claude') {
-      reviewText = await reviewWithClaude(diff);
+      rawReviewText = await reviewWithClaude(diff);
+      reviewText = rawReviewText;
     } else {
-      reviewText = formatCodexReview(await reviewWithCodex(diff));
+      rawReviewText = await reviewWithCodex(diff);
+      console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
+      try {
+        reviewText = sanitizeCodexReviewPayload(rawReviewText);
+      } catch (sanitizeErr) {
+        console.error(`[reviewer] SANITIZE FAILED: ${sanitizeErr.message}`);
+        console.error(`[reviewer] SANITIZE INPUT PREVIEW: ${previewText(rawReviewText, 400)}`);
+        throw sanitizeErr;
+      }
     }
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
@@ -742,10 +681,11 @@ async function main() {
   const fullComment = header + reviewText;
 
   try {
+    console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);
     await postGitHubReview(repo, prNumber, fullComment, botTokenEnv);
     console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
   } catch (err) {
-    console.error(`[reviewer] Failed to post review to ${repo}#${prNumber}:`, err.message);
+    console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err.message);
     process.exit(1);
   }
 
@@ -769,13 +709,14 @@ async function main() {
 
   // 4. Update Linear (LAC-13)
   try {
+    console.error(`[reviewer] DEBUG: updating Linear ticket ${linearTicketId || '<none>'}; critical=${critical}`);
     await updateLinearTicket(linearTicketId, {
       reviewComplete: true,
       critical,
       reviewSummary: reviewText,
     });
   } catch (err) {
-    console.error(`[reviewer] Linear update failed for ${linearTicketId}:`, err.message);
+    console.error(`[reviewer] LINEAR UPDATE FAILED for ${linearTicketId}:`, err.message);
     // Non-fatal — review was posted, just log and continue
   }
 

@@ -96,7 +96,11 @@ node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerMo
 2. Detects PR author tag from PR title (`[claude-code]`, `[codex]`, `[clio-agent]`)
 3. If tag is missing/invalid, triggers fail-loud signaling (PR comment + structured watcher failure log/record) and does **not** spawn review
 4. Malformed-title records are terminal by design: retitling an existing PR does not retrigger review
-5. Skips PRs already reviewed (tracked in `data/reviews.db`)
+5. Uses durable delivery state in `data/reviews.db` instead of a binary seen/not-seen flag
+   - `pending` = picked up / attempt in flight
+   - `posted` = review successfully posted to GitHub (terminal success)
+   - `failed` = attempt failed and should be retried on a later poll
+   - `malformed` = PR title malformed; terminal failure until human creates a correctly tagged PR
 6. Sets Linear ticket to **In Review** state
 7. Spawns **Reviewer Agent** as a child process
 8. Reviewer fetches diff via `gh pr diff`, sends to AI model with adversarial prompt
@@ -138,11 +142,31 @@ Rules enforced by the helper:
 
 ## Data
 
-Reviewed PRs are tracked in `data/reviews.db` (SQLite). This prevents duplicate reviews across watcher restarts.
+Reviewed PRs are tracked in `data/reviews.db` (SQLite). This now stores delivery state rather than just a binary already-reviewed marker, so failed review attempts remain visible and retryable across watcher restarts instead of being silently skipped forever.
 
 Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, and the recommended next action: start a follow-up coding session against the reviewed PR.
 
-This is intentionally a narrow first slice. The queue is explicit and durable, but nothing consumes it yet. The long-term direction is to replace file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
+## Cross-user runtime contract (2026-04-22)
+
+The canonical watcher runs as `placey`, but the adversarial-review source tree currently lives under `/Users/airlock/agent-os/tools/adversarial-review`. That means the service depends on a shared-read filesystem contract across the `airlock` ↔ `placey` boundary.
+
+Current required shape:
+```bash
+sudo sh -c 'chgrp -R staff /Users/airlock/agent-os/tools && chmod -R g+rX /Users/airlock/agent-os/tools && find /Users/airlock/agent-os/tools -type d -exec chmod g+s {} +'
+sudo chmod 750 /Users/airlock
+```
+
+If this contract drifts, reviewer imports can fail with `EACCES` even when launch/auth configuration is otherwise correct.
+
+A one-shot consumer now claims the oldest pending job, moves it into `data/follow-up-jobs/in-progress/`, prepares a PR checkout under `data/follow-up-jobs/workspaces/<jobId>/`, and spawns a detached Codex remediation worker using OAuth-backed Codex CLI auth only. If launch preparation fails, the claimed job is moved into `data/follow-up-jobs/failed/` with the error captured in the JSON record.
+
+Run the consumer manually with:
+
+```bash
+npm run follow-up:consume
+```
+
+This is still intentionally a narrow slice. Launch ownership is explicit and durable, but worker completion is not yet reconciled back into the queue. The long-term direction is to replace file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
 
 ## Operational semantics note (2026-04-21)
 

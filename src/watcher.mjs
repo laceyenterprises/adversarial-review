@@ -30,15 +30,21 @@ const db = new Database(join(ROOT, 'data', 'reviews.db'));
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS reviewed_prs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo        TEXT NOT NULL,
-    pr_number   INTEGER NOT NULL,
-    reviewed_at TEXT NOT NULL,
-    reviewer    TEXT NOT NULL,
-    pr_state    TEXT NOT NULL DEFAULT 'open',
-    merged_at   TEXT,
-    closed_at   TEXT,
-    linear_ticket TEXT,
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo              TEXT NOT NULL,
+    pr_number         INTEGER NOT NULL,
+    reviewed_at       TEXT NOT NULL,
+    reviewer          TEXT NOT NULL,
+    pr_state          TEXT NOT NULL DEFAULT 'open',
+    merged_at         TEXT,
+    closed_at         TEXT,
+    linear_ticket     TEXT,
+    review_status     TEXT NOT NULL DEFAULT 'posted',
+    review_attempts   INTEGER NOT NULL DEFAULT 0,
+    last_attempted_at TEXT,
+    posted_at         TEXT,
+    failed_at         TEXT,
+    failure_message   TEXT,
     UNIQUE(repo, pr_number)
   )
 `);
@@ -48,12 +54,33 @@ try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN pr_state TEXT NOT NULL DEFAUL
 try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN merged_at TEXT`); } catch (_) {}
 try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN closed_at TEXT`); } catch (_) {}
 try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN linear_ticket TEXT`); } catch (_) {}
+try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN review_status TEXT NOT NULL DEFAULT 'posted'`); } catch (_) {}
+try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN review_attempts INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN last_attempted_at TEXT`); } catch (_) {}
+try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN posted_at TEXT`); } catch (_) {}
+try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN failed_at TEXT`); } catch (_) {}
+try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN failure_message TEXT`); } catch (_) {}
 
-const stmtIsReviewed = db.prepare(
-  'SELECT 1 FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+const stmtGetReviewRow = db.prepare(
+  'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
 );
-const stmtMarkReviewed = db.prepare(
-  'INSERT OR IGNORE INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket) VALUES (?, ?, ?, ?, ?, ?)'
+const stmtCreateReviewRow = db.prepare(
+  'INSERT OR IGNORE INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, 0)'
+);
+const stmtUpdateReviewRouting = db.prepare(
+  'UPDATE reviewed_prs SET reviewer = ?, linear_ticket = COALESCE(?, linear_ticket) WHERE repo = ? AND pr_number = ?'
+);
+const stmtMarkMalformed = db.prepare(
+  "UPDATE reviewed_prs SET reviewer = 'malformed-title', review_status = 'malformed', failure_message = ?, failed_at = ?, last_attempted_at = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+);
+const stmtMarkAttemptStarted = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'pending', last_attempted_at = ?, failure_message = NULL WHERE repo = ? AND pr_number = ?"
+);
+const stmtMarkPosted = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+);
+const stmtMarkFailed = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
 );
 const stmtGetOpenPRs = db.prepare(
   "SELECT repo, pr_number, linear_ticket FROM reviewed_prs WHERE pr_state = 'open'"
@@ -109,11 +136,16 @@ async function spawnReviewer({ repo, prNumber, reviewerModel, botTokenEnv, linea
     );
     if (stdout) console.log(`[reviewer:${prNumber}] ${stdout.trim()}`);
     if (stderr) console.error(`[reviewer:${prNumber}] stderr: ${stderr.trim()}`);
+    return { ok: true };
   } catch (err) {
-    console.error(`[watcher] Reviewer failed for ${repo}#${prNumber}:`, err.message);
-    return false;
+    const detail = [err.message, err.stdout, err.stderr]
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+      .slice(0, 4000);
+    console.error(`[watcher] Reviewer failed for ${repo}#${prNumber}:`, detail || err.message);
+    return { ok: false, error: detail || err.message };
   }
-  return true;
 }
 
 // ── Linear state helpers ─────────────────────────────────────────────────────
@@ -306,13 +338,26 @@ async function pollOnce(octokit) {
     for (const pr of prs) {
       const prNumber = pr.number;
       const prTitle = pr.title;
+      const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
-      if (stmtIsReviewed.get(repoPath, prNumber)) {
+      if (existing?.review_status === 'posted' || existing?.review_status === 'malformed') {
         continue;
       }
 
       const route = routePR(prTitle);
       if (!route) {
+        if (!existing) {
+          stmtCreateReviewRow.run(
+            repoPath,
+            prNumber,
+            new Date().toISOString(),
+            'malformed-title',
+            'open',
+            null,
+            'pending'
+          );
+        }
+
         await signalMalformedTitleFailure(octokit, {
           repoPath,
           owner,
@@ -322,34 +367,58 @@ async function pollOnce(octokit) {
         });
 
         // Malformed titles are terminal in watcher state to avoid ambiguous retitle retries.
-        stmtMarkReviewed.run(
+        const failureAt = new Date().toISOString();
+        stmtMarkMalformed.run(
+          `Malformed PR title: ${prTitle}`,
+          failureAt,
+          failureAt,
           repoPath,
-          prNumber,
-          new Date().toISOString(),
-          'malformed-title',
-          'malformed',
-          null
+          prNumber
         );
         continue;
       }
 
       const linearTicketId = extractLinearTicketId(prTitle);
-      console.log(
-        `[watcher] New PR ${repoPath}#${prNumber}: "${prTitle}" → ${route.reviewerModel}` +
-          (linearTicketId ? ` (${linearTicketId})` : '')
-      );
+      if (!existing) {
+        console.log(
+          `[watcher] New PR ${repoPath}#${prNumber}: "${prTitle}" → ${route.reviewerModel}` +
+            (linearTicketId ? ` (${linearTicketId})` : '')
+        );
+        stmtCreateReviewRow.run(
+          repoPath,
+          prNumber,
+          new Date().toISOString(),
+          route.reviewerModel,
+          'open',
+          linearTicketId,
+          'pending'
+        );
+      } else {
+        console.log(
+          `[watcher] Retrying PR ${repoPath}#${prNumber}: "${prTitle}" → ${route.reviewerModel}` +
+            (linearTicketId ? ` (${linearTicketId})` : '') +
+            ` | previous status=${existing.review_status}`
+        );
+        stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
+      }
 
-      stmtMarkReviewed.run(repoPath, prNumber, new Date().toISOString(), route.reviewerModel, 'open', linearTicketId);
-
+      const attemptAt = new Date().toISOString();
+      stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
       await setLinearInReview(linearTicketId);
 
-      await spawnReviewer({
+      const result = await spawnReviewer({
         repo: repoPath,
         prNumber,
         reviewerModel: route.reviewerModel,
         botTokenEnv: route.botTokenEnv,
         linearTicketId,
       });
+
+      if (result.ok) {
+        stmtMarkPosted.run(new Date().toISOString(), repoPath, prNumber);
+      } else {
+        stmtMarkFailed.run(new Date().toISOString(), result.error || 'Unknown reviewer failure', repoPath, prNumber);
+      }
 
       // Sync prlt after each new PR picked up
       await runPrltSync();

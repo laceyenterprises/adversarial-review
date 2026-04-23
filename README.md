@@ -146,6 +146,34 @@ Reviewed PRs are tracked in `data/reviews.db` (SQLite). This now stores delivery
 
 Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, and the recommended next action: start a follow-up coding session against the reviewed PR.
 
+### Force a re-review manually
+
+If a PR already has a posted review and GitHub-side reviewer re-request is **not** sufficient to retrigger the watcher, you can force a fresh pass by editing the SQLite row directly.
+
+Current watcher behavior:
+- rows with `review_status in ('posted', 'malformed')` are skipped on poll
+- forcing a re-review means making the row eligible again without deleting its history
+
+Safe procedure for an **open** PR:
+
+1. Inspect the row:
+```bash
+sqlite3 data/reviews.db "select id,repo,pr_number,reviewer,pr_state,review_status,review_attempts,last_attempted_at,posted_at,failed_at,failure_message from reviewed_prs where repo='laceyenterprises/agent-os' and pr_number=25;"
+```
+
+2. Flip it back to `pending` and clear terminal post/failure metadata:
+```bash
+sqlite3 data/reviews.db "BEGIN; UPDATE reviewed_prs SET review_status='pending', posted_at=NULL, failed_at=NULL, failure_message=NULL WHERE repo='laceyenterprises/agent-os' AND pr_number=25; COMMIT;"
+```
+
+3. Verify the row, then wait for the next watcher poll cycle.
+
+Important constraints:
+- keep `reviewer` unchanged unless you intentionally want a different reviewer path
+- keep `review_attempts` and `last_attempted_at` intact so history is preserved
+- do **not** use this to override malformed-title guardrails unless you explicitly want to bypass that safety contract
+- prefer this only when the watcher does not yet support retriggering from GitHub review-request state alone
+
 ## Cross-user runtime contract (2026-04-22)
 
 The canonical watcher runs as `placey`, but the adversarial-review source tree currently lives under `/Users/airlock/agent-os/tools/adversarial-review`. That means the service depends on a shared-read filesystem contract across the `airlock` ↔ `placey` boundary.

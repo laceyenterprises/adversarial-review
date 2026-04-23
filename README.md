@@ -166,7 +166,27 @@ Run the consumer manually with:
 npm run follow-up:consume
 ```
 
-This is still intentionally a narrow slice. Launch ownership is explicit and durable, but worker completion is not yet reconciled back into the queue. The long-term direction is to replace file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
+A separate one-shot reconciler now closes the first durable queue gap for detached worker completion:
+
+```bash
+npm run follow-up:reconcile
+```
+
+Current reconciliation contract:
+- only `data/follow-up-jobs/in-progress/` jobs with `remediationWorker.state = "spawned"` are inspected
+- if the recorded worker PID is still live, the job remains `in_progress`
+- if the PID is gone and `.adversarial-follow-up/codex-last-message.md` exists with non-empty content, the job moves to `data/follow-up-jobs/completed/`
+- if the PID is gone and that final-message artifact is missing or empty, the job moves to `data/follow-up-jobs/failed/`
+- completed/failed records retain the worker artifact paths plus a short operator-facing preview or failure context
+
+New hardening lesson from the detached remediation-launch failure:
+- do **not** treat `spawned process` as equivalent to `durable worker established`
+- require a preflight contract before launch: repo/PR/branch target, runtime path, cwd, auth principal, lane type (`builder` vs `integration`), and expected edit/commit/push/PR-reply authority
+- require a startup receipt or other explicit progress marker within a bounded timeout
+- preserve exact launch metadata and expected artifact paths so failures remain diagnosable after wrapper death
+- classify failures explicitly: launch failure, attach/transport failure, permission-blocked worker, artifact-missing completion, or successful completion
+
+This is still intentionally a bounded slice. Launch ownership is explicit and durable, and completion now has a first-pass reconciler, but the long-term direction remains replacing file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
 
 ## Operational semantics note (2026-04-21)
 

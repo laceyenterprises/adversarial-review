@@ -365,6 +365,62 @@ async function fetchPRDiff(repo, prNumber) {
   return stdout;
 }
 
+async function fetchPRContext(repo, prNumber) {
+  const { stdout } = await execFileAsync(
+    'gh',
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'body,comments,headRefOid'],
+    { maxBuffer: 10 * 1024 * 1024 }
+  );
+  return JSON.parse(stdout);
+}
+
+function extractLinkedRepoDocs(text, repo) {
+  const rels = new Set();
+  const patterns = [
+    /(?:^|\s)(projects\/[A-Za-z0-9._\/-]+\.md|docs\/[A-Za-z0-9._\/-]+\.md|agents\/[A-Za-z0-9._\/-]+\.md|knowledge\/[A-Za-z0-9._\/-]+\.md|modules\/[A-Za-z0-9._\/-]+\.md|tools\/[A-Za-z0-9._\/-]+\.md)/g,
+    /\((\.?\/?(?:projects|docs|agents|knowledge|modules|tools)\/[A-Za-z0-9._\/-]+\.md)\)/g,
+    new RegExp(`https://github\.com/${repo.replace('/', '\/')}/blob/[^\s)]+/((?:projects|docs|agents|knowledge|modules|tools)\/[A-Za-z0-9._\/-]+\.md)`, 'g'),
+    new RegExp(`https://github\.com/${repo.replace('/', '\/')}/pull/\d+[^\s)]*`, 'g'),
+  ];
+
+  for (const pattern of patterns) {
+    let m;
+    while ((m = pattern.exec(text)) !== null) {
+      const rel = m[1];
+      if (!rel) continue;
+      const normalized = rel.replace(/^\.\//, '');
+      if (normalized.endsWith('.md')) rels.add(normalized);
+    }
+  }
+
+  return [...rels].sort();
+}
+
+async function fetchLinkedSpecContents(repo, prNumber) {
+  const pr = await fetchPRContext(repo, prNumber);
+  const combinedText = [pr.body || '', ...(pr.comments || []).map((c) => c.body || '')].join('\n\n');
+  const linked = extractLinkedRepoDocs(combinedText, repo).slice(0, 12);
+  if (!linked.length) return '';
+
+  const sections = [];
+  for (const relPath of linked) {
+    try {
+      const { stdout } = await execFileAsync(
+        'gh',
+        ['api', `repos/${repo}/contents/${relPath}?ref=${pr.headRefOid}`, '--jq', '.content'],
+        { maxBuffer: 10 * 1024 * 1024 }
+      );
+      const decoded = Buffer.from(stdout.replace(/\n/g, ''), 'base64').toString('utf8');
+      const trimmed = decoded.length > 12000 ? `${decoded.slice(0, 12000)}\n\n[truncated]` : decoded;
+      sections.push(`### ${relPath}\n\n\`\`\`md\n${trimmed}\n\`\`\``);
+    } catch (err) {
+      sections.push(`### ${relPath}\n\n[failed to fetch linked spec: ${err.message}]`);
+    }
+  }
+
+  return `\n\n---\n\nAdditional linked project context from the PR body/comments (fetch and use these as governing docs when relevant):\n\n${sections.join('\n\n')}`;
+}
+
 // ── AI review via CLI (OAuth only) ──────────────────────────────────────────
 
 /**
@@ -373,10 +429,10 @@ async function fetchPRDiff(repo, prNumber) {
  * uses its native OAuth path only. Preflight auth validation is aligned with
  * the broker/Keychain path used by the live stack.
  */
-async function reviewWithClaude(diff) {
+async function reviewWithClaude(diff, extraContext = '') {
   await assertClaudeOAuth();
 
-  const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+  const prompt = `${ADVERSARIAL_PROMPT}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
   const env = { ...process.env };
@@ -419,7 +475,7 @@ async function reviewWithClaude(diff) {
  * (see runbooks/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md).
  * Using native Codex CLI instead, which is stable and produces quality reviews.
  */
-async function reviewWithCodex(diff) {
+async function reviewWithCodex(diff, extraContext = '') {
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
   console.error('[reviewWithCodex] OAuth OK');
@@ -428,7 +484,7 @@ async function reviewWithCodex(diff) {
     throw new Error(`Codex CLI not found at ${CODEX_CLI}`);
   }
 
-  const prompt = `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+  const prompt = `${ADVERSARIAL_PROMPT}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const authPath = resolveCodexAuthPath();
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
 
@@ -637,6 +693,18 @@ async function main() {
     process.exit(0);
   }
 
+  let extraContext = '';
+  try {
+    extraContext = await fetchLinkedSpecContents(repo, prNumber);
+    if (extraContext) {
+      console.error(`[reviewer] DEBUG: fetched linked PR context (${extraContext.length} bytes)`);
+    } else {
+      console.error('[reviewer] DEBUG: no linked PR context found');
+    }
+  } catch (err) {
+    console.error(`[reviewer] WARN: failed to fetch linked PR context: ${err.message}`);
+  }
+
   // 2. Run adversarial review (OAuth only — no API key fallback)
   const effectiveModel = reviewerModel;
 
@@ -645,10 +713,10 @@ async function main() {
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
     if (effectiveModel === 'claude') {
-      rawReviewText = await reviewWithClaude(diff);
+      rawReviewText = await reviewWithClaude(diff, extraContext);
       reviewText = rawReviewText;
     } else {
-      rawReviewText = await reviewWithCodex(diff);
+      rawReviewText = await reviewWithCodex(diff, extraContext);
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
       try {
         reviewText = sanitizeCodexReviewPayload(rawReviewText);

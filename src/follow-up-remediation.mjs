@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import {
   claimNextFollowUpJob,
   getFollowUpJobDir,
+  listInProgressFollowUpJobs,
+  markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobSpawned,
 } from './follow-up-jobs.mjs';
@@ -305,6 +307,182 @@ function spawnCodexRemediationWorker({
   }
 }
 
+function isWorkerProcessRunning(processId) {
+  if (!Number.isInteger(processId) || processId <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') {
+      return false;
+    }
+    if (err?.code === 'EPERM') {
+      return true;
+    }
+    throw err;
+  }
+}
+
+function buildReconciliationPaths(rootDir, job) {
+  const worker = job?.remediationWorker || {};
+  const workspaceDir = job.workspaceDir || worker.workspaceDir || null;
+  const outputPath = worker.outputPath || null;
+  const logPath = worker.logPath || null;
+
+  return {
+    workspaceDir: workspaceDir ? join(rootDir, workspaceDir) : null,
+    outputPath: outputPath ? join(rootDir, outputPath) : null,
+    logPath: logPath ? join(rootDir, logPath) : null,
+  };
+}
+
+function readWorkerFinalMessage(outputPath) {
+  if (!outputPath || !existsSync(outputPath)) {
+    return { exists: false, text: '', bytes: 0 };
+  }
+
+  const text = readFileSync(outputPath, 'utf8');
+  return {
+    exists: true,
+    text,
+    bytes: Buffer.byteLength(text, 'utf8'),
+  };
+}
+
+function summarizeWorkerFinalMessage(text, limit = 400) {
+  const normalized = String(text ?? '').trim().replace(/\s+/g, ' ');
+  if (!normalized) {
+    return '';
+  }
+
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, limit - 1)}…`;
+}
+
+function reconcileFollowUpJob({
+  rootDir = ROOT,
+  job,
+  jobPath,
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+} = {}) {
+  const worker = job?.remediationWorker;
+  if (!worker?.processId || worker.state !== 'spawned') {
+    return {
+      action: 'skipped',
+      reason: 'missing-worker-metadata',
+      job,
+      jobPath,
+    };
+  }
+
+  if (isWorkerRunning(worker.processId)) {
+    return {
+      action: 'active',
+      reason: 'worker-still-running',
+      job,
+      jobPath,
+    };
+  }
+
+  const completedAt = now();
+  const paths = buildReconciliationPaths(rootDir, job);
+  const finalMessage = readWorkerFinalMessage(paths.outputPath);
+  const workerState = {
+    ...worker,
+    reconciledAt: completedAt,
+  };
+
+  if (finalMessage.exists && String(finalMessage.text).trim()) {
+    const completed = markFollowUpJobCompleted({
+      rootDir,
+      jobPath,
+      completedAt,
+      completion: {
+        source: 'codex-output-last-message',
+        note: 'Reconciled from detached worker exit plus non-empty final message artifact.',
+        finalMessagePath: worker.outputPath || null,
+        finalMessageBytes: finalMessage.bytes,
+        finalMessagePreview: summarizeWorkerFinalMessage(finalMessage.text),
+        logPath: worker.logPath || null,
+      },
+    });
+
+    completed.job.remediationWorker = {
+      ...workerState,
+      state: 'completed',
+    };
+    writeFileSync(completed.jobPath, `${JSON.stringify(completed.job, null, 2)}\n`, 'utf8');
+
+    return {
+      action: 'completed',
+      reason: 'final-message-artifact-present',
+      job: completed.job,
+      jobPath: completed.jobPath,
+    };
+  }
+
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath,
+    failedAt: completedAt,
+    error: new Error(
+      finalMessage.exists
+        ? 'Remediation worker exited without a non-empty final message artifact.'
+        : 'Remediation worker exited before writing the final message artifact.'
+    ),
+  });
+
+  failed.job.remediationWorker = {
+    ...workerState,
+    state: 'failed',
+  };
+  failed.job.failure = {
+    ...failed.job.failure,
+    finalMessagePath: worker.outputPath || null,
+    finalMessageBytes: finalMessage.bytes,
+    logPath: worker.logPath || null,
+  };
+  writeFileSync(failed.jobPath, `${JSON.stringify(failed.job, null, 2)}\n`, 'utf8');
+
+  return {
+    action: 'failed',
+    reason: finalMessage.exists ? 'empty-final-message-artifact' : 'missing-final-message-artifact',
+    job: failed.job,
+    jobPath: failed.jobPath,
+  };
+}
+
+function reconcileInProgressFollowUpJobs({
+  rootDir = ROOT,
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+} = {}) {
+  const jobs = listInProgressFollowUpJobs(rootDir);
+  const results = jobs.map(({ job, jobPath }) => reconcileFollowUpJob({
+    rootDir,
+    job,
+    jobPath,
+    now,
+    isWorkerRunning,
+  }));
+
+  return {
+    scanned: jobs.length,
+    active: results.filter((result) => result.action === 'active').length,
+    completed: results.filter((result) => result.action === 'completed').length,
+    failed: results.filter((result) => result.action === 'failed').length,
+    skipped: results.filter((result) => result.action === 'skipped').length,
+    results,
+  };
+}
+
 async function consumeNextFollowUpJob({
   rootDir = ROOT,
   execFileImpl = execFileAsync,
@@ -379,7 +557,22 @@ async function consumeNextFollowUpJob({
 }
 
 async function main() {
+  const mode = process.argv[2] === 'reconcile' ? 'reconcile' : 'consume';
+
   try {
+    if (mode === 'reconcile') {
+      const result = reconcileInProgressFollowUpJobs();
+      console.log(
+        `[follow-up-remediation] Reconciliation scanned=${result.scanned} active=${result.active} completed=${result.completed} failed=${result.failed} skipped=${result.skipped}`
+      );
+      result.results
+        .filter((entry) => entry.action === 'completed' || entry.action === 'failed')
+        .forEach((entry) => {
+          console.log(`[follow-up-remediation] ${entry.action}: ${entry.job.repo}#${entry.job.prNumber} -> ${entry.jobPath}`);
+        });
+      return;
+    }
+
     const result = await consumeNextFollowUpJob();
     if (!result.consumed) {
       console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
@@ -413,10 +606,14 @@ export {
   buildInheritedPath,
   consumeNextFollowUpJob,
   inspectWorkspaceState,
+  isWorkerProcessRunning,
   loadFollowUpPromptTemplate,
   prepareWorkspaceForJob,
+  reconcileFollowUpJob,
+  reconcileInProgressFollowUpJobs,
   resolveCodexCliPath,
   resolveCodexAuthPath,
+  summarizeWorkerFinalMessage,
   spawnCodexRemediationWorker,
 };
 

@@ -9,7 +9,8 @@
     "review": "node src/reviewer.mjs",
     "pr:create:tagged": "node src/pr-create-tagged.mjs",
     "test": "node --test test/*.test.mjs",
-    "follow-up:consume": "node src/follow-up-remediation.mjs"
+    "follow-up:consume": "node src/follow-up-remediation.mjs",
+    "follow-up:reconcile": "node src/follow-up-remediation.mjs reconcile"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

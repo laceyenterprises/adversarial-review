@@ -127,6 +127,18 @@ GitHub PR opened
 \- Keep the handoff explicit and append-only; do not hide it behind undocumented local hooks
 \- This queue is the minimal bridge until session-aware continuation exists natively
 
+\#\#\# 5\.1 Follow-up worker completion reconciliation (bounded next slice)
+\- A detached remediation worker launch must not be treated as terminal queue success by itself
+\- The queue must expose explicit terminal states for launched remediation work: \`completed\` and \`failed\`
+\- Reconciliation may remain one-shot/manual in this slice; it does not need a new long-running daemon
+\- Current bounded contract:
+\- inspect only \`in_progress\` jobs whose \`remediationWorker.state\` is \`spawned\`
+\- if the recorded worker PID is still live, leave the job \`in_progress\`
+\- if the PID is gone and the recorded final-message artifact exists with non-empty content, move the job to \`completed\`
+\- if the PID is gone and the final-message artifact is missing or empty, move the job to \`failed\`
+\- Reconciled terminal records must preserve operator-visible metadata: worker PID, workspace path, log path, final-message path, and a short completion preview or explicit failure reason
+\- This slice preserves wrapper-owned review completion semantics; it does not grant the remediation worker ownership of the GitHub review side effect
+
 \#\#\# 6\. Review completion semantics (current vs target)
 
 \*\*Current implementation: A semantics (wrapper-owned completion)\*\*

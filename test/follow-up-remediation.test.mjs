@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -8,8 +8,16 @@ import {
   buildRemediationPrompt,
   buildInheritedPath,
   prepareWorkspaceForJob,
+  reconcileFollowUpJob,
+  reconcileInProgressFollowUpJobs,
   spawnCodexRemediationWorker,
 } from '../src/follow-up-remediation.mjs';
+import {
+  claimNextFollowUpJob,
+  createFollowUpJob,
+  getFollowUpJobDir,
+  markFollowUpJobSpawned,
+} from '../src/follow-up-jobs.mjs';
 
 function makeJob(overrides = {}) {
   return {
@@ -185,4 +193,139 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
       process.env.PATH = originalPath;
     }
   }
+});
+
+function makeQueuedJob(rootDir, overrides = {}) {
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    linearTicketId: 'LAC-207',
+    reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: true,
+    ...overrides,
+  });
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    launcherPid: 4242,
+  });
+
+  return { created, claimed };
+}
+
+test('reconcileFollowUpJob marks exited workers completed when the final artifact exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir);
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const logPath = path.join(artifactDir, 'codex-worker.log');
+  writeFileSync(outputPath, 'Implemented fix and ran npm test.\n', 'utf8');
+  writeFileSync(logPath, 'worker log\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8123,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, logPath),
+    },
+  });
+
+  const result = reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+  });
+
+  assert.equal(result.action, 'completed');
+  assert.match(result.jobPath, /data\/follow-up-jobs\/completed\/.+\.json$/);
+  assert.equal(result.job.status, 'completed');
+  assert.equal(result.job.remediationWorker.state, 'completed');
+  assert.equal(result.job.completedAt, '2026-04-21T10:30:00.000Z');
+  assert.equal(result.job.completion.finalMessageBytes, Buffer.byteLength('Implemented fix and ran npm test.\n', 'utf8'));
+  assert.match(result.job.completion.finalMessagePreview, /Implemented fix and ran npm test/);
+});
+
+test('reconcileFollowUpJob marks exited workers failed when the final artifact is missing', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:05:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const logPath = path.join(artifactDir, 'codex-worker.log');
+  writeFileSync(logPath, 'worker log\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8124,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+      logPath: path.relative(rootDir, logPath),
+    },
+  });
+
+  const result = reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:31:00.000Z',
+    isWorkerRunning: () => false,
+  });
+
+  assert.equal(result.action, 'failed');
+  assert.match(result.jobPath, /data\/follow-up-jobs\/failed\/.+\.json$/);
+  assert.equal(result.job.status, 'failed');
+  assert.equal(result.job.remediationWorker.state, 'failed');
+  assert.match(result.job.failure.message, /before writing the final message artifact/);
+  assert.equal(result.job.failure.logPath, path.relative(rootDir, logPath));
+});
+
+test('reconcileInProgressFollowUpJobs leaves live workers in place', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 9, reviewPostedAt: '2026-04-21T08:06:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+
+  markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8125,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+    },
+  });
+
+  const result = reconcileInProgressFollowUpJobs({
+    rootDir,
+    now: () => '2026-04-21T10:32:00.000Z',
+    isWorkerRunning: () => true,
+  });
+
+  assert.deepEqual(
+    { scanned: result.scanned, active: result.active, completed: result.completed, failed: result.failed, skipped: result.skipped },
+    { scanned: 1, active: 1, completed: 0, failed: 0, skipped: 0 }
+  );
+
+  const inProgressPath = path.join(getFollowUpJobDir(rootDir, 'inProgress'), `${claimed.job.jobId}.json`);
+  const persisted = JSON.parse(readFileSync(inProgressPath, 'utf8'));
+  assert.equal(persisted.status, 'in_progress');
+  assert.equal(persisted.remediationWorker.state, 'spawned');
 });

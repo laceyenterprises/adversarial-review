@@ -10,6 +10,7 @@ import {
   createFollowUpJob,
   extractReviewSummary,
   getFollowUpJobDir,
+  markFollowUpJobCompleted,
   markFollowUpJobFailed,
 } from '../src/follow-up-jobs.mjs';
 
@@ -130,5 +131,27 @@ test('markFollowUpJobFailed moves an in-progress job into failed with error cont
   assert.equal(failed.job.status, 'failed');
   assert.equal(failed.job.failedAt, '2026-04-21T10:05:00.000Z');
   assert.equal(failed.job.failure.message, 'gh repo clone failed');
+  assert.equal(existsSync(claimed.jobPath), false);
+});
+
+test('markFollowUpJobCompleted moves an in-progress job into completed with reconciliation context', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-21T10:07:00.000Z',
+    completion: {
+      source: 'codex-output-last-message',
+      finalMessagePath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md',
+    },
+  });
+
+  assert.match(completed.jobPath, /data\/follow-up-jobs\/completed\/.+\.json$/);
+  assert.equal(completed.job.status, 'completed');
+  assert.equal(completed.job.completedAt, '2026-04-21T10:07:00.000Z');
+  assert.equal(completed.job.completion.source, 'codex-output-last-message');
   assert.equal(existsSync(claimed.jobPath), false);
 });

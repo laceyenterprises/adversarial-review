@@ -166,7 +166,20 @@ Run the consumer manually with:
 npm run follow-up:consume
 ```
 
-This is still intentionally a narrow slice. Launch ownership is explicit and durable, but worker completion is not yet reconciled back into the queue. The long-term direction is to replace file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
+A separate one-shot reconciler now closes the durable queue gap for detached worker completion:
+
+```bash
+npm run follow-up:reconcile
+```
+
+Current reconciliation contract:
+- only `data/follow-up-jobs/in-progress/` jobs with `remediationWorker.state = "spawned"` are inspected
+- if the recorded worker PID is still live, the job remains `in_progress`
+- if the PID is gone and `.adversarial-follow-up/codex-last-message.md` exists with non-empty content, the job moves to `data/follow-up-jobs/completed/`
+- if the PID is gone and that final-message artifact is missing or empty, the job moves to `data/follow-up-jobs/failed/`
+- completed/failed records retain the worker artifact paths plus a short operator-facing preview or failure context
+
+This is still intentionally a narrow slice. It gives the queue durable terminal states and operator visibility, but it does not yet implement a multi-round autonomous remediation loop or native session-aware continuation. The long-term direction remains replacing the file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
 
 ## Operational semantics note (2026-04-21)
 

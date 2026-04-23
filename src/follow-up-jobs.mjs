@@ -14,6 +14,7 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 1;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],
+  completed: ['data', 'follow-up-jobs', 'completed'],
   failed: ['data', 'follow-up-jobs', 'failed'],
   workspaces: ['data', 'follow-up-jobs', 'workspaces'],
 });
@@ -51,8 +52,25 @@ function listPendingFollowUpJobPaths(rootDir) {
     .map((name) => join(pendingDir, name));
 }
 
+function listInProgressFollowUpJobPaths(rootDir) {
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  if (!existsSync(inProgressDir)) return [];
+
+  return readdirSync(inProgressDir)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map((name) => join(inProgressDir, name));
+}
+
 function listPendingFollowUpJobs(rootDir) {
   return listPendingFollowUpJobPaths(rootDir).map((jobPath) => ({
+    job: readFollowUpJob(jobPath),
+    jobPath,
+  }));
+}
+
+function listInProgressFollowUpJobs(rootDir) {
+  return listInProgressFollowUpJobPaths(rootDir).map((jobPath) => ({
     job: readFollowUpJob(jobPath),
     jobPath,
   }));
@@ -218,6 +236,28 @@ function markFollowUpJobSpawned({
   return { job: nextJob, jobPath };
 }
 
+function markFollowUpJobCompleted({
+  rootDir,
+  jobPath,
+  completion,
+  completedAt = new Date().toISOString(),
+}) {
+  ensureFollowUpJobDirs(rootDir);
+
+  const completedPath = join(getFollowUpJobDir(rootDir, 'completed'), basename(jobPath));
+  const currentJob = readFollowUpJob(jobPath);
+  const nextJob = {
+    ...currentJob,
+    status: 'completed',
+    completedAt,
+    completion,
+  };
+
+  writeFollowUpJob(jobPath, nextJob);
+  renameSync(jobPath, completedPath);
+  return { job: nextJob, jobPath: completedPath };
+}
+
 function markFollowUpJobFailed({
   rootDir,
   jobPath,
@@ -251,8 +291,11 @@ export {
   ensureFollowUpJobDirs,
   extractReviewSummary,
   getFollowUpJobDir,
+  listInProgressFollowUpJobPaths,
+  listInProgressFollowUpJobs,
   listPendingFollowUpJobPaths,
   listPendingFollowUpJobs,
+  markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobSpawned,
   readFollowUpJob,

@@ -144,13 +144,21 @@ Rules enforced by the helper:
 
 Reviewed PRs are tracked in `data/reviews.db` (SQLite). This now stores delivery state rather than just a binary already-reviewed marker, so failed review attempts remain visible and retryable across watcher restarts instead of being silently skipped forever.
 
-Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, a bounded remediation plan, and a durable remediation reply contract slot:
-- `remediationPlan.mode = "bounded-manual-rounds"`
-- `remediationPlan.maxRounds` caps the number of remediation attempts for the job and defaults to `6`
-- `remediationPlan.currentRound` and `remediationPlan.rounds[]` preserve explicit operator-visible round history
-- `remediationPlan.stop.code` and `remediationPlan.stop.reason` preserve durable stop cause metadata when a loop is stopped
-- queue state remains explicit instead of hiding retries inside worker code
-- `remediationReply.state = "awaiting-worker-write"` reserves a machine-readable worker reply artifact
+Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`.
+
+Canonical operator documentation for the bounded remediation loop now lives in:
+
+- [docs/follow-up-runbook.md](docs/follow-up-runbook.md)
+
+Current shipped follow-up shape:
+
+- job files live under `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/`
+- each job carries `remediationPlan.mode = "bounded-manual-rounds"`
+- `remediationPlan.maxRounds` defaults to `6`
+- `remediationPlan.currentRound` plus `remediationPlan.rounds[]` preserve explicit round history
+- `remediationPlan.stop.code` and `remediationPlan.stop.reason` preserve durable stop metadata
+- `remediationReply.state = "awaiting-worker-write"` reserves the machine-readable worker reply slot
+- the control surface is explicit: `follow-up:consume`, `follow-up:reconcile`, `follow-up:requeue`, and `follow-up:stop`
 
 ### Force a re-review manually
 
@@ -164,12 +172,12 @@ Safe procedure for an **open** PR:
 
 1. Inspect the row:
 ```bash
-sqlite3 data/reviews.db "select id,repo,pr_number,reviewer,pr_state,review_status,review_attempts,last_attempted_at,posted_at,failed_at,failure_message from reviewed_prs where repo='laceyenterprises/agent-os' and pr_number=25;"
+sqlite3 data/reviews.db "select id,repo,pr_number,reviewer,pr_state,review_status,review_attempts,last_attempted_at,posted_at,failed_at,failure_message from reviewed_prs where repo='laceyenterprises/adversarial-review' and pr_number=212;"
 ```
 
 2. Flip it back to `pending` and clear terminal post/failure metadata:
 ```bash
-sqlite3 data/reviews.db "BEGIN; UPDATE reviewed_prs SET review_status='pending', posted_at=NULL, failed_at=NULL, failure_message=NULL WHERE repo='laceyenterprises/agent-os' AND pr_number=25; COMMIT;"
+sqlite3 data/reviews.db "BEGIN; UPDATE reviewed_prs SET review_status='pending', posted_at=NULL, failed_at=NULL, failure_message=NULL WHERE repo='laceyenterprises/adversarial-review' AND pr_number=212; COMMIT;"
 ```
 
 3. Verify the row, then wait for the next watcher poll cycle.
@@ -179,6 +187,30 @@ Important constraints:
 - keep `review_attempts` and `last_attempted_at` intact so history is preserved
 - do **not** use this to override malformed-title guardrails unless you explicitly want to bypass that safety contract
 - prefer this only when the watcher does not yet support retriggering from GitHub review-request state alone
+
+## Follow-Up Operations
+
+The follow-up remediation flow is now documented in one place:
+
+- [docs/follow-up-runbook.md](docs/follow-up-runbook.md)
+
+Most-used commands:
+
+```bash
+npm run follow-up:consume
+npm run follow-up:reconcile
+npm run follow-up:requeue -- data/follow-up-jobs/completed/<jobId>.json "Need one more bounded remediation pass"
+npm run follow-up:stop -- data/follow-up-jobs/in-progress/<jobId>.json "Operator requested stop"
+```
+
+Key current semantics:
+
+- remediation is bounded and operator-driven, not autonomous
+- the worker modifies the existing PR branch, commits, and pushes
+- the worker does not open a new PR and does not merge the PR
+- `reReview.requested = true` in the reply JSON is the durable signal for another watcher-driven review pass
+- when no durable re-review request exists, the loop stops with `remediationPlan.stop.code = "no-progress"`
+- when the round cap is reached, the loop stops with `remediationPlan.stop.code = "max-rounds-reached"`
 
 ## Cross-user runtime contract (2026-04-22)
 
@@ -192,73 +224,6 @@ sudo chmod 750 /Users/airlock
 
 If this contract drifts, reviewer imports can fail with `EACCES` even when launch/auth configuration is otherwise correct.
 
-A one-shot consumer now claims the oldest pending job, starts the next bounded remediation round, moves the job into `data/follow-up-jobs/in-progress/`, prepares a PR checkout under `data/follow-up-jobs/workspaces/<jobId>/`, and spawns a detached Codex remediation worker using OAuth-backed Codex CLI auth only. If launch preparation fails, the claimed job is moved into `data/follow-up-jobs/failed/` with the error captured in the JSON record and attached to the active round record.
-
-The remediation worker contract now includes an explicit machine-readable reply artifact:
-- queue records start with `remediationReply.state = "awaiting-worker-write"`
-- once a worker is spawned, the queue record includes the expected `remediationReply.path`
-- the worker must write `adversarial-review-remediation-reply` JSON there instead of expressing re-review only in prose
-- `reReview.requested = true` is the durable signal that this remediation result wants another adversarial review pass
-- this ticket stops at the contract substrate; later tickets still need to consume that reply and trigger or requeue the next step
-
-Run the consumer manually with:
-
-```bash
-npm run follow-up:consume
-```
-
-A separate one-shot reconciler now closes the first durable queue gap for detached worker completion:
-
-```bash
-npm run follow-up:reconcile
-```
-
-Current reconciliation contract:
-- only `data/follow-up-jobs/in-progress/` jobs with `remediationWorker.state = "spawned"` are inspected
-- if the recorded worker PID is still live, the job remains `in_progress`
-- if the PID is gone and `.adversarial-follow-up/codex-last-message.md` exists with non-empty content, reconciliation records the round outcome durably and then:
-  - moves the job to `data/follow-up-jobs/completed/` when remediation explicitly requested another adversarial review pass
-  - moves the job to `data/follow-up-jobs/stopped/` with `remediationPlan.stop.code = "no-progress"` when no durable re-review request was recorded
-- if a remediation reply artifact path is configured, reconciliation reads and validates it before trusting the completion
-- if that reply sets `reReview.requested = true`, reconciliation resets the matching `reviewed_prs` row to `review_status = 'pending'` so the watcher can trigger the next adversarial review pass on a later poll
-- malformed-title rows and non-open PR rows remain blocked explicitly; the completed follow-up job records that blocked re-review outcome for operators
-- if the PID is gone and that final-message artifact is missing or empty, the job moves to `data/follow-up-jobs/failed/`
-- completed/failed records retain the worker artifact paths plus a short operator-facing preview or failure context
-- reconciliation does not auto-start another remediation round; advancing to the next bounded remediation round is still an explicit operator action
-
-To request another bounded remediation round after a completed or failed attempt:
-
-```bash
-npm run follow-up:requeue -- data/follow-up-jobs/completed/<jobId>.json "Need one more bounded remediation pass"
-```
-
-Requeue semantics:
-- the existing job record is moved back to `data/follow-up-jobs/pending/`
-- prior round history remains in `remediationPlan.rounds[]`
-- `remediationPlan.maxRounds` is enforced with a default `6`-round cap; when the cap is reached, the job moves to `data/follow-up-jobs/stopped/`
-- if the latest completed round did not record `reReview.requested = true`, requeue stops the job with `remediationPlan.stop.code = "no-progress"` instead of silently starting another loop
-- there is no hidden infinite retry path
-
-To stop a follow-up job explicitly:
-
-```bash
-npm run follow-up:stop -- data/follow-up-jobs/in-progress/<jobId>.json "Operator requested stop"
-```
-
-Stop semantics:
-- accepted source states are `pending`, `in_progress`, `completed`, and `failed`
-- the job moves to `data/follow-up-jobs/stopped/`
-- `remediationPlan.stop.code = "operator-stop"` and `remediationPlan.stop.reason` preserve the operator-visible cause durably
-
-Manual SQLite edits are now a recovery path rather than the normal re-review trigger. When a remediation worker writes a valid reply artifact with `reReview.requested = true`, `npm run follow-up:reconcile` makes the PR eligible for another watcher-driven adversarial review automatically. The direct DB procedure above still matters when the reply artifact is missing, invalid, or intentionally blocked by terminal watcher state.
-New hardening lesson from the detached remediation-launch failure:
-- do **not** treat `spawned process` as equivalent to `durable worker established`
-- require a preflight contract before launch: repo/PR/branch target, runtime path, cwd, auth principal, lane type (`builder` vs `integration`), and expected edit/commit/push/PR-reply authority
-- require a startup receipt or other explicit progress marker within a bounded timeout
-- preserve exact launch metadata and expected artifact paths so failures remain diagnosable after wrapper death
-- classify failures explicitly: launch failure, attach/transport failure, permission-blocked worker, artifact-missing completion, or successful completion
-
-This is still intentionally a bounded slice. It gives the queue durable terminal states and operator visibility, launch ownership is treated explicitly, completion has a one-shot reconciler, multi-round remediation remains explicit and capped rather than autonomous, and the remediation reply contract now drives explicit watcher re-review eligibility instead of living only as inert substrate. Operator recovery paths still remain explicit when reply or watcher state blocks that trigger.
 ## Operational semantics note (2026-04-21)
 
 This service currently uses **A semantics** for review completion:

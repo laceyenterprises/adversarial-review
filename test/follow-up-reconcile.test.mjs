@@ -58,7 +58,7 @@ function readReviewRow(rootDir, repo = 'laceyenterprises/clio', prNumber = 7) {
   }
 }
 
-test('reconcileFollowUpJob completes a finished spawned round when output exists', () => {
+test('reconcileFollowUpJob stops a finished spawned round for no-progress when no re-review is requested', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
@@ -89,9 +89,10 @@ test('reconcileFollowUpJob completes a finished spawned round when output exists
 
   assert.equal(reconciled.reconciled, true);
   assert.equal(reconciled.outcome, 'completed');
-  assert.match(reconciled.jobPath, /data\/follow-up-jobs\/completed\/.+\.json$/);
-  assert.equal(reconciled.job.status, 'completed');
-  assert.equal(reconciled.job.remediationPlan.rounds[0].state, 'completed');
+  assert.match(reconciled.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(reconciled.job.status, 'stopped');
+  assert.equal(reconciled.job.remediationPlan.stop.code, 'no-progress');
+  assert.equal(reconciled.job.remediationPlan.rounds[0].state, 'stopped');
   assert.match(reconciled.job.completion.preview, /Validation: npm test/);
   assert.equal(reconciled.job.completion.source, 'codex-output-last-message');
   assert.equal(reconciled.job.completion.finalMessagePath, path.relative(rootDir, outputPath));

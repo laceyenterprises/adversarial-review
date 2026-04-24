@@ -255,7 +255,7 @@ function makeQueuedJob(rootDir, overrides = {}) {
   return { created, claimed };
 }
 
-test('reconcileFollowUpJob marks exited workers completed when the final artifact exists', () => {
+test('reconcileFollowUpJob stops exited workers for no-progress when the final artifact exists without re-review', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir);
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
@@ -287,10 +287,11 @@ test('reconcileFollowUpJob marks exited workers completed when the final artifac
   });
 
   assert.equal(result.action, 'completed');
-  assert.match(result.jobPath, /data\/follow-up-jobs\/completed\/.+\.json$/);
-  assert.equal(result.job.status, 'completed');
+  assert.match(result.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(result.job.status, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'no-progress');
   assert.equal(result.job.remediationWorker.state, 'completed');
-  assert.equal(result.job.completedAt, '2026-04-21T10:30:00.000Z');
+  assert.equal(result.job.stoppedAt, '2026-04-21T10:30:00.000Z');
   assert.equal(result.job.completion.finalMessageBytes, Buffer.byteLength('Implemented fix and ran npm test.\n', 'utf8'));
   assert.equal(result.job.completion.finalMessageDigest, digestWorkerFinalMessage('Implemented fix and ran npm test.\n'));
   assert.match(result.job.completion.finalMessageSummary, /Implemented fix and ran npm test/);

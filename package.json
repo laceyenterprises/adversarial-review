@@ -11,7 +11,8 @@
     "test": "node --test test/*.test.mjs",
     "follow-up:consume": "node src/follow-up-remediation.mjs",
     "follow-up:reconcile": "node src/follow-up-reconcile.mjs",
-    "follow-up:requeue": "node src/follow-up-requeue.mjs"
+    "follow-up:requeue": "node src/follow-up-requeue.mjs",
+    "follow-up:stop": "node src/follow-up-stop.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

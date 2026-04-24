@@ -146,8 +146,9 @@ Reviewed PRs are tracked in `data/reviews.db` (SQLite). This now stores delivery
 
 Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, a bounded remediation plan, and a durable remediation reply contract slot:
 - `remediationPlan.mode = "bounded-manual-rounds"`
-- `remediationPlan.maxRounds` caps the number of remediation attempts for the job
+- `remediationPlan.maxRounds` caps the number of remediation attempts for the job and defaults to `6`
 - `remediationPlan.currentRound` and `remediationPlan.rounds[]` preserve explicit operator-visible round history
+- `remediationPlan.stop.code` and `remediationPlan.stop.reason` preserve durable stop cause metadata when a loop is stopped
 - queue state remains explicit instead of hiding retries inside worker code
 - `remediationReply.state = "awaiting-worker-write"` reserves a machine-readable worker reply artifact
 
@@ -215,7 +216,9 @@ npm run follow-up:reconcile
 Current reconciliation contract:
 - only `data/follow-up-jobs/in-progress/` jobs with `remediationWorker.state = "spawned"` are inspected
 - if the recorded worker PID is still live, the job remains `in_progress`
-- if the PID is gone and `.adversarial-follow-up/codex-last-message.md` exists with non-empty content, the job moves to `data/follow-up-jobs/completed/`
+- if the PID is gone and `.adversarial-follow-up/codex-last-message.md` exists with non-empty content, reconciliation records the round outcome durably and then:
+  - moves the job to `data/follow-up-jobs/completed/` when remediation explicitly requested another adversarial review pass
+  - moves the job to `data/follow-up-jobs/stopped/` with `remediationPlan.stop.code = "no-progress"` when no durable re-review request was recorded
 - if a remediation reply artifact path is configured, reconciliation reads and validates it before trusting the completion
 - if that reply sets `reReview.requested = true`, reconciliation resets the matching `reviewed_prs` row to `review_status = 'pending'` so the watcher can trigger the next adversarial review pass on a later poll
 - malformed-title rows and non-open PR rows remain blocked explicitly; the completed follow-up job records that blocked re-review outcome for operators
@@ -232,8 +235,20 @@ npm run follow-up:requeue -- data/follow-up-jobs/completed/<jobId>.json "Need on
 Requeue semantics:
 - the existing job record is moved back to `data/follow-up-jobs/pending/`
 - prior round history remains in `remediationPlan.rounds[]`
-- `remediationPlan.maxRounds` is enforced; when the cap is reached, the job moves to `data/follow-up-jobs/stopped/`
+- `remediationPlan.maxRounds` is enforced with a default `6`-round cap; when the cap is reached, the job moves to `data/follow-up-jobs/stopped/`
+- if the latest completed round did not record `reReview.requested = true`, requeue stops the job with `remediationPlan.stop.code = "no-progress"` instead of silently starting another loop
 - there is no hidden infinite retry path
+
+To stop a follow-up job explicitly:
+
+```bash
+npm run follow-up:stop -- data/follow-up-jobs/in-progress/<jobId>.json "Operator requested stop"
+```
+
+Stop semantics:
+- accepted source states are `pending`, `in_progress`, `completed`, and `failed`
+- the job moves to `data/follow-up-jobs/stopped/`
+- `remediationPlan.stop.code = "operator-stop"` and `remediationPlan.stop.reason` preserve the operator-visible cause durably
 
 Manual SQLite edits are now a recovery path rather than the normal re-review trigger. When a remediation worker writes a valid reply artifact with `reReview.requested = true`, `npm run follow-up:reconcile` makes the PR eligible for another watcher-driven adversarial review automatically. The direct DB procedure above still matters when the reply artifact is missing, invalid, or intentionally blocked by terminal watcher state.
 New hardening lesson from the detached remediation-launch failure:

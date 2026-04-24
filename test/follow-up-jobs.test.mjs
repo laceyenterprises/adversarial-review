@@ -20,6 +20,7 @@ import {
   readRemediationReplyArtifact,
   readFollowUpJob,
   requeueFollowUpJobForNextRound,
+  stopFollowUpJob,
   validateRemediationReply,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
@@ -759,6 +760,15 @@ test('requeueFollowUpJobForNextRound moves a completed job back to pending for t
     jobPath: claimed.jobPath,
     finishedAt: '2026-04-21T10:05:00.000Z',
     completionPreview: 'Patched auth refresh path.',
+    reReview: {
+      requested: true,
+      status: 'pending',
+      reason: 'Needs another adversarial pass.',
+      triggered: true,
+      outcomeReason: null,
+      reviewRow: null,
+      requestedAt: '2026-04-21T10:05:00.000Z',
+    },
   });
 
   const requeued = requeueFollowUpJobForNextRound({
@@ -774,6 +784,40 @@ test('requeueFollowUpJobForNextRound moves a completed job back to pending for t
   assert.equal(requeued.job.remediationPlan.currentRound, 1);
   assert.equal(requeued.job.remediationPlan.nextAction.round, 2);
   assert.equal(requeued.job.remediationPlan.nextAction.requestedBy, 'operator');
+});
+
+test('requeueFollowUpJobForNextRound stops a completed job when no durable re-review request was recorded', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    finishedAt: '2026-04-21T10:05:00.000Z',
+    completionPreview: 'Patched auth refresh path.',
+    reReview: {
+      requested: false,
+      status: 'not-requested',
+      reason: null,
+      triggered: false,
+      outcomeReason: 'reply-did-not-request-rereview',
+      reviewRow: null,
+      requestedAt: null,
+    },
+  });
+
+  const stopped = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: completed.jobPath,
+    requestedAt: '2026-04-21T10:06:00.000Z',
+    requestedBy: 'operator',
+    reason: 'Trying another round anyway.',
+  });
+
+  assert.match(stopped.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.job.remediationPlan.stop.code, 'no-progress');
+  assert.match(stopped.job.remediationPlan.stop.reason, /No durable re-review request/);
 });
 
 test('requeueFollowUpJobForNextRound stops the job once the round cap is reached', () => {
@@ -799,6 +843,7 @@ test('requeueFollowUpJobForNextRound stops the job once the round cap is reached
 
   assert.match(stopped.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
   assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.job.remediationPlan.stop.code, 'max-rounds-reached');
   assert.match(stopped.job.remediationPlan.stopReason, /Reached max remediation rounds \(1\/1\)/);
 });
 
@@ -813,4 +858,25 @@ test('requeueFollowUpJobForNextRound rejects non-terminal source statuses', () =
     }),
     /Cannot requeue follow-up job .* from status pending/
   );
+});
+
+test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible metadata', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const stopped = stopFollowUpJob({
+    rootDir,
+    jobPath: claimed.jobPath,
+    requestedAt: '2026-04-21T10:01:00.000Z',
+    requestedBy: 'paul',
+    reason: 'Operator requested stop for manual handling.',
+  });
+
+  assert.match(stopped.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.job.remediationPlan.stop.code, 'operator-stop');
+  assert.equal(stopped.job.remediationPlan.stop.stoppedBy.requestedBy, 'paul');
+  assert.equal(stopped.job.remediationPlan.rounds[0].state, 'stopped');
+  assert.equal(stopped.job.remediationPlan.rounds[0].stop.code, 'operator-stop');
 });

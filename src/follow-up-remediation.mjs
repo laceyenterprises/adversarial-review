@@ -12,6 +12,7 @@ import {
   listInProgressFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
+  markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
 } from './follow-up-jobs.mjs';
@@ -669,6 +670,40 @@ function reconcileFollowUpJob({
           outcome: { status: 'not-requested', reason: 'reply-did-not-request-rereview' },
         });
       }
+    }
+
+    if (!rereview.requested) {
+      const stopped = markFollowUpJobStopped({
+        rootDir,
+        jobPath,
+        stoppedAt: completedAt,
+        stopCode: 'no-progress',
+        sourceStatus: 'completed',
+        remediationWorker: {
+          ...workerState,
+          state: 'completed',
+        },
+        completion: {
+          source: 'codex-output-last-message',
+          note: 'Reconciled from detached worker exit plus non-empty final message artifact.',
+          finalMessagePath: worker.outputPath || null,
+          finalMessageBytes: finalMessage.bytes,
+          finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
+          preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
+          finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
+          logPath: worker.logPath || null,
+        },
+        remediationReply,
+        reReview: rereview,
+        stopReason: `No durable re-review request was recorded after remediation round ${job?.remediationPlan?.currentRound || 1}; stopping to avoid a silent no-progress loop.`,
+      });
+
+      return {
+        action: 'completed',
+        reason: 'no-progress-stop',
+        job: stopped.job,
+        jobPath: stopped.jobPath,
+      };
     }
 
     const completed = markFollowUpJobCompleted({

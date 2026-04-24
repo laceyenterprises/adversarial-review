@@ -150,6 +150,16 @@ GitHub PR opened
 \- When an operator requests another round and the cap has already been reached, the job must move to a terminal \`stopped\` state with an explicit stop reason
 \- Manual or scripted requeue is acceptable in this slice; a fully autonomous multi-round loop is intentionally deferred
 
+\#\#\# 5\.1\.2 Remediation reply contract for re-review requests (LAC-209 slice)
+\- Remediation output must expose a durable machine-readable reply contract in addition to any prose final message
+\- The contract must not hide a re-review request only inside Markdown text
+\- Each follow-up job must carry explicit remediation-reply metadata, including the expected artifact path once a worker is spawned
+\- The worker reply artifact must be JSON with a stable kind/schema, job identity, outcome summary, validation/blocker fields, and a \`reReview\` object
+\- Durable re-review request signal in this slice: \`reReview.requested = true\`
+\- If \`reReview.requested\` is true, the reply must also include a short operator-visible reason
+\- This slice lands the contract substrate only; it does not yet auto-trigger another review or build a fully autonomous loop
+\- \`LAC-210\` / \`LAC-211\` / \`LAC-212\` should consume this reply contract, connect it to explicit queue transitions, and document manual/operator recovery semantics
+
 \#\#\# 5\.2 Remediation worker launch contract (new hardening requirements)
 \- A detached remediation launch must not treat \"process spawned\" as equivalent to \"durable worker established\"
 \- Required control-plane distinctions:

@@ -13,3 +13,4 @@ When you finish:
 - Summarize what you changed.
 - Report the validation you ran.
 - Report any blockers or follow-ups that remain.
+- Write the required remediation reply JSON artifact so re-review requests are machine-readable, not prose-only.

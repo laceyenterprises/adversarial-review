@@ -144,11 +144,12 @@ Rules enforced by the helper:
 
 Reviewed PRs are tracked in `data/reviews.db` (SQLite). This now stores delivery state rather than just a binary already-reviewed marker, so failed review attempts remain visible and retryable across watcher restarts instead of being silently skipped forever.
 
-Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, and a bounded remediation plan:
+Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, a bounded remediation plan, and a durable remediation reply contract slot:
 - `remediationPlan.mode = "bounded-manual-rounds"`
 - `remediationPlan.maxRounds` caps the number of remediation attempts for the job
 - `remediationPlan.currentRound` and `remediationPlan.rounds[]` preserve explicit operator-visible round history
 - queue state remains explicit instead of hiding retries inside worker code
+- `remediationReply.state = "awaiting-worker-write"` reserves a machine-readable worker reply artifact
 
 ### Force a re-review manually
 
@@ -192,6 +193,13 @@ If this contract drifts, reviewer imports can fail with `EACCES` even when launc
 
 A one-shot consumer now claims the oldest pending job, starts the next bounded remediation round, moves the job into `data/follow-up-jobs/in-progress/`, prepares a PR checkout under `data/follow-up-jobs/workspaces/<jobId>/`, and spawns a detached Codex remediation worker using OAuth-backed Codex CLI auth only. If launch preparation fails, the claimed job is moved into `data/follow-up-jobs/failed/` with the error captured in the JSON record and attached to the active round record.
 
+The remediation worker contract now includes an explicit machine-readable reply artifact:
+- queue records start with `remediationReply.state = "awaiting-worker-write"`
+- once a worker is spawned, the queue record includes the expected `remediationReply.path`
+- the worker must write `adversarial-review-remediation-reply` JSON there instead of expressing re-review only in prose
+- `reReview.requested = true` is the durable signal that this remediation result wants another adversarial review pass
+- this ticket stops at the contract substrate; later tickets still need to consume that reply and trigger or requeue the next step
+
 Run the consumer manually with:
 
 ```bash
@@ -230,7 +238,7 @@ New hardening lesson from the detached remediation-launch failure:
 - preserve exact launch metadata and expected artifact paths so failures remain diagnosable after wrapper death
 - classify failures explicitly: launch failure, attach/transport failure, permission-blocked worker, artifact-missing completion, or successful completion
 
-This is still intentionally a bounded slice. It gives the queue durable terminal states and operator visibility, launch ownership is treated explicitly, completion has a one-shot reconciler, and multi-round remediation remains explicit and capped rather than autonomous. The long-term direction remains replacing the file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
+This is still intentionally a bounded slice. It gives the queue durable terminal states and operator visibility, launch ownership is treated explicitly, completion has a one-shot reconciler, multi-round remediation remains explicit and capped rather than autonomous, and the remediation reply contract is now explicit as well. LAC-210 / LAC-211 / LAC-212 should consume the durable reply, decide when a re-review should actually be triggered, and document the operator-facing recovery path.
 ## Operational semantics note (2026-04-21)
 
 This service currently uses **A semantics** for review completion:

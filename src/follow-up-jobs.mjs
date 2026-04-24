@@ -15,6 +15,8 @@ const MAX_CREATE_ATTEMPTS = 100;
 
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 const DEFAULT_MAX_REMEDIATION_ROUNDS = 2;
+const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
+const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],
@@ -77,6 +79,142 @@ function buildRecommendedFollowUpAction({ critical }) {
     maxRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
     futureArchitectureNote: 'Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff.',
   };
+}
+
+function buildRemediationReplyArtifact(outputPath) {
+  return {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    state: 'awaiting-worker-write',
+    path: outputPath ?? null,
+  };
+}
+
+function buildRemediationReply({
+  job,
+  outcome = 'completed',
+  summary,
+  validation = [],
+  blockers = [],
+  reReviewRequested = false,
+  reReviewReason = null,
+}) {
+  if (!job?.jobId) {
+    throw new Error('Cannot build remediation reply without a job record');
+  }
+
+  return {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome,
+    summary,
+    validation,
+    blockers,
+    reReview: {
+      requested: Boolean(reReviewRequested),
+      reason: reReviewRequested
+        ? (reReviewReason || 'Remediation applied and ready for another adversarial review pass.')
+        : null,
+    },
+  };
+}
+
+function validateStringArrayField(items, fieldName) {
+  if (!Array.isArray(items)) {
+    throw new Error(`Remediation reply ${fieldName} must be an array`);
+  }
+
+  items.forEach((item, index) => {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw new Error(`Remediation reply ${fieldName}[${index}] must be a non-empty string`);
+    }
+  });
+}
+
+function validateRemediationReply(reply, { expectedJob = null } = {}) {
+  if (!reply || typeof reply !== 'object' || Array.isArray(reply)) {
+    throw new Error('Remediation reply must be a JSON object');
+  }
+
+  if (reply.kind !== REMEDIATION_REPLY_KIND) {
+    throw new Error(`Remediation reply kind must be ${REMEDIATION_REPLY_KIND}`);
+  }
+
+  if (reply.schemaVersion !== REMEDIATION_REPLY_SCHEMA_VERSION) {
+    throw new Error(`Unsupported remediation reply schemaVersion: ${reply.schemaVersion}`);
+  }
+
+  if (typeof reply.jobId !== 'string' || !reply.jobId.trim()) {
+    throw new Error('Remediation reply jobId is required');
+  }
+
+  if (typeof reply.repo !== 'string' || !reply.repo.trim()) {
+    throw new Error('Remediation reply repo is required');
+  }
+
+  if (!Number.isInteger(reply.prNumber) || reply.prNumber <= 0) {
+    throw new Error('Remediation reply prNumber must be a positive integer');
+  }
+
+  if (typeof reply.summary !== 'string' || !reply.summary.trim()) {
+    throw new Error('Remediation reply summary is required');
+  }
+
+  const allowedOutcomes = new Set(['completed', 'blocked', 'partial']);
+  if (!allowedOutcomes.has(reply.outcome)) {
+    throw new Error(`Remediation reply outcome must be one of: ${Array.from(allowedOutcomes).join(', ')}`);
+  }
+
+  validateStringArrayField(reply.validation, 'validation');
+  validateStringArrayField(reply.blockers, 'blockers');
+
+  if (!reply.reReview || typeof reply.reReview !== 'object' || Array.isArray(reply.reReview)) {
+    throw new Error('Remediation reply reReview must be an object');
+  }
+
+  if (typeof reply.reReview.requested !== 'boolean') {
+    throw new Error('Remediation reply reReview.requested must be a boolean');
+  }
+
+  if (reply.reReview.requested && (typeof reply.reReview.reason !== 'string' || !reply.reReview.reason.trim())) {
+    throw new Error('Remediation reply reReview.reason is required when reReview.requested is true');
+  }
+
+  if (expectedJob) {
+    if (reply.jobId !== expectedJob.jobId) {
+      throw new Error(`Remediation reply jobId mismatch: expected ${expectedJob.jobId}, got ${reply.jobId}`);
+    }
+
+    if (reply.repo !== expectedJob.repo) {
+      throw new Error(`Remediation reply repo mismatch: expected ${expectedJob.repo}, got ${reply.repo}`);
+    }
+
+    if (reply.prNumber !== expectedJob.prNumber) {
+      throw new Error(`Remediation reply prNumber mismatch: expected ${expectedJob.prNumber}, got ${reply.prNumber}`);
+    }
+  }
+
+  return reply;
+}
+
+function readRemediationReplyArtifact(replyPath, { expectedJob = null } = {}) {
+  try {
+    return validateRemediationReply(
+      JSON.parse(readFileSync(replyPath, 'utf8')),
+      { expectedJob }
+    );
+  } catch (err) {
+    const jobContext = expectedJob
+      ? ` for job ${expectedJob.jobId} (${expectedJob.repo}#${expectedJob.prNumber})`
+      : '';
+    throw new Error(
+      `Failed to read remediation reply artifact at ${replyPath}${jobContext}: ${err.message}`,
+      { cause: err }
+    );
+  }
 }
 
 function buildLegacyRemediationPlan(job) {
@@ -184,6 +322,11 @@ function normalizeFollowUpJob(job) {
   }
 
   const remediationPlan = normalizeRemediationPlan(job);
+  const persistedRemediationReply = job?.remediationReply;
+  const normalizedRemediationReplyPath = typeof persistedRemediationReply?.path === 'string'
+    && persistedRemediationReply.path.trim()
+    ? persistedRemediationReply.path
+    : null;
   return {
     ...job,
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -192,6 +335,15 @@ function normalizeFollowUpJob(job) {
       ...(job.recommendedFollowUpAction || {}),
       executionModel: 'bounded-manual-rounds',
       maxRounds: remediationPlan.maxRounds,
+    },
+    remediationReply: {
+      ...buildRemediationReplyArtifact(null),
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      state: typeof persistedRemediationReply?.state === 'string' && persistedRemediationReply.state.trim()
+        ? persistedRemediationReply.state
+        : 'awaiting-worker-write',
+      path: normalizedRemediationReplyPath,
     },
     remediationPlan,
   };
@@ -392,6 +544,7 @@ function buildFollowUpJob({
       ...buildRecommendedFollowUpAction({ critical }),
       maxRounds: remediationPlan.maxRounds,
     },
+    remediationReply: buildRemediationReplyArtifact(null),
     remediationPlan,
     sessionHandoff: {
       originalBuildSessionId: null,
@@ -520,6 +673,7 @@ function markFollowUpJobSpawned({
       spawnedAt,
       ...worker,
     },
+    remediationReply: buildRemediationReplyArtifact(worker?.replyPath ?? null),
     remediationPlan: {
       ...currentJob.remediationPlan,
       nextAction: {
@@ -722,7 +876,11 @@ export {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
+  REMEDIATION_REPLY_KIND,
+  REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
+  buildRemediationReply,
+  buildRemediationReplyArtifact,
   claimNextFollowUpJob,
   createFollowUpJob,
   ensureFollowUpJobDirs,
@@ -738,7 +896,9 @@ export {
   markFollowUpJobFailed,
   markFollowUpJobSpawned,
   markFollowUpJobStopped,
+  readRemediationReplyArtifact,
   readFollowUpJob,
   requeueFollowUpJobForNextRound,
+  validateRemediationReply,
   writeFollowUpJob,
 };

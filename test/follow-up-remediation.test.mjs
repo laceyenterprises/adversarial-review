@@ -15,6 +15,7 @@ import {
   resolveJobRelativePath,
   spawnCodexRemediationWorker,
 } from '../src/follow-up-remediation.mjs';
+import { collectWorkspaceDocContext } from '../src/prompt-context.mjs';
 import {
   claimNextFollowUpJob,
   createFollowUpJob,
@@ -75,6 +76,31 @@ test('buildRemediationPrompt includes the durable remediation reply artifact pat
     prompt,
     /"remediationReplyArtifact": "data\/follow-up-jobs\/workspaces\/example\/\.adversarial-follow-up\/remediation-reply\.json"/
   );
+});
+
+test('buildRemediationPrompt can include governing repo docs and fallback guidance', () => {
+  const prompt = buildRemediationPrompt(makeJob(), {
+    template: 'You are a remediation worker.',
+    governingDocContext: '\n\n## Additional Governing Repo Docs\n### README.md\n\n```md\nhello\n```',
+  });
+
+  assert.match(prompt, /Additional Governing Repo Docs/);
+  assert.match(prompt, /README\.md/);
+  assert.match(prompt, /Before making architecture-sensitive changes, read the obvious governing docs/);
+});
+
+test('collectWorkspaceDocContext reads obvious repo docs from the workspace when present', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, 'docs'), { recursive: true });
+  writeFileSync(path.join(workspaceDir, 'README.md'), '# hello\n', 'utf8');
+  writeFileSync(path.join(workspaceDir, 'SPEC.md'), '# spec\n', 'utf8');
+  writeFileSync(path.join(workspaceDir, 'docs', 'STATE-MACHINE.md'), '# states\n', 'utf8');
+
+  const context = collectWorkspaceDocContext(workspaceDir);
+  assert.match(context, /Additional Governing Repo Docs/);
+  assert.match(context, /### README\.md/);
+  assert.match(context, /### SPEC\.md/);
+  assert.match(context, /### docs\/STATE-MACHINE\.md/);
 });
 
 test('assertValidRepoSlug rejects malformed repo names', () => {

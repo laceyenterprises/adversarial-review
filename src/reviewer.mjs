@@ -24,6 +24,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createFollowUpJob } from './follow-up-jobs.mjs';
+import {
+  buildObviousDocsGuidance,
+  extractLinkedRepoDocs,
+  fetchLinkedSpecContents,
+  parseGitHubBlobPath,
+} from './prompt-context.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -354,37 +360,6 @@ function sanitizeCodexReviewPayload(reviewText) {
   return sanitized;
 }
 
-function parseGitHubBlobPath(candidateUrl, expectedRepo) {
-  let parsed;
-  try {
-    parsed = new URL(candidateUrl);
-  } catch {
-    return null;
-  }
-
-  if (parsed.hostname !== 'github.com') {
-    return null;
-  }
-
-  const parts = parsed.pathname.split('/').filter(Boolean);
-  if (parts.length < 5 || parts[2] !== 'blob') {
-    return null;
-  }
-
-  const repo = `${parts[0]}/${parts[1]}`;
-  if (repo !== expectedRepo) {
-    return null;
-  }
-
-  const pathParts = parts.slice(4);
-  if (!pathParts.length) {
-    return null;
-  }
-
-  const relPath = pathParts.join('/');
-  return relPath.endsWith('.md') ? relPath : null;
-}
-
 // ── PR diff fetch ────────────────────────────────────────────────────────────
 
 async function fetchPRDiff(repo, prNumber) {
@@ -403,58 +378,6 @@ async function fetchPRContext(repo, prNumber) {
     { maxBuffer: 10 * 1024 * 1024 }
   );
   return JSON.parse(stdout);
-}
-
-function extractLinkedRepoDocs(text, repo) {
-  const rels = new Set();
-  const patterns = [
-    /(?:^|\s)(projects\/[A-Za-z0-9._\/-]+\.md|docs\/[A-Za-z0-9._\/-]+\.md|agents\/[A-Za-z0-9._\/-]+\.md|knowledge\/[A-Za-z0-9._\/-]+\.md|modules\/[A-Za-z0-9._\/-]+\.md|tools\/[A-Za-z0-9._\/-]+\.md)/g,
-    /\((\.?\/?(?:projects|docs|agents|knowledge|modules|tools)\/[A-Za-z0-9._\/-]+\.md)\)/g,
-  ];
-
-  for (const pattern of patterns) {
-    let m;
-    while ((m = pattern.exec(text)) !== null) {
-      const rel = m[1];
-      if (!rel) continue;
-      const normalized = rel.replace(/^\.\//, '');
-      if (normalized.endsWith('.md')) rels.add(normalized);
-    }
-  }
-
-  const urlMatches = String(text ?? '').match(/https:\/\/github\.com\/[^\s)]+/g) || [];
-  for (const rawUrl of urlMatches) {
-    const relPath = parseGitHubBlobPath(rawUrl, repo);
-    if (relPath) {
-      rels.add(relPath);
-    }
-  }
-
-  return [...rels].sort();
-}
-
-async function fetchLinkedSpecContents(repo, prNumber, { fetchPRContextImpl = fetchPRContext, execFileImpl = execFileAsync } = {}) {
-  const pr = await fetchPRContextImpl(repo, prNumber);
-  const combinedText = [pr.body || '', ...(pr.comments || []).map((c) => c.body || '')].join('\n\n');
-  const linked = extractLinkedRepoDocs(combinedText, repo).slice(0, 12);
-  if (!linked.length) return '';
-
-  const sections = await Promise.all(linked.map(async (relPath) => {
-    try {
-      const { stdout } = await execFileImpl(
-        'gh',
-        ['api', `repos/${repo}/contents/${relPath}?ref=${pr.headRefOid}`, '--jq', '.content'],
-        { maxBuffer: 10 * 1024 * 1024 }
-      );
-      const decoded = Buffer.from(stdout.replace(/\n/g, ''), 'base64').toString('utf8');
-      const trimmed = decoded.length > 12000 ? `${decoded.slice(0, 12000)}\n\n[truncated]` : decoded;
-      return `### ${relPath}\n\n\`\`\`md\n${trimmed}\n\`\`\``;
-    } catch (err) {
-      return `### ${relPath}\n\n[failed to fetch linked spec: ${err.message}]`;
-    }
-  }));
-
-  return `\n\n---\n\nAdditional linked project context from the PR body/comments (fetch and use these as governing docs when relevant):\n\n${sections.join('\n\n')}`;
 }
 
 // ── AI review via CLI (OAuth only) ──────────────────────────────────────────
@@ -729,13 +652,17 @@ async function main() {
     process.exit(0);
   }
 
-  let extraContext = '';
+  let extraContext = buildObviousDocsGuidance();
   try {
-    extraContext = await fetchLinkedSpecContents(repo, prNumber);
-    if (extraContext) {
-      console.error(`[reviewer] DEBUG: fetched linked PR context (${extraContext.length} bytes)`);
+    const linkedContext = await fetchLinkedSpecContents(repo, prNumber, {
+      fetchPRContextImpl: fetchPRContext,
+      execFileImpl: execFileAsync,
+    });
+    if (linkedContext) {
+      extraContext = `${linkedContext}${buildObviousDocsGuidance({ repoRootRelative: true, includeSelfContainedHint: true })}`;
+      console.error(`[reviewer] DEBUG: fetched linked PR context (${linkedContext.length} bytes)`);
     } else {
-      console.error('[reviewer] DEBUG: no linked PR context found');
+      console.error('[reviewer] DEBUG: no linked PR context found; using obvious-docs fallback guidance');
     }
   } catch (err) {
     console.error(`[reviewer] WARN: failed to fetch linked PR context: ${err.message}`);
@@ -832,9 +759,6 @@ async function main() {
 }
 
 export {
-  extractLinkedRepoDocs,
-  fetchLinkedSpecContents,
-  parseGitHubBlobPath,
   sanitizeCodexReviewPayload,
 };
 

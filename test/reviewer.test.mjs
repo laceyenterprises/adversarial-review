@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/reviewer.mjs';
+import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {
   assert.equal(
@@ -61,4 +61,11 @@ test('fetchLinkedSpecContents fetches linked specs concurrently and preserves li
   assert.deepEqual(starts, ['docs/ARCHITECTURE.md', 'tools/PLAYBOOK.md']);
   assert.match(result, /### docs\/ARCHITECTURE.md/);
   assert.match(result, /### tools\/PLAYBOOK.md/);
+});
+
+test('buildObviousDocsGuidance tells workers to inspect obvious repo docs before guessing', () => {
+  const guidance = buildObviousDocsGuidance();
+  assert.match(guidance, /README\.md/);
+  assert.match(guidance, /SPEC\.md/);
+  assert.match(guidance, /go read it directly rather than guessing from the diff alone/i);
 });

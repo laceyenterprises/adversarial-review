@@ -5,6 +5,7 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
+  buildRemediationReply,
   claimNextFollowUpJob,
   getFollowUpJobDir,
   markFollowUpJobFailed,
@@ -161,9 +162,21 @@ function resetWorkspaceDir(workspaceDir) {
   rmSync(workspaceDir, { recursive: true, force: true });
 }
 
-function buildRemediationPrompt(job, { template = loadFollowUpPromptTemplate(ROOT) } = {}) {
+function buildRemediationPrompt(job, {
+  template = loadFollowUpPromptTemplate(ROOT),
+  remediationReplyPath = job?.remediationReply?.path || null,
+} = {}) {
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
+  const replyContract = buildRemediationReply({
+    job,
+    outcome: 'completed',
+    summary: 'Replace this with a short remediation summary.',
+    validation: ['Replace with validation you ran.'],
+    blockers: [],
+    reReviewRequested: true,
+    reReviewReason: 'Replace with the reason this PR should receive another adversarial review pass.',
+  });
   const trustedMetadata = {
     jobId: job.jobId,
     repo: job.repo,
@@ -172,6 +185,7 @@ function buildRemediationPrompt(job, { template = loadFollowUpPromptTemplate(ROO
     reviewerModel: job.reviewerModel,
     reviewCriticality: criticality,
     queueTriggeredAt: job.createdAt,
+    remediationReplyArtifact: remediationReplyPath,
   };
 
   return `${template}
@@ -194,7 +208,13 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}
 - Commit the remediation changes and push the PR branch.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed Codex only; do not rely on API key fallbacks.
+- Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.
+- If you want another adversarial review pass, set \`reReview.requested\` to \`true\` in that JSON reply. Do not rely on prose alone.
 - In your final message, report validation run and files changed.
+
+## Required Remediation Reply Contract
+Write JSON matching this schema exactly, filling in real values for the work you performed:
+${formatFencedBlock(JSON.stringify(replyContract, null, 2), 'json')}
 `.trim();
 }
 
@@ -337,7 +357,12 @@ async function consumeNextFollowUpJob({
     const promptPath = join(artifactDir, 'prompt.md');
     const outputPath = join(artifactDir, 'codex-last-message.md');
     const logPath = join(artifactDir, 'codex-worker.log');
-    const prompt = buildRemediationPrompt(claimed.job, { template: promptTemplate });
+    const replyPath = join(artifactDir, 'remediation-reply.json');
+    const relativeReplyPath = relative(rootDir, replyPath);
+    const prompt = buildRemediationPrompt(claimed.job, {
+      template: promptTemplate,
+      remediationReplyPath: relativeReplyPath,
+    });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
 
     const worker = spawnCodexRemediationWorker({
@@ -358,6 +383,7 @@ async function consumeNextFollowUpJob({
         promptPath: relative(rootDir, worker.promptPath),
         outputPath: relative(rootDir, worker.outputPath),
         logPath: relative(rootDir, worker.logPath),
+        replyPath: relativeReplyPath,
       },
     });
 

@@ -135,6 +135,16 @@ GitHub PR opened
 \- Reconciled terminal records must preserve operator-visible metadata: worker PID, workspace path, log path, final-message path, and a short completion preview or explicit failure reason
 \- This slice preserves wrapper-owned review completion semantics; it does not grant the remediation worker ownership of the GitHub review side effect
 
+\#\#\# 5\.1\.1 Remediation reply contract for re-review requests (LAC-209 slice)
+\- Remediation output must expose a durable machine-readable reply contract in addition to any prose final message
+\- The contract must not hide a re-review request only inside Markdown text
+\- Each follow-up job must carry explicit remediation-reply metadata, including the expected artifact path once a worker is spawned
+\- The worker reply artifact must be JSON with a stable kind/schema, job identity, outcome summary, validation/blocker fields, and a \`reReview\` object
+\- Durable re-review request signal in this slice: \`reReview.requested = true\`
+\- If \`reReview.requested\` is true, the reply must also include a short operator-visible reason
+\- This slice lands the contract substrate only; it does not yet auto-trigger another review or build a fully autonomous loop
+\- \`LAC-210\` / \`LAC-211\` / \`LAC-212\` should consume this reply contract, connect it to explicit queue transitions, and document manual/operator recovery semantics
+
 \#\#\# 5\.2 Remediation worker launch contract (new hardening requirements)
 \- A detached remediation launch must not treat \"process spawned\" as equivalent to \"durable worker established\"
 \- Required control-plane distinctions:

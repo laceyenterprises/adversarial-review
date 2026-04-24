@@ -189,7 +189,7 @@ function buildRemediationPrompt(job, {
     summary: 'Replace this with a short remediation summary.',
     validation: ['Replace with validation you ran.'],
     blockers: [],
-    reReviewRequested: true,
+    reReviewRequested: false,
     reReviewReason: 'Replace with the reason this PR should receive another adversarial review pass.',
   });
   const trustedMetadata = {

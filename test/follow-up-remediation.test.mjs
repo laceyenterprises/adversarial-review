@@ -61,7 +61,7 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /Use OAuth-backed Codex only/);
   assert.match(prompt, /Write a machine-readable remediation reply JSON file/);
   assert.match(prompt, /"kind": "adversarial-review-remediation-reply"/);
-  assert.match(prompt, /"requested": true/);
+  assert.match(prompt, /"requested": false/);
   assert.match(prompt, /Handle token refresh before retrying/);
 });
 

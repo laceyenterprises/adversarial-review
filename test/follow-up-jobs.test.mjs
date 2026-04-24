@@ -158,6 +158,42 @@ test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape',
   assert.equal(normalized.remediationReply.path, null);
 });
 
+test('readFollowUpJob whitelists persisted remediationReply fields during normalization', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const jobPath = path.join(rootDir, 'job.json');
+  writeFileSync(jobPath, `${JSON.stringify({
+    schemaVersion: 2,
+    kind: 'adversarial-review-follow-up',
+    status: 'pending',
+    jobId: 'job-1',
+    createdAt: '2026-04-21T08:00:00.000Z',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    critical: false,
+    reviewSummary: 'Summary',
+    reviewBody: 'Body',
+    remediationReply: {
+      state: 'worker-wrote-reply',
+      path: 'data/follow-up-jobs/workspaces/job-1/.adversarial-follow-up/remediation-reply.json',
+      arbitraryKey: 'should-not-survive',
+      reReview: {
+        requested: true,
+      },
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const normalized = readFollowUpJob(jobPath);
+  assert.deepEqual(normalized.remediationReply, {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    state: 'worker-wrote-reply',
+    path: 'data/follow-up-jobs/workspaces/job-1/.adversarial-follow-up/remediation-reply.json',
+  });
+  assert.equal('arbitraryKey' in normalized.remediationReply, false);
+  assert.equal('reReview' in normalized.remediationReply, false);
+});
+
 test('claimNextFollowUpJob moves the oldest pending file into in-progress metadata', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
@@ -386,6 +422,56 @@ test('buildRemediationReply and validateRemediationReply accept a re-review requ
   assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
 });
 
+test('validateRemediationReply rejects non-string validation and blocker entries', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 42,
+    reviewerModel: 'codex',
+    linearTicketId: 'LAC-42',
+    reviewBody: '## Summary\nTighten null handling.',
+    reviewPostedAt: '2026-04-21T07:46:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'completed',
+      summary: 'Patched null handling.',
+      validation: ['npm test', { command: 'npm run lint' }],
+      blockers: [],
+      reReview: {
+        requested: false,
+        reason: null,
+      },
+    }, { expectedJob: job }),
+    /validation\[1\] must be a non-empty string/
+  );
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'blocked',
+      summary: 'Blocked on missing credential.',
+      validation: [],
+      blockers: ['waiting on token', '   '],
+      reReview: {
+        requested: false,
+        reason: null,
+      },
+    }, { expectedJob: job }),
+    /blockers\[1\] must be a non-empty string/
+  );
+});
+
 test('validateRemediationReply rejects a re-review request without a durable reason', () => {
   const job = buildFollowUpJob({
     repo: 'laceyenterprises/clio',
@@ -441,6 +527,64 @@ test('readRemediationReplyArtifact parses and validates the durable remediation 
   writeFileSync(replyPath, `${JSON.stringify(reply, null, 2)}\n`, 'utf8');
 
   assert.deepEqual(readRemediationReplyArtifact(replyPath, { expectedJob: job }), reply);
+});
+
+test('readRemediationReplyArtifact wraps filesystem errors with artifact and job context', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 42,
+    reviewerModel: 'codex',
+    linearTicketId: 'LAC-42',
+    reviewBody: '## Summary\nTighten null handling.',
+    reviewPostedAt: '2026-04-21T07:46:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => readRemediationReplyArtifact('/tmp/missing-reply.json', { expectedJob: job }),
+    /Failed to read remediation reply artifact at \/tmp\/missing-reply\.json for job .* \(laceyenterprises\/clio#42\): ENOENT/
+  );
+});
+
+test('readRemediationReplyArtifact wraps parse and validation errors with artifact context', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 42,
+    reviewerModel: 'codex',
+    linearTicketId: 'LAC-42',
+    reviewBody: '## Summary\nTighten null handling.',
+    reviewPostedAt: '2026-04-21T07:46:00.000Z',
+    critical: false,
+  });
+  const badJsonPath = path.join(rootDir, 'bad-reply.json');
+  const invalidReplyPath = path.join(rootDir, 'invalid-reply.json');
+
+  writeFileSync(badJsonPath, '{not-json}\n', 'utf8');
+  writeFileSync(invalidReplyPath, `${JSON.stringify({
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Patched null handling.',
+    validation: ['npm test', { command: 'npm run lint' }],
+    blockers: [],
+    reReview: {
+      requested: false,
+      reason: null,
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  assert.throws(
+    () => readRemediationReplyArtifact(badJsonPath, { expectedJob: job }),
+    /Failed to read remediation reply artifact at .*bad-reply\.json.*JSON.*position|Failed to read remediation reply artifact at .*bad-reply\.json.*Expected property name/
+  );
+  assert.throws(
+    () => readRemediationReplyArtifact(invalidReplyPath, { expectedJob: job }),
+    /Failed to read remediation reply artifact at .*invalid-reply\.json.*validation\[1\] must be a non-empty string/
+  );
 });
 
 test('markFollowUpJobCompleted moves an in-progress job into completed with reconciliation context', () => {

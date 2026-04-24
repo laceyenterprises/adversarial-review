@@ -122,6 +122,18 @@ function buildRemediationReply({
   };
 }
 
+function validateStringArrayField(items, fieldName) {
+  if (!Array.isArray(items)) {
+    throw new Error(`Remediation reply ${fieldName} must be an array`);
+  }
+
+  items.forEach((item, index) => {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw new Error(`Remediation reply ${fieldName}[${index}] must be a non-empty string`);
+    }
+  });
+}
+
 function validateRemediationReply(reply, { expectedJob = null } = {}) {
   if (!reply || typeof reply !== 'object' || Array.isArray(reply)) {
     throw new Error('Remediation reply must be a JSON object');
@@ -156,13 +168,8 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
     throw new Error(`Remediation reply outcome must be one of: ${Array.from(allowedOutcomes).join(', ')}`);
   }
 
-  if (!Array.isArray(reply.validation)) {
-    throw new Error('Remediation reply validation must be an array');
-  }
-
-  if (!Array.isArray(reply.blockers)) {
-    throw new Error('Remediation reply blockers must be an array');
-  }
+  validateStringArrayField(reply.validation, 'validation');
+  validateStringArrayField(reply.blockers, 'blockers');
 
   if (!reply.reReview || typeof reply.reReview !== 'object' || Array.isArray(reply.reReview)) {
     throw new Error('Remediation reply reReview must be an object');
@@ -194,10 +201,20 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
 }
 
 function readRemediationReplyArtifact(replyPath, { expectedJob = null } = {}) {
-  return validateRemediationReply(
-    JSON.parse(readFileSync(replyPath, 'utf8')),
-    { expectedJob }
-  );
+  try {
+    return validateRemediationReply(
+      JSON.parse(readFileSync(replyPath, 'utf8')),
+      { expectedJob }
+    );
+  } catch (err) {
+    const jobContext = expectedJob
+      ? ` for job ${expectedJob.jobId} (${expectedJob.repo}#${expectedJob.prNumber})`
+      : '';
+    throw new Error(
+      `Failed to read remediation reply artifact at ${replyPath}${jobContext}: ${err.message}`,
+      { cause: err }
+    );
+  }
 }
 
 function buildLegacyRemediationPlan(job) {
@@ -305,6 +322,11 @@ function normalizeFollowUpJob(job) {
   }
 
   const remediationPlan = normalizeRemediationPlan(job);
+  const persistedRemediationReply = job?.remediationReply;
+  const normalizedRemediationReplyPath = typeof persistedRemediationReply?.path === 'string'
+    && persistedRemediationReply.path.trim()
+    ? persistedRemediationReply.path
+    : null;
   return {
     ...job,
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -316,9 +338,12 @@ function normalizeFollowUpJob(job) {
     },
     remediationReply: {
       ...buildRemediationReplyArtifact(null),
-      ...(job.remediationReply || {}),
       kind: REMEDIATION_REPLY_KIND,
       schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      state: typeof persistedRemediationReply?.state === 'string' && persistedRemediationReply.state.trim()
+        ? persistedRemediationReply.state
+        : 'awaiting-worker-write',
+      path: normalizedRemediationReplyPath,
     },
     remediationPlan,
   };
@@ -648,7 +673,7 @@ function markFollowUpJobSpawned({
       spawnedAt,
       ...worker,
     },
-    remediationReply: buildRemediationReplyArtifact(worker?.replyPath || currentJob?.remediationReply?.path || null),
+    remediationReply: buildRemediationReplyArtifact(worker?.replyPath ?? null),
     remediationPlan: {
       ...currentJob.remediationPlan,
       nextAction: {

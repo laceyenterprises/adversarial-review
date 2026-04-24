@@ -13,7 +13,9 @@ import {
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobSpawned,
+  readRemediationReplyArtifact,
 } from './follow-up-jobs.mjs';
+import { requestReviewRereview } from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -402,6 +404,9 @@ function buildReconciliationPaths(rootDir, job) {
   const logPath = resolveJobRelativePath(rootDir, worker.logPath || null, {
     label: 'logPath',
   });
+  const replyPath = resolveJobRelativePath(rootDir, worker.replyPath || job?.remediationReply?.path || null, {
+    label: 'replyPath',
+  });
 
   if (workspaceDir && outputPath) {
     const relativeToWorkspace = relative(workspaceDir, outputPath);
@@ -421,6 +426,31 @@ function buildReconciliationPaths(rootDir, job) {
     workspaceDir,
     outputPath,
     logPath,
+    replyPath,
+  };
+}
+
+function buildRereviewResult({ requested, reason, outcome = null }) {
+  return {
+    requested,
+    requestedAt: outcome?.requestedAt || null,
+    reason: reason || null,
+    triggered: Boolean(outcome?.triggered),
+    status: outcome?.status || (requested ? 'blocked' : 'not-requested'),
+    outcomeReason: outcome?.reason || null,
+    reviewRow: outcome?.reviewRow
+      ? {
+          repo: outcome.reviewRow.repo,
+          prNumber: outcome.reviewRow.pr_number,
+          reviewer: outcome.reviewRow.reviewer,
+          prState: outcome.reviewRow.pr_state,
+          reviewStatus: outcome.reviewRow.review_status,
+          reviewAttempts: outcome.reviewRow.review_attempts,
+          lastAttemptedAt: outcome.reviewRow.last_attempted_at,
+          postedAt: outcome.reviewRow.posted_at,
+          failedAt: outcome.reviewRow.failed_at,
+        }
+      : null,
   };
 }
 
@@ -575,6 +605,72 @@ function reconcileFollowUpJob({
   };
 
   if (finalMessage.exists && String(finalMessage.text).trim()) {
+    let remediationReply = {
+      ...job?.remediationReply,
+      state: job?.remediationReply?.path ? 'awaiting-worker-write' : 'not-configured',
+    };
+    let rereview = buildRereviewResult({ requested: false });
+
+    if (paths.replyPath) {
+      let reply;
+      try {
+        reply = readRemediationReplyArtifact(paths.replyPath, { expectedJob: job });
+      } catch (err) {
+        const failed = markFollowUpJobFailed({
+          rootDir,
+          jobPath,
+          failedAt: completedAt,
+          failureCode: 'invalid-remediation-reply',
+          error: err,
+          remediationWorker: {
+            ...workerState,
+            state: 'failed',
+          },
+          failure: {
+            remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+          },
+        });
+
+        return {
+          action: 'failed',
+          reason: 'invalid-remediation-reply',
+          job: failed.job,
+          jobPath: failed.jobPath,
+        };
+      }
+
+      remediationReply = {
+        ...remediationReply,
+        state: 'worker-wrote-reply',
+        path: worker.replyPath || job?.remediationReply?.path || null,
+      };
+
+      if (reply.reReview.requested) {
+        const requestedAt = completedAt;
+        const rereviewOutcome = requestReviewRereview({
+          rootDir,
+          repo: job.repo,
+          prNumber: job.prNumber,
+          requestedAt,
+          reason: reply.reReview.reason,
+        });
+        rereview = buildRereviewResult({
+          requested: true,
+          reason: reply.reReview.reason,
+          outcome: {
+            ...rereviewOutcome,
+            requestedAt,
+          },
+        });
+      } else {
+        rereview = buildRereviewResult({
+          requested: false,
+          reason: null,
+          outcome: { status: 'not-requested', reason: 'reply-did-not-request-rereview' },
+        });
+      }
+    }
+
     const completed = markFollowUpJobCompleted({
       rootDir,
       jobPath,
@@ -595,10 +691,17 @@ function reconcileFollowUpJob({
       },
     });
 
+    const completedWithReply = {
+      ...completed.job,
+      remediationReply,
+      reReview: rereview,
+    };
+    writeFileSync(completed.jobPath, `${JSON.stringify(completedWithReply, null, 2)}\n`, 'utf8');
+
     return {
       action: 'completed',
       reason: 'final-message-artifact-present',
-      job: completed.job,
+      job: completedWithReply,
       jobPath: completed.jobPath,
     };
   }

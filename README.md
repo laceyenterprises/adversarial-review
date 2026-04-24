@@ -1,200 +1,206 @@
 ---
 delegation: full
-confidence: 0.9
-last_verified: 2026-04-05
+confidence: 0.95
+last_verified: 2026-04-24
 influence_weight: medium
 tags: [adversarial-review-hq, documentation, reference]
-staleness_window: 90d
+staleness_window: 30d
 ---
 # Adversarial Code Review Service
 
-Enforces cross-model review of agent-built PRs: the model that builds the code never reviews it.
+Cross-model review for agent-authored pull requests, with a bounded follow-up remediation loop.
 
-| Builder | Reviewer |
-|---|---|
-| `[claude-code]` or `[clio-agent]` | Codex / GPT-4o (`codex-reviewer-lacey`) |
-| `[codex]` | Claude Sonnet (`claude-reviewer-lacey`) |
-| No/invalid tag | **Fail-loud guardrail** (PR comment + terminal watcher failure record), no review spawned |
+**Core rule:** the model that builds the code never reviews it.
 
-## Setup
+| Builder tag | Reviewer path | Review bot |
+|---|---|---|
+| `[codex]` | Claude | `claude-reviewer-lacey` |
+| `[claude-code]` | Codex | `codex-reviewer-lacey` |
+| `[clio-agent]` | Codex | `codex-reviewer-lacey` |
+| missing / malformed tag | fail-loud guardrail, no review spawned | n/a |
 
-### 1. Install dependencies
+---
+
+## Docs map
+
+Start here depending on what you need:
+
+- **Quick orientation:** `README.md`
+- **Operating the remediation loop:** `docs/follow-up-runbook.md`
+- **Understanding states and transitions:** `docs/STATE-MACHINE.md`
+- **Debugging auth/runtime scars:** `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md`
+- **Changing behavior in code:** `src/watcher.mjs`, `src/reviewer.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-remediation.mjs`
+
+Fast triage:
+
+- “Why didn’t review trigger?” → `README.md` + `docs/STATE-MACHINE.md`
+- “Why didn’t rereview happen?” → `docs/follow-up-runbook.md` + inspect `remediation-reply.json`
+- “What state is the system actually in?” → `docs/STATE-MACHINE.md` + `data/reviews.db` + `data/follow-up-jobs/*`
+- “What should I run next?” → `docs/follow-up-runbook.md`
+
+---
+
+## What this module does
+
+### 1. First-pass review
+
+- watcher polls GitHub for tagged PRs
+- validates title guardrails
+- routes to the opposite reviewer model
+- posts the GitHub review through the correct bot
+- records durable delivery state in `data/reviews.db`
+
+### 2. Follow-up remediation
+
+After a successful review post, the service creates a durable follow-up job.
+
+That job can then be:
+
+- consumed explicitly
+- worked by a detached remediation worker on the existing PR branch
+- reconciled explicitly
+- stopped or requeued explicitly
+- re-armed for another review pass only via durable JSON reply metadata
+
+This is **bounded and operator-visible**, not an autonomous retry daemon.
+
+---
+
+## Architecture
+
+```text
+                          ┌──────────────────────────────┐
+                          │      GitHub Pull Request     │
+                          │ tagged at creation time      │
+                          │ [codex]/[claude-code]/...    │
+                          └──────────────┬───────────────┘
+                                         │
+                                         ▼
+                          ┌──────────────────────────────┐
+                          │         watcher.mjs          │
+                          │ poll + title validation      │
+                          │ + route selection            │
+                          └───────┬───────────┬──────────┘
+                                  │           │
+                    malformed tag  │           │ valid tagged PR
+                                  │           ▼
+                                  │  ┌──────────────────────────┐
+                                  │  │       reviewer.mjs       │
+                                  │  │ fetch diff, run reviewer │
+                                  │  │ post GitHub review       │
+                                  │  └──────────┬───────────────┘
+                                  │             │
+                                  ▼             ▼
+                    ┌──────────────────────┐  ┌──────────────────────────────┐
+                    │ fail-loud comment +  │  │ durable review row updated   │
+                    │ malformed DB state   │  │ + follow-up job created      │
+                    └──────────────────────┘  └──────────┬───────────────────┘
+                                                         │
+                                                         ▼
+                                  ┌──────────────────────────────────────────┐
+                                  │ data/follow-up-jobs/pending/*.json      │
+                                  └─────────────────┬────────────────────────┘
+                                                    │
+                                                    ▼
+                                  ┌──────────────────────────────────────────┐
+                                  │ follow-up:consume                        │
+                                  │ claim job, prep workspace, spawn worker  │
+                                  └─────────────────┬────────────────────────┘
+                                                    │
+                                                    ▼
+                         ┌─────────────────────────────────────────────────────────┐
+                         │ workspace artifacts                                     │
+                         │   codex-last-message.md                                 │
+                         │   remediation-reply.json                                │
+                         └─────────────────┬──────────────────────────────────────┘
+                                           │
+                                           ▼
+                              ┌──────────────────────────────┐
+                              │   follow-up:reconcile        │
+                              │ validate artifacts,          │
+                              │ finalize queue state         │
+                              └─────────────┬────────────────┘
+                                            │
+                    ┌───────────────────────┴────────────────────────┐
+                    ▼                                                ▼
+      ┌──────────────────────────────┐                 ┌──────────────────────────────┐
+      │ no durable rereview request  │                 │ rereview requested=true      │
+      │ -> stopped/no-progress       │                 │ -> review_status='pending'   │
+      │                              │                 │ -> watcher can review again  │
+      └──────────────────────────────┘                 └──────────────────────────────┘
+```
+
+---
+
+## Quick start
+
+### Install
 
 ```bash
 npm install
 ```
 
-### 2. Configure environment
+### Configure
 
 ```bash
 cp .env.example .env
-# Fill in all values
+# fill in runtime values
 ```
 
-Required env vars:
+At minimum, expect to provide:
 
-| Variable | Purpose |
-|---|---|
-| `GITHUB_TOKEN` | Read PRs from watched repos |
-| `GH_CODEX_REVIEWER_TOKEN` | PAT for `codex-reviewer-lacey` bot |
-| `GH_CLAUDE_REVIEWER_TOKEN` | PAT for `claude-reviewer-lacey` bot |
-| `OPENAI_API_KEY` | GPT-4o reviewer (codex path) |
-| `ANTHROPIC_API_KEY` | Claude Sonnet reviewer (claude path) |
-| `LINEAR_API_KEY` | Ticket status updates |
+- `GITHUB_TOKEN`
+- `GH_CODEX_REVIEWER_TOKEN`
+- `GH_CLAUDE_REVIEWER_TOKEN`
+- `LINEAR_API_KEY` (if using Linear sync)
 
-### 3. GitHub bot accounts
+### Important auth note
 
-Create two GitHub accounts and add them to the `laceyenterprises` org with write access to covered repos:
+The real runtime contract is stricter than the generic `.env.example` suggests:
 
-- `codex-reviewer-lacey` — posts reviews on Claude/Clio PRs
-- `claude-reviewer-lacey` — posts reviews on Codex PRs
+- **Claude review path is OAuth-first**
+- **Codex review path is OAuth-first**
+- silent API-key fallback is not the intended operating mode
 
-Generate a PAT for each with `pull_requests: write` scope. Store tokens in 1Password (Cliovault).
+If auth drifts, fail loud and fix auth. Don’t normalize degraded reviewer identity.
 
-### 4. Configure watched repos
+### Configure watched repos
 
-Edit `config.json`:
+Edit `config.json`.
+
+Minimal example:
 
 ```json
 {
   "repos": ["laceyenterprises/clio"],
   "pollIntervalMs": 300000,
-  "linear": {
-    "teamKey": "LAC"
-  }
+  "linear": { "teamKey": "LAC" }
 }
 ```
 
-## Usage
+---
 
-### Prompt location
+## Commands
 
-The long-form adversarial reviewer prompt lives in:
-
-```bash
-prompts/reviewer-prompt.md
-```
-
-Design rule: prompt text that humans are expected to tune over time should live in standalone Markdown artifacts, not inline string literals buried in runtime code.
-
-
-### Start the watcher (polls every 5 minutes)
+### Start watcher
 
 ```bash
 npm start
 ```
 
-### Run a one-shot review manually
+### Run one-shot review
 
 ```bash
 node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerModel":"codex","botTokenEnv":"GH_CODEX_REVIEWER_TOKEN","linearTicketId":"LAC-42"}'
 ```
 
-## How it works
-
-1. **Watcher** polls configured repos every `pollIntervalMs` ms
-2. Detects PR author tag from PR title (`[claude-code]`, `[codex]`, `[clio-agent]`)
-3. If tag is missing/invalid, triggers fail-loud signaling (PR comment + structured watcher failure log/record) and does **not** spawn review
-4. Malformed-title records are terminal by design: retitling an existing PR does not retrigger review
-5. Uses durable delivery state in `data/reviews.db` instead of a binary seen/not-seen flag
-   - `pending` = picked up / attempt in flight
-   - `posted` = review successfully posted to GitHub (terminal success)
-   - `failed` = attempt failed and should be retried on a later poll
-   - `malformed` = PR title malformed; terminal failure until human creates a correctly tagged PR
-6. Sets Linear ticket to **In Review** state
-7. Spawns **Reviewer Agent** as a child process
-8. Reviewer fetches diff via `gh pr diff`, sends to AI model with adversarial prompt
-   - **Codex path:** Uses native Codex CLI with OAuth credentials (not ACPX) — see `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md` for why
-   - **Claude path:** Uses native Claude CLI with OAuth credentials
-9. Review is posted as a GitHub PR comment by the appropriate bot account
-10. After a successful GitHub post, reviewer writes a durable follow-up handoff file under `data/follow-up-jobs/pending/`
-    - Queue uses exclusive writes with collision-safe retries to prevent overwriting existing jobs
-11. Linear ticket updated to **Review Complete** (Done)
-12. If review contains critical/security issues → comment added to Linear ticket flagging Paul
-
-## PR Title Convention
-
-All agent-built PRs must include a tag at the start of the title:
-
-Repo-visible enforcement: GitHub Action `PR Title Prefix Validation` fails PR checks when this prefix is missing or malformed, and explains why creation-time correctness matters and why retitling is not a recovery path.
-
-```
-[claude-code] feat: add payment webhook handler (LAC-42)
-[codex] fix: resolve null pointer in auth middleware (LAC-17)
-[clio-agent] chore: update dependency versions
-```
-
-See `AUTHOR_TAGGING.md` for the full convention.
-
-## Canonical Tagged PR Creation Helper
-
-Use this helper instead of raw `gh pr create` for adversarial-review-tagged PRs:
+### Create a correctly tagged PR
 
 ```bash
 npm run pr:create:tagged -- --tag codex --title "LAC-180: build PR creation helper" -- --body "..." --base main
 ```
 
-Rules enforced by the helper:
-- `--tag` is required and must be one of `codex`, `claude-code`, `clio-agent` (aliases: `claude`, `clio`)
-- `--title` is required and must be unprefixed
-- helper prepends the canonical prefix and prints the exact final title before PR creation
-- passing `--title` through to raw `gh` args is blocked (including short-flag bundles that include `-t`) so title enforcement cannot be bypassed accidentally
-
-## Data
-
-Reviewed PRs are tracked in `data/reviews.db` (SQLite). This now stores delivery state rather than just a binary already-reviewed marker, so failed review attempts remain visible and retryable across watcher restarts instead of being silently skipped forever.
-
-Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`.
-
-Canonical operator documentation for the bounded remediation loop now lives in:
-
-- [docs/follow-up-runbook.md](docs/follow-up-runbook.md)
-
-Current shipped follow-up shape:
-
-- job files live under `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/`
-- each job carries `remediationPlan.mode = "bounded-manual-rounds"`
-- `remediationPlan.maxRounds` defaults to `6`
-- `remediationPlan.currentRound` plus `remediationPlan.rounds[]` preserve explicit round history
-- `remediationPlan.stop.code` and `remediationPlan.stop.reason` preserve durable stop metadata
-- `remediationReply.state = "awaiting-worker-write"` reserves the machine-readable worker reply slot
-- the control surface is explicit: `follow-up:consume`, `follow-up:reconcile`, `follow-up:requeue`, and `follow-up:stop`
-
-### Force a re-review manually
-
-If a PR already has a posted review and GitHub-side reviewer re-request is **not** sufficient to retrigger the watcher, you can force a fresh pass by editing the SQLite row directly.
-
-Current watcher behavior:
-- rows with `review_status in ('posted', 'malformed')` are skipped on poll
-- forcing a re-review means making the row eligible again without deleting its history
-
-Safe procedure for an **open** PR:
-
-1. Inspect the row:
-```bash
-sqlite3 data/reviews.db "select id,repo,pr_number,reviewer,pr_state,review_status,review_attempts,last_attempted_at,posted_at,failed_at,failure_message from reviewed_prs where repo='laceyenterprises/adversarial-review' and pr_number=212;"
-```
-
-2. Flip it back to `pending` and clear terminal post/failure metadata:
-```bash
-sqlite3 data/reviews.db "BEGIN; UPDATE reviewed_prs SET review_status='pending', posted_at=NULL, failed_at=NULL, failure_message=NULL WHERE repo='laceyenterprises/adversarial-review' AND pr_number=212; COMMIT;"
-```
-
-3. Verify the row, then wait for the next watcher poll cycle.
-
-Important constraints:
-- keep `reviewer` unchanged unless you intentionally want a different reviewer path
-- keep `review_attempts` and `last_attempted_at` intact so history is preserved
-- do **not** use this to override malformed-title guardrails unless you explicitly want to bypass that safety contract
-- prefer this only when the watcher does not yet support retriggering from GitHub review-request state alone
-
-## Follow-Up Operations
-
-The follow-up remediation flow is now documented in one place:
-
-- [docs/follow-up-runbook.md](docs/follow-up-runbook.md)
-
-Most-used commands:
+### Follow-up queue operations
 
 ```bash
 npm run follow-up:consume
@@ -203,42 +209,227 @@ npm run follow-up:requeue -- data/follow-up-jobs/completed/<jobId>.json "Need on
 npm run follow-up:stop -- data/follow-up-jobs/in-progress/<jobId>.json "Operator requested stop"
 ```
 
-Key current semantics:
+### Test
 
-- remediation is bounded and operator-driven, not autonomous
-- the worker modifies the existing PR branch, commits, and pushes
-- the worker does not open a new PR and does not merge the PR
-- `reReview.requested = true` in the reply JSON is the durable signal for another watcher-driven review pass
-- when no durable re-review request exists, the loop stops with `remediationPlan.stop.code = "no-progress"`
-- when the round cap is reached, the loop stops with `remediationPlan.stop.code = "max-rounds-reached"`
-
-## Cross-user runtime contract (2026-04-22)
-
-The canonical watcher runs as `placey`, but the adversarial-review source tree currently lives under `/Users/airlock/agent-os/tools/adversarial-review`. That means the service depends on a shared-read filesystem contract across the `airlock` ↔ `placey` boundary.
-
-Current required shape:
 ```bash
-sudo sh -c 'chgrp -R staff /Users/airlock/agent-os/tools && chmod -R g+rX /Users/airlock/agent-os/tools && find /Users/airlock/agent-os/tools -type d -exec chmod g+s {} +'
-sudo chmod 750 /Users/airlock
+npm test
 ```
 
-If this contract drifts, reviewer imports can fail with `EACCES` even when launch/auth configuration is otherwise correct.
+---
 
-## Operational semantics note (2026-04-21)
+## PR title contract
 
-This service currently uses **A semantics** for review completion:
-- Codex/Claude generates review text
-- the outer reviewer wrapper captures the final artifact
-- the wrapper posts the PR review comment itself via `gh pr review`
-- only after successful post does the wrapper enqueue a durable follow-up handoff job
+Tagged titles are mandatory at PR creation time.
 
-That means the current service does **not** yet implement delegated-worker-owned completion (**B semantics**). The worker does not own the GitHub side effect directly; the wrapper does.
+Examples:
 
-Important lesson from the ACPX/Codex debugging cycle:
-- ACPX/native Codex can still support this A-style contract
-- the quick operational win is to preserve the known-good wrapper-owned review-post path and swap only invocation/auth plumbing underneath it
-- do not let a larger ambition for B-style delegated completion become the critical path for getting the review pipeline working reliably again
+```text
+[codex] fix: resolve null pointer in auth middleware (LAC-17)
+[claude-code] feat: add payment webhook handler (LAC-42)
+[clio-agent] chore: refresh docs and scripts
+```
 
-Practical implication:
-- substrate choice (`acpx`, native `codex exec`, file-based output handoff) and completion semantics are separate decisions
-- if we want real B semantics later, that needs an explicit job/session ownership contract rather than wrapper glue that scrapes output and pretends delegated work was an inline free model call
+If the title is malformed:
+
+- watcher records `review_status = 'malformed'`
+- a fail-loud GitHub comment explains why review did not trigger
+- this state is terminal by design
+- safe recovery is usually opening a new correctly tagged PR
+
+---
+
+## State you should know exists
+
+### Review ledger
+
+SQLite database:
+
+```text
+data/reviews.db
+```
+
+Important `review_status` values:
+
+- `pending`
+- `posted`
+- `failed`
+- `malformed`
+
+### Follow-up queue
+
+```text
+data/follow-up-jobs/
+  pending/
+  in-progress/
+  completed/
+  failed/
+  stopped/
+  workspaces/
+```
+
+Queue directories are the state machine.
+
+---
+
+## The rereview contract
+
+Another adversarial review pass only happens if the remediation worker writes a valid reply JSON with:
+
+```json
+{
+  "reReview": {
+    "requested": true,
+    "reason": "..."
+  }
+}
+```
+
+That durable artifact causes reconciliation to reset the corresponding row in `reviews.db` back to:
+
+```text
+review_status = 'pending'
+```
+
+That is what re-arms the watcher.
+
+Not enough:
+
+- prose in the final message
+- commit text
+- PR comments
+- human assumptions
+
+The JSON artifact is the contract.
+
+---
+
+## Maintenance cheatsheet
+
+Inspect the queue:
+
+```bash
+find data/follow-up-jobs -maxdepth 2 -type f -name '*.json' | sort
+jq '.' data/follow-up-jobs/in-progress/<jobId>.json
+```
+
+Inspect review DB:
+
+```bash
+sqlite3 data/reviews.db "select repo,pr_number,review_status,pr_state,review_attempts,posted_at,failed_at,rereview_requested_at from reviewed_prs order by id desc limit 20;"
+```
+
+Reset one PR to pending manually:
+
+```bash
+sqlite3 data/reviews.db "BEGIN; UPDATE reviewed_prs SET review_status='pending', posted_at=NULL, failed_at=NULL, failure_message=NULL WHERE repo='laceyenterprises/adversarial-review' AND pr_number=212; COMMIT;"
+```
+
+Check worker artifacts:
+
+```bash
+ls -la data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/
+jq '.' data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/remediation-reply.json
+```
+
+If a remediation round “finished” but nothing advanced, the first thing to ask is usually:
+
+- was `follow-up:reconcile` run?
+- did `remediation-reply.json` exist?
+- did it actually set `reReview.requested = true`?
+
+---
+
+## Common failure modes
+
+### Review never triggered
+
+Usually one of:
+
+- PR title missing required creation-time tag
+- watcher is not polling the repo you expect
+- `GITHUB_TOKEN` lacks read access
+- row already landed in `malformed`
+
+### Reviewer failed to post
+
+Usually one of:
+
+- reviewer bot PAT missing/invalid
+- Claude/Codex OAuth drift
+- CLI path drift
+- cross-user permission drift
+- runtime/env mismatch
+
+### Follow-up worker ran but queue did not advance
+
+Usually one of:
+
+- `follow-up:reconcile` was not run yet
+- final artifact missing/empty
+- `remediation-reply.json` invalid or absent
+- rereview was not requested durably
+
+### Queue round completed but no new review appeared yet
+
+Usually one of:
+
+- watcher has not polled again yet
+- `reviews.db` was not actually reset to `pending`
+- PR is no longer open
+
+### Sharp edges worth remembering
+
+- malformed-title state is terminal by design
+- `completed` does not mean merged/done; it means rereview was armed successfully
+- `no-progress` is healthy defensive behavior, not necessarily a bug
+- the `.env.example` is generic; real reviewer auth is stricter
+
+For the compact control-plane view, see `docs/STATE-MACHINE.md`.
+For the full operator guide, see `docs/follow-up-runbook.md`.
+For auth/runtime history, see `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md`.
+
+---
+
+## Repository map
+
+```text
+src/
+  watcher.mjs
+  reviewer.mjs
+  review-state.mjs
+  watcher-title-guardrails.mjs
+  watcher-fail-loud.mjs
+  pr-title-tagging.mjs
+  pr-create-tagged.mjs
+  follow-up-jobs.mjs
+  follow-up-remediation.mjs
+  follow-up-reconcile.mjs
+  follow-up-requeue.mjs
+  follow-up-stop.mjs
+
+prompts/
+  reviewer-prompt.md
+  follow-up-remediation.md
+
+docs/
+  follow-up-runbook.md
+  INCIDENT-2026-04-21-ACPX-codex-exec-regression.md
+```
+
+---
+
+## For deeper operator detail
+
+See:
+
+- `docs/follow-up-runbook.md`
+- `src/watcher.mjs`
+- `src/reviewer.mjs`
+- `src/follow-up-jobs.mjs`
+- `src/follow-up-remediation.mjs`
+
+---
+
+## Status
+
+As of 2026-04-24, this README is intentionally optimized for quick scanning. Heavier operator semantics and maintenance detail live in `docs/follow-up-runbook.md`.

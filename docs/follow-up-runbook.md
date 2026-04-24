@@ -2,15 +2,18 @@
 
 This runbook covers the shipped bounded remediation loop for adversarial-review after `LAC-206`, `LAC-209`, `LAC-210`, and `LAC-211`.
 
-Use this when a review has already been posted to GitHub and you need to run, inspect, reconcile, stop, or debug the follow-up remediation flow without reading the implementation first.
+Use this when a review has already been posted to GitHub and you need to run, inspect, reconcile, stop, requeue, or debug the follow-up remediation flow without re-reading the implementation.
 
-## Scope and Current Contract
+---
 
-- This is a bounded, operator-visible loop. It is not an autonomous retry daemon.
-- The watcher owns review posting. Follow-up remediation does not post GitHub reviews directly.
-- The remediation worker works on the existing PR branch, commits changes, and pushes that branch.
-- The remediation worker does **not** open a new PR and does **not** land or merge the PR.
-- Advancing from one remediation round to another remains an explicit operator action.
+## Scope and current contract
+
+- This is a **bounded, operator-visible loop**. It is not an autonomous retry daemon.
+- The **watcher owns review posting**. Follow-up remediation does not post GitHub reviews directly.
+- The remediation worker works on the **existing PR branch**, commits changes, and pushes that branch.
+- The remediation worker does **not** open a new PR and does **not** merge the PR.
+- Advancing from one remediation round to another remains an **explicit operator action**.
+- A new adversarial review pass only happens when the worker writes a **durable machine-readable rereview request**.
 
 Relevant scripts:
 
@@ -21,7 +24,148 @@ npm run follow-up:requeue -- <job-path> [reason]
 npm run follow-up:stop -- <job-path> [reason]
 ```
 
-## Lifecycle
+---
+
+## Mental model
+
+There are two separate state machines here:
+
+1. **Watcher delivery state** in SQLite (`data/reviews.db`)
+2. **Follow-up remediation queue state** in JSON files (`data/follow-up-jobs/*`)
+
+They interact, but they are not the same thing.
+
+- SQLite answers: *has this PR been reviewed / can it be reviewed again?*
+- Follow-up jobs answer: *what remediation round is happening around this already-posted review?*
+
+A lot of operator confusion comes from mixing those two ledgers together.
+
+---
+
+## End-to-end architecture
+
+```text
+GitHub PR
+  │
+  ▼
+watcher.mjs
+  │ validate title tag + choose route
+  ▼
+reviewer.mjs
+  │ fetch diff, run adversarial review, post review
+  ▼
+create follow-up job JSON
+  │
+  ▼
+data/follow-up-jobs/pending/<jobId>.json
+  │
+  ├─(operator) npm run follow-up:consume
+  ▼
+data/follow-up-jobs/in-progress/<jobId>.json
+  │
+  ▼
+detached remediation worker on checked-out PR branch
+  │ writes artifacts
+  ├─ codex-last-message.md
+  └─ remediation-reply.json
+  │
+  ├─(operator) npm run follow-up:reconcile
+  ▼
+terminal queue state
+  ├─ completed/   -> valid rereview request recorded
+  ├─ failed/      -> launch/reconcile/artifact failure
+  └─ stopped/     -> bounded stop (no-progress, operator-stop, max-rounds-reached)
+  │
+  └─ if rereview requested:
+       requestReviewRereview(...)
+       -> reviews.db row reset to review_status='pending'
+       -> watcher may pick the PR up again
+```
+
+---
+
+## State transition diagram
+
+### Follow-up queue transitions
+
+```text
+pending
+  │
+  ├─ follow-up:consume
+  ▼
+in-progress
+  │
+  ├─ worker still alive during reconcile
+  │    └─ stays in-progress
+  │
+  ├─ launch preparation fails
+  │    └─ failed
+  │
+  ├─ worker exits, final artifact missing/invalid
+  │    └─ failed
+  │
+  ├─ worker exits, valid reply, rereview requested=true
+  │    └─ completed
+  │
+  ├─ worker exits, no durable rereview request
+  │    └─ stopped (code=no-progress)
+  │
+  └─ operator stop
+       └─ stopped (code=operator-stop)
+
+completed
+  │
+  ├─ operator requeue
+  │    └─ pending
+  │
+  └─ if maxRounds already reached
+       └─ stopped (code=max-rounds-reached)
+
+failed
+  │
+  ├─ operator requeue
+  │    └─ pending
+  │
+  └─ if maxRounds already reached
+       └─ stopped (code=max-rounds-reached)
+```
+
+### Watcher delivery state transitions
+
+```text
+new tagged PR
+  │
+  ├─ malformed title
+  │    └─ malformed   (terminal by design)
+  │
+  └─ valid tagged PR
+       └─ pending
+            │
+            ├─ successful review post
+            │    └─ posted
+            │
+            ├─ review attempt fails
+            │    └─ failed
+            │
+            └─ remediation rereview request accepted
+                 └─ pending   (re-armed for another watcher pass)
+```
+
+### Important consequence
+
+A follow-up job can be `completed` while the PR is still far from done.
+
+Here, `completed` means:
+
+- the remediation round finished cleanly
+- a durable rereview request was accepted
+- the queue round reached terminal success
+
+It does **not** mean the PR is merged, approved, or production-ready.
+
+---
+
+## Lifecycle in detail
 
 ### 1. Review pickup and follow-up job creation
 
@@ -34,10 +178,10 @@ data/follow-up-jobs/pending/
 That job includes:
 
 - PR identity: `repo`, `prNumber`, `linearTicketId`, `reviewerModel`
-- Review context: `reviewSummary`, `reviewBody`, `critical`
-- Bounded-loop state: `remediationPlan.mode`, `maxRounds`, `currentRound`, `rounds[]`
-- Reply contract state: `remediationReply.state`
-- Future-session placeholder metadata: `sessionHandoff`
+- review context: `reviewSummary`, `reviewBody`, `critical`
+- bounded-loop state: `remediationPlan.mode`, `maxRounds`, `currentRound`, `rounds[]`
+- reply contract state: `remediationReply.state`
+- future-session placeholder metadata: `sessionHandoff`
 
 Initial state:
 
@@ -81,7 +225,7 @@ Current worker authority and expectations:
 
 - edit code in the checked-out PR branch
 - run focused validation
-- commit and push the PR branch
+- commit the remediation changes and push the PR branch
 - write a machine-readable remediation reply JSON file
 - do not open a new PR
 - do not merge the PR
@@ -164,7 +308,9 @@ The loop is intentionally capped and explicit. A job moves to `data/follow-up-jo
 
 `max-rounds-reached` means another round would exceed the stored `remediationPlan.maxRounds` cap.
 
-## Operator Control Surface
+---
+
+## Operator control surface
 
 ### Inspect queue state
 
@@ -252,7 +398,9 @@ Stop behavior:
 - records `remediationPlan.stop.reason`
 - records `remediationPlan.stop.stoppedBy`
 
-## Durable Metadata Operators Should Read
+---
+
+## Durable metadata operators should read
 
 ### In the follow-up job JSON
 
@@ -322,7 +470,9 @@ Interpretation:
 - `review_status = 'posted'` means the previous review is terminal unless requeued by reconciliation or manual DB recovery
 - `review_status = 'malformed'` is terminal by design for malformed-title cases
 
-## Terminal States and What They Mean
+---
+
+## Terminal states and what they mean
 
 ### `completed`
 
@@ -331,6 +481,7 @@ Meaning:
 - the detached remediation worker produced a non-empty final message artifact
 - if a reply path was configured, the reply JSON validated
 - the worker requested another adversarial review pass
+- the rereview reset was accepted by the watcher delivery ledger
 
 Important nuance:
 
@@ -341,115 +492,162 @@ Important nuance:
 
 Meaning:
 
-- the round did not produce a trustworthy terminal completion
+- launch preparation failed, or
+- worker output artifact was missing/empty/invalid, or
+- rereview handling failed in a way the reconciler treats as failure
 
-Common failure codes:
-
-- `worker-failure`
-- `invalid-output-path`
-- `artifact-missing-completion`
-- `artifact-empty-completion`
-- `invalid-remediation-reply`
-- `manual-inspection-required`
-
-`manual-inspection-required` is used when the recorded worker PID still appears live past the reconciliation runtime cap. The system does not trust PID-only liveness forever.
+This is an operator investigation state, not an automatic retry signal.
 
 ### `stopped`
 
 Meaning:
 
-- the bounded loop was ended intentionally or because it could not make durable progress
+- the loop intentionally terminated without arming another review round
 
-Stop codes:
+Common reasons:
 
 - `operator-stop`
 - `no-progress`
 - `max-rounds-reached`
 
-Read `remediationPlan.stop` first; that is the machine-readable explanation.
+`stopped` is often healthy. It frequently means the worker did not make a durable rereview request, so the control plane refused to guess.
 
-## No-Progress Semantics
+---
 
-This is the part operators should be explicit about with stakeholders:
+## Maintenance and debugging tips
 
-- A remediation round can finish with useful code changes and still be considered `no-progress` by the bounded loop.
-- That happens when no valid durable re-review request was recorded.
-- In that case the system stops instead of assuming another round or another review should happen.
+### 1. Check the durable artifact before debugging control flow
 
-Current shipped behavior:
-
-- reconciliation stops a finished round with `no-progress` when the worker did not request re-review durably
-- requeue also stops a `completed/` job with `no-progress` if `reReview.requested` is not `true`
-
-This is working as designed. It prevents silent loops and prose-only state transitions.
-
-## Blocked Re-Review Cases
-
-A worker can request re-review and still not get the watcher row reset.
-
-Current explicit blocked cases include:
-
-- malformed-title terminal watcher rows
-- non-open PR rows
-
-When that happens:
-
-- the follow-up job still records the worker’s request
-- `job.reReview.triggered = false`
-- `job.reReview.status = "blocked"`
-- `job.reReview.outcomeReason` explains why
-
-The system does not bypass watcher terminal safeguards automatically.
-
-## Manual Recovery
-
-### When to use direct SQLite edits
-
-Manual DB edits are a recovery path, not the normal operator flow.
-
-Use them when:
-
-- the reply artifact is missing
-- the reply artifact is invalid
-- watcher state intentionally blocked re-review and you have decided to override that state
-- you need to recover from an older row that will not be reset by reconciliation
-
-Safe procedure for an open PR:
+If a rereview didn’t happen, first inspect:
 
 ```bash
-sqlite3 data/reviews.db "select id,repo,pr_number,reviewer,pr_state,review_status,review_attempts,last_attempted_at,posted_at,failed_at,failure_message from reviewed_prs where repo='laceyenterprises/adversarial-review' and pr_number=212;"
-sqlite3 data/reviews.db "BEGIN; UPDATE reviewed_prs SET review_status='pending', posted_at=NULL, failed_at=NULL, failure_message=NULL WHERE repo='laceyenterprises/adversarial-review' AND pr_number=212; COMMIT;"
+jq '.' data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/remediation-reply.json
 ```
 
-Constraints:
+The most common root cause is simply that `reReview.requested` was absent or false.
 
-- keep `reviewer` unchanged unless you intentionally want a different reviewer route
-- keep `review_attempts` and `last_attempted_at` intact so history survives
-- do not casually override malformed-title terminal rows
+### 2. Reconcile is not automatic
 
-## Debugging Checklist
+A worker can finish successfully and the queue can still appear stuck in `in-progress/` if nobody ran:
 
-If an operator says “the loop is stuck”, check in this order:
+```bash
+npm run follow-up:reconcile
+```
 
-1. Is the JSON file in `pending/`, `in-progress/`, `completed/`, `failed/`, or `stopped/`?
-2. What does `remediationPlan.nextAction` say?
-3. What does the latest `remediationPlan.rounds[]` entry say?
-4. Does `remediationWorker.state` match the directory state?
-5. Does the workspace contain `codex-last-message.md`?
-6. Does the workspace contain a valid `remediation-reply.json`?
-7. If re-review was requested, what does `job.reReview` say?
-8. Does `data/reviews.db` show `review_status = 'pending'` for that PR?
+This is normal and by design.
 
-Common interpretations:
+### 3. Don’t confuse `completed` with “PR done”
 
-- `in-progress` plus live PID: worker is still running or appears to be
-- `in-progress` plus dead PID plus no artifacts: reconcile should fail the round
-- `completed` plus `reReview.triggered = false`: worker asked for re-review but watcher state blocked it
-- `stopped` plus `no-progress`: the round ended without a durable re-review request
+Queue success means the remediation round closed successfully.
+It says nothing by itself about merge readiness.
 
-## Related Context
+### 4. Malformed-title rows are intentionally sticky
 
-- [README](../README.md)
-- [SPEC](../SPEC.md)
-- [SPEC-durable-first-pass-review-jobs](../SPEC-durable-first-pass-review-jobs.md)
-- [docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md](./INCIDENT-2026-04-21-ACPX-codex-exec-regression.md)
+If a PR hit malformed-title guardrails, don’t assume retitling later will restore the happy path.
+The safer recovery remains: create a fresh, correctly tagged PR.
+
+### 5. Use the workspace as the forensic record
+
+Before guessing, inspect:
+
+- worker prompt
+- final message artifact
+- reply artifact
+- worker log
+- round history in the job JSON
+
+Usually the answer is already there.
+
+### 6. Max rounds is a safety rail, not a suggestion
+
+Default max rounds is 6.
+If the loop hits that cap, the correct action is usually human review of strategy, not blind extension.
+
+### 7. Be careful with manual DB resets
+
+Resetting `review_status='pending'` is powerful.
+Use it for recovery, not to paper over malformed titles or to bypass queue semantics without understanding the consequences.
+
+### 8. Cross-user auth/permission drift is a real failure mode
+
+If workers or reviewers suddenly start failing after runtime/user changes, verify:
+
+- CLI paths still exist
+- Codex OAuth auth file is readable
+- cross-user permissions still allow the active runtime to read required artifacts
+- queue/workspace directories are writable by the runtime user
+
+---
+
+## Common operator playbooks
+
+### A. “A remediation worker finished. Why didn’t we get another review?”
+
+1. run `npm run follow-up:reconcile`
+2. inspect `remediation-reply.json`
+3. verify `reReview.requested = true`
+4. inspect `data/reviews.db` row for the PR
+5. confirm the PR is still `pr_state='open'`
+
+### B. “The queue says completed, but nothing has happened yet.”
+
+Likely meaning:
+
+- the remediation round successfully requested rereview
+- the DB row was reset to `pending`
+- the watcher has not polled / processed the PR again yet
+
+Check watcher logs and `reviews.db`.
+
+### C. “I want one more bounded remediation round.”
+
+Use:
+
+```bash
+npm run follow-up:requeue -- data/follow-up-jobs/completed/<jobId>.json "Need one more bounded remediation pass"
+```
+
+Then consume it explicitly.
+
+### D. “I want this to stop right now.”
+
+Use:
+
+```bash
+npm run follow-up:stop -- data/follow-up-jobs/in-progress/<jobId>.json "Operator requested stop"
+```
+
+### E. “Something feels inconsistent.”
+
+Inspect in this order:
+
+1. queue JSON file
+2. workspace artifacts
+3. SQLite review row
+4. watcher logs
+5. worker log
+
+---
+
+## Canonical files to read before code changes
+
+- `src/follow-up-jobs.mjs`
+- `src/follow-up-remediation.mjs`
+- `src/follow-up-reconcile.mjs`
+- `src/follow-up-requeue.mjs`
+- `src/follow-up-stop.mjs`
+- `src/review-state.mjs`
+- `src/watcher.mjs`
+
+---
+
+## Bottom line
+
+The system is intentionally conservative.
+
+- review posting is owned by the watcher path
+- remediation is owned by the follow-up queue path
+- rereview is armed only by durable JSON metadata
+- explicit operator actions keep the loop bounded and debuggable
+
+That conservatism is the feature. It keeps the service from silently spinning or fabricating progress.

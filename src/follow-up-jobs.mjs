@@ -1,9 +1,12 @@
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -14,6 +17,7 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 1;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],
+  completed: ['data', 'follow-up-jobs', 'completed'],
   failed: ['data', 'follow-up-jobs', 'failed'],
   workspaces: ['data', 'follow-up-jobs', 'workspaces'],
 });
@@ -51,8 +55,25 @@ function listPendingFollowUpJobPaths(rootDir) {
     .map((name) => join(pendingDir, name));
 }
 
+function listInProgressFollowUpJobPaths(rootDir) {
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  if (!existsSync(inProgressDir)) return [];
+
+  return readdirSync(inProgressDir)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map((name) => join(inProgressDir, name));
+}
+
 function listPendingFollowUpJobs(rootDir) {
   return listPendingFollowUpJobPaths(rootDir).map((jobPath) => ({
+    job: readFollowUpJob(jobPath),
+    jobPath,
+  }));
+}
+
+function listInProgressFollowUpJobs(rootDir) {
+  return listInProgressFollowUpJobPaths(rootDir).map((jobPath) => ({
     job: readFollowUpJob(jobPath),
     jobPath,
   }));
@@ -218,28 +239,106 @@ function markFollowUpJobSpawned({
   return { job: nextJob, jobPath };
 }
 
+function moveTerminalJobRecord({
+  rootDir,
+  jobPath,
+  destinationKey,
+  buildNextJob,
+}) {
+  ensureFollowUpJobDirs(rootDir);
+
+  const terminalPath = join(getFollowUpJobDir(rootDir, destinationKey), basename(jobPath));
+
+  let currentJob;
+  try {
+    currentJob = readFollowUpJob(jobPath);
+  } catch (err) {
+    if (err?.code === 'ENOENT' && existsSync(terminalPath)) {
+      return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+    }
+    throw err;
+  }
+
+  if (existsSync(terminalPath)) {
+    rmSync(jobPath, { force: true });
+    return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+  }
+
+  const nextJob = buildNextJob(currentJob);
+
+  let terminalFd;
+  try {
+    terminalFd = openSync(terminalPath, 'wx');
+  } catch (err) {
+    if (err?.code === 'EEXIST' && existsSync(terminalPath)) {
+      rmSync(jobPath, { force: true });
+      return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+    }
+    throw err;
+  }
+
+  try {
+    writeFileSync(terminalFd, `${JSON.stringify(nextJob, null, 2)}\n`, 'utf8');
+    closeSync(terminalFd);
+    terminalFd = null;
+    rmSync(jobPath, { force: true });
+  } catch (err) {
+    if (terminalFd !== undefined && terminalFd !== null) {
+      try {
+        closeSync(terminalFd);
+      } catch {}
+    }
+    rmSync(terminalPath, { force: true });
+    throw err;
+  }
+
+  return { job: nextJob, jobPath: terminalPath, alreadyTerminal: false };
+}
+
+function markFollowUpJobCompleted({
+  rootDir,
+  jobPath,
+  completion,
+  completedAt = new Date().toISOString(),
+  remediationWorker,
+}) {
+  return moveTerminalJobRecord({
+    rootDir,
+    jobPath,
+    destinationKey: 'completed',
+    buildNextJob: (currentJob) => ({
+      ...currentJob,
+      status: 'completed',
+      completedAt,
+      completion,
+      ...(remediationWorker ? { remediationWorker } : {}),
+    }),
+  });
+}
+
 function markFollowUpJobFailed({
   rootDir,
   jobPath,
   error,
   failedAt = new Date().toISOString(),
+  remediationWorker,
+  failure = {},
 }) {
-  ensureFollowUpJobDirs(rootDir);
-
-  const failedPath = join(getFollowUpJobDir(rootDir, 'failed'), basename(jobPath));
-  const currentJob = readFollowUpJob(jobPath);
-  const nextJob = {
-    ...currentJob,
-    status: 'failed',
-    failedAt,
-    failure: {
-      message: error?.message || String(error),
-    },
-  };
-
-  writeFollowUpJob(jobPath, nextJob);
-  renameSync(jobPath, failedPath);
-  return { job: nextJob, jobPath: failedPath };
+  return moveTerminalJobRecord({
+    rootDir,
+    jobPath,
+    destinationKey: 'failed',
+    buildNextJob: (currentJob) => ({
+      ...currentJob,
+      status: 'failed',
+      failedAt,
+      ...(remediationWorker ? { remediationWorker } : {}),
+      failure: {
+        ...failure,
+        message: error?.message || String(error),
+      },
+    }),
+  });
 }
 
 export {
@@ -251,8 +350,11 @@ export {
   ensureFollowUpJobDirs,
   extractReviewSummary,
   getFollowUpJobDir,
+  listInProgressFollowUpJobPaths,
+  listInProgressFollowUpJobs,
   listPendingFollowUpJobPaths,
   listPendingFollowUpJobs,
+  markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobSpawned,
   readFollowUpJob,

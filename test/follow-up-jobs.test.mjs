@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -10,7 +10,9 @@ import {
   createFollowUpJob,
   extractReviewSummary,
   getFollowUpJobDir,
+  markFollowUpJobCompleted,
   markFollowUpJobFailed,
+  readFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 
 function makeJobInput(rootDir) {
@@ -130,5 +132,147 @@ test('markFollowUpJobFailed moves an in-progress job into failed with error cont
   assert.equal(failed.job.status, 'failed');
   assert.equal(failed.job.failedAt, '2026-04-21T10:05:00.000Z');
   assert.equal(failed.job.failure.message, 'gh repo clone failed');
+  assert.equal(existsSync(claimed.jobPath), false);
+});
+
+test('markFollowUpJobFailed is idempotent when the failed record already exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath: claimed.jobPath,
+    error: new Error('first failure'),
+    failedAt: '2026-04-21T10:05:00.000Z',
+  });
+
+  const repeated = markFollowUpJobFailed({
+    rootDir,
+    jobPath: claimed.jobPath,
+    error: new Error('second failure'),
+    failedAt: '2026-04-21T10:06:00.000Z',
+  });
+
+  assert.equal(repeated.jobPath, failed.jobPath);
+  assert.deepEqual(repeated.job, readFollowUpJob(failed.jobPath));
+  assert.equal(repeated.job.failedAt, '2026-04-21T10:05:00.000Z');
+  assert.equal(repeated.job.failure.message, 'first failure');
+});
+
+test('markFollowUpJobCompleted moves an in-progress job into completed with reconciliation context', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-21T10:07:00.000Z',
+    completion: {
+      source: 'codex-output-last-message',
+      finalMessagePath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md',
+    },
+  });
+
+  assert.match(completed.jobPath, /data\/follow-up-jobs\/completed\/.+\.json$/);
+  assert.equal(completed.job.status, 'completed');
+  assert.equal(completed.job.completedAt, '2026-04-21T10:07:00.000Z');
+  assert.equal(completed.job.completion.source, 'codex-output-last-message');
+  assert.equal(existsSync(claimed.jobPath), false);
+});
+
+test('markFollowUpJobCompleted is idempotent when the completed record already exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-21T10:07:00.000Z',
+    completion: { source: 'codex-output-last-message' },
+  });
+
+  const repeated = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-21T10:08:00.000Z',
+    completion: { source: 'ignored-second-pass' },
+  });
+
+  assert.equal(repeated.jobPath, completed.jobPath);
+  assert.deepEqual(repeated.job, readFollowUpJob(completed.jobPath));
+  assert.equal(repeated.job.completedAt, '2026-04-21T10:07:00.000Z');
+  assert.equal(repeated.job.completion.source, 'codex-output-last-message');
+});
+
+test('markFollowUpJobCompleted preserves an existing terminal record even if a stale in-progress source still exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-21T10:07:00.000Z',
+    completion: { source: 'codex-output-last-message', winner: 'first-writer' },
+  });
+
+  const staleCopy = {
+    ...completed.job,
+    status: 'in_progress',
+    completedAt: undefined,
+    completion: undefined,
+  };
+  writeFileSync(claimed.jobPath, `${JSON.stringify(staleCopy, null, 2)}\n`, 'utf8');
+
+  const repeated = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-21T10:08:00.000Z',
+    completion: { source: 'ignored-second-pass', winner: 'second-writer' },
+  });
+
+  const persisted = readFollowUpJob(completed.jobPath);
+  assert.equal(repeated.jobPath, completed.jobPath);
+  assert.deepEqual(repeated.job, persisted);
+  assert.equal(persisted.completedAt, '2026-04-21T10:07:00.000Z');
+  assert.equal(persisted.completion.winner, 'first-writer');
+  assert.equal(existsSync(claimed.jobPath), false);
+});
+
+test('markFollowUpJobFailed preserves an existing terminal record even if a stale in-progress source still exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath: claimed.jobPath,
+    error: new Error('first failure'),
+    failedAt: '2026-04-21T10:05:00.000Z',
+  });
+
+  const staleCopy = {
+    ...failed.job,
+    status: 'in_progress',
+    failedAt: undefined,
+    failure: undefined,
+  };
+  writeFileSync(claimed.jobPath, `${JSON.stringify(staleCopy, null, 2)}\n`, 'utf8');
+
+  const repeated = markFollowUpJobFailed({
+    rootDir,
+    jobPath: claimed.jobPath,
+    error: new Error('second failure'),
+    failedAt: '2026-04-21T10:06:00.000Z',
+  });
+
+  const persisted = readFollowUpJob(failed.jobPath);
+  assert.equal(repeated.jobPath, failed.jobPath);
+  assert.deepEqual(repeated.job, persisted);
+  assert.equal(persisted.failedAt, '2026-04-21T10:05:00.000Z');
+  assert.equal(persisted.failure.message, 'first failure');
   assert.equal(existsSync(claimed.jobPath), false);
 });

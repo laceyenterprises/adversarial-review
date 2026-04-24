@@ -673,11 +673,19 @@ function reconcileFollowUpJob({
     }
 
     if (!rereview.requested) {
+      const currentRound = Number(job?.remediationPlan?.currentRound || 0);
+      const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
+      const stopCode = maxRounds > 0 && currentRound >= maxRounds
+        ? 'max-rounds-reached'
+        : 'no-progress';
+      const stopReason = stopCode === 'max-rounds-reached'
+        ? `Remediation round ${currentRound || 1} finished without a durable re-review request and reached the max remediation rounds cap (${currentRound}/${maxRounds}); stopping the bounded loop.`
+        : `No durable re-review request was recorded after remediation round ${currentRound || 1}; stopping to avoid a silent no-progress loop.`;
       const stopped = markFollowUpJobStopped({
         rootDir,
         jobPath,
         stoppedAt: completedAt,
-        stopCode: 'no-progress',
+        stopCode,
         sourceStatus: 'completed',
         remediationWorker: {
           ...workerState,
@@ -695,11 +703,11 @@ function reconcileFollowUpJob({
         },
         remediationReply,
         reReview: rereview,
-        stopReason: `No durable re-review request was recorded after remediation round ${job?.remediationPlan?.currentRound || 1}; stopping to avoid a silent no-progress loop.`,
+        stopReason,
       });
 
       return {
-        action: 'completed',
+        action: 'stopped',
         reason: 'no-progress-stop',
         job: stopped.job,
         jobPath: stopped.jobPath,

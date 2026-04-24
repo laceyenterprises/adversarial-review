@@ -1,3 +1,4 @@
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { stopFollowUpJob } from './follow-up-jobs.mjs';
@@ -12,18 +13,28 @@ function resolveFollowUpJobPath(rootDir, jobPathArg) {
     resolve(rootDir, 'data', 'follow-up-jobs', 'in-progress'),
     resolve(rootDir, 'data', 'follow-up-jobs', 'completed'),
     resolve(rootDir, 'data', 'follow-up-jobs', 'failed'),
-  ];
+  ].map((prefix) => realpathSync.native?.(prefix) ?? realpathSync(prefix));
 
-  const isAllowed = allowedPrefixes.some((prefix) => {
-    const rel = relative(prefix, candidate);
-    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-  });
-
-  if (!isAllowed || !candidate.endsWith('.json')) {
+  if (!existsSync(candidate)) {
     throw new Error('Job path must point to a pending, in-progress, completed, or failed follow-up job JSON under data/follow-up-jobs/');
   }
 
-  return candidate;
+  if (lstatSync(candidate).isSymbolicLink()) {
+    throw new Error('Job path must not be a symbolic link.');
+  }
+
+  const resolvedCandidate = realpathSync.native?.(candidate) ?? realpathSync(candidate);
+
+  const isAllowed = allowedPrefixes.some((prefix) => {
+    const rel = relative(prefix, resolvedCandidate);
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  });
+
+  if (!isAllowed || !resolvedCandidate.endsWith('.json')) {
+    throw new Error('Job path must point to a pending, in-progress, completed, or failed follow-up job JSON under data/follow-up-jobs/');
+  }
+
+  return resolvedCandidate;
 }
 
 function parseArgs(argv) {

@@ -10,6 +10,7 @@ import {
   REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
   buildRemediationReply,
+  buildStopMetadata,
   claimNextFollowUpJob,
   createFollowUpJob,
   extractReviewSummary,
@@ -193,6 +194,53 @@ test('readFollowUpJob whitelists persisted remediationReply fields during normal
   });
   assert.equal('arbitraryKey' in normalized.remediationReply, false);
   assert.equal('reReview' in normalized.remediationReply, false);
+});
+
+test('readFollowUpJob normalizes persisted remediation stop metadata through trusted stop builder', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const jobPath = path.join(rootDir, 'job.json');
+  writeFileSync(jobPath, `${JSON.stringify({
+    schemaVersion: 2,
+    kind: 'adversarial-review-follow-up',
+    status: 'stopped',
+    jobId: 'job-1',
+    createdAt: '2026-04-21T08:00:00.000Z',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    critical: false,
+    reviewSummary: 'Summary',
+    reviewBody: 'Body',
+    remediationPlan: {
+      mode: 'bounded-manual-rounds',
+      maxRounds: 2,
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'stopped' }],
+      stopReason: 'Persisted reason',
+      stop: {
+        code: 17,
+        reason: ['bad-type'],
+        stoppedAt: '2026-04-21T10:00:00.000Z',
+        stoppedBy: { type: 'operator', requestedBy: 'paul' },
+        sourceStatus: false,
+        currentRound: 999,
+        maxRounds: 999,
+        arbitraryKey: 'should-not-survive',
+      },
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const normalized = readFollowUpJob(jobPath);
+  assert.deepEqual(normalized.remediationPlan.stop, buildStopMetadata({
+    code: 17,
+    reason: 'Persisted reason',
+    stoppedAt: '2026-04-21T10:00:00.000Z',
+    stoppedBy: { type: 'operator', requestedBy: 'paul' },
+    sourceStatus: false,
+    currentRound: 1,
+    maxRounds: 2,
+  }));
+  assert.equal('arbitraryKey' in normalized.remediationPlan.stop, false);
 });
 
 test('claimNextFollowUpJob moves the oldest pending file into in-progress metadata', () => {

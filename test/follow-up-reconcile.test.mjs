@@ -88,7 +88,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
   });
 
   assert.equal(reconciled.reconciled, true);
-  assert.equal(reconciled.outcome, 'completed');
+  assert.equal(reconciled.outcome, 'stopped');
   assert.match(reconciled.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
   assert.equal(reconciled.job.status, 'stopped');
   assert.equal(reconciled.job.remediationPlan.stop.code, 'no-progress');

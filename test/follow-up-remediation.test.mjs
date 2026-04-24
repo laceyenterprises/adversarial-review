@@ -286,7 +286,7 @@ test('reconcileFollowUpJob stops exited workers for no-progress when the final a
     isWorkerRunning: () => false,
   });
 
-  assert.equal(result.action, 'completed');
+  assert.equal(result.action, 'stopped');
   assert.match(result.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
   assert.equal(result.job.status, 'stopped');
   assert.equal(result.job.remediationPlan.stop.code, 'no-progress');
@@ -295,6 +295,45 @@ test('reconcileFollowUpJob stops exited workers for no-progress when the final a
   assert.equal(result.job.completion.finalMessageBytes, Buffer.byteLength('Implemented fix and ran npm test.\n', 'utf8'));
   assert.equal(result.job.completion.finalMessageDigest, digestWorkerFinalMessage('Implemented fix and ran npm test.\n'));
   assert.match(result.job.completion.finalMessageSummary, /Implemented fix and ran npm test/);
+});
+
+test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit also exhausts the cap', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, {
+    prNumber: 70,
+    reviewPostedAt: '2026-04-21T08:10:00.000Z',
+    maxRemediationRounds: 1,
+  });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'Implemented fix but no rereview requested.\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8199,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+    },
+  });
+
+  const result = reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+  });
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.status, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'max-rounds-reached');
+  assert.match(result.job.remediationPlan.stop.reason, /reached the max remediation rounds cap/);
 });
 
 test('reconcileFollowUpJob marks exited workers failed when the final artifact is missing', () => {

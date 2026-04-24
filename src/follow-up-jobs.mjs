@@ -323,29 +323,47 @@ function buildStopMetadata({
   };
 }
 
+function selectStopCode({ currentRound, maxRounds, requestedStopCode }) {
+  if (currentRound >= maxRounds && requestedStopCode !== 'operator-stop') {
+    return 'max-rounds-reached';
+  }
+
+  return requestedStopCode || 'stopped';
+}
+
 function normalizeRemediationPlan(job) {
   if (job?.schemaVersion === FOLLOW_UP_JOB_SCHEMA_VERSION && job?.remediationPlan) {
     const currentRound = Math.max(0, Number(job.remediationPlan.currentRound || 0));
+    const maxRounds = normalizeMaxRounds(
+      Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds)
+    );
+    const persistedStopReason = typeof job.remediationPlan.stop?.reason === 'string'
+      && job.remediationPlan.stop.reason.trim()
+      ? job.remediationPlan.stop.reason
+      : job.remediationPlan.stopReason;
     const rounds = Array.isArray(job.remediationPlan.rounds)
       ? job.remediationPlan.rounds.map((round, index) => normalizeRound(round, index))
       : [];
 
     return {
       ...buildRemediationRoundPlan(
-        Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds)
+        maxRounds
       ),
       ...job.remediationPlan,
       mode: 'bounded-manual-rounds',
-      maxRounds: normalizeMaxRounds(
-        Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds)
-      ),
+      maxRounds,
       currentRound,
       rounds,
       stop: job.remediationPlan.stop && typeof job.remediationPlan.stop === 'object'
-        ? {
-            ...buildStopMetadata({}),
-            ...job.remediationPlan.stop,
-          }
+        ? buildStopMetadata({
+            code: job.remediationPlan.stop.code,
+            reason: persistedStopReason,
+            stoppedAt: job.remediationPlan.stop.stoppedAt,
+            stoppedBy: job.remediationPlan.stop.stoppedBy,
+            sourceStatus: job.remediationPlan.stop.sourceStatus,
+            currentRound,
+            maxRounds,
+          })
         : null,
     };
   }
@@ -875,11 +893,11 @@ function markFollowUpJobStopped({
         ...currentJob,
         status: 'stopped',
         stoppedAt,
-        remediationWorker: remediationWorker || currentJob.remediationWorker || null,
-        remediationReply: remediationReply || currentJob.remediationReply,
-        reReview: reReview || currentJob.reReview || null,
-        completion: completion || currentJob.completion || null,
-        failure: failure || currentJob.failure || null,
+        remediationWorker: remediationWorker ?? currentJob.remediationWorker ?? null,
+        remediationReply: remediationReply ?? currentJob.remediationReply,
+        reReview: reReview ?? currentJob.reReview ?? null,
+        completion: completion ?? currentJob.completion ?? null,
+        failure: failure ?? currentJob.failure ?? null,
         remediationPlan: {
           ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
           stopReason: stop.reason,
@@ -893,11 +911,11 @@ function markFollowUpJobStopped({
           ...round,
           state: 'stopped',
           finishedAt: stoppedAt,
-          worker: remediationWorker || round.worker || currentJob.remediationWorker || null,
-          remediationReply: remediationReply || round.remediationReply || currentJob.remediationReply || null,
-          reReview: reReview || round.reReview || currentJob.reReview || null,
-          completion: completion || round.completion || currentJob.completion || null,
-          failure: failure || round.failure || currentJob.failure || null,
+          worker: remediationWorker ?? round.worker ?? currentJob.remediationWorker ?? null,
+          remediationReply: remediationReply ?? round.remediationReply ?? currentJob.remediationReply ?? null,
+          reReview: reReview ?? round.reReview ?? currentJob.reReview ?? null,
+          completion: completion ?? round.completion ?? currentJob.completion ?? null,
+          failure: failure ?? round.failure ?? currentJob.failure ?? null,
           stop,
         }));
       }
@@ -917,6 +935,13 @@ function requeueFollowUpJobForNextRound({
   const currentJob = readFollowUpJob(jobPath);
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
   const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
+  const stopCode = selectStopCode({
+    currentRound,
+    maxRounds,
+    requestedStopCode: currentJob.status === 'completed' && currentJob?.reReview?.requested !== true
+      ? 'no-progress'
+      : 'max-rounds-reached',
+  });
 
   if (!['completed', 'failed'].includes(currentJob.status)) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
@@ -927,7 +952,7 @@ function requeueFollowUpJobForNextRound({
       rootDir,
       jobPath,
       stoppedAt: requestedAt,
-      stopCode: 'max-rounds-reached',
+      stopCode,
       stoppedBy: {
         type: 'system',
         requestedBy,
@@ -942,7 +967,7 @@ function requeueFollowUpJobForNextRound({
       rootDir,
       jobPath,
       stoppedAt: requestedAt,
-      stopCode: 'no-progress',
+      stopCode,
       stoppedBy: {
         type: 'system',
         requestedBy,
@@ -1018,6 +1043,7 @@ export {
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
+  buildStopMetadata,
   buildRemediationReply,
   buildRemediationReplyArtifact,
   claimNextFollowUpJob,

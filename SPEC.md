@@ -149,7 +149,7 @@ GitHub PR opened
 - active progress observed
 - terminal outcome recorded
 - Minimum hardening requirements for remediation workers:
-- preflight contract before launch covering repo / PR / branch target, runtime path, cwd, auth principal, lane classification (`builder` vs `integration`), and expected edit / commit / push / PR reply authority
+- preflight contract before launch covering repo / PR / branch target, runtime path, cwd, auth principal, lane classification (`builder` vs `integration`), normalized publish remote, and expected edit / commit / push / PR reply authority
 - startup receipt within a bounded timeout; if no receipt arrives, classify as launch failure rather than leaving the run ambiguously spawned
 - durable launch metadata recording the exact launch shape, expected artifact paths, and timeout semantics so failures remain diagnosable after wrapper death
 - progress evidence beyond PID existence; PID-only liveness is insufficient as a durable success signal

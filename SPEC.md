@@ -139,6 +139,27 @@ GitHub PR opened
 \- Reconciled terminal records must preserve operator-visible metadata: worker PID, workspace path, log path, final-message path, and a short completion preview or explicit failure reason
 \- This slice preserves wrapper-owned review completion semantics; it does not grant the remediation worker ownership of the GitHub review side effect
 
+### 5.2 Remediation worker launch contract (new hardening requirements)
+- A detached remediation launch must not treat "process spawned" as equivalent to "durable worker established"
+- Required control-plane distinctions:
+- launch command issued
+- worker/session registration created
+- startup receipt emitted
+- transport/attach healthy
+- active progress observed
+- terminal outcome recorded
+- Minimum hardening requirements for remediation workers:
+- preflight contract before launch covering repo / PR / branch target, runtime path, cwd, auth principal, lane classification (`builder` vs `integration`), and expected edit / commit / push / PR reply authority
+- startup receipt within a bounded timeout; if no receipt arrives, classify as launch failure rather than leaving the run ambiguously spawned
+- durable launch metadata recording the exact launch shape, expected artifact paths, and timeout semantics so failures remain diagnosable after wrapper death
+- progress evidence beyond PID existence; PID-only liveness is insufficient as a durable success signal
+- explicit failure classification separating launch failure, attach/transport failure, permission-blocked worker, artifact-missing completion, and successful completion
+- Ticket mapping:
+- `LAC-207` should not be considered production-complete if success still effectively means only "spawned a detached process"
+- `LAC-208` should carry the durable per-PR / per-run ledger state needed to model the distinctions above
+- `LAC-209` and `LAC-210` should build on explicit terminal and reply states rather than implicit worker disappearance
+- `LAC-212` should document the operator-visible meaning of each state plus the manual recovery path
+
 \#\#\# 6\. Review completion semantics (current vs target)
 
 \*\*Current implementation: A semantics (wrapper-owned completion)\*\*

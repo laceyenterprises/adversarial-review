@@ -194,21 +194,14 @@ Run the consumer manually with:
 npm run follow-up:consume
 ```
 
-A separate one-shot reconciler now closes the durable queue gap for detached worker completion:
+New hardening lesson from the detached remediation-launch failure:
+- do **not** treat `spawned process` as equivalent to `durable worker established`
+- require a preflight contract before launch: repo/PR/branch target, runtime path, cwd, auth principal, lane type (`builder` vs `integration`), and expected edit/commit/push/PR-reply authority
+- require a startup receipt or other explicit progress marker within a bounded timeout
+- preserve exact launch metadata and expected artifact paths so failures remain diagnosable after wrapper death
+- classify failures explicitly: launch failure, attach/transport failure, permission-blocked worker, artifact-missing completion, or successful completion
 
-```bash
-npm run follow-up:reconcile
-```
-
-Current reconciliation contract:
-- only `data/follow-up-jobs/in-progress/` jobs with `remediationWorker.state = "spawned"` are inspected
-- if the recorded worker PID is still live, the job remains `in_progress`
-- if the PID is gone and `.adversarial-follow-up/codex-last-message.md` exists with non-empty content, the job moves to `data/follow-up-jobs/completed/`
-- if the PID is gone and that final-message artifact is missing or empty, the job moves to `data/follow-up-jobs/failed/`
-- completed/failed records retain the worker artifact paths plus a short operator-facing preview or failure context
-
-This is still intentionally a narrow slice. It gives the queue durable terminal states and operator visibility, but it does not yet implement a multi-round autonomous remediation loop or native session-aware continuation. The long-term direction remains replacing the file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
-
+This is still intentionally a bounded slice. It gives the queue durable terminal states and operator visibility, and launch ownership is now treated more explicitly, but it does not yet implement a multi-round autonomous remediation loop or native session-aware continuation. The long-term direction remains replacing the file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
 ## Operational semantics note (2026-04-21)
 
 This service currently uses **A semantics** for review completion:

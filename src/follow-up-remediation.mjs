@@ -1,7 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
@@ -20,6 +21,18 @@ const ROOT = join(__dirname, '..');
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
+const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
+const FINAL_MESSAGE_REDACTIONS = [
+  [/sk-[A-Za-z0-9_-]{8,}/g, '[REDACTED_OPENAI_TOKEN]'],
+  [/\bgh[pousr]_[A-Za-z0-9_]{8,}\b/g, '[REDACTED_GITHUB_TOKEN]'],
+  [/\bBearer\s+[A-Za-z0-9._-]+\b/gi, 'Bearer [REDACTED]'],
+  [/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\b\s*[:=]\s*\S+/gi, (match) => {
+    const [label] = match.split(/[:=]/, 1);
+    return `${label}=[REDACTED]`;
+  }],
+  [/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]'],
+];
 
 class OAuthError extends Error {
   constructor(model, reason) {
@@ -326,16 +339,64 @@ function isWorkerProcessRunning(processId) {
   }
 }
 
+function parseIsoTime(value) {
+  const timestamp = Date.parse(String(value ?? ''));
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function resolveJobRelativePath(rootDir, relativePath, { label, allowMissing = true } = {}) {
+  if (!relativePath) {
+    return null;
+  }
+
+  const value = String(relativePath);
+  if (isAbsolute(value)) {
+    throw new Error(`Invalid ${label}: absolute paths are not allowed`);
+  }
+
+  const absolutePath = resolve(rootDir, value);
+  const relativeToRoot = relative(rootDir, absolutePath);
+  if (relativeToRoot.startsWith('..') || relativeToRoot === '') {
+    throw new Error(`Invalid ${label}: path escapes follow-up job root`);
+  }
+
+  if (!allowMissing && !existsSync(absolutePath)) {
+    throw new Error(`Invalid ${label}: path does not exist`);
+  }
+
+  return absolutePath;
+}
+
 function buildReconciliationPaths(rootDir, job) {
   const worker = job?.remediationWorker || {};
-  const workspaceDir = job.workspaceDir || worker.workspaceDir || null;
-  const outputPath = worker.outputPath || null;
-  const logPath = worker.logPath || null;
+  const workspaceDir = resolveJobRelativePath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
+    label: 'workspaceDir',
+  });
+  const outputPath = resolveJobRelativePath(rootDir, worker.outputPath || null, {
+    label: 'outputPath',
+  });
+  const logPath = resolveJobRelativePath(rootDir, worker.logPath || null, {
+    label: 'logPath',
+  });
+
+  if (workspaceDir && outputPath) {
+    const relativeToWorkspace = relative(workspaceDir, outputPath);
+    if (relativeToWorkspace.startsWith('..') || relativeToWorkspace === '') {
+      throw new Error('Invalid outputPath: path escapes workspaceDir');
+    }
+  }
+
+  if (workspaceDir && logPath) {
+    const relativeToWorkspace = relative(workspaceDir, logPath);
+    if (relativeToWorkspace.startsWith('..') || relativeToWorkspace === '') {
+      throw new Error('Invalid logPath: path escapes workspaceDir');
+    }
+  }
 
   return {
-    workspaceDir: workspaceDir ? join(rootDir, workspaceDir) : null,
-    outputPath: outputPath ? join(rootDir, outputPath) : null,
-    logPath: logPath ? join(rootDir, logPath) : null,
+    workspaceDir,
+    outputPath,
+    logPath,
   };
 }
 
@@ -353,9 +414,13 @@ function readWorkerFinalMessage(outputPath) {
 }
 
 function summarizeWorkerFinalMessage(text, limit = 400) {
-  const normalized = String(text ?? '').trim().replace(/\s+/g, ' ');
+  let normalized = String(text ?? '').trim().replace(/\s+/g, ' ');
   if (!normalized) {
     return '';
+  }
+
+  for (const [pattern, replacement] of FINAL_MESSAGE_REDACTIONS) {
+    normalized = normalized.replace(pattern, replacement);
   }
 
   if (normalized.length <= limit) {
@@ -363,6 +428,33 @@ function summarizeWorkerFinalMessage(text, limit = 400) {
   }
 
   return `${normalized.slice(0, limit - 1)}…`;
+}
+
+function digestWorkerFinalMessage(text) {
+  const buffer = Buffer.from(String(text ?? ''), 'utf8');
+  const hash = createHash('sha256');
+  hash.update(buffer.subarray(0, MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES));
+  if (buffer.length > MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES) {
+    hash.update(Buffer.from(String(buffer.length), 'utf8'));
+  }
+  return hash.digest('hex');
+}
+
+function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWorkerRunning = isWorkerProcessRunning } = {}) {
+  const worker = job?.remediationWorker || {};
+  const nowAt = parseIsoTime(now());
+  const spawnedAt = parseIsoTime(worker.spawnedAt);
+  const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
+  const processRunning = isWorkerRunning(worker.processId);
+
+  if (processRunning) {
+    if (ageMs !== null && ageMs > RECONCILIATION_MAX_ACTIVE_MS) {
+      return { state: 'manual-inspection', reason: 'pid-active-beyond-runtime-cap', ageMs };
+    }
+    return { state: 'active', reason: 'worker-still-running', ageMs };
+  }
+
+  return { state: 'exited', reason: 'worker-not-running', ageMs };
 }
 
 function reconcileFollowUpJob({
@@ -382,17 +474,74 @@ function reconcileFollowUpJob({
     };
   }
 
-  if (isWorkerRunning(worker.processId)) {
+  const liveness = assessWorkerLiveness(job, { now, isWorkerRunning });
+  if (liveness.state === 'active') {
     return {
       action: 'active',
-      reason: 'worker-still-running',
+      reason: liveness.reason,
       job,
       jobPath,
     };
   }
 
   const completedAt = now();
-  const paths = buildReconciliationPaths(rootDir, job);
+  if (liveness.state === 'manual-inspection') {
+    const failed = markFollowUpJobFailed({
+      rootDir,
+      jobPath,
+      failedAt: completedAt,
+      error: new Error(
+        `Remediation worker PID ${worker.processId} still appears active beyond the reconciliation runtime cap. Manual inspection required before trusting the PID association.`
+      ),
+      remediationWorker: {
+        ...worker,
+        state: 'manual_inspection_required',
+        reconciledAt: completedAt,
+      },
+      failure: {
+        manualInspectionRequired: true,
+        inspectionReason: liveness.reason,
+        workerRuntimeMs: liveness.ageMs,
+        finalMessagePath: worker.outputPath || null,
+        logPath: worker.logPath || null,
+      },
+    });
+
+    return {
+      action: 'failed',
+      reason: liveness.reason,
+      job: failed.job,
+      jobPath: failed.jobPath,
+    };
+  }
+
+  let paths;
+  try {
+    paths = buildReconciliationPaths(rootDir, job);
+  } catch (err) {
+    const failed = markFollowUpJobFailed({
+      rootDir,
+      jobPath,
+      failedAt: completedAt,
+      error: err,
+      remediationWorker: {
+        ...worker,
+        state: 'failed',
+        reconciledAt: completedAt,
+      },
+      failure: {
+        invalidArtifactPaths: true,
+      },
+    });
+
+    return {
+      action: 'failed',
+      reason: 'invalid-worker-paths',
+      job: failed.job,
+      jobPath: failed.jobPath,
+    };
+  }
+
   const finalMessage = readWorkerFinalMessage(paths.outputPath);
   const workerState = {
     ...worker,
@@ -404,21 +553,20 @@ function reconcileFollowUpJob({
       rootDir,
       jobPath,
       completedAt,
+      remediationWorker: {
+        ...workerState,
+        state: 'completed',
+      },
       completion: {
         source: 'codex-output-last-message',
         note: 'Reconciled from detached worker exit plus non-empty final message artifact.',
         finalMessagePath: worker.outputPath || null,
         finalMessageBytes: finalMessage.bytes,
-        finalMessagePreview: summarizeWorkerFinalMessage(finalMessage.text),
+        finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
+        finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
         logPath: worker.logPath || null,
       },
     });
-
-    completed.job.remediationWorker = {
-      ...workerState,
-      state: 'completed',
-    };
-    writeFileSync(completed.jobPath, `${JSON.stringify(completed.job, null, 2)}\n`, 'utf8');
 
     return {
       action: 'completed',
@@ -437,19 +585,16 @@ function reconcileFollowUpJob({
         ? 'Remediation worker exited without a non-empty final message artifact.'
         : 'Remediation worker exited before writing the final message artifact.'
     ),
+    remediationWorker: {
+      ...workerState,
+      state: 'failed',
+    },
+    failure: {
+      finalMessagePath: worker.outputPath || null,
+      finalMessageBytes: finalMessage.bytes,
+      logPath: worker.logPath || null,
+    },
   });
-
-  failed.job.remediationWorker = {
-    ...workerState,
-    state: 'failed',
-  };
-  failed.job.failure = {
-    ...failed.job.failure,
-    finalMessagePath: worker.outputPath || null,
-    finalMessageBytes: finalMessage.bytes,
-    logPath: worker.logPath || null,
-  };
-  writeFileSync(failed.jobPath, `${JSON.stringify(failed.job, null, 2)}\n`, 'utf8');
 
   return {
     action: 'failed',
@@ -606,6 +751,7 @@ export {
   buildInheritedPath,
   consumeNextFollowUpJob,
   inspectWorkspaceState,
+  digestWorkerFinalMessage,
   isWorkerProcessRunning,
   loadFollowUpPromptTemplate,
   prepareWorkspaceForJob,
@@ -613,7 +759,9 @@ export {
   reconcileInProgressFollowUpJobs,
   resolveCodexCliPath,
   resolveCodexAuthPath,
+  resolveJobRelativePath,
   summarizeWorkerFinalMessage,
+  assessWorkerLiveness,
   spawnCodexRemediationWorker,
 };
 

@@ -4,6 +4,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -236,26 +237,60 @@ function markFollowUpJobSpawned({
   return { job: nextJob, jobPath };
 }
 
+function moveTerminalJobRecord({
+  rootDir,
+  jobPath,
+  destinationKey,
+  buildNextJob,
+}) {
+  ensureFollowUpJobDirs(rootDir);
+
+  const terminalPath = join(getFollowUpJobDir(rootDir, destinationKey), basename(jobPath));
+
+  let currentJob;
+  try {
+    currentJob = readFollowUpJob(jobPath);
+  } catch (err) {
+    if (err?.code === 'ENOENT' && existsSync(terminalPath)) {
+      return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+    }
+    throw err;
+  }
+
+  const nextJob = buildNextJob(currentJob);
+  writeFollowUpJob(jobPath, nextJob);
+  try {
+    renameSync(jobPath, terminalPath);
+  } catch (err) {
+    if ((err?.code === 'ENOENT' || err?.code === 'EEXIST') && existsSync(terminalPath)) {
+      rmSync(jobPath, { force: true });
+      return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+    }
+    throw err;
+  }
+
+  return { job: nextJob, jobPath: terminalPath, alreadyTerminal: false };
+}
+
 function markFollowUpJobCompleted({
   rootDir,
   jobPath,
   completion,
   completedAt = new Date().toISOString(),
+  remediationWorker,
 }) {
-  ensureFollowUpJobDirs(rootDir);
-
-  const completedPath = join(getFollowUpJobDir(rootDir, 'completed'), basename(jobPath));
-  const currentJob = readFollowUpJob(jobPath);
-  const nextJob = {
-    ...currentJob,
-    status: 'completed',
-    completedAt,
-    completion,
-  };
-
-  writeFollowUpJob(jobPath, nextJob);
-  renameSync(jobPath, completedPath);
-  return { job: nextJob, jobPath: completedPath };
+  return moveTerminalJobRecord({
+    rootDir,
+    jobPath,
+    destinationKey: 'completed',
+    buildNextJob: (currentJob) => ({
+      ...currentJob,
+      status: 'completed',
+      completedAt,
+      completion,
+      ...(remediationWorker ? { remediationWorker } : {}),
+    }),
+  });
 }
 
 function markFollowUpJobFailed({
@@ -263,23 +298,24 @@ function markFollowUpJobFailed({
   jobPath,
   error,
   failedAt = new Date().toISOString(),
+  remediationWorker,
+  failure = {},
 }) {
-  ensureFollowUpJobDirs(rootDir);
-
-  const failedPath = join(getFollowUpJobDir(rootDir, 'failed'), basename(jobPath));
-  const currentJob = readFollowUpJob(jobPath);
-  const nextJob = {
-    ...currentJob,
-    status: 'failed',
-    failedAt,
-    failure: {
-      message: error?.message || String(error),
-    },
-  };
-
-  writeFollowUpJob(jobPath, nextJob);
-  renameSync(jobPath, failedPath);
-  return { job: nextJob, jobPath: failedPath };
+  return moveTerminalJobRecord({
+    rootDir,
+    jobPath,
+    destinationKey: 'failed',
+    buildNextJob: (currentJob) => ({
+      ...currentJob,
+      status: 'failed',
+      failedAt,
+      ...(remediationWorker ? { remediationWorker } : {}),
+      failure: {
+        ...failure,
+        message: error?.message || String(error),
+      },
+    }),
+  });
 }
 
 export {

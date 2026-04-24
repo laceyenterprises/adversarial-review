@@ -354,6 +354,37 @@ function sanitizeCodexReviewPayload(reviewText) {
   return sanitized;
 }
 
+function parseGitHubBlobPath(candidateUrl, expectedRepo) {
+  let parsed;
+  try {
+    parsed = new URL(candidateUrl);
+  } catch {
+    return null;
+  }
+
+  if (parsed.hostname !== 'github.com') {
+    return null;
+  }
+
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  if (parts.length < 5 || parts[2] !== 'blob') {
+    return null;
+  }
+
+  const repo = `${parts[0]}/${parts[1]}`;
+  if (repo !== expectedRepo) {
+    return null;
+  }
+
+  const pathParts = parts.slice(4);
+  if (!pathParts.length) {
+    return null;
+  }
+
+  const relPath = pathParts.join('/');
+  return relPath.endsWith('.md') ? relPath : null;
+}
+
 // ── PR diff fetch ────────────────────────────────────────────────────────────
 
 async function fetchPRDiff(repo, prNumber) {
@@ -379,8 +410,6 @@ function extractLinkedRepoDocs(text, repo) {
   const patterns = [
     /(?:^|\s)(projects\/[A-Za-z0-9._\/-]+\.md|docs\/[A-Za-z0-9._\/-]+\.md|agents\/[A-Za-z0-9._\/-]+\.md|knowledge\/[A-Za-z0-9._\/-]+\.md|modules\/[A-Za-z0-9._\/-]+\.md|tools\/[A-Za-z0-9._\/-]+\.md)/g,
     /\((\.?\/?(?:projects|docs|agents|knowledge|modules|tools)\/[A-Za-z0-9._\/-]+\.md)\)/g,
-    new RegExp(`https://github\.com/${repo.replace('/', '\/')}/blob/[^\s)]+/((?:projects|docs|agents|knowledge|modules|tools)\/[A-Za-z0-9._\/-]+\.md)`, 'g'),
-    new RegExp(`https://github\.com/${repo.replace('/', '\/')}/pull/\d+[^\s)]*`, 'g'),
   ];
 
   for (const pattern of patterns) {
@@ -393,30 +422,37 @@ function extractLinkedRepoDocs(text, repo) {
     }
   }
 
+  const urlMatches = String(text ?? '').match(/https:\/\/github\.com\/[^\s)]+/g) || [];
+  for (const rawUrl of urlMatches) {
+    const relPath = parseGitHubBlobPath(rawUrl, repo);
+    if (relPath) {
+      rels.add(relPath);
+    }
+  }
+
   return [...rels].sort();
 }
 
-async function fetchLinkedSpecContents(repo, prNumber) {
-  const pr = await fetchPRContext(repo, prNumber);
+async function fetchLinkedSpecContents(repo, prNumber, { fetchPRContextImpl = fetchPRContext, execFileImpl = execFileAsync } = {}) {
+  const pr = await fetchPRContextImpl(repo, prNumber);
   const combinedText = [pr.body || '', ...(pr.comments || []).map((c) => c.body || '')].join('\n\n');
   const linked = extractLinkedRepoDocs(combinedText, repo).slice(0, 12);
   if (!linked.length) return '';
 
-  const sections = [];
-  for (const relPath of linked) {
+  const sections = await Promise.all(linked.map(async (relPath) => {
     try {
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execFileImpl(
         'gh',
         ['api', `repos/${repo}/contents/${relPath}?ref=${pr.headRefOid}`, '--jq', '.content'],
         { maxBuffer: 10 * 1024 * 1024 }
       );
       const decoded = Buffer.from(stdout.replace(/\n/g, ''), 'base64').toString('utf8');
       const trimmed = decoded.length > 12000 ? `${decoded.slice(0, 12000)}\n\n[truncated]` : decoded;
-      sections.push(`### ${relPath}\n\n\`\`\`md\n${trimmed}\n\`\`\``);
+      return `### ${relPath}\n\n\`\`\`md\n${trimmed}\n\`\`\``;
     } catch (err) {
-      sections.push(`### ${relPath}\n\n[failed to fetch linked spec: ${err.message}]`);
+      return `### ${relPath}\n\n[failed to fetch linked spec: ${err.message}]`;
     }
-  }
+  }));
 
   return `\n\n---\n\nAdditional linked project context from the PR body/comments (fetch and use these as governing docs when relevant):\n\n${sections.join('\n\n')}`;
 }
@@ -795,7 +831,16 @@ async function main() {
   console.log(`[reviewer] Done: ${repo}#${prNumber}`);
 }
 
-main().catch((err) => {
-  console.error('[reviewer] Unhandled error:', err);
-  process.exit(1);
-});
+export {
+  extractLinkedRepoDocs,
+  fetchLinkedSpecContents,
+  parseGitHubBlobPath,
+  sanitizeCodexReviewPayload,
+};
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error('[reviewer] Unhandled error:', err);
+    process.exit(1);
+  });
+}

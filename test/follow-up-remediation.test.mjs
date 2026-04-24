@@ -4,12 +4,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  assessWorkerLiveness,
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,
+  digestWorkerFinalMessage,
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  resolveJobRelativePath,
   spawnCodexRemediationWorker,
 } from '../src/follow-up-remediation.mjs';
 import {
@@ -52,6 +55,16 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
 test('assertValidRepoSlug rejects malformed repo names', () => {
   assert.equal(assertValidRepoSlug('laceyenterprises/clio'), 'laceyenterprises/clio');
   assert.throws(() => assertValidRepoSlug('../clio'));
+});
+
+test('resolveJobRelativePath rejects traversal outside the follow-up root', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const safePath = resolveJobRelativePath(rootDir, 'data/follow-up-jobs/workspaces/job', { label: 'workspaceDir' });
+  assert.equal(safePath, path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', 'job'));
+  assert.throws(
+    () => resolveJobRelativePath(rootDir, '../outside', { label: 'workspaceDir' }),
+    /path escapes follow-up job root/
+  );
 });
 
 test('prepareWorkspaceForJob clones missing repos and checks out the PR branch', async () => {
@@ -254,7 +267,8 @@ test('reconcileFollowUpJob marks exited workers completed when the final artifac
   assert.equal(result.job.remediationWorker.state, 'completed');
   assert.equal(result.job.completedAt, '2026-04-21T10:30:00.000Z');
   assert.equal(result.job.completion.finalMessageBytes, Buffer.byteLength('Implemented fix and ran npm test.\n', 'utf8'));
-  assert.match(result.job.completion.finalMessagePreview, /Implemented fix and ran npm test/);
+  assert.equal(result.job.completion.finalMessageDigest, digestWorkerFinalMessage('Implemented fix and ran npm test.\n'));
+  assert.match(result.job.completion.finalMessageSummary, /Implemented fix and ran npm test/);
 });
 
 test('reconcileFollowUpJob marks exited workers failed when the final artifact is missing', () => {
@@ -294,6 +308,38 @@ test('reconcileFollowUpJob marks exited workers failed when the final artifact i
   assert.equal(result.job.failure.logPath, path.relative(rootDir, logPath));
 });
 
+test('reconcileFollowUpJob rejects worker artifact traversal paths', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 10, reviewPostedAt: '2026-04-21T08:07:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  mkdirSync(workspaceDir, { recursive: true });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8126,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: '../escape.txt',
+      logPath: 'data/follow-up-jobs/workspaces/log.txt',
+    },
+  });
+
+  const result = reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:31:00.000Z',
+    isWorkerRunning: () => false,
+  });
+
+  assert.equal(result.action, 'failed');
+  assert.equal(result.reason, 'invalid-worker-paths');
+  assert.equal(result.job.status, 'failed');
+  assert.equal(result.job.remediationWorker.state, 'failed');
+});
+
 test('reconcileInProgressFollowUpJobs leaves live workers in place', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 9, reviewPostedAt: '2026-04-21T08:06:00.000Z' });
@@ -328,4 +374,63 @@ test('reconcileInProgressFollowUpJobs leaves live workers in place', () => {
   const persisted = JSON.parse(readFileSync(inProgressPath, 'utf8'));
   assert.equal(persisted.status, 'in_progress');
   assert.equal(persisted.remediationWorker.state, 'spawned');
+});
+
+test('assessWorkerLiveness bounds suspicious worker states for manual inspection', () => {
+  const job = {
+    remediationWorker: {
+      processId: 9001,
+      spawnedAt: '2026-04-21T10:00:00.000Z',
+    },
+  };
+
+  assert.deepEqual(
+    assessWorkerLiveness(job, {
+      now: () => '2026-04-21T10:00:20.000Z',
+      isWorkerRunning: () => false,
+    }),
+    { state: 'exited', reason: 'worker-not-running', ageMs: 20_000 }
+  );
+
+  assert.deepEqual(
+    assessWorkerLiveness(job, {
+      now: () => '2026-04-21T16:30:01.000Z',
+      isWorkerRunning: () => true,
+    }),
+    { state: 'manual-inspection', reason: 'pid-active-beyond-runtime-cap', ageMs: 23_401_000 }
+  );
+});
+
+test('reconcileFollowUpJob flags suspicious live PIDs for manual inspection instead of skipping forever', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 11, reviewPostedAt: '2026-04-21T08:08:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8127,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+    },
+  });
+
+  const result = reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T16:30:01.000Z',
+    isWorkerRunning: () => true,
+  });
+
+  assert.equal(result.action, 'failed');
+  assert.equal(result.reason, 'pid-active-beyond-runtime-cap');
+  assert.equal(result.job.status, 'failed');
+  assert.equal(result.job.remediationWorker.state, 'manual_inspection_required');
+  assert.equal(result.job.failure.manualInspectionRequired, true);
 });

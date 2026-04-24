@@ -1,6 +1,8 @@
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -257,15 +259,36 @@ function moveTerminalJobRecord({
     throw err;
   }
 
+  if (existsSync(terminalPath)) {
+    rmSync(jobPath, { force: true });
+    return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+  }
+
   const nextJob = buildNextJob(currentJob);
-  writeFollowUpJob(jobPath, nextJob);
+
+  let terminalFd;
   try {
-    renameSync(jobPath, terminalPath);
+    terminalFd = openSync(terminalPath, 'wx');
   } catch (err) {
-    if ((err?.code === 'ENOENT' || err?.code === 'EEXIST') && existsSync(terminalPath)) {
+    if (err?.code === 'EEXIST' && existsSync(terminalPath)) {
       rmSync(jobPath, { force: true });
       return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
     }
+    throw err;
+  }
+
+  try {
+    writeFileSync(terminalFd, `${JSON.stringify(nextJob, null, 2)}\n`, 'utf8');
+    closeSync(terminalFd);
+    terminalFd = null;
+    rmSync(jobPath, { force: true });
+  } catch (err) {
+    if (terminalFd !== undefined && terminalFd !== null) {
+      try {
+        closeSync(terminalFd);
+      } catch {}
+    }
+    rmSync(terminalPath, { force: true });
     throw err;
   }
 

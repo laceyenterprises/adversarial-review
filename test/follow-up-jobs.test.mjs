@@ -371,6 +371,27 @@ test('markFollowUpJobFailed preserves remediationWorker metadata for existing ca
   assert.equal(failed.job.failure.finalMessagePath, 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md');
 });
 
+test('markFollowUpJobFailed preserves the supplied failureCode even when failure metadata has its own code field', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath: claimed.jobPath,
+    error: new Error('worker reply artifact was invalid'),
+    failedAt: '2026-04-21T10:05:00.000Z',
+    failureCode: 'invalid-remediation-reply',
+    failure: {
+      code: 'accidental-override',
+      remediationReplyPath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/remediation-reply.json',
+    },
+  });
+
+  assert.equal(failed.job.failure.code, 'invalid-remediation-reply');
+  assert.equal(failed.job.remediationPlan.rounds[0].failure.code, 'invalid-remediation-reply');
+});
+
 test('markFollowUpJobSpawned records the expected remediation reply artifact path', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));

@@ -216,9 +216,12 @@ Current reconciliation contract:
 - only `data/follow-up-jobs/in-progress/` jobs with `remediationWorker.state = "spawned"` are inspected
 - if the recorded worker PID is still live, the job remains `in_progress`
 - if the PID is gone and `.adversarial-follow-up/codex-last-message.md` exists with non-empty content, the job moves to `data/follow-up-jobs/completed/`
+- if a remediation reply artifact path is configured, reconciliation reads and validates it before trusting the completion
+- if that reply sets `reReview.requested = true`, reconciliation resets the matching `reviewed_prs` row to `review_status = 'pending'` so the watcher can trigger the next adversarial review pass on a later poll
+- malformed-title rows and non-open PR rows remain blocked explicitly; the completed follow-up job records that blocked re-review outcome for operators
 - if the PID is gone and that final-message artifact is missing or empty, the job moves to `data/follow-up-jobs/failed/`
 - completed/failed records retain the worker artifact paths plus a short operator-facing preview or failure context
-- reconciliation does not auto-start another round; advancing to the next round is an explicit operator action
+- reconciliation does not auto-start another remediation round; advancing to the next bounded remediation round is still an explicit operator action
 
 To request another bounded remediation round after a completed or failed attempt:
 
@@ -231,6 +234,8 @@ Requeue semantics:
 - prior round history remains in `remediationPlan.rounds[]`
 - `remediationPlan.maxRounds` is enforced; when the cap is reached, the job moves to `data/follow-up-jobs/stopped/`
 - there is no hidden infinite retry path
+
+Manual SQLite edits are now a recovery path rather than the normal re-review trigger. When a remediation worker writes a valid reply artifact with `reReview.requested = true`, `npm run follow-up:reconcile` makes the PR eligible for another watcher-driven adversarial review automatically. The direct DB procedure above still matters when the reply artifact is missing, invalid, or intentionally blocked by terminal watcher state.
 New hardening lesson from the detached remediation-launch failure:
 - do **not** treat `spawned process` as equivalent to `durable worker established`
 - require a preflight contract before launch: repo/PR/branch target, runtime path, cwd, auth principal, lane type (`builder` vs `integration`), and expected edit/commit/push/PR-reply authority
@@ -238,7 +243,7 @@ New hardening lesson from the detached remediation-launch failure:
 - preserve exact launch metadata and expected artifact paths so failures remain diagnosable after wrapper death
 - classify failures explicitly: launch failure, attach/transport failure, permission-blocked worker, artifact-missing completion, or successful completion
 
-This is still intentionally a bounded slice. It gives the queue durable terminal states and operator visibility, launch ownership is treated explicitly, completion has a one-shot reconciler, multi-round remediation remains explicit and capped rather than autonomous, and the remediation reply contract is now explicit as well. LAC-210 / LAC-211 / LAC-212 should consume the durable reply, decide when a re-review should actually be triggered, and document the operator-facing recovery path.
+This is still intentionally a bounded slice. It gives the queue durable terminal states and operator visibility, launch ownership is treated explicitly, completion has a one-shot reconciler, multi-round remediation remains explicit and capped rather than autonomous, and the remediation reply contract now drives explicit watcher re-review eligibility instead of living only as inert substrate. Operator recovery paths still remain explicit when reply or watcher state blocks that trigger.
 ## Operational semantics note (2026-04-21)
 
 This service currently uses **A semantics** for review completion:

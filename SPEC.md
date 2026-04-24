@@ -135,6 +135,9 @@ GitHub PR opened
 \- inspect only \`in_progress\` jobs whose \`remediationWorker.state\` is \`spawned\`
 \- if the recorded worker PID is still live, leave the job \`in_progress\`
 \- if the PID is gone and the recorded final-message artifact exists with non-empty content, move the job to \`completed\`
+\- if a remediation reply artifact path is recorded, reconciliation must read and validate that JSON before trusting the terminal completion
+\- if the validated reply sets \`reReview.requested = true\`, reconciliation must explicitly reset the matching watcher delivery row to \`review_status = pending\` so the next adversarial review pass is a durable queued state transition rather than prose-only intent
+\- if watcher state blocks that reset (for example malformed-title terminal state or a non-open PR), reconciliation must preserve that blocked outcome explicitly on the follow-up job for operator inspection instead of silently forcing another review
 \- if the PID is gone and the final-message artifact is missing or empty, move the job to \`failed\`
 \- Reconciled terminal records must preserve operator-visible metadata: worker PID, workspace path, log path, final-message path, and a short completion preview or explicit failure reason
 \- This slice preserves wrapper-owned review completion semantics; it does not grant the remediation worker ownership of the GitHub review side effect
@@ -157,8 +160,8 @@ GitHub PR opened
 \- The worker reply artifact must be JSON with a stable kind/schema, job identity, outcome summary, validation/blocker fields, and a \`reReview\` object
 \- Durable re-review request signal in this slice: \`reReview.requested = true\`
 \- If \`reReview.requested\` is true, the reply must also include a short operator-visible reason
-\- This slice lands the contract substrate only; it does not yet auto-trigger another review or build a fully autonomous loop
-\- \`LAC-210\` / \`LAC-211\` / \`LAC-212\` should consume this reply contract, connect it to explicit queue transitions, and document manual/operator recovery semantics
+\- \`LAC-210\` consumes this reply contract during reconciliation: a valid explicit request resets watcher delivery state to a durable pending re-review, while blocked paths remain operator-visible and do not bypass malformed-title or closed/merged safeguards
+\- This still must not create an implicit infinite autonomous loop; remediation-round caps and explicit terminal states remain authoritative, and manual/operator recovery semantics remain documented for blocked or invalid reply cases
 
 \#\#\# 5\.2 Remediation worker launch contract (new hardening requirements)
 \- A detached remediation launch must not treat \"process spawned\" as equivalent to \"durable worker established\"

@@ -58,6 +58,9 @@ test('reconcileFollowUpJob completes a finished spawned round when output exists
   assert.equal(reconciled.job.status, 'completed');
   assert.equal(reconciled.job.remediationPlan.rounds[0].state, 'completed');
   assert.match(reconciled.job.completion.preview, /Validation: npm test/);
+  assert.equal(reconciled.job.completion.source, 'codex-output-last-message');
+  assert.equal(reconciled.job.completion.finalMessagePath, path.relative(rootDir, outputPath));
+  assert.equal(reconciled.job.remediationWorker.processId, 8123);
 });
 
 test('reconcileFollowUpJob fails a finished spawned round when output is missing', () => {
@@ -92,4 +95,37 @@ test('reconcileFollowUpJob fails a finished spawned round when output is missing
   assert.match(reconciled.jobPath, /data\/follow-up-jobs\/failed\/.+\.json$/);
   assert.equal(reconciled.job.status, 'failed');
   assert.equal(reconciled.job.failure.code, 'artifact-missing-completion');
+  assert.equal(reconciled.job.remediationWorker.processId, 8123);
+});
+
+test('reconcileFollowUpJob fails a finished spawned round when outputPath escapes the repo root', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8123,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: '../outside.md',
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+    },
+  });
+
+  const reconciled = reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'failed');
+  assert.equal(reconciled.job.failure.code, 'invalid-output-path');
 });

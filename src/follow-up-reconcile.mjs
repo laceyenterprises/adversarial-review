@@ -1,43 +1,13 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import {
-  listFollowUpJobsInDir,
-  markFollowUpJobCompleted,
-  markFollowUpJobFailed,
-} from './follow-up-jobs.mjs';
+  reconcileFollowUpJob as reconcileFollowUpJobImpl,
+  reconcileInProgressFollowUpJobs as reconcileInProgressFollowUpJobsImpl,
+} from './follow-up-remediation.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-
-function isProcessAlive(processId) {
-  if (!Number.isInteger(processId) || processId <= 0) {
-    return false;
-  }
-
-  try {
-    process.kill(processId, 0);
-    return true;
-  } catch (err) {
-    if (err?.code === 'EPERM') return true;
-    if (err?.code === 'ESRCH') return false;
-    throw err;
-  }
-}
-
-function readCompletionArtifact(rootDir, job) {
-  const outputPath = job?.remediationWorker?.outputPath;
-  if (!outputPath) {
-    return '';
-  }
-
-  const absolutePath = join(rootDir, outputPath);
-  if (!existsSync(absolutePath)) {
-    return '';
-  }
-
-  return readFileSync(absolutePath, 'utf8').trim();
-}
 
 function buildCompletionPreview(text, limit = 240) {
   const normalized = String(text ?? '')
@@ -49,60 +19,63 @@ function buildCompletionPreview(text, limit = 240) {
   return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized;
 }
 
+function mapReconcileResult(result) {
+  if (result.action === 'completed' || result.action === 'failed') {
+    return {
+      reconciled: true,
+      outcome: result.action,
+      job: result.job,
+      jobPath: result.jobPath,
+    };
+  }
+
+  const reasonMap = {
+    active: 'worker-still-running',
+    skipped: 'worker-not-spawned',
+  };
+
+  return {
+    reconciled: false,
+    reason: reasonMap[result.action] || result.reason,
+    job: result.job,
+    jobPath: result.jobPath,
+  };
+}
+
 function reconcileFollowUpJob({
   rootDir = ROOT,
   jobPath,
   now = () => new Date().toISOString(),
-  isProcessAliveImpl = isProcessAlive,
+  isProcessAliveImpl,
 }) {
   const entry = listFollowUpJobsInDir(rootDir, 'inProgress').find((item) => item.jobPath === jobPath);
   if (!entry?.job) {
     throw new Error(`In-progress follow-up job not found: ${jobPath}`);
   }
-  const { job } = entry;
 
-  if (job?.remediationWorker?.state !== 'spawned') {
-    return { reconciled: false, reason: 'worker-not-spawned', job, jobPath };
-  }
-
-  if (isProcessAliveImpl(job.remediationWorker.processId)) {
-    return { reconciled: false, reason: 'worker-still-running', job, jobPath };
-  }
-
-  const completionText = readCompletionArtifact(rootDir, job);
-  if (completionText) {
-    const completed = markFollowUpJobCompleted({
-      rootDir,
-      jobPath,
-      finishedAt: now(),
-      completionPreview: buildCompletionPreview(completionText),
-    });
-    return { reconciled: true, outcome: 'completed', ...completed };
-  }
-
-  const failed = markFollowUpJobFailed({
+  const result = reconcileFollowUpJobImpl({
     rootDir,
+    job: entry.job,
     jobPath,
-    failedAt: now(),
-    failureCode: 'artifact-missing-completion',
-    error: new Error('Worker exited without a non-empty completion artifact'),
+    now,
+    isWorkerRunning: isProcessAliveImpl,
   });
-  return { reconciled: true, outcome: 'failed', ...failed };
+
+  return mapReconcileResult(result);
 }
 
 function reconcileInProgressFollowUpJobs({
   rootDir = ROOT,
   now = () => new Date().toISOString(),
-  isProcessAliveImpl = isProcessAlive,
+  isProcessAliveImpl,
 } = {}) {
-  return listFollowUpJobsInDir(rootDir, 'inProgress').map(({ jobPath }) => (
-    reconcileFollowUpJob({
-      rootDir,
-      jobPath,
-      now,
-      isProcessAliveImpl,
-    })
-  ));
+  const result = reconcileInProgressFollowUpJobsImpl({
+    rootDir,
+    now,
+    isWorkerRunning: isProcessAliveImpl,
+  });
+
+  return result.results.map(mapReconcileResult);
 }
 
 function main() {
@@ -129,7 +102,6 @@ function main() {
 
 export {
   buildCompletionPreview,
-  isProcessAlive,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
 };

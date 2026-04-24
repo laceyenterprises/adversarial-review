@@ -12,9 +12,13 @@ staleness_window: 60d
 
 AI coding agents tend to be sycophantic toward their own output. A Claude-written PR reviewed by Claude will often pass with minimal critique. Same-model review is a rubber stamp, not a quality gate.
 
+A second failure mode is context starvation: reviewing only the diff without the governing specs/runbooks can produce shallow or misleading feedback on architecture-heavy PRs.
+
 \#\# Solution
 
 Enforce adversarial cross-model review: the agent that builds the code is never the agent that reviews it. Claude Code and Codex have different training, tendencies, and blind spots — each will catch things the other misses.
+
+For spec-driven projects, require PR authors to link the governing specs/runbooks/briefs in the PR body or top-level PR comments, and have the reviewer fetch those linked docs and include them as review context.
 
 \---
 

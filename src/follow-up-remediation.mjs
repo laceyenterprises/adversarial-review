@@ -1,12 +1,15 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   claimNextFollowUpJob,
   getFollowUpJobDir,
+  listInProgressFollowUpJobs,
+  markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobSpawned,
 } from './follow-up-jobs.mjs';
@@ -18,6 +21,18 @@ const ROOT = join(__dirname, '..');
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
+const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
+const FINAL_MESSAGE_REDACTIONS = [
+  [/sk-[A-Za-z0-9_-]{8,}/g, '[REDACTED_OPENAI_TOKEN]'],
+  [/\bgh[pousr]_[A-Za-z0-9_]{8,}\b/g, '[REDACTED_GITHUB_TOKEN]'],
+  [/\bBearer\s+[A-Za-z0-9._-]+\b/gi, 'Bearer [REDACTED]'],
+  [/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\b\s*[:=]\s*\S+/gi, (match) => {
+    const [label] = match.split(/[:=]/, 1);
+    return `${label}=[REDACTED]`;
+  }],
+  [/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]'],
+];
 
 class OAuthError extends Error {
   constructor(model, reason) {
@@ -309,6 +324,318 @@ function spawnCodexRemediationWorker({
   }
 }
 
+function isWorkerProcessRunning(processId) {
+  if (!Number.isInteger(processId) || processId <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') {
+      return false;
+    }
+    if (err?.code === 'EPERM') {
+      return true;
+    }
+    throw err;
+  }
+}
+
+function parseIsoTime(value) {
+  const timestamp = Date.parse(String(value ?? ''));
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function resolveJobRelativePath(rootDir, relativePath, { label, allowMissing = true } = {}) {
+  if (!relativePath) {
+    return null;
+  }
+
+  const value = String(relativePath);
+  if (isAbsolute(value)) {
+    throw new Error(`Invalid ${label}: absolute paths are not allowed`);
+  }
+
+  const absolutePath = resolve(rootDir, value);
+  const relativeToRoot = relative(rootDir, absolutePath);
+  if (relativeToRoot.startsWith('..') || relativeToRoot === '') {
+    throw new Error(`Invalid ${label}: path escapes follow-up job root`);
+  }
+
+  if (!allowMissing && !existsSync(absolutePath)) {
+    throw new Error(`Invalid ${label}: path does not exist`);
+  }
+
+  return absolutePath;
+}
+
+function buildReconciliationPaths(rootDir, job) {
+  const worker = job?.remediationWorker || {};
+  const workspaceDir = resolveJobRelativePath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
+    label: 'workspaceDir',
+  });
+  const outputPath = resolveJobRelativePath(rootDir, worker.outputPath || null, {
+    label: 'outputPath',
+  });
+  const logPath = resolveJobRelativePath(rootDir, worker.logPath || null, {
+    label: 'logPath',
+  });
+
+  if (workspaceDir && outputPath) {
+    const relativeToWorkspace = relative(workspaceDir, outputPath);
+    if (relativeToWorkspace.startsWith('..') || relativeToWorkspace === '') {
+      throw new Error('Invalid outputPath: path escapes workspaceDir');
+    }
+  }
+
+  if (workspaceDir && logPath) {
+    const relativeToWorkspace = relative(workspaceDir, logPath);
+    if (relativeToWorkspace.startsWith('..') || relativeToWorkspace === '') {
+      throw new Error('Invalid logPath: path escapes workspaceDir');
+    }
+  }
+
+  return {
+    workspaceDir,
+    outputPath,
+    logPath,
+  };
+}
+
+function readWorkerFinalMessage(outputPath) {
+  if (!outputPath || !existsSync(outputPath)) {
+    return { exists: false, text: '', bytes: 0 };
+  }
+
+  const text = readFileSync(outputPath, 'utf8');
+  return {
+    exists: true,
+    text,
+    bytes: Buffer.byteLength(text, 'utf8'),
+  };
+}
+
+function summarizeWorkerFinalMessage(text, limit = 400) {
+  let normalized = String(text ?? '').trim().replace(/\s+/g, ' ');
+  if (!normalized) {
+    return '';
+  }
+
+  for (const [pattern, replacement] of FINAL_MESSAGE_REDACTIONS) {
+    normalized = normalized.replace(pattern, replacement);
+  }
+
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, limit - 1)}…`;
+}
+
+function digestWorkerFinalMessage(text) {
+  const buffer = Buffer.from(String(text ?? ''), 'utf8');
+  const hash = createHash('sha256');
+  hash.update(buffer.subarray(0, MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES));
+  if (buffer.length > MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES) {
+    hash.update(Buffer.from(String(buffer.length), 'utf8'));
+  }
+  return hash.digest('hex');
+}
+
+function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWorkerRunning = isWorkerProcessRunning } = {}) {
+  const worker = job?.remediationWorker || {};
+  const nowAt = parseIsoTime(now());
+  const spawnedAt = parseIsoTime(worker.spawnedAt);
+  const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
+  const processRunning = isWorkerRunning(worker.processId);
+
+  if (processRunning) {
+    if (ageMs !== null && ageMs > RECONCILIATION_MAX_ACTIVE_MS) {
+      return { state: 'manual-inspection', reason: 'pid-active-beyond-runtime-cap', ageMs };
+    }
+    return { state: 'active', reason: 'worker-still-running', ageMs };
+  }
+
+  return { state: 'exited', reason: 'worker-not-running', ageMs };
+}
+
+function reconcileFollowUpJob({
+  rootDir = ROOT,
+  job,
+  jobPath,
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+} = {}) {
+  const worker = job?.remediationWorker;
+  if (!worker?.processId || worker.state !== 'spawned') {
+    return {
+      action: 'skipped',
+      reason: 'missing-worker-metadata',
+      job,
+      jobPath,
+    };
+  }
+
+  const liveness = assessWorkerLiveness(job, { now, isWorkerRunning });
+  if (liveness.state === 'active') {
+    return {
+      action: 'active',
+      reason: liveness.reason,
+      job,
+      jobPath,
+    };
+  }
+
+  const completedAt = now();
+  if (liveness.state === 'manual-inspection') {
+    const failed = markFollowUpJobFailed({
+      rootDir,
+      jobPath,
+      failedAt: completedAt,
+      failureCode: 'manual-inspection-required',
+      error: new Error(
+        `Remediation worker PID ${worker.processId} still appears active beyond the reconciliation runtime cap. Manual inspection required before trusting the PID association.`
+      ),
+      remediationWorker: {
+        ...worker,
+        state: 'manual_inspection_required',
+        reconciledAt: completedAt,
+      },
+      failure: {
+        manualInspectionRequired: true,
+        inspectionReason: liveness.reason,
+        workerRuntimeMs: liveness.ageMs,
+        finalMessagePath: worker.outputPath || null,
+        logPath: worker.logPath || null,
+      },
+    });
+
+    return {
+      action: 'failed',
+      reason: liveness.reason,
+      job: failed.job,
+      jobPath: failed.jobPath,
+    };
+  }
+
+  let paths;
+  try {
+    paths = buildReconciliationPaths(rootDir, job);
+  } catch (err) {
+    const failed = markFollowUpJobFailed({
+      rootDir,
+      jobPath,
+      failedAt: completedAt,
+      failureCode: 'invalid-output-path',
+      error: err,
+      remediationWorker: {
+        ...worker,
+        state: 'failed',
+        reconciledAt: completedAt,
+      },
+      failure: {
+        invalidArtifactPaths: true,
+      },
+    });
+
+    return {
+      action: 'failed',
+      reason: 'invalid-worker-paths',
+      job: failed.job,
+      jobPath: failed.jobPath,
+    };
+  }
+
+  const finalMessage = readWorkerFinalMessage(paths.outputPath);
+  const workerState = {
+    ...worker,
+    reconciledAt: completedAt,
+  };
+
+  if (finalMessage.exists && String(finalMessage.text).trim()) {
+    const completed = markFollowUpJobCompleted({
+      rootDir,
+      jobPath,
+      completedAt,
+      remediationWorker: {
+        ...workerState,
+        state: 'completed',
+      },
+      completion: {
+        source: 'codex-output-last-message',
+        note: 'Reconciled from detached worker exit plus non-empty final message artifact.',
+        finalMessagePath: worker.outputPath || null,
+        finalMessageBytes: finalMessage.bytes,
+        finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
+        preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
+        finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
+        logPath: worker.logPath || null,
+      },
+    });
+
+    return {
+      action: 'completed',
+      reason: 'final-message-artifact-present',
+      job: completed.job,
+      jobPath: completed.jobPath,
+    };
+  }
+
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath,
+    failedAt: completedAt,
+    failureCode: finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion',
+    error: new Error(
+      finalMessage.exists
+        ? 'Remediation worker exited without a non-empty final message artifact.'
+        : 'Remediation worker exited before writing the final message artifact.'
+    ),
+    remediationWorker: {
+      ...workerState,
+      state: 'failed',
+    },
+    failure: {
+      finalMessagePath: worker.outputPath || null,
+      finalMessageBytes: finalMessage.bytes,
+      logPath: worker.logPath || null,
+    },
+  });
+
+  return {
+    action: 'failed',
+    reason: finalMessage.exists ? 'empty-final-message-artifact' : 'missing-final-message-artifact',
+    job: failed.job,
+    jobPath: failed.jobPath,
+  };
+}
+
+function reconcileInProgressFollowUpJobs({
+  rootDir = ROOT,
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+} = {}) {
+  const jobs = listInProgressFollowUpJobs(rootDir);
+  const results = jobs.map(({ job, jobPath }) => reconcileFollowUpJob({
+    rootDir,
+    job,
+    jobPath,
+    now,
+    isWorkerRunning,
+  }));
+
+  return {
+    scanned: jobs.length,
+    active: results.filter((result) => result.action === 'active').length,
+    completed: results.filter((result) => result.action === 'completed').length,
+    failed: results.filter((result) => result.action === 'failed').length,
+    skipped: results.filter((result) => result.action === 'skipped').length,
+    results,
+  };
+}
+
 async function consumeNextFollowUpJob({
   rootDir = ROOT,
   execFileImpl = execFileAsync,
@@ -383,7 +710,22 @@ async function consumeNextFollowUpJob({
 }
 
 async function main() {
+  const mode = process.argv[2] === 'reconcile' ? 'reconcile' : 'consume';
+
   try {
+    if (mode === 'reconcile') {
+      const result = reconcileInProgressFollowUpJobs();
+      console.log(
+        `[follow-up-remediation] Reconciliation scanned=${result.scanned} active=${result.active} completed=${result.completed} failed=${result.failed} skipped=${result.skipped}`
+      );
+      result.results
+        .filter((entry) => entry.action === 'completed' || entry.action === 'failed')
+        .forEach((entry) => {
+          console.log(`[follow-up-remediation] ${entry.action}: ${entry.job.repo}#${entry.job.prNumber} -> ${entry.jobPath}`);
+        });
+      return;
+    }
+
     const result = await consumeNextFollowUpJob();
     if (!result.consumed) {
       console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
@@ -417,10 +759,17 @@ export {
   buildInheritedPath,
   consumeNextFollowUpJob,
   inspectWorkspaceState,
+  digestWorkerFinalMessage,
+  isWorkerProcessRunning,
   loadFollowUpPromptTemplate,
   prepareWorkspaceForJob,
+  reconcileFollowUpJob,
+  reconcileInProgressFollowUpJobs,
   resolveCodexCliPath,
   resolveCodexAuthPath,
+  resolveJobRelativePath,
+  summarizeWorkerFinalMessage,
+  assessWorkerLiveness,
   spawnCodexRemediationWorker,
 };
 

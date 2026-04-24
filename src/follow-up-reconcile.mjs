@@ -20,7 +20,7 @@ function buildCompletionPreview(text, limit = 240) {
 }
 
 function mapReconcileResult(result) {
-  if (result.action === 'completed' || result.action === 'failed') {
+  if (result.action === 'completed' || result.action === 'failed' || result.action === 'stopped') {
     return {
       reconciled: true,
       outcome: result.action,

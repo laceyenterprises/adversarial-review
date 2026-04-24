@@ -146,11 +146,15 @@ GitHub PR opened
 \- Follow-up remediation must not remain an implicit one-shot with no durable path for a second bounded pass
 \- Each follow-up job must carry an explicit bounded remediation plan:
 \- \`mode = bounded-manual-rounds\`
-\- \`maxRounds\` cap stored durably in the job record
+\- \`maxRounds\` cap stored durably in the job record; current bounded default is \`6\`
 \- \`currentRound\` plus append-only \`rounds[]\` history for operator inspection
 \- Starting a worker consumes exactly one round and records round claim/spawn metadata durably
 \- Advancing to another round must remain explicit and operator-visible; do not hide it inside an autonomous retry loop
-\- When an operator requests another round and the cap has already been reached, the job must move to a terminal \`stopped\` state with an explicit stop reason
+\- Bounded-stop conditions in this slice must be durable and operator-visible:
+\- \`max-rounds-reached\` when another round would exceed the stored \`maxRounds\` cap
+\- \`no-progress\` when a remediation round finishes without a durable \`reReview.requested = true\` signal and the loop would otherwise stall ambiguously
+\- \`operator-stop\` when a human explicitly stops the job
+\- Stopped jobs must carry machine-readable stop metadata in addition to human-readable reason text
 \- Manual or scripted requeue is acceptable in this slice; a fully autonomous multi-round loop is intentionally deferred
 
 \#\#\# 5\.1\.2 Remediation reply contract for re-review requests (LAC-209 slice)

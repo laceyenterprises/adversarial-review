@@ -10,6 +10,7 @@ import {
   REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
   buildRemediationReply,
+  buildStopMetadata,
   claimNextFollowUpJob,
   createFollowUpJob,
   extractReviewSummary,
@@ -20,6 +21,7 @@ import {
   readRemediationReplyArtifact,
   readFollowUpJob,
   requeueFollowUpJobForNextRound,
+  stopFollowUpJob,
   validateRemediationReply,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
@@ -192,6 +194,53 @@ test('readFollowUpJob whitelists persisted remediationReply fields during normal
   });
   assert.equal('arbitraryKey' in normalized.remediationReply, false);
   assert.equal('reReview' in normalized.remediationReply, false);
+});
+
+test('readFollowUpJob normalizes persisted remediation stop metadata through trusted stop builder', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const jobPath = path.join(rootDir, 'job.json');
+  writeFileSync(jobPath, `${JSON.stringify({
+    schemaVersion: 2,
+    kind: 'adversarial-review-follow-up',
+    status: 'stopped',
+    jobId: 'job-1',
+    createdAt: '2026-04-21T08:00:00.000Z',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    critical: false,
+    reviewSummary: 'Summary',
+    reviewBody: 'Body',
+    remediationPlan: {
+      mode: 'bounded-manual-rounds',
+      maxRounds: 2,
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'stopped' }],
+      stopReason: 'Persisted reason',
+      stop: {
+        code: 17,
+        reason: ['bad-type'],
+        stoppedAt: '2026-04-21T10:00:00.000Z',
+        stoppedBy: { type: 'operator', requestedBy: 'paul' },
+        sourceStatus: false,
+        currentRound: 999,
+        maxRounds: 999,
+        arbitraryKey: 'should-not-survive',
+      },
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const normalized = readFollowUpJob(jobPath);
+  assert.deepEqual(normalized.remediationPlan.stop, buildStopMetadata({
+    code: 17,
+    reason: 'Persisted reason',
+    stoppedAt: '2026-04-21T10:00:00.000Z',
+    stoppedBy: { type: 'operator', requestedBy: 'paul' },
+    sourceStatus: false,
+    currentRound: 1,
+    maxRounds: 2,
+  }));
+  assert.equal('arbitraryKey' in normalized.remediationPlan.stop, false);
 });
 
 test('claimNextFollowUpJob moves the oldest pending file into in-progress metadata', () => {
@@ -759,6 +808,15 @@ test('requeueFollowUpJobForNextRound moves a completed job back to pending for t
     jobPath: claimed.jobPath,
     finishedAt: '2026-04-21T10:05:00.000Z',
     completionPreview: 'Patched auth refresh path.',
+    reReview: {
+      requested: true,
+      status: 'pending',
+      reason: 'Needs another adversarial pass.',
+      triggered: true,
+      outcomeReason: null,
+      reviewRow: null,
+      requestedAt: '2026-04-21T10:05:00.000Z',
+    },
   });
 
   const requeued = requeueFollowUpJobForNextRound({
@@ -774,6 +832,40 @@ test('requeueFollowUpJobForNextRound moves a completed job back to pending for t
   assert.equal(requeued.job.remediationPlan.currentRound, 1);
   assert.equal(requeued.job.remediationPlan.nextAction.round, 2);
   assert.equal(requeued.job.remediationPlan.nextAction.requestedBy, 'operator');
+});
+
+test('requeueFollowUpJobForNextRound stops a completed job when no durable re-review request was recorded', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    finishedAt: '2026-04-21T10:05:00.000Z',
+    completionPreview: 'Patched auth refresh path.',
+    reReview: {
+      requested: false,
+      status: 'not-requested',
+      reason: null,
+      triggered: false,
+      outcomeReason: 'reply-did-not-request-rereview',
+      reviewRow: null,
+      requestedAt: null,
+    },
+  });
+
+  const stopped = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: completed.jobPath,
+    requestedAt: '2026-04-21T10:06:00.000Z',
+    requestedBy: 'operator',
+    reason: 'Trying another round anyway.',
+  });
+
+  assert.match(stopped.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.job.remediationPlan.stop.code, 'no-progress');
+  assert.match(stopped.job.remediationPlan.stop.reason, /No durable re-review request/);
 });
 
 test('requeueFollowUpJobForNextRound stops the job once the round cap is reached', () => {
@@ -799,6 +891,7 @@ test('requeueFollowUpJobForNextRound stops the job once the round cap is reached
 
   assert.match(stopped.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
   assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.job.remediationPlan.stop.code, 'max-rounds-reached');
   assert.match(stopped.job.remediationPlan.stopReason, /Reached max remediation rounds \(1\/1\)/);
 });
 
@@ -813,4 +906,25 @@ test('requeueFollowUpJobForNextRound rejects non-terminal source statuses', () =
     }),
     /Cannot requeue follow-up job .* from status pending/
   );
+});
+
+test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible metadata', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const stopped = stopFollowUpJob({
+    rootDir,
+    jobPath: claimed.jobPath,
+    requestedAt: '2026-04-21T10:01:00.000Z',
+    requestedBy: 'paul',
+    reason: 'Operator requested stop for manual handling.',
+  });
+
+  assert.match(stopped.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.job.remediationPlan.stop.code, 'operator-stop');
+  assert.equal(stopped.job.remediationPlan.stop.stoppedBy.requestedBy, 'paul');
+  assert.equal(stopped.job.remediationPlan.rounds[0].state, 'stopped');
+  assert.equal(stopped.job.remediationPlan.rounds[0].stop.code, 'operator-stop');
 });

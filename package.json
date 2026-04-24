@@ -10,7 +10,8 @@
     "pr:create:tagged": "node src/pr-create-tagged.mjs",
     "test": "node --test test/*.test.mjs",
     "follow-up:consume": "node src/follow-up-remediation.mjs",
-    "follow-up:reconcile": "node src/follow-up-remediation.mjs reconcile"
+    "follow-up:reconcile": "node src/follow-up-reconcile.mjs",
+    "follow-up:requeue": "node src/follow-up-requeue.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

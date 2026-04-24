@@ -144,7 +144,11 @@ Rules enforced by the helper:
 
 Reviewed PRs are tracked in `data/reviews.db` (SQLite). This now stores delivery state rather than just a binary already-reviewed marker, so failed review attempts remain visible and retryable across watcher restarts instead of being silently skipped forever.
 
-Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, and the recommended next action: start a follow-up coding session against the reviewed PR.
+Successful review posts also enqueue a durable follow-up handoff artifact under `data/follow-up-jobs/pending/`. Each JSON job records the repo, PR number, reviewer model, review summary/body, criticality, and a bounded remediation plan:
+- `remediationPlan.mode = "bounded-manual-rounds"`
+- `remediationPlan.maxRounds` caps the number of remediation attempts for the job
+- `remediationPlan.currentRound` and `remediationPlan.rounds[]` preserve explicit operator-visible round history
+- queue state remains explicit instead of hiding retries inside worker code
 
 ### Force a re-review manually
 
@@ -186,7 +190,7 @@ sudo chmod 750 /Users/airlock
 
 If this contract drifts, reviewer imports can fail with `EACCES` even when launch/auth configuration is otherwise correct.
 
-A one-shot consumer now claims the oldest pending job, moves it into `data/follow-up-jobs/in-progress/`, prepares a PR checkout under `data/follow-up-jobs/workspaces/<jobId>/`, and spawns a detached Codex remediation worker using OAuth-backed Codex CLI auth only. If launch preparation fails, the claimed job is moved into `data/follow-up-jobs/failed/` with the error captured in the JSON record.
+A one-shot consumer now claims the oldest pending job, starts the next bounded remediation round, moves the job into `data/follow-up-jobs/in-progress/`, prepares a PR checkout under `data/follow-up-jobs/workspaces/<jobId>/`, and spawns a detached Codex remediation worker using OAuth-backed Codex CLI auth only. If launch preparation fails, the claimed job is moved into `data/follow-up-jobs/failed/` with the error captured in the JSON record and attached to the active round record.
 
 Run the consumer manually with:
 
@@ -194,6 +198,31 @@ Run the consumer manually with:
 npm run follow-up:consume
 ```
 
+A separate one-shot reconciler now closes the first durable queue gap for detached worker completion:
+
+```bash
+npm run follow-up:reconcile
+```
+
+Current reconciliation contract:
+- only `data/follow-up-jobs/in-progress/` jobs with `remediationWorker.state = "spawned"` are inspected
+- if the recorded worker PID is still live, the job remains `in_progress`
+- if the PID is gone and `.adversarial-follow-up/codex-last-message.md` exists with non-empty content, the job moves to `data/follow-up-jobs/completed/`
+- if the PID is gone and that final-message artifact is missing or empty, the job moves to `data/follow-up-jobs/failed/`
+- completed/failed records retain the worker artifact paths plus a short operator-facing preview or failure context
+- reconciliation does not auto-start another round; advancing to the next round is an explicit operator action
+
+To request another bounded remediation round after a completed or failed attempt:
+
+```bash
+npm run follow-up:requeue -- data/follow-up-jobs/completed/<jobId>.json "Need one more bounded remediation pass"
+```
+
+Requeue semantics:
+- the existing job record is moved back to `data/follow-up-jobs/pending/`
+- prior round history remains in `remediationPlan.rounds[]`
+- `remediationPlan.maxRounds` is enforced; when the cap is reached, the job moves to `data/follow-up-jobs/stopped/`
+- there is no hidden infinite retry path
 New hardening lesson from the detached remediation-launch failure:
 - do **not** treat `spawned process` as equivalent to `durable worker established`
 - require a preflight contract before launch: repo/PR/branch target, runtime path, cwd, auth principal, lane type (`builder` vs `integration`), and expected edit/commit/push/PR-reply authority
@@ -201,7 +230,7 @@ New hardening lesson from the detached remediation-launch failure:
 - preserve exact launch metadata and expected artifact paths so failures remain diagnosable after wrapper death
 - classify failures explicitly: launch failure, attach/transport failure, permission-blocked worker, artifact-missing completion, or successful completion
 
-This is still intentionally a bounded slice. It gives the queue durable terminal states and operator visibility, and launch ownership is now treated more explicitly, but it does not yet implement a multi-round autonomous remediation loop or native session-aware continuation. The long-term direction remains replacing the file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
+This is still intentionally a bounded slice. It gives the queue durable terminal states and operator visibility, launch ownership is treated explicitly, completion has a one-shot reconciler, and multi-round remediation remains explicit and capped rather than autonomous. The long-term direction remains replacing the file handoff with native session/principal-aware continuation so the system can resume the original build session with its intent and context intact instead of starting fresh.
 ## Operational semantics note (2026-04-21)
 
 This service currently uses **A semantics** for review completion:

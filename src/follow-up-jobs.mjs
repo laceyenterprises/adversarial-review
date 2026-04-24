@@ -13,12 +13,14 @@ import { basename, join } from 'node:path';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
-const FOLLOW_UP_JOB_SCHEMA_VERSION = 1;
+const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
+const DEFAULT_MAX_REMEDIATION_ROUNDS = 2;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],
   completed: ['data', 'follow-up-jobs', 'completed'],
   failed: ['data', 'follow-up-jobs', 'failed'],
+  stopped: ['data', 'follow-up-jobs', 'stopped'],
   workspaces: ['data', 'follow-up-jobs', 'workspaces'],
 });
 
@@ -41,8 +43,162 @@ function writeFollowUpJob(jobPath, job) {
   writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
 }
 
+function normalizeMaxRounds(maxRounds) {
+  return Number.isInteger(maxRounds) && maxRounds > 0
+    ? maxRounds
+    : DEFAULT_MAX_REMEDIATION_ROUNDS;
+}
+
+function buildRemediationRoundPlan(maxRounds = DEFAULT_MAX_REMEDIATION_ROUNDS) {
+  const normalizedMaxRounds = normalizeMaxRounds(maxRounds);
+
+  return {
+    mode: 'bounded-manual-rounds',
+    maxRounds: normalizedMaxRounds,
+    currentRound: 0,
+    rounds: [],
+    stopReason: null,
+    nextAction: {
+      type: 'consume-pending-round',
+      round: 1,
+      operatorVisibility: 'explicit',
+    },
+  };
+}
+
+function buildRecommendedFollowUpAction({ critical }) {
+  return {
+    type: 'address-adversarial-review',
+    priority: critical ? 'high' : 'normal',
+    summary: critical
+      ? 'Start a follow-up coding session for this PR immediately and address the critical review findings first.'
+      : 'Start a follow-up coding session for this PR and address the adversarial review findings.',
+    executionModel: 'bounded-manual-rounds',
+    maxRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
+    futureArchitectureNote: 'Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff.',
+  };
+}
+
+function buildLegacyRemediationPlan(job) {
+  const maxRounds = normalizeMaxRounds(
+    Number(job?.remediationPlan?.maxRounds)
+      || Number(job?.recommendedFollowUpAction?.maxRounds)
+  );
+  const basePlan = buildRemediationRoundPlan(maxRounds);
+  const status = String(job?.status || 'pending');
+
+  if (status === 'pending') {
+    return basePlan;
+  }
+
+  const round = {
+    round: 1,
+    state: 'claimed',
+  };
+
+  if (job?.claimedAt) {
+    round.claimedAt = job.claimedAt;
+  }
+  if (job?.claimedBy) {
+    round.claimedBy = job.claimedBy;
+  }
+  if (job?.remediationWorker) {
+    round.worker = job.remediationWorker;
+  }
+  if (job?.remediationWorker?.spawnedAt) {
+    round.spawnedAt = job.remediationWorker.spawnedAt;
+  }
+
+  if (status === 'in_progress') {
+    round.state = job?.remediationWorker?.state === 'spawned' ? 'spawned' : 'claimed';
+    return {
+      ...basePlan,
+      currentRound: 1,
+      rounds: [round],
+      nextAction: {
+        type: round.state === 'spawned' ? 'reconcile-worker' : 'worker-spawn',
+        round: 1,
+        operatorVisibility: 'explicit',
+      },
+    };
+  }
+
+  if (status === 'completed') {
+    round.state = 'completed';
+    round.finishedAt = job?.completedAt || null;
+    round.completion = job?.completion || null;
+  } else if (status === 'failed') {
+    round.state = 'failed';
+    round.finishedAt = job?.failedAt || null;
+    round.failure = job?.failure || null;
+  } else if (status === 'stopped') {
+    round.state = 'stopped';
+    round.finishedAt = job?.stoppedAt || null;
+  }
+
+  return {
+    ...basePlan,
+    currentRound: 1,
+    rounds: [round],
+    stopReason: status === 'stopped' ? job?.remediationPlan?.stopReason || job?.stopReason || null : null,
+    nextAction: null,
+  };
+}
+
+function normalizeRound(round, index, fallbackState = 'claimed') {
+  const roundNumber = Number(round?.round ?? index + 1);
+  return {
+    ...round,
+    round: roundNumber > 0 ? roundNumber : index + 1,
+    state: round?.state || fallbackState,
+  };
+}
+
+function normalizeRemediationPlan(job) {
+  if (job?.schemaVersion === FOLLOW_UP_JOB_SCHEMA_VERSION && job?.remediationPlan) {
+    const currentRound = Math.max(0, Number(job.remediationPlan.currentRound || 0));
+    const rounds = Array.isArray(job.remediationPlan.rounds)
+      ? job.remediationPlan.rounds.map((round, index) => normalizeRound(round, index))
+      : [];
+
+    return {
+      ...buildRemediationRoundPlan(
+        Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds)
+      ),
+      ...job.remediationPlan,
+      mode: 'bounded-manual-rounds',
+      maxRounds: normalizeMaxRounds(
+        Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds)
+      ),
+      currentRound,
+      rounds,
+    };
+  }
+
+  return buildLegacyRemediationPlan(job);
+}
+
+function normalizeFollowUpJob(job) {
+  if (!job || typeof job !== 'object') {
+    return job;
+  }
+
+  const remediationPlan = normalizeRemediationPlan(job);
+  return {
+    ...job,
+    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+    recommendedFollowUpAction: {
+      ...buildRecommendedFollowUpAction({ critical: job.critical }),
+      ...(job.recommendedFollowUpAction || {}),
+      executionModel: 'bounded-manual-rounds',
+      maxRounds: remediationPlan.maxRounds,
+    },
+    remediationPlan,
+  };
+}
+
 function readFollowUpJob(jobPath) {
-  return JSON.parse(readFileSync(jobPath, 'utf8'));
+  return normalizeFollowUpJob(JSON.parse(readFileSync(jobPath, 'utf8')));
 }
 
 function listPendingFollowUpJobPaths(rootDir) {
@@ -79,6 +235,19 @@ function listInProgressFollowUpJobs(rootDir) {
   }));
 }
 
+function listFollowUpJobsInDir(rootDir, key) {
+  const dir = getFollowUpJobDir(rootDir, key);
+  if (!existsSync(dir)) return [];
+
+  return readdirSync(dir)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map((name) => ({
+      job: readFollowUpJob(join(dir, name)),
+      jobPath: join(dir, name),
+    }));
+}
+
 function sanitizeRepo(repo) {
   return String(repo ?? '').replace(/\//g, '__').replace(/[^a-zA-Z0-9_.-]/g, '-');
 }
@@ -99,144 +268,37 @@ function extractReviewSummary(reviewBody) {
   return text.slice(0, 1000);
 }
 
-function buildRecommendedFollowUpAction({ critical }) {
-  return {
-    type: 'address-adversarial-review',
-    priority: critical ? 'high' : 'normal',
-    summary: critical
-      ? 'Start a follow-up coding session for this PR immediately and address the critical review findings first.'
-      : 'Start a follow-up coding session for this PR and address the adversarial review findings.',
-    futureArchitectureNote: 'Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff.',
-  };
+function getCurrentRound(job) {
+  const roundNumber = Number(job?.remediationPlan?.currentRound || 0);
+  if (roundNumber <= 0) return null;
+  return job?.remediationPlan?.rounds?.find((round) => round.round === roundNumber) || null;
 }
 
-function buildFollowUpJob({
-  repo,
-  prNumber,
-  reviewerModel,
-  linearTicketId = null,
-  reviewBody,
-  reviewPostedAt,
-  critical,
-}) {
-  const createdAt = reviewPostedAt || new Date().toISOString();
-  const jobId = `${sanitizeRepo(repo)}-pr-${prNumber}-${sanitizeTimestamp(createdAt)}`;
-
-  return {
-    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
-    kind: 'adversarial-review-follow-up',
-    status: 'pending',
-    jobId,
-    createdAt,
-    trigger: {
-      type: 'github-review-posted',
-      postedAt: createdAt,
-    },
-    repo,
-    prNumber,
-    linearTicketId,
-    reviewerModel,
-    critical: Boolean(critical),
-    reviewSummary: extractReviewSummary(reviewBody),
-    reviewBody,
-    recommendedFollowUpAction: buildRecommendedFollowUpAction({ critical }),
-    sessionHandoff: {
-      originalBuildSessionId: null,
-      resumePreferred: true,
-      resumeAvailable: false,
-    },
-  };
-}
-
-function createFollowUpJob({ rootDir, ...jobInput }) {
-  const baseJob = buildFollowUpJob(jobInput);
-  const queueDir = getFollowUpJobDir(rootDir, 'pending');
-
-  mkdirSync(queueDir, { recursive: true });
-
-  for (let attempt = 0; attempt < MAX_CREATE_ATTEMPTS; attempt += 1) {
-    const job = attempt === 0
-      ? baseJob
-      : {
-          ...baseJob,
-          jobId: `${baseJob.jobId}-${attempt + 1}`,
-        };
-    const jobPath = join(queueDir, `${job.jobId}.json`);
-
-    try {
-      writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, {
-        encoding: 'utf8',
-        flag: 'wx',
-      });
-      return { job, jobPath };
-    } catch (err) {
-      if (err?.code === 'EEXIST') continue;
-      throw err;
-    }
+function updateCurrentRound(job, updater) {
+  const currentRound = getCurrentRound(job);
+  if (!currentRound) {
+    throw new Error(`Follow-up job ${job?.jobId || '<unknown>'} has no active remediation round`);
   }
 
-  throw new Error(`Unable to create unique follow-up job file for ${baseJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
+  return {
+    ...job,
+    remediationPlan: {
+      ...job.remediationPlan,
+      rounds: job.remediationPlan.rounds.map((round) => (
+        round.round === currentRound.round ? updater(round) : round
+      )),
+    },
+  };
 }
 
-function claimNextFollowUpJob({
-  rootDir,
-  workerType = 'codex-remediation',
-  claimedAt = new Date().toISOString(),
-  launcherPid = process.pid,
-} = {}) {
+function moveFollowUpJob(rootDir, jobPath, targetKey, nextJob) {
   ensureFollowUpJobDirs(rootDir);
-
-  for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
-    const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
-
-    try {
-      renameSync(pendingPath, inProgressPath);
-    } catch (err) {
-      if (err?.code === 'ENOENT') continue;
-      throw err;
-    }
-
-    const job = readFollowUpJob(inProgressPath);
-    const claimedJob = {
-      ...job,
-      status: 'in_progress',
-      claimedAt,
-      claimedBy: {
-        workerType,
-        launcherPid,
-      },
-    };
-
-    writeFollowUpJob(inProgressPath, claimedJob);
-    return { job: claimedJob, jobPath: inProgressPath };
-  }
-
-  return null;
-}
-
-function markFollowUpJobSpawned({
-  jobPath,
-  worker,
-  spawnedAt = new Date().toISOString(),
-}) {
-  const currentJob = readFollowUpJob(jobPath);
-  const nextJob = {
-    ...currentJob,
-    status: 'in_progress',
-    remediationWorker: {
-      model: 'codex',
-      state: 'spawned',
-      spawnedAt,
-      ...worker,
-    },
-  };
-
-  if (worker?.workspaceDir) {
-    nextJob.workspaceDir = worker.workspaceDir;
-  }
-
+  const targetPath = join(getFollowUpJobDir(rootDir, targetKey), basename(jobPath));
   writeFollowUpJob(jobPath, nextJob);
-  return { job: nextJob, jobPath };
+  if (targetPath !== jobPath) {
+    renameSync(jobPath, targetPath);
+  }
+  return { job: nextJob, jobPath: targetPath };
 }
 
 function moveTerminalJobRecord({
@@ -295,25 +357,195 @@ function moveTerminalJobRecord({
   return { job: nextJob, jobPath: terminalPath, alreadyTerminal: false };
 }
 
-function markFollowUpJobCompleted({
-  rootDir,
-  jobPath,
-  completion,
-  completedAt = new Date().toISOString(),
-  remediationWorker,
+function buildFollowUpJob({
+  repo,
+  prNumber,
+  reviewerModel,
+  linearTicketId = null,
+  reviewBody,
+  reviewPostedAt,
+  critical,
+  maxRemediationRounds = DEFAULT_MAX_REMEDIATION_ROUNDS,
 }) {
-  return moveTerminalJobRecord({
-    rootDir,
-    jobPath,
-    destinationKey: 'completed',
-    buildNextJob: (currentJob) => ({
-      ...currentJob,
-      status: 'completed',
-      completedAt,
-      completion,
-      ...(remediationWorker ? { remediationWorker } : {}),
-    }),
-  });
+  const createdAt = reviewPostedAt || new Date().toISOString();
+  const jobId = `${sanitizeRepo(repo)}-pr-${prNumber}-${sanitizeTimestamp(createdAt)}`;
+  const remediationPlan = buildRemediationRoundPlan(maxRemediationRounds);
+
+  return {
+    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+    kind: 'adversarial-review-follow-up',
+    status: 'pending',
+    jobId,
+    createdAt,
+    trigger: {
+      type: 'github-review-posted',
+      postedAt: createdAt,
+    },
+    repo,
+    prNumber,
+    linearTicketId,
+    reviewerModel,
+    critical: Boolean(critical),
+    reviewSummary: extractReviewSummary(reviewBody),
+    reviewBody,
+    recommendedFollowUpAction: {
+      ...buildRecommendedFollowUpAction({ critical }),
+      maxRounds: remediationPlan.maxRounds,
+    },
+    remediationPlan,
+    sessionHandoff: {
+      originalBuildSessionId: null,
+      resumePreferred: true,
+      resumeAvailable: false,
+    },
+  };
+}
+
+function createFollowUpJob({ rootDir, ...jobInput }) {
+  const baseJob = buildFollowUpJob(jobInput);
+  const queueDir = getFollowUpJobDir(rootDir, 'pending');
+
+  mkdirSync(queueDir, { recursive: true });
+
+  for (let attempt = 0; attempt < MAX_CREATE_ATTEMPTS; attempt += 1) {
+    const job = attempt === 0
+      ? baseJob
+      : {
+          ...baseJob,
+          jobId: `${baseJob.jobId}-${attempt + 1}`,
+        };
+    const jobPath = join(queueDir, `${job.jobId}.json`);
+
+    try {
+      writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, {
+        encoding: 'utf8',
+        flag: 'wx',
+      });
+      return { job, jobPath };
+    } catch (err) {
+      if (err?.code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+
+  throw new Error(`Unable to create unique follow-up job file for ${baseJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
+}
+
+function claimNextFollowUpJob({
+  rootDir,
+  workerType = 'codex-remediation',
+  claimedAt = new Date().toISOString(),
+  launcherPid = process.pid,
+  markStoppedImpl = markFollowUpJobStopped,
+} = {}) {
+  ensureFollowUpJobDirs(rootDir);
+
+  for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+    const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
+
+    try {
+      renameSync(pendingPath, inProgressPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+
+    const job = readFollowUpJob(inProgressPath);
+    const currentRound = Number(job?.remediationPlan?.currentRound || 0);
+    const maxRounds = Number(job?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
+    if (currentRound >= maxRounds) {
+      try {
+        markStoppedImpl({
+          rootDir,
+          jobPath: inProgressPath,
+          stoppedAt: claimedAt,
+          stopReason: `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
+        });
+      } catch {}
+      continue;
+    }
+
+    const nextRoundNumber = currentRound + 1;
+    const claimedJob = {
+      ...job,
+      status: 'in_progress',
+      claimedAt,
+      claimedBy: {
+        workerType,
+        launcherPid,
+      },
+      remediationPlan: {
+        ...(job.remediationPlan || buildRemediationRoundPlan()),
+        currentRound: nextRoundNumber,
+        stopReason: null,
+        nextAction: {
+          type: 'worker-spawn',
+          round: nextRoundNumber,
+          operatorVisibility: 'explicit',
+        },
+        rounds: [
+          ...(job?.remediationPlan?.rounds || []),
+          {
+            round: nextRoundNumber,
+            state: 'claimed',
+            claimedAt,
+            claimedBy: {
+              workerType,
+              launcherPid,
+            },
+          },
+        ],
+      },
+    };
+
+    writeFollowUpJob(inProgressPath, claimedJob);
+    return { job: claimedJob, jobPath: inProgressPath };
+  }
+
+  return null;
+}
+
+function markFollowUpJobSpawned({
+  jobPath,
+  worker,
+  spawnedAt = new Date().toISOString(),
+}) {
+  const currentJob = readFollowUpJob(jobPath);
+  let nextJob = {
+    ...currentJob,
+    status: 'in_progress',
+    remediationWorker: {
+      model: 'codex',
+      state: 'spawned',
+      spawnedAt,
+      ...worker,
+    },
+    remediationPlan: {
+      ...currentJob.remediationPlan,
+      nextAction: {
+        type: 'reconcile-worker',
+        round: currentJob?.remediationPlan?.currentRound || 1,
+        operatorVisibility: 'explicit',
+      },
+    },
+  };
+
+  nextJob = updateCurrentRound(nextJob, (round) => ({
+    ...round,
+    state: 'spawned',
+    spawnedAt,
+    worker: {
+      model: 'codex',
+      ...worker,
+    },
+  }));
+
+  if (worker?.workspaceDir) {
+    nextJob.workspaceDir = worker.workspaceDir;
+  }
+
+  writeFollowUpJob(jobPath, nextJob);
+  return { job: nextJob, jobPath };
 }
 
 function markFollowUpJobFailed({
@@ -321,6 +553,7 @@ function markFollowUpJobFailed({
   jobPath,
   error,
   failedAt = new Date().toISOString(),
+  failureCode = 'worker-failure',
   remediationWorker,
   failure = {},
 }) {
@@ -328,20 +561,165 @@ function markFollowUpJobFailed({
     rootDir,
     jobPath,
     destinationKey: 'failed',
+    buildNextJob: (currentJob) => {
+      let nextJob = {
+        ...currentJob,
+        status: 'failed',
+        failedAt,
+        remediationWorker: remediationWorker || currentJob.remediationWorker,
+        failure: {
+          code: failureCode,
+          ...failure,
+          message: error?.message || failure.message || String(error),
+        },
+        remediationPlan: {
+          ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
+          nextAction: null,
+        },
+      };
+
+      if (currentJob?.remediationPlan?.currentRound > 0) {
+        nextJob = updateCurrentRound(nextJob, (round) => ({
+          ...round,
+          state: 'failed',
+          finishedAt: failedAt,
+          worker: remediationWorker || round.worker || currentJob.remediationWorker || null,
+          failure: {
+            code: failureCode,
+            ...failure,
+            message: error?.message || failure.message || String(error),
+          },
+        }));
+      }
+
+      return nextJob;
+    },
+  });
+}
+
+function markFollowUpJobCompleted({
+  rootDir,
+  jobPath,
+  completion,
+  completedAt,
+  remediationWorker,
+  finishedAt = new Date().toISOString(),
+  completionPreview = null,
+}) {
+  const normalizedCompletedAt = completedAt ?? finishedAt;
+  const normalizedCompletion = completion || {
+    preview: completionPreview,
+  };
+
+  return moveTerminalJobRecord({
+    rootDir,
+    jobPath,
+    destinationKey: 'completed',
+    buildNextJob: (currentJob) => {
+      let nextJob = {
+        ...currentJob,
+        status: 'completed',
+        completedAt: normalizedCompletedAt,
+        remediationWorker: remediationWorker || currentJob.remediationWorker,
+        completion: normalizedCompletion,
+        remediationPlan: {
+          ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
+          nextAction: null,
+        },
+      };
+
+      if (currentJob?.remediationPlan?.currentRound > 0) {
+        nextJob = updateCurrentRound(nextJob, (round) => ({
+          ...round,
+          state: 'completed',
+          finishedAt: normalizedCompletedAt,
+          worker: remediationWorker || round.worker || currentJob.remediationWorker || null,
+          completion: normalizedCompletion,
+        }));
+      }
+
+      return nextJob;
+    },
+  });
+}
+
+function markFollowUpJobStopped({
+  rootDir,
+  jobPath,
+  stoppedAt = new Date().toISOString(),
+  stopReason,
+}) {
+  return moveTerminalJobRecord({
+    rootDir,
+    jobPath,
+    destinationKey: 'stopped',
     buildNextJob: (currentJob) => ({
       ...currentJob,
-      status: 'failed',
-      failedAt,
-      ...(remediationWorker ? { remediationWorker } : {}),
-      failure: {
-        ...failure,
-        message: error?.message || String(error),
+      status: 'stopped',
+      stoppedAt,
+      remediationPlan: {
+        ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
+        stopReason,
+        nextAction: null,
       },
     }),
   });
 }
 
+function requeueFollowUpJobForNextRound({
+  rootDir,
+  jobPath,
+  requestedAt = new Date().toISOString(),
+  requestedBy = 'operator',
+  reason = 'Additional remediation round requested.',
+}) {
+  const currentJob = readFollowUpJob(jobPath);
+  const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
+  const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
+
+  if (!['completed', 'failed'].includes(currentJob.status)) {
+    throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
+  }
+
+  if (currentRound >= maxRounds) {
+    return markFollowUpJobStopped({
+      rootDir,
+      jobPath,
+      stoppedAt: requestedAt,
+      stopReason: `Reached max remediation rounds (${currentRound}/${maxRounds}). ${reason}`,
+    });
+  }
+
+  const nextJob = {
+    ...currentJob,
+    status: 'pending',
+    pendingAt: requestedAt,
+    claimedAt: null,
+    claimedBy: null,
+    remediationWorker: null,
+    failure: null,
+    completedAt: null,
+    stoppedAt: null,
+    completion: null,
+    remediationPlan: {
+      ...(currentJob.remediationPlan || buildRemediationRoundPlan(maxRounds)),
+      stopReason: null,
+      nextAction: {
+        type: 'consume-pending-round',
+        round: currentRound + 1,
+        operatorVisibility: 'explicit',
+        requestedAt,
+        requestedBy,
+        reason,
+      },
+    },
+  };
+
+  return moveFollowUpJob(rootDir, jobPath, 'pending', nextJob);
+}
+
 export {
+  DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   buildFollowUpJob,
@@ -349,7 +727,9 @@ export {
   createFollowUpJob,
   ensureFollowUpJobDirs,
   extractReviewSummary,
+  getCurrentRound,
   getFollowUpJobDir,
+  listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,
   listInProgressFollowUpJobs,
   listPendingFollowUpJobPaths,
@@ -357,6 +737,8 @@ export {
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobSpawned,
+  markFollowUpJobStopped,
   readFollowUpJob,
+  requeueFollowUpJobForNextRound,
   writeFollowUpJob,
 };

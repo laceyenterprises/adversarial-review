@@ -187,6 +187,9 @@ function buildRemediationPrompt(job, { template = loadFollowUpPromptTemplate(ROO
     reviewerModel: job.reviewerModel,
     reviewCriticality: criticality,
     queueTriggeredAt: job.createdAt,
+    remediationMode: job?.remediationPlan?.mode || 'bounded-manual-rounds',
+    remediationRound: Number(job?.remediationPlan?.currentRound || 0) + 1,
+    maxRemediationRounds: Number(job?.remediationPlan?.maxRounds || 1),
   };
 
   return `${template}
@@ -204,6 +207,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}
 
 ## Required Operating Rules
 - Work on the PR branch that is already checked out in this repository clone.
+- This is one bounded remediation round. Do not create an autonomous retry loop inside the worker.
 - Address the review findings directly in code, tests, or docs as needed.
 - Run the smallest relevant validation before finishing.
 - Commit the remediation changes and push the PR branch.
@@ -490,6 +494,7 @@ function reconcileFollowUpJob({
       rootDir,
       jobPath,
       failedAt: completedAt,
+      failureCode: 'manual-inspection-required',
       error: new Error(
         `Remediation worker PID ${worker.processId} still appears active beyond the reconciliation runtime cap. Manual inspection required before trusting the PID association.`
       ),
@@ -523,6 +528,7 @@ function reconcileFollowUpJob({
       rootDir,
       jobPath,
       failedAt: completedAt,
+      failureCode: 'invalid-output-path',
       error: err,
       remediationWorker: {
         ...worker,
@@ -563,6 +569,7 @@ function reconcileFollowUpJob({
         finalMessagePath: worker.outputPath || null,
         finalMessageBytes: finalMessage.bytes,
         finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
+        preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
         finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
         logPath: worker.logPath || null,
       },
@@ -580,6 +587,7 @@ function reconcileFollowUpJob({
     rootDir,
     jobPath,
     failedAt: completedAt,
+    failureCode: finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion',
     error: new Error(
       finalMessage.exists
         ? 'Remediation worker exited without a non-empty final message artifact.'

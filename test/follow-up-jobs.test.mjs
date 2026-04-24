@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   buildFollowUpJob,
   claimNextFollowUpJob,
@@ -13,6 +14,8 @@ import {
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
   readFollowUpJob,
+  requeueFollowUpJobForNextRound,
+  writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 
 function makeJobInput(rootDir) {
@@ -62,6 +65,9 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.equal(job.reviewSummary, 'Tighten null handling.');
   assert.equal(job.sessionHandoff.resumePreferred, true);
   assert.equal(job.sessionHandoff.resumeAvailable, false);
+  assert.equal(job.remediationPlan.mode, 'bounded-manual-rounds');
+  assert.equal(job.remediationPlan.maxRounds, DEFAULT_MAX_REMEDIATION_ROUNDS);
+  assert.deepEqual(job.remediationPlan.rounds, []);
   assert.match(job.jobId, /^laceyenterprises__clio-pr-42-/);
 });
 
@@ -92,6 +98,53 @@ test('createFollowUpJob does not overwrite an existing job file when ids collide
   assert.equal(secondPersisted.jobId, second.job.jobId);
 });
 
+test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const jobPath = path.join(rootDir, 'legacy.json');
+  writeFileSync(jobPath, `${JSON.stringify({
+    schemaVersion: 1,
+    kind: 'adversarial-review-follow-up',
+    status: 'completed',
+    jobId: 'legacy-job',
+    createdAt: '2026-04-21T08:00:00.000Z',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    critical: true,
+    reviewSummary: 'Legacy job',
+    reviewBody: 'Legacy body',
+    recommendedFollowUpAction: {
+      type: 'address-adversarial-review',
+      priority: 'high',
+      summary: 'Legacy',
+    },
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    claimedBy: {
+      workerType: 'codex-remediation',
+      launcherPid: 7,
+    },
+    remediationWorker: {
+      model: 'codex',
+      state: 'spawned',
+      processId: 8123,
+    },
+    completedAt: '2026-04-21T10:05:00.000Z',
+    completion: {
+      preview: 'Legacy completion',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const normalized = readFollowUpJob(jobPath);
+  assert.equal(normalized.schemaVersion, 2);
+  assert.equal(normalized.remediationPlan.mode, 'bounded-manual-rounds');
+  assert.equal(normalized.remediationPlan.maxRounds, DEFAULT_MAX_REMEDIATION_ROUNDS);
+  assert.equal(normalized.remediationPlan.currentRound, 1);
+  assert.equal(normalized.remediationPlan.rounds[0].state, 'completed');
+  assert.equal(normalized.remediationPlan.rounds[0].worker.processId, 8123);
+  assert.equal(normalized.remediationPlan.rounds[0].completion.preview, 'Legacy completion');
+  assert.equal(normalized.recommendedFollowUpAction.executionModel, 'bounded-manual-rounds');
+});
+
 test('claimNextFollowUpJob moves the oldest pending file into in-progress metadata', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
@@ -113,7 +166,86 @@ test('claimNextFollowUpJob moves the oldest pending file into in-progress metada
   assert.equal(claimed.job.claimedAt, '2026-04-21T10:00:00.000Z');
   assert.equal(claimed.job.claimedBy.workerType, 'codex-remediation');
   assert.equal(claimed.job.claimedBy.launcherPid, 4242);
+  assert.equal(claimed.job.remediationPlan.currentRound, 1);
+  assert.equal(claimed.job.remediationPlan.rounds[0].state, 'claimed');
   assert.equal(existsSync(path.join(getFollowUpJobDir(rootDir, 'pending'), `${claimed.job.jobId}.json`)), false);
+});
+
+test('claimNextFollowUpJob skips exhausted pending jobs after moving them to stopped', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const exhausted = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    prNumber: 7,
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    maxRemediationRounds: 1,
+  });
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    prNumber: 8,
+    reviewPostedAt: '2026-04-21T09:00:00.000Z',
+  });
+
+  writeFollowUpJob(exhausted.jobPath, {
+    ...exhausted.job,
+    remediationPlan: {
+      ...exhausted.job.remediationPlan,
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'completed' }],
+      nextAction: {
+        type: 'consume-pending-round',
+        round: 2,
+        operatorVisibility: 'explicit',
+      },
+    },
+  });
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    launcherPid: 4242,
+  });
+
+  assert.ok(claimed);
+  assert.equal(claimed.job.prNumber, 8);
+  assert.equal(
+    existsSync(path.join(getFollowUpJobDir(rootDir, 'stopped'), `${exhausted.job.jobId}.json`)),
+    true
+  );
+});
+
+test('claimNextFollowUpJob continues past an exhausted job when stopped-marking fails', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 1,
+  });
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    prNumber: 8,
+    reviewPostedAt: '2026-04-21T09:00:00.000Z',
+  });
+
+  const exhaustedPath = path.join(getFollowUpJobDir(rootDir, 'pending'), 'laceyenterprises__clio-pr-7-2026-04-21T08-00-00-000Z.json');
+  const exhausted = readFollowUpJob(exhaustedPath);
+  writeFollowUpJob(exhaustedPath, {
+    ...exhausted,
+    remediationPlan: {
+      ...exhausted.remediationPlan,
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'completed' }],
+    },
+  });
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    markStoppedImpl: () => {
+      throw new Error('broken stop move');
+    },
+  });
+
+  assert.ok(claimed);
+  assert.equal(claimed.job.prNumber, 8);
 });
 
 test('markFollowUpJobFailed moves an in-progress job into failed with error context', () => {
@@ -131,7 +263,9 @@ test('markFollowUpJobFailed moves an in-progress job into failed with error cont
   assert.match(failed.jobPath, /data\/follow-up-jobs\/failed\/.+\.json$/);
   assert.equal(failed.job.status, 'failed');
   assert.equal(failed.job.failedAt, '2026-04-21T10:05:00.000Z');
+  assert.equal(failed.job.failure.code, 'worker-failure');
   assert.equal(failed.job.failure.message, 'gh repo clone failed');
+  assert.equal(failed.job.remediationPlan.rounds[0].state, 'failed');
   assert.equal(existsSync(claimed.jobPath), false);
 });
 
@@ -160,6 +294,34 @@ test('markFollowUpJobFailed is idempotent when the failed record already exists'
   assert.equal(repeated.job.failure.message, 'first failure');
 });
 
+test('markFollowUpJobFailed preserves remediationWorker metadata for existing callers', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  writeFollowUpJob(claimed.jobPath, {
+    ...claimed.job,
+    remediationWorker: {
+      model: 'codex',
+      state: 'spawned',
+      processId: 8123,
+      outputPath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md',
+    },
+  });
+
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath: claimed.jobPath,
+    error: new Error('worker crashed'),
+    failedAt: '2026-04-21T10:05:00.000Z',
+    failure: {
+      finalMessagePath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md',
+    },
+  });
+
+  assert.equal(failed.job.remediationWorker.processId, 8123);
+  assert.equal(failed.job.failure.finalMessagePath, 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md');
+});
+
 test('markFollowUpJobCompleted moves an in-progress job into completed with reconciliation context', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
@@ -180,6 +342,31 @@ test('markFollowUpJobCompleted moves an in-progress job into completed with reco
   assert.equal(completed.job.completedAt, '2026-04-21T10:07:00.000Z');
   assert.equal(completed.job.completion.source, 'codex-output-last-message');
   assert.equal(existsSync(claimed.jobPath), false);
+});
+
+test('markFollowUpJobCompleted preserves metadata for finishedAt/completionPreview callers', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  writeFollowUpJob(claimed.jobPath, {
+    ...claimed.job,
+    remediationWorker: {
+      model: 'codex',
+      state: 'spawned',
+      processId: 8123,
+    },
+  });
+
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    finishedAt: '2026-04-21T10:07:00.000Z',
+    completionPreview: 'Patched auth refresh path.',
+  });
+
+  assert.equal(completed.job.completedAt, '2026-04-21T10:07:00.000Z');
+  assert.equal(completed.job.completion.preview, 'Patched auth refresh path.');
+  assert.equal(completed.job.remediationWorker.processId, 8123);
 });
 
 test('markFollowUpJobCompleted is idempotent when the completed record already exists', () => {
@@ -275,4 +462,69 @@ test('markFollowUpJobFailed preserves an existing terminal record even if a stal
   assert.equal(persisted.failedAt, '2026-04-21T10:05:00.000Z');
   assert.equal(persisted.failure.message, 'first failure');
   assert.equal(existsSync(claimed.jobPath), false);
+});
+
+test('requeueFollowUpJobForNextRound moves a completed job back to pending for the next bounded round', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    finishedAt: '2026-04-21T10:05:00.000Z',
+    completionPreview: 'Patched auth refresh path.',
+  });
+
+  const requeued = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: completed.jobPath,
+    requestedAt: '2026-04-21T10:06:00.000Z',
+    requestedBy: 'operator',
+    reason: 'Reviewer requested another bounded pass.',
+  });
+
+  assert.match(requeued.jobPath, /data\/follow-up-jobs\/pending\/.+\.json$/);
+  assert.equal(requeued.job.status, 'pending');
+  assert.equal(requeued.job.remediationPlan.currentRound, 1);
+  assert.equal(requeued.job.remediationPlan.nextAction.round, 2);
+  assert.equal(requeued.job.remediationPlan.nextAction.requestedBy, 'operator');
+});
+
+test('requeueFollowUpJobForNextRound stops the job once the round cap is reached', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 1,
+  });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    finishedAt: '2026-04-21T10:05:00.000Z',
+    completionPreview: 'Patched auth refresh path.',
+  });
+
+  const stopped = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: completed.jobPath,
+    requestedAt: '2026-04-21T10:06:00.000Z',
+    reason: 'Operator requested another round even though the cap was reached.',
+  });
+
+  assert.match(stopped.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(stopped.job.status, 'stopped');
+  assert.match(stopped.job.remediationPlan.stopReason, /Reached max remediation rounds \(1\/1\)/);
+});
+
+test('requeueFollowUpJobForNextRound rejects non-terminal source statuses', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createFollowUpJob(makeJobInput(rootDir));
+
+  assert.throws(
+    () => requeueFollowUpJobForNextRound({
+      rootDir,
+      jobPath: created.jobPath,
+    }),
+    /Cannot requeue follow-up job .* from status pending/
+  );
 });

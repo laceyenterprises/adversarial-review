@@ -153,7 +153,11 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   assert.equal(reconciled.job.reReview.triggered, true);
   assert.equal(reconciled.job.reReview.status, 'pending');
   assert.equal(reviewRow.review_status, 'pending');
-  assert.equal(reviewRow.failure_message, 'Remediation landed and is ready for another adversarial pass.');
+  assert.equal(reviewRow.failure_message, null);
+  assert.equal(reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
+  assert.equal(reviewRow.rereview_requested_at, '2026-04-21T10:05:00.000Z');
+  assert.equal(reviewRow.last_attempted_at, null);
+  assert.equal(reviewRow.review_attempts, 1);
   assert.equal(reviewRow.posted_at, null);
 });
 

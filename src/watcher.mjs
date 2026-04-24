@@ -5,16 +5,16 @@
  */
 
 import { Octokit } from '@octokit/rest';
-import Database from 'better-sqlite3';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   routePR,
 } from './watcher-title-guardrails.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -25,41 +25,8 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 
 // ── DB setup ────────────────────────────────────────────────────────────────
 
-mkdirSync(join(ROOT, 'data'), { recursive: true });
-const db = new Database(join(ROOT, 'data', 'reviews.db'));
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS reviewed_prs (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo              TEXT NOT NULL,
-    pr_number         INTEGER NOT NULL,
-    reviewed_at       TEXT NOT NULL,
-    reviewer          TEXT NOT NULL,
-    pr_state          TEXT NOT NULL DEFAULT 'open',
-    merged_at         TEXT,
-    closed_at         TEXT,
-    linear_ticket     TEXT,
-    review_status     TEXT NOT NULL DEFAULT 'posted',
-    review_attempts   INTEGER NOT NULL DEFAULT 0,
-    last_attempted_at TEXT,
-    posted_at         TEXT,
-    failed_at         TEXT,
-    failure_message   TEXT,
-    UNIQUE(repo, pr_number)
-  )
-`);
-
-// Migrate existing rows that may be missing new columns (safe no-op if columns exist)
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN pr_state TEXT NOT NULL DEFAULT 'open'`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN merged_at TEXT`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN closed_at TEXT`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN linear_ticket TEXT`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN review_status TEXT NOT NULL DEFAULT 'posted'`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN review_attempts INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN last_attempted_at TEXT`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN posted_at TEXT`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN failed_at TEXT`); } catch (_) {}
-try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN failure_message TEXT`); } catch (_) {}
+const db = openReviewStateDb(ROOT);
+ensureReviewStateSchema(db);
 
 const stmtGetReviewRow = db.prepare(
   'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
@@ -74,7 +41,7 @@ const stmtMarkMalformed = db.prepare(
   "UPDATE reviewed_prs SET reviewer = 'malformed-title', review_status = 'malformed', failure_message = ?, failed_at = ?, last_attempted_at = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkAttemptStarted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'pending', last_attempted_at = ?, failure_message = NULL WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'pending', last_attempted_at = ?, failed_at = NULL, failure_message = NULL WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"

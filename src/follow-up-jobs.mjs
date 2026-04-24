@@ -716,16 +716,18 @@ function markFollowUpJobFailed({
     jobPath,
     destinationKey: 'failed',
     buildNextJob: (currentJob) => {
+      const failureDetails = {
+        ...failure,
+        code: failureCode,
+        message: error?.message || failure.message || String(error),
+      };
+
       let nextJob = {
         ...currentJob,
         status: 'failed',
         failedAt,
         remediationWorker: remediationWorker || currentJob.remediationWorker,
-        failure: {
-          code: failureCode,
-          ...failure,
-          message: error?.message || failure.message || String(error),
-        },
+        failure: failureDetails,
         remediationPlan: {
           ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
           nextAction: null,
@@ -738,11 +740,7 @@ function markFollowUpJobFailed({
           state: 'failed',
           finishedAt: failedAt,
           worker: remediationWorker || round.worker || currentJob.remediationWorker || null,
-          failure: {
-            code: failureCode,
-            ...failure,
-            message: error?.message || failure.message || String(error),
-          },
+          failure: failureDetails,
         }));
       }
 
@@ -757,6 +755,8 @@ function markFollowUpJobCompleted({
   completion,
   completedAt,
   remediationWorker,
+  remediationReply,
+  reReview,
   finishedAt = new Date().toISOString(),
   completionPreview = null,
 }) {
@@ -776,6 +776,8 @@ function markFollowUpJobCompleted({
         completedAt: normalizedCompletedAt,
         remediationWorker: remediationWorker || currentJob.remediationWorker,
         completion: normalizedCompletion,
+        remediationReply: remediationReply || currentJob.remediationReply,
+        reReview: reReview || currentJob.reReview,
         remediationPlan: {
           ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
           nextAction: null,
@@ -789,6 +791,8 @@ function markFollowUpJobCompleted({
           finishedAt: normalizedCompletedAt,
           worker: remediationWorker || round.worker || currentJob.remediationWorker || null,
           completion: normalizedCompletion,
+          remediationReply: remediationReply || round.remediationReply || currentJob.remediationReply || null,
+          reReview: reReview || round.reReview || currentJob.reReview || null,
         }));
       }
 

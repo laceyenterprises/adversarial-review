@@ -2,9 +2,13 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-function openReviewStateDb(rootDir) {
+const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
+
+function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
   mkdirSync(join(rootDir, 'data'), { recursive: true });
-  return new Database(join(rootDir, 'data', 'reviews.db'));
+  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  db.pragma(`busy_timeout = ${Math.max(0, Number(busyTimeoutMs) || 0)}`);
+  return db;
 }
 
 function ensureReviewStateSchema(db) {
@@ -25,6 +29,8 @@ function ensureReviewStateSchema(db) {
       posted_at         TEXT,
       failed_at         TEXT,
       failure_message   TEXT,
+      rereview_requested_at TEXT,
+      rereview_reason   TEXT,
       UNIQUE(repo, pr_number)
     )
   `);
@@ -39,6 +45,8 @@ function ensureReviewStateSchema(db) {
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN posted_at TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN failed_at TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN failure_message TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN rereview_requested_at TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN rereview_reason TEXT`); } catch {}
 }
 
 function getReviewRow(db, { repo, prNumber }) {
@@ -90,7 +98,7 @@ function requestReviewRereview({
     }
 
     db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'pending', last_attempted_at = ?, posted_at = NULL, failed_at = NULL, failure_message = ? WHERE repo = ? AND pr_number = ?"
+      "UPDATE reviewed_prs SET review_status = 'pending', posted_at = NULL, failed_at = NULL, failure_message = NULL, rereview_requested_at = ?, rereview_reason = ? WHERE repo = ? AND pr_number = ?"
     ).run(
       requestedAt,
       reason || 'Re-review requested from remediation reply.',

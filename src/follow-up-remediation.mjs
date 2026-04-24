@@ -689,19 +689,14 @@ function reconcileFollowUpJob({
         finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
         logPath: worker.logPath || null,
       },
-    });
-
-    const completedWithReply = {
-      ...completed.job,
       remediationReply,
       reReview: rereview,
-    };
-    writeFileSync(completed.jobPath, `${JSON.stringify(completedWithReply, null, 2)}\n`, 'utf8');
+    });
 
     return {
       action: 'completed',
       reason: 'final-message-artifact-present',
-      job: completedWithReply,
+      job: completed.job,
       jobPath: completed.jobPath,
     };
   }

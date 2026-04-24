@@ -1,29 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
 
 function setupDb() {
   const db = new Database(':memory:');
-  db.exec(`
-    CREATE TABLE reviewed_prs (
-      id                INTEGER PRIMARY KEY AUTOINCREMENT,
-      repo              TEXT NOT NULL,
-      pr_number         INTEGER NOT NULL,
-      reviewed_at       TEXT NOT NULL,
-      reviewer          TEXT NOT NULL,
-      pr_state          TEXT NOT NULL DEFAULT 'open',
-      merged_at         TEXT,
-      closed_at         TEXT,
-      linear_ticket     TEXT,
-      review_status     TEXT NOT NULL DEFAULT 'posted',
-      review_attempts   INTEGER NOT NULL DEFAULT 0,
-      last_attempted_at TEXT,
-      posted_at         TEXT,
-      failed_at         TEXT,
-      failure_message   TEXT,
-      UNIQUE(repo, pr_number)
-    )
-  `);
+  ensureReviewStateSchema(db);
   return db;
 }
 

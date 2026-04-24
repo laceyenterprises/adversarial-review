@@ -172,6 +172,9 @@ function buildRemediationPrompt(job, { template = loadFollowUpPromptTemplate(ROO
     reviewerModel: job.reviewerModel,
     reviewCriticality: criticality,
     queueTriggeredAt: job.createdAt,
+    remediationMode: job?.remediationPlan?.mode || 'bounded-manual-rounds',
+    remediationRound: Number(job?.remediationPlan?.currentRound || 0) + 1,
+    maxRemediationRounds: Number(job?.remediationPlan?.maxRounds || 1),
   };
 
   return `${template}
@@ -189,6 +192,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}
 
 ## Required Operating Rules
 - Work on the PR branch that is already checked out in this repository clone.
+- This is one bounded remediation round. Do not create an autonomous retry loop inside the worker.
 - Address the review findings directly in code, tests, or docs as needed.
 - Run the smallest relevant validation before finishing.
 - Commit the remediation changes and push the PR branch.

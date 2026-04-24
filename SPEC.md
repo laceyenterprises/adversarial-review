@@ -135,6 +135,17 @@ GitHub PR opened
 \- Reconciled terminal records must preserve operator-visible metadata: worker PID, workspace path, log path, final-message path, and a short completion preview or explicit failure reason
 \- This slice preserves wrapper-owned review completion semantics; it does not grant the remediation worker ownership of the GitHub review side effect
 
+\#\#\# 5\.1\.1 Bounded remediation rounds (LAC-206 slice)
+\- Follow-up remediation must not remain an implicit one-shot with no durable path for a second bounded pass
+\- Each follow-up job must carry an explicit bounded remediation plan:
+\- \`mode = bounded-manual-rounds\`
+\- \`maxRounds\` cap stored durably in the job record
+\- \`currentRound\` plus append-only \`rounds[]\` history for operator inspection
+\- Starting a worker consumes exactly one round and records round claim/spawn metadata durably
+\- Advancing to another round must remain explicit and operator-visible; do not hide it inside an autonomous retry loop
+\- When an operator requests another round and the cap has already been reached, the job must move to a terminal \`stopped\` state with an explicit stop reason
+\- Manual or scripted requeue is acceptable in this slice; a fully autonomous multi-round loop is intentionally deferred
+
 \#\#\# 5\.2 Remediation worker launch contract (new hardening requirements)
 \- A detached remediation launch must not treat \"process spawned\" as equivalent to \"durable worker established\"
 \- Required control-plane distinctions:

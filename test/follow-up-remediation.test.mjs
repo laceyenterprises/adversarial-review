@@ -187,7 +187,9 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
   const promptPath = path.join(workspaceDir, 'prompt.md');
   const outputPath = path.join(workspaceDir, 'codex-last-message.md');
   const logPath = path.join(workspaceDir, 'codex.log');
-  const authPath = path.join(workspaceDir, 'auth.json');
+  const codexHome = path.join(workspaceDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
   writeFileSync(promptPath, 'Fix the bug.\n', 'utf8');
   writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }), 'utf8');
 
@@ -195,9 +197,13 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
   const originalCodexCli = process.env.CODEX_CLI_PATH;
   const originalCodexHome = process.env.CODEX_HOME;
   const originalPath = process.env.PATH;
+  const originalHome = process.env.HOME;
+  const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
   process.env.CODEX_AUTH_PATH = authPath;
   process.env.CODEX_CLI_PATH = '/tmp/codex';
-  process.env.CODEX_HOME = workspaceDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.HOME = workspaceDir;
+  process.env.OPENAI_API_KEY = 'sk-test';
   process.env.PATH = '/custom/bin';
 
   const spawnCalls = [];
@@ -233,7 +239,10 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     assert.equal(spawnCalls[0].options.cwd, workspaceDir);
     assert.equal(spawnCalls[0].options.detached, true);
     assert.equal(spawnCalls[0].options.env.CODEX_AUTH_PATH, authPath);
-    assert.equal(spawnCalls[0].options.env.CODEX_HOME, workspaceDir);
+    assert.equal(spawnCalls[0].options.env.CODEX_HOME, codexHome);
+    assert.equal(spawnCalls[0].options.env.HOME, workspaceDir);
+    assert.equal(spawnCalls[0].options.env.OPENAI_API_KEY, undefined);
+    assert.deepEqual(worker.startupEvidence.sanitizedEnv.stripped, ['OPENAI_API_KEY']);
     assert.match(spawnCalls[0].options.env.PATH, /\/custom\/bin/);
   } finally {
     if (originalAuthPath === undefined) {
@@ -255,6 +264,78 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
       delete process.env.PATH;
     } else {
       process.env.PATH = originalPath;
+    }
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    if (originalOpenAiApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+    }
+  }
+});
+
+test('spawnCodexRemediationWorker fails closed on conflicting inherited local OAuth env', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const logPath = path.join(workspaceDir, 'codex.log');
+  const authRoot = path.join(workspaceDir, 'placey');
+  const codexHome = path.join(authRoot, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(promptPath, 'Fix the bug.\n', 'utf8');
+  writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }), 'utf8');
+
+  const originalAuthPath = process.env.CODEX_AUTH_PATH;
+  const originalCodexCli = process.env.CODEX_CLI_PATH;
+  const originalCodexHome = process.env.CODEX_HOME;
+  const originalHome = process.env.HOME;
+
+  process.env.CODEX_AUTH_PATH = authPath;
+  process.env.CODEX_CLI_PATH = '/tmp/codex';
+  process.env.CODEX_HOME = codexHome;
+  process.env.HOME = path.join(workspaceDir, 'airlock');
+
+  try {
+    assert.throws(
+      () => spawnCodexRemediationWorker({
+        workspaceDir,
+        promptPath,
+        outputPath,
+        logPath,
+      }),
+      (error) => {
+        assert.equal(error.name, 'StartupContractError');
+        assert.equal(error.violationType, 'conflicting-env-contract-breach');
+        assert.equal(error.startupEvidence.policy_violations[0].requested_value, authRoot);
+        assert.equal(error.startupEvidence.policy_violations[0].resolved_value, process.env.HOME);
+        return true;
+      }
+    );
+  } finally {
+    if (originalAuthPath === undefined) {
+      delete process.env.CODEX_AUTH_PATH;
+    } else {
+      process.env.CODEX_AUTH_PATH = originalAuthPath;
+    }
+    if (originalCodexCli === undefined) {
+      delete process.env.CODEX_CLI_PATH;
+    } else {
+      process.env.CODEX_CLI_PATH = originalCodexCli;
+    }
+    if (originalCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = originalCodexHome;
+    }
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
     }
   }
 });

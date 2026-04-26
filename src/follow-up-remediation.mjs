@@ -50,6 +50,18 @@ class OAuthError extends Error {
   }
 }
 
+class StartupContractError extends Error {
+  constructor(reason, { violationType, requestedValue = null, resolvedValue = null, startupEvidence = null } = {}) {
+    super(reason);
+    this.name = 'StartupContractError';
+    this.isPolicyViolation = true;
+    this.violationType = violationType || 'conflicting-env-contract-breach';
+    this.requestedValue = requestedValue;
+    this.resolvedValue = resolvedValue;
+    this.startupEvidence = startupEvidence;
+  }
+}
+
 function resolveCodexCliPath() {
   return process.env.CODEX_CLI_PATH || process.env.CODEX_CLI || 'codex';
 }
@@ -126,6 +138,121 @@ function formatFencedBlock(text, language = 'text') {
 function buildInheritedPath(currentPath = process.env.PATH || '') {
   const segments = [...DEFAULT_PATH_PREFIX, ...String(currentPath).split(':').filter(Boolean)];
   return [...new Set(segments)].join(':');
+}
+
+function resolveCodexAuthHome(authPath) {
+  const normalizedAuthPath = resolve(authPath);
+  const segments = normalizedAuthPath.split('/').filter(Boolean);
+  if (segments[0] === 'Users' && segments[1]) {
+    return `/${segments[0]}/${segments[1]}`;
+  }
+  return dirname(dirname(normalizedAuthPath));
+}
+
+function resolveCodexAuthOwner(authPath) {
+  const homePath = resolveCodexAuthHome(authPath);
+  return homePath.split('/').filter(Boolean).at(-1) || null;
+}
+
+function buildCodexStartupPolicyViolation({ reason, requestedValue = null, resolvedValue = null }) {
+  return {
+    violation_type: 'conflicting-env-contract-breach',
+    reason,
+    requested_value: requestedValue,
+    resolved_value: resolvedValue,
+  };
+}
+
+function prepareCodexRemediationStartupEnv() {
+  const authPath = resolveCodexAuthPath();
+  const authHome = resolveCodexAuthHome(authPath);
+  const authOwner = resolveCodexAuthOwner(authPath);
+  const codexHome = dirname(authPath);
+  const strippedEnv = [];
+  const policyViolations = [];
+
+  if (process.env.OPENAI_API_KEY) {
+    strippedEnv.push('OPENAI_API_KEY');
+  }
+
+  if (process.env.CODEX_AUTH_PATH && resolve(process.env.CODEX_AUTH_PATH) !== resolve(authPath)) {
+    policyViolations.push(
+      buildCodexStartupPolicyViolation({
+        reason: 'inherited CODEX_AUTH_PATH does not satisfy the requested local OAuth contract',
+        requestedValue: authPath,
+        resolvedValue: process.env.CODEX_AUTH_PATH,
+      })
+    );
+  }
+
+  if ((process.env.HOME || homedir()) && resolve(process.env.HOME || homedir()) !== resolve(authHome)) {
+    policyViolations.push(
+      buildCodexStartupPolicyViolation({
+        reason: 'inherited HOME does not satisfy the requested local OAuth owner contract',
+        requestedValue: authHome,
+        resolvedValue: process.env.HOME || homedir(),
+      })
+    );
+  }
+
+  if (process.env.CODEX_HOME && resolve(process.env.CODEX_HOME) !== resolve(codexHome)) {
+    policyViolations.push(
+      buildCodexStartupPolicyViolation({
+        reason: 'inherited CODEX_HOME does not satisfy the requested local OAuth contract',
+        requestedValue: codexHome,
+        resolvedValue: process.env.CODEX_HOME,
+      })
+    );
+  }
+
+  const startupEvidence = {
+    stage: 'pre-side-effect-gate',
+    requestedContract: {
+      authMode: 'local-oauth',
+      authOwnerUser: authOwner,
+      authHome,
+      authPath,
+      forbiddenFallbacks: ['api-key', 'openai-api-key'],
+      forbiddenCalls: ['authenticate'],
+    },
+    resolvedStartup: {
+      resolvedAuthMode: 'local-oauth',
+      resolvedAuthOwner: authOwner,
+      authHome,
+      authPath,
+      codexHome,
+    },
+    sanitizedEnv: {
+      stripped: strippedEnv,
+    },
+    policy_violations: policyViolations,
+  };
+
+  if (policyViolations.length) {
+    throw new StartupContractError(
+      policyViolations.map((item) => item.reason).join('; '),
+      {
+        requestedValue: policyViolations[0].requested_value,
+        resolvedValue: policyViolations[0].resolved_value,
+        startupEvidence,
+      }
+    );
+  }
+
+  const env = {
+    ...process.env,
+    PATH: buildInheritedPath(process.env.PATH),
+    CODEX_AUTH_PATH: authPath,
+    CODEX_HOME: codexHome,
+    HOME: authHome,
+  };
+  delete env.OPENAI_API_KEY;
+
+  return {
+    authPath,
+    env,
+    startupEvidence,
+  };
 }
 
 function assertValidRepoSlug(repo) {
@@ -291,16 +418,7 @@ function spawnCodexRemediationWorker({
   spawnImpl = spawn,
 }) {
   const codexCli = resolveCodexCliPath();
-  const authPath = resolveCodexAuthPath();
-  const codexHome = process.env.CODEX_HOME || dirname(authPath);
-  const env = {
-    ...process.env,
-    PATH: buildInheritedPath(process.env.PATH),
-    CODEX_AUTH_PATH: authPath,
-    CODEX_HOME: codexHome,
-    HOME: process.env.HOME || homedir(),
-  };
-  delete env.OPENAI_API_KEY;
+  const { env, startupEvidence } = prepareCodexRemediationStartupEnv();
 
   const promptFd = openSync(promptPath, 'r');
   const stdoutFd = openSync(logPath, 'a');
@@ -336,6 +454,7 @@ function spawnCodexRemediationWorker({
       promptPath,
       outputPath,
       logPath,
+      startupEvidence,
       command: [
         codexCli,
         'exec',
@@ -873,11 +992,23 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
+    const failure = err.isPolicyViolation
+      ? {
+          policyViolation: {
+            type: err.violationType,
+            requestedValue: err.requestedValue,
+            resolvedValue: err.resolvedValue,
+          },
+          startupEvidence: err.startupEvidence || null,
+        }
+      : {};
     const failed = markFollowUpJobFailed({
       rootDir,
       jobPath: claimed.jobPath,
       error: err,
       failedAt: now(),
+      failureCode: err.isPolicyViolation ? 'startup-contract-violation' : 'worker-failure',
+      failure,
     });
     err.followUpJobPath = failed.jobPath;
     throw err;
@@ -928,6 +1059,7 @@ async function main() {
 export {
   FOLLOW_UP_PROMPT_PATH,
   OAuthError,
+  StartupContractError,
   assertCodexOAuth,
   assertValidRepoSlug,
   buildRemediationPrompt,
@@ -937,6 +1069,7 @@ export {
   digestWorkerFinalMessage,
   isWorkerProcessRunning,
   loadFollowUpPromptTemplate,
+  prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,

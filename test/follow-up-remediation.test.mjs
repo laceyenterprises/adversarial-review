@@ -138,9 +138,13 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   assert.deepEqual(result.workspaceState, { action: 'reused', reason: 'missing' });
   assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
     ['gh', 'repo', 'clone', 'laceyenterprises/clio', result.workspaceDir],
+    ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
+    ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
     ['gh', 'pr', 'checkout', '7'],
   ]);
-  assert.equal(calls[1].options.cwd, result.workspaceDir);
+  // pr checkout still runs with cwd set to the workspace; the git -C config
+  // calls embed the workspace dir as an arg instead, so cwd is unset there.
+  assert.equal(calls[3].options.cwd, result.workspaceDir);
 });
 
 test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remote', async () => {
@@ -172,8 +176,57 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
     ['git', 'config', '--get', 'remote.origin.url'],
     ['git', 'status', '--short'],
     ['gh', 'repo', 'clone', 'laceyenterprises/clio', result.workspaceDir],
+    ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
+    ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
     ['gh', 'pr', 'checkout', '7'],
   ]);
+});
+
+test('prepareWorkspaceForJob honors REMEDIATION_WORKER_GIT_NAME / REMEDIATION_WORKER_GIT_EMAIL env overrides', async () => {
+  // Re-import the module under test with the env vars set, so the constants
+  // pick up the override at module init. Node ESM caches modules per URL,
+  // but importing a fresh URL (cache-buster query param) gives us a clean
+  // module instance for this test.
+  const prevName = process.env.REMEDIATION_WORKER_GIT_NAME;
+  const prevEmail = process.env.REMEDIATION_WORKER_GIT_EMAIL;
+  process.env.REMEDIATION_WORKER_GIT_NAME = 'Test Worker Identity';
+  process.env.REMEDIATION_WORKER_GIT_EMAIL = 'test-worker@example.invalid';
+  try {
+    const fresh = await import(
+      `../src/follow-up-remediation.mjs?cache-bust=${Date.now()}-${Math.random()}`
+    );
+
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+    const calls = [];
+    await fresh.prepareWorkspaceForJob({
+      rootDir,
+      job: makeJob(),
+      execFileImpl: async (command, args, options = {}) => {
+        calls.push({ command, args });
+        if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+          mkdirSync(path.join(args[3], '.git'), { recursive: true });
+        }
+        return { stdout: '', stderr: '' };
+      },
+    });
+
+    const configCalls = calls.filter(
+      (c) => c.command === 'git' && c.args.includes('config')
+    );
+    assert.equal(configCalls.length, 2, 'should set user.name and user.email');
+    assert.deepEqual(
+      configCalls.map((c) => c.args.slice(-2)),
+      [
+        ['user.name', 'Test Worker Identity'],
+        ['user.email', 'test-worker@example.invalid'],
+      ]
+    );
+  } finally {
+    if (prevName === undefined) delete process.env.REMEDIATION_WORKER_GIT_NAME;
+    else process.env.REMEDIATION_WORKER_GIT_NAME = prevName;
+    if (prevEmail === undefined) delete process.env.REMEDIATION_WORKER_GIT_EMAIL;
+    else process.env.REMEDIATION_WORKER_GIT_EMAIL = prevEmail;
+  }
 });
 
 test('buildInheritedPath prepends required system directories without dropping existing PATH entries', () => {

@@ -29,6 +29,18 @@ const ROOT = join(__dirname, '..');
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+// Identity the remediation worker should commit under. Without this, the
+// workspace inherits the operator's global git config and every remediation
+// commit (and therefore every blame line GitHub renders for it) looks like
+// the human operator wrote it. We set these *locally* on the per-job
+// workspace so they never leak into other repos. Override via env when a
+// non-Codex remediation-worker class is introduced (Claude Code, Gemini, …).
+const REMEDIATION_WORKER_GIT_NAME =
+  process.env.REMEDIATION_WORKER_GIT_NAME || 'Codex Remediation Worker';
+const REMEDIATION_WORKER_GIT_EMAIL =
+  process.env.REMEDIATION_WORKER_GIT_EMAIL || 'codex-remediation-worker@laceyenterprises.com';
+
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
 const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
 const FINAL_MESSAGE_REDACTIONS = [
@@ -396,6 +408,19 @@ async function prepareWorkspaceForJob({
       maxBuffer: 10 * 1024 * 1024,
     });
   }
+
+  // Set local git identity *before* the PR checkout so that the very first
+  // commits the remediation worker makes (including any in-process author
+  // hooks that read `git config user.*` at startup) see the correct values.
+  // Local config (no --global) is scoped to .git/config in this workspace
+  // alone — it cannot leak into the operator's other repos. Idempotent: a
+  // re-run against an existing workspace just overwrites the same values.
+  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.name', REMEDIATION_WORKER_GIT_NAME], {
+    maxBuffer: 1 * 1024 * 1024,
+  });
+  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.email', REMEDIATION_WORKER_GIT_EMAIL], {
+    maxBuffer: 1 * 1024 * 1024,
+  });
 
   await execFileImpl('gh', ['pr', 'checkout', String(job.prNumber)], {
     cwd: workspaceDir,

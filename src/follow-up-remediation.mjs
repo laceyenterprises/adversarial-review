@@ -30,16 +30,57 @@ const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-// Identity the remediation worker should commit under. Without this, the
-// workspace inherits the operator's global git config and every remediation
-// commit (and therefore every blame line GitHub renders for it) looks like
-// the human operator wrote it. We set these *locally* on the per-job
-// workspace so they never leak into other repos. Override via env when a
-// non-Codex remediation-worker class is introduced (Claude Code, Gemini, …).
-const REMEDIATION_WORKER_GIT_NAME =
-  process.env.REMEDIATION_WORKER_GIT_NAME || 'Codex Remediation Worker';
-const REMEDIATION_WORKER_GIT_EMAIL =
-  process.env.REMEDIATION_WORKER_GIT_EMAIL || 'codex-remediation-worker@laceyenterprises.com';
+// Identity each remediation-worker class should commit under. Without this,
+// the workspace inherits the operator's global git config and every
+// remediation commit looks like the human operator wrote it. We set these
+// *locally* on the per-job workspace so they never leak into other repos.
+//
+// Keyed by worker class so adding a new class (e.g., claude-code remediation
+// when that spawn path lands) is a one-row change instead of touching call
+// sites. Each class supports an env-var override for ops flexibility:
+//
+//   REMEDIATION_WORKER_GIT_NAME_<CLASS>   /  REMEDIATION_WORKER_GIT_EMAIL_<CLASS>
+//
+// where <CLASS> is the upper-snake-case form of the worker class
+// (e.g. claude-code → CLAUDE_CODE).
+const REMEDIATION_WORKER_IDENTITIES = {
+  codex: {
+    name:
+      process.env.REMEDIATION_WORKER_GIT_NAME_CODEX ||
+      'Codex Remediation Worker',
+    email:
+      process.env.REMEDIATION_WORKER_GIT_EMAIL_CODEX ||
+      'codex-remediation-worker@laceyenterprises.com',
+  },
+  'claude-code': {
+    name:
+      process.env.REMEDIATION_WORKER_GIT_NAME_CLAUDE_CODE ||
+      'Claude Code Remediation Worker',
+    email:
+      process.env.REMEDIATION_WORKER_GIT_EMAIL_CLAUDE_CODE ||
+      'claude-code-remediation-worker@laceyenterprises.com',
+  },
+};
+
+// The remediation-worker class the consume path spawns today. Currently the
+// only spawn function is `spawnCodexRemediationWorker`, so the default class
+// is 'codex'. When a Claude Code remediation worker is added, callers (or a
+// per-job field) will pass the appropriate class through to
+// `prepareWorkspaceForJob`. Identifying the class up front means the git
+// identity is right from the first commit, not after a follow-up rewrite.
+const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
+
+function remediationWorkerGitIdentity(workerClass) {
+  const identity = REMEDIATION_WORKER_IDENTITIES[workerClass];
+  if (!identity) {
+    throw new Error(
+      `unknown remediation worker class: ${JSON.stringify(workerClass)}; ` +
+      `cannot determine git identity. Add an entry to ` +
+      `REMEDIATION_WORKER_IDENTITIES in src/follow-up-remediation.mjs.`
+    );
+  }
+  return identity;
+}
 
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
 const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
@@ -388,6 +429,7 @@ ${formatFencedBlock(JSON.stringify(replyContract, null, 2), 'json')}
 async function prepareWorkspaceForJob({
   rootDir = ROOT,
   job,
+  workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
   execFileImpl = execFileAsync,
 }) {
   const repo = assertValidRepoSlug(job.repo);
@@ -409,16 +451,19 @@ async function prepareWorkspaceForJob({
     });
   }
 
-  // Set local git identity *before* the PR checkout so that the very first
+  // Set local git identity *before* the PR checkout so the very first
   // commits the remediation worker makes (including any in-process author
   // hooks that read `git config user.*` at startup) see the correct values.
   // Local config (no --global) is scoped to .git/config in this workspace
   // alone — it cannot leak into the operator's other repos. Idempotent: a
   // re-run against an existing workspace just overwrites the same values.
-  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.name', REMEDIATION_WORKER_GIT_NAME], {
+  // The identity is keyed on workerClass so the soon-to-land claude-code
+  // remediation path doesn't need a separate code change here.
+  const gitIdentity = remediationWorkerGitIdentity(workerClass);
+  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.name', gitIdentity.name], {
     maxBuffer: 1 * 1024 * 1024,
   });
-  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.email', REMEDIATION_WORKER_GIT_EMAIL], {
+  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.email', gitIdentity.email], {
     maxBuffer: 1 * 1024 * 1024,
   });
 
@@ -1096,6 +1141,8 @@ export {
   loadFollowUpPromptTemplate,
   prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,
+  remediationWorkerGitIdentity,
+  REMEDIATION_WORKER_IDENTITIES,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
   resolveCodexCliPath,

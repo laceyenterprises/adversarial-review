@@ -12,6 +12,7 @@ import {
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  remediationWorkerGitIdentity,
   resolveJobRelativePath,
   spawnCodexRemediationWorker,
 } from '../src/follow-up-remediation.mjs';
@@ -182,50 +183,95 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
   ]);
 });
 
-test('prepareWorkspaceForJob honors REMEDIATION_WORKER_GIT_NAME / REMEDIATION_WORKER_GIT_EMAIL env overrides', async () => {
+test('remediationWorkerGitIdentity returns the codex identity by default', () => {
+  const codex = remediationWorkerGitIdentity('codex');
+  assert.equal(codex.name, 'Codex Remediation Worker');
+  assert.equal(codex.email, 'codex-remediation-worker@laceyenterprises.com');
+});
+
+test('remediationWorkerGitIdentity returns the claude-code identity', () => {
+  const cc = remediationWorkerGitIdentity('claude-code');
+  assert.equal(cc.name, 'Claude Code Remediation Worker');
+  assert.equal(cc.email, 'claude-code-remediation-worker@laceyenterprises.com');
+});
+
+test('remediationWorkerGitIdentity throws on unknown worker class', () => {
+  assert.throws(
+    () => remediationWorkerGitIdentity('not-a-real-class'),
+    /unknown remediation worker class/
+  );
+  // Failing closed (not silently falling back to operator identity) is the
+  // entire point: a typo in `workerClass` must surface as an error rather
+  // than reverting to the broken behavior the previous PR was fixing.
+});
+
+test('prepareWorkspaceForJob uses the claude-code identity when workerClass="claude-code"', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    workerClass: 'claude-code',
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args });
+      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  const configCalls = calls.filter(
+    (c) => c.command === 'git' && c.args.includes('config')
+  );
+  assert.deepEqual(
+    configCalls.map((c) => c.args.slice(-2)),
+    [
+      ['user.name', 'Claude Code Remediation Worker'],
+      ['user.email', 'claude-code-remediation-worker@laceyenterprises.com'],
+    ]
+  );
+});
+
+test('prepareWorkspaceForJob honors per-class env overrides', async () => {
   // Re-import the module under test with the env vars set, so the constants
   // pick up the override at module init. Node ESM caches modules per URL,
   // but importing a fresh URL (cache-buster query param) gives us a clean
-  // module instance for this test.
-  const prevName = process.env.REMEDIATION_WORKER_GIT_NAME;
-  const prevEmail = process.env.REMEDIATION_WORKER_GIT_EMAIL;
-  process.env.REMEDIATION_WORKER_GIT_NAME = 'Test Worker Identity';
-  process.env.REMEDIATION_WORKER_GIT_EMAIL = 'test-worker@example.invalid';
+  // module instance.
+  const prev = {
+    codexName: process.env.REMEDIATION_WORKER_GIT_NAME_CODEX,
+    codexEmail: process.env.REMEDIATION_WORKER_GIT_EMAIL_CODEX,
+    ccName: process.env.REMEDIATION_WORKER_GIT_NAME_CLAUDE_CODE,
+    ccEmail: process.env.REMEDIATION_WORKER_GIT_EMAIL_CLAUDE_CODE,
+  };
+  process.env.REMEDIATION_WORKER_GIT_NAME_CODEX = 'Codex Test Identity';
+  process.env.REMEDIATION_WORKER_GIT_EMAIL_CODEX = 'codex-test@example.invalid';
+  process.env.REMEDIATION_WORKER_GIT_NAME_CLAUDE_CODE = 'Claude Code Test Identity';
+  process.env.REMEDIATION_WORKER_GIT_EMAIL_CLAUDE_CODE = 'cc-test@example.invalid';
   try {
     const fresh = await import(
       `../src/follow-up-remediation.mjs?cache-bust=${Date.now()}-${Math.random()}`
     );
 
-    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-    const calls = [];
-    await fresh.prepareWorkspaceForJob({
-      rootDir,
-      job: makeJob(),
-      execFileImpl: async (command, args, options = {}) => {
-        calls.push({ command, args });
-        if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-          mkdirSync(path.join(args[3], '.git'), { recursive: true });
-        }
-        return { stdout: '', stderr: '' };
-      },
-    });
+    // Verify codex picks up its env override.
+    const codex = fresh.remediationWorkerGitIdentity('codex');
+    assert.equal(codex.name, 'Codex Test Identity');
+    assert.equal(codex.email, 'codex-test@example.invalid');
 
-    const configCalls = calls.filter(
-      (c) => c.command === 'git' && c.args.includes('config')
-    );
-    assert.equal(configCalls.length, 2, 'should set user.name and user.email');
-    assert.deepEqual(
-      configCalls.map((c) => c.args.slice(-2)),
-      [
-        ['user.name', 'Test Worker Identity'],
-        ['user.email', 'test-worker@example.invalid'],
-      ]
-    );
+    // Verify claude-code picks up its env override.
+    const cc = fresh.remediationWorkerGitIdentity('claude-code');
+    assert.equal(cc.name, 'Claude Code Test Identity');
+    assert.equal(cc.email, 'cc-test@example.invalid');
   } finally {
-    if (prevName === undefined) delete process.env.REMEDIATION_WORKER_GIT_NAME;
-    else process.env.REMEDIATION_WORKER_GIT_NAME = prevName;
-    if (prevEmail === undefined) delete process.env.REMEDIATION_WORKER_GIT_EMAIL;
-    else process.env.REMEDIATION_WORKER_GIT_EMAIL = prevEmail;
+    for (const [envKey, prevVal] of [
+      ['REMEDIATION_WORKER_GIT_NAME_CODEX', prev.codexName],
+      ['REMEDIATION_WORKER_GIT_EMAIL_CODEX', prev.codexEmail],
+      ['REMEDIATION_WORKER_GIT_NAME_CLAUDE_CODE', prev.ccName],
+      ['REMEDIATION_WORKER_GIT_EMAIL_CLAUDE_CODE', prev.ccEmail],
+    ]) {
+      if (prevVal === undefined) delete process.env[envKey];
+      else process.env[envKey] = prevVal;
+    }
   }
 });
 

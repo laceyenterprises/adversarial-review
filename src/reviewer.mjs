@@ -626,7 +626,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { repo, prNumber, reviewerModel, botTokenEnv, linearTicketId } = args;
+  const { repo, prNumber, reviewerModel, botTokenEnv, linearTicketId, builderTag } = args;
 
   if (!repo || !prNumber || !reviewerModel || !botTokenEnv) {
     console.error('[reviewer] Missing required fields in args:', args);
@@ -728,6 +728,7 @@ async function main() {
       repo,
       prNumber,
       reviewerModel: effectiveModel,
+      builderTag: builderTag || null,
       linearTicketId,
       reviewBody: reviewText,
       reviewPostedAt,

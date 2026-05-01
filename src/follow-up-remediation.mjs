@@ -189,6 +189,291 @@ async function assertCodexOAuth() {
   return assertCodexAuthReadable();
 }
 
+// ── Claude Code remediation worker (parallel to Codex) ─────────────────────
+// Cross-model rule: the BUILDER fixes their own code. So when the original
+// PR was built by Claude Code (tag `[claude-code]`, reviewed by Codex), the
+// remediation worker that lands review-feedback fixes also has to be Claude
+// Code — not Codex. Without this path, every `[claude-code]` PR gets its
+// review findings remediated by the wrong model, breaking the symmetry the
+// rest of the pipeline depends on.
+
+function resolveClaudeCodeCliPath() {
+  return process.env.CLAUDE_CODE_CLI_PATH || process.env.CLAUDE_CLI || 'claude';
+}
+
+// Required values for the OAuth invariant. These match what the
+// worker-pool's claude-code adapter ENV_CLEAR enforces by stripping
+// ANTHROPIC_API_KEY / CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX —
+// "OAuth subscription only, Anthropic direct (no third-party providers)."
+const CLAUDE_CODE_REQUIRED_AUTH_METHOD = 'claude.ai';
+const CLAUDE_CODE_REQUIRED_API_PROVIDER = 'firstParty';
+
+async function assertClaudeCodeOAuth({ execFileImpl = execFileAsync } = {}) {
+  const claudeCli = resolveClaudeCodeCliPath();
+  if (claudeCli.includes('/') && !existsSync(claudeCli)) {
+    throw new OAuthError('claude-code', `claude CLI not found at ${claudeCli}`);
+  }
+
+  // Run `claude auth status --json` and validate the response. This is
+  // the cheap, structured equivalent of the codex auth-file parse: it
+  // catches three real failure modes before we ever spawn a worker —
+  //   (1) not logged in
+  //   (2) logged in but routed via API key instead of the OAuth path
+  //   (3) routed via a 3P provider (Bedrock / Vertex / Foundry)
+  // ANY of these would silently change the billing path or fail the
+  // worker mid-run, so a 1-second pre-flight is worth it.
+  //
+  // IMPORTANT: strip Anthropic API credentials from the probe env. With
+  // ANTHROPIC_API_KEY set, the CLI may report `authMethod: 'apiKey'` even
+  // when the OAuth subscription is also configured, masking the real
+  // login state. Mirrors `reviewer.mjs`'s `assertClaudeOAuth` hardening.
+  const probeEnv = { ...process.env };
+  delete probeEnv.ANTHROPIC_API_KEY;
+  delete probeEnv.ANTHROPIC_BASE_URL;
+  delete probeEnv.CLAUDE_CODE_USE_BEDROCK;
+  delete probeEnv.CLAUDE_CODE_USE_VERTEX;
+  delete probeEnv.AWS_BEARER_TOKEN_BEDROCK;
+
+  let raw;
+  try {
+    const result = await execFileImpl(claudeCli, ['auth', 'status', '--json'], {
+      env: probeEnv,
+      maxBuffer: 1 * 1024 * 1024,
+      timeout: 15_000,
+    });
+    raw = result.stdout;
+  } catch (err) {
+    throw new OAuthError(
+      'claude-code',
+      `\`claude auth status --json\` failed: ${err.message}`
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new OAuthError(
+      'claude-code',
+      `\`claude auth status --json\` did not return valid JSON: ${err.message}`
+    );
+  }
+
+  if (!parsed?.loggedIn) {
+    throw new OAuthError(
+      'claude-code',
+      `not logged in to Claude Code (run \`claude auth login\`)`
+    );
+  }
+
+  if (parsed.authMethod !== CLAUDE_CODE_REQUIRED_AUTH_METHOD) {
+    throw new OAuthError(
+      'claude-code',
+      `authMethod is ${JSON.stringify(parsed.authMethod)} but ` +
+      `${JSON.stringify(CLAUDE_CODE_REQUIRED_AUTH_METHOD)} (OAuth subscription) is required`
+    );
+  }
+
+  if (parsed.apiProvider !== CLAUDE_CODE_REQUIRED_API_PROVIDER) {
+    throw new OAuthError(
+      'claude-code',
+      `apiProvider is ${JSON.stringify(parsed.apiProvider)} but ` +
+      `${JSON.stringify(CLAUDE_CODE_REQUIRED_API_PROVIDER)} (Anthropic direct) is required`
+    );
+  }
+
+  return {
+    authMethod: parsed.authMethod,
+    apiProvider: parsed.apiProvider,
+    cliPath: claudeCli,
+  };
+}
+
+function prepareClaudeCodeRemediationStartupEnv() {
+  // Strip provider API credentials before spawning so the worker can't
+  // silently route through a metered API key when its OAuth state is
+  // expected to be the billing path. Mirror of the worker-pool's
+  // claude-code adapter ENV_CLEAR list, applied as JS-side env hygiene
+  // (since this spawn doesn't go through that adapter).
+  const env = { ...process.env };
+  const stripped = [];
+  const FORBIDDEN_ENV = [
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+    'AWS_BEARER_TOKEN_BEDROCK',
+    'OPENAI_API_KEY',
+    'GOOGLE_API_KEY',
+    'GEMINI_API_KEY',
+  ];
+  for (const key of FORBIDDEN_ENV) {
+    if (env[key] !== undefined) {
+      delete env[key];
+      stripped.push(key);
+    }
+  }
+  // ANTHROPIC_AUTH_TOKEN, when set, can be the OAuth bearer the worker
+  // is supposed to use. NOT stripped — see worker-pool/lib/adapters/
+  // claude-code.sh for the same rationale.
+  env.PATH = buildInheritedPath(env.PATH || '');
+
+  const startupEvidence = {
+    stage: 'pre-side-effect-gate',
+    requestedContract: {
+      authMode: 'local-oauth',
+      forbiddenFallbacks: ['api-key', 'anthropic-api-key', 'bedrock', 'vertex'],
+    },
+    resolvedStartup: {
+      resolvedAuthMode: 'local-oauth',
+      strippedEnv: stripped,
+      preservedForOAuth: env.ANTHROPIC_AUTH_TOKEN ? ['ANTHROPIC_AUTH_TOKEN'] : [],
+    },
+    policyViolations: [],
+  };
+
+  return { env, startupEvidence };
+}
+
+function spawnClaudeCodeRemediationWorker({
+  workspaceDir,
+  promptPath,
+  outputPath,
+  logPath,
+  jobId = null,
+  workerClass = 'claude-code-remediation',
+  spawnImpl = spawn,
+  now = () => new Date().toISOString(),
+}) {
+  const claudeCli = resolveClaudeCodeCliPath();
+  const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv();
+
+  // Same worker-provenance env as the Codex spawn. The commit-msg hook
+  // installed in the workspace reads these and stamps trailers.
+  const env = {
+    ...baseEnv,
+    WORKER_CLASS: workerClass,
+    WORKER_RUN_AT: now(),
+  };
+  if (jobId) env.WORKER_JOB_ID = jobId;
+
+  // Claude Code in --print mode reads the prompt from stdin and writes the
+  // final assistant message to stdout. We capture stdout directly to
+  // outputPath (the equivalent of codex's --output-last-message), and
+  // route stderr to the worker log.
+  //
+  // --dangerously-skip-permissions is required for unattended remediation:
+  // `--permission-mode acceptEdits` auto-approves *file edits* but still
+  // gates shell commands (git add / commit / push, test runners, etc.) on
+  // an interactive permission prompt. In --print mode there is no human
+  // to answer, so without this flag the worker can edit but cannot
+  // actually commit or push the remediation. Codex's matching flag is
+  // --dangerously-bypass-approvals-and-sandbox, used in the parallel
+  // spawnCodexRemediationWorker call. The per-job workspace is itself
+  // the sandbox boundary — nothing in it can leak into the operator's
+  // primary checkout.
+  const promptFd = openSync(promptPath, 'r');
+  const stdoutFd = openSync(outputPath, 'w');
+  const stderrFd = openSync(logPath, 'a');
+
+  try {
+    const child = spawnImpl(
+      claudeCli,
+      ['--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
+      {
+        cwd: workspaceDir,
+        detached: true,
+        env,
+        stdio: [promptFd, stdoutFd, stderrFd],
+      }
+    );
+
+    if (typeof child.unref === 'function') {
+      child.unref();
+    }
+
+    return {
+      model: 'claude-code',
+      processId: child.pid,
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      startupEvidence,
+      command: [claudeCli, '--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
+    };
+  } finally {
+    closeSync(promptFd);
+    closeSync(stdoutFd);
+    closeSync(stderrFd);
+  }
+}
+
+// ── Worker-class dispatcher ────────────────────────────────────────────────
+
+// Map a job to the remediation worker class that should handle it. The
+// cross-model rule is: the BUILDER fixes their own code.
+//
+// Routing is keyed off the durable builder tag persisted on the job at
+// creation time:
+//   builderTag='codex'       → codex remediator
+//   builderTag='claude-code' → claude-code remediator
+//   builderTag='clio-agent'  → codex remediator (Clio sub-agent PRs are
+//                              not the same operational entity as the
+//                              local Claude Code CLI, so they fall back
+//                              to codex remediation; aligns with the
+//                              SPEC fallback rule.)
+//
+// Reverse-mapping from `reviewerModel` is unsafe: both [claude-code] and
+// [clio-agent] PRs are reviewed by codex, so reviewerModel='codex' alone
+// cannot distinguish them. We only consult `reviewerModel` for legacy
+// job records (created before builderTag was persisted), and even then
+// only `reviewerModel='claude'` reliably implies a [codex] builder.
+function pickRemediationWorkerClass(job) {
+  const builderTag = job?.builderTag;
+  if (builderTag) {
+    switch (builderTag) {
+      case 'codex':
+        return 'codex';
+      case 'claude-code':
+        return 'claude-code';
+      case 'clio-agent':
+        // No dedicated clio-agent worker class today — fall back to the
+        // SPEC's documented default reviewer/remediator: codex.
+        return 'codex';
+      default:
+        return 'codex';
+    }
+  }
+
+  // Legacy fallback for jobs created before builderTag was persisted.
+  // claude reviewer unambiguously implies a codex builder. codex reviewer
+  // is ambiguous between [claude-code] and [clio-agent], so fall back to
+  // codex (the SPEC-documented default) rather than guessing claude-code.
+  if (job?.reviewerModel === 'claude') {
+    return 'codex';
+  }
+  return 'codex';
+}
+
+async function assertRemediationWorkerOAuth(workerClass, { execFileImpl } = {}) {
+  switch (workerClass) {
+    case 'codex':       return assertCodexOAuth();
+    case 'claude-code': return assertClaudeCodeOAuth({ execFileImpl });
+    default:
+      throw new Error(`unknown remediation worker class: ${workerClass}`);
+  }
+}
+
+function spawnRemediationWorker(workerClass, opts) {
+  switch (workerClass) {
+    case 'codex':       return spawnCodexRemediationWorker(opts);
+    case 'claude-code': return spawnClaudeCodeRemediationWorker(opts);
+    default:
+      throw new Error(`unknown remediation worker class: ${workerClass}`);
+  }
+}
+
 function loadFollowUpPromptTemplate(rootDir = ROOT) {
   return readFileSync(rootDir === ROOT ? FOLLOW_UP_PROMPT_PATH : join(rootDir, 'prompts', 'follow-up-remediation.md'), 'utf8').trim();
 }
@@ -464,7 +749,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Run the smallest relevant validation before finishing.
 - Commit the remediation changes and push the PR branch.
 - Do not open a new PR; this job is for an existing PR follow-up.
-- Use OAuth-backed Codex only; do not rely on API key fallbacks.
+- Use OAuth-backed authentication only; do not rely on API key fallbacks.
 - Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.
 - If you want another adversarial review pass, set \`reReview.requested\` to \`true\` in that JSON reply. Do not rely on prose alone.
 - In your final message, report validation run and files changed.
@@ -1015,6 +1300,24 @@ function reconcileFollowUpJob({
       }
     }
 
+    // Worker-class aware completion metadata. The legacy default is
+    // 'codex' so old jobs (model unrecorded) still produce the historical
+    // `codex-output-last-message` source string. New claude-code workers
+    // produce `claude-code-output-last-message`, so worker-class metrics
+    // and operator-visible completion records reflect what actually ran.
+    const workerModel = worker?.model || 'codex';
+    const completionMetadata = {
+      source: `${workerModel}-output-last-message`,
+      workerModel,
+      note: 'Reconciled from detached worker exit plus non-empty final message artifact.',
+      finalMessagePath: worker.outputPath || null,
+      finalMessageBytes: finalMessage.bytes,
+      finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
+      preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
+      finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
+      logPath: worker.logPath || null,
+    };
+
     if (!rereview.requested) {
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
@@ -1034,16 +1337,7 @@ function reconcileFollowUpJob({
           ...workerState,
           state: 'completed',
         },
-        completion: {
-          source: 'codex-output-last-message',
-          note: 'Reconciled from detached worker exit plus non-empty final message artifact.',
-          finalMessagePath: worker.outputPath || null,
-          finalMessageBytes: finalMessage.bytes,
-          finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
-          preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
-          finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
-          logPath: worker.logPath || null,
-        },
+        completion: completionMetadata,
         remediationReply,
         reReview: rereview,
         stopReason,
@@ -1065,16 +1359,7 @@ function reconcileFollowUpJob({
         ...workerState,
         state: 'completed',
       },
-      completion: {
-        source: 'codex-output-last-message',
-        note: 'Reconciled from detached worker exit plus non-empty final message artifact.',
-        finalMessagePath: worker.outputPath || null,
-        finalMessageBytes: finalMessage.bytes,
-        finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
-        preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
-        finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
-        logPath: worker.logPath || null,
-      },
+      completion: completionMetadata,
       remediationReply,
       reReview: rereview,
     });
@@ -1147,8 +1432,10 @@ async function consumeNextFollowUpJob({
   now = () => new Date().toISOString(),
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
 } = {}) {
-  await assertCodexOAuth();
-
+  // Claim first so we know which worker class we're running. This lets
+  // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
+  // pointed at Claude Code's CLI rather than incorrectly blocking on
+  // codex auth state — and vice versa.
   const claimed = claimNextFollowUpJob({
     rootDir,
     claimedAt: now(),
@@ -1158,7 +1445,16 @@ async function consumeNextFollowUpJob({
     return { consumed: false, reason: 'no-pending-jobs' };
   }
 
+  const workerClass = pickRemediationWorkerClass(claimed.job);
+
   try {
+    // OAuth pre-flight runs inside the try so an expired/missing OAuth
+    // session moves the already-claimed job to `failed/` via the catch
+    // below, rather than exiting with a still-`in_progress` ledger row.
+    // The runbook contract is that launch-preparation failures become
+    // terminal queue state, not orphaned in_progress claims.
+    await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
+
     const { workspaceDir, workspaceState } = await prepareWorkspaceForJob({
       rootDir,
       job: claimed.job,
@@ -1170,6 +1466,11 @@ async function consumeNextFollowUpJob({
     mkdirSync(artifactDir, { recursive: true });
 
     const promptPath = join(artifactDir, 'prompt.md');
+    // Output / log filenames are kept generic across worker classes so
+    // operator runbooks and the reconcile path don't need per-class
+    // branches. The "codex-" prefix is historical; what matters is
+    // these are the per-job artifact filenames the prompt and the
+    // reconciler agree on.
     const outputPath = join(artifactDir, 'codex-last-message.md');
     const logPath = join(artifactDir, 'codex-worker.log');
     const replyPath = join(artifactDir, 'remediation-reply.json');
@@ -1182,7 +1483,7 @@ async function consumeNextFollowUpJob({
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
 
-    const worker = spawnCodexRemediationWorker({
+    const worker = spawnRemediationWorker(workerClass, {
       workspaceDir,
       promptPath,
       outputPath,
@@ -1212,22 +1513,35 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
-    const failure = err.isPolicyViolation
-      ? {
-          policyViolation: {
-            type: err.violationType,
-            requestedValue: err.requestedValue,
-            resolvedValue: err.resolvedValue,
-          },
-          startupEvidence: err.startupEvidence || null,
-        }
-      : {};
+    let failure = {};
+    let failureCode = 'worker-failure';
+
+    if (err.isOAuthError) {
+      failureCode = 'oauth-preflight-failure';
+      failure = {
+        oauthError: {
+          model: err.model || workerClass,
+          reason: err.message,
+        },
+      };
+    } else if (err.isPolicyViolation) {
+      failureCode = 'startup-contract-violation';
+      failure = {
+        policyViolation: {
+          type: err.violationType,
+          requestedValue: err.requestedValue,
+          resolvedValue: err.resolvedValue,
+        },
+        startupEvidence: err.startupEvidence || null,
+      };
+    }
+
     const failed = markFollowUpJobFailed({
       rootDir,
       jobPath: claimed.jobPath,
       error: err,
       failedAt: now(),
-      failureCode: err.isPolicyViolation ? 'startup-contract-violation' : 'worker-failure',
+      failureCode,
       failure,
     });
     err.followUpJobPath = failed.jobPath;
@@ -1258,8 +1572,9 @@ async function main() {
       return;
     }
 
+    const workerModel = result.job.remediationWorker?.model || 'codex';
     console.log(
-      `[follow-up-remediation] Spawned Codex remediation worker pid=${result.job.remediationWorker.processId} for ${result.job.repo}#${result.job.prNumber}`
+      `[follow-up-remediation] Spawned ${workerModel} remediation worker pid=${result.job.remediationWorker.processId} for ${result.job.repo}#${result.job.prNumber}`
     );
     console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
   } catch (err) {
@@ -1304,6 +1619,13 @@ export {
   summarizeWorkerFinalMessage,
   assessWorkerLiveness,
   spawnCodexRemediationWorker,
+  spawnClaudeCodeRemediationWorker,
+  spawnRemediationWorker,
+  assertClaudeCodeOAuth,
+  assertRemediationWorkerOAuth,
+  pickRemediationWorkerClass,
+  prepareClaudeCodeRemediationStartupEnv,
+  resolveClaudeCodeCliPath,
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

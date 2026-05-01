@@ -82,9 +82,9 @@ function resolveCodexReviewerEnv(reviewerEnv) {
 
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
-async function spawnReviewer({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId }) {
+async function spawnReviewer({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId, builderTag }) {
   const reviewerPath = join(__dirname, 'reviewer.mjs');
-  const args = JSON.stringify({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId });
+  const args = JSON.stringify({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId, builderTag });
 
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})`);
 
@@ -379,6 +379,7 @@ async function pollOnce(octokit) {
         reviewerModel: route.reviewerModel,
         botTokenEnv: route.botTokenEnv,
         linearTicketId,
+        builderTag: route.tag,
       });
 
       if (result.ok) {

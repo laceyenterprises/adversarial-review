@@ -568,6 +568,7 @@ function buildFollowUpJob({
   repo,
   prNumber,
   reviewerModel,
+  builderTag = null,
   linearTicketId = null,
   reviewBody,
   reviewPostedAt,
@@ -592,6 +593,12 @@ function buildFollowUpJob({
     prNumber,
     linearTicketId,
     reviewerModel,
+    // Durable record of the original PR title tag so remediation routing
+    // does not have to reverse-map from reviewerModel. Reverse-mapping is
+    // ambiguous because both [claude-code] and [clio-agent] PRs carry
+    // reviewerModel='codex'. Persisting the tag at creation time keeps the
+    // builder→remediator routing deterministic.
+    builderTag: builderTag || null,
     critical: Boolean(critical),
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,

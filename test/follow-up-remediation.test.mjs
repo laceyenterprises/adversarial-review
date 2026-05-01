@@ -11,6 +11,7 @@ import {
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,
+  consumeNextFollowUpJob,
   digestWorkerFinalMessage,
   installWorkerProvenanceHook,
   prepareCodexRemediationStartupEnv,
@@ -1089,4 +1090,342 @@ test('reconcileFollowUpJob flags suspicious live PIDs for manual inspection inst
   assert.equal(result.job.status, 'failed');
   assert.equal(result.job.remediationWorker.state, 'manual_inspection_required');
   assert.equal(result.job.failure.manualInspectionRequired, true);
+});
+
+// ── consumeNextFollowUpJob end-to-end regression ────────────────────────────
+
+test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker without ReferenceError', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  // Stand up a pending follow-up job in the queue.
+  const created = (() => {
+    // Build a minimal pending job using the same path createFollowUpJob writes to.
+    // The function under test claims pending jobs via claimNextFollowUpJob.
+    return createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      reviewerModel: 'claude',
+      linearTicketId: 'LAC-207',
+      reviewBody: '## Summary\nFix.\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: true,
+    });
+  })();
+
+  // Configure CODEX_AUTH so assertCodexOAuth + prepareCodexRemediationStartupEnv pass.
+  const codexHome = path.join(rootDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(
+    authPath,
+    JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }),
+    'utf8'
+  );
+
+  const prev = {
+    HOME: process.env.HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH,
+    CODEX_CLI_PATH: process.env.CODEX_CLI_PATH,
+  };
+  process.env.HOME = rootDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+  // Use a name without slashes so assertCodexOAuth's existsSync gate is skipped
+  // — production resolves a real CLI; tests just need the OAuth assertion to pass.
+  process.env.CODEX_CLI_PATH = 'codex';
+
+  let capturedSpawnEnv;
+  try {
+    const result = await consumeNextFollowUpJob({
+      rootDir,
+      // The default promptTemplate loader reads <rootDir>/prompts/follow-up-remediation.md;
+      // we don't provision a prompts dir under the temp rootDir, so pass a literal
+      // template string instead.
+      promptTemplate: 'You are a remediation worker.',
+      execFileImpl: async (command, args) => {
+        if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+          // Simulate the clone: drop a `.git` dir at the workspace.
+          mkdirSync(path.join(args[3], '.git'), { recursive: true });
+          return { stdout: '', stderr: '' };
+        }
+        if (command === 'gh' && args[0] === 'pr' && args[1] === 'checkout') {
+          return { stdout: '', stderr: '' };
+        }
+        if (command === 'git') {
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: '', stderr: '' };
+      },
+      spawnImpl: (_cmd, _args, opts) => {
+        capturedSpawnEnv = opts.env;
+        return { pid: 4242, unref() {} };
+      },
+      now: () => '2026-04-21T10:00:00.000Z',
+    });
+
+    assert.equal(result.consumed, true);
+    // The bug was a ReferenceError because spawnCodexRemediationWorker was
+    // passed `job.jobId` instead of `claimed.job.jobId`. If we got here
+    // without throwing AND the spawned env carries the job's id under
+    // WORKER_JOB_ID, we know the threading is correct.
+    assert.equal(capturedSpawnEnv.WORKER_JOB_ID, created.job.jobId);
+    assert.equal(capturedSpawnEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+  } finally {
+    for (const k of Object.keys(prev)) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+});
+
+// ── installWorkerProvenanceHook honors core.hooksPath ──────────────────────
+
+test('installWorkerProvenanceHook honors core.hooksPath instead of hardcoding .git/hooks', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  // Real repo so `git rev-parse --git-path hooks` returns a meaningful answer.
+  execFileSync('git', ['init', '-q', '-b', 'main', workspaceDir], { stdio: 'ignore' });
+
+  // Configure a custom hooks path. This is the exact configuration the
+  // reviewer flagged as silently breaking the audit trail under the old
+  // hard-coded `.git/hooks` install path.
+  const customHooksDir = path.join(workspaceDir, 'custom-hooks');
+  mkdirSync(customHooksDir, { recursive: true });
+  execFileSync('git', ['config', 'core.hooksPath', customHooksDir], {
+    cwd: workspaceDir,
+    stdio: 'ignore',
+  });
+
+  installWorkerProvenanceHook(workspaceDir);
+
+  // Hook must physically land in the configured path. Comparing the return
+  // value of installWorkerProvenanceHook directly is brittle on macOS
+  // because mkdtemp returns /var/folders/... but git can canonicalize to
+  // /private/var/folders/... — assert on file existence instead.
+  assert.equal(
+    existsSync(path.join(customHooksDir, 'commit-msg')),
+    true,
+    'hook must be installed at the configured core.hooksPath'
+  );
+  assert.equal(
+    existsSync(path.join(workspaceDir, '.git', 'hooks', 'commit-msg')),
+    false,
+    'must not install at .git/hooks/commit-msg when core.hooksPath is set'
+  );
+});
+
+// ── installWorkerProvenanceHook chains existing commit-msg hooks ───────────
+
+test('installWorkerProvenanceHook preserves a pre-existing commit-msg hook by chaining instead of clobbering', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', workspaceDir], { stdio: 'ignore' });
+
+  // A pre-existing commit-msg hook simulating repo/operator policy
+  // (e.g. message validation, signoff, ticket tagging). It records that
+  // it ran by writing a sentinel file to the workspace.
+  const hooksDir = path.join(workspaceDir, '.git', 'hooks');
+  mkdirSync(hooksDir, { recursive: true });
+  const existingHook = path.join(hooksDir, 'commit-msg');
+  const existingHookSentinel = path.join(workspaceDir, 'pre-existing-hook-fired.txt');
+  writeFileSync(
+    existingHook,
+    `#!/bin/bash\nset -e\necho fired > ${JSON.stringify(existingHookSentinel)}\n`,
+    'utf8'
+  );
+  execFileSync('chmod', ['0755', existingHook]);
+
+  installWorkerProvenanceHook(workspaceDir);
+
+  // Original hook must be preserved as the chain file, not deleted.
+  const chainPath = path.join(hooksDir, 'commit-msg.worker-provenance-chain');
+  assert.equal(existsSync(chainPath), true, 'pre-existing hook must be preserved as chain file');
+  assert.match(readFileSync(chainPath, 'utf8'), /pre-existing-hook-fired\.txt/);
+
+  // Our wrapper is now at the dest.
+  const ourHook = readFileSync(existingHook, 'utf8');
+  assert.match(ourHook, /managed-by: adversarial-review-worker-provenance/);
+
+  // Run our wrapper without WORKER_CLASS — chained hook should still run.
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  writeFileSync(msgPath, 'fix: change\n', 'utf8');
+  spawnSync(existingHook, [msgPath], {
+    env: { PATH: process.env.PATH },
+    stdio: 'ignore',
+  });
+  assert.equal(
+    existsSync(existingHookSentinel),
+    true,
+    'chained pre-existing hook must run when our wrapper executes'
+  );
+});
+
+test('installWorkerProvenanceHook does not re-chain its own hook on repeated installs', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', workspaceDir], { stdio: 'ignore' });
+
+  installWorkerProvenanceHook(workspaceDir);
+  // Second install should overwrite our own dest in place — never chain
+  // ourselves, which would build up a chain of identical wrappers.
+  installWorkerProvenanceHook(workspaceDir);
+
+  const hooksDir = path.join(workspaceDir, '.git', 'hooks');
+  assert.equal(existsSync(path.join(hooksDir, 'commit-msg')), true);
+  assert.equal(
+    existsSync(path.join(hooksDir, 'commit-msg.worker-provenance-chain')),
+    false,
+    'idempotent install must not produce a chain of our own hook'
+  );
+});
+
+// ── worker-provenance hook input sanitization ──────────────────────────────
+
+test('worker-provenance hook rejects WORKER_JOB_ID values containing newlines', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  const original = 'fix: nothing nefarious\n';
+  writeFileSync(msgPath, original, 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        WORKER_CLASS: 'codex-remediation',
+        // A newline-bearing job id would forge an extra trailer (e.g.
+        // Signed-off-by) if not rejected.
+        WORKER_JOB_ID: 'legit-job\nSigned-off-by: Forged <forged@example.com>',
+      },
+      stdio: 'pipe',
+    }
+  );
+
+  assert.notEqual(result.status, 0, 'hook must exit non-zero on newline-bearing trailer input');
+  // Message file must not be modified — no trailers, no forged signoff.
+  assert.equal(readFileSync(msgPath, 'utf8'), original);
+});
+
+test('worker-provenance hook rejects WORKER_CLASS values containing carriage returns', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  const original = 'fix: carriage return guard\n';
+  writeFileSync(msgPath, original, 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        WORKER_CLASS: 'codex-remediation\rCo-authored-by: Forged <f@example.com>',
+      },
+      stdio: 'pipe',
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(msgPath, 'utf8'), original);
+});
+
+// ── integration: real `git commit` honors the installed hook ───────────────
+
+test('integration: real git commit picks up the worker-provenance hook under custom core.hooksPath', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', workspaceDir], { stdio: 'ignore' });
+  // Local-only identity so the test never depends on global git config.
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: workspaceDir, stdio: 'ignore' });
+
+  // Custom hooks path — this is the exact case the old install path
+  // silently broke.
+  const customHooksDir = path.join(workspaceDir, 'custom-hooks');
+  mkdirSync(customHooksDir, { recursive: true });
+  execFileSync('git', ['config', 'core.hooksPath', customHooksDir], {
+    cwd: workspaceDir,
+    stdio: 'ignore',
+  });
+
+  installWorkerProvenanceHook(workspaceDir);
+
+  // Author a real commit with worker env set.
+  writeFileSync(path.join(workspaceDir, 'README.md'), 'hello\n', 'utf8');
+  execFileSync('git', ['add', 'README.md'], { cwd: workspaceDir, stdio: 'ignore' });
+  execFileSync(
+    'git',
+    ['commit', '-m', 'feat: trigger worker-provenance hook'],
+    {
+      cwd: workspaceDir,
+      env: {
+        ...process.env,
+        WORKER_CLASS: 'codex-remediation',
+        WORKER_JOB_ID: 'integration-job-123',
+        WORKER_RUN_AT: '2026-05-01T20:00:00Z',
+      },
+      stdio: 'ignore',
+    }
+  );
+
+  const finalMessage = execFileSync('git', ['log', '-1', '--format=%B'], {
+    cwd: workspaceDir,
+    encoding: 'utf8',
+  });
+  assert.match(finalMessage, /^Worker-Class: codex-remediation$/m);
+  assert.match(finalMessage, /^Worker-Job-Id: integration-job-123$/m);
+  assert.match(finalMessage, /^Worker-Run-At: 2026-05-01T20:00:00Z$/m);
+});
+
+test('integration: real git commit runs the chained pre-existing hook before our wrapper', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', workspaceDir], { stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspaceDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: workspaceDir, stdio: 'ignore' });
+
+  // Plant a pre-existing commit-msg hook that appends a signoff line.
+  // This is the kind of repo-local policy the reviewer flagged as
+  // getting silently disabled by the old clobbering install.
+  const hooksDir = path.join(workspaceDir, '.git', 'hooks');
+  mkdirSync(hooksDir, { recursive: true });
+  const existingHook = path.join(hooksDir, 'commit-msg');
+  writeFileSync(
+    existingHook,
+    "#!/bin/bash\nset -e\nprintf '\\nSigned-off-by: Pre-Existing <pre@example.com>\\n' >> \"$1\"\n",
+    'utf8'
+  );
+  execFileSync('chmod', ['0755', existingHook]);
+
+  installWorkerProvenanceHook(workspaceDir);
+
+  writeFileSync(path.join(workspaceDir, 'README.md'), 'hi\n', 'utf8');
+  execFileSync('git', ['add', 'README.md'], { cwd: workspaceDir, stdio: 'ignore' });
+  execFileSync(
+    'git',
+    ['commit', '-m', 'feat: chained hook integration'],
+    {
+      cwd: workspaceDir,
+      env: {
+        ...process.env,
+        WORKER_CLASS: 'codex-remediation',
+        WORKER_JOB_ID: 'chained-integration-456',
+        WORKER_RUN_AT: '2026-05-01T20:01:00Z',
+      },
+      stdio: 'ignore',
+    }
+  );
+
+  const finalMessage = execFileSync('git', ['log', '-1', '--format=%B'], {
+    cwd: workspaceDir,
+    encoding: 'utf8',
+  });
+  // Pre-existing hook's signoff must survive.
+  assert.match(finalMessage, /^Signed-off-by: Pre-Existing <pre@example\.com>$/m);
+  // Our provenance trailers must also be present.
+  assert.match(finalMessage, /^Worker-Class: codex-remediation$/m);
+  assert.match(finalMessage, /^Worker-Job-Id: chained-integration-456$/m);
 });

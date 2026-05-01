@@ -1,6 +1,6 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +63,16 @@ const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 // constant rather than composed from the workerClass parameter so the
 // trailer value is stable across spawn-site refactors.
 const REMEDIATION_WORKER_TRAILER_CLASS = 'codex-remediation';
+
+// Sentinel marker the install path uses to detect "this dest is already our
+// hook" without doing brittle byte-for-byte content compares. The marker
+// lives on a comment line near the top of hooks/worker-provenance-commit-msg.
+const WORKER_PROVENANCE_HOOK_SENTINEL = 'managed-by: adversarial-review-worker-provenance';
+// Filename used to preserve a pre-existing commit-msg hook when our wrapper
+// is installed on top. The wrapper invokes this chained file before appending
+// provenance trailers, so existing commit policy (DCO/signoff, message
+// validation, etc.) is preserved instead of silently disabled.
+const WORKER_PROVENANCE_CHAINED_HOOK_FILENAME = 'commit-msg.worker-provenance-chain';
 
 // Each class supports an env-var override for ops flexibility:
 //
@@ -531,12 +541,65 @@ async function prepareWorkspaceForJob({
   };
 }
 
-function installWorkerProvenanceHook(workspaceDir) {
-  const hooksDir = join(workspaceDir, '.git', 'hooks');
+function resolveEffectiveGitHooksDir(workspaceDir, { execFileSyncImpl = execFileSync } = {}) {
+  // Ask git itself for the hooks dir so we honor core.hooksPath. Hard-coding
+  // `.git/hooks` would silently install a no-op when an operator or repo has
+  // configured a custom hooks path, turning the audit trail into a lie.
+  try {
+    const stdout = execFileSyncImpl('git', ['rev-parse', '--git-path', 'hooks'], {
+      cwd: workspaceDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const relPath = String(stdout).trim();
+    if (relPath) {
+      return isAbsolute(relPath) ? relPath : resolve(workspaceDir, relPath);
+    }
+  } catch {
+    // git not available, or the workspace isn't a real repo (e.g. a unit test
+    // with a bare `.git` placeholder). Fall through to the conservative
+    // default; production always runs after `gh repo clone`, so the try
+    // branch is the live path.
+  }
+  return join(workspaceDir, '.git', 'hooks');
+}
+
+function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFileSync } = {}) {
+  const hooksDir = resolveEffectiveGitHooksDir(workspaceDir, { execFileSyncImpl });
   if (!existsSync(hooksDir)) {
     mkdirSync(hooksDir, { recursive: true });
   }
   const dest = join(hooksDir, 'commit-msg');
+  const chainedDest = join(hooksDir, WORKER_PROVENANCE_CHAINED_HOOK_FILENAME);
+
+  // If a commit-msg hook already exists at the dest and it isn't ours, move
+  // it aside so our wrapper can chain to it instead of clobbering it. Repo
+  // or operator policy (DCO/signoff, message validation, ticket tagging)
+  // must survive installation of this wrapper.
+  if (existsSync(dest)) {
+    let existing = '';
+    try {
+      existing = readFileSync(dest, 'utf8');
+    } catch {
+      existing = '';
+    }
+    const isAlreadyOurs = existing.includes(WORKER_PROVENANCE_HOOK_SENTINEL);
+    if (!isAlreadyOurs && !existsSync(chainedDest)) {
+      renameSync(dest, chainedDest);
+      try {
+        chmodSync(chainedDest, 0o755);
+      } catch {
+        // Some filesystems (e.g. sandboxed test envs) won't allow chmod;
+        // the chained hook only needs to be executable for the wrapper to
+        // invoke it, and rename preserves the original mode. If chmod
+        // fails, leave the existing mode untouched.
+      }
+    }
+    // If the dest is already ours, fall through and overwrite — that's the
+    // documented idempotency contract: the deployed hook never drifts from
+    // the source on this branch.
+  }
+
   copyFileSync(WORKER_PROVENANCE_HOOK_SRC, dest);
   chmodSync(dest, 0o755);
   return dest;

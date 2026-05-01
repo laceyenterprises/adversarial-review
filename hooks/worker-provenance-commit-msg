@@ -1,10 +1,12 @@
 #!/bin/bash
+# managed-by: adversarial-review-worker-provenance
 # worker-provenance commit-msg hook
 #
 # Appends provenance trailers to a commit message when the committing
 # process has worker-context env vars set. Installed into per-job
 # workspaces by tools/adversarial-review/src/follow-up-remediation.mjs
-# during prepareWorkspaceForJob, at .git/hooks/commit-msg.
+# during prepareWorkspaceForJob, at the effective git hooks dir
+# (`git rev-parse --git-path hooks`, which honors core.hooksPath).
 #
 # Trailer schema (all optional except Worker-Class, which gates the hook):
 #
@@ -17,30 +19,64 @@
 #                    cleaned up)
 #
 # Design notes:
-# - No-op when WORKER_CLASS is unset. That means the same workspace can
-#   be used by an operator for inspection/manual commits without
-#   accidentally getting worker trailers stamped on operator work.
+# - When a `commit-msg` hook already existed in the workspace at install
+#   time, the installer renames it to `commit-msg.worker-provenance-chain`
+#   and we invoke it here before appending our trailers. That preserves
+#   any pre-existing commit policy (DCO/signoff, message validation,
+#   ticket tagging) instead of silently disabling it. Failure of the
+#   chained hook fails the commit (set -e); we never erase pre-existing
+#   policy by skipping its non-zero exit.
+# - No-op (other than the chained hook) when WORKER_CLASS is unset. The
+#   same workspace can be used by an operator for inspection or manual
+#   commits without accidentally getting worker trailers stamped on
+#   operator work.
 # - Idempotent: `git interpret-trailers --if-exists addIfDifferent`
 #   declines to write a trailer that's already present, so a worker
 #   that authors its own provenance (or an operator who amends a
 #   worker commit) won't end up with duplicates.
-# - Per-job workspace = per-job .git/hooks. Cannot leak into other
-#   repos or into the operator's main checkout.
+# - Trailer values are rejected if they contain CR or LF. A newline in a
+#   trailer value would be parsed by git as a separate trailer line and
+#   could forge arbitrary trailers (e.g. Signed-off-by, Co-authored-by),
+#   which would undermine the audit trail this hook is meant to provide.
 
 set -eu
 
 COMMIT_MSG_FILE="$1"
+
+# Chain to any pre-existing commit-msg hook that was preserved when this
+# wrapper was installed. Run it first so its policy acts on the original
+# message before we append provenance trailers. set -e propagates a
+# non-zero exit so we never silently disable an existing hook.
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+CHAINED_HOOK="$HOOK_DIR/commit-msg.worker-provenance-chain"
+if [[ -x "$CHAINED_HOOK" ]]; then
+  "$CHAINED_HOOK" "$@"
+fi
 
 # Operator-mode commit (no worker env): stay out of the way entirely.
 if [[ -z "${WORKER_CLASS:-}" ]]; then
   exit 0
 fi
 
+require_safe_trailer_value() {
+  local label="$1"
+  local value="$2"
+  case "$value" in
+    *$'\n'*|*$'\r'*)
+      echo "worker-provenance hook: $label contains forbidden newline; refusing to commit" >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_safe_trailer_value "WORKER_CLASS" "$WORKER_CLASS"
 TRAILERS=("--trailer" "Worker-Class: $WORKER_CLASS")
 if [[ -n "${WORKER_JOB_ID:-}" ]]; then
+  require_safe_trailer_value "WORKER_JOB_ID" "$WORKER_JOB_ID"
   TRAILERS+=("--trailer" "Worker-Job-Id: $WORKER_JOB_ID")
 fi
 if [[ -n "${WORKER_RUN_AT:-}" ]]; then
+  require_safe_trailer_value "WORKER_RUN_AT" "$WORKER_RUN_AT"
   TRAILERS+=("--trailer" "Worker-Run-At: $WORKER_RUN_AT")
 fi
 

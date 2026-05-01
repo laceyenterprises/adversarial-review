@@ -1,7 +1,7 @@
 ---
 delegation: full
 confidence: 0.95
-last_verified: 2026-04-24
+last_verified: 2026-05-01
 influence_weight: medium
 tags: [adversarial-review-hq, documentation, reference]
 staleness_window: 30d
@@ -54,15 +54,23 @@ Fast triage:
 
 After a successful review post, the service creates a durable follow-up job.
 
-That job can then be:
+The pipeline is **automated end-to-end**:
 
-- consumed explicitly
-- worked by a detached remediation worker on the existing PR branch
-- reconciled explicitly
-- stopped or requeued explicitly
-- re-armed for another review pass only via durable JSON reply metadata
+- a LaunchAgent (`ai.laceyenterprises.adversarial-follow-up`) ticks every 2 min
+- each tick claims one pending job, spawns a detached remediation worker (codex or claude-code, picked from the PR's `builderTag`), then reconciles any in-progress jobs whose worker has exited
+- on every terminal transition (completed / stopped / failed) the reconciler posts a public PR comment under the matching reviewer-bot identity so operators can read the loop status from the PR itself
+- bounded by `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` (in `src/follow-up-jobs.mjs`) and by the per-PR rereview cooldown in `review-state.mjs`
 
-This is **bounded and operator-visible**, not an autonomous retry daemon.
+Operator-visible state is preserved in `data/follow-up-jobs/` (the durable JSON queue) and `data/reviews.db` (the review ledger). Operators retain explicit control: `npm run follow-up:requeue`, `npm run follow-up:stop`, `npm run retrigger-review` are still the canonical levers when manual intervention is required.
+
+### 3. Convergence and automerge
+
+A PR's review verdict is what the worker-pool automerge gate watches (it reads the GitHub review body's `## Verdict` section: `Comment only` = pass, `Request changes` = fail). The remediation worker drives convergence by setting `reReview.requested` in `remediation-reply.json`:
+
+- `true` (the default success path) — fresh adversarial pass runs; new verdict replaces the stale `Request changes`; if it lands as `Comment only`, the gate fires automerge
+- `false` — deliberate human-intervention exit; the PR keeps its current verdict; a public PR comment flags that human review is needed (use the `blockers` array to explain)
+
+If the loop reaches the 6-round cap without converging, the job stops with code `max-rounds-reached` and the PR comment explicitly says human intervention is required.
 
 ---
 
@@ -103,8 +111,10 @@ This is **bounded and operator-visible**, not an autonomous retry daemon.
                                                     │
                                                     ▼
                                   ┌──────────────────────────────────────────┐
-                                  │ follow-up:consume                        │
-                                  │ claim job, prep workspace, spawn worker  │
+                                  │ adversarial-follow-up LaunchAgent        │
+                                  │ ticks every 2 min:                       │
+                                  │   1. consume one pending job             │
+                                  │   2. reconcile in-progress jobs          │
                                   └─────────────────┬────────────────────────┘
                                                     │
                                                     ▼
@@ -116,18 +126,26 @@ This is **bounded and operator-visible**, not an autonomous retry daemon.
                                            │
                                            ▼
                               ┌──────────────────────────────┐
-                              │   follow-up:reconcile        │
+                              │   reconcileFollowUpJob       │
                               │ validate artifacts,          │
-                              │ finalize queue state         │
+                              │ finalize queue state,        │
+                              │ post PR comment              │
                               └─────────────┬────────────────┘
                                             │
                     ┌───────────────────────┴────────────────────────┐
                     ▼                                                ▼
       ┌──────────────────────────────┐                 ┌──────────────────────────────┐
-      │ no durable rereview request  │                 │ rereview requested=true      │
+      │ rereview requested=false     │                 │ rereview requested=true      │
       │ -> stopped/no-progress       │                 │ -> review_status='pending'   │
-      │                              │                 │ -> watcher can review again  │
-      └──────────────────────────────┘                 └──────────────────────────────┘
+      │ -> PR comment: human needed  │                 │ -> watcher reviews again     │
+      └──────────────────────────────┘                 └─────────────┬────────────────┘
+                                                                     │
+                                                                     ▼
+                                                       ┌──────────────────────────────┐
+                                                       │ verdict on PR:               │
+                                                       │   Comment only -> automerge  │
+                                                       │   Request changes -> loop    │
+                                                       └──────────────────────────────┘
 ```
 
 ---
@@ -177,6 +195,32 @@ Minimal example:
   "linear": { "teamKey": "LAC" }
 }
 ```
+
+### Install LaunchAgents
+
+Two agents drive the system:
+
+| Agent | Cadence | What it runs |
+|---|---|---|
+| `ai.laceyenterprises.adversarial-watcher` | KeepAlive (long-lived) | `src/watcher.mjs` — polls for tagged PRs, spawns reviewers |
+| `ai.laceyenterprises.adversarial-follow-up` | StartInterval=120s (one-shot tick) | `scripts/adversarial-follow-up-tick.sh` — consume + reconcile |
+
+Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo. To install one manually:
+
+```bash
+cp launchd/ai.laceyenterprises.adversarial-follow-up.placey.plist \
+   ~/Library/LaunchAgents/
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.placey.plist
+launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
+```
+
+To pause the loop during an outage:
+
+```bash
+launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-follow-up
+```
+
+The follow-up daemon resolves the same secrets the watcher does (`OP_SERVICE_ACCOUNT_TOKEN`, `GITHUB_TOKEN`, `GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`, `CODEX_AUTH_PATH`) and uses `unset` to scrub direct-provider API keys before exec — same OAuth-first contract as `src/reviewer.mjs`.
 
 ---
 
@@ -301,6 +345,8 @@ Not enough:
 
 The JSON artifact is the contract.
 
+**Convergence rule (see `prompts/follow-up-remediation.md`):** `reReview.requested = true` is the default success path — without it, the PR's stale `Request changes` verdict is never replaced and the worker-pool automerge gate never fires. `false` is reserved for deliberate human-intervention exits (cite the reason in `blockers`). The bounded 6-round loop is the safety net against thrashing.
+
 ---
 
 ## Maintenance cheatsheet
@@ -344,11 +390,20 @@ ls -la data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/
 jq '.' data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/remediation-reply.json
 ```
 
-If a remediation round “finished” but nothing advanced, the first thing to ask is usually:
+If a remediation round "finished" but nothing advanced, the first thing to ask is usually:
 
-- was `follow-up:reconcile` run?
+- did the follow-up LaunchAgent tick? (`tail -200 ~/Library/Logs/adversarial-follow-up.log`)
 - did `remediation-reply.json` exist?
 - did it actually set `reReview.requested = true`?
+
+The PR comment posted at every terminal transition is the operator-facing source of truth — if there's no comment, reconcile didn't run; if the comment says "Re-review requested: no", the worker chose the human-intervention exit.
+
+Inspect daemon logs:
+
+```bash
+tail -100 ~/Library/Logs/adversarial-follow-up.log
+launchctl list | grep adversarial
+```
 
 ---
 
@@ -407,25 +462,39 @@ For auth/runtime history, see `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regressi
 
 ```text
 src/
-  watcher.mjs
-  reviewer.mjs
-  review-state.mjs
-  watcher-title-guardrails.mjs
-  watcher-fail-loud.mjs
-  pr-title-tagging.mjs
-  pr-create-tagged.mjs
-  follow-up-jobs.mjs
-  follow-up-remediation.mjs
-  follow-up-reconcile.mjs
-  follow-up-requeue.mjs
-  follow-up-stop.mjs
+  watcher.mjs                      # poll loop + tag routing
+  reviewer.mjs                     # cross-model review post
+  review-state.mjs                 # reviews.db ledger
+  watcher-title-guardrails.mjs     # PR title tag enforcement
+  watcher-fail-loud.mjs            # fail-loud comment posting
+  pr-title-tagging.mjs             # title parsing
+  pr-create-tagged.mjs             # operator helper for tagged PRs
+  pr-comments.mjs                  # remediation outcome comments (this PR)
+  follow-up-jobs.mjs               # durable JSON queue + reply schema
+  follow-up-remediation.mjs        # consume + reconcile + worker spawn
+  follow-up-reconcile.mjs          # canonical reconcile entrypoint
+  follow-up-requeue.mjs            # operator: re-arm a completed job
+  follow-up-stop.mjs               # operator: stop an in-progress job
+  retrigger-review.mjs             # operator: re-review a PR
 
 prompts/
   reviewer-prompt.md
   follow-up-remediation.md
 
+hooks/
+  worker-provenance-commit-msg     # stamps Worker-Class trailers
+
+scripts/
+  adversarial-watcher-start-placey.sh
+  adversarial-follow-up-tick.sh    # daemon tick driver
+
+launchd/
+  ai.laceyenterprises.adversarial-watcher.placey.plist
+  ai.laceyenterprises.adversarial-follow-up.placey.plist
+
 docs/
   follow-up-runbook.md
+  STATE-MACHINE.md
   INCIDENT-2026-04-21-ACPX-codex-exec-regression.md
 ```
 
@@ -445,4 +514,10 @@ See:
 
 ## Status
 
-As of 2026-04-24, this README is intentionally optimized for quick scanning. Heavier operator semantics and maintenance detail live in `docs/follow-up-runbook.md`.
+As of 2026-05-01, the pipeline is automated end-to-end:
+- watcher posts reviews
+- follow-up daemon claims jobs every 2 min, spawns workers, reconciles
+- public PR comments narrate every terminal outcome
+- convergence rule + 6-round cap + per-PR rereview cooldown bound the loop
+
+This README is optimized for quick scanning. Heavier operator semantics and maintenance detail live in `docs/follow-up-runbook.md`.

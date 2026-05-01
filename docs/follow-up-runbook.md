@@ -1,28 +1,45 @@
 # Follow-Up Remediation Runbook
 
-This runbook covers the shipped bounded remediation loop for adversarial-review after `LAC-206`, `LAC-209`, `LAC-210`, and `LAC-211`.
+This runbook covers the shipped bounded remediation loop for adversarial-review after `LAC-206`, `LAC-209`, `LAC-210`, `LAC-211`, and the 2026-05-01 automation pass.
 
-Use this when a review has already been posted to GitHub and you need to run, inspect, reconcile, stop, requeue, or debug the follow-up remediation flow without re-reading the implementation.
+Use this when a review has already been posted to GitHub and you need to inspect, reconcile, stop, requeue, or debug the follow-up remediation flow without re-reading the implementation.
 
 ---
 
 ## Scope and current contract
 
-- This is a **bounded, operator-visible loop**. It is not an autonomous retry daemon.
+- This is a **bounded loop** with operator override. It is not an unbounded autonomous retry daemon.
 - The **watcher owns review posting**. Follow-up remediation does not post GitHub reviews directly.
 - The remediation worker works on the **existing PR branch**, commits changes, and pushes that branch.
 - The remediation worker does **not** open a new PR and does **not** merge the PR.
-- Advancing from one remediation round to another remains an **explicit operator action**.
-- A new adversarial review pass only happens when the worker writes a **durable machine-readable rereview request**.
+- Advancing from one remediation round to another runs **automatically** via the `ai.laceyenterprises.adversarial-follow-up` LaunchAgent (StartInterval=120s). The daemon claims pending jobs, spawns workers, reconciles exits, and posts public PR comments at every terminal transition.
+- A new adversarial review pass only happens when the worker writes a **durable machine-readable rereview request** (`reReview.requested = true` in `remediation-reply.json`).
+- Bounding: `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` in `src/follow-up-jobs.mjs` plus the per-PR rereview cooldown in `review-state.mjs`.
 
-Relevant scripts:
+Operator levers (still available, override the daemon):
 
 ```bash
-npm run follow-up:consume
-npm run follow-up:reconcile
-npm run follow-up:requeue -- <job-path> [reason]
-npm run follow-up:stop -- <job-path> [reason]
+npm run follow-up:consume                         # claim + spawn one job (manual tick)
+npm run follow-up:reconcile                       # reconcile in-progress jobs (manual tick)
+npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
+npm run follow-up:stop -- <job-path> [reason]     # stop an in-progress job
+npm run retrigger-review -- --repo <slug> --pr <n> --reason "<why>"  # force a re-review pass
 ```
+
+To pause the daemon during an outage:
+
+```bash
+launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-follow-up
+```
+
+To resume:
+
+```bash
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.placey.plist
+launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
+```
+
+Daemon log: `~/Library/Logs/adversarial-follow-up.log`.
 
 ---
 

@@ -1,15 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  REMEDIATION_WORKER_TRAILER_CLASS,
+  WORKER_PROVENANCE_HOOK_SRC,
   assessWorkerLiveness,
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,
   digestWorkerFinalMessage,
+  installWorkerProvenanceHook,
   prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
@@ -267,6 +270,210 @@ test('buildInheritedPath prepends required system directories without dropping e
   const inherited = buildInheritedPath('/custom/bin:/usr/bin');
   assert.match(inherited, /^\/opt\/homebrew\/bin:/);
   assert.match(inherited, /\/custom\/bin/);
+});
+
+// ── worker-provenance commit-msg hook ──────────────────────────────────────
+
+test('installWorkerProvenanceHook writes an executable hook to .git/hooks/commit-msg', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+
+  const hookPath = installWorkerProvenanceHook(workspaceDir);
+  assert.equal(hookPath, path.join(workspaceDir, '.git', 'hooks', 'commit-msg'));
+  assert.equal(existsSync(hookPath), true);
+
+  const mode = statSync(hookPath).mode & 0o777;
+  // Owner must have execute. Group/other execute is mode-policy and not
+  // load-bearing for this test; just assert owner-execute.
+  assert.ok((mode & 0o100) !== 0, `hook should be owner-executable; mode=${mode.toString(8)}`);
+});
+
+test('worker-provenance hook is a no-op when WORKER_CLASS is unset', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  const original = 'fix: small change\n\nbody paragraph\n';
+  writeFileSync(msgPath, original, 'utf8');
+
+  // Run the hook with no WORKER_* env. It must touch nothing.
+  spawnSync(path.join(workspaceDir, '.git', 'hooks', 'commit-msg'), [msgPath], {
+    env: { PATH: process.env.PATH },
+    stdio: 'ignore',
+  });
+
+  assert.equal(readFileSync(msgPath, 'utf8'), original);
+});
+
+test('worker-provenance hook appends Worker-Class / Worker-Job-Id / Worker-Run-At trailers when env is set', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  writeFileSync(msgPath, 'fix: another change\n\nbody paragraph\n', 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        WORKER_CLASS: 'codex-remediation',
+        WORKER_JOB_ID: 'lac__agent-os-pr-100-2026-05-01T19-46-58-155Z',
+        WORKER_RUN_AT: '2026-05-01T20:00:00Z',
+      },
+      stdio: 'pipe',
+    }
+  );
+  assert.equal(result.status, 0, `hook exited ${result.status}: ${result.stderr?.toString()}`);
+
+  const updated = readFileSync(msgPath, 'utf8');
+  assert.match(updated, /^Worker-Class: codex-remediation$/m);
+  assert.match(updated, /^Worker-Job-Id: lac__agent-os-pr-100-2026-05-01T19-46-58-155Z$/m);
+  assert.match(updated, /^Worker-Run-At: 2026-05-01T20:00:00Z$/m);
+  // Trailers come at the end, after the body, with a blank line separator.
+  assert.match(updated, /body paragraph\n\nWorker-Class:/);
+});
+
+test('worker-provenance hook is idempotent — repeated runs do not duplicate trailers', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  writeFileSync(msgPath, 'fix: idempotent run\n', 'utf8');
+
+  const env = {
+    PATH: process.env.PATH,
+    WORKER_CLASS: 'codex-remediation',
+    WORKER_JOB_ID: 'job-x',
+  };
+  for (let i = 0; i < 3; i++) {
+    spawnSync(path.join(workspaceDir, '.git', 'hooks', 'commit-msg'), [msgPath], {
+      env,
+      stdio: 'ignore',
+    });
+  }
+
+  const updated = readFileSync(msgPath, 'utf8');
+  // Each trailer should appear exactly once regardless of how many hook
+  // invocations fired against the same message file.
+  assert.equal((updated.match(/^Worker-Class: codex-remediation$/gm) || []).length, 1);
+  assert.equal((updated.match(/^Worker-Job-Id: job-x$/gm) || []).length, 1);
+});
+
+test('prepareWorkspaceForJob installs the worker-provenance hook in the workspace', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    execFileImpl: async (command, args, options = {}) => {
+      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  const hookPath = path.join(result.workspaceDir, '.git', 'hooks', 'commit-msg');
+  assert.equal(existsSync(hookPath), true, 'hook should be installed at .git/hooks/commit-msg');
+  // Hook content should match the source.
+  assert.equal(
+    readFileSync(hookPath, 'utf8'),
+    readFileSync(WORKER_PROVENANCE_HOOK_SRC, 'utf8')
+  );
+});
+
+test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN_AT in spawn env', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const logPath = path.join(workspaceDir, 'codex.log');
+  const codexHome = path.join(workspaceDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(promptPath, 'Fix the bug.\n', 'utf8');
+  writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }), 'utf8');
+
+  // Capture spawn args via the injectable spawnImpl + now hook.
+  const prevHome = process.env.HOME;
+  const prevCodexHome = process.env.CODEX_HOME;
+  const prevAuthPath = process.env.CODEX_AUTH_PATH;
+  process.env.HOME = workspaceDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+
+  let capturedEnv;
+  try {
+    spawnCodexRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      jobId: 'job-abc-123',
+      now: () => '2026-05-01T20:00:00Z',
+      spawnImpl: (_cmd, _args, opts) => {
+        capturedEnv = opts.env;
+        return { pid: 999, unref() {} };
+      },
+    });
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCodexHome;
+    if (prevAuthPath === undefined) delete process.env.CODEX_AUTH_PATH;
+    else process.env.CODEX_AUTH_PATH = prevAuthPath;
+  }
+
+  assert.equal(capturedEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+  assert.equal(capturedEnv.WORKER_JOB_ID, 'job-abc-123');
+  assert.equal(capturedEnv.WORKER_RUN_AT, '2026-05-01T20:00:00Z');
+});
+
+test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const logPath = path.join(workspaceDir, 'codex.log');
+  const codexHome = path.join(workspaceDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(promptPath, 'Fix.\n', 'utf8');
+  writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }), 'utf8');
+
+  const prev = { HOME: process.env.HOME, CODEX_HOME: process.env.CODEX_HOME, CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH };
+  process.env.HOME = workspaceDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+
+  let capturedEnv;
+  try {
+    spawnCodexRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      // jobId deliberately omitted
+      now: () => '2026-05-01T20:00:00Z',
+      spawnImpl: (_cmd, _args, opts) => {
+        capturedEnv = opts.env;
+        return { pid: 999, unref() {} };
+      },
+    });
+  } finally {
+    for (const k of ['HOME', 'CODEX_HOME', 'CODEX_AUTH_PATH']) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+
+  // WORKER_CLASS still set, WORKER_JOB_ID absent.
+  assert.equal(capturedEnv.WORKER_CLASS, REMEDIATION_WORKER_TRAILER_CLASS);
+  assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'WORKER_JOB_ID'), false);
 });
 
 test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt and output artifact', () => {

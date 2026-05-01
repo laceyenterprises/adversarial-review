@@ -1,0 +1,50 @@
+#!/bin/bash
+# worker-provenance commit-msg hook
+#
+# Appends provenance trailers to a commit message when the committing
+# process has worker-context env vars set. Installed into per-job
+# workspaces by tools/adversarial-review/src/follow-up-remediation.mjs
+# during prepareWorkspaceForJob, at .git/hooks/commit-msg.
+#
+# Trailer schema (all optional except Worker-Class, which gates the hook):
+#
+#   Worker-Class:    e.g. "codex-remediation", "claude-code-remediation"
+#                    (set by the spawn path; presence enables the hook)
+#   Worker-Job-Id:   the follow-up job's jobId — uniquely identifies the
+#                    unit of work being executed
+#   Worker-Run-At:   ISO 8601 timestamp the spawn fired (so the audit
+#                    trail survives even if the job record is later
+#                    cleaned up)
+#
+# Design notes:
+# - No-op when WORKER_CLASS is unset. That means the same workspace can
+#   be used by an operator for inspection/manual commits without
+#   accidentally getting worker trailers stamped on operator work.
+# - Idempotent: `git interpret-trailers --if-exists addIfDifferent`
+#   declines to write a trailer that's already present, so a worker
+#   that authors its own provenance (or an operator who amends a
+#   worker commit) won't end up with duplicates.
+# - Per-job workspace = per-job .git/hooks. Cannot leak into other
+#   repos or into the operator's main checkout.
+
+set -eu
+
+COMMIT_MSG_FILE="$1"
+
+# Operator-mode commit (no worker env): stay out of the way entirely.
+if [[ -z "${WORKER_CLASS:-}" ]]; then
+  exit 0
+fi
+
+TRAILERS=("--trailer" "Worker-Class: $WORKER_CLASS")
+if [[ -n "${WORKER_JOB_ID:-}" ]]; then
+  TRAILERS+=("--trailer" "Worker-Job-Id: $WORKER_JOB_ID")
+fi
+if [[ -n "${WORKER_RUN_AT:-}" ]]; then
+  TRAILERS+=("--trailer" "Worker-Run-At: $WORKER_RUN_AT")
+fi
+
+git interpret-trailers \
+  --if-exists addIfDifferent \
+  "${TRAILERS[@]}" \
+  --in-place "$COMMIT_MSG_FILE"

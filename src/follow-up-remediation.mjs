@@ -1,6 +1,6 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,7 @@ const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
+const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
@@ -53,6 +54,25 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 // per-job field) will pass the appropriate class through to
 // `prepareWorkspaceForJob` / `spawnCodexRemediationWorker`.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
+
+// The Worker-Class trailer this pipeline stamps on commits via the
+// commit-msg hook. Different from the worker-model class — encodes
+// role+model so audit trails can distinguish remediation work from other
+// codex-class work elsewhere (e.g. modules/worker-pool dispatch workers
+// also use the codex model but for a different purpose). Kept as a fixed
+// constant rather than composed from the workerClass parameter so the
+// trailer value is stable across spawn-site refactors.
+const REMEDIATION_WORKER_TRAILER_CLASS = 'codex-remediation';
+
+// Sentinel marker the install path uses to detect "this dest is already our
+// hook" without doing brittle byte-for-byte content compares. The marker
+// lives on a comment line near the top of hooks/worker-provenance-commit-msg.
+const WORKER_PROVENANCE_HOOK_SENTINEL = 'managed-by: adversarial-review-worker-provenance';
+// Filename used to preserve a pre-existing commit-msg hook when our wrapper
+// is installed on top. The wrapper invokes this chained file before appending
+// provenance trailers, so existing commit policy (DCO/signoff, message
+// validation, etc.) is preserved instead of silently disabled.
+const WORKER_PROVENANCE_CHAINED_HOOK_FILENAME = 'commit-msg.worker-provenance-chain';
 
 // Each class supports an env-var override for ops flexibility:
 //
@@ -496,6 +516,18 @@ async function prepareWorkspaceForJob({
     maxBuffer: 1 * 1024 * 1024,
   });
 
+  // Install the worker-provenance commit-msg hook in this workspace's
+  // .git/hooks. The hook reads worker-context env vars at commit time
+  // and appends Worker-Class / Worker-Job-Id / Worker-Run-At trailers
+  // so each commit carries durable audit metadata in the immutable
+  // commit object (no separate ledger lookup required to know what
+  // pipeline produced the commit). Per-job clone = per-job hooks dir;
+  // cannot leak into other repos. Idempotent: if a previous consume of
+  // this job already installed the hook, we just overwrite it with the
+  // current source — guaranteeing the deployed hook never drifts from
+  // the version checked into this branch.
+  installWorkerProvenanceHook(workspaceDir);
+
   await execFileImpl('gh', ['pr', 'checkout', String(job.prNumber)], {
     cwd: workspaceDir,
     maxBuffer: 10 * 1024 * 1024,
@@ -509,17 +541,100 @@ async function prepareWorkspaceForJob({
   };
 }
 
+function resolveEffectiveGitHooksDir(workspaceDir, { execFileSyncImpl = execFileSync } = {}) {
+  // Ask git itself for the hooks dir so we honor core.hooksPath. Hard-coding
+  // `.git/hooks` would silently install a no-op when an operator or repo has
+  // configured a custom hooks path, turning the audit trail into a lie.
+  try {
+    const stdout = execFileSyncImpl('git', ['rev-parse', '--git-path', 'hooks'], {
+      cwd: workspaceDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const relPath = String(stdout).trim();
+    if (relPath) {
+      return isAbsolute(relPath) ? relPath : resolve(workspaceDir, relPath);
+    }
+  } catch {
+    // git not available, or the workspace isn't a real repo (e.g. a unit test
+    // with a bare `.git` placeholder). Fall through to the conservative
+    // default; production always runs after `gh repo clone`, so the try
+    // branch is the live path.
+  }
+  return join(workspaceDir, '.git', 'hooks');
+}
+
+function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFileSync } = {}) {
+  const hooksDir = resolveEffectiveGitHooksDir(workspaceDir, { execFileSyncImpl });
+  if (!existsSync(hooksDir)) {
+    mkdirSync(hooksDir, { recursive: true });
+  }
+  const dest = join(hooksDir, 'commit-msg');
+  const chainedDest = join(hooksDir, WORKER_PROVENANCE_CHAINED_HOOK_FILENAME);
+
+  // If a commit-msg hook already exists at the dest and it isn't ours, move
+  // it aside so our wrapper can chain to it instead of clobbering it. Repo
+  // or operator policy (DCO/signoff, message validation, ticket tagging)
+  // must survive installation of this wrapper.
+  if (existsSync(dest)) {
+    let existing = '';
+    try {
+      existing = readFileSync(dest, 'utf8');
+    } catch {
+      existing = '';
+    }
+    const isAlreadyOurs = existing.includes(WORKER_PROVENANCE_HOOK_SENTINEL);
+    if (!isAlreadyOurs && !existsSync(chainedDest)) {
+      renameSync(dest, chainedDest);
+      try {
+        chmodSync(chainedDest, 0o755);
+      } catch {
+        // Some filesystems (e.g. sandboxed test envs) won't allow chmod;
+        // the chained hook only needs to be executable for the wrapper to
+        // invoke it, and rename preserves the original mode. If chmod
+        // fails, leave the existing mode untouched.
+      }
+    }
+    // If the dest is already ours, fall through and overwrite — that's the
+    // documented idempotency contract: the deployed hook never drifts from
+    // the source on this branch.
+  }
+
+  copyFileSync(WORKER_PROVENANCE_HOOK_SRC, dest);
+  chmodSync(dest, 0o755);
+  return dest;
+}
+
 function spawnCodexRemediationWorker({
   workspaceDir,
   promptPath,
   outputPath,
   logPath,
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
+  jobId = null,
   spawnImpl = spawn,
+  now = () => new Date().toISOString(),
 }) {
   const codexCli = resolveCodexCliPath();
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  const { env, startupEvidence } = prepareCodexRemediationStartupEnv({ gitIdentity });
+  const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({ gitIdentity });
+
+  // Worker-provenance env. The commit-msg hook installed by
+  // prepareWorkspaceForJob reads these at commit time and appends matching
+  // trailers to the immutable commit object. Hook is no-op when WORKER_CLASS
+  // is unset, so passing the env here is what activates the trailer write.
+  // Trailer class is fixed (REMEDIATION_WORKER_TRAILER_CLASS) so the audit
+  // signature stays stable across worker-model variants — disambiguation
+  // between codex / claude-code remediations lives in WORKER_JOB_ID and
+  // the workspace identity, not in the trailer class.
+  const env = {
+    ...baseEnv,
+    WORKER_CLASS: REMEDIATION_WORKER_TRAILER_CLASS,
+    WORKER_RUN_AT: now(),
+  };
+  if (jobId) {
+    env.WORKER_JOB_ID = jobId;
+  }
 
   const promptFd = openSync(promptPath, 'r');
   const stdoutFd = openSync(logPath, 'a');
@@ -1072,7 +1187,9 @@ async function consumeNextFollowUpJob({
       promptPath,
       outputPath,
       logPath,
+      jobId: claimed.job.jobId,
       spawnImpl,
+      now,
     });
 
     const updated = markFollowUpJobSpawned({
@@ -1161,6 +1278,9 @@ async function main() {
 
 export {
   FOLLOW_UP_PROMPT_PATH,
+  REMEDIATION_WORKER_TRAILER_CLASS,
+  WORKER_PROVENANCE_HOOK_SRC,
+  installWorkerProvenanceHook,
   OAuthError,
   StartupContractError,
   assertCodexOAuth,

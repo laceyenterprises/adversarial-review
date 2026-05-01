@@ -14,6 +14,24 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export HOME="/Users/placey"
 export CODEX_AUTH_PATH="/Users/placey/.codex/auth.json"
 
+# Sanity gate: better-sqlite3 is a native module and breaks across Node ABI
+# bumps (NODE_MODULE_VERSION mismatch). If the watcher will fail to load
+# anyway, sleep instead of crash-looping — KeepAlive=true + ThrottleInterval=30
+# in the LaunchAgent plist would otherwise turn an ABI mismatch into a
+# 1Password popup storm (every spawn triggers `op read` calls). Keep this
+# gate BEFORE any 1Password resolution so a broken native module produces
+# zero popups.
+WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
+if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >/tmp/adversarial-watcher-native-check.err 2>&1; then
+  echo "[adversarial-watcher] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
+  echo "[adversarial-watcher] details:" >&2
+  sed 's/^/  /' /tmp/adversarial-watcher-native-check.err >&2
+  echo "[adversarial-watcher] fix: cd $WATCHER_DIR && npm rebuild better-sqlite3" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; bootout the agent and rebuild to recover sooner." >&2
+  sleep 3600
+  exit 1
+fi
+
 # Load 1Password service account token
 source /Users/airlock/agent-os/agents/clio/credentials/local/op-service-account.env
 export OP_SERVICE_ACCOUNT_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
@@ -30,9 +48,14 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
 fi
 
 # Resolve only the 1Password-backed secrets needed by watcher.mjs + reviewer.mjs.
-export LINEAR_API_KEY=$(/opt/homebrew/bin/op read --cache=false 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
-export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read --cache=false 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
-export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read --cache=false 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+# `--cache=false` was dropped on 2026-05-01: forcing a fresh auth on every
+# call turned a transient watcher crash-loop (Node ABI mismatch) into a
+# 1Password popup storm. The service-account token in the env makes these
+# calls non-interactive; the cache only memoizes the resolution and does
+# not change auth strength.
+export LINEAR_API_KEY=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
+export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
+export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
 
 if [[ -z "${LINEAR_API_KEY:-}" ]]; then
   echo "[adversarial-watcher] ERROR: failed to resolve LINEAR_API_KEY from 1Password" >&2

@@ -755,7 +755,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
 - Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.
-- If you want another adversarial review pass, set \`reReview.requested\` to \`true\` in that JSON reply. Do not rely on prose alone.
+- Convergence rule (load-bearing): if you believe the review findings are addressed, set \`reReview.requested\` to \`true\` in that JSON reply — this is the default success path. The PR's existing \`Request changes\` verdict is what blocks the automerge gate, and only a fresh adversarial pass can replace it. Set \`reReview.requested\` to \`false\` ONLY when you are deliberately exiting and a human needs to step in (use the \`blockers\` array to explain). Do not rely on prose alone.
 - In your final message, report validation run and files changed.
 
 ## Required Remediation Reply Contract

@@ -14,3 +14,14 @@ When you finish:
 - Report the validation you ran.
 - Report any blockers or follow-ups that remain.
 - Write the required remediation reply JSON artifact so re-review requests are machine-readable, not prose-only.
+
+## Convergence rule (load-bearing)
+
+The PR currently carries an adversarial review with verdict `Request changes`. That verdict is what blocks the worker-pool automerge gate. The only way to clear it is to trigger a fresh adversarial review pass that posts a new verdict — typically `Comment only` once the findings are addressed.
+
+You drive that by setting `reReview.requested` in the remediation reply JSON:
+
+- **Set `reReview.requested = true`** — when you believe the review findings are addressed and the PR is ready for another adversarial pass to confirm. This is the **default success path**. Without it, the stale `Request changes` verdict stays on the PR forever and automerge never fires, even if your fix is correct.
+- **Set `reReview.requested = false`** — only when you are deliberately bowing out and human intervention is required (e.g., you cannot fix the issue without secrets you do not have, the change requires a design decision outside the review's scope, or you reached an architectural disagreement). Use the `blockers` array to explain what the human needs to decide.
+
+If you are not sure whether you have fixed enough, set `true` and let the next reviewer pass adjudicate. The 6-round cap in the bounded loop is the safety net against thrashing.

@@ -30,35 +30,20 @@ const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-// Identity each remediation-worker class should commit under. Without this,
-// the workspace inherits the operator's global git config and every
-// remediation commit looks like the human operator wrote it. We set these
-// *locally* on the per-job workspace so they never leak into other repos.
-//
-// Keyed by worker class so adding a new class (e.g., claude-code remediation
-// when that spawn path lands) is a one-row change instead of touching call
-// sites. Each class supports an env-var override for ops flexibility:
-//
-//   REMEDIATION_WORKER_GIT_NAME_<CLASS>   /  REMEDIATION_WORKER_GIT_EMAIL_<CLASS>
-//
-// where <CLASS> is the upper-snake-case form of the worker class
-// (e.g. claude-code → CLAUDE_CODE).
-const REMEDIATION_WORKER_IDENTITIES = {
+// Default identity each remediation-worker class commits under. Without
+// these, the workspace inherits the operator's global git config and every
+// remediation commit looks like the human operator wrote it. The defaults
+// are pure constants — no env reads at module-load time — so the resolver
+// below can pick up env overrides at call time, even if they are exported
+// after this process has started.
+const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
   codex: {
-    name:
-      process.env.REMEDIATION_WORKER_GIT_NAME_CODEX ||
-      'Codex Remediation Worker',
-    email:
-      process.env.REMEDIATION_WORKER_GIT_EMAIL_CODEX ||
-      'codex-remediation-worker@laceyenterprises.com',
+    name: 'Codex Remediation Worker',
+    email: 'codex-remediation-worker@laceyenterprises.com',
   },
   'claude-code': {
-    name:
-      process.env.REMEDIATION_WORKER_GIT_NAME_CLAUDE_CODE ||
-      'Claude Code Remediation Worker',
-    email:
-      process.env.REMEDIATION_WORKER_GIT_EMAIL_CLAUDE_CODE ||
-      'claude-code-remediation-worker@laceyenterprises.com',
+    name: 'Claude Code Remediation Worker',
+    email: 'claude-code-remediation-worker@laceyenterprises.com',
   },
 };
 
@@ -66,20 +51,35 @@ const REMEDIATION_WORKER_IDENTITIES = {
 // only spawn function is `spawnCodexRemediationWorker`, so the default class
 // is 'codex'. When a Claude Code remediation worker is added, callers (or a
 // per-job field) will pass the appropriate class through to
-// `prepareWorkspaceForJob`. Identifying the class up front means the git
-// identity is right from the first commit, not after a follow-up rewrite.
+// `prepareWorkspaceForJob` / `spawnCodexRemediationWorker`.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 
-function remediationWorkerGitIdentity(workerClass) {
-  const identity = REMEDIATION_WORKER_IDENTITIES[workerClass];
-  if (!identity) {
+// Each class supports an env-var override for ops flexibility:
+//
+//   REMEDIATION_WORKER_GIT_NAME_<CLASS>   /  REMEDIATION_WORKER_GIT_EMAIL_<CLASS>
+//
+// where <CLASS> is the upper-snake-case form of the worker class
+// (e.g. claude-code → CLAUDE_CODE). Resolved at call time, not module-load
+// time, so a long-running consumer can pick up identity changes without
+// being restarted.
+function remediationWorkerGitIdentity(workerClass, env = process.env) {
+  const defaults = REMEDIATION_WORKER_IDENTITY_DEFAULTS[workerClass];
+  if (!defaults) {
     throw new Error(
       `unknown remediation worker class: ${JSON.stringify(workerClass)}; ` +
       `cannot determine git identity. Add an entry to ` +
-      `REMEDIATION_WORKER_IDENTITIES in src/follow-up-remediation.mjs.`
+      `REMEDIATION_WORKER_IDENTITY_DEFAULTS in src/follow-up-remediation.mjs.`
     );
   }
-  return identity;
+  const envSuffix = String(workerClass).toUpperCase().replace(/-/g, '_');
+  const name = env[`REMEDIATION_WORKER_GIT_NAME_${envSuffix}`] || defaults.name;
+  const email = env[`REMEDIATION_WORKER_GIT_EMAIL_${envSuffix}`] || defaults.email;
+  if (!name || !email) {
+    throw new Error(
+      `remediation worker git identity for ${JSON.stringify(workerClass)} resolved to empty name or email`
+    );
+  }
+  return { name, email };
 }
 
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
@@ -216,12 +216,13 @@ function buildCodexStartupPolicyViolation({ reason, requestedValue = null, resol
   };
 }
 
-function prepareCodexRemediationStartupEnv() {
+function prepareCodexRemediationStartupEnv({ gitIdentity = null } = {}) {
   const authPath = resolveCodexAuthPath();
   const authHome = resolveCodexAuthHome(authPath);
   const authOwner = resolveCodexAuthOwner(authPath);
   const codexHome = dirname(authPath);
   const strippedEnv = [];
+  const overriddenGitEnv = [];
   const policyViolations = [];
 
   if (process.env.OPENAI_API_KEY) {
@@ -277,7 +278,9 @@ function prepareCodexRemediationStartupEnv() {
     },
     sanitizedEnv: {
       stripped: strippedEnv,
+      gitIdentityOverrides: overriddenGitEnv,
     },
+    gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
     policy_violations: policyViolations,
   };
 
@@ -300,6 +303,32 @@ function prepareCodexRemediationStartupEnv() {
     HOME: authHome,
   };
   delete env.OPENAI_API_KEY;
+
+  // Belt-and-suspenders: even though `prepareWorkspaceForJob` writes
+  // `git config user.name/.email` locally to the workspace, git's documented
+  // precedence prefers `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env vars over local
+  // config. Any inherited operator GIT_* env (from a launcher, shell profile,
+  // CI wrapper, etc.) would silently defeat that local config and put the
+  // operator's identity back on remediation commits. So when an identity is
+  // supplied we explicitly set those env vars to the worker identity for the
+  // spawned worker — which both (a) overrides any inherited operator value
+  // and (b) survives even if the worker's process tree calls git from a
+  // directory where the local config does not apply. We record the override
+  // in `startupEvidence.sanitizedEnv.gitIdentityOverrides` so any inherited
+  // value an operator had set is auditable rather than silently ignored.
+  if (gitIdentity) {
+    for (const [key, value] of [
+      ['GIT_AUTHOR_NAME', gitIdentity.name],
+      ['GIT_AUTHOR_EMAIL', gitIdentity.email],
+      ['GIT_COMMITTER_NAME', gitIdentity.name],
+      ['GIT_COMMITTER_EMAIL', gitIdentity.email],
+    ]) {
+      if (process.env[key] !== undefined && process.env[key] !== value) {
+        overriddenGitEnv.push(key);
+      }
+      env[key] = value;
+    }
+  }
 
   return {
     authPath,
@@ -485,10 +514,12 @@ function spawnCodexRemediationWorker({
   promptPath,
   outputPath,
   logPath,
+  workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
   spawnImpl = spawn,
 }) {
   const codexCli = resolveCodexCliPath();
-  const { env, startupEvidence } = prepareCodexRemediationStartupEnv();
+  const gitIdentity = remediationWorkerGitIdentity(workerClass);
+  const { env, startupEvidence } = prepareCodexRemediationStartupEnv({ gitIdentity });
 
   const promptFd = openSync(promptPath, 'r');
   const stdoutFd = openSync(logPath, 'a');
@@ -519,11 +550,13 @@ function spawnCodexRemediationWorker({
 
     return {
       model: 'codex',
+      workerClass,
       processId: child.pid,
       workspaceDir,
       promptPath,
       outputPath,
       logPath,
+      gitIdentity,
       startupEvidence,
       command: [
         codexCli,
@@ -1142,7 +1175,7 @@ export {
   prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,
   remediationWorkerGitIdentity,
-  REMEDIATION_WORKER_IDENTITIES,
+  REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
   resolveCodexCliPath,

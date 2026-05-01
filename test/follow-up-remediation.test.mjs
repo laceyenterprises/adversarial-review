@@ -1165,7 +1165,7 @@ function makeQueuedJob(rootDir, overrides = {}) {
   return { created, claimed };
 }
 
-test('reconcileFollowUpJob stops exited workers for no-progress when the final artifact exists without re-review', () => {
+test('reconcileFollowUpJob stops exited workers for no-progress when the final artifact exists without re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir);
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
@@ -1188,7 +1188,7 @@ test('reconcileFollowUpJob stops exited workers for no-progress when the final a
     },
   });
 
-  const result = reconcileFollowUpJob({
+  const result = await reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -1207,7 +1207,7 @@ test('reconcileFollowUpJob stops exited workers for no-progress when the final a
   assert.match(result.job.completion.finalMessageSummary, /Implemented fix and ran npm test/);
 });
 
-test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit also exhausts the cap', () => {
+test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit also exhausts the cap', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, {
     prNumber: 70,
@@ -1232,7 +1232,7 @@ test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit al
     },
   });
 
-  const result = reconcileFollowUpJob({
+  const result = await reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -1246,7 +1246,7 @@ test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit al
   assert.match(result.job.remediationPlan.stop.reason, /reached the max remediation rounds cap/);
 });
 
-test('reconcileFollowUpJob marks exited workers failed when the final artifact is missing', () => {
+test('reconcileFollowUpJob marks exited workers failed when the final artifact is missing', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:05:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
@@ -1267,7 +1267,7 @@ test('reconcileFollowUpJob marks exited workers failed when the final artifact i
     },
   });
 
-  const result = reconcileFollowUpJob({
+  const result = await reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -1283,7 +1283,7 @@ test('reconcileFollowUpJob marks exited workers failed when the final artifact i
   assert.equal(result.job.failure.logPath, path.relative(rootDir, logPath));
 });
 
-test('reconcileFollowUpJob rejects worker artifact traversal paths', () => {
+test('reconcileFollowUpJob rejects worker artifact traversal paths', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 10, reviewPostedAt: '2026-04-21T08:07:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
@@ -1301,7 +1301,7 @@ test('reconcileFollowUpJob rejects worker artifact traversal paths', () => {
     },
   });
 
-  const result = reconcileFollowUpJob({
+  const result = await reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -1315,7 +1315,7 @@ test('reconcileFollowUpJob rejects worker artifact traversal paths', () => {
   assert.equal(result.job.remediationWorker.state, 'failed');
 });
 
-test('reconcileInProgressFollowUpJobs leaves live workers in place', () => {
+test('reconcileInProgressFollowUpJobs leaves live workers in place', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 9, reviewPostedAt: '2026-04-21T08:06:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
@@ -1334,7 +1334,7 @@ test('reconcileInProgressFollowUpJobs leaves live workers in place', () => {
     },
   });
 
-  const result = reconcileInProgressFollowUpJobs({
+  const result = await reconcileInProgressFollowUpJobs({
     rootDir,
     now: () => '2026-04-21T10:32:00.000Z',
     isWorkerRunning: () => true,
@@ -1376,7 +1376,7 @@ test('assessWorkerLiveness bounds suspicious worker states for manual inspection
   );
 });
 
-test('reconcileFollowUpJob flags suspicious live PIDs for manual inspection instead of skipping forever', () => {
+test('reconcileFollowUpJob flags suspicious live PIDs for manual inspection instead of skipping forever', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 11, reviewPostedAt: '2026-04-21T08:08:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
@@ -1395,7 +1395,7 @@ test('reconcileFollowUpJob flags suspicious live PIDs for manual inspection inst
     },
   });
 
-  const result = reconcileFollowUpJob({
+  const result = await reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -1863,7 +1863,7 @@ test('assertClaudeCodeOAuth strips ANTHROPIC_API_KEY before probing so apiKey st
 
 // ── Worker-class metadata propagates through completion ────────────────────
 
-test('reconcileFollowUpJob records worker-class-aware completion source for claude-code workers', () => {
+test('reconcileFollowUpJob records worker-class-aware completion source for claude-code workers', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, {
     prNumber: 17,
@@ -1891,7 +1891,7 @@ test('reconcileFollowUpJob records worker-class-aware completion source for clau
     },
   });
 
-  const result = reconcileFollowUpJob({
+  const result = await reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -1906,4 +1906,238 @@ test('reconcileFollowUpJob records worker-class-aware completion source for clau
     'completion.source must reflect the actual worker class, not be hardcoded to codex'
   );
   assert.equal(result.job.completion.workerModel, 'claude-code');
+});
+
+// ── reconcile → public PR comment integration ──────────────────────────────
+
+test('reconcileFollowUpJob posts a public PR comment on no-progress stop with the worker-class header', async () => {
+  // Verify the wiring end-to-end: reconcile detects "rereview not requested"
+  // → marks stopped → calls postCommentImpl with action=stopped and the
+  // resolved worker class. Without this, an automated remediation cycle is
+  // invisible on the PR.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 50, builderTag: 'claude-code', reviewerModel: 'codex' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  writeFileSync(outputPath, 'Worker did the thing.\n', 'utf8');
+  writeFileSync(replyPath, JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Tightened token refresh handling.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: { requested: false, reason: null },
+  }), 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'claude-code',
+      processId: 9501,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    postCommentImpl: async (args) => {
+      commentCalls.push(args);
+      return { posted: true };
+    },
+  });
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(commentCalls.length, 1, 'reconcile must post exactly one comment per terminal transition');
+  assert.equal(commentCalls[0].repo, 'laceyenterprises/clio');
+  assert.equal(commentCalls[0].prNumber, 50);
+  assert.equal(commentCalls[0].workerClass, 'claude-code');
+  assert.match(commentCalls[0].body, /Remediation Worker \(claude-code\)/);
+  assert.match(commentCalls[0].body, /Tightened token refresh handling/);
+  assert.match(commentCalls[0].body, /Re-review requested:\*\*\s*no/);
+});
+
+test('reconcileFollowUpJob posts a public PR comment on completed (re-review queued)', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 51 });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  writeFileSync(outputPath, 'Worker did the thing.\n', 'utf8');
+  writeFileSync(replyPath, JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Addressed three findings.',
+    validation: ['npm test', 'lint'],
+    blockers: [],
+    reReview: { requested: true, reason: 'Want adversarial confirmation of the fixes.' },
+  }), 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9502,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    postCommentImpl: async (args) => {
+      commentCalls.push(args);
+      return { posted: true };
+    },
+  });
+
+  assert.equal(result.action, 'completed');
+  assert.equal(commentCalls.length, 1);
+  assert.equal(commentCalls[0].workerClass, 'codex');
+  assert.match(commentCalls[0].body, /re-review queued/);
+  assert.match(commentCalls[0].body, /Want adversarial confirmation of the fixes\./);
+});
+
+test('reconcileFollowUpJob posts a public PR comment on missing-final-message failure', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 52 });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  // Intentionally don't write the final-message artifact.
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9503,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+    },
+  });
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    postCommentImpl: async (args) => {
+      commentCalls.push(args);
+      return { posted: true };
+    },
+  });
+
+  assert.equal(result.action, 'failed');
+  assert.equal(commentCalls.length, 1);
+  assert.match(commentCalls[0].body, /Outcome:.*failed/);
+  assert.match(commentCalls[0].body, /Reason: `Remediation worker exited before writing the final message artifact\.`/);
+});
+
+test('reconcileFollowUpJob does NOT post a comment for active workers (only on terminal transitions)', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 53 });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9504,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+    },
+  });
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:05:00.000Z',
+    isWorkerRunning: () => true, // still running
+    postCommentImpl: async (args) => {
+      commentCalls.push(args);
+      return { posted: true };
+    },
+  });
+
+  assert.equal(result.action, 'active');
+  assert.equal(commentCalls.length, 0, 'active reconcile must not post any comment');
+});
+
+test('reconcileFollowUpJob does not throw when postCommentImpl rejects (best-effort posting)', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 54 });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'worker output\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9505,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+    },
+  });
+
+  // Reconcile must still complete and return a terminal action even when
+  // posting blows up — otherwise a flaky GitHub API would jam the queue.
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    postCommentImpl: async () => { throw new Error('GitHub API down'); },
+    log: { error: () => {} },
+  });
+  assert.equal(result.action, 'stopped');
 });

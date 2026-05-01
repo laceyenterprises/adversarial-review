@@ -20,6 +20,10 @@ import {
   buildObviousDocsGuidance,
   collectWorkspaceDocContext,
 } from './prompt-context.mjs';
+import {
+  buildRemediationOutcomeCommentBody,
+  postRemediationOutcomeComment,
+} from './pr-comments.mjs';
 import { requestReviewRereview } from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -1140,12 +1144,59 @@ function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWor
   return { state: 'exited', reason: 'worker-not-running', ageMs };
 }
 
-function reconcileFollowUpJob({
+// Resolve the worker class (codex / claude-code) for a reconcile-time
+// comment. The spawned worker stamps `model` on its metadata; fall back
+// to the job's builderTag (the canonical class chooser used at consume
+// time) if the model wasn't recorded. Final fallback is 'codex' to
+// preserve historical behavior on legacy job records.
+function resolveReconcileWorkerClass(job, worker) {
+  return worker?.model || job?.builderTag || 'codex';
+}
+
+async function postReconcileOutcomeCommentSafe({
+  job,
+  worker,
+  action,
+  reply = null,
+  reReview = null,
+  failure = null,
+  postCommentImpl,
+  log = console,
+}) {
+  // Best-effort: never let a post failure block the state transition or
+  // throw out of reconcile. The terminal directory move has already
+  // happened by the time we get here, so a thrown error would leave the
+  // queue in a confusing state with no operator feedback.
+  try {
+    const workerClass = resolveReconcileWorkerClass(job, worker);
+    const body = buildRemediationOutcomeCommentBody({
+      workerClass,
+      action,
+      job,
+      reply,
+      reReview,
+      failure,
+    });
+    await postCommentImpl({
+      repo: job?.repo,
+      prNumber: job?.prNumber,
+      workerClass,
+      body,
+      log,
+    });
+  } catch (err) {
+    log.error?.(`[follow-up-remediation] PR comment post threw (non-fatal): ${err.message}`);
+  }
+}
+
+async function reconcileFollowUpJob({
   rootDir = ROOT,
   job,
   jobPath,
   now = () => new Date().toISOString(),
   isWorkerRunning = isWorkerProcessRunning,
+  postCommentImpl = postRemediationOutcomeComment,
+  log = console,
 } = {}) {
   const worker = job?.remediationWorker;
   if (!worker?.processId || worker.state !== 'spawned') {
@@ -1191,6 +1242,15 @@ function reconcileFollowUpJob({
       },
     });
 
+    await postReconcileOutcomeCommentSafe({
+      job: failed.job,
+      worker,
+      action: 'failed',
+      failure: { code: 'manual-inspection-required', message: liveness.reason },
+      postCommentImpl,
+      log,
+    });
+
     return {
       action: 'failed',
       reason: liveness.reason,
@@ -1219,6 +1279,15 @@ function reconcileFollowUpJob({
       },
     });
 
+    await postReconcileOutcomeCommentSafe({
+      job: failed.job,
+      worker,
+      action: 'failed',
+      failure: { code: 'invalid-output-path', message: err.message },
+      postCommentImpl,
+      log,
+    });
+
     return {
       action: 'failed',
       reason: 'invalid-worker-paths',
@@ -1239,6 +1308,12 @@ function reconcileFollowUpJob({
       state: job?.remediationReply?.path ? 'awaiting-worker-write' : 'not-configured',
     };
     let rereview = buildRereviewResult({ requested: false });
+    // Hoisted so the terminal `stopped` / `completed` branches below
+    // can pass the worker's parsed reply (summary, validation,
+    // blockers) into the public PR comment. When the reply path
+    // is not configured for this job, this stays null and the
+    // comment body falls back to the action / reReview signal alone.
+    let parsedReply = null;
 
     if (paths.replyPath) {
       let reply;
@@ -1260,6 +1335,15 @@ function reconcileFollowUpJob({
           },
         });
 
+        await postReconcileOutcomeCommentSafe({
+          job: failed.job,
+          worker,
+          action: 'failed',
+          failure: { code: 'invalid-remediation-reply', message: err.message },
+          postCommentImpl,
+          log,
+        });
+
         return {
           action: 'failed',
           reason: 'invalid-remediation-reply',
@@ -1273,6 +1357,7 @@ function reconcileFollowUpJob({
         state: 'worker-wrote-reply',
         path: worker.replyPath || job?.remediationReply?.path || null,
       };
+      parsedReply = reply;
 
       if (reply.reReview.requested) {
         const requestedAt = completedAt;
@@ -1343,6 +1428,16 @@ function reconcileFollowUpJob({
         stopReason,
       });
 
+      await postReconcileOutcomeCommentSafe({
+        job: stopped.job,
+        worker,
+        action: 'stopped',
+        reply: parsedReply,
+        reReview: rereview,
+        postCommentImpl,
+        log,
+      });
+
       return {
         action: 'stopped',
         reason: 'no-progress-stop',
@@ -1364,6 +1459,16 @@ function reconcileFollowUpJob({
       reReview: rereview,
     });
 
+    await postReconcileOutcomeCommentSafe({
+      job: completed.job,
+      worker,
+      action: 'completed',
+      reply: parsedReply,
+      reReview: rereview,
+      postCommentImpl,
+      log,
+    });
+
     return {
       action: 'completed',
       reason: 'final-message-artifact-present',
@@ -1372,16 +1477,16 @@ function reconcileFollowUpJob({
     };
   }
 
+  const failureCode = finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion';
+  const failureMessage = finalMessage.exists
+    ? 'Remediation worker exited without a non-empty final message artifact.'
+    : 'Remediation worker exited before writing the final message artifact.';
   const failed = markFollowUpJobFailed({
     rootDir,
     jobPath,
     failedAt: completedAt,
-    failureCode: finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion',
-    error: new Error(
-      finalMessage.exists
-        ? 'Remediation worker exited without a non-empty final message artifact.'
-        : 'Remediation worker exited before writing the final message artifact.'
-    ),
+    failureCode,
+    error: new Error(failureMessage),
     remediationWorker: {
       ...workerState,
       state: 'failed',
@@ -1393,6 +1498,15 @@ function reconcileFollowUpJob({
     },
   });
 
+  await postReconcileOutcomeCommentSafe({
+    job: failed.job,
+    worker,
+    action: 'failed',
+    failure: { code: failureCode, message: failureMessage },
+    postCommentImpl,
+    log,
+  });
+
   return {
     action: 'failed',
     reason: finalMessage.exists ? 'empty-final-message-artifact' : 'missing-final-message-artifact',
@@ -1401,19 +1515,34 @@ function reconcileFollowUpJob({
   };
 }
 
-function reconcileInProgressFollowUpJobs({
+async function reconcileInProgressFollowUpJobs({
   rootDir = ROOT,
   now = () => new Date().toISOString(),
   isWorkerRunning = isWorkerProcessRunning,
+  postCommentImpl = postRemediationOutcomeComment,
+  log = console,
 } = {}) {
   const jobs = listInProgressFollowUpJobs(rootDir);
-  const results = jobs.map(({ job, jobPath }) => reconcileFollowUpJob({
-    rootDir,
-    job,
-    jobPath,
-    now,
-    isWorkerRunning,
-  }));
+  // Sequential, not Promise.all: each comment post is a network call to
+  // GitHub, and if many jobs land on the same PR we'd rather queue a
+  // tidy serialized comment stream than risk concurrent posts arriving
+  // out-of-order. The volume here is tiny (one tick = a handful of
+  // jobs at most), so serial is the right tradeoff.
+  const results = [];
+  for (const { job, jobPath } of jobs) {
+    /* eslint-disable no-await-in-loop */
+    const result = await reconcileFollowUpJob({
+      rootDir,
+      job,
+      jobPath,
+      now,
+      isWorkerRunning,
+      postCommentImpl,
+      log,
+    });
+    results.push(result);
+    /* eslint-enable no-await-in-loop */
+  }
 
   return {
     scanned: jobs.length,
@@ -1554,7 +1683,7 @@ async function main() {
 
   try {
     if (mode === 'reconcile') {
-      const result = reconcileInProgressFollowUpJobs();
+      const result = await reconcileInProgressFollowUpJobs();
       console.log(
         `[follow-up-remediation] Reconciliation scanned=${result.scanned} active=${result.active} completed=${result.completed} failed=${result.failed} skipped=${result.skipped}`
       );

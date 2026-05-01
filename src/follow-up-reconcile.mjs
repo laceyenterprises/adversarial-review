@@ -42,45 +42,49 @@ function mapReconcileResult(result) {
   };
 }
 
-function reconcileFollowUpJob({
+async function reconcileFollowUpJob({
   rootDir = ROOT,
   jobPath,
   now = () => new Date().toISOString(),
   isProcessAliveImpl,
+  postCommentImpl,
 }) {
   const entry = listFollowUpJobsInDir(rootDir, 'inProgress').find((item) => item.jobPath === jobPath);
   if (!entry?.job) {
     throw new Error(`In-progress follow-up job not found: ${jobPath}`);
   }
 
-  const result = reconcileFollowUpJobImpl({
+  const result = await reconcileFollowUpJobImpl({
     rootDir,
     job: entry.job,
     jobPath,
     now,
     isWorkerRunning: isProcessAliveImpl,
+    postCommentImpl,
   });
 
   return mapReconcileResult(result);
 }
 
-function reconcileInProgressFollowUpJobs({
+async function reconcileInProgressFollowUpJobs({
   rootDir = ROOT,
   now = () => new Date().toISOString(),
   isProcessAliveImpl,
+  postCommentImpl,
 } = {}) {
-  const result = reconcileInProgressFollowUpJobsImpl({
+  const result = await reconcileInProgressFollowUpJobsImpl({
     rootDir,
     now,
     isWorkerRunning: isProcessAliveImpl,
+    postCommentImpl,
   });
 
   return result.results.map(mapReconcileResult);
 }
 
-function main() {
+async function main() {
   try {
-    const results = reconcileInProgressFollowUpJobs();
+    const results = await reconcileInProgressFollowUpJobs();
     if (results.length === 0) {
       console.log('[follow-up-reconcile] No in-progress follow-up jobs found.');
       return;

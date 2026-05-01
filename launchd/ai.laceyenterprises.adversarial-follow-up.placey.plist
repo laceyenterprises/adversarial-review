@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.laceyenterprises.adversarial-follow-up</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/airlock/agent-os/tools/adversarial-review/scripts/adversarial-follow-up-tick.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/airlock/agent-os/tools/adversarial-review</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/placey</string>
+        <key>CODEX_AUTH_PATH</key>
+        <string>/Users/placey/.codex/auth.json</string>
+    </dict>
+
+    <!-- Fire every 120s. Each tick is a one-shot: claim+spawn one
+         pending job, reconcile any in-progress ones, exit. The 6-round
+         cap inside follow-up-jobs.mjs and the per-PR rereview cooldown
+         in review-state.mjs are the runaway guards; this interval just
+         decides how quickly a freshly-posted review turns into a
+         spawned remediation worker. -->
+    <key>StartInterval</key>
+    <integer>120</integer>
+
+    <!-- Fire once on agent load so an outage recovery is not delayed
+         by up to 2 minutes for the first tick. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- KeepAlive=false: this is a one-shot tick. KeepAlive=true would
+         turn a fast tick (no pending work) into a respawn storm. -->
+
+    <key>StandardOutPath</key>
+    <string>/Users/placey/Library/Logs/adversarial-follow-up.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/placey/Library/Logs/adversarial-follow-up.log</string>
+</dict>
+</plist>

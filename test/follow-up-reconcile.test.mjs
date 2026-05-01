@@ -58,7 +58,7 @@ function readReviewRow(rootDir, repo = 'laceyenterprises/clio', prNumber = 7) {
   }
 }
 
-test('reconcileFollowUpJob stops a finished spawned round for no-progress when no re-review is requested', () => {
+test('reconcileFollowUpJob stops a finished spawned round for no-progress when no re-review is requested', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
@@ -80,7 +80,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
     },
   });
 
-  const reconciled = reconcileFollowUpJob({
+  const reconciled = await reconcileFollowUpJob({
     rootDir,
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
@@ -99,7 +99,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
   assert.equal(reconciled.job.remediationWorker.processId, 8123);
 });
 
-test('reconcileFollowUpJob resets watcher review state when remediation reply requests re-review', () => {
+test('reconcileFollowUpJob resets watcher review state when remediation reply requests re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
   createFollowUpJob(makeJobInput(rootDir));
@@ -139,7 +139,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
     },
   });
 
-  const reconciled = reconcileFollowUpJob({
+  const reconciled = await reconcileFollowUpJob({
     rootDir,
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
@@ -162,7 +162,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   assert.equal(reviewRow.posted_at, null);
 });
 
-test('reconcileFollowUpJob records a blocked re-review request when the watcher row is terminal malformed', () => {
+test('reconcileFollowUpJob records a blocked re-review request when the watcher row is terminal malformed', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir, {
     reviewer: 'malformed-title',
@@ -205,7 +205,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
     },
   });
 
-  const reconciled = reconcileFollowUpJob({
+  const reconciled = await reconcileFollowUpJob({
     rootDir,
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
@@ -222,7 +222,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
   assert.equal(reviewRow.review_status, 'malformed');
 });
 
-test('reconcileFollowUpJob fails a finished spawned round when output is missing', () => {
+test('reconcileFollowUpJob fails a finished spawned round when output is missing', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
@@ -242,7 +242,7 @@ test('reconcileFollowUpJob fails a finished spawned round when output is missing
     },
   });
 
-  const reconciled = reconcileFollowUpJob({
+  const reconciled = await reconcileFollowUpJob({
     rootDir,
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
@@ -257,7 +257,7 @@ test('reconcileFollowUpJob fails a finished spawned round when output is missing
   assert.equal(reconciled.job.remediationWorker.processId, 8123);
 });
 
-test('reconcileFollowUpJob fails when the remediation reply artifact is invalid', () => {
+test('reconcileFollowUpJob fails when the remediation reply artifact is invalid', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
   createFollowUpJob(makeJobInput(rootDir));
@@ -284,7 +284,7 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
     },
   });
 
-  const reconciled = reconcileFollowUpJob({
+  const reconciled = await reconcileFollowUpJob({
     rootDir,
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
@@ -296,7 +296,7 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
   assert.equal(reconciled.job.failure.code, 'invalid-remediation-reply');
 });
 
-test('reconcileFollowUpJob fails a finished spawned round when outputPath escapes the repo root', () => {
+test('reconcileFollowUpJob fails a finished spawned round when outputPath escapes the repo root', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
@@ -316,7 +316,7 @@ test('reconcileFollowUpJob fails a finished spawned round when outputPath escape
     },
   });
 
-  const reconciled = reconcileFollowUpJob({
+  const reconciled = await reconcileFollowUpJob({
     rootDir,
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',

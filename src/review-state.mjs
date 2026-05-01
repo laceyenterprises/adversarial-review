@@ -120,5 +120,6 @@ function requestReviewRereview({
 export {
   ensureReviewStateSchema,
   openReviewStateDb,
+  getReviewRow,
   requestReviewRereview,
 };

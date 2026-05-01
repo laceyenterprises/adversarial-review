@@ -318,11 +318,24 @@ Inspect review DB:
 sqlite3 data/reviews.db "select repo,pr_number,review_status,pr_state,review_attempts,posted_at,failed_at,rereview_requested_at from reviewed_prs order by id desc limit 20;"
 ```
 
-Reset one PR to pending manually:
+Re-trigger a review for a previously-reviewed PR (canonical path):
+
+```bash
+npm run retrigger-review -- \
+  --repo laceyenterprises/adversarial-review \
+  --pr 212 \
+  --reason "operator triggered: <why you're rerunning>"
+```
+
+This wraps the same atomic transition the follow-up flow uses — `review_status='pending'`, clears `posted_at`/`failed_at`/`failure_message`, stamps `rereview_requested_at` and `rereview_reason`. Hand-written SQL that only sets `rereview_requested_at` is a silent no-op because the watcher polls on `review_status`, not on the rereview metadata. By default the CLI refuses rows whose `review_status` is `'failed'` (the watcher already retries those automatically and the reset would erase diagnostic evidence); pass `--allow-failed-reset` after reviewing the failure if you really want a clean rerun. See `npm run retrigger-review -- --help` for the full surface.
+
+**Emergency-only direct SQL** (use only if the npm script is unavailable, e.g. partial repo state during an incident):
 
 ```bash
 sqlite3 data/reviews.db "BEGIN; UPDATE reviewed_prs SET review_status='pending', posted_at=NULL, failed_at=NULL, failure_message=NULL WHERE repo='laceyenterprises/adversarial-review' AND pr_number=212; COMMIT;"
 ```
+
+Note that this path skips the rereview audit metadata (`rereview_requested_at`, `rereview_reason`) — the npm wrapper is preferred for any non-emergency operator action.
 
 Check worker artifacts:
 

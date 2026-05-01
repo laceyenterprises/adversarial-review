@@ -391,3 +391,167 @@ test('main with --quiet suppresses informational output but preserves exit code'
   assert.equal(rc, 0);
   assert.equal(out.text(), '');
 });
+
+// ── PR #13 round-2 review fixes ─────────────────────────────────────────────
+
+test('parseArgs accepts --allow-failed-reset (default false)', () => {
+  const { values: defaultValues } = parseArgs([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '99',
+    '--reason', 'x',
+  ]);
+  assert.equal(defaultValues['allow-failed-reset'], false);
+
+  const { values: optedIn } = parseArgs([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '99',
+    '--reason', 'x',
+    '--allow-failed-reset',
+  ]);
+  assert.equal(optedIn['allow-failed-reset'], true);
+});
+
+test('main refuses review_status=failed without --allow-failed-reset and preserves failure evidence', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'failed',
+    failedAt: '2026-04-30T22:11:33.000Z',
+    failureMessage: 'oauth token expired',
+    postedAt: null,
+  });
+
+  const err = makeCaptureStream();
+  const rc = main(
+    [
+      '--repo', 'laceyenterprises/adversarial-review',
+      '--pr', '42',
+      '--reason', 'fix it',
+      '--root-dir', rootDir,
+    ],
+    { stdout: makeCaptureStream(), stderr: err }
+  );
+
+  assert.equal(rc, 1, 'should be blocked');
+  assert.match(err.text(), /failed-status-needs-explicit-allow/);
+  assert.match(err.text(), /--allow-failed-reset/);
+
+  // Diagnostic evidence MUST still be on disk — that's the whole point.
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/adversarial-review', 42);
+    assert.equal(row.review_status, 'failed', 'status untouched');
+    assert.equal(row.failed_at, '2026-04-30T22:11:33.000Z', 'failed_at preserved');
+    assert.equal(row.failure_message, 'oauth token expired', 'failure_message preserved');
+  } finally {
+    db.close();
+  }
+});
+
+test('main accepts review_status=failed when --allow-failed-reset is set (matches existing behavior)', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'failed',
+    failedAt: '2026-04-30T22:11:33.000Z',
+    failureMessage: 'oauth token expired',
+    postedAt: null,
+  });
+
+  const out = makeCaptureStream();
+  const rc = main(
+    [
+      '--repo', 'laceyenterprises/adversarial-review',
+      '--pr', '42',
+      '--reason', 'fixed token; clean rerun',
+      '--root-dir', rootDir,
+      '--allow-failed-reset',
+    ],
+    { stdout: out, stderr: makeCaptureStream() }
+  );
+
+  assert.equal(rc, 0, 'should trigger');
+  assert.match(out.text(), /triggered/);
+
+  // With the explicit override, the helper's reset behavior applies and
+  // failure evidence is intentionally cleared.
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, failed_at, failure_message, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/adversarial-review', 42);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.failed_at, null);
+    assert.equal(row.failure_message, null);
+    assert.equal(row.rereview_reason, 'fixed token; clean rerun');
+  } finally {
+    db.close();
+  }
+});
+
+test('main returns 4 with concise stderr (no stack trace) when rereview throws', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
+  insertReviewRow(rootDir, { reviewStatus: 'posted' });
+
+  const err = makeCaptureStream();
+  const rc = main(
+    [
+      '--repo', 'laceyenterprises/adversarial-review',
+      '--pr', '42',
+      '--reason', 'simulate runtime failure',
+      '--root-dir', rootDir,
+    ],
+    {
+      stdout: makeCaptureStream(),
+      stderr: err,
+      rereview: () => { throw new Error('database is locked'); },
+    }
+  );
+
+  assert.equal(rc, 4);
+  const text = err.text();
+  assert.match(text, /rereview failed: database is locked/);
+  // No 'at <function>' frames — the operator should see a clean message,
+  // not a Node stack trace.
+  assert.doesNotMatch(text, / at /);
+});
+
+test('main returns 4 when readReviewRow throws (e.g. unreadable --root-dir)', () => {
+  const err = makeCaptureStream();
+  const rc = main(
+    [
+      '--repo', 'laceyenterprises/adversarial-review',
+      '--pr', '42',
+      '--reason', 'simulate bad root-dir',
+    ],
+    {
+      stdout: makeCaptureStream(),
+      stderr: err,
+      readReviewRow: () => { throw new Error('ENOENT: no such file or directory'); },
+    }
+  );
+
+  assert.equal(rc, 4);
+  assert.match(err.text(), /could not read review state: ENOENT/);
+  assert.doesNotMatch(err.text(), / at /);
+});
+
+test('main returns 4 with real broken --root-dir (subprocess-style: passing /dev/null)', () => {
+  // The reviewer's repro: --root-dir /dev/null. openReviewStateDb does
+  // mkdirSync(join(rootDir, 'data'), {recursive:true}) which fails with
+  // ENOTDIR because /dev/null is a character device, not a directory.
+  const err = makeCaptureStream();
+  const rc = main(
+    [
+      '--repo', 'laceyenterprises/adversarial-review',
+      '--pr', '42',
+      '--reason', 'broken root',
+      '--root-dir', '/dev/null',
+    ],
+    { stdout: makeCaptureStream(), stderr: err }
+  );
+
+  assert.equal(rc, 4, 'broken --root-dir must produce a deterministic exit, not a stack trace');
+  assert.match(err.text(), /could not read review state/);
+  assert.doesNotMatch(err.text(), / at /);
+});

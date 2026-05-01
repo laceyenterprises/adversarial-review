@@ -17,7 +17,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { requestReviewRereview } from './review-state.mjs';
+import {
+  ensureReviewStateSchema,
+  getReviewRow,
+  openReviewStateDb,
+  requestReviewRereview,
+} from './review-state.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -40,14 +45,24 @@ Required:
 
 Optional:
   --root-dir <path>       Adversarial-review tool root (default: this script's parent).
+  --allow-failed-reset    Permit retriggering a row whose review_status is 'failed'.
+                          Refused by default because the watcher already retries
+                          'failed' rows automatically, and the reset clears
+                          failed_at + failure_message — i.e. the diagnostic
+                          evidence — before anyone has read it. Pass this flag
+                          only when you have reviewed the failure and explicitly
+                          want a clean rerun.
   --quiet                 Suppress informational stdout; only the exit code matters.
   -h, --help              Show this help.
 
 Exit codes:
   0  triggered or already-pending (a review will run / is already queued)
-  1  blocked (review row missing, PR not open, or malformed-title-terminal)
+  1  blocked (review row missing, PR not open, malformed-title-terminal, or
+     review_status='failed' without --allow-failed-reset)
   2  usage error (missing/invalid args)
-  3  I/O error (e.g. --reason-file path unreadable)
+  3  reason-input I/O error (e.g. --reason-file path unreadable)
+  4  runtime / database error (could not open or write reviews.db; the failure
+     message is printed to stderr without a stack trace)
 `;
 
 class UsageError extends Error {}
@@ -64,6 +79,7 @@ function parseArgs(argv) {
         'reason-file': { type: 'string' },
         'reason-stdin': { type: 'boolean', default: false },
         'root-dir': { type: 'string' },
+        'allow-failed-reset': { type: 'boolean', default: false },
         quiet: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -126,11 +142,25 @@ function emit(quiet, stream, msg) {
   stream.write(msg);
 }
 
+function readReviewRowSafely({ rootDir, repo, prNumber }) {
+  // Open + close inside this helper so the connection lifecycle stays
+  // local. Schema is ensured before reading because tests (and a
+  // freshly-created tool root) may produce a brand-new DB.
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    return getReviewRow(db, { repo, prNumber });
+  } finally {
+    db.close();
+  }
+}
+
 function main(argv, {
   stdout = process.stdout,
   stderr = process.stderr,
   stdinReader = readStdinSync,
   rereview = requestReviewRereview,
+  readReviewRow = readReviewRowSafely,
 } = {}) {
   let parsed;
   try {
@@ -166,14 +196,52 @@ function main(argv, {
     ? resolve(values['root-dir'])
     : DEFAULT_ROOT_DIR;
 
-  const result = rereview({
-    rootDir,
-    repo: values.repo,
-    prNumber: values.pr,
-    reason,
-  });
-
   const target = `${values.repo}#${values.pr}`;
+
+  // Eligibility gate (PR #13 review blocking #2): the lower-level
+  // `requestReviewRereview` accepts any non-pending, non-malformed,
+  // PR-open row — including review_status='failed'. The watcher already
+  // retries 'failed' rows automatically, and the reset clears failed_at
+  // + failure_message. Running this CLI on 'failed' is therefore both
+  // unnecessary and destructive (erases the diagnostic evidence). Refuse
+  // by default; require explicit --allow-failed-reset to override.
+  //
+  // Wrapped in try/catch (PR #13 review blocking #1): any operational
+  // failure here (bad --root-dir, unreadable DB file, permission issue,
+  // lock timeout) becomes a controlled exit-4 instead of a Node stack
+  // trace. The CLI is for manual recovery — recovery tooling cannot
+  // assume the DB is healthy.
+  let reviewRow;
+  try {
+    reviewRow = readReviewRow({ rootDir, repo: values.repo, prNumber: values.pr });
+  } catch (err) {
+    stderr.write(`error: could not read review state: ${err.message}\n`);
+    return 4;
+  }
+
+  if (reviewRow && reviewRow.review_status === 'failed' && !values['allow-failed-reset']) {
+    stderr.write(
+      `blocked (failed-status-needs-explicit-allow): ${target} is in 'failed' state.\n` +
+      `  The watcher already retries 'failed' rows automatically.\n` +
+      `  Resetting it would clear failed_at + failure_message (the diagnostic\n` +
+      `  evidence) before anyone has read it. If you have reviewed the failure\n` +
+      `  and explicitly want a clean rerun, pass --allow-failed-reset.\n`
+    );
+    return 1;
+  }
+
+  let result;
+  try {
+    result = rereview({
+      rootDir,
+      repo: values.repo,
+      prNumber: values.pr,
+      reason,
+    });
+  } catch (err) {
+    stderr.write(`error: rereview failed: ${err.message}\n`);
+    return 4;
+  }
 
   if (result.triggered) {
     emit(values.quiet, stdout,
@@ -196,7 +264,7 @@ function main(argv, {
   return 1;
 }
 
-export { parseArgs, readReasonFromSource, main, UsageError, USAGE };
+export { parseArgs, readReasonFromSource, readReviewRowSafely, main, UsageError, USAGE };
 
 // Module-vs-CLI guard: only run main() when invoked as a script, so the
 // test file can `import { main, ... }` without triggering execution.

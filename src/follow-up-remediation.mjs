@@ -27,7 +27,7 @@ import {
 } from './pr-comments.mjs';
 import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
 import { redactSensitiveText } from './redaction.mjs';
-import { requestReviewRereview } from './review-state.mjs';
+import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1402,6 +1402,79 @@ async function postReconcileOutcomeCommentSafe({
   }
 }
 
+// Resolve the live PR lifecycle for a job, swallowing any errors so the
+// merge gate degrades to "proceed with existing behavior" instead of
+// halting the whole pipeline when GitHub or the SQLite mirror is down.
+// Logs at error level so the visibility regression isn't silent — ops
+// can still tell the difference between "merge gate didn't fire" and
+// "merge gate couldn't fire because the lookup failed".
+async function resolveJobPRLifecycleSafe({
+  rootDir,
+  job,
+  resolvePRLifecycleImpl,
+  execFileImpl,
+  log = console,
+}) {
+  try {
+    return await resolvePRLifecycleImpl(rootDir, {
+      repo: job.repo,
+      prNumber: job.prNumber,
+      execFileImpl,
+    });
+  } catch (err) {
+    log.error?.(
+      `[follow-up-remediation] PR lifecycle resolve threw for ${job.repo}#${job.prNumber} (non-fatal): ${err.message}`
+    );
+    return null;
+  }
+}
+
+// Map a lifecycle observation to a stop decision (or null when the gate
+// should let the flow through). Centralized so the consume + reconcile
+// sites can't drift out of sync on which states stop and what stop code
+// they emit.
+//
+// Stop codes:
+//   - operator-merged-pr — PR was merged. Worker's pushed commits may
+//     already be in main; don't undo, don't reset the watcher row.
+//   - operator-closed-pr — PR was closed unmerged. Same gate as merged
+//     because requestReviewRereview refuses pr_state != 'open' anyway,
+//     but a separate code so operator reporting can distinguish "we
+//     shipped this" from "we abandoned this".
+function lifecycleStopDecision(lifecycle, { repo, prNumber, site }) {
+  if (!lifecycle) return null;
+  if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') return null;
+
+  const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
+  const tail = site === 'consume'
+    ? 'stopping the bounded loop instead of spawning a worker on a closed branch.'
+    : 'stopping the bounded loop instead of advancing the queue or posting a comment on a closed PR.';
+
+  if (lifecycle.prState === 'merged') {
+    const mergedTail = site === 'consume'
+      ? 'stopping the bounded loop instead of spawning a worker on a closed branch.'
+      : 'stopping the bounded loop instead of advancing the queue or posting a comment on a merged PR.';
+    const verb = site === 'consume' ? 'was merged before remediation could run' : 'was merged while the remediation worker was running';
+    return {
+      stopCode: 'operator-merged-pr',
+      actionReason: 'pr-merged',
+      workerState: site === 'consume' ? 'never-spawned' : 'completed-pr-already-merged',
+      stopReason: `PR ${repo}#${prNumber} ${verb}` +
+        `${lifecycle.mergedAt ? ` (mergedAt=${lifecycle.mergedAt})` : ''}${sourceTag}; ${mergedTail}`,
+    };
+  }
+
+  // closed (unmerged)
+  const verb = site === 'consume' ? 'was closed before remediation could run' : 'was closed while the remediation worker was running';
+  return {
+    stopCode: 'operator-closed-pr',
+    actionReason: 'pr-closed',
+    workerState: site === 'consume' ? 'never-spawned' : 'completed-pr-already-closed',
+    stopReason: `PR ${repo}#${prNumber} ${verb}` +
+      `${lifecycle.closedAt ? ` (closedAt=${lifecycle.closedAt})` : ''}${sourceTag}; ${tail}`,
+  };
+}
+
 async function reconcileFollowUpJob({
   rootDir = ROOT,
   job,
@@ -1410,6 +1483,8 @@ async function reconcileFollowUpJob({
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  execFileImpl = execFileAsync,
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
@@ -1429,6 +1504,51 @@ async function reconcileFollowUpJob({
       reason: liveness.reason,
       job,
       jobPath,
+    };
+  }
+
+  // Lifecycle gate: stop the bounded loop on any non-open PR state. If
+  // the operator merged or closed the PR while the worker was running,
+  // none of the downstream reconcile steps will help — the rereview
+  // reset is refused because pr_state != 'open', and any PR comment
+  // lands at the bottom of an already-terminal thread. The worker's
+  // pushed commits stay on the remote branch; if they're already in
+  // main via the merge, that's the operator's intent and we don't
+  // want to undo it. resolvePRLifecycleImpl prefers a live `gh pr
+  // view` lookup over the SQLite mirror so this gate closes the race
+  // where the watcher's syncPRLifecycle poll lags GitHub.
+  const lifecycle = await resolveJobPRLifecycleSafe({
+    rootDir,
+    job,
+    resolvePRLifecycleImpl,
+    execFileImpl,
+    log,
+  });
+  const lifecycleStop = lifecycleStopDecision(lifecycle, {
+    repo: job.repo,
+    prNumber: job.prNumber,
+    site: 'reconcile',
+  });
+  if (lifecycleStop) {
+    const lifecycleStoppedAt = now();
+    const stopped = markFollowUpJobStopped({
+      rootDir,
+      jobPath,
+      stoppedAt: lifecycleStoppedAt,
+      stopCode: lifecycleStop.stopCode,
+      stopReason: lifecycleStop.stopReason,
+      sourceStatus: 'in_progress',
+      remediationWorker: {
+        ...worker,
+        state: lifecycleStop.workerState,
+        reconciledAt: lifecycleStoppedAt,
+      },
+    });
+    return {
+      action: 'stopped',
+      reason: lifecycleStop.actionReason,
+      job: stopped.job,
+      jobPath: stopped.jobPath,
     };
   }
 
@@ -1912,6 +2032,8 @@ async function reconcileInProgressFollowUpJobs({
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  execFileImpl = execFileAsync,
   log = console,
 } = {}) {
   const jobs = listInProgressFollowUpJobs(rootDir);
@@ -1931,6 +2053,8 @@ async function reconcileInProgressFollowUpJobs({
       isWorkerRunning,
       postCommentImpl,
       requestReviewRereviewImpl,
+      resolvePRLifecycleImpl,
+      execFileImpl,
       log,
     });
     results.push(result);
@@ -1942,6 +2066,7 @@ async function reconcileInProgressFollowUpJobs({
     active: results.filter((result) => result.action === 'active').length,
     completed: results.filter((result) => result.action === 'completed').length,
     failed: results.filter((result) => result.action === 'failed').length,
+    stopped: results.filter((result) => result.action === 'stopped').length,
     skipped: results.filter((result) => result.action === 'skipped').length,
     results,
   };
@@ -1953,6 +2078,8 @@ async function consumeNextFollowUpJob({
   spawnImpl = spawn,
   now = () => new Date().toISOString(),
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  log = console,
 } = {}) {
   // Claim first so we know which worker class we're running. This lets
   // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
@@ -1965,6 +2092,56 @@ async function consumeNextFollowUpJob({
 
   if (!claimed) {
     return { consumed: false, reason: 'no-pending-jobs' };
+  }
+
+  // Lifecycle gate: stop the bounded loop on any non-open PR state. If
+  // the operator already merged or closed the PR there's nothing for
+  // the remediation worker to do — the branch may be gone, the review
+  // verdict no longer matters, and the watcher row will never accept a
+  // rereview reset (`requestReviewRereview` refuses pr_state != 'open').
+  // Spawning a worker would cost an OAuth pre-flight, a 1-2 minute
+  // worker run, and a misleading PR comment on the closed PR. Stop the
+  // job cleanly with an explicit code so operators reading stopped/
+  // can see what happened. resolvePRLifecycleImpl prefers a live `gh
+  // pr view` lookup over the SQLite mirror so this gate closes the
+  // race where the watcher's syncPRLifecycle poll lags GitHub.
+  //
+  // Errors / missing data from both live + mirror fall through to the
+  // existing path — the gate is a positive opt-in, not default-deny;
+  // we'd rather spawn a worker that quickly notices the dead branch
+  // than silently halt the queue when the lifecycle source is down.
+  const lifecycle = await resolveJobPRLifecycleSafe({
+    rootDir,
+    job: claimed.job,
+    resolvePRLifecycleImpl,
+    execFileImpl,
+    log,
+  });
+  const lifecycleStop = lifecycleStopDecision(lifecycle, {
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    site: 'consume',
+  });
+  if (lifecycleStop) {
+    const stoppedAt = now();
+    const stopped = markFollowUpJobStopped({
+      rootDir,
+      jobPath: claimed.jobPath,
+      stoppedAt,
+      stopCode: lifecycleStop.stopCode,
+      stopReason: lifecycleStop.stopReason,
+      sourceStatus: 'in_progress',
+      remediationWorker: {
+        state: 'never-spawned',
+        reconciledAt: stoppedAt,
+      },
+    });
+    return {
+      consumed: false,
+      reason: lifecycleStop.actionReason,
+      job: stopped.job,
+      jobPath: stopped.jobPath,
+    };
   }
 
   const workerClass = pickRemediationWorkerClass(claimed.job);
@@ -2078,19 +2255,39 @@ async function main() {
     if (mode === 'reconcile') {
       const result = await reconcileInProgressFollowUpJobs();
       console.log(
-        `[follow-up-remediation] Reconciliation scanned=${result.scanned} active=${result.active} completed=${result.completed} failed=${result.failed} skipped=${result.skipped}`
+        `[follow-up-remediation] Reconciliation scanned=${result.scanned} active=${result.active} completed=${result.completed} failed=${result.failed} stopped=${result.stopped} skipped=${result.skipped}`
       );
       result.results
-        .filter((entry) => entry.action === 'completed' || entry.action === 'failed')
+        .filter((entry) => entry.action === 'completed' || entry.action === 'failed' || entry.action === 'stopped')
         .forEach((entry) => {
-          console.log(`[follow-up-remediation] ${entry.action}: ${entry.job.repo}#${entry.job.prNumber} -> ${entry.jobPath}`);
+          const reasonTag = entry.reason ? ` reason=${entry.reason}` : '';
+          console.log(`[follow-up-remediation] ${entry.action}${reasonTag}: ${entry.job.repo}#${entry.job.prNumber} -> ${entry.jobPath}`);
         });
       return;
     }
 
     const result = await consumeNextFollowUpJob();
     if (!result.consumed) {
-      console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
+      // A claimed-then-stopped outcome (e.g. lifecycle gate fired) is
+      // operationally meaningful — it represents a real state transition
+      // on a queued job. Don't collapse it into the "no pending jobs"
+      // bucket where it'd look like a no-op. Each stop reason gets an
+      // explicit log line so operators reading the daemon log can tell
+      // a merged-PR stop from "queue was empty".
+      if (result.reason === 'no-pending-jobs') {
+        console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
+        return;
+      }
+      const stopRepoTag = result.job?.repo && result.job?.prNumber
+        ? `${result.job.repo}#${result.job.prNumber} `
+        : '';
+      const stopCode = result.job?.remediationPlan?.stop?.code || result.reason;
+      console.log(
+        `[follow-up-remediation] Stopped pending ${stopRepoTag}-> ${stopCode} (${result.reason})`
+      );
+      if (result.jobPath) {
+        console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
+      }
       return;
     }
 

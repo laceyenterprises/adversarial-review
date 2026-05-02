@@ -1,8 +1,12 @@
+import { execFile } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
+const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
+const execFileAsyncDefault = promisify(execFile);
 
 function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
   mkdirSync(join(rootDir, 'data'), { recursive: true });
@@ -51,6 +55,195 @@ function ensureReviewStateSchema(db) {
 
 function getReviewRow(db, { repo, prNumber }) {
   return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber) || null;
+}
+
+// Read just the PR-lifecycle columns the watcher's syncPRLifecycle
+// keeps current. Used by the follow-up daemon to short-circuit work
+// on PRs the operator has already merged or closed — no point
+// spawning a remediation worker, posting a comment, or resetting
+// the watcher row when the PR is no longer accepting changes.
+//
+// Returns null when no review row exists yet (e.g. a fresh repo or
+// a job created before the watcher saw the PR). Callers should
+// treat null as "proceed with existing behavior" — the merge gate
+// is a positive opt-in, not a default-deny gate.
+function readPRState(rootDir, { repo, prNumber }) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db
+      .prepare('SELECT pr_state, merged_at, closed_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+      .get(repo, prNumber);
+    if (!row) return null;
+    return {
+      prState: row.pr_state || 'open',
+      mergedAt: row.merged_at || null,
+      closedAt: row.closed_at || null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+// GitHub returns PR state as `OPEN | CLOSED | MERGED`. Our mirror stores
+// the lowercase form. Keep this map small and explicit so an unexpected
+// value (future GitHub state, typo) surfaces as null instead of being
+// silently coerced — callers fall back to the SQLite mirror in that case.
+function normalizeGhPrState(rawState) {
+  if (typeof rawState !== 'string') return null;
+  const upper = rawState.toUpperCase();
+  if (upper === 'OPEN') return 'open';
+  if (upper === 'MERGED') return 'merged';
+  if (upper === 'CLOSED') return 'closed';
+  return null;
+}
+
+// Live GitHub PR-state lookup via `gh pr view`. Used by the follow-up
+// daemon at the consume/reconcile decision points to close the race the
+// SQLite mirror cannot: the watcher's syncPRLifecycle poll runs on its
+// own cadence, so the mirror can lag GitHub by minutes. A merged or
+// closed PR observed live here means the daemon should stop the job
+// even if reviews.db still says `open`.
+//
+// Returns:
+//   - { source: 'live', prState, mergedAt, closedAt } on a successful
+//     lookup (mergedAt/closedAt may be null if GitHub returns empty)
+//   - null on any failure (gh missing, auth fail, network blip, weird
+//     state value). Callers must treat null as "live lookup unavailable"
+//     and fall back to the mirror — the gate degrades to its previous
+//     behavior, never to "spawn anyway with no information".
+async function fetchLivePRLifecycle({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsyncDefault,
+  timeoutMs = DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS,
+} = {}) {
+  if (!repo || !prNumber) return null;
+  let stdout;
+  try {
+    const result = await execFileImpl(
+      'gh',
+      [
+        'pr',
+        'view',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--json',
+        'state,mergedAt,closedAt',
+      ],
+      {
+        maxBuffer: 1 * 1024 * 1024,
+        timeout: timeoutMs,
+      }
+    );
+    stdout = result?.stdout;
+  } catch {
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(String(stdout || '').trim() || '{}');
+  } catch {
+    return null;
+  }
+
+  const prState = normalizeGhPrState(parsed.state);
+  if (!prState) return null;
+
+  return {
+    source: 'live',
+    prState,
+    mergedAt: parsed.mergedAt || null,
+    closedAt: parsed.closedAt || null,
+  };
+}
+
+// Persist a live lifecycle observation back to the SQLite mirror so the
+// watcher's view of the PR matches what we just learned and other parts
+// of the system (e.g. requestReviewRereview's pr_state guardrail) see a
+// consistent picture. No-op when there's no review row yet — we don't
+// fabricate one because the watcher owns row creation.
+function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, closedAt }) {
+  if (prState !== 'merged' && prState !== 'closed' && prState !== 'open') return;
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const existing = db
+      .prepare('SELECT id FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+      .get(repo, prNumber);
+    if (!existing) return;
+
+    if (prState === 'merged') {
+      db.prepare(
+        "UPDATE reviewed_prs SET pr_state = 'merged', merged_at = COALESCE(?, merged_at) WHERE repo = ? AND pr_number = ?"
+      ).run(mergedAt || null, repo, prNumber);
+    } else if (prState === 'closed') {
+      db.prepare(
+        "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = COALESCE(?, closed_at) WHERE repo = ? AND pr_number = ?"
+      ).run(closedAt || null, repo, prNumber);
+    } else {
+      db.prepare(
+        "UPDATE reviewed_prs SET pr_state = 'open' WHERE repo = ? AND pr_number = ?"
+      ).run(repo, prNumber);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+// Authoritative resolver for "what is this PR's current lifecycle state?"
+// at consume/reconcile boundaries. Live lookup first; on success, the
+// mirror is updated so the next tick (and requestReviewRereview's open-
+// state guardrail) agree. On any live-lookup failure, falls back to the
+// mirror via readPRState — degrades to the prior behavior rather than
+// punching through with "open" when we have no information.
+//
+// Returns:
+//   - { source: 'live' | 'mirror', prState, mergedAt, closedAt } when we
+//     have a state we trust (live succeeded, or mirror had a row)
+//   - null when neither source returns information; callers treat this
+//     as "proceed with existing behavior" because the gate is positive
+//     opt-in, not default-deny.
+async function resolvePRLifecycle(rootDir, {
+  repo,
+  prNumber,
+  execFileImpl = execFileAsyncDefault,
+  liveLookupTimeoutMs = DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS,
+} = {}) {
+  const live = await fetchLivePRLifecycle({
+    repo,
+    prNumber,
+    execFileImpl,
+    timeoutMs: liveLookupTimeoutMs,
+  });
+  if (live) {
+    try {
+      persistPRStateToMirror(rootDir, {
+        repo,
+        prNumber,
+        prState: live.prState,
+        mergedAt: live.mergedAt,
+        closedAt: live.closedAt,
+      });
+    } catch {
+      // Persisting back to the mirror is best-effort. If the DB is
+      // momentarily locked or unwritable, the live result is still the
+      // truth callers need to act on — the next tick will refresh the
+      // mirror anyway.
+    }
+    return live;
+  }
+
+  let cached;
+  try {
+    cached = readPRState(rootDir, { repo, prNumber });
+  } catch {
+    cached = null;
+  }
+  if (!cached) return null;
+  return { source: 'mirror', ...cached };
 }
 
 function buildBlockedRereviewResult(reason, reviewRow = null, extra = {}) {
@@ -121,5 +314,9 @@ export {
   ensureReviewStateSchema,
   openReviewStateDb,
   getReviewRow,
+  readPRState,
+  fetchLivePRLifecycle,
+  persistPRStateToMirror,
+  resolvePRLifecycle,
   requestReviewRereview,
 };

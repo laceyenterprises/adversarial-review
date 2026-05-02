@@ -1276,6 +1276,7 @@ test('reconcileFollowUpJob stops exited workers for no-progress when the final a
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(result.action, 'stopped');
@@ -1320,6 +1321,7 @@ test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit al
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(result.action, 'stopped');
@@ -1355,6 +1357,7 @@ test('reconcileFollowUpJob marks exited workers failed when the final artifact i
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:31:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(result.action, 'failed');
@@ -1389,6 +1392,7 @@ test('reconcileFollowUpJob rejects worker artifact traversal paths', async () =>
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:31:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(result.action, 'failed');
@@ -1445,6 +1449,7 @@ test('assessWorkerLiveness bounds suspicious worker states for manual inspection
     assessWorkerLiveness(job, {
       now: () => '2026-04-21T10:00:20.000Z',
       isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     }),
     { state: 'exited', reason: 'worker-not-running', ageMs: 20_000 }
   );
@@ -1979,6 +1984,7 @@ test('reconcileFollowUpJob records worker-class-aware completion source for clau
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(result.action, 'stopped');
@@ -2039,6 +2045,7 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => {
       commentCalls.push(args);
       return { posted: true };
@@ -2098,6 +2105,7 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     // Stub the rereview reset as accepted by the watcher (the real
     // watcher would also accept this — review row exists, PR open,
     // status not malformed, not already pending). Without this stub
@@ -2149,6 +2157,7 @@ test('reconcileFollowUpJob posts a public PR comment on missing-final-message fa
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => {
       commentCalls.push(args);
       return { posted: true };
@@ -2228,6 +2237,7 @@ test('reconcileFollowUpJob does not throw when postCommentImpl rejects (best-eff
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async () => { throw new Error('GitHub API down'); },
     log: { error: () => {} },
   });
@@ -2295,6 +2305,7 @@ test('reconcile routes blocked rereview (review-row-missing) to stopped, NOT com
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     requestReviewRereviewImpl: () => ({
       triggered: false,
       status: 'blocked',
@@ -2327,6 +2338,7 @@ test('reconcile routes blocked rereview (pr-not-open) to stopped with the closed
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     requestReviewRereviewImpl: () => ({
       triggered: false,
       status: 'blocked',
@@ -2353,6 +2365,7 @@ test('reconcile routes blocked rereview (malformed-title-terminal) to stopped', 
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     requestReviewRereviewImpl: () => ({
       triggered: false,
       status: 'blocked',
@@ -2383,6 +2396,7 @@ test('reconcile treats already-pending as a benign success (still completed, com
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     requestReviewRereviewImpl: () => ({
       triggered: false,
       status: 'already-pending',
@@ -2465,6 +2479,7 @@ test('reconcile does NOT post when the terminal move was already done by another
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   });
 
@@ -2537,6 +2552,7 @@ test('reconcile routes [clio-agent] PRs through the codex bot, not a non-existen
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   });
 
@@ -2599,6 +2615,7 @@ test('reconcile prefers worker.model when it has a bot-token mapping', async () 
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   });
 
@@ -2660,6 +2677,7 @@ test('reconcile falls through to pickRemediationWorkerClass when worker.model is
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   });
 

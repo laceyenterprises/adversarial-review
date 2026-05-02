@@ -90,17 +90,26 @@ with `reReview.requested = false` and `outcome = "blocked"` (or
 
 The validator enforces these invariants — it will reject a reply that
 sets `reReview.requested = true` while `blockers` is non-empty, a
-reply with `outcome: "blocked"` and an empty `blockers` list, or a
-reply with `outcome: "completed"` and a non-empty `blockers` list.
-Do not try to fight the contract; the constraints exist so the public
-PR comment never claims contradictory things about the same round.
+reply with `outcome: "blocked"` and an empty `blockers` list, a
+reply with `outcome: "completed"` and a non-empty `blockers` list,
+a reply that does not record exactly one entry per blocking finding
+across `addressed[]`, `pushback[]`, and `blockers[]`, or a reply that
+duplicates the same finding across those lists. Do not try to fight
+the contract; the constraints exist so the public PR comment never
+claims contradictory things about the same round.
 
 The contract example below uses **empty arrays** for `addressed`,
 `pushback`, and `blockers`. That is intentional — replace the empty
 arrays with the entries you actually want to record. Do **not** copy
 the example shapes from this section verbatim; the validator
-recognizes the prompt's placeholder strings (e.g. anything beginning
-with `Replace with…`) and will reject the reply.
+recognizes the prompt's exact placeholder strings (the
+`Replace this with…` / `Replace with…` / `Optional list of files…`
+sentinels) and will reject the reply. Legitimate review language
+that happens to start with similar wording — e.g.
+`"Replace with parameterized queries"` as a real action, or
+`"Replace this regex; it can backtrack exponentially"` as a real
+finding — is fine; only the byte-exact placeholder strings are
+rejected.
 
 **Why this exists.** The PR comment that gets posted from your reply
 is the only durable record of how you handled each finding. Without

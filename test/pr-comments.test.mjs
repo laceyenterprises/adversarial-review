@@ -268,3 +268,96 @@ test('postRemediationOutcomeComment skips when repo or prNumber is missing', asy
   assert.equal(result.posted, false);
   assert.equal(result.reason, 'missing-pr-coordinates');
 });
+
+// ── Worker-supplied content is redacted before posting ───────────────────────
+
+test('buildRemediationOutcomeCommentBody redacts tokens in the worker summary', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      // Worker echoed an OpenAI-shaped key, a GitHub PAT, and a labelled
+      // secret from a log line into its summary. None of these may
+      // appear verbatim in the public PR comment.
+      summary: 'Fixed the env loader. Logs showed sk-test_abcdef1234567 and ghp_aaaabbbbccccdddd1234 — also api_key=ZZZZZZZZZ.',
+      validation: ['npm test'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(body, /sk-test_abcdef1234567/);
+  assert.doesNotMatch(body, /ghp_aaaabbbbccccdddd1234/);
+  assert.doesNotMatch(body, /api_key=ZZZZZZZZZ/i);
+  assert.match(body, /\[REDACTED_OPENAI_TOKEN\]/);
+  assert.match(body, /\[REDACTED_GITHUB_TOKEN\]/);
+  assert.match(body, /api_key=\[REDACTED\]/);
+});
+
+test('buildRemediationOutcomeCommentBody redacts tokens in validation and blockers entries', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'claude-code',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Done.',
+      validation: ['curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig" https://example.com/api'],
+      blockers: ['Could not verify token sk-ant-test_xxxxxxxxxxxxxxxxxxxx — please rotate'],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(body, /eyJhbGciOiJIUzI1NiJ9\.payload\.sig/);
+  assert.doesNotMatch(body, /sk-ant-test_xxxxxxxxxxxxxxxxxxxx/);
+  assert.match(body, /Bearer \[REDACTED\]/);
+  assert.match(body, /\[REDACTED_ANTHROPIC_TOKEN\]/);
+});
+
+test('buildRemediationOutcomeCommentBody caps a runaway summary at the configured length', () => {
+  const huge = 'A'.repeat(50_000);
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: huge, validation: [], blockers: [] },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  // The summary section must not contain the entire 50K-char run; the
+  // truncation marker (…) must appear instead.
+  assert.ok(body.length < 10_000, `body should be capped well below the runaway summary; got ${body.length} chars`);
+  assert.match(body, /…/);
+});
+
+test('buildRemediationOutcomeCommentBody caps the validation/blockers list size', () => {
+  const items = Array.from({ length: 200 }, (_, i) => `step-${i}`);
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: items, blockers: [] },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  // Cap is 25 entries; step-25 onwards must be truncated.
+  assert.match(body, /- step-0$/m);
+  assert.match(body, /- step-24$/m);
+  assert.doesNotMatch(body, /- step-25$/m);
+  assert.doesNotMatch(body, /- step-100$/m);
+});
+
+test('buildRemediationOutcomeCommentBody redacts tokens in the rereview reason', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: [], blockers: [] },
+    reReview: {
+      requested: true,
+      triggered: true,
+      status: 'pending',
+      reason: 'Need to verify ghp_aaaaaaaaaaaaaaaaaaaa works after rotation',
+    },
+  });
+  assert.doesNotMatch(body, /ghp_aaaaaaaaaaaaaaaaaaaa/);
+  assert.match(body, /Re-review status:.*queued — Need to verify \[REDACTED_GITHUB_TOKEN\] works after rotation/);
+});

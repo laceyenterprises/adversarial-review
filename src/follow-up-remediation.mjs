@@ -24,6 +24,7 @@ import {
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
 } from './pr-comments.mjs';
+import { redactSensitiveText } from './redaction.mjs';
 import { requestReviewRereview } from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -108,16 +109,6 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
 
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
 const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
-const FINAL_MESSAGE_REDACTIONS = [
-  [/sk-[A-Za-z0-9_-]{8,}/g, '[REDACTED_OPENAI_TOKEN]'],
-  [/\bgh[pousr]_[A-Za-z0-9_]{8,}\b/g, '[REDACTED_GITHUB_TOKEN]'],
-  [/\bBearer\s+[A-Za-z0-9._-]+\b/gi, 'Bearer [REDACTED]'],
-  [/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\b\s*[:=]\s*\S+/gi, (match) => {
-    const [label] = match.split(/[:=]/, 1);
-    return `${label}=[REDACTED]`;
-  }],
-  [/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]'],
-];
 
 class OAuthError extends Error {
   constructor(model, reason) {
@@ -1101,20 +1092,21 @@ function readWorkerFinalMessage(outputPath) {
 }
 
 function summarizeWorkerFinalMessage(text, limit = 400) {
-  let normalized = String(text ?? '').trim().replace(/\s+/g, ' ');
-  if (!normalized) {
+  // Worker output is untrusted; redactSensitiveText masks tokens / Bearer
+  // headers / private keys / labelled secrets the worker may have echoed
+  // from logs or environment. Whitespace is collapsed so a one-line
+  // preview fits in a digest field even if the worker dumped multi-line
+  // output. Centralized in src/redaction.mjs so PR comments and final-
+  // message previews share the same masking pipeline.
+  const collapsed = String(text ?? '').trim().replace(/\s+/g, ' ');
+  if (!collapsed) {
     return '';
   }
-
-  for (const [pattern, replacement] of FINAL_MESSAGE_REDACTIONS) {
-    normalized = normalized.replace(pattern, replacement);
+  const redacted = redactSensitiveText(collapsed);
+  if (redacted.length <= limit) {
+    return redacted;
   }
-
-  if (normalized.length <= limit) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, limit - 1)}…`;
+  return `${redacted.slice(0, limit - 1)}…`;
 }
 
 function digestWorkerFinalMessage(text) {

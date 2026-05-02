@@ -20,7 +20,17 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import { redactAndCap, redactBulletList } from './redaction.mjs';
+
 const execFileAsync = promisify(execFile);
+
+// Length caps for worker-supplied fields in the public PR comment.
+// Workers are untrusted output sources — these caps bound how much
+// markdown a single round can dump on the PR even after redaction.
+const SUMMARY_MAX_CHARS = 2000;
+const REREVIEW_REASON_MAX_CHARS = 400;
+const BULLET_LIST_PER_ITEM_MAX_CHARS = 400;
+const BULLET_LIST_MAX_ITEMS = 25;
 
 // Worker class → bot-token env var. Add an entry here when a new
 // remediation worker class lands; the absence of an entry causes
@@ -35,10 +45,22 @@ function resolveCommentBotTokenEnv(workerClass) {
   return WORKER_CLASS_TO_BOT_TOKEN_ENV[workerClass] || null;
 }
 
-function formatBulletList(items, emptyText = '_(none reported)_') {
-  const list = Array.isArray(items) ? items.filter((s) => typeof s === 'string' && s.trim()) : [];
-  if (!list.length) return emptyText;
-  return list.map((s) => `- ${s.trim()}`).join('\n');
+// Render a worker-supplied bullet list with redaction + caps applied.
+// Empty (after filtering) → returns the placeholder text.
+function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
+  const safe = redactBulletList(items, {
+    perItemLimit: BULLET_LIST_PER_ITEM_MAX_CHARS,
+    maxItems: BULLET_LIST_MAX_ITEMS,
+  });
+  if (!safe.length) return emptyText;
+  return safe.map((s) => `- ${s}`).join('\n');
+}
+
+// Sanitize a free-text field (summary, rereview.reason). Redacts
+// sensitive substrings and caps length so a runaway worker can't
+// dump megabytes of markdown into a PR comment.
+function sanitizeFreeText(text, limit) {
+  return redactAndCap(String(text ?? '').trim(), limit);
 }
 
 function buildRemediationOutcomeCommentBody({
@@ -110,25 +132,31 @@ function buildRemediationOutcomeCommentBody({
     );
   }
 
+  // Worker-supplied fields below are *untrusted*. They go through
+  // src/redaction.mjs (token / Bearer / private-key / labelled-secret
+  // patterns) and are length-capped before being written to the PR.
+  // See review of PR #18 for the leakage path this guards against:
+  // a worker echoing a token from a log line into reply.summary
+  // would otherwise be republished verbatim to the public comment.
   if (reply?.summary) {
     lines.push('');
     lines.push('**Summary**');
     lines.push('');
-    lines.push(String(reply.summary).trim());
+    lines.push(sanitizeFreeText(reply.summary, SUMMARY_MAX_CHARS));
   }
 
   if (reply?.validation?.length) {
     lines.push('');
     lines.push('**Validation run**');
     lines.push('');
-    lines.push(formatBulletList(reply.validation));
+    lines.push(formatRedactedBulletList(reply.validation));
   }
 
   if (reply?.blockers?.length) {
     lines.push('');
     lines.push('**Blockers**');
     lines.push('');
-    lines.push(formatBulletList(reply.blockers));
+    lines.push(formatRedactedBulletList(reply.blockers));
   }
 
   // Surface the actual rereview outcome (not just the worker's request bit)
@@ -145,12 +173,15 @@ function buildRemediationOutcomeCommentBody({
       lines.push('**Re-review requested:** no');
     }
   } else if (reReview.triggered) {
-    lines.push(`**Re-review status:** queued${reReview.reason ? ` — ${reReview.reason}` : ''}`);
+    const reasonText = reReview.reason ? sanitizeFreeText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
+    lines.push(`**Re-review status:** queued${reasonText ? ` — ${reasonText}` : ''}`);
   } else if (reReview.status === 'already-pending') {
-    lines.push(`**Re-review status:** already pending${reReview.reason ? ` — ${reReview.reason}` : ''}`);
+    const reasonText = reReview.reason ? sanitizeFreeText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
+    lines.push(`**Re-review status:** already pending${reasonText ? ` — ${reasonText}` : ''}`);
   } else {
     const blockedReason = reReview.outcomeReason || reReview.status || 'unknown';
-    lines.push(`**Re-review status:** **BLOCKED** (\`${blockedReason}\`)${reReview.reason ? ` — worker reason: ${reReview.reason}` : ''}`);
+    const reasonText = reReview.reason ? sanitizeFreeText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
+    lines.push(`**Re-review status:** **BLOCKED** (\`${blockedReason}\`)${reasonText ? ` — worker reason: ${reasonText}` : ''}`);
   }
 
   lines.push('');

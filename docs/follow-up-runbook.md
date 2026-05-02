@@ -1,28 +1,49 @@
 # Follow-Up Remediation Runbook
 
-This runbook covers the shipped bounded remediation loop for adversarial-review after `LAC-206`, `LAC-209`, `LAC-210`, and `LAC-211`.
+This runbook covers the shipped bounded remediation loop for adversarial-review after `LAC-206`, `LAC-209`, `LAC-210`, `LAC-211`, and the 2026-05-01 automation pass.
 
-Use this when a review has already been posted to GitHub and you need to run, inspect, reconcile, stop, requeue, or debug the follow-up remediation flow without re-reading the implementation.
+Use this when a review has already been posted to GitHub and you need to inspect, reconcile, stop, requeue, or debug the follow-up remediation flow without re-reading the implementation.
 
 ---
 
 ## Scope and current contract
 
-- This is a **bounded, operator-visible loop**. It is not an autonomous retry daemon.
+- This is a **bounded loop** with operator override. It is not an unbounded autonomous retry daemon.
 - The **watcher owns review posting**. Follow-up remediation does not post GitHub reviews directly.
 - The remediation worker works on the **existing PR branch**, commits changes, and pushes that branch.
 - The remediation worker does **not** open a new PR and does **not** merge the PR.
-- Advancing from one remediation round to another remains an **explicit operator action**.
-- A new adversarial review pass only happens when the worker writes a **durable machine-readable rereview request**.
+- Advancing from one remediation round to another runs **automatically** via the `ai.laceyenterprises.adversarial-follow-up` LaunchAgent (long-lived, internal 120s tick loop running entirely in a single node process). Each tick runs three steps in order: consume one pending job, reconcile any in-progress jobs whose worker has exited, retry pending PR comment deliveries (bounded by `RETRY_BUDGET_PER_TICK`). The daemon resolves 1Password / `gh` secrets once at startup; subsequent ticks reuse them in-process. The tick loop itself runs in-process (no `node` subprocess fork on every tick), so macOS TCC trust is granted once for the daemon's `node` binary and reused for the daemon's lifetime — eliminates the per-tick "node would like to access data from other apps" prompts that an earlier subprocess-per-tick design produced.
+- Public PR comments are best-effort but durable: every reconcile-time post attempt is stamped into the terminal job JSON under `commentDelivery`. A failed post (timeout, gh outage, missing token) is retried on subsequent ticks up to `MAX_COMMENT_DELIVERY_ATTEMPTS = 5`. The terminal JSON is the source of truth, not the PR comment.
+- Public PR comments are **idempotent**. Each comment body embeds an HTML-comment marker keyed by `(jobId, round, action)` (prefix `adversarial-review-remediation-marker:`). Before posting, the poster runs a bounded `gh api` lookup on the PR's existing comments and skips the create if a previous attempt already landed on GitHub even though the local CLI saw a timeout. Lookup failures fall through to posting (best-effort: a duplicate is preferable to silent loss).
+- The retry path reads from a dedicated index, not the full terminal history. `data/follow-up-jobs/delivery-retry-index/` holds one pointer file per outstanding `posted=false` delivery; pointers are added on failure and removed on success. The first tick after upgrade walks the existing terminal history once to seed the index (sentinel: `.initialized`), then steady-state ticks read only the index — bounded by retry backlog size, not history size.
+- A new adversarial review pass only happens when the worker writes a **durable machine-readable rereview request** (`reReview.requested = true` in `remediation-reply.json`).
+- Bounding: `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` in `src/follow-up-jobs.mjs`. `requestReviewRereview` in `src/review-state.mjs` does **not** implement a cooldown — it refuses the reset only on hard guardrails (review row missing, malformed-title terminal, PR not open, already pending). The round cap is the only re-arm bound. (An earlier doc claim about a per-PR rereview cooldown was inaccurate.)
+- Reviewer-bot tokens (`GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`) are best-effort: a missing token at startup is logged as a warning, the daemon still runs consume/reconcile, and the comment poster records `token-env-missing` for later retry once the token is restored. A 1Password outage at boot does not block remediation.
 
-Relevant scripts:
+Operator levers (still available, override the daemon):
 
 ```bash
-npm run follow-up:consume
-npm run follow-up:reconcile
-npm run follow-up:requeue -- <job-path> [reason]
-npm run follow-up:stop -- <job-path> [reason]
+npm run follow-up:consume                         # claim + spawn one job (manual tick)
+npm run follow-up:reconcile                       # reconcile in-progress jobs (manual tick)
+npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
+npm run follow-up:stop -- <job-path> [reason]     # stop an in-progress job
+npm run retrigger-review -- --repo <slug> --pr <n> --reason "<why>"  # force a re-review pass
 ```
+
+To pause the daemon during an outage:
+
+```bash
+launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-follow-up
+```
+
+To resume (the install layout deploys the plist with the `.placey` suffix dropped — see README "Install LaunchAgents" — so resume uses the deployed filename, NOT the per-user template name from `launchd/`):
+
+```bash
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
+launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
+```
+
+Daemon log: `~/Library/Logs/adversarial-follow-up.log`.
 
 ---
 
@@ -334,6 +355,7 @@ The state directories are the queue:
 - `failed/`: launch or reconciliation failure
 - `stopped/`: bounded-loop terminal stop
 - `workspaces/`: per-job repo checkout and worker artifacts
+- `delivery-retry-index/`: pointer files for terminal jobs whose PR-comment delivery still owes a retry (`<jobId>.json` → `{ "jobPath": "..." }`). The retry tick reads only this directory; pointers are added on delivery failure and removed on success or terminal cap. Operators should not edit these by hand — to clear a stuck pointer, fix the underlying `commentDelivery.posted` state on the terminal record (or delete the record entirely if recovery is hopeless), and the next tick will prune the dangling pointer automatically.
 
 ### Start the next round
 

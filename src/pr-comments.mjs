@@ -192,6 +192,14 @@ function buildRemediationOutcomeCommentBody({
   return lines.join('\n');
 }
 
+// Hard timeout on the gh subprocess. Without this, a hung GitHub API
+// (network blip, auth flakiness, gh CLI getting stuck on an unexpected
+// prompt) can wedge the entire reconcile tick — reconciliation is
+// serialized, so one stuck post blocks every later in-progress job
+// behind it. 30s is generous for a single comment post; in practice
+// `gh pr comment` returns sub-second.
+const GH_COMMENT_TIMEOUT_MS = 30_000;
+
 async function postRemediationOutcomeComment({
   repo,
   prNumber,
@@ -200,6 +208,7 @@ async function postRemediationOutcomeComment({
   execFileImpl = execFileAsync,
   env = process.env,
   log = console,
+  timeoutMs = GH_COMMENT_TIMEOUT_MS,
 }) {
   if (!repo || !prNumber) {
     log.error?.('[pr-comments] skipping comment: missing repo or prNumber');
@@ -242,10 +251,22 @@ async function postRemediationOutcomeComment({
       {
         env: allowlistedEnv,
         maxBuffer: 5 * 1024 * 1024,
+        timeout: timeoutMs,
+        killSignal: 'SIGTERM',
       }
     );
     return { posted: true, repo, prNumber, workerClass, tokenEnvName };
   } catch (err) {
+    // execFile with `timeout` SIGTERMs the child when the deadline
+    // expires; the resulting error has .killed === true and
+    // .signal === 'SIGTERM'. Distinguish it from a generic CLI
+    // failure so the retry path can decide whether to attempt again.
+    if (err && err.killed === true) {
+      log.error?.(
+        `[pr-comments] gh pr comment timed out after ${timeoutMs}ms on ${repo}#${prNumber} (worker class "${workerClass}")`
+      );
+      return { posted: false, reason: 'gh-cli-timeout', timeoutMs, repo, prNumber };
+    }
     log.error?.(
       `[pr-comments] failed to post comment on ${repo}#${prNumber} (worker class "${workerClass}"): ${err.message}`
     );

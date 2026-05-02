@@ -24,6 +24,7 @@ import {
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
 } from './pr-comments.mjs';
+import { recordInitialCommentDelivery } from './comment-delivery.mjs';
 import { redactSensitiveText } from './redaction.mjs';
 import { requestReviewRereview } from './review-state.mjs';
 
@@ -1146,6 +1147,8 @@ function resolveReconcileWorkerClass(job, worker) {
 }
 
 async function postReconcileOutcomeCommentSafe({
+  rootDir,
+  jobPath,
   job,
   worker,
   action,
@@ -1153,12 +1156,19 @@ async function postReconcileOutcomeCommentSafe({
   reReview = null,
   failure = null,
   postCommentImpl,
+  now = () => new Date().toISOString(),
   log = console,
 }) {
-  // Best-effort: never let a post failure block the state transition or
-  // throw out of reconcile. The terminal directory move has already
-  // happened by the time we get here, so a thrown error would leave the
-  // queue in a confusing state with no operator feedback.
+  // Best-effort: never let a post failure throw out of reconcile. The
+  // terminal directory move has already happened by the time we get
+  // here, so a thrown error would leave the queue in a confusing state
+  // with no operator feedback. The actual delivery state — success,
+  // timeout, gh-cli-failure, etc. — is stamped into the terminal job
+  // record under `commentDelivery` via recordInitialCommentDelivery,
+  // so retryFailedCommentDeliveries (run on each daemon tick) can pick
+  // up failed posts and try again. Without that durable record, a
+  // missing PR comment after a flaky post would be silent control-
+  // plane drift — exactly the regression flagged on PR #18 round 2.
   try {
     const workerClass = resolveReconcileWorkerClass(job, worker);
     const body = buildRemediationOutcomeCommentBody({
@@ -1169,13 +1179,25 @@ async function postReconcileOutcomeCommentSafe({
       reReview,
       failure,
     });
-    await postCommentImpl({
+    const postResult = await postCommentImpl({
       repo: job?.repo,
       prNumber: job?.prNumber,
       workerClass,
       body,
       log,
     });
+    if (jobPath) {
+      recordInitialCommentDelivery({
+        jobPath,
+        body,
+        repo: job?.repo,
+        prNumber: job?.prNumber,
+        workerClass,
+        postResult,
+        now,
+        log,
+      });
+    }
   } catch (err) {
     log.error?.(`[follow-up-remediation] PR comment post threw (non-fatal): ${err.message}`);
   }
@@ -1236,11 +1258,14 @@ async function reconcileFollowUpJob({
     });
 
     await postReconcileOutcomeCommentSafe({
+      rootDir,
+      jobPath: failed.jobPath,
       job: failed.job,
       worker,
       action: 'failed',
       failure: { code: 'manual-inspection-required', message: liveness.reason },
       postCommentImpl,
+      now,
       log,
     });
 
@@ -1273,11 +1298,14 @@ async function reconcileFollowUpJob({
     });
 
     await postReconcileOutcomeCommentSafe({
+      rootDir,
+      jobPath: failed.jobPath,
       job: failed.job,
       worker,
       action: 'failed',
       failure: { code: 'invalid-output-path', message: err.message },
       postCommentImpl,
+      now,
       log,
     });
 
@@ -1329,11 +1357,14 @@ async function reconcileFollowUpJob({
         });
 
         await postReconcileOutcomeCommentSafe({
+          rootDir,
+          jobPath: failed.jobPath,
           job: failed.job,
           worker,
           action: 'failed',
           failure: { code: 'invalid-remediation-reply', message: err.message },
           postCommentImpl,
+          now,
           log,
         });
 
@@ -1437,12 +1468,15 @@ async function reconcileFollowUpJob({
       });
 
       await postReconcileOutcomeCommentSafe({
+        rootDir,
+        jobPath: stopped.jobPath,
         job: stopped.job,
         worker,
         action: 'stopped',
         reply: parsedReply,
         reReview: rereview,
         postCommentImpl,
+        now,
         log,
       });
 
@@ -1474,12 +1508,15 @@ async function reconcileFollowUpJob({
       });
 
       await postReconcileOutcomeCommentSafe({
+        rootDir,
+        jobPath: stopped.jobPath,
         job: stopped.job,
         worker,
         action: 'stopped',
         reply: parsedReply,
         reReview: rereview,
         postCommentImpl,
+        now,
         log,
       });
 
@@ -1505,12 +1542,15 @@ async function reconcileFollowUpJob({
     });
 
     await postReconcileOutcomeCommentSafe({
+      rootDir,
+      jobPath: completed.jobPath,
       job: completed.job,
       worker,
       action: 'completed',
       reply: parsedReply,
       reReview: rereview,
       postCommentImpl,
+      now,
       log,
     });
 
@@ -1544,11 +1584,14 @@ async function reconcileFollowUpJob({
   });
 
   await postReconcileOutcomeCommentSafe({
+    rootDir,
+    jobPath: failed.jobPath,
     job: failed.job,
     worker,
     action: 'failed',
     failure: { code: failureCode, message: failureMessage },
     postCommentImpl,
+    now,
     log,
   });
 

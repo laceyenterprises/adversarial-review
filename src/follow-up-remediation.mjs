@@ -21,6 +21,7 @@ import {
   collectWorkspaceDocContext,
 } from './prompt-context.mjs';
 import {
+  WORKER_CLASS_TO_BOT_TOKEN_ENV,
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
 } from './pr-comments.mjs';
@@ -1138,12 +1139,34 @@ function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWor
 }
 
 // Resolve the worker class (codex / claude-code) for a reconcile-time
-// comment. The spawned worker stamps `model` on its metadata; fall back
-// to the job's builderTag (the canonical class chooser used at consume
-// time) if the model wasn't recorded. Final fallback is 'codex' to
-// preserve historical behavior on legacy job records.
+// comment. Must reuse the same canonical mapping consume uses
+// (`pickRemediationWorkerClass`), because the bot-token map only
+// covers worker classes that actually have dedicated PATs:
+//
+//   WORKER_CLASS_TO_BOT_TOKEN_ENV = { codex, 'claude-code' }
+//
+// The previous implementation returned `worker.model || job.builderTag
+// || 'codex'`. For `[clio-agent]` PRs that produced
+// `workerClass='clio-agent'`, which has no token mapping → the comment
+// poster returned `no-token-mapping`, which the retry path treats as
+// non-retryable → permanent silent loss of the terminal PR comment.
+// (PR #18 R7 blocking #3.)
+//
+// Strategy:
+//   1. If the spawned worker recorded a `.model` AND that model has a
+//      bot-token mapping, trust it (most authoritative for THIS
+//      worker's actual session — claude-code-spawned workers should
+//      post under the claude-code bot regardless of the PR's tag).
+//   2. Otherwise, fall through to `pickRemediationWorkerClass(job)`
+//      which canonically maps `clio-agent → codex` (since clio-agent
+//      has no dedicated worker class today; consume already does this
+//      at spawn time).
 function resolveReconcileWorkerClass(job, worker) {
-  return worker?.model || job?.builderTag || 'codex';
+  const recordedModel = worker?.model;
+  if (recordedModel && WORKER_CLASS_TO_BOT_TOKEN_ENV[recordedModel]) {
+    return recordedModel;
+  }
+  return pickRemediationWorkerClass(job);
 }
 
 // Build the comment body + an owed-delivery stub from the same inputs

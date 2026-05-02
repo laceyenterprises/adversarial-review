@@ -324,6 +324,82 @@ test('postRemediationOutcomeComment skips when repo or prNumber is missing', asy
 
 // ── Worker-supplied content is redacted before posting ───────────────────────
 
+// ── R6 #1: path redaction in worker-supplied PR comment fields ────────────
+//
+// redactPathlikeText was previously applied only to internal failure
+// messages. Worker-authored summary/validation/blockers/reReview.reason
+// can ALSO contain absolute paths from log echoes (e.g. the worker
+// running tests and pasting a `at /Users/airlock/.../foo.js:42` stack).
+// Path redaction must run on every worker field before fencing/posting.
+
+test('worker summary masks absolute /Users/<user>/ paths', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'Test failed at /Users/airlock/agent-os/modules/foo/bar.js:42',
+      validation: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(body, /\/Users\/airlock/);
+  assert.match(body, /<path-redacted>\/bar\.js:42/);
+});
+
+test('worker validation entries mask absolute paths', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'ok',
+      validation: ['ran tests in /Users/airlock/agent-os/tools/adversarial-review'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(body, /\/Users\/airlock\/agent-os/);
+  assert.match(body, /<path-redacted>\/adversarial-review/);
+});
+
+test('worker blockers mask /private/var/folders/ temp paths', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'claude-code',
+    action: 'stopped',
+    job: { ...makeJob(), remediationPlan: { currentRound: 1, maxRounds: 6, stop: { code: 'no-progress' } } },
+    reply: {
+      outcome: 'blocked',
+      summary: 'cannot proceed',
+      validation: [],
+      blockers: ['Cannot read /private/var/folders/k7/abc123/T/tmp.XXX/data.json'],
+    },
+    reReview: { requested: false },
+  });
+  assert.doesNotMatch(body, /\/private\/var\/folders/);
+  assert.match(body, /<path-redacted>\/data\.json/);
+});
+
+test('reReview.reason masks absolute paths in the inline status line', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: [], blockers: [] },
+    reReview: {
+      requested: true,
+      triggered: true,
+      status: 'pending',
+      reason: 'Need rerun after touching /Users/airlock/agent-os/spec.md',
+    },
+  });
+  assert.doesNotMatch(body, /\/Users\/airlock/);
+  assert.match(body, /<path-redacted>\/spec\.md/);
+});
+
 test('buildRemediationOutcomeCommentBody redacts tokens in the worker summary', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',

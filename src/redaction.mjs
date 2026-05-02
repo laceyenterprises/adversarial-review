@@ -71,10 +71,17 @@ function redactPathlikeText(text) {
 // to preserve newlines so paragraphs render as paragraphs in the PR
 // comment. Use `redactAndCap` for that — preserves structure, just
 // redacts and caps.
+//
+// Token redaction AND path masking both apply here: worker-supplied
+// fields can contain log-line echoes that include either kind of leak
+// (e.g. `failed at /Users/airlock/.../foo.json` or `Bearer eyJ...`).
+// PR #18 round 6 flagged the path-redaction gap on these fields; both
+// need to run before the value is fenced/posted.
 function redactAndCap(text, limit = 2000) {
-  const redacted = redactSensitiveText(text);
-  if (redacted.length <= limit) return redacted;
-  return `${redacted.slice(0, limit - 1)}…`;
+  const tokenSafe = redactSensitiveText(text);
+  const pathSafe = redactPathlikeText(tokenSafe);
+  if (pathSafe.length <= limit) return pathSafe;
+  return `${pathSafe.slice(0, limit - 1)}…`;
 }
 
 // Combined token + filesystem-path redaction for worker-supplied text

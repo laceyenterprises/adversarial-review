@@ -176,8 +176,44 @@ const stmtMarkMalformed = db.prepare(
 // converts these on startup to 'failed-orphan' (sticky), which is the
 // signal to a human that the GitHub PR may already carry a review
 // from the killed child and a blind retry would produce a duplicate.
+// Compare-and-swap claim: only flip `pending` / `failed` rows to
+// `'reviewing'`. The unconditional UPDATE the previous version of this
+// statement performed was safe under the in-process pollOnce
+// serialization in this module, but did NOT close the cross-process
+// race: if a second watcher instance (operator dev-mode launch racing
+// launchd's KeepAlive, accidental double-launch, etc.) reads the same
+// `pending` row, both would have called the unconditional UPDATE and
+// both would have spawned a reviewer subprocess, producing duplicate
+// GitHub reviews. The atomic CAS below is the second of two layers
+// (in-process self-scheduled poll loop + cross-process SQL CAS) that
+// together close the duplicate-spawn vector at both layers.
+//
+// Match conditions:
+//   - `review_status = 'pending'` — happy-path claim.
+//   - `review_status = 'failed'` — automatic-retry path; the pre-CAS
+//     code treated `failed` as eligible for retry on the next poll,
+//     and we preserve that contract here.
+//
+// Terminal statuses (`posted`, `malformed`) and the durable in-flight
+// states (`reviewing`, `failed-orphan`) are NOT reclaimable by this
+// CAS. `failed-orphan` recovery is operator-driven via
+// `npm run retrigger-review --allow-failed-reset` after verifying the
+// GitHub side; that path resets the row to `pending` and the CAS
+// then matches it on the next poll.
+//
+// Callers must check `result.changes === 1` before proceeding with
+// the spawn. A 0-changes result means another watcher (or a parallel
+// claim path) won the row, or the row's status moved to a state this
+// CAS does not match — log and skip.
 const stmtMarkAttemptStarted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'reviewing', last_attempted_at = ?, failed_at = NULL, failure_message = NULL WHERE repo = ? AND pr_number = ?"
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         failed_at = NULL,
+         failure_message = NULL
+   WHERE repo = ?
+     AND pr_number = ?
+     AND review_status IN ('pending', 'failed')`
 );
 const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
@@ -611,7 +647,18 @@ async function pollOnce(octokit) {
       }
 
       const attemptAt = new Date().toISOString();
-      stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
+      const claim = stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
+      if (claim.changes === 0) {
+        // Lost the cross-process compare-and-swap. Either another
+        // watcher just claimed this row, or the row's status moved to
+        // a non-claimable state (`reviewing`, `failed-orphan`, terminal)
+        // between the readback above and the UPDATE here. Either way,
+        // do NOT spawn a reviewer; the next poll will see fresh state.
+        console.log(
+          `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
+        );
+        continue;
+      }
       await setLinearInReview(linearTicketId);
 
       // Final-round inputs come from the durable per-PR follow-up ledger,

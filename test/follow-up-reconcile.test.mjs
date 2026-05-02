@@ -85,6 +85,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -144,6 +145,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -210,6 +212,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -255,6 +258,7 @@ test('reconcileFollowUpJob fails a finished spawned round when output is missing
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -297,6 +301,7 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -329,6 +334,7 @@ test('reconcileFollowUpJob fails a finished spawned round when outputPath escape
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(reconciled.reconciled, true);

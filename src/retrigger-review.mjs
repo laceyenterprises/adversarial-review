@@ -57,7 +57,8 @@ Optional:
 
 Exit codes:
   0  triggered or already-pending (a review will run / is already queued)
-  1  blocked (review row missing, PR not open, malformed-title-terminal, or
+  1  blocked (review row missing, PR not open, malformed-title-terminal,
+     review_status='reviewing' (in-flight reviewer subprocess), or
      review_status='failed' without --allow-failed-reset)
   2  usage error (missing/invalid args)
   3  reason-input I/O error (e.g. --reason-file path unreadable)
@@ -226,6 +227,31 @@ function main(argv, {
       `  Resetting it would clear failed_at + failure_message (the diagnostic\n` +
       `  evidence) before anyone has read it. If you have reviewed the failure\n` +
       `  and explicitly want a clean rerun, pass --allow-failed-reset.\n`
+    );
+    return 1;
+  }
+
+  // 'reviewing' is the watcher's durable in-flight claim — there is an
+  // active reviewer subprocess for this PR right now. Allowing this
+  // CLI to flip it back to 'pending' would let the next poll spawn a
+  // second reviewer for the same PR and post a duplicate review.
+  // Refuse loudly with a recovery path (no override flag — if you
+  // truly need to clear the claim, restart the watcher and let
+  // reconcileOrphanedReviewing turn the row into 'failed-orphan',
+  // then verify GitHub and re-run this command on the orphan row).
+  if (reviewRow && reviewRow.review_status === 'reviewing') {
+    stderr.write(
+      `blocked (review-in-flight): ${target} is in 'reviewing' state.\n` +
+      `  A reviewer subprocess is currently in flight for this PR.\n` +
+      `  Resetting now would queue a second reviewer and post a duplicate\n` +
+      `  GitHub review. Recovery path:\n` +
+      `    1. Wait for the in-flight review to finish (the row will move\n` +
+      `       to 'posted' or 'failed' on its own).\n` +
+      `    2. If the watcher has died and the row is genuinely stuck,\n` +
+      `       restart the watcher; reconcileOrphanedReviewing will mark\n` +
+      `       the row 'failed-orphan'. Verify the PR on GitHub for an\n` +
+      `       already-posted review, then rerun this command on the\n` +
+      `       'failed-orphan' row to clear it.\n`
     );
     return 1;
   }

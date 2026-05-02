@@ -536,6 +536,90 @@ test('main returns 4 when readReviewRow throws (e.g. unreadable --root-dir)', ()
   assert.doesNotMatch(err.text(), / at /);
 });
 
+test("main refuses review_status=reviewing (in-flight) without any override flag", () => {
+  // 'reviewing' is the watcher's durable in-flight claim — the row's
+  // reviewer subprocess is still running. Resetting it would let the
+  // next poll spawn a second reviewer and post a duplicate GitHub
+  // review. The CLI must surface a dedicated 'review-in-flight' error
+  // and exit 1; --allow-failed-reset (which only covers 'failed')
+  // must NOT unblock this case.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    postedAt: null,
+    failedAt: null,
+    failureMessage: null,
+  });
+
+  const err = makeCaptureStream();
+  const rc = main(
+    [
+      '--repo', 'laceyenterprises/adversarial-review',
+      '--pr', '42',
+      '--reason', 'try to reset in-flight review',
+      '--root-dir', rootDir,
+    ],
+    { stdout: makeCaptureStream(), stderr: err }
+  );
+
+  assert.equal(rc, 1, 'should be blocked');
+  assert.match(err.text(), /review-in-flight/);
+  assert.match(err.text(), /reviewer subprocess is currently in flight/i);
+  assert.doesNotMatch(err.text(), /--allow-failed-reset.*reviewing/, 'must not advertise --allow-failed-reset as the override');
+
+  // Confirm row was not modified.
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, rereview_requested_at FROM reviewed_prs WHERE pr_number = 42'
+    ).get();
+    assert.equal(row.review_status, 'reviewing');
+    assert.equal(row.rereview_requested_at, null);
+  } finally {
+    db.close();
+  }
+});
+
+test("main refuses review_status=reviewing even when --allow-failed-reset is set (different override scope)", () => {
+  // The --allow-failed-reset flag is scoped specifically to the
+  // 'failed' state and clearing failure diagnostic evidence. It must
+  // NOT unblock 'reviewing' — the duplicate-review hazard there is
+  // unrelated to the failed-evidence concern, and reusing the same
+  // flag would conflate two different recovery scenarios.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    postedAt: null,
+    failedAt: null,
+    failureMessage: null,
+  });
+
+  const err = makeCaptureStream();
+  const rc = main(
+    [
+      '--repo', 'laceyenterprises/adversarial-review',
+      '--pr', '42',
+      '--reason', 'try to reset in-flight review',
+      '--root-dir', rootDir,
+      '--allow-failed-reset',
+    ],
+    { stdout: makeCaptureStream(), stderr: err }
+  );
+
+  assert.equal(rc, 1, 'should still be blocked despite --allow-failed-reset');
+  assert.match(err.text(), /review-in-flight/);
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status FROM reviewed_prs WHERE pr_number = 42'
+    ).get();
+    assert.equal(row.review_status, 'reviewing');
+  } finally {
+    db.close();
+  }
+});
+
 test('main returns 4 with real broken --root-dir (subprocess-style: passing /dev/null)', () => {
   // The reviewer's repro: --root-dir /dev/null. openReviewStateDb does
   // mkdirSync(join(rootDir, 'data'), {recursive:true}) which fails with

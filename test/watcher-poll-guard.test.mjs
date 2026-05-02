@@ -5,6 +5,8 @@ import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_MS,
+  DEFAULT_POLL_DEADLINE_FLOOR_MS,
+  DEFAULT_MAX_PRS_PER_REPO,
 } from '../src/watcher-poll-guard.mjs';
 
 function deferred() {
@@ -324,6 +326,56 @@ test('computeWorkloadAwarePollDeadlineMs covers the worst-case budget for a real
     computed >= worstCase,
     `expected ${computed}ms >= worst-case ${worstCase}ms`
   );
+});
+
+test('DEFAULT_MAX_PRS_PER_REPO matches the per_page ceiling actually used by pollOnce', () => {
+  // pollOnce calls octokit.rest.pulls.list({ per_page: 50, ... }), so
+  // the conservative ceiling for "PRs the watcher could process this
+  // pass" is 50, not the previous default of 5. Anything smaller
+  // under-budgets the watchdog and trips on legitimate work — the
+  // exact regression the round-3 review flagged.
+  assert.equal(DEFAULT_MAX_PRS_PER_REPO, 50);
+});
+
+test('default workload-aware deadline covers a single-repo per_page=50 worst case', () => {
+  // Single repo handing back the GitHub-query ceiling of 50 open PRs
+  // — the default deadline must comfortably exceed the time to run
+  // 50 reviewer subprocesses serially at the 5m execFileAsync timeout
+  // each, plus API slack. Without the per_page=50 ceiling baked into
+  // the default, this case would trip the watchdog on legitimate work
+  // and exit code 86 would force every surviving 'reviewing' row to
+  // 'failed-orphan' on restart.
+  const reviewerTimeoutMs = 5 * 60 * 1000;
+  const apiSlackMs = 5 * 60 * 1000;
+  const worstCase = 1 * 50 * reviewerTimeoutMs + apiSlackMs;
+  const computed = computeWorkloadAwarePollDeadlineMs({ activeRepoCount: 1 });
+  assert.ok(
+    computed >= worstCase,
+    `expected default deadline (${computed}ms) >= per_page=50 worst case (${worstCase}ms)`
+  );
+});
+
+test('DEFAULT_POLL_DEADLINE_FLOOR_MS exists and is what computeWorkloadAwarePollDeadlineMs actually uses as floor', () => {
+  // The reviewer-flagged misleading-log issue: an earlier version
+  // logged DEFAULT_POLL_DEADLINE_MS / 1000 (3600s) as the "default
+  // floor", while the helper here used 1800s. Operators debugging a
+  // watchdog trip would reason from the wrong baseline. The two
+  // constants must be the single source of truth — log and runtime
+  // cannot diverge.
+  assert.ok(Number.isFinite(DEFAULT_POLL_DEADLINE_FLOOR_MS));
+  assert.ok(DEFAULT_POLL_DEADLINE_FLOOR_MS > 0);
+  // Smallest case: zero repos. The helper clamps `repos` to 1 and
+  // `prs` to whatever the default ceiling is. Compare the result to
+  // both branches: floor and dynamic. The floor only "wins" when it's
+  // larger than the dynamic value — so this test asserts the helper
+  // never returns less than the floor.
+  const result = computeWorkloadAwarePollDeadlineMs({
+    activeRepoCount: 0,
+    maxPrsPerRepo: 1,
+    reviewerTimeoutMs: 1,
+    apiSlackMs: 0,
+  });
+  assert.equal(result, DEFAULT_POLL_DEADLINE_FLOOR_MS);
 });
 
 test('safePollOnce keeps the watchdog timer ref\'d so a wedged promise still fires onTimeout', async () => {

@@ -17,7 +17,7 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
-  DEFAULT_POLL_DEADLINE_MS,
+  DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } from './watcher-poll-guard.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
@@ -710,7 +710,7 @@ function main() {
     : `repos: ${activeRepos.join(', ')}`;
   const deadlineLabel = Number.isFinite(configuredDeadlineMs) && configuredDeadlineMs > 0
     ? `${configuredDeadlineMs / 1000}s (configured)`
-    : `workload-aware (default floor ${DEFAULT_POLL_DEADLINE_MS / 1000}s)`;
+    : `workload-aware (default floor ${DEFAULT_POLL_DEADLINE_FLOOR_MS / 1000}s)`;
   console.log(
     `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | poll deadline: ${deadlineLabel}`
   );

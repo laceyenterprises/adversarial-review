@@ -277,6 +277,22 @@ function requestReviewRereview({
       return buildBlockedRereviewResult('malformed-title-terminal', reviewRow);
     }
 
+    // 'reviewing' is the durable in-flight claim set by the watcher
+    // BEFORE it spawns a reviewer subprocess. Resetting it back to
+    // 'pending' while the subprocess is still running would let the
+    // next watcher poll spawn a second reviewer for the same PR and
+    // recreate the duplicate-post race the in-flight claim was
+    // introduced to prevent. Block at this layer so every caller
+    // (reconcile path, retrigger-review CLI, future operator tools)
+    // gets the same guardrail without having to re-derive it; the
+    // recovery path is to let the watcher restart and turn the row
+    // into 'failed-orphan' via reconcileOrphanedReviewing, then run
+    // retrigger-review with --allow-failed-reset after operator
+    // verification.
+    if (reviewRow.review_status === 'reviewing') {
+      return buildBlockedRereviewResult('review-in-flight', reviewRow);
+    }
+
     if (reviewRow.pr_state !== 'open') {
       return buildBlockedRereviewResult('pr-not-open', reviewRow);
     }

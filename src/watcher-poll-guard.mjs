@@ -54,6 +54,25 @@
 
 const DEFAULT_POLL_DEADLINE_MS = 60 * 60 * 1000;
 
+// Floor for the workload-aware deadline. Exported as the canonical
+// constant so the watcher's startup log reports the same number the
+// runtime actually uses — a previous version logged
+// `DEFAULT_POLL_DEADLINE_MS / 1000` (3600s) while the floor here was
+// 30 minutes (1800s), which made the watchdog appear twice as
+// generous in operator logs as it actually was.
+const DEFAULT_POLL_DEADLINE_FLOOR_MS = 30 * 60 * 1000;
+
+// Conservative ceiling for "how many PRs could a single repo poll
+// realistically process this pass." The watcher's `pollOnce` calls
+// `octokit.rest.pulls.list({ per_page: 50, ... })`, so 50 is the hard
+// upper bound on PRs handed back per repo per poll. Using 50 (instead
+// of the previous 5) keeps the watchdog deadline above the worst case
+// the GitHub query can actually produce, even though most listed PRs
+// will be in `posted` / `malformed` / `failed-orphan` and skipped
+// without spawning a reviewer. The deadline is a safety bound, not an
+// SLA — pessimistic is correct here.
+const DEFAULT_MAX_PRS_PER_REPO = 50;
+
 function resolveDeadlineMs(deadlineMs, source) {
   const value = typeof deadlineMs === 'function' ? deadlineMs(source) : deadlineMs;
   if (!Number.isFinite(value) || value <= 0) {
@@ -142,12 +161,23 @@ function buildSafePollOnce({
 // calls between PRs. `floorMs` keeps tiny configurations (no repos
 // configured yet, single-repo scans) from getting an unhelpfully short
 // deadline that fails on a single slow review.
+//
+// `maxPrsPerRepo` defaults to `DEFAULT_MAX_PRS_PER_REPO` (50), which
+// matches `octokit.rest.pulls.list({ per_page: 50, ... })` in
+// `pollOnce`. Earlier versions defaulted to 5, which under-budgeted
+// the watchdog by up to 10x on any repo that returned more than 5
+// open PRs in a single poll — legitimate work would trip the deadline
+// and exit code 86 would mark surviving `reviewing` rows as
+// `failed-orphan` on restart, which is a false-failure path under
+// normal load. Callers may override `maxPrsPerRepo` with the actual
+// candidate count when they have it; the default here is the
+// conservative ceiling.
 function computeWorkloadAwarePollDeadlineMs({
   activeRepoCount,
-  maxPrsPerRepo = 5,
+  maxPrsPerRepo = DEFAULT_MAX_PRS_PER_REPO,
   reviewerTimeoutMs = 5 * 60 * 1000,
   apiSlackMs = 5 * 60 * 1000,
-  floorMs = 30 * 60 * 1000,
+  floorMs = DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } = {}) {
   const repos = Math.max(1, Number(activeRepoCount) || 1);
   const prs = Math.max(1, Number(maxPrsPerRepo) || 1);
@@ -159,4 +189,6 @@ export {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_MS,
+  DEFAULT_POLL_DEADLINE_FLOOR_MS,
+  DEFAULT_MAX_PRS_PER_REPO,
 };

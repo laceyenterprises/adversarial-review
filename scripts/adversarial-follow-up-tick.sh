@@ -1,16 +1,23 @@
 #!/bin/zsh
 # adversarial-follow-up-tick.sh
 #
-# Single-tick driver for the follow-up remediation pipeline. Fires from a
-# LaunchAgent on a fixed interval (StartInterval=120s). One tick:
+# Long-lived driver for the follow-up remediation pipeline. Resolves
+# secrets ONCE at startup, then loops every 120s running:
 #
-#   1. claim + spawn the next pending follow-up job (consume mode)
-#   2. reconcile any in-progress jobs whose worker has exited
+#   1. consume   — claim + spawn one pending follow-up job
+#   2. reconcile — finalize in-progress jobs whose worker has exited
+#   3. retry-comments — bounded drain of failed historical PR comment
+#                       deliveries (RETRY_BUDGET_PER_TICK records max)
 #
-# Process exits cleanly between ticks. Long-running daemons that hold
-# claim locks across crashes get nasty fast; this is intentionally
-# stateless. Whatever launchd next-fires picks up where the last left
-# off via the durable JSON queue under data/follow-up-jobs/.
+# Why long-lived (changed 2026-05-02): the original design was a
+# one-shot tick (script exits, launchd respawns every 120s via
+# StartInterval). That triggered a 1Password / TCC popup storm on
+# every tick because launchd-spawned subprocesses aren't
+# process-trusted by the macOS 1Password app or the macOS privacy
+# gatekeeper the same way an interactive shell's are — each fresh
+# `op read` and `gh auth token` call re-prompted. Converting to
+# long-lived means secrets resolve once at startup (one popup per
+# system boot) and ticks reuse them in-process.
 #
 # Auth policy mirrors the reviewer watcher:
 # - Reviewer/remediator CLIs use OAuth credentials only.
@@ -40,6 +47,9 @@ set -euo pipefail
 
 AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
 WATCHER_DIR="$AGENT_OS_ROOT/tools/adversarial-review"
+TICK_INTERVAL_SECONDS="${TICK_INTERVAL_SECONDS:-120}"
+
+# ── Startup gate (runs once) ───────────────────────────────────────────────
 
 # Sanity gate: better-sqlite3 is a native module and breaks across Node ABI
 # bumps (NODE_MODULE_VERSION mismatch). If the daemon will fail to load
@@ -78,6 +88,10 @@ fi
 # Reviewer-bot PATs for the comment poster. Worker class → bot mapping
 # (canonical): codex → GH_CODEX_REVIEWER_TOKEN, claude-code → GH_CLAUDE_REVIEWER_TOKEN.
 # See src/pr-comments.mjs::WORKER_CLASS_TO_BOT_TOKEN_ENV.
+#
+# Resolved ONCE at daemon startup. Subsequent ticks within the same
+# daemon process reuse these env vars in-process — no new `op read`
+# subprocess, no new popup. Token rotation requires a daemon restart.
 export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
 export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
 if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then
@@ -103,42 +117,40 @@ unset OPENAI_API_KEY
 
 cd "$WATCHER_DIR"
 
-TICK_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+echo "[follow-up-daemon $(date -u +"%Y-%m-%dT%H:%M:%SZ")] startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s)"
 
-# Tick step 1: consume one pending job (no-op if queue is empty).
-# We don't fail the tick on a non-zero exit because consume failures
-# (e.g., OAuth pre-flight) move the offending job to failed/ via the
-# in-process catch — the queue keeps moving on the next tick.
+# ── Tick loop (runs forever) ───────────────────────────────────────────────
 #
-# Live work runs FIRST. The previous tick order put retry-comments
-# first, but a backlog of failed deliveries (e.g. 40 records during a
-# GitHub outage, each up to a 30s gh timeout) could starve the
-# remediation queue for many minutes — operators reported the queue
-# stalled while the daemon ground through historical retries. The
-# retry pass is now the lowest-priority step and is bounded by
-# RETRY_BUDGET_PER_TICK (see src/comment-delivery.mjs).
-echo "[follow-up-tick $TICK_TS] consume: starting"
-/opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-remediation.mjs" || \
-  echo "[follow-up-tick $TICK_TS] consume: exited non-zero (job moved to failed/ — see logs)"
+# Each iteration: consume → reconcile → retry-comments. We never exit
+# cleanly; KeepAlive=SuccessfulExit=false in the plist relaunches on
+# crash. Trap SIGTERM so launchd can stop the daemon gracefully when
+# the operator runs `launchctl bootout`.
 
-# Tick step 2: reconcile in-progress jobs (workers may have exited).
-# Uses src/follow-up-reconcile.mjs (the canonical entry point exposed by
-# `npm run follow-up:reconcile`) rather than the `reconcile` arg of
-# follow-up-remediation.mjs, so output formatting matches what an
-# operator would see when running the reconcile npm script by hand.
-echo "[follow-up-tick $TICK_TS] reconcile: starting"
-/opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-reconcile.mjs" || \
-  echo "[follow-up-tick $TICK_TS] reconcile: exited non-zero"
+trap 'echo "[follow-up-daemon] received SIGTERM — exiting tick loop"; exit 0' TERM INT
 
-# Tick step 3: drain any failed historical comment deliveries. Bounded
-# at RETRY_BUDGET_PER_TICK records per call (see src/comment-delivery.mjs)
-# so a backlog can't starve future ticks' live work. The cap means a
-# 40-record backlog drains over ~16 minutes (5 records / 2-min tick),
-# but consume + reconcile run on every tick regardless of backlog
-# size. Idempotent against concurrent ticks via a per-record sidecar
-# claim lock.
-echo "[follow-up-tick $TICK_TS] retry-comments: starting"
-/opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-retry-comments.mjs" || \
-  echo "[follow-up-tick $TICK_TS] retry-comments: exited non-zero"
+while true; do
+  TICK_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-echo "[follow-up-tick $TICK_TS] tick complete"
+  # Tick step 1: consume one pending job (no-op if queue is empty).
+  # We don't fail the tick on a non-zero exit because consume failures
+  # (e.g., OAuth pre-flight) move the offending job to failed/ via the
+  # in-process catch — the queue keeps moving on the next tick.
+  echo "[follow-up-tick $TICK_TS] consume: starting"
+  /opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-remediation.mjs" || \
+    echo "[follow-up-tick $TICK_TS] consume: exited non-zero (job moved to failed/ — see logs)"
+
+  # Tick step 2: reconcile in-progress jobs (workers may have exited).
+  echo "[follow-up-tick $TICK_TS] reconcile: starting"
+  /opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-reconcile.mjs" || \
+    echo "[follow-up-tick $TICK_TS] reconcile: exited non-zero"
+
+  # Tick step 3: drain any failed historical comment deliveries. Bounded
+  # at RETRY_BUDGET_PER_TICK records per call (see src/comment-delivery.mjs)
+  # so a backlog can't starve future ticks' live work.
+  echo "[follow-up-tick $TICK_TS] retry-comments: starting"
+  /opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-retry-comments.mjs" || \
+    echo "[follow-up-tick $TICK_TS] retry-comments: exited non-zero"
+
+  echo "[follow-up-tick $TICK_TS] tick complete; sleeping ${TICK_INTERVAL_SECONDS}s"
+  sleep "$TICK_INTERVAL_SECONDS"
+done

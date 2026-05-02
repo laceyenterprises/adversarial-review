@@ -20,6 +20,18 @@
   per-user is HOME itself plus the log paths (which `launchctl` opens
   before the script runs).
 
+  Long-lived process model (changed 2026-05-02): the daemon used to be
+  a one-shot tick (StartInterval=120, exit each cycle). That triggered
+  a 1Password / TCC popup storm because launchd-spawned `op` and `gh`
+  subprocesses aren't process-trusted by the macOS 1Password app and
+  by macOS's privacy gatekeeper the same way an interactive shell's
+  are — each fresh subprocess re-prompted, so 2 op calls + 1 gh call
+  per tick × 1 tick per 2min = a popup every minute. Converted to a
+  long-lived `while true; sleep 120` loop in the tick script: secrets
+  resolve ONCE at daemon start (one popup per system boot), then ticks
+  reuse them in-process. KeepAlive=SuccessfulExit=false relaunches on
+  crash but not on clean exit so we don't dance around the popups.
+
   Not generic / not portable across machines: WorkingDirectory and the
   ProgramArguments path embed `/Users/airlock/agent-os/`. That is the
   documented Agent OS root on this host (matching the existing
@@ -51,22 +63,24 @@
         <string>/Users/placey</string>
     </dict>
 
-    <!-- Fire every 120s. Each tick is a one-shot: claim+spawn one
-         pending job, reconcile any in-progress ones, exit. The 6-round
-         cap inside follow-up-jobs.mjs and the per-PR rereview cooldown
-         in review-state.mjs are the runaway guards; this interval just
-         decides how quickly a freshly-posted review turns into a
-         spawned remediation worker. -->
-    <key>StartInterval</key>
-    <integer>120</integer>
+    <!-- Long-lived: the script runs an internal `while true; sleep 120`
+         loop and never exits cleanly. KeepAlive with SuccessfulExit=false
+         means launchd respawns on crash but not on clean exit; the
+         script never exits cleanly anyway, so this is purely a safety
+         net for unexpected crashes. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
-    <!-- Fire once on agent load so an outage recovery is not delayed
-         by up to 2 minutes for the first tick. -->
+    <!-- Throttle relaunches so a crash spiral doesn't burn through
+         1Password/TCC popups on every restart attempt. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
     <key>RunAtLoad</key>
     <true/>
-
-    <!-- KeepAlive=false: this is a one-shot tick. KeepAlive=true would
-         turn a fast tick (no pending work) into a respawn storm. -->
 
     <key>StandardOutPath</key>
     <string>/Users/placey/Library/Logs/adversarial-follow-up.log</string>

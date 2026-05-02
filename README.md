@@ -203,7 +203,7 @@ Two agents drive the system:
 | Agent | Cadence | What it runs |
 |---|---|---|
 | `ai.laceyenterprises.adversarial-watcher` | KeepAlive (long-lived) | `src/watcher.mjs` — polls for tagged PRs, spawns reviewers |
-| `ai.laceyenterprises.adversarial-follow-up` | StartInterval=120s (one-shot tick) | `scripts/adversarial-follow-up-tick.sh` — consume + reconcile |
+| `ai.laceyenterprises.adversarial-follow-up` | KeepAlive (long-lived, internal 120s loop) | `scripts/adversarial-follow-up-tick.sh` — consume + reconcile + retry-comments |
 
 Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo.
 

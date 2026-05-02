@@ -295,10 +295,12 @@ What reconciliation inspects:
 Possible outcomes:
 
 - worker PID still live: job stays `in_progress`
-- worker PID gone and final message artifact missing or empty: job moves to `failed/`
-- worker PID gone and final message artifact present:
+- worker PID gone, `remediation-reply.json` exists but is malformed / fails schema validation / does not match the job: job moves to `failed/` with code `invalid-remediation-reply` (this path is taken regardless of whether stdout is empty — the invalid reply is the load-bearing signal, not a missing narrative)
+- worker PID gone, final message artifact missing or empty, AND no valid reply artifact: job moves to `failed/`
+- worker PID gone, final message artifact present (non-empty stdout):
   - if a valid reply requested re-review, job moves to `completed/`
   - if no durable re-review request was recorded, job moves to `stopped/`
+- worker PID gone, final message artifact missing or empty, BUT a valid reply artifact exists (e.g. a tool-only `claude-code` worker that pushed code + wrote `remediation-reply.json` but emitted no stdout narrative): the validated reply is the durable success signal — `reReview.requested` (per SPEC.md §5.1.2), NOT `outcome`, decides the terminal state. Routes to `completed/` if rereview was requested, otherwise to `stopped/` with code `no-progress`.
 
 Reconciliation never starts another remediation round on its own.
 

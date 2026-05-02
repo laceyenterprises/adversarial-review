@@ -1493,11 +1493,16 @@ async function reconcileFollowUpJob({
   // remediation-reply.json. A claude-code worker's `--print` mode can
   // legitimately produce zero stdout when its response was tool-only
   // (edits + commit + push + reply.json written via the Write tool, no
-  // textual narrative back). Probe the reply silently here so we can
-  // route those workers through the success path even when the
-  // narrative is empty. The inner block below still re-reads the reply
-  // and fails LOUDLY on invalid JSON / schema violations — that is a
-  // genuine artifact failure and stays a failed/ outcome.
+  // textual narrative back). Probe the reply up front in tri-state form
+  // so we can:
+  //   - route empty-stdout-but-valid-reply workers through the success
+  //     branch (where reply.reReview.requested decides completed vs
+  //     stopped — that is the durable signal per SPEC.md §5.1.2, NOT
+  //     reply.outcome)
+  //   - surface invalid replies as `invalid-remediation-reply`
+  //     regardless of stdout (hiding invalid replies behind a generic
+  //     empty-stdout failure loses the real failure cause and makes
+  //     operator recovery harder)
   //
   // Concrete incident this guards against: PR #20's first remediation
   // round (job 2026-05-02T13-40-18-832Z). Worker pushed a real fix
@@ -1505,18 +1510,67 @@ async function reconcileFollowUpJob({
   // wrote a valid reply.json with reReview.requested=true, but
   // produced empty stdout. Reconciler false-failed the job and posted
   // "Human intervention required" on the PR.
-  let replyOutcomeProbe = null;
-  if (paths.replyPath) {
+  let replyProbe = { state: 'missing' };
+  if (paths.replyPath && existsSync(paths.replyPath)) {
     try {
-      replyOutcomeProbe = readRemediationReplyArtifact(paths.replyPath, { expectedJob: job })?.outcome || null;
-    } catch {
-      replyOutcomeProbe = null;
+      replyProbe = {
+        state: 'valid',
+        reply: readRemediationReplyArtifact(paths.replyPath, { expectedJob: job }),
+      };
+    } catch (err) {
+      replyProbe = { state: 'invalid', error: err };
     }
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
-  const replyClaimsCompleted = replyOutcomeProbe === 'completed';
 
-  if (hasNonEmptyNarrative || replyClaimsCompleted) {
+  // Invalid reply is a distinct artifact failure regardless of whether
+  // stdout is empty or non-empty. Route it directly to
+  // `invalid-remediation-reply` so the operator gets the real cause
+  // instead of a misleading `artifact-empty-completion`.
+  if (replyProbe.state === 'invalid') {
+    const err = replyProbe.error;
+    const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
+    const { commentDelivery: invalidReplyDelivery } = buildReconcileCommentDelivery({
+      job, worker, action: 'failed', failure: invalidReplyFailure, now,
+    });
+    const failed = markFollowUpJobFailed({
+      rootDir,
+      jobPath,
+      failedAt: completedAt,
+      failureCode: 'invalid-remediation-reply',
+      error: err,
+      remediationWorker: {
+        ...workerState,
+        state: 'failed',
+      },
+      failure: {
+        remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+      },
+      commentDelivery: invalidReplyDelivery,
+    });
+
+    await postReconcileOutcomeCommentSafe({
+      rootDir,
+      jobPath: failed.jobPath,
+      job: failed.job,
+      worker,
+      action: 'failed',
+      failure: invalidReplyFailure,
+      postCommentImpl,
+      alreadyTerminal: failed.alreadyTerminal,
+      now,
+      log,
+    });
+
+    return {
+      action: 'failed',
+      reason: 'invalid-remediation-reply',
+      job: failed.job,
+      jobPath: failed.jobPath,
+    };
+  }
+
+  if (hasNonEmptyNarrative || replyProbe.state === 'valid') {
     let remediationReply = {
       ...job?.remediationReply,
       state: job?.remediationReply?.path ? 'awaiting-worker-write' : 'not-configured',
@@ -1529,52 +1583,8 @@ async function reconcileFollowUpJob({
     // comment body falls back to the action / reReview signal alone.
     let parsedReply = null;
 
-    if (paths.replyPath) {
-      let reply;
-      try {
-        reply = readRemediationReplyArtifact(paths.replyPath, { expectedJob: job });
-      } catch (err) {
-        const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
-        const { commentDelivery: invalidReplyDelivery } = buildReconcileCommentDelivery({
-          job, worker, action: 'failed', failure: invalidReplyFailure, now,
-        });
-        const failed = markFollowUpJobFailed({
-          rootDir,
-          jobPath,
-          failedAt: completedAt,
-          failureCode: 'invalid-remediation-reply',
-          error: err,
-          remediationWorker: {
-            ...workerState,
-            state: 'failed',
-          },
-          failure: {
-            remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
-          },
-          commentDelivery: invalidReplyDelivery,
-        });
-
-        await postReconcileOutcomeCommentSafe({
-          rootDir,
-          jobPath: failed.jobPath,
-          job: failed.job,
-          worker,
-          action: 'failed',
-          failure: invalidReplyFailure,
-          postCommentImpl,
-          alreadyTerminal: failed.alreadyTerminal,
-          now,
-          log,
-        });
-
-        return {
-          action: 'failed',
-          reason: 'invalid-remediation-reply',
-          job: failed.job,
-          jobPath: failed.jobPath,
-        };
-      }
-
+    if (replyProbe.state === 'valid') {
+      const reply = replyProbe.reply;
       remediationReply = {
         ...remediationReply,
         state: 'worker-wrote-reply',

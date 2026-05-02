@@ -304,7 +304,7 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
   assert.equal(reconciled.job.failure.code, 'invalid-remediation-reply');
 });
 
-test('reconcileFollowUpJob completes when stdout is empty but the reply.json validates with outcome=completed', async () => {
+test('reconcileFollowUpJob completes when stdout is empty but the reply.json validates and reReview.requested=true', async () => {
   // Regression for PR #20 incident: a claude-code worker pushed a
   // real fix (commit 839ed9c, 9 files / 557 lines) and wrote a valid
   // remediation-reply.json with reReview.requested=true, but its
@@ -312,9 +312,9 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
   // empty because the response was tool-only. The reconciler used to
   // false-fail this with code `artifact-empty-completion` and post
   // "Human intervention required" on the PR. The fix: when the
-  // narrative is empty but the reply.json validates with
-  // outcome=completed, treat the reply as the durable success
-  // signal — it IS the contract, the narrative is decoration.
+  // narrative is empty but the reply.json validates, treat the reply
+  // as the durable success signal — `reReview.requested` (per
+  // SPEC.md §5.1.2) decides completed vs stopped, NOT `outcome`.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
   createFollowUpJob(makeJobInput(rootDir));
@@ -381,14 +381,19 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
   assert.equal(reconciled.job.completion.finalMessageBytes, 0);
 });
 
-test('reconcileFollowUpJob stops with no-progress when stdout is empty and reply.json says completed but reReview not requested', async () => {
-  // Companion to the above: reply.outcome=completed routes us through
-  // the success branch, but if the worker explicitly chose the
-  // human-intervention exit (reReview.requested=false), we still stop
-  // the loop — we don't silently advance. This guards against the
-  // mirror failure mode where a worker writes outcome=completed
-  // without actually requesting another review pass.
+test('reconcileFollowUpJob completes when stdout is empty and reply has reReview.requested=true with non-completed outcome', async () => {
+  // The durable signal per SPEC.md §5.1.2 is `reReview.requested =
+  // true`, NOT `outcome === 'completed'`. A worker may legitimately
+  // request another review pass while reporting `outcome: 'partial'`
+  // (some findings addressed, some still in flight) or even
+  // `outcome: 'blocked'` (worker hit something it could not finish
+  // and wants the next adversarial pass to weigh in). The reconciler
+  // must enter the success branch and accept the rereview reset
+  // regardless of the outcome string. Earlier code keyed the
+  // empty-stdout fallback on `outcome === 'completed'` and would
+  // have wrongly fallen through to `artifact-empty-completion` here.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
@@ -403,14 +408,70 @@ test('reconcileFollowUpJob stops with no-progress when stdout is empty and reply
     jobId: claimed.job.jobId,
     repo: claimed.job.repo,
     prNumber: claimed.job.prNumber,
-    outcome: 'completed',
-    summary: 'Worker decided this needs human review.',
-    validation: [],
-    blockers: ['Architectural decision required before further automated work.'],
+    outcome: 'partial',
+    summary: 'Addressed two of three blockers; want a fresh pass before continuing.',
+    validation: ['npm test'],
+    blockers: [],
     reReview: {
-      requested: false,
+      requested: true,
+      reason: 'Two blockers addressed; please re-review before I tackle the third.',
     },
   }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 8125,
+      model: 'claude-code',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  const reviewRow = readReviewRow(rootDir);
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(
+    reconciled.outcome,
+    'completed',
+    'durable signal is reReview.requested, not outcome — must NOT fall through to artifact-empty-completion'
+  );
+  assert.equal(reconciled.job.reReview.requested, true);
+  assert.equal(reconciled.job.reReview.triggered, true);
+  assert.equal(reviewRow.review_status, 'pending');
+  assert.equal(reconciled.job.completion.source, 'claude-code-remediation-reply-only');
+});
+
+test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is empty and reply.json is malformed', async () => {
+  // Companion regression: when stdout is empty AND reply.json exists
+  // but is malformed/mismatched, the prior probe swallowed the
+  // validation error and the reconciler reclassified the job as
+  // generic `artifact-empty-completion`. That hid the real cause and
+  // made operator recovery harder. The fix uses a tri-state probe
+  // (missing | valid | invalid) and routes invalid replies directly
+  // to `invalid-remediation-reply` regardless of stdout state.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  writeFileSync(outputPath, '', 'utf8');
+  // Wrong `kind` -> validateRemediationReply throws.
+  writeFileSync(replyPath, '{"kind":"wrong"}\n', 'utf8');
 
   const spawned = markFollowUpJobSpawned({
     jobPath: claimed.jobPath,
@@ -433,9 +494,12 @@ test('reconcileFollowUpJob stops with no-progress when stdout is empty and reply
   });
 
   assert.equal(reconciled.reconciled, true);
-  assert.equal(reconciled.outcome, 'stopped');
-  assert.equal(reconciled.job.remediationPlan.stop.code, 'no-progress');
-  assert.equal(reconciled.job.completion.finalMessageBytes, 0);
+  assert.equal(reconciled.outcome, 'failed');
+  assert.equal(
+    reconciled.job.failure.code,
+    'invalid-remediation-reply',
+    'invalid reply must NOT be hidden behind artifact-empty-completion when stdout is also empty'
+  );
 });
 
 test('reconcileFollowUpJob still fails when stdout is empty AND no reply.json exists', async () => {

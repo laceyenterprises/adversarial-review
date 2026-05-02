@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { mkdtempSync } from 'node:fs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { claimNextFollowUpJob, createFollowUpJob, markFollowUpJobCompleted } from '../src/follow-up-jobs.mjs';
+import { evaluateRoundBudgetForReview } from '../src/watcher.mjs';
 
 function setupDb() {
   const db = new Database(':memory:');
@@ -256,4 +262,70 @@ test("requestReviewRereview accepts 'failed-orphan' rows so retrigger-review can
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('evaluateRoundBudgetForReview skips rereview spawn when completed rounds exhaust the budget', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json'),
+    `${JSON.stringify({
+      planSchemaVersion: 1,
+      tickets: [{ id: 'PMO-A1', riskClass: 'medium' }],
+    }, null, 2)}\n`,
+    'utf8'
+  );
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json.linear-mapping.json'),
+    `${JSON.stringify({ 'PMO-A1': 'LAC-207' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 5,
+    reviewerModel: 'claude',
+    linearTicketId: 'LAC-207',
+    reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-22T05:22:42.212Z',
+    critical: false,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-22T05:25:00.000Z',
+  });
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-22T05:30:00.000Z',
+    completion: { source: 'test-fixture' },
+    reReview: {
+      requested: true,
+      status: 'pending',
+      reason: 'Please re-review.',
+      triggered: true,
+      requestedAt: '2026-04-22T05:30:00.000Z',
+    },
+  });
+
+  const logLines = [];
+  const decision = evaluateRoundBudgetForReview({
+    rootDir,
+    repo: completed.job.repo,
+    prNumber: completed.job.prNumber,
+    linearTicketId: completed.job.linearTicketId,
+    reviewStatus: 'pending',
+    reviewAttempts: 1,
+    log: (line) => logLines.push(line),
+  });
+
+  assert.equal(decision.skip, true);
+  assert.equal(decision.reason, 'round-budget-exhausted');
+  assert.equal(decision.roundBudget, 1);
+  assert.equal(decision.riskClass, 'medium');
+  assert.equal(logLines.length, 1);
+  assert.match(logLines[0], /completed remediation rounds 1\/1/);
+  assert.match(logLines[0], /medium risk-class budget/);
 });

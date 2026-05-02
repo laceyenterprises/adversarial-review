@@ -1155,3 +1155,32 @@ test('buildRemediationOutcomeCommentBody truncates an absurdly long Files: line 
   const maxFileNum = numbers.length ? Math.max(...numbers) : 0;
   assert.ok(maxFileNum < 100, `expected truncation well below 200 files, got max=${maxFileNum}`);
 });
+
+test('buildRemediationOutcomeCommentBody renders round-budget-exhausted with risk class and operator next step', () => {
+  // Track A surfaces a new stop code from the daemon. The renderer
+  // must produce a comment that names the riskClass tier, the budget,
+  // and the operator-next-step (review prior rounds, decide whether
+  // to reopen the spec at a higher tier or accept as-is). Mirrors the
+  // existing `max-rounds-reached` branch shape.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'stopped',
+    job: {
+      jobId: 'lac__demo-pr-7-2026-05-01T20-00-00-000Z',
+      repo: 'laceyenterprises/demo',
+      prNumber: 7,
+      riskClass: 'medium',
+      remediationPlan: {
+        currentRound: 1,
+        maxRounds: 1,
+        stop: { code: 'round-budget-exhausted' },
+      },
+    },
+  });
+
+  assert.match(body, /Outcome:.*stopped.*round-budget-exhausted/);
+  assert.match(body, /medium.*risk-class remediation budget \(1 round/);
+  assert.match(body, /completed: 1/);
+  assert.match(body, /reopen the linked spec to justify a higher.*riskClass/);
+  assert.match(body, /Human intervention required/);
+});

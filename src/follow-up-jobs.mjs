@@ -9,21 +9,35 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
-// Bounded remediation cap. Was 6 (PR #18 era); dropped to 3 after
-// observing diminishing returns past round 3 — rounds 1-3 caught real
-// structural bugs, edge cases, and security regressions; rounds 4-7
-// produced mostly duplicate findings and stacked complexity faster
-// than they removed risk. Pairs with a lenient final-round verdict
-// threshold in the reviewer prompt (the final-round review only blocks
-// on data corruption / secret leakage / security regression /
-// broken external contract; everything else becomes a non-blocking
-// note for human review). See prompts/reviewer-prompt-final-round-addendum.md.
-const DEFAULT_MAX_REMEDIATION_ROUNDS = 3;
+// Bounded remediation cap, risk-tiered per the pr-merge-orchestration
+// spec (`projects/pr-merge-orchestration/SPEC.md` §3.1). Was uniformly
+// 6 in PR #18's era, dropped to a uniform 3 after observing
+// diminishing returns past round 3, then dropped to a default of 1
+// (`medium` risk) under the spec, with higher tiers (`high=2`,
+// `critical=3`) reserved for the PRs that genuinely need more
+// iteration. Pairs with a lenient final-round verdict threshold in
+// the reviewer prompt (the final-round review only blocks on data
+// corruption / secret leakage / security regression / broken
+// external contract; everything else becomes a non-blocking note for
+// human review). See prompts/reviewer-prompt-final-round-addendum.md.
+//
+// Legacy jobs persisted with the old 3- or 6-round caps keep their
+// persisted value via the per-job `remediationPlan.maxRounds` field;
+// only NEW jobs derive their budget from this table.
+const LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
+const DEFAULT_RISK_CLASS = 'medium';
+const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
+  low: 1,
+  medium: 1,
+  high: 2,
+  critical: 3,
+});
+const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
 const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
@@ -54,10 +68,141 @@ function writeFollowUpJob(jobPath, job) {
   writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
 }
 
-function normalizeMaxRounds(maxRounds) {
+function normalizeMaxRounds(maxRounds, { fallback = LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS } = {}) {
   return Number.isInteger(maxRounds) && maxRounds > 0
     ? maxRounds
-    : DEFAULT_MAX_REMEDIATION_ROUNDS;
+    : fallback;
+}
+
+function normalizeRiskClass(riskClass, { fallback = null } = {}) {
+  const normalized = String(riskClass ?? '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(ROUND_BUDGET_BY_RISK_CLASS, normalized)
+    ? normalized
+    : fallback;
+}
+
+function buildRoundBudgetResolution({
+  riskClass = DEFAULT_RISK_CLASS,
+  roundBudget = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS],
+  source = 'default-medium',
+} = {}) {
+  const normalizedRiskClass = normalizeRiskClass(riskClass, { fallback: DEFAULT_RISK_CLASS });
+  const normalizedRoundBudget = normalizeMaxRounds(
+    roundBudget,
+    { fallback: ROUND_BUDGET_BY_RISK_CLASS[normalizedRiskClass] }
+  );
+
+  return {
+    riskClass: normalizedRiskClass,
+    roundBudget: normalizedRoundBudget,
+    source,
+  };
+}
+
+function getProjectsDir(rootDir) {
+  const candidates = [
+    join(rootDir, 'projects'),
+    resolve(rootDir, '..', '..', 'projects'),
+  ];
+
+  return candidates.find((candidate) => existsSync(candidate)) || candidates[0];
+}
+
+function listLinearMappingPaths(dirPath) {
+  if (!existsSync(dirPath)) {
+    return [];
+  }
+
+  const results = [];
+  for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+    const entryPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...listLinearMappingPaths(entryPath));
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith('.linear-mapping.json')) {
+      results.push(entryPath);
+    }
+  }
+  return results.sort();
+}
+
+function readJsonFileIfPresent(filePath) {
+  if (!existsSync(filePath)) {
+    return null;
+  }
+
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}
+
+function resolveRiskClassForLinearTicket(linearTicketId, { rootDir }) {
+  const normalizedTicketId = String(linearTicketId ?? '').trim().toUpperCase();
+  if (!normalizedTicketId) {
+    return buildRoundBudgetResolution({ source: 'default-medium' });
+  }
+
+  const projectsDir = getProjectsDir(rootDir);
+  for (const mappingPath of listLinearMappingPaths(projectsDir)) {
+    try {
+      const mapping = readJsonFileIfPresent(mappingPath);
+      if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) {
+        continue;
+      }
+
+      const ticketEntry = Object.entries(mapping).find(([, ticketId]) => (
+        String(ticketId ?? '').trim().toUpperCase() === normalizedTicketId
+      ));
+      if (!ticketEntry) {
+        continue;
+      }
+
+      const [planTicketId] = ticketEntry;
+      const planPath = mappingPath.replace(/\.linear-mapping\.json$/u, '');
+      const plan = readJsonFileIfPresent(planPath);
+      const planTicket = Array.isArray(plan?.tickets)
+        ? plan.tickets.find((ticket) => String(ticket?.id ?? '').trim() === String(planTicketId).trim())
+        : null;
+      const riskClass = normalizeRiskClass(planTicket?.riskClass);
+
+      if (!riskClass) {
+        continue;
+      }
+
+      return buildRoundBudgetResolution({
+        riskClass,
+        roundBudget: ROUND_BUDGET_BY_RISK_CLASS[riskClass],
+        source: `plan:${planPath}`,
+      });
+    } catch {}
+  }
+
+  return buildRoundBudgetResolution({ source: normalizedTicketId ? 'default-medium' : 'default-medium' });
+}
+
+function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {}) {
+  const persistedRiskClass = normalizeRiskClass(job?.riskClass);
+  const persistedRoundBudget = Number(
+    job?.remediationPlan?.maxRounds
+      || job?.recommendedFollowUpAction?.maxRounds
+  );
+
+  if (persistedRiskClass) {
+    return buildRoundBudgetResolution({
+      riskClass: persistedRiskClass,
+      roundBudget: ROUND_BUDGET_BY_RISK_CLASS[persistedRiskClass],
+      source: 'job-risk-class',
+    });
+  }
+
+  if (preferPersisted && Number.isInteger(persistedRoundBudget) && persistedRoundBudget > 0) {
+    return buildRoundBudgetResolution({
+      riskClass: DEFAULT_RISK_CLASS,
+      roundBudget: persistedRoundBudget,
+      source: 'job-persisted-maxRounds',
+    });
+  }
+
+  return resolveRiskClassForLinearTicket(job?.linearTicketId, { rootDir });
 }
 
 function buildRemediationRoundPlan(maxRounds = DEFAULT_MAX_REMEDIATION_ROUNDS) {
@@ -577,7 +722,8 @@ function readRemediationReplyArtifact(replyPath, { expectedJob = null } = {}) {
 function buildLegacyRemediationPlan(job) {
   const maxRounds = normalizeMaxRounds(
     Number(job?.remediationPlan?.maxRounds)
-      || Number(job?.recommendedFollowUpAction?.maxRounds)
+      || Number(job?.recommendedFollowUpAction?.maxRounds),
+    { fallback: LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS }
   );
   const basePlan = buildRemediationRoundPlan(maxRounds);
   const status = String(job?.status || 'pending');
@@ -691,7 +837,8 @@ function normalizeRemediationPlan(job) {
   if (job?.schemaVersion === FOLLOW_UP_JOB_SCHEMA_VERSION && job?.remediationPlan) {
     const currentRound = Math.max(0, Number(job.remediationPlan.currentRound || 0));
     const maxRounds = normalizeMaxRounds(
-      Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds)
+      Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds),
+      { fallback: LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS }
     );
     const persistedStopReason = typeof job.remediationPlan.stop?.reason === 'string'
       && job.remediationPlan.stop.reason.trim()
@@ -738,9 +885,11 @@ function normalizeFollowUpJob(job) {
     && persistedRemediationReply.path.trim()
     ? persistedRemediationReply.path
     : null;
+  const normalizedRiskClass = normalizeRiskClass(job?.riskClass);
   return {
     ...job,
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+    riskClass: normalizedRiskClass,
     recommendedFollowUpAction: {
       ...buildRecommendedFollowUpAction({ critical: job.critical }),
       ...(job.recommendedFollowUpAction || {}),
@@ -916,9 +1065,17 @@ function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
     ? latestMaxRoundsRaw
     : null;
 
+  // PMO-A1 / Track A: callers (watcher's pre-spawn rereview gate)
+  // need to know the PR's last-recorded riskClass to decide whether
+  // the round budget has been exhausted at the riskClass tier.
+  // `latestRiskClass` falls back to DEFAULT_RISK_CLASS when no job
+  // records a riskClass (legacy or spec-less PRs).
+  const latestRiskClass = normalizeRiskClass(latestJob?.riskClass) || DEFAULT_RISK_CLASS;
+
   return {
     completedRoundsForPR,
     latestMaxRounds,
+    latestRiskClass,
     latestJobId: latestJob?.jobId || null,
   };
 }
@@ -1050,6 +1207,12 @@ function buildFollowUpJob({
   // guard naturally stops the job after the PR exhausts its budget,
   // even though each individual job is freshly created.
   priorCompletedRounds = 0,
+  // riskClass tier (low/medium/high/critical) carried from the linked
+  // spec/plan. `createFollowUpJob` calls `resolveRoundBudgetForJob`
+  // with this value to derive `remediationPlan.maxRounds` — the
+  // pr-merge-orchestration spec's risk-tiered budget. Null for jobs
+  // built without a spec linkage; falls back to DEFAULT_RISK_CLASS.
+  riskClass = null,
 }) {
   const createdAt = reviewPostedAt || new Date().toISOString();
   const jobId = `${sanitizeRepo(repo)}-pr-${prNumber}-${sanitizeTimestamp(createdAt)}`;
@@ -1079,6 +1242,7 @@ function buildFollowUpJob({
     repo,
     prNumber,
     linearTicketId,
+    riskClass: normalizeRiskClass(riskClass),
     reviewerModel,
     // Durable record of the original PR title tag so remediation routing
     // does not have to reverse-map from reviewerModel. Reverse-mapping is
@@ -1105,16 +1269,38 @@ function buildFollowUpJob({
 
 function createFollowUpJob({ rootDir, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
+  const { riskClass, roundBudget } = resolveRoundBudgetForJob(baseJob, {
+    rootDir,
+    preferPersisted: Number.isInteger(jobInput.maxRemediationRounds) && jobInput.maxRemediationRounds > 0,
+  });
+  // Preserve the `currentRound` seeded from `priorCompletedRounds` in
+  // `buildFollowUpJob` — that's how the PR-wide bounded cap is
+  // enforced across multiple follow-up jobs. Only `maxRounds` is
+  // overridden by the riskClass-derived budget; the seeded round
+  // count and the empty `rounds` history stay as `buildFollowUpJob`
+  // wrote them.
+  const resolvedJob = {
+    ...baseJob,
+    riskClass,
+    recommendedFollowUpAction: {
+      ...baseJob.recommendedFollowUpAction,
+      maxRounds: roundBudget,
+    },
+    remediationPlan: {
+      ...baseJob.remediationPlan,
+      maxRounds: roundBudget,
+    },
+  };
   const queueDir = getFollowUpJobDir(rootDir, 'pending');
 
   mkdirSync(queueDir, { recursive: true });
 
   for (let attempt = 0; attempt < MAX_CREATE_ATTEMPTS; attempt += 1) {
     const job = attempt === 0
-      ? baseJob
+      ? resolvedJob
       : {
-          ...baseJob,
-          jobId: `${baseJob.jobId}-${attempt + 1}`,
+          ...resolvedJob,
+          jobId: `${resolvedJob.jobId}-${attempt + 1}`,
         };
     const jobPath = join(queueDir, `${job.jobId}.json`);
 
@@ -1130,7 +1316,7 @@ function createFollowUpJob({ rootDir, ...jobInput }) {
     }
   }
 
-  throw new Error(`Unable to create unique follow-up job file for ${baseJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
+  throw new Error(`Unable to create unique follow-up job file for ${resolvedJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
 }
 
 function claimNextFollowUpJob({
@@ -1560,6 +1746,8 @@ export {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
+  LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS,
+  ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
@@ -1583,6 +1771,7 @@ export {
   markFollowUpJobStopped,
   readRemediationReplyArtifact,
   readFollowUpJob,
+  resolveRoundBudgetForJob,
   requeueFollowUpJobForNextRound,
   stopFollowUpJob,
   summarizePRRemediationLedger,

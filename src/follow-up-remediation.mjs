@@ -15,6 +15,8 @@ import {
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
+  resolveRoundBudgetForJob,
+  writeFollowUpJob,
 } from './follow-up-jobs.mjs';
 import {
   buildObviousDocsGuidance,
@@ -2164,6 +2166,41 @@ async function consumeNextFollowUpJob({
   const workerClass = pickRemediationWorkerClass(claimed.job);
 
   try {
+    // Round-budget check first (cheap, short-circuits before any
+    // OAuth/work). The pr-merge-orchestration spec's risk-tiered
+    // budget enforces "stop the remediation loop when the PR has
+    // exhausted its riskClass-derived rounds" at the substrate, not
+    // in worker prompts. Resolves the budget from the job's linked
+    // spec/plan; persists the riskClass back onto the job so the
+    // next round agrees on the same tier.
+    const roundBudgetResolution = resolveRoundBudgetForJob(claimed.job, { rootDir });
+    if (claimed.job?.riskClass !== roundBudgetResolution.riskClass) {
+      claimed.job = {
+        ...claimed.job,
+        riskClass: roundBudgetResolution.riskClass,
+      };
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
+
+    const currentRound = Number(claimed.job?.remediationPlan?.currentRound || 0);
+    if (currentRound > roundBudgetResolution.roundBudget) {
+      const stopped = markFollowUpJobStopped({
+        rootDir,
+        jobPath: claimed.jobPath,
+        stoppedAt: now(),
+        stopCode: 'round-budget-exhausted',
+        sourceStatus: claimed.job.status,
+        stopReason: `Remediation round ${currentRound} exceeds the ${roundBudgetResolution.riskClass} risk-class budget (${roundBudgetResolution.roundBudget}); refusing to spawn another remediation worker.`,
+      });
+
+      return {
+        consumed: false,
+        reason: 'round-budget-exhausted',
+        job: stopped.job,
+        jobPath: stopped.jobPath,
+      };
+    }
+
     // OAuth pre-flight runs inside the try so an expired/missing OAuth
     // session moves the already-claimed job to `failed/` via the catch
     // below, rather than exiting with a still-`in_progress` ledger row.

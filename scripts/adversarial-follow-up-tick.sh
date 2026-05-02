@@ -128,6 +128,73 @@ unset OPENAI_API_KEY
 
 cd "$WATCHER_DIR"
 
+# ── TCC reminder banner ────────────────────────────────────────────────────
+#
+# The daemon's own `node` process is approved at TCC once the operator
+# has dragged /opt/homebrew/bin/node into Full Disk Access. Per-spawn
+# remediation worker subprocesses (codex, claude) are *separate* TCC
+# subjects and need their own approval — the operator handles that
+# once via System Settings (see docs/MACOS-TCC.md). We log the
+# currently-resolved underlying binary paths so operators can confirm
+# the FDA list still matches the live install after a Homebrew bump.
+#
+# This is intentionally a single log line, not a check — checking
+# whether a path is FDA-approved requires private TCC APIs. The
+# documented signal that approval has lapsed is "TCC popups start
+# firing on remediation worker spawn"; when that happens the operator
+# reads docs/MACOS-TCC.md and re-drags the affected binary.
+NODE_REAL=$(readlink -f /opt/homebrew/bin/node 2>/dev/null || echo "<missing>")
+CLAUDE_REAL=$(readlink -f /opt/homebrew/bin/claude 2>/dev/null || echo "<missing>")
+# Codex's real Mach-O binary lives under a platform-specific npm
+# sub-package whose path moves on every codex version bump and every
+# fnm node-version change. The user-facing `codex` symlink resolves
+# to a `codex.js` script that *spawns* the real binary, so TCC keys
+# on the spawned binary, not the symlink. Resolve through the same
+# env contract the worker uses (src/follow-up-remediation.mjs::
+# resolveCodexCliPath): $CODEX_CLI_PATH, then $CODEX_CLI, then
+# `command -v codex`. Branch on runtime arch for the vendor triple.
+# Fail closed on ambiguous multi-version readlink output so the
+# banner doesn't silently point operators at a stale install.
+CODEX_REAL=""
+codex_resolution_note=""
+codex_exe="${CODEX_CLI_PATH:-${CODEX_CLI:-}}"
+if [[ -z "$codex_exe" || ! -e "$codex_exe" ]]; then
+  codex_exe=$(command -v codex 2>/dev/null || true)
+fi
+if [[ -z "$codex_exe" || ! -e "$codex_exe" ]]; then
+  codex_resolution_note='codex executable not resolvable via $CODEX_CLI_PATH, $CODEX_CLI, or PATH'
+else
+  codex_real_target=$(readlink -f "$codex_exe" 2>/dev/null || true)
+  if [[ -z "$codex_real_target" ]]; then
+    codex_resolution_note="readlink -f failed for $codex_exe"
+  elif [[ "$codex_real_target" == *$'\n'* ]]; then
+    codex_resolution_note="ambiguous readlink result for $codex_exe — resolve $CODEX_CLI_PATH explicitly"
+  else
+    case "$(/usr/bin/uname -m)" in
+      arm64)  codex_triple="aarch64-apple-darwin"; codex_subpkg="codex-darwin-arm64" ;;
+      x86_64) codex_triple="x86_64-apple-darwin"; codex_subpkg="codex-darwin-x64" ;;
+      *)      codex_triple=""; codex_subpkg="" ;;
+    esac
+    if [[ -z "$codex_triple" ]]; then
+      codex_resolution_note="unsupported macOS arch: $(/usr/bin/uname -m)"
+    else
+      codex_candidate="$(dirname "$codex_real_target")/../node_modules/@openai/$codex_subpkg/vendor/$codex_triple/codex/codex"
+      if [[ -f "$codex_candidate" ]]; then
+        CODEX_REAL="$(cd "$(dirname "$codex_candidate")" && pwd)/codex"
+      else
+        codex_resolution_note="vendor binary not found at expected path: $codex_candidate"
+      fi
+    fi
+  fi
+fi
+if [[ -z "$CODEX_REAL" ]]; then
+  CODEX_REAL="<unresolved: ${codex_resolution_note:-unknown reason} — see docs/MACOS-TCC.md>"
+fi
+echo "[follow-up-tick] TCC subjects (must be in Full Disk Access — see docs/MACOS-TCC.md):"
+echo "[follow-up-tick]   /opt/homebrew/bin/node    -> $NODE_REAL"
+echo "[follow-up-tick]   /opt/homebrew/bin/claude  -> $CLAUDE_REAL"
+echo "[follow-up-tick]   codex (real Mach-O)       -> $CODEX_REAL"
+
 # ── Hand off to the in-process node daemon ────────────────────────────────
 #
 # This bash script's only responsibility is the startup gate — sanity-check

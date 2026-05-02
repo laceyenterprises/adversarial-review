@@ -29,6 +29,7 @@ Start here depending on what you need:
 - **Operating the remediation loop:** `docs/follow-up-runbook.md`
 - **Understanding states and transitions:** `docs/STATE-MACHINE.md`
 - **Debugging auth/runtime scars:** `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md`
+- **Silencing macOS TCC popups on worker spawn:** `docs/MACOS-TCC.md`
 - **Changing behavior in code:** `src/watcher.mjs`, `src/reviewer.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-remediation.mjs`
 
 Fast triage:
@@ -208,6 +209,8 @@ Two agents drive the system:
 | `ai.laceyenterprises.adversarial-follow-up` | KeepAlive (long-lived, internal 120s loop) | `scripts/adversarial-follow-up-tick.sh` — consume + reconcile + retry-comments |
 
 Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo.
+
+> **macOS TCC: read `docs/MACOS-TCC.md` before silencing popups.** Both the watcher's first-pass reviewer subprocess and the follow-up daemon's remediation workers exec the AI CLIs with bypass-style approvals (`--dangerously-bypass-approvals-and-sandbox` for codex; `--permission-mode bypassPermissions` / `--dangerously-skip-permissions` for claude) against untrusted PR content. The recommended posture is to run this stack on an **isolated worker account or VM**, not the operator's primary daily-driver account. The Full Disk Access workaround that approves `node`, `claude`, and the real Mach-O `codex` binary is a documented break-glass for non-isolated dev hosts that expands the trust boundary — read the security tradeoff and resolve authoritative paths with `node scripts/print-tcc-targets.mjs` before approving anything. Use `⌘⇧G` in the file picker to navigate into `/opt` and `~/.local` (Finder hides them). Full details: `docs/MACOS-TCC.md`.
 
 > **The shipped plists are user-bound.** The filename suffix (`.placey.plist`) names the operator the plist's `HOME` and log paths point at. If you are running as `placey`, the manual install below works as-is. If you are running as a different operator, **do not bootstrap the shipped plist directly** — it would write logs to the wrong account and resolve `gh`/Codex auth from the wrong home directory. Copy with the matching suffix and substitute paths first (see `Install for a different user` below).
 
@@ -530,6 +533,7 @@ docs/
   follow-up-runbook.md
   STATE-MACHINE.md
   INCIDENT-2026-04-21-ACPX-codex-exec-regression.md
+  MACOS-TCC.md
 ```
 
 ---

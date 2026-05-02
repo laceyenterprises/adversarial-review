@@ -176,14 +176,64 @@ function assertCodexAuthReadable() {
   return authPath;
 }
 
+// Per-process pre-flight cache. The OAuth pre-flight reads
+// `~/.codex/auth.json` (and runs `claude auth status --json` for the
+// claude-code worker class), which on macOS Sequoia / Sonoma triggers
+// per-file TCC prompts ("node would like to access data from other
+// apps") on every read because the dirs `~/.codex/` and
+// `~/.claude/` are tagged as their respective CLIs' data areas.
+//
+// The pre-flight is fail-fast guard, not load-bearing: if auth is
+// broken, the worker we'd otherwise spawn would also fail (codex /
+// claude both re-validate auth on startup), and reconcile would
+// detect the missing-final-message artifact and mark the job
+// failed. So caching the pre-flight result for the daemon's
+// lifetime is safe — at worst we waste one worker spawn cycle on
+// auth that broke after daemon start, which the next reconcile
+// catches.
+//
+// Cache shape per worker class: null = unchecked (next call runs
+// the real check), true = passed (skip the check), an OAuthError
+// instance = failed (re-throw without retrying — operators see the
+// same structured error every consume call until daemon restart,
+// matching the previous fail-fast behavior).
+//
+// Invalidate via `resetOAuthPreflightCache()` from a test seam OR
+// via SIGHUP (operator-driven re-check after rotating credentials).
+const __oauthPreflightCache = {
+  codex: null,
+  'claude-code': null,
+};
+
+function resetOAuthPreflightCache(workerClass) {
+  if (workerClass) {
+    __oauthPreflightCache[workerClass] = null;
+  } else {
+    for (const key of Object.keys(__oauthPreflightCache)) {
+      __oauthPreflightCache[key] = null;
+    }
+  }
+}
+
 async function assertCodexOAuth() {
+  const cached = __oauthPreflightCache.codex;
+  if (cached === true) return;
+  if (cached instanceof OAuthError) throw cached;
+
   const codexCli = resolveCodexCliPath();
 
-  if (codexCli.includes('/') && !existsSync(codexCli)) {
-    throw new OAuthError('codex', `codex CLI not found at ${codexCli}`);
+  try {
+    if (codexCli.includes('/') && !existsSync(codexCli)) {
+      throw new OAuthError('codex', `codex CLI not found at ${codexCli}`);
+    }
+    assertCodexAuthReadable();
+    __oauthPreflightCache.codex = true;
+  } catch (err) {
+    if (err instanceof OAuthError) {
+      __oauthPreflightCache.codex = err;
+    }
+    throw err;
   }
-
-  return assertCodexAuthReadable();
 }
 
 // ── Claude Code remediation worker (parallel to Codex) ─────────────────────
@@ -206,9 +256,24 @@ const CLAUDE_CODE_REQUIRED_AUTH_METHOD = 'claude.ai';
 const CLAUDE_CODE_REQUIRED_API_PROVIDER = 'firstParty';
 
 async function assertClaudeCodeOAuth({ execFileImpl = execFileAsync } = {}) {
+  // Per-process cache mirrors the codex pre-flight cache. The
+  // `claude auth status --json` subprocess otherwise runs every
+  // consume tick, and macOS Sequoia's per-app-data-dir TCC prompts
+  // ("node would like to access data from other apps") fire on
+  // each spawn because the resulting `claude` binary touches
+  // `~/.claude/` files. Caching the pre-flight result keeps the
+  // first call honest and silences subsequent ones.
+  // See the cache comment block above `assertCodexOAuth` for full
+  // rationale.
+  const cached = __oauthPreflightCache['claude-code'];
+  if (cached === true) return;
+  if (cached instanceof OAuthError) throw cached;
+
   const claudeCli = resolveClaudeCodeCliPath();
   if (claudeCli.includes('/') && !existsSync(claudeCli)) {
-    throw new OAuthError('claude-code', `claude CLI not found at ${claudeCli}`);
+    const err = new OAuthError('claude-code', `claude CLI not found at ${claudeCli}`);
+    __oauthPreflightCache['claude-code'] = err;
+    throw err;
   }
 
   // Run `claude auth status --json` and validate the response. This is
@@ -257,27 +322,35 @@ async function assertClaudeCodeOAuth({ execFileImpl = execFileAsync } = {}) {
   }
 
   if (!parsed?.loggedIn) {
-    throw new OAuthError(
+    const err = new OAuthError(
       'claude-code',
       `not logged in to Claude Code (run \`claude auth login\`)`
     );
+    __oauthPreflightCache['claude-code'] = err;
+    throw err;
   }
 
   if (parsed.authMethod !== CLAUDE_CODE_REQUIRED_AUTH_METHOD) {
-    throw new OAuthError(
+    const err = new OAuthError(
       'claude-code',
       `authMethod is ${JSON.stringify(parsed.authMethod)} but ` +
       `${JSON.stringify(CLAUDE_CODE_REQUIRED_AUTH_METHOD)} (OAuth subscription) is required`
     );
+    __oauthPreflightCache['claude-code'] = err;
+    throw err;
   }
 
   if (parsed.apiProvider !== CLAUDE_CODE_REQUIRED_API_PROVIDER) {
-    throw new OAuthError(
+    const err = new OAuthError(
       'claude-code',
       `apiProvider is ${JSON.stringify(parsed.apiProvider)} but ` +
       `${JSON.stringify(CLAUDE_CODE_REQUIRED_API_PROVIDER)} (Anthropic direct) is required`
     );
+    __oauthPreflightCache['claude-code'] = err;
+    throw err;
   }
+
+  __oauthPreflightCache['claude-code'] = true;
 
   return {
     authMethod: parsed.authMethod,
@@ -1960,6 +2033,7 @@ export {
   OAuthError,
   StartupContractError,
   assertCodexOAuth,
+  resetOAuthPreflightCache,
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,

@@ -471,19 +471,30 @@ function listFollowUpJobsInDir(rootDir, key) {
 // transient post / OAuth / reviewer-crash failures and would silently
 // trip the lenient final-round threshold on infrastructure flakiness).
 //
-// The auto-flow creates one new follow-up job per adversarial review
-// pass, so `currentRound` stamps written into terminal job records are
-// effectively a per-PR ledger of completed remediation rounds.
+// `currentRound` on terminal jobs is *cumulative* for the PR: each new
+// follow-up job is seeded from the PR's prior accumulated count
+// (`buildFollowUpJob` -> `priorCompletedRounds`), and `claimNext...`
+// then increments it by exactly one. The PR-wide consumed-round count
+// is therefore `max(currentRound)` across terminal jobs, NOT the sum.
+// Summing would double-count: 3 sequential remediation cycles produce
+// terminal `currentRound` stamps of 1, 2, 3 — a sum of 6 would
+// prematurely trip `max-rounds-reached` at round 2 on the new 3-round
+// default cap, and at round 3 on the legacy 6-round cap.
 //
 // `latestMaxRounds` is read from the most-recent job (by terminal /
 // claim / create timestamp). Jobs created with the legacy 6-round cap
 // must continue to use 6 as their bound — this is what the reviewer's
 // blocking issue #2 calls out: do not substitute the global default.
 //
-// Pending and in-progress jobs are intentionally excluded from the
-// `completedRoundsForPR` sum: pending hasn't consumed a round yet,
-// and in-progress is mid-flight (the round it's running has not yet
+// Pending and in-progress jobs are intentionally excluded from
+// `completedRoundsForPR`: pending hasn't consumed a round yet, and
+// in-progress is mid-flight (the round it's running has not yet
 // produced a terminal outcome the gate can react to).
+//
+// Resilience: a single corrupt or unreadable JSON file in any of the
+// scanned directories must NOT silently zero out the directory's
+// contribution to the ledger for unrelated PRs. Errors are caught
+// per-file (logged + skipped), not per-directory.
 function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
   const targetRepo = String(repo ?? '');
   const targetPr = Number(prNumber);
@@ -499,20 +510,45 @@ function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
   const terminalKeys = new Set(['completed', 'failed', 'stopped']);
 
   for (const key of allKeys) {
-    let entries;
+    const dir = getFollowUpJobDir(rootDir, key);
+    if (!existsSync(dir)) continue;
+
+    let names;
     try {
-      entries = listFollowUpJobsInDir(rootDir, key);
-    } catch {
-      entries = [];
+      names = readdirSync(dir).filter((name) => name.endsWith('.json'));
+    } catch (err) {
+      console.error(
+        `[follow-up-jobs] Failed to list ${key} directory while summarizing ` +
+          `PR ledger for ${targetRepo}#${targetPr}: ${err?.message || err}`,
+      );
+      continue;
     }
-    for (const { job } of entries) {
+
+    for (const name of names) {
+      const jobPath = join(dir, name);
+      let job;
+      try {
+        job = readFollowUpJob(jobPath);
+      } catch (err) {
+        // Per-file fail-soft: a single bad JSON record cannot remove
+        // history for unrelated PRs in the same directory. Logging
+        // the bad path keeps the failure visible to operators.
+        console.error(
+          `[follow-up-jobs] Skipping unreadable ledger record ${jobPath} ` +
+            `while summarizing PR ledger for ${targetRepo}#${targetPr}: ` +
+            `${err?.message || err}`,
+        );
+        continue;
+      }
       if (!job) continue;
       if (job.repo !== targetRepo) continue;
       if (Number(job.prNumber) !== targetPr) continue;
 
       if (terminalKeys.has(key)) {
         const cur = Number(job?.remediationPlan?.currentRound || 0);
-        if (Number.isFinite(cur) && cur > 0) completedRoundsForPR += cur;
+        if (Number.isFinite(cur) && cur > completedRoundsForPR) {
+          completedRoundsForPR = cur;
+        }
       }
 
       const ts = job?.completedAt

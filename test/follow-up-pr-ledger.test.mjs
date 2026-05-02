@@ -12,7 +12,7 @@
 // two rounds of remediation budget mid-deploy).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -120,9 +120,13 @@ test('summarizePRRemediationLedger only counts terminal jobs and isolates by (re
   assert.equal(ledgerAfterOne.latestMaxRounds, DEFAULT_MAX_REMEDIATION_ROUNDS);
 });
 
-test('summarizePRRemediationLedger sums currentRound across multiple terminal jobs for the same PR', () => {
-  // Three sequential remediation cycles (each is its own follow-up
-  // job in the auto-flow) → completedRoundsForPR should be 3.
+test('summarizePRRemediationLedger takes max(currentRound) across terminal jobs (currentRound is cumulative, not per-job)', () => {
+  // Three sequential remediation cycles. Each new follow-up job is
+  // seeded from the PR's prior accumulated count, so the terminal
+  // currentRound stamps are 1, 2, 3 — already cumulative. The PR-wide
+  // ledger must take the MAX (3), not the SUM (6). Summing would
+  // double-count and trip max-rounds-reached after only 2 cycles on
+  // the new 3-round default cap.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   for (let i = 1; i <= 3; i += 1) {
@@ -141,7 +145,218 @@ test('summarizePRRemediationLedger sums currentRound across multiple terminal jo
     repo: 'laceyenterprises/clio',
     prNumber: 7,
   });
-  assert.equal(ledger.completedRoundsForPR, 1 + 2 + 3);
+  assert.equal(
+    ledger.completedRoundsForPR,
+    3,
+    'three cycles should report 3 consumed rounds (max), not 1+2+3=6 (sum)',
+  );
+});
+
+test('after 2 completed rounds on the 3-round default cap, the next attempt is 3 and a third worker can still claim', () => {
+  // Reviewer requested regression: with the buggy sum-of-currentRound
+  // accounting, after 2 cycles completedRoundsForPR was 1+2=3. The
+  // next adversarial review pass would compute attempt=4, the new
+  // job would be seeded with currentRound=3, and claim would
+  // immediately stop it as max-rounds-reached — the third remediation
+  // worker would never run on the new 3-round default cap.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  // Round 1
+  createFollowUpJob(makeJobInput(rootDir, {
+    reviewPostedAt: '2026-04-21T01:00:00.000Z',
+    priorCompletedRounds: 0,
+    maxRemediationRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
+  }));
+  runOneRound(rootDir, '2026-04-21T01:30:00.000Z', '2026-04-21T01:35:00.000Z');
+
+  // Round 2 — seeded from the now-correctly-reported PR ledger.
+  let ledgerAfter1 = summarizePRRemediationLedger(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+  });
+  createFollowUpJob(makeJobInput(rootDir, {
+    reviewPostedAt: '2026-04-21T02:00:00.000Z',
+    priorCompletedRounds: ledgerAfter1.completedRoundsForPR,
+    maxRemediationRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
+  }));
+  runOneRound(rootDir, '2026-04-21T02:30:00.000Z', '2026-04-21T02:35:00.000Z');
+
+  // After 2 rounds the ledger must report exactly 2 — not 1+2=3.
+  const ledgerAfter2 = summarizePRRemediationLedger(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+  });
+  assert.equal(ledgerAfter2.completedRoundsForPR, 2);
+
+  // The next adversarial review pass computes attempt = ledger + 1.
+  // With the fix, this is 3 (the third and final round). With the bug
+  // it would have been 4 — already past the 3-round cap.
+  const reviewAttemptNumber = ledgerAfter2.completedRoundsForPR + 1;
+  assert.equal(reviewAttemptNumber, 3, 'attempt must be 3 after 2 cycles, not 4');
+
+  // Reviewer creates the round-3 follow-up job, seeded with the PR's
+  // correct prior count.
+  createFollowUpJob(makeJobInput(rootDir, {
+    reviewPostedAt: '2026-04-21T03:00:00.000Z',
+    priorCompletedRounds: ledgerAfter2.completedRoundsForPR,
+    maxRemediationRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
+  }));
+
+  // The third worker MUST be able to claim — the buggy accounting
+  // would have tripped max-rounds-reached and stopped the job here.
+  const claimResult = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T03:30:00.000Z',
+  });
+  assert.ok(claimResult, 'third worker must still be claimable on the 3-round cap');
+  assert.equal(claimResult.job.status, 'in_progress');
+  assert.equal(
+    claimResult.job.remediationPlan.currentRound,
+    3,
+    'claim should bump currentRound to the third (final) round',
+  );
+});
+
+test('legacy maxRounds=6 PR runs all six actual remediation cycles, not three', () => {
+  // Reviewer requested regression: with the buggy sum-of-currentRound
+  // accounting, after 3 cycles on a legacy maxRounds=6 PR, the ledger
+  // reported 1+2+3=6 — already at the cap — so the loop would stop
+  // after only 3 of the 6 budgeted rounds. With the max(currentRound)
+  // fix, the ledger reports 3, and rounds 4, 5, 6 can still claim.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  for (let i = 1; i <= 6; i += 1) {
+    const ledger = summarizePRRemediationLedger(rootDir, {
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+    });
+    createFollowUpJob(makeJobInput(rootDir, {
+      reviewPostedAt: `2026-04-21T${String(i).padStart(2, '0')}:00:00.000Z`,
+      priorCompletedRounds: ledger.completedRoundsForPR,
+      maxRemediationRounds: 6,
+    }));
+    const claimed = claimNextFollowUpJob({
+      rootDir,
+      claimedAt: `2026-04-21T${String(i).padStart(2, '0')}:30:00.000Z`,
+    });
+    assert.ok(
+      claimed,
+      `legacy 6-round PR must claim all six rounds; failed at round ${i}`,
+    );
+    assert.equal(
+      claimed.job.remediationPlan.currentRound,
+      i,
+      `round ${i} claim should set currentRound to ${i}`,
+    );
+    markFollowUpJobCompleted({
+      rootDir,
+      jobPath: claimed.jobPath,
+      finishedAt: `2026-04-21T${String(i).padStart(2, '0')}:35:00.000Z`,
+      completionPreview: `legacy round ${i}`,
+      reReview: {
+        requested: true,
+        status: 'pending',
+        reason: 'Findings addressed; please re-review.',
+        triggered: true,
+        outcomeReason: null,
+        reviewRow: null,
+        requestedAt: `2026-04-21T${String(i).padStart(2, '0')}:35:00.000Z`,
+      },
+    });
+  }
+
+  const finalLedger = summarizePRRemediationLedger(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+  });
+  assert.equal(finalLedger.completedRoundsForPR, 6);
+  assert.equal(finalLedger.latestMaxRounds, 6);
+
+  // Round 7 must be blocked because the legacy 6-round cap is now
+  // genuinely exhausted (not falsely exhausted at round 4).
+  createFollowUpJob(makeJobInput(rootDir, {
+    reviewPostedAt: '2026-04-21T07:00:00.000Z',
+    priorCompletedRounds: finalLedger.completedRoundsForPR,
+    maxRemediationRounds: 6,
+  }));
+  const blockedClaim = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T07:30:00.000Z',
+  });
+  assert.equal(
+    blockedClaim,
+    null,
+    'no further claim after the legacy 6-round cap is genuinely consumed',
+  );
+});
+
+test('summarizePRRemediationLedger fails soft on a single corrupt JSON record without zeroing out unrelated PR history', () => {
+  // Reviewer blocking #2: the previous broad per-directory try/catch
+  // meant one bad JSON file in completed/ would silently drop ALL
+  // history from that directory for ALL PRs, undercount the target
+  // PR's ledger, and re-arm PRs that had already exhausted their
+  // budget. The resilient scan must catch and log per-file errors,
+  // skip the bad record, and keep the rest of the directory intact.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  // Three completed rounds for the target PR.
+  for (let i = 1; i <= 3; i += 1) {
+    createFollowUpJob(makeJobInput(rootDir, {
+      reviewPostedAt: `2026-04-21T0${i}:00:00.000Z`,
+      priorCompletedRounds: i - 1,
+      maxRemediationRounds: 6,
+    }));
+    runOneRound(
+      rootDir,
+      `2026-04-21T0${i}:30:00.000Z`,
+      `2026-04-21T0${i}:35:00.000Z`,
+    );
+  }
+
+  // Drop a corrupt JSON file alongside the legitimate completed/
+  // records — modeled on a partially-written or operator-edited file.
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  writeFileSync(
+    path.join(completedDir, 'corrupt-not-json.json'),
+    '{ this is not valid json',
+    'utf8',
+  );
+
+  // Suppress the expected per-file warning so test output stays clean
+  // without hiding regressions: we still assert it was called.
+  const originalError = console.error;
+  let warnedAboutBadFile = false;
+  console.error = (...args) => {
+    if (
+      args.some((a) => typeof a === 'string' && a.includes('Skipping unreadable ledger record'))
+    ) {
+      warnedAboutBadFile = true;
+      return;
+    }
+    originalError.apply(console, args);
+  };
+
+  let ledger;
+  try {
+    ledger = summarizePRRemediationLedger(rootDir, {
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+    });
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.ok(warnedAboutBadFile, 'corrupt file must produce a per-file warning');
+  assert.equal(
+    ledger.completedRoundsForPR,
+    3,
+    'corrupt file must not zero out unrelated completed rounds for the target PR',
+  );
+  assert.equal(
+    ledger.latestMaxRounds,
+    6,
+    'corrupt file must not erase latestMaxRounds for unrelated jobs in the same directory',
+  );
 });
 
 test('summarizePRRemediationLedger picks latestMaxRounds from the most recent terminal job, preserving legacy 6-round caps', () => {
@@ -174,8 +389,8 @@ test('summarizePRRemediationLedger picks latestMaxRounds from the most recent te
 test('summarizePRRemediationLedger does not double-count failed and stopped intermediate rounds', () => {
   // A worker that ran but the reply was invalid lands in failed/.
   // Its currentRound was set to 1 by the claim. That counts as one
-  // PR-wide consumed round (the worker spent the cycle), so it is
-  // included in the sum.
+  // PR-wide consumed round (the worker spent the cycle), and under
+  // max(currentRound) semantics the failed job alone reports 1.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T08:30:00.000Z' });

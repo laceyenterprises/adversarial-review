@@ -105,28 +105,23 @@ cd "$WATCHER_DIR"
 
 TICK_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Tick step 1: retry any PR comments that failed delivery on a prior
-# tick. `gh pr comment` has a hard 30s timeout (see src/pr-comments.mjs),
-# but timeouts / outages / token glitches still happen, and reconcile
-# moves a job to its terminal directory BEFORE attempting the comment
-# (the move must be atomic). The terminal record stamps a
-# `commentDelivery` field so this retry pass can re-attempt the post
-# without losing track. Bounded: 5 attempts then the record sits for
-# operator inspection. Run first so an outage that's already healed
-# gets cleared before any new posts pile up behind it.
-echo "[follow-up-tick $TICK_TS] retry-comments: starting"
-/opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-retry-comments.mjs" || \
-  echo "[follow-up-tick $TICK_TS] retry-comments: exited non-zero"
-
-# Tick step 2: consume one pending job (no-op if queue is empty).
+# Tick step 1: consume one pending job (no-op if queue is empty).
 # We don't fail the tick on a non-zero exit because consume failures
 # (e.g., OAuth pre-flight) move the offending job to failed/ via the
 # in-process catch — the queue keeps moving on the next tick.
+#
+# Live work runs FIRST. The previous tick order put retry-comments
+# first, but a backlog of failed deliveries (e.g. 40 records during a
+# GitHub outage, each up to a 30s gh timeout) could starve the
+# remediation queue for many minutes — operators reported the queue
+# stalled while the daemon ground through historical retries. The
+# retry pass is now the lowest-priority step and is bounded by
+# RETRY_BUDGET_PER_TICK (see src/comment-delivery.mjs).
 echo "[follow-up-tick $TICK_TS] consume: starting"
 /opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-remediation.mjs" || \
   echo "[follow-up-tick $TICK_TS] consume: exited non-zero (job moved to failed/ — see logs)"
 
-# Tick step 3: reconcile in-progress jobs (workers may have exited).
+# Tick step 2: reconcile in-progress jobs (workers may have exited).
 # Uses src/follow-up-reconcile.mjs (the canonical entry point exposed by
 # `npm run follow-up:reconcile`) rather than the `reconcile` arg of
 # follow-up-remediation.mjs, so output formatting matches what an
@@ -134,5 +129,16 @@ echo "[follow-up-tick $TICK_TS] consume: starting"
 echo "[follow-up-tick $TICK_TS] reconcile: starting"
 /opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-reconcile.mjs" || \
   echo "[follow-up-tick $TICK_TS] reconcile: exited non-zero"
+
+# Tick step 3: drain any failed historical comment deliveries. Bounded
+# at RETRY_BUDGET_PER_TICK records per call (see src/comment-delivery.mjs)
+# so a backlog can't starve future ticks' live work. The cap means a
+# 40-record backlog drains over ~16 minutes (5 records / 2-min tick),
+# but consume + reconcile run on every tick regardless of backlog
+# size. Idempotent against concurrent ticks via a per-record sidecar
+# claim lock.
+echo "[follow-up-tick $TICK_TS] retry-comments: starting"
+/opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-retry-comments.mjs" || \
+  echo "[follow-up-tick $TICK_TS] retry-comments: exited non-zero"
 
 echo "[follow-up-tick $TICK_TS] tick complete"

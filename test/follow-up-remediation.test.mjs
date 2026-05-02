@@ -2315,3 +2315,82 @@ test('reconcile treats already-pending as a benign success (still completed, com
   assert.match(commentCalls[0].body, /Re-review status:.*already pending/);
   assert.doesNotMatch(commentCalls[0].body, /BLOCKED/);
 });
+
+// ── Concurrent reconcile idempotency (R3 review #1, race A) ────────────────
+
+test('reconcile does NOT post when the terminal move was already done by another process (alreadyTerminal=true short-circuits)', async () => {
+  // Simulate the two-reconciler race: process A wins the move, the
+  // job is already at its terminal directory by the time process B
+  // calls mark*. mark* returns `alreadyTerminal: true` for B.
+  // Without the fix, B would happily call postCommentImpl and post
+  // a duplicate. With the fix, B sees alreadyTerminal=true and
+  // skips the post.
+  //
+  // We simulate B's path by pre-staging a terminal record at the
+  // destination, then running reconcile on the same in-progress
+  // record. moveTerminalJobRecord detects the existing target,
+  // returns alreadyTerminal=true, and our code path must not post.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 70, builderTag: 'codex' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  writeFileSync(outputPath, 'Worker output.\n', 'utf8');
+  writeFileSync(replyPath, JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Done.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: { requested: false, reason: null },
+  }), 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9700,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  // Pre-stage the terminal destination as if process A already moved
+  // it. moveTerminalJobRecord will see `existsSync(terminalPath)` and
+  // return `alreadyTerminal: true`.
+  const stoppedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  writeFileSync(
+    path.join(stoppedDir, path.basename(spawned.jobPath)),
+    JSON.stringify({ jobId: spawned.job.jobId, status: 'stopped', sealedByProcessA: true }),
+    'utf8'
+  );
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
+  });
+
+  // Reconcile still completes (returns a terminal action), but does
+  // NOT post — process A owns the comment.
+  assert.equal(result.action, 'stopped');
+  assert.equal(
+    commentCalls.length, 0,
+    'duplicate-post race: the second reconciler must not post when alreadyTerminal=true'
+  );
+});

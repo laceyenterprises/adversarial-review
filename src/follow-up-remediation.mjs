@@ -1156,19 +1156,27 @@ async function postReconcileOutcomeCommentSafe({
   reReview = null,
   failure = null,
   postCommentImpl,
+  alreadyTerminal = false,
   now = () => new Date().toISOString(),
   log = console,
 }) {
-  // Best-effort: never let a post failure throw out of reconcile. The
-  // terminal directory move has already happened by the time we get
-  // here, so a thrown error would leave the queue in a confusing state
-  // with no operator feedback. The actual delivery state — success,
-  // timeout, gh-cli-failure, etc. — is stamped into the terminal job
-  // record under `commentDelivery` via recordInitialCommentDelivery,
-  // so retryFailedCommentDeliveries (run on each daemon tick) can pick
-  // up failed posts and try again. Without that durable record, a
-  // missing PR comment after a flaky post would be silent control-
-  // plane drift — exactly the regression flagged on PR #18 round 2.
+  // Idempotency — when `moveTerminalJobRecord` reports the job was
+  // already moved by another process (concurrent reconcile race),
+  // that other process is already responsible for the comment. We
+  // MUST NOT also post; doing so would produce duplicate public PR
+  // comments. This is the alreadyTerminal short-circuit demanded by
+  // PR #18 round 3 review (blocking #1, race A).
+  if (alreadyTerminal) {
+    log.error?.(`[follow-up-remediation] skipping comment post — terminal move already owned by another process (jobPath=${jobPath || 'unknown'})`);
+    return;
+  }
+
+  // Best-effort: never let a post failure throw out of reconcile.
+  // recordInitialCommentDelivery handles the durability-first stamp
+  // (write attempting=true → call gh → write final result), the
+  // claim lock (concurrent-retry idempotency, race B), and the
+  // poster-throws-synthesizes-failure path. We just hand it the
+  // ingredients and let it own the lifecycle.
   try {
     const workerClass = resolveReconcileWorkerClass(job, worker);
     const body = buildRemediationOutcomeCommentBody({
@@ -1179,22 +1187,34 @@ async function postReconcileOutcomeCommentSafe({
       reReview,
       failure,
     });
-    const postResult = await postCommentImpl({
-      repo: job?.repo,
-      prNumber: job?.prNumber,
-      workerClass,
-      body,
-      log,
-    });
     if (jobPath) {
-      recordInitialCommentDelivery({
+      await recordInitialCommentDelivery({
         jobPath,
         body,
         repo: job?.repo,
         prNumber: job?.prNumber,
         workerClass,
-        postResult,
+        postCommentImpl: (args) => postCommentImpl(args),
+        postCommentArgs: {
+          repo: job?.repo,
+          prNumber: job?.prNumber,
+          workerClass,
+          body,
+          log,
+        },
         now,
+        log,
+      });
+    } else {
+      // No jobPath (defensive — shouldn't happen on reconcile path)
+      // means we can't stamp delivery state durably. Still attempt
+      // the post for operator visibility, but log the gap.
+      log.error?.('[follow-up-remediation] posting comment without a jobPath — no durable delivery record');
+      await postCommentImpl({
+        repo: job?.repo,
+        prNumber: job?.prNumber,
+        workerClass,
+        body,
         log,
       });
     }
@@ -1265,6 +1285,7 @@ async function reconcileFollowUpJob({
       action: 'failed',
       failure: { code: 'manual-inspection-required', message: liveness.reason },
       postCommentImpl,
+      alreadyTerminal: failed.alreadyTerminal,
       now,
       log,
     });
@@ -1305,6 +1326,7 @@ async function reconcileFollowUpJob({
       action: 'failed',
       failure: { code: 'invalid-output-path', message: err.message },
       postCommentImpl,
+      alreadyTerminal: failed.alreadyTerminal,
       now,
       log,
     });
@@ -1364,6 +1386,7 @@ async function reconcileFollowUpJob({
           action: 'failed',
           failure: { code: 'invalid-remediation-reply', message: err.message },
           postCommentImpl,
+          alreadyTerminal: failed.alreadyTerminal,
           now,
           log,
         });
@@ -1476,6 +1499,7 @@ async function reconcileFollowUpJob({
         reply: parsedReply,
         reReview: rereview,
         postCommentImpl,
+        alreadyTerminal: stopped.alreadyTerminal,
         now,
         log,
       });
@@ -1516,6 +1540,7 @@ async function reconcileFollowUpJob({
         reply: parsedReply,
         reReview: rereview,
         postCommentImpl,
+        alreadyTerminal: stopped.alreadyTerminal,
         now,
         log,
       });
@@ -1550,6 +1575,7 @@ async function reconcileFollowUpJob({
       reply: parsedReply,
       reReview: rereview,
       postCommentImpl,
+      alreadyTerminal: completed.alreadyTerminal,
       now,
       log,
     });
@@ -1591,6 +1617,7 @@ async function reconcileFollowUpJob({
     action: 'failed',
     failure: { code: failureCode, message: failureMessage },
     postCommentImpl,
+    alreadyTerminal: failed.alreadyTerminal,
     now,
     log,
   });

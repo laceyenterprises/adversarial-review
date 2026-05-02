@@ -1,70 +1,102 @@
-// In-process guard against overlapping pollOnce invocations.
+// Bounded watchdog around pollOnce.
 //
-// `setInterval(pollOnce, intervalMs)` fires regardless of whether the
-// previous async callback has resolved. When a single pollOnce takes
-// longer than the poll interval (slow Codex review, slow `prlt sync`,
-// GitHub API latency), the next interval tick begins while the previous
-// is still mid-flight. Both ticks then observe `review_status = 'pending'`
-// for the same PR — `stmtMarkAttemptStarted` does not change the status
-// field, only `last_attempted_at` — and both spawn a reviewer
-// subprocess. Two reviews get posted, two follow-up jobs get queued,
-// two remediation workers run, and the PR gets two near-simultaneous
-// remediation commits per round.
+// Background: the previous design (PR #24, before review feedback)
+// serialized polling behind a single in-memory flag. That removed the
+// duplicate-reviewer-spawn failure mode triggered by overlapping
+// `setInterval` ticks, but introduced a worse one: any awaited step
+// inside `pollOnce` that hung instead of rejecting (octokit calls in
+// `syncPRLifecycle` / `pulls.list`, Linear API calls in
+// `setLinearState`) would leave the in-flight flag stuck forever, and
+// every future tick would be skipped until a human restarted the
+// process.
 //
-// Smoking gun observed on PR #114 round 2 + round 3: two
-//   `[watcher] Spawning reviewer for ...#114 ... attempt=N/4`
-// log lines back-to-back from interleaved pollOnce iterations, each
-// producing its own GitHub review and its own follow-up job.
+// The current design has two parts that work together:
 //
-// Fix shape: serialize pollOnce in-process via a closure-scoped flag.
-// If a tick fires while the previous one is still running, log and
-// skip — the next tick will pick up any work that arrived during the
-// long-running poll. We accept the slight tick-skip latency; the
-// alternative is the token-bonfire described above.
+//   1. Self-scheduling loop in `src/watcher.mjs` — `setInterval` is
+//      gone. `main()` awaits `safePollOnce()` then sleeps
+//      `intervalMs`. By construction no two polls overlap, so the
+//      in-flight flag is no longer load-bearing and is removed.
 //
-// This addresses single-process overlap only. A second watcher process
-// (e.g. accidentally launched in parallel) would still race. That
-// scenario is covered by the SQL-level atomic claim in a separate
-// change so duplication has defense in depth.
+//   2. Watchdog deadline in this file — every `safePollOnce`
+//      invocation races the underlying `pollOnceImpl(octokit)` against
+//      a `setTimeout(deadlineMs)`. If the deadline fires first we log
+//      loudly, abandon the hung promise, and call the supplied
+//      `onTimeout` hook. The watcher wires that hook to a clean
+//      `process.exit` so launchd KeepAlive respawns the watcher with a
+//      fresh event loop — the abandoned `pollOnce` continuation is
+//      still alive in memory and may still attempt side effects, so
+//      the only durable way to drop that risk is to drop the whole
+//      node process.
+//
+// Error semantics are preserved at the wrapper boundary. The wrapper
+// returns a typed `{ ok, skipped, error, timedOut }` result so callers
+// can distinguish clean success, a rejected poll, and a timeout. The
+// previous shape resolved success-looking objects on every path,
+// which made health checks, metrics, and tests easy to write
+// incorrectly.
 
-// How often to repeat the "still in flight" log line during a single
-// long-running poll. The first skip always logs (so a wedged poll is
-// visible immediately); after that we log every Nth skip to avoid
-// flooding the log file when the underlying poll genuinely hangs.
-const SKIP_LOG_EVERY_N = 10;
+const DEFAULT_POLL_DEADLINE_MS = 10 * 60 * 1000;
 
-function buildSafePollOnce({ pollOnceImpl, octokit, errorHandler, log = console } = {}) {
+function buildSafePollOnce({
+  pollOnceImpl,
+  octokit,
+  errorHandler,
+  log = console,
+  deadlineMs = DEFAULT_POLL_DEADLINE_MS,
+  onTimeout,
+} = {}) {
   if (typeof pollOnceImpl !== 'function') {
     throw new TypeError('buildSafePollOnce requires a pollOnceImpl function');
   }
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    throw new TypeError('buildSafePollOnce requires a positive numeric deadlineMs');
+  }
 
-  let pollInFlight = false;
-  let skipsLogged = 0;
+  return function safePollOnce(source = 'scheduled pollOnce') {
+    let timeoutHandle;
 
-  return function safePollOnce() {
-    if (pollInFlight) {
-      skipsLogged += 1;
-      if (skipsLogged === 1 || skipsLogged % SKIP_LOG_EVERY_N === 0) {
-        log.log?.(
-          `[watcher] Skipping scheduled poll — previous poll still in flight (skip count: ${skipsLogged}).`
+    const watchdog = new Promise((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        const err = new Error(
+          `pollOnce exceeded deadline of ${deadlineMs}ms (source=${source}). ` +
+          'Abandoning the hung promise so the watcher can recover.'
         );
-      }
-      return Promise.resolve({ skipped: true, skipCount: skipsLogged });
-    }
+        err.code = 'POLL_DEADLINE_EXCEEDED';
+        log.error?.(`[watcher] ${err.message}`);
+        resolve({ ok: false, skipped: false, error: err, timedOut: true });
+      }, deadlineMs);
+      // The watchdog timer should not keep the event loop alive on
+      // its own; the poll loop already does.
+      timeoutHandle.unref?.();
+    });
 
-    pollInFlight = true;
-    skipsLogged = 0;
-
-    return Promise.resolve()
+    const work = Promise.resolve()
       .then(() => pollOnceImpl(octokit))
-      .catch((err) => {
-        if (errorHandler) errorHandler(err, 'scheduled pollOnce');
-      })
-      .finally(() => {
-        pollInFlight = false;
-      })
-      .then(() => ({ skipped: false, skippedDuringPriorRun: skipsLogged }));
+      .then(() => ({ ok: true, skipped: false, timedOut: false }))
+      .catch((err) => ({ ok: false, skipped: false, error: err, timedOut: false }));
+
+    return Promise.race([work, watchdog]).then((result) => {
+      clearTimeout(timeoutHandle);
+
+      if (!result.ok && result.error && errorHandler) {
+        try {
+          errorHandler(result.error, source);
+        } catch (handlerErr) {
+          log.error?.('[watcher] errorHandler threw while handling poll failure:', handlerErr);
+        }
+      }
+
+      if (result.timedOut && onTimeout) {
+        try {
+          onTimeout(result.error, source);
+        } catch (timeoutHandlerErr) {
+          log.error?.('[watcher] onTimeout handler threw:', timeoutHandlerErr);
+        }
+      }
+
+      return result;
+    });
   };
 }
 
-export { buildSafePollOnce, SKIP_LOG_EVERY_N };
+export { buildSafePollOnce, DEFAULT_POLL_DEADLINE_MS };

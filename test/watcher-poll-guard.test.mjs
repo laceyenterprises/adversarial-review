@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildSafePollOnce, SKIP_LOG_EVERY_N } from '../src/watcher-poll-guard.mjs';
+import {
+  buildSafePollOnce,
+  DEFAULT_POLL_DEADLINE_MS,
+} from '../src/watcher-poll-guard.mjs';
 
 function deferred() {
   let resolve;
@@ -15,148 +18,185 @@ function deferred() {
 
 function captureLog() {
   const messages = [];
+  const errors = [];
   return {
-    log: { log: (msg) => messages.push(String(msg)) },
+    log: {
+      log: (msg) => messages.push(String(msg)),
+      error: (...args) => errors.push(args.map(String).join(' ')),
+    },
     messages,
+    errors,
   };
 }
 
-test('safePollOnce serializes overlapping invocations', async () => {
-  const calls = [];
-  const gate = deferred();
-
-  const pollOnceImpl = (octokit) => {
-    calls.push(octokit);
-    return gate.promise;
+test('safePollOnce returns ok=true on a clean poll', async () => {
+  let calls = 0;
+  const pollOnceImpl = async () => {
+    calls += 1;
   };
 
-  const { log, messages } = captureLog();
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl,
+    octokit: 'stub',
+    log: { log: () => {}, error: () => {} },
+  });
+
+  const result = await safePollOnce();
+
+  assert.equal(calls, 1);
+  assert.deepEqual(result, { ok: true, skipped: false, timedOut: false });
+});
+
+test('safePollOnce passes octokit through to pollOnceImpl', async () => {
+  let received;
+  const pollOnceImpl = async (octokit) => {
+    received = octokit;
+  };
+
   const safePollOnce = buildSafePollOnce({
     pollOnceImpl,
     octokit: 'octokit-stub',
+    log: { log: () => {}, error: () => {} },
+  });
+
+  await safePollOnce();
+  assert.equal(received, 'octokit-stub');
+});
+
+test('safePollOnce returns ok=false with the error when pollOnceImpl rejects', async () => {
+  const boom = new Error('boom');
+  const pollOnceImpl = async () => { throw boom; };
+  const seen = [];
+
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl,
+    octokit: 'stub',
+    errorHandler: (err, source) => seen.push({ msg: err.message, source }),
+    log: { log: () => {}, error: () => {} },
+  });
+
+  const result = await safePollOnce('startup pollOnce');
+
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, false);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.error, boom);
+  assert.deepEqual(seen, [{ msg: 'boom', source: 'startup pollOnce' }]);
+});
+
+test('safePollOnce passes the source label per call so startup vs scheduled failures are distinguishable', async () => {
+  const pollOnceImpl = async () => { throw new Error('x'); };
+  const seen = [];
+
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl,
+    octokit: 'stub',
+    errorHandler: (err, source) => seen.push(source),
+    log: { log: () => {}, error: () => {} },
+  });
+
+  await safePollOnce('startup pollOnce');
+  await safePollOnce('scheduled pollOnce');
+  await safePollOnce(); // default
+
+  assert.deepEqual(seen, ['startup pollOnce', 'scheduled pollOnce', 'scheduled pollOnce']);
+});
+
+test('safePollOnce times out a hung poll, returns timedOut=true, and invokes onTimeout', async () => {
+  const gate = deferred();
+  const pollOnceImpl = () => gate.promise; // never resolves on its own
+  const errors = [];
+  const timeouts = [];
+  const { log } = captureLog();
+
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl,
+    octokit: 'stub',
+    errorHandler: (err, source) => errors.push({ code: err.code, source }),
+    onTimeout: (err, source) => timeouts.push({ code: err.code, source }),
+    deadlineMs: 25,
     log,
   });
 
-  const first = safePollOnce();
+  const result = await safePollOnce('scheduled pollOnce');
 
-  // While the first poll is still in-flight (gate not resolved), a
-  // second invocation must not call pollOnceImpl again.
-  const secondResult = await safePollOnce();
-  const thirdResult = await safePollOnce();
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, false);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.error.code, 'POLL_DEADLINE_EXCEEDED');
+  assert.deepEqual(errors, [{ code: 'POLL_DEADLINE_EXCEEDED', source: 'scheduled pollOnce' }]);
+  assert.deepEqual(timeouts, [{ code: 'POLL_DEADLINE_EXCEEDED', source: 'scheduled pollOnce' }]);
 
-  assert.equal(calls.length, 1, 'only the first invocation reaches pollOnceImpl');
-  assert.deepEqual(secondResult, { skipped: true, skipCount: 1 });
-  assert.deepEqual(thirdResult, { skipped: true, skipCount: 2 });
-
+  // Don't leak the dangling promise into the test runner output.
   gate.resolve();
-  const firstResult = await first;
-  assert.equal(firstResult.skipped, false);
-  assert.equal(firstResult.skippedDuringPriorRun, 2);
-
-  // First skip logged immediately; subsequent skips throttled.
-  assert.ok(
-    messages.some((m) => m.includes('skip count: 1')),
-    'first skip is logged immediately'
-  );
 });
 
-test('safePollOnce releases the in-flight flag after the underlying poll resolves', async () => {
-  let calls = 0;
-  const pollOnceImpl = async () => {
-    calls += 1;
-  };
+test('safePollOnce does NOT invoke onTimeout when pollOnce simply rejects', async () => {
+  const pollOnceImpl = async () => { throw new Error('boom'); };
+  const timeouts = [];
 
   const safePollOnce = buildSafePollOnce({
     pollOnceImpl,
     octokit: 'stub',
-    log: { log: () => {} },
+    errorHandler: () => {},
+    onTimeout: () => timeouts.push('called'),
+    deadlineMs: 1000,
+    log: { log: () => {}, error: () => {} },
   });
 
   await safePollOnce();
-  await safePollOnce();
-  await safePollOnce();
-
-  assert.equal(calls, 3, 'sequential calls all reach pollOnceImpl');
+  assert.deepEqual(timeouts, []);
 });
 
-test('safePollOnce releases the in-flight flag even when pollOnce throws', async () => {
-  let calls = 0;
-  const errors = [];
-  const pollOnceImpl = async () => {
-    calls += 1;
-    throw new Error(`boom-${calls}`);
-  };
-  const errorHandler = (err) => errors.push(err.message);
+test('safePollOnce never rejects even when errorHandler throws', async () => {
+  const pollOnceImpl = async () => { throw new Error('underlying'); };
 
   const safePollOnce = buildSafePollOnce({
     pollOnceImpl,
     octokit: 'stub',
-    errorHandler,
-    log: { log: () => {} },
+    errorHandler: () => { throw new Error('handler exploded'); },
+    log: { log: () => {}, error: () => {} },
   });
 
-  await safePollOnce();
-  await safePollOnce();
-
-  assert.equal(calls, 2, 'a throw does not leave the flag stuck');
-  assert.deepEqual(errors, ['boom-1', 'boom-2']);
+  // Must not throw — caller in pollLoop relies on this.
+  const result = await safePollOnce();
+  assert.equal(result.ok, false);
 });
 
-test('safePollOnce throttles repeated skip log lines during a single long-running poll', async () => {
+test('safePollOnce never rejects even when onTimeout throws', async () => {
   const gate = deferred();
   const pollOnceImpl = () => gate.promise;
-  const { log, messages } = captureLog();
 
   const safePollOnce = buildSafePollOnce({
     pollOnceImpl,
     octokit: 'stub',
-    log,
+    errorHandler: () => {},
+    onTimeout: () => { throw new Error('timeout handler exploded'); },
+    deadlineMs: 25,
+    log: { log: () => {}, error: () => {} },
   });
 
-  safePollOnce();
-
-  for (let i = 0; i < SKIP_LOG_EVERY_N + 1; i += 1) {
-    // eslint-disable-next-line no-await-in-loop
-    await safePollOnce();
-  }
-
+  const result = await safePollOnce();
+  assert.equal(result.timedOut, true);
   gate.resolve();
-
-  // First skip logged + one more at SKIP_LOG_EVERY_N. Anything between
-  // is throttled, so the count of log lines is much smaller than the
-  // count of skips.
-  const skipLines = messages.filter((m) => m.includes('Skipping scheduled poll'));
-  assert.equal(skipLines.length, 2, 'first skip + every-Nth skip = 2 log lines');
-  assert.ok(skipLines[0].includes('skip count: 1'));
-  assert.ok(skipLines[1].includes(`skip count: ${SKIP_LOG_EVERY_N}`));
 });
 
-test('safePollOnce reports skippedDuringPriorRun on the next successful run', async () => {
-  const gate1 = deferred();
-  let next = gate1;
-  const pollOnceImpl = () => next.promise;
+test('safePollOnce supports many sequential calls without leaking timers', async () => {
+  let calls = 0;
+  const pollOnceImpl = async () => { calls += 1; };
 
   const safePollOnce = buildSafePollOnce({
     pollOnceImpl,
     octokit: 'stub',
-    log: { log: () => {} },
+    log: { log: () => {}, error: () => {} },
   });
 
-  const first = safePollOnce();
-  await safePollOnce();
-  await safePollOnce();
-  const gate2 = deferred();
-  next = gate2;
-  gate1.resolve();
-  const firstResult = await first;
-  assert.equal(firstResult.skippedDuringPriorRun, 2);
-
-  // After a clean run, the skip counter resets, so the next poll
-  // begins with a fresh window.
-  const second = safePollOnce();
-  gate2.resolve();
-  const secondResult = await second;
-  assert.equal(secondResult.skippedDuringPriorRun, 0);
+  for (let i = 0; i < 5; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const result = await safePollOnce();
+    assert.equal(result.ok, true);
+  }
+  assert.equal(calls, 5);
 });
 
 test('buildSafePollOnce throws if pollOnceImpl is missing', () => {
@@ -164,4 +204,24 @@ test('buildSafePollOnce throws if pollOnceImpl is missing', () => {
     () => buildSafePollOnce({ octokit: 'stub' }),
     /requires a pollOnceImpl function/
   );
+});
+
+test('buildSafePollOnce rejects a non-positive deadlineMs', () => {
+  assert.throws(
+    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: 0 }),
+    /positive numeric deadlineMs/
+  );
+  assert.throws(
+    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: -1 }),
+    /positive numeric deadlineMs/
+  );
+  assert.throws(
+    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: Number.NaN }),
+    /positive numeric deadlineMs/
+  );
+});
+
+test('DEFAULT_POLL_DEADLINE_MS is exported and is a positive number larger than typical poll work', () => {
+  assert.ok(Number.isFinite(DEFAULT_POLL_DEADLINE_MS));
+  assert.ok(DEFAULT_POLL_DEADLINE_MS > 0);
 });

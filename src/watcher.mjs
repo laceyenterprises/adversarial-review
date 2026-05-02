@@ -14,7 +14,7 @@ import {
   routePR,
 } from './watcher-title-guardrails.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
-import { buildSafePollOnce } from './watcher-poll-guard.mjs';
+import { buildSafePollOnce, DEFAULT_POLL_DEADLINE_MS } from './watcher-poll-guard.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
@@ -58,6 +58,11 @@ ensureReviewStateSchema(db);
 // KeepAlive=true respawns regardless of exit code.
 const SQLITE_ORPHAN_EXIT_CODE = 75;
 
+// Distinct exit code for poll-watchdog-tripped restarts so the launchd
+// log shows whether respawns are caused by SQLite orphan recovery (75)
+// or a hung poll deadline (86). KeepAlive=true respawns either way.
+const POLL_DEADLINE_EXIT_CODE = 86;
+
 function exitForSqliteOrphan(err, contextLabel) {
   console.error(
     `[watcher] FATAL: SQLite database file was replaced on disk while we held it open ` +
@@ -77,7 +82,18 @@ function handlePollError(err, source = 'pollOnce') {
     exitForSqliteOrphan(err, source);
     return;
   }
-  console.error('[watcher] Poll error:', err);
+  console.error(`[watcher] Poll error (source=${source}):`, err);
+}
+
+function exitForPollDeadline(err, source) {
+  console.error(
+    `[watcher] FATAL: ${err?.message || err} (source=${source}). ` +
+    'Exiting so launchd KeepAlive respawns the watcher with a clean event loop. ' +
+    'The abandoned pollOnce continuation may still be alive in this process; ' +
+    'restarting drops it.'
+  );
+  process.exitCode = POLL_DEADLINE_EXIT_CODE;
+  setImmediate(() => process.exit(POLL_DEADLINE_EXIT_CODE));
 }
 
 // Belt-and-suspenders: in case a synchronous SqliteError escapes a
@@ -534,6 +550,7 @@ function main() {
 
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;
+  const pollDeadlineMs = config.pollDeadlineMs ?? DEFAULT_POLL_DEADLINE_MS;
 
   if (Object.prototype.hasOwnProperty.call(config, 'fallbackReviewer')) {
     console.error(
@@ -545,20 +562,39 @@ function main() {
   const watchMode = config.org
     ? `org: ${config.org} (dynamic discovery, refresh every ${(config.repoRefreshIntervalMs ?? 3_600_000) / 60_000}m)`
     : `repos: ${activeRepos.join(', ')}`;
-  console.log(`[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s`);
+  console.log(
+    `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | poll deadline: ${pollDeadlineMs / 1000}s`
+  );
 
-  // Use the same guarded callable for the immediate-on-start poll and
-  // the recurring interval poll. Sharing the in-flight flag matters: if
-  // the initial pollOnce is still running when the first interval tick
-  // fires, the interval tick must observe and skip.
+  // Self-scheduling loop. Awaiting safePollOnce before sleeping
+  // intervalMs guarantees no two polls overlap, so the previous
+  // overlap-skip scheme is no longer needed. The watchdog deadline
+  // inside safePollOnce protects against a single hung poll wedging
+  // the loop forever — on timeout, exitForPollDeadline calls
+  // process.exit so launchd KeepAlive respawns a clean process.
   const safePollOnce = buildSafePollOnce({
     pollOnceImpl: pollOnce,
     octokit,
     errorHandler: handlePollError,
+    onTimeout: exitForPollDeadline,
+    deadlineMs: pollDeadlineMs,
   });
 
-  safePollOnce();
-  setInterval(safePollOnce, intervalMs);
+  (async function pollLoop() {
+    await safePollOnce('startup pollOnce');
+    while (true) {
+      // The interval-sleep timer is the only handle keeping the
+      // event loop alive between polls, so it MUST NOT be unref'd.
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      await safePollOnce('scheduled pollOnce');
+    }
+  })().catch((err) => {
+    // Should be unreachable — safePollOnce never rejects, it returns
+    // a typed result. This is a backstop for an unexpected throw in
+    // the loop scaffolding itself.
+    console.error('[watcher] poll loop crashed unexpectedly:', err);
+    process.exit(1);
+  });
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

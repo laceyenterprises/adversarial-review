@@ -214,11 +214,19 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
 
   const reviewRow = readReviewRow(rootDir);
   assert.equal(reconciled.reconciled, true);
-  assert.equal(reconciled.outcome, 'completed');
+  // The pre-fix behavior here was `completed` — but that was the bug
+  // PR #18's review flagged: a blocked rereview reset must not be
+  // wrapped as "completed / re-review queued" because the watcher row
+  // was never reset. The job moves to `stopped` with code
+  // `rereview-blocked` so operators see that human intervention is
+  // required to clear the malformed-title state.
+  assert.equal(reconciled.outcome, 'stopped');
+  assert.equal(reconciled.job.remediationPlan.stop.code, 'rereview-blocked');
   assert.equal(reconciled.job.reReview.requested, true);
   assert.equal(reconciled.job.reReview.triggered, false);
   assert.equal(reconciled.job.reReview.status, 'blocked');
   assert.equal(reconciled.job.reReview.outcomeReason, 'malformed-title-terminal');
+  // The malformed review row stays put; we never silently overwrite it.
   assert.equal(reviewRow.review_status, 'malformed');
 });
 

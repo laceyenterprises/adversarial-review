@@ -1196,6 +1196,7 @@ async function reconcileFollowUpJob({
   now = () => new Date().toISOString(),
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
+  requestReviewRereviewImpl = requestReviewRereview,
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
@@ -1361,7 +1362,7 @@ async function reconcileFollowUpJob({
 
       if (reply.reReview.requested) {
         const requestedAt = completedAt;
-        const rereviewOutcome = requestReviewRereview({
+        const rereviewOutcome = requestReviewRereviewImpl({
           rootDir,
           repo: job.repo,
           prNumber: job.prNumber,
@@ -1403,6 +1404,21 @@ async function reconcileFollowUpJob({
       logPath: worker.logPath || null,
     };
 
+    // Gate the terminal transition on whether the rereview was actually
+    // accepted by the watcher's review-state machine, not just on whether
+    // the worker asked for one. `requestReviewRereview` can refuse the
+    // reset for several reasons (review row missing, malformed-title
+    // terminal, PR closed, already pending). Without this gate, a job
+    // moves to `completed` with a "re-review queued" PR comment even
+    // though the watcher row was never reset — operators are misled and
+    // the loop is silently dead in the review-row-missing / pr-not-open
+    // cases. Already-pending is benign: a fresh review pass is already
+    // armed, so we still treat it as a successful terminal.
+    const rereviewAccepted = rereview.requested && (
+      rereview.triggered || rereview.status === 'already-pending'
+    );
+    const rereviewBlocked = rereview.requested && !rereviewAccepted;
+
     if (!rereview.requested) {
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
@@ -1441,6 +1457,43 @@ async function reconcileFollowUpJob({
       return {
         action: 'stopped',
         reason: 'no-progress-stop',
+        job: stopped.job,
+        jobPath: stopped.jobPath,
+      };
+    }
+
+    if (rereviewBlocked) {
+      const blockedReason = rereview.outcomeReason || rereview.status || 'rereview-blocked';
+      const stopReasonText = `Worker requested re-review but the watcher refused the reset: ${blockedReason}. The PR's existing adversarial review verdict will not be replaced; human intervention required.`;
+      const stopped = markFollowUpJobStopped({
+        rootDir,
+        jobPath,
+        stoppedAt: completedAt,
+        stopCode: 'rereview-blocked',
+        sourceStatus: 'completed',
+        remediationWorker: {
+          ...workerState,
+          state: 'completed',
+        },
+        completion: completionMetadata,
+        remediationReply,
+        reReview: rereview,
+        stopReason: stopReasonText,
+      });
+
+      await postReconcileOutcomeCommentSafe({
+        job: stopped.job,
+        worker,
+        action: 'stopped',
+        reply: parsedReply,
+        reReview: rereview,
+        postCommentImpl,
+        log,
+      });
+
+      return {
+        action: 'stopped',
+        reason: 'rereview-blocked',
         job: stopped.job,
         jobPath: stopped.jobPath,
       };
@@ -1520,6 +1573,7 @@ async function reconcileInProgressFollowUpJobs({
   now = () => new Date().toISOString(),
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
+  requestReviewRereviewImpl = requestReviewRereview,
   log = console,
 } = {}) {
   const jobs = listInProgressFollowUpJobs(rootDir);
@@ -1538,6 +1592,7 @@ async function reconcileInProgressFollowUpJobs({
       now,
       isWorkerRunning,
       postCommentImpl,
+      requestReviewRereviewImpl,
       log,
     });
     results.push(result);

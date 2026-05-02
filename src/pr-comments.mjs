@@ -59,11 +59,26 @@ function buildRemediationOutcomeCommentBody({
   lines.push('');
 
   if (action === 'completed') {
-    lines.push(`**Outcome:** \`${reply?.outcome || 'completed'}\` — re-review queued.`);
+    // The completed action is gated on rereview acceptance in
+    // reconcileFollowUpJob, so by the time we render here we know the
+    // rereview either was accepted (status='pending', triggered=true)
+    // or was already pending (status='already-pending'). Both mean a
+    // fresh adversarial pass is queued; word the comment to match.
+    const rrStatus = reReview?.status;
+    const queuedNote = rrStatus === 'already-pending'
+      ? 're-review already pending — no reset needed'
+      : 're-review queued';
+    lines.push(`**Outcome:** \`${reply?.outcome || 'completed'}\` — ${queuedNote}.`);
   } else if (action === 'stopped') {
     const stopCode = job?.remediationPlan?.stop?.code || 'no-progress';
     lines.push(`**Outcome:** stopped (\`${stopCode}\`).`);
-    if (stopCode === 'max-rounds-reached') {
+    if (stopCode === 'rereview-blocked') {
+      const blockedReason = reReview?.outcomeReason || reReview?.status || 'unknown';
+      lines.push('');
+      lines.push(
+        `> **Human intervention required.** The worker requested a re-review pass, but the watcher refused the reset (\`${blockedReason}\`). The PR's existing adversarial-review verdict will not be replaced. Inspect the review ledger and either re-open the PR / restore the review row / clear the malformed-title state, then re-arm with \`npm run retrigger-review\`.`
+      );
+    } else if (stopCode === 'max-rounds-reached') {
       lines.push('');
       lines.push(
         '> **Human intervention required.** The remediation loop exhausted its bounded round cap without converging. Review the changes by hand, decide whether to re-arm or close.'
@@ -116,11 +131,26 @@ function buildRemediationOutcomeCommentBody({
     lines.push(formatBulletList(reply.blockers));
   }
 
+  // Surface the actual rereview outcome (not just the worker's request bit)
+  // so the comment never claims "queued" when the watcher refused the reset.
+  // Possible reReview shapes (see buildRereviewResult in
+  // follow-up-remediation.mjs):
+  //   - requested=false                                    → no rereview
+  //   - requested=true, triggered=true                     → accepted
+  //   - requested=true, status='already-pending'           → benign no-op (review already coming)
+  //   - requested=true, triggered=false, status='blocked'  → refused
   lines.push('');
-  if (reReview?.requested) {
-    lines.push(`**Re-review requested:** yes${reReview.reason ? ` — ${reReview.reason}` : ''}`);
-  } else if (action === 'completed' || action === 'stopped') {
-    lines.push('**Re-review requested:** no');
+  if (!reReview?.requested) {
+    if (action === 'completed' || action === 'stopped') {
+      lines.push('**Re-review requested:** no');
+    }
+  } else if (reReview.triggered) {
+    lines.push(`**Re-review status:** queued${reReview.reason ? ` — ${reReview.reason}` : ''}`);
+  } else if (reReview.status === 'already-pending') {
+    lines.push(`**Re-review status:** already pending${reReview.reason ? ` — ${reReview.reason}` : ''}`);
+  } else {
+    const blockedReason = reReview.outcomeReason || reReview.status || 'unknown';
+    lines.push(`**Re-review status:** **BLOCKED** (\`${blockedReason}\`)${reReview.reason ? ` — worker reason: ${reReview.reason}` : ''}`);
   }
 
   lines.push('');

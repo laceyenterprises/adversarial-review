@@ -47,7 +47,7 @@ test('WORKER_CLASS_TO_BOT_TOKEN_ENV covers every known remediation worker class'
   }
 });
 
-test('buildRemediationOutcomeCommentBody on completed includes summary, validation, and re-review yes', () => {
+test('buildRemediationOutcomeCommentBody on completed includes summary, validation, and re-review queued', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'claude-code',
     action: 'completed',
@@ -58,15 +58,61 @@ test('buildRemediationOutcomeCommentBody on completed includes summary, validati
       validation: ['npm test', 'manual smoke of /v1/users'],
       blockers: [],
     },
-    reReview: { requested: true, reason: 'Want adversarial confirmation.' },
+    // Watcher accepted the rereview reset (status reset to pending).
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Want adversarial confirmation.' },
   });
   assert.match(body, /Remediation Worker \(claude-code\) — round 2 of 6/);
   assert.match(body, /Outcome:.*completed.*re-review queued/);
   assert.match(body, /Tightened null handling in the API layer/);
   assert.match(body, /- npm test/);
   assert.match(body, /- manual smoke of \/v1\/users/);
-  assert.match(body, /Re-review requested:\*\*\s*yes — Want adversarial confirmation\./);
+  assert.match(body, /Re-review status:\*\*\s*queued — Want adversarial confirmation\./);
   assert.match(body, /Job: `lac__demo-pr-7-2026-05-01T20-00-00-000Z`/);
+});
+
+test('buildRemediationOutcomeCommentBody on completed reports already-pending when no reset was needed', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed.',
+      validation: ['npm test'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: false, status: 'already-pending', reason: 'Worker wants confirmation.' },
+  });
+  assert.match(body, /re-review already pending — no reset needed/);
+  assert.match(body, /Re-review status:\*\*\s*already pending/);
+});
+
+test('buildRemediationOutcomeCommentBody on stopped (rereview-blocked) flags the watcher refusal', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'claude-code',
+    action: 'stopped',
+    job: {
+      ...makeJob(),
+      remediationPlan: { currentRound: 1, maxRounds: 6, stop: { code: 'rereview-blocked' } },
+    },
+    reply: {
+      outcome: 'completed',
+      summary: 'Worker thought it was done.',
+      validation: ['npm test'],
+      blockers: [],
+    },
+    reReview: {
+      requested: true,
+      triggered: false,
+      status: 'blocked',
+      outcomeReason: 'review-row-missing',
+      reason: 'Worker wants confirmation.',
+    },
+  });
+  assert.match(body, /Outcome:.*stopped.*rereview-blocked/);
+  assert.match(body, /Human intervention required/);
+  assert.match(body, /watcher refused the reset.*review-row-missing/);
+  assert.match(body, /Re-review status:\*\*\s*\*\*BLOCKED\*\*\s*\(`review-row-missing`\)/);
 });
 
 test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) flags human intervention', () => {

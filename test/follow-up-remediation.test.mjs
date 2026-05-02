@@ -2016,6 +2016,16 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
+    // Stub the rereview reset as accepted by the watcher (the real
+    // watcher would also accept this — review row exists, PR open,
+    // status not malformed, not already pending). Without this stub
+    // the test would have to populate reviews.db directly.
+    requestReviewRereviewImpl: () => ({
+      triggered: true,
+      status: 'pending',
+      reason: 'review-status-reset',
+      reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
+    }),
     postCommentImpl: async (args) => {
       commentCalls.push(args);
       return { posted: true };

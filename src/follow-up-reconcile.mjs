@@ -48,6 +48,7 @@ async function reconcileFollowUpJob({
   now = () => new Date().toISOString(),
   isProcessAliveImpl,
   postCommentImpl,
+  requestReviewRereviewImpl,
 }) {
   const entry = listFollowUpJobsInDir(rootDir, 'inProgress').find((item) => item.jobPath === jobPath);
   if (!entry?.job) {
@@ -61,6 +62,7 @@ async function reconcileFollowUpJob({
     now,
     isWorkerRunning: isProcessAliveImpl,
     postCommentImpl,
+    requestReviewRereviewImpl,
   });
 
   return mapReconcileResult(result);
@@ -71,12 +73,14 @@ async function reconcileInProgressFollowUpJobs({
   now = () => new Date().toISOString(),
   isProcessAliveImpl,
   postCommentImpl,
+  requestReviewRereviewImpl,
 } = {}) {
   const result = await reconcileInProgressFollowUpJobsImpl({
     rootDir,
     now,
     isWorkerRunning: isProcessAliveImpl,
     postCommentImpl,
+    requestReviewRereviewImpl,
   });
 
   return result.results.map(mapReconcileResult);

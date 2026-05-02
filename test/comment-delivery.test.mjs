@@ -987,3 +987,208 @@ test('listRetryCandidates prunes pointers whose terminal record was deleted', as
   assert.equal(summary.scanned, 0, 'dangling pointer must not become a candidate');
   assert.equal(existsSync(danglingPointer), false, 'dangling pointer must be pruned');
 });
+
+// ── token-env-missing must not burn retry budget (R6 review #1) ───────────
+//
+// The daemon resolves bot-token env vars ONCE at startup and never
+// refreshes them in-process. If a token isn't available at boot,
+// every subsequent retry will hit the same empty env and fail the
+// same way. Treating that as a normal retryable reason consumes
+// one of the 5 attempts per tick, exhausting the budget in ~10 min
+// and permanently dropping the comment even after the daemon is
+// restarted with the token restored. The fix: skip the candidate
+// (without burning attempts AND without dropping the index pointer)
+// while the token is still absent. After restart with the token in
+// env, the same record becomes a candidate again.
+
+test('retryFailedCommentDeliveries skips token-env-missing records when the token is still absent (no attempts burned)', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const jobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-token-missing', 'body-token-missing',
+    'laceyenterprises/demo', 1, 'codex',
+    { posted: false, reason: 'token-env-missing', tokenEnvName: 'GH_CODEX_REVIEWER_TOKEN' }
+  );
+  const initial = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(initial.commentDelivery.attempts, 1, 'initial attempt is recorded by the post path');
+
+  // Run five "ticks" with the token still missing. Without the
+  // conditional skip, each tick would burn one attempt and exhaust
+  // the budget in ~10 min real time.
+  let totalCalls = 0;
+  for (let i = 0; i < 5; i += 1) {
+    /* eslint-disable no-await-in-loop */
+    const summary = await retryFailedCommentDeliveries({
+      rootDir,
+      env: {}, // no GH_CODEX_REVIEWER_TOKEN
+      postCommentImpl: async () => { totalCalls += 1; return { posted: true }; },
+      log: { error: () => {} },
+    });
+    assert.equal(summary.retried, 0, `tick ${i + 1}: must not run a retry while the token is missing`);
+    /* eslint-enable no-await-in-loop */
+  }
+  assert.equal(totalCalls, 0, 'no post calls fire while the token is missing');
+
+  // Index pointer must STAY (not be dropped) so post-restart recovery works.
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), true,
+    'retry-index pointer must persist for token-env-missing records (post-restart recovery)');
+
+  const after = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(after.commentDelivery.attempts, 1,
+    'attempts must NOT increment on token-env-missing while the token is missing');
+  assert.equal(after.commentDelivery.posted, false);
+  assert.equal(after.commentDelivery.reason, 'token-env-missing');
+
+  // Now simulate a daemon restart with the token resolved → next tick
+  // re-attempts and posts successfully.
+  const summary = await retryFailedCommentDeliveries({
+    rootDir,
+    env: { GH_CODEX_REVIEWER_TOKEN: 'restored-pat' },
+    postCommentImpl: async () => ({ posted: true }),
+    log: { error: () => {} },
+  });
+  assert.equal(summary.posted, 1, 'after token is restored, the record posts on the next retry');
+});
+
+// ── commentUrl as durable dedupe token (R6 review #3) ─────────────────────
+//
+// `gh pr comment` returns the URL of the just-created comment on
+// success. Storing that URL on the on-disk delivery record gives the
+// retry path a durable dedupe signal even if the sidecar marker is
+// missing or corrupt: if commentUrl is set, GitHub already accepted
+// the post and we must never re-post (a duplicate public comment is
+// visible to humans on the PR).
+
+test('successful initial post stamps commentUrl onto the delivery record', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-url.json');
+  writeFileSync(jobPath, JSON.stringify({ jobId: 'job-url', status: 'completed' }, null, 2), 'utf8');
+
+  await recordInitialCommentDelivery({
+    jobPath,
+    body: 'b',
+    repo: 'laceyenterprises/demo',
+    prNumber: 42,
+    workerClass: 'codex',
+    postCommentImpl: async () => ({
+      posted: true,
+      commentUrl: 'https://github.com/laceyenterprises/demo/pull/42#issuecomment-9999',
+    }),
+    now: () => '2026-05-02T03:00:00.000Z',
+    log: { error: () => {} },
+  });
+
+  const record = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(record.commentDelivery.posted, true);
+  assert.equal(record.commentDelivery.commentUrl,
+    'https://github.com/laceyenterprises/demo/pull/42#issuecomment-9999');
+});
+
+test('successful retry stamps commentUrl onto the delivery record', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const jobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-url-retry', 'body-url-retry',
+    'laceyenterprises/demo', 50, 'codex',
+    { posted: false, reason: 'gh-cli-timeout' }
+  );
+
+  await retryFailedCommentDeliveries({
+    rootDir,
+    env: { GH_CODEX_REVIEWER_TOKEN: 'pat' },
+    postCommentImpl: async () => ({
+      posted: true,
+      commentUrl: 'https://github.com/laceyenterprises/demo/pull/50#issuecomment-12345',
+    }),
+    log: { error: () => {} },
+  });
+
+  const record = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(record.commentDelivery.posted, true);
+  assert.equal(record.commentDelivery.commentUrl,
+    'https://github.com/laceyenterprises/demo/pull/50#issuecomment-12345');
+});
+
+test('listRetryCandidates skips records that already have a commentUrl (durable dedupe token)', async () => {
+  const { listRetryCandidates } = await import('../src/comment-delivery.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-already-posted.json');
+  writeFileSync(jobPath, JSON.stringify({
+    jobId: 'job-already-posted',
+    repo: 'laceyenterprises/demo',
+    prNumber: 11,
+    status: 'completed',
+    commentDelivery: {
+      posted: false, // intentionally false to verify commentUrl wins
+      reason: 'gh-cli-timeout',
+      attempts: 1,
+      firstAttemptAt: '2026-05-02T03:00:00.000Z',
+      body: 'b',
+      repo: 'laceyenterprises/demo',
+      prNumber: 11,
+      workerClass: 'codex',
+      commentUrl: 'https://github.com/laceyenterprises/demo/pull/11#issuecomment-555',
+    },
+  }, null, 2), 'utf8');
+  // Plant a pointer too so the candidate path actually visits this record.
+  addToDeliveryRetryIndex(rootDir, jobPath);
+
+  const candidates = listRetryCandidates(rootDir, {
+    maxAttempts: 5,
+    log: { error: () => {} },
+    env: { GH_CODEX_REVIEWER_TOKEN: 'pat' },
+  });
+  assert.equal(candidates.length, 0,
+    'a record carrying commentUrl must never be a retry candidate (would duplicate the public comment)');
+  // The pointer is dropped because recordOwesRetry returns false when
+  // commentUrl is set — the record is settled, no retry owed.
+  assert.equal(existsSync(deliveryRetryIndexPointerPath(rootDir, jobPath)), false,
+    'pointer is pruned for a settled commentUrl-bearing record');
+});
+
+test('retry preserves commentUrl across a still-failing attempt (dedupe token survives intermediate failures)', async () => {
+  // Plant a record where a previous successful attempt captured a URL
+  // but the post-stamp wrote posted=false somehow (defense-in-depth
+  // scenario). The retry path must NOT pick this up — but if it ever
+  // did, it must preserve the URL and not lose the dedupe signal.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-url-preserve.json');
+  writeFileSync(jobPath, JSON.stringify({
+    jobId: 'job-url-preserve',
+    repo: 'laceyenterprises/demo',
+    prNumber: 21,
+    status: 'completed',
+    commentDelivery: {
+      posted: false,
+      reason: 'gh-cli-timeout',
+      attempts: 2,
+      firstAttemptAt: '2026-05-02T03:00:00.000Z',
+      lastAttemptAt: '2026-05-02T03:02:00.000Z',
+      body: 'b',
+      repo: 'laceyenterprises/demo',
+      prNumber: 21,
+      workerClass: 'codex',
+      commentUrl: 'https://github.com/laceyenterprises/demo/pull/21#issuecomment-777',
+    },
+  }, null, 2), 'utf8');
+  addToDeliveryRetryIndex(rootDir, jobPath);
+
+  let calls = 0;
+  await retryFailedCommentDeliveries({
+    rootDir,
+    env: { GH_CODEX_REVIEWER_TOKEN: 'pat' },
+    postCommentImpl: async () => { calls += 1; return { posted: true }; },
+    log: { error: () => {} },
+  });
+  assert.equal(calls, 0,
+    'commentUrl filter must prevent a re-post that would create a duplicate public comment');
+  const record = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(record.commentDelivery.commentUrl,
+    'https://github.com/laceyenterprises/demo/pull/21#issuecomment-777',
+    'commentUrl is preserved verbatim');
+});

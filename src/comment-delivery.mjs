@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
 import { getFollowUpJobDir, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
-import { buildRemediationOutcomeCommentBody, postRemediationOutcomeComment } from './pr-comments.mjs';
+import { WORKER_CLASS_TO_BOT_TOKEN_ENV, buildRemediationOutcomeCommentBody, postRemediationOutcomeComment } from './pr-comments.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -81,6 +81,27 @@ const NON_RETRYABLE_DELIVERY_REASONS = new Set([
   'no-token-mapping',
 ]);
 
+// `token-env-missing` is *conditionally* skipped — it gets its own
+// branch in the candidate filter. The daemon resolves bot-token env
+// vars ONCE at startup and never refreshes them in-process, so a
+// record that landed with reason='token-env-missing' cannot heal
+// until the daemon restarts with the token resolved. Treating it as
+// a normal retryable reason would burn one of the 5 retry attempts
+// on every tick (~10 min to permanently exhaust the budget) on a
+// condition the current process has no way to fix. Treating it as
+// fully non-retryable would prevent recovery even after restart.
+// The conditional path: keep the retry-index pointer so the record
+// stays owed, but skip the candidate (without burning attempts)
+// while the token is still absent in this process's env. After a
+// daemon restart with the token now present, the same record
+// becomes a candidate again automatically.
+function isTokenAvailableForDelivery(delivery, env) {
+  if (!delivery) return false;
+  const tokenEnvName = WORKER_CLASS_TO_BOT_TOKEN_ENV[delivery.workerClass];
+  if (!tokenEnvName) return false;
+  return Boolean(env?.[tokenEnvName]);
+}
+
 // Pre-move "comment owed" stamp. Used by reconcile to embed delivery
 // debt into the terminal record atomically with the move-to-terminal
 // write — otherwise there is a crash window where a record can land in
@@ -128,12 +149,20 @@ function buildPendingDelivery({
   // `attempting: false` is explicit so consumers can distinguish a
   // settled record (this shape) from an in-flight one
   // (buildAttemptingDelivery → attempting: true).
+  //
+  // commentUrl: persisted on success so the retry path has a durable
+  // dedupe token even if the sidecar marker is missing or corrupt.
+  // GitHub returns the URL on every successful `gh pr comment`; if
+  // it's on the on-disk record, GitHub already accepted the post and
+  // the retry path must never re-post (which would create a duplicate
+  // public comment visible to PR readers). PR #18 round 6.
   return {
     posted: Boolean(postResult?.posted),
     attempting: false,
     reason: postResult?.posted ? null : (postResult?.reason || 'unknown'),
     error: postResult?.error || null,
     timeoutMs: postResult?.timeoutMs ?? null,
+    commentUrl: postResult?.commentUrl || null,
     attempts: 1,
     firstAttemptAt: attemptedAt,
     lastAttemptAt: attemptedAt,
@@ -567,8 +596,14 @@ function removeFromDeliveryRetryIndex(rootDir, jobPath) {
 // Determine whether a delivery state warrants an entry in the retry
 // index. Posted records and non-retryable reasons stay out of the
 // index entirely so the retry tick never even sees them.
+//
+// commentUrl is the durable dedupe token (PR #18 round 6): if a
+// previous post returned a URL, GitHub already accepted the comment
+// and the record must NEVER be retried, even if `posted` somehow got
+// rolled back to false.
 function deliveryWarrantsRetry(delivery, maxAttempts) {
   if (!delivery) return false;
+  if (delivery.commentUrl) return false;
   if (delivery.posted) return false;
   if ((delivery.attempts || 0) >= maxAttempts) return false;
   if (NON_RETRYABLE_DELIVERY_REASONS.has(delivery.reason)) return false;
@@ -679,6 +714,11 @@ function recordOwesRetry(record, maxAttempts) {
   if (!record.repo || !record.prNumber) return false;
   const delivery = record.commentDelivery;
   if (!delivery) return true; // missing — reconstructable debt
+  // commentUrl is the durable dedupe token (PR #18 round 6): if it's
+  // on the record, GitHub accepted the comment, and re-posting would
+  // create a duplicate. Authoritative even if `posted` got rolled
+  // back somehow.
+  if (delivery.commentUrl) return false;
   if (delivery.posted) return false;
   if ((delivery.attempts || 0) >= maxAttempts) return false;
   if (NON_RETRYABLE_DELIVERY_REASONS.has(delivery.reason)) return false;
@@ -737,7 +777,7 @@ function seedDeliveryRetryIndexFromHistory(rootDir, { maxAttempts, log }) {
 // listRetryCandidates work on a fresh queue without a separate seed
 // step (the retry tick still calls seed explicitly to make the
 // migration boundary obvious).
-function listRetryCandidates(rootDir, { maxAttempts, log }) {
+function listRetryCandidates(rootDir, { maxAttempts, log, env = process.env } = {}) {
   seedDeliveryRetryIndexFromHistory(rootDir, { maxAttempts, log });
   let entries;
   try {
@@ -781,6 +821,15 @@ function listRetryCandidates(rootDir, { maxAttempts, log }) {
       // this is the normal cleanup path; on capped/non-retryable it
       // matches the legacy scan's filter behavior.
       try { rmSync(pointerPath, { force: true }); } catch {}
+      continue;
+    }
+    // token-env-missing skips without burning the retry budget when
+    // the token is still absent (PR #18 round 6). The current daemon
+    // process can't heal this — only a restart with the token resolved
+    // can. Keep the pointer in the index so the same record becomes a
+    // candidate again automatically once the token reappears.
+    if (record.commentDelivery?.reason === 'token-env-missing'
+        && !isTokenAvailableForDelivery(record.commentDelivery, env)) {
       continue;
     }
     const delivery = record.commentDelivery;
@@ -836,6 +885,7 @@ async function retryFailedCommentDeliveries({
   log = console,
   maxAttempts = MAX_COMMENT_DELIVERY_ATTEMPTS,
   budget = RETRY_BUDGET_PER_TICK,
+  env = process.env,
 } = {}) {
   // One-time backfill: if the retry index hasn't been seeded yet,
   // walk the existing terminal history once so any pre-index
@@ -844,7 +894,7 @@ async function retryFailedCommentDeliveries({
   // only; the steady-state hot path is the index walk below.
   seedDeliveryRetryIndexFromHistory(rootDir, { maxAttempts, log });
 
-  const candidates = listRetryCandidates(rootDir, { maxAttempts, log });
+  const candidates = listRetryCandidates(rootDir, { maxAttempts, log, env });
   const scanned = candidates.length;
   let retried = 0;
   let posted = 0;
@@ -902,6 +952,10 @@ async function retryFailedCommentDeliveries({
         reason: null,
         error: null,
         timeoutMs: null,
+        // Carry the dedupe token forward from whichever source has
+        // it: an existing record field, or the sidecar's postResult.
+        // PR #18 round 6.
+        commentUrl: previous.commentUrl || sidecar?.postResult?.commentUrl || null,
         recoveredFromSidecar: true,
       };
       try {
@@ -979,6 +1033,11 @@ async function retryFailedCommentDeliveries({
       reason: result?.posted ? null : (result?.reason || previous.reason || 'unknown'),
       error: result?.error || null,
       timeoutMs: result?.timeoutMs ?? null,
+      // Persist the GitHub-returned URL on success; preserve any
+      // previously-captured URL across a still-failing retry so the
+      // dedupe token survives intermediate gh-cli flakiness. PR #18
+      // round 6.
+      commentUrl: result?.commentUrl || previous.commentUrl || null,
     };
     try {
       writeTerminalRecord(jobPath, record);

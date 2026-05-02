@@ -98,11 +98,13 @@ fi
 # DEGRADED MODE: missing PAT does NOT exit. PR comments are documented
 # as best-effort, so a 1Password outage at boot or a missing/rotated
 # bot token must NOT block consume/reconcile. The comment poster
-# records the failure under `commentDelivery.reason='token-env-missing'`
-# (NON_RETRYABLE_DELIVERY_REASONS, so the retry pass doesn't burn
-# attempts hammering an obviously-broken token); the daemon picks up
-# the token on its next start once 1Password is back. R4 review
-# blocking #4 on PR #18.
+# records the failure under `commentDelivery.reason='token-env-missing'`,
+# and the retry pass conditionally skips those records when the token
+# is still absent in env (so the 5-attempt budget is preserved on a
+# condition the current process can't heal). The retry-index pointer
+# stays in place so the same record becomes a candidate again
+# automatically once the daemon is restarted with the token resolved.
+# No operator re-arm step required. R4+R6 review on PR #18.
 GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential' 2>/dev/null || true)
 GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential' 2>/dev/null || true)
 export GH_CLAUDE_REVIEWER_TOKEN

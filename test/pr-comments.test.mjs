@@ -496,3 +496,62 @@ test('rereview.reason with worker-injected mention is wrapped inline-safe (no li
   // the rendered comment.
   assert.match(body, /Re-review status:.*queued — `cc @paul-lacey for visibility`/);
 });
+
+// ── Failure message path redaction (R3 review #3) ─────────────────────────
+
+test('failure.message has absolute /Users/<user>/ paths masked before posting', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'failed',
+    job: makeJob({ builderTag: 'codex' }),
+    failure: {
+      code: 'invalid-remediation-reply',
+      message: 'Failed to read remediation reply artifact at /Users/airlock/agent-os/tools/adversarial-review/data/follow-up-jobs/workspaces/laceyenterprises__demo-pr-7-2026-05-01T20-00-00-000Z/.adversarial-follow-up/remediation-reply.json',
+    },
+  });
+  // Host filesystem layout must not appear verbatim.
+  assert.doesNotMatch(body, /\/Users\/airlock/);
+  assert.doesNotMatch(body, /agent-os\/tools\/adversarial-review/);
+  // The basename survives so an operator can recognize the artifact.
+  assert.match(body, /<path-redacted>\/remediation-reply\.json/);
+});
+
+test('failure.message has /private/var/folders/... temp paths masked', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'failed',
+    job: makeJob({ builderTag: 'codex' }),
+    failure: {
+      code: 'invalid-output-path',
+      message: 'Path escapes follow-up job root: /private/var/folders/k7/xyz123/T/adversarial-review-abc/data/oops.txt',
+    },
+  });
+  assert.doesNotMatch(body, /\/private\/var\/folders/);
+  assert.match(body, /<path-redacted>\/oops\.txt/);
+});
+
+test('failure.message has tokens redacted (defense in depth — internal exceptions can echo log lines)', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'failed',
+    job: makeJob({ builderTag: 'codex' }),
+    failure: {
+      code: 'gh-cli-failure',
+      message: 'Command failed: GH_TOKEN=ghp_deadbeefcafebabe1234 gh pr comment...',
+    },
+  });
+  assert.doesNotMatch(body, /ghp_deadbeefcafebabe1234/);
+  assert.match(body, /\[REDACTED_GITHUB_TOKEN\]/);
+});
+
+test('failure.message preserves non-path identifiers (code names like manual-inspection-required)', () => {
+  // Non-path failure codes stay intact — they're our own structured
+  // identifiers and operators rely on them in runbooks.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'failed',
+    job: makeJob({ builderTag: 'codex' }),
+    failure: { code: 'manual-inspection-required', message: 'Worker PID 8123 still running past runtime cap' },
+  });
+  assert.match(body, /Reason: `Worker PID 8123 still running past runtime cap`/);
+});

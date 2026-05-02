@@ -20,7 +20,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { redactAndCap, redactBulletList } from './redaction.mjs';
+import { redactAndCap, redactBulletList, redactPathlikeText, redactSensitiveText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -119,6 +119,25 @@ function sanitizeInlineText(text, limit) {
   return `\`${safe}\``;
 }
 
+// Sanitize an INTERNAL failure message before publishing it in a
+// PR comment. Different from worker-supplied text (which gets fenced
+// code blocks because it could contain anything): failure messages
+// are inline-safe text from our own code, but they routinely embed
+// absolute filesystem paths from exception messages
+// (`/Users/airlock/agent-os/.../foo.json`). Publishing those leaks
+// host filesystem layout. Redact tokens (defense-in-depth) and mask
+// paths to `<path-redacted>/<basename>`. Output is plain text, not
+// fenced — the caller wraps it in inline code.
+const FAILURE_MESSAGE_MAX_CHARS = 400;
+function sanitizeFailureText(text) {
+  const collapsed = String(text ?? '').trim().replace(/\s+/g, ' ');
+  if (!collapsed) return '';
+  const tokenSafe = redactSensitiveText(collapsed);
+  const pathSafe = redactPathlikeText(tokenSafe);
+  if (pathSafe.length <= FAILURE_MESSAGE_MAX_CHARS) return pathSafe;
+  return `${pathSafe.slice(0, FAILURE_MESSAGE_MAX_CHARS - 1)}…`;
+}
+
 function buildRemediationOutcomeCommentBody({
   workerClass,
   action,
@@ -175,10 +194,18 @@ function buildRemediationOutcomeCommentBody({
   } else if (action === 'failed') {
     lines.push(`**Outcome:** failed.`);
     lines.push('');
+    // failure.message and failure.code originate from internal
+    // exceptions and stop codes (e.g. `Failed to read remediation
+    // reply artifact at /Users/airlock/agent-os/.../foo.json`).
+    // They cross a trust boundary into a public PR comment, so
+    // we redact tokens AND mask host-local filesystem paths
+    // before publishing. R3 review #3.
     if (failure?.message) {
-      lines.push(`Reason: \`${failure.message}\``);
+      const safeMessage = sanitizeFailureText(failure.message);
+      lines.push(`Reason: \`${safeMessage}\``);
     } else if (failure?.code) {
-      lines.push(`Reason: \`${failure.code}\``);
+      const safeCode = sanitizeFailureText(failure.code);
+      lines.push(`Reason: \`${safeCode}\``);
     } else {
       lines.push('Reason: unknown — check the daemon logs.');
     }

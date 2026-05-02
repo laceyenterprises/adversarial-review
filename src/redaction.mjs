@@ -30,6 +30,40 @@ function redactSensitiveText(text) {
   return out;
 }
 
+// Mask host-local filesystem paths before writing to a public surface
+// (PR comments, GitHub issue bodies). Internal exception messages
+// commonly include absolute paths like
+// `/Users/airlock/agent-os/tools/.../foo.json` or
+// `/private/var/folders/.../tmp.X/data.json`. Publishing those leaks
+// the operator's username, the repo's filesystem layout, and the
+// host's homedir convention. We replace the path with a stable
+// `<path-redacted>/<basename>` token that preserves enough info for
+// an operator to recognize the file (the basename) without exposing
+// the rest of the layout.
+function redactPathlikeText(text) {
+  let out = String(text ?? '');
+  // Order matters: the more-specific patterns run first so a
+  // `/private/var/folders/...` path doesn't get prematurely matched
+  // as `/private/...`. The basename extraction relies on the path
+  // ending at whitespace or a non-path character.
+  const PATH_PATTERNS = [
+    // /Users/<user>/...           — macOS user homedir
+    /\/Users\/[^/\s]+\/(?:[^/\s]+\/)*([^/\s]+)/g,
+    // /private/var/folders/.../... — macOS sandboxed temp dirs
+    /\/private\/var\/folders\/(?:[^/\s]+\/)*([^/\s]+)/g,
+    // /var/folders/.../...         — same path without /private prefix
+    /\/var\/folders\/(?:[^/\s]+\/)*([^/\s]+)/g,
+    // /tmp/<hash>/...              — generic temp dir under /tmp
+    /\/tmp\/(?:[^/\s]+\/)+([^/\s]+)/g,
+    // /home/<user>/...             — Linux user homedir
+    /\/home\/[^/\s]+\/(?:[^/\s]+\/)*([^/\s]+)/g,
+  ];
+  for (const pattern of PATH_PATTERNS) {
+    out = out.replace(pattern, (_match, basename) => `<path-redacted>/${basename}`);
+  }
+  return out;
+}
+
 // Redact + collapse whitespace + cap length. The whitespace-collapse is
 // historical (matches the existing summarizeWorkerFinalMessage shape so
 // final-message previews and PR-comment previews look the same to an
@@ -58,6 +92,7 @@ function redactBulletList(items, { perItemLimit = 400, maxItems = 25 } = {}) {
 export {
   REDACTION_PATTERNS,
   redactSensitiveText,
+  redactPathlikeText,
   redactAndCap,
   redactBulletList,
 };

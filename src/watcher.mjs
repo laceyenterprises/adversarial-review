@@ -23,6 +23,7 @@ import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
+  resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 
@@ -381,6 +382,50 @@ async function spawnReviewer({
   }
 }
 
+function evaluateRoundBudgetForReview({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  linearTicketId,
+  reviewStatus,
+  reviewAttempts = 0,
+  log = console.log,
+}) {
+  if (reviewStatus !== 'pending' || Number(reviewAttempts) <= 0) {
+    return { skip: false };
+  }
+
+  const ledger = summarizePRRemediationLedger(rootDir, { repo, prNumber });
+  const resolution = resolveRoundBudgetForJob({
+    linearTicketId,
+    riskClass: ledger.latestRiskClass,
+    remediationPlan: {
+      maxRounds: ledger.latestMaxRounds,
+    },
+  }, { rootDir });
+
+  if (ledger.completedRoundsForPR < resolution.roundBudget) {
+    return {
+      skip: false,
+      completedRoundsForPR: ledger.completedRoundsForPR,
+      roundBudget: resolution.roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
+
+  log(
+    `[watcher] Skipping rereview for ${repo}#${prNumber}: completed remediation rounds ${ledger.completedRoundsForPR}/${resolution.roundBudget} exhaust the ${resolution.riskClass} risk-class budget. Merge-agent handoff is future Track B work.`
+  );
+
+  return {
+    skip: true,
+    reason: 'round-budget-exhausted',
+    completedRoundsForPR: ledger.completedRoundsForPR,
+    roundBudget: resolution.roundBudget,
+    riskClass: resolution.riskClass,
+  };
+}
+
 // ── Linear state helpers ─────────────────────────────────────────────────────
 
 let linearClient = null;
@@ -646,6 +691,18 @@ async function pollOnce(octokit) {
         stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
       }
 
+      const roundBudgetDecision = evaluateRoundBudgetForReview({
+        rootDir: ROOT,
+        repo: repoPath,
+        prNumber,
+        linearTicketId,
+        reviewStatus: existing?.review_status || 'pending',
+        reviewAttempts: existing?.review_attempts || 0,
+      });
+      if (roundBudgetDecision.skip) {
+        continue;
+      }
+
       const attemptAt = new Date().toISOString();
       const claim = stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
       if (claim.changes === 0) {
@@ -813,5 +870,6 @@ if (isMain) {
 }
 
 export {
+  evaluateRoundBudgetForReview,
   pollOnce,
 };

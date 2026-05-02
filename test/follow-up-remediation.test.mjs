@@ -44,6 +44,7 @@ import {
   createFollowUpJob,
   getFollowUpJobDir,
   markFollowUpJobSpawned,
+  writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 
 function makeJob(overrides = {}) {
@@ -65,6 +66,54 @@ function makeJob(overrides = {}) {
     },
     ...overrides,
   };
+}
+
+async function withOAuthTestEnv(workDir, run) {
+  const authDir = path.join(workDir, '.codex');
+  const authPath = path.join(authDir, 'auth.json');
+  mkdirSync(authDir, { recursive: true });
+  writeFileSync(authPath, JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: {
+      access_token: 'access-token',
+      refresh_token: 'refresh-token',
+    },
+  }), 'utf8');
+
+  const originalAuthPath = process.env.CODEX_AUTH_PATH;
+  const originalCliPath = process.env.CODEX_CLI_PATH;
+  const originalCodexHome = process.env.CODEX_HOME;
+  const originalHome = process.env.HOME;
+
+  process.env.CODEX_AUTH_PATH = authPath;
+  process.env.CODEX_CLI_PATH = '/usr/bin/true';
+  process.env.CODEX_HOME = authDir;
+  process.env.HOME = workDir;
+
+  try {
+    return await run();
+  } finally {
+    if (originalAuthPath === undefined) {
+      delete process.env.CODEX_AUTH_PATH;
+    } else {
+      process.env.CODEX_AUTH_PATH = originalAuthPath;
+    }
+    if (originalCliPath === undefined) {
+      delete process.env.CODEX_CLI_PATH;
+    } else {
+      process.env.CODEX_CLI_PATH = originalCliPath;
+    }
+    if (originalCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = originalCodexHome;
+    }
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+  }
 }
 
 test('buildRemediationPrompt carries job context and follow-up operating rules', () => {
@@ -1247,9 +1296,131 @@ function makeQueuedJob(rootDir, overrides = {}) {
   return { created, claimed };
 }
 
+test('consumeNextFollowUpJob stops round 2 for a medium-risk legacy job with round-budget-exhausted', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json'),
+    `${JSON.stringify({
+      planSchemaVersion: 1,
+      tickets: [{ id: 'PMO-A1', riskClass: 'medium' }],
+    }, null, 2)}\n`,
+    'utf8'
+  );
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json.linear-mapping.json'),
+    `${JSON.stringify({ 'PMO-A1': 'LAC-207' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    linearTicketId: 'LAC-207',
+    reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: true,
+    maxRemediationRounds: 2,
+  });
+
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    remediationPlan: {
+      ...created.job.remediationPlan,
+      maxRounds: 2,
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'completed' }],
+    },
+  });
+
+  const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob({
+    rootDir,
+    now: () => '2026-04-21T10:30:00.000Z',
+    promptTemplate: 'You are a remediation worker.',
+  }));
+
+  assert.equal(result.consumed, false);
+  assert.equal(result.reason, 'round-budget-exhausted');
+  assert.match(result.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(result.job.status, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'round-budget-exhausted');
+  assert.equal(result.job.riskClass, 'medium');
+  assert.match(result.job.remediationPlan.stop.reason, /medium risk-class budget \(1\)/);
+});
+
+test('consumeNextFollowUpJob still spawns when a high-risk job enters round 2 within budget', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json'),
+    `${JSON.stringify({
+      planSchemaVersion: 1,
+      tickets: [{ id: 'PMO-A2', riskClass: 'high' }],
+    }, null, 2)}\n`,
+    'utf8'
+  );
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json.linear-mapping.json'),
+    `${JSON.stringify({ 'PMO-A2': 'LAC-208' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 8,
+    reviewerModel: 'claude',
+    linearTicketId: 'LAC-208',
+    reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:01:00.000Z',
+    critical: true,
+  });
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    remediationPlan: {
+      ...created.job.remediationPlan,
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'completed' }],
+    },
+  });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob({
+    rootDir,
+    now: () => '2026-04-21T10:31:00.000Z',
+    execFileImpl: async (command, args, options = {}) => {
+      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      }
+      return { stdout: '', stderr: '' };
+    },
+    spawnImpl: (command, args, options) => {
+      spawnCalls.push({ command, args, options });
+      return {
+        pid: 8127,
+        unref() {},
+      };
+    },
+    promptTemplate: 'You are a remediation worker.',
+  }));
+
+  assert.equal(result.consumed, true);
+  assert.equal(result.job.status, 'in_progress');
+  assert.equal(result.job.remediationPlan.currentRound, 2);
+  assert.equal(result.job.remediationWorker.processId, 8127);
+  assert.equal(result.job.riskClass, 'high');
+  assert.equal(spawnCalls.length, 1);
+});
+
 test('reconcileFollowUpJob stops exited workers for no-progress when the final artifact exists without re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const { claimed } = makeQueuedJob(rootDir);
+  const { claimed } = makeQueuedJob(rootDir, {
+    maxRemediationRounds: 2,
+  });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });

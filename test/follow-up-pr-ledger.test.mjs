@@ -75,6 +75,7 @@ test('summarizePRRemediationLedger returns zero counts for a PR with no follow-u
   assert.deepEqual(ledger, {
     completedRoundsForPR: 0,
     latestMaxRounds: null,
+    latestRiskClass: 'medium',
     latestJobId: null,
   });
 });
@@ -125,14 +126,17 @@ test('summarizePRRemediationLedger takes max(currentRound) across terminal jobs 
   // seeded from the PR's prior accumulated count, so the terminal
   // currentRound stamps are 1, 2, 3 — already cumulative. The PR-wide
   // ledger must take the MAX (3), not the SUM (6). Summing would
-  // double-count and trip max-rounds-reached after only 2 cycles on
-  // the new 3-round default cap.
+  // double-count and trip max-rounds-reached after only 2 cycles.
+  // PMO-A1 dropped the default budget from 3 to 1 (for medium
+  // riskClass); pass maxRemediationRounds=3 explicitly so this test
+  // still exercises the cumulative-round-counting invariant.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   for (let i = 1; i <= 3; i += 1) {
     createFollowUpJob(makeJobInput(rootDir, {
       reviewPostedAt: `2026-04-21T0${i}:00:00.000Z`,
       priorCompletedRounds: i - 1,
+      maxRemediationRounds: 3,
     }));
     runOneRound(
       rootDir,
@@ -165,7 +169,7 @@ test('after 2 completed rounds on the 3-round default cap, the next attempt is 3
   createFollowUpJob(makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T01:00:00.000Z',
     priorCompletedRounds: 0,
-    maxRemediationRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
+    maxRemediationRounds: 3,
   }));
   runOneRound(rootDir, '2026-04-21T01:30:00.000Z', '2026-04-21T01:35:00.000Z');
 
@@ -177,7 +181,7 @@ test('after 2 completed rounds on the 3-round default cap, the next attempt is 3
   createFollowUpJob(makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T02:00:00.000Z',
     priorCompletedRounds: ledgerAfter1.completedRoundsForPR,
-    maxRemediationRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
+    maxRemediationRounds: 3,
   }));
   runOneRound(rootDir, '2026-04-21T02:30:00.000Z', '2026-04-21T02:35:00.000Z');
 
@@ -199,7 +203,7 @@ test('after 2 completed rounds on the 3-round default cap, the next attempt is 3
   createFollowUpJob(makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T03:00:00.000Z',
     priorCompletedRounds: ledgerAfter2.completedRoundsForPR,
-    maxRemediationRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
+    maxRemediationRounds: 3,
   }));
 
   // The third worker MUST be able to claim — the buggy accounting

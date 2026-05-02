@@ -333,6 +333,27 @@ function buildRemediationOutcomeCommentBody({
       lines.push(
         '> **Human intervention required.** The remediation loop exhausted its bounded round cap without converging. Review the changes by hand, decide whether to re-arm or close.'
       );
+    } else if (stopCode === 'round-budget-exhausted') {
+      // Risk-tiered budget refusal from
+      // pr-merge-orchestration spec §3.1: the daemon refused to
+      // spawn another remediation worker because the PR's
+      // riskClass-derived budget was already exhausted PR-wide.
+      // Distinct from `max-rounds-reached` (which is per-job
+      // legacy capacity); this branch fires when the riskClass
+      // tier itself has been exhausted across all rounds for
+      // this PR. Operator next step is to either accept the PR
+      // as-is or justify a higher riskClass via the linked spec.
+      const riskClass = job?.riskClass || 'medium';
+      const roundBudget = Number(
+        job?.remediationPlan?.maxRounds
+          || job?.recommendedFollowUpAction?.maxRounds
+          || 1
+      );
+      const currentRound = Number(job?.remediationPlan?.currentRound || 0);
+      lines.push('');
+      lines.push(
+        `> **Human intervention required.** This PR exhausted its \`${riskClass}\` risk-class remediation budget (${roundBudget} round${roundBudget === 1 ? '' : 's'}; completed: ${currentRound}). Review the prior rounds and either accept the PR as-is or reopen the linked spec to justify a higher \`riskClass\` before requesting more remediation.`
+      );
     } else if (reply && reply.outcome === 'blocked') {
       lines.push('');
       lines.push(

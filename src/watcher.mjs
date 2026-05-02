@@ -14,6 +14,11 @@ import {
   routePR,
 } from './watcher-title-guardrails.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
+import {
+  buildSafePollOnce,
+  computeWorkloadAwarePollDeadlineMs,
+  DEFAULT_POLL_DEADLINE_FLOOR_MS,
+} from './watcher-poll-guard.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
@@ -57,6 +62,11 @@ ensureReviewStateSchema(db);
 // KeepAlive=true respawns regardless of exit code.
 const SQLITE_ORPHAN_EXIT_CODE = 75;
 
+// Distinct exit code for poll-watchdog-tripped restarts so the launchd
+// log shows whether respawns are caused by SQLite orphan recovery (75)
+// or a hung poll deadline (86). KeepAlive=true respawns either way.
+const POLL_DEADLINE_EXIT_CODE = 86;
+
 function exitForSqliteOrphan(err, contextLabel) {
   console.error(
     `[watcher] FATAL: SQLite database file was replaced on disk while we held it open ` +
@@ -76,7 +86,50 @@ function handlePollError(err, source = 'pollOnce') {
     exitForSqliteOrphan(err, source);
     return;
   }
-  console.error('[watcher] Poll error:', err);
+  console.error(`[watcher] Poll error (source=${source}):`, err);
+}
+
+// Set of AbortControllers for in-flight reviewer subprocesses. The
+// watchdog-timeout exit path aborts every controller in this set
+// before exiting so spawned reviewers cannot post a review after the
+// parent watcher has died — without this, an orphan child can post,
+// the parent never gets to mark the row 'posted', the row stays in
+// 'reviewing' (or 'pending' under the previous design), restart
+// spawns a second reviewer, and the same PR gets two reviews. See
+// reconcileOrphanedReviewing() for the durable-state half of this
+// guard.
+const inFlightReviewerControllers = new Set();
+
+function abortInFlightReviewers(reason) {
+  for (const controller of inFlightReviewerControllers) {
+    try {
+      controller.abort(reason);
+    } catch {
+      // Aborting an already-aborted controller is a no-op; swallow
+      // any unexpected throw rather than block the exit path.
+    }
+  }
+  inFlightReviewerControllers.clear();
+}
+
+function exitForPollDeadline(err, source) {
+  console.error(
+    `[watcher] FATAL: ${err?.message || err} (source=${source}). ` +
+    'Aborting in-flight reviewer subprocesses and exiting so launchd ' +
+    'KeepAlive respawns the watcher with a clean event loop. ' +
+    'The abandoned pollOnce continuation may still be alive in this ' +
+    'process; restarting drops it.'
+  );
+  // Tear down spawned reviewer children synchronously BEFORE setting
+  // up the deferred exit. Without this, an orphan child can finish
+  // its `gh pr review` call after we exit, posting a review the
+  // parent watcher never recorded — and the next watcher run, seeing
+  // the row stuck in 'reviewing', will turn it into 'failed-orphan'
+  // (sticky, requires operator). Aborting up front prevents that
+  // case in the first place.
+  abortInFlightReviewers('poll deadline exceeded');
+  process.exitCode = POLL_DEADLINE_EXIT_CODE;
+  setImmediate(() => process.exit(POLL_DEADLINE_EXIT_CODE));
 }
 
 // Belt-and-suspenders: in case a synchronous SqliteError escapes a
@@ -113,14 +166,30 @@ const stmtUpdateReviewRouting = db.prepare(
 const stmtMarkMalformed = db.prepare(
   "UPDATE reviewed_prs SET reviewer = 'malformed-title', review_status = 'malformed', failure_message = ?, failed_at = ?, last_attempted_at = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
 );
+// 'reviewing' is the durable in-progress claim: set BEFORE spawning
+// the reviewer subprocess, replaced with 'posted' / 'failed' once the
+// spawn resolves. If the watcher exits between these two updates
+// (watchdog timeout, OOM kill, launchd restart), the row stays in
+// 'reviewing' on disk — that is the operator-visible signal that a
+// review subprocess was in flight when the parent died and may have
+// posted a review the parent never recorded. reconcileOrphanedReviewing
+// converts these on startup to 'failed-orphan' (sticky), which is the
+// signal to a human that the GitHub PR may already carry a review
+// from the killed child and a blind retry would produce a duplicate.
 const stmtMarkAttemptStarted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'pending', last_attempted_at = ?, failed_at = NULL, failure_message = NULL WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'reviewing', last_attempted_at = ?, failed_at = NULL, failure_message = NULL WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+);
+const stmtListReviewing = db.prepare(
+  "SELECT repo, pr_number, last_attempted_at FROM reviewed_prs WHERE review_status = 'reviewing'"
+);
+const stmtMarkOrphan = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
 );
 const stmtGetOpenPRs = db.prepare(
   "SELECT repo, pr_number, linear_ticket FROM reviewed_prs WHERE pr_state = 'open'"
@@ -131,6 +200,49 @@ const stmtMarkMerged = db.prepare(
 const stmtMarkClosed = db.prepare(
   "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = ? WHERE repo = ? AND pr_number = ?"
 );
+
+// ── Orphan review reconciliation (startup) ───────────────────────────────────
+//
+// On startup, find any rows still in 'reviewing' from a previous
+// watcher run that exited (watchdog timeout, crash, OOM, launchd
+// restart) before transitioning them to 'posted' or 'failed'. Those
+// rows mean a reviewer subprocess was in flight when the parent died
+// — and may have posted a review to GitHub the parent never recorded.
+//
+// Auto-retrying these rows would risk a duplicate review post. Mark
+// them sticky-failed ('failed-orphan') so pollOnce skips them and the
+// operator gets a clear, durable record. Recovery path:
+//
+//   1. Inspect the GitHub PR to see whether a review was already posted.
+//   2. If yes: leave the row alone (it's effectively done) — or use
+//      the operator tooling to mark it posted; either way the row
+//      stops blocking.
+//   3. If no: run `npm run retrigger-review --repo <slug> --pr <n>
+//      --reason "verified no orphan review present"` to clear the
+//      sticky state and re-arm review_status='pending'.
+//
+// This is the durable half of the duplicate-review guard; the abort-
+// children-on-timeout path in exitForPollDeadline is the proactive
+// half. Together they close the race the previous design left open.
+function reconcileOrphanedReviewing() {
+  const orphans = stmtListReviewing.all();
+  if (orphans.length === 0) return;
+
+  const failureAt = new Date().toISOString();
+  for (const row of orphans) {
+    const message =
+      'Watcher restarted while review subprocess was in flight. ' +
+      'A review may have been posted on GitHub by the orphaned child. ' +
+      'Verify the PR before retriggering with `npm run retrigger-review`.';
+    stmtMarkOrphan.run(failureAt, message, row.repo, row.pr_number);
+    console.warn(
+      `[watcher] Orphan reviewer detected for ${row.repo}#${row.pr_number} ` +
+      `(last_attempted_at=${row.last_attempted_at || 'unknown'}); ` +
+      `marked review_status='failed-orphan'. Operator must verify GitHub ` +
+      `before clearing.`
+    );
+  }
+}
 
 // ── Author tag detection ─────────────────────────────────────────────────────
 
@@ -187,6 +299,18 @@ async function spawnReviewer({
     : '';
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
+  // AbortController ties the reviewer subprocess lifetime to the
+  // watcher process. On normal completion it's a no-op. On a
+  // watchdog-timeout exit (exitForPollDeadline) we abort every
+  // controller in inFlightReviewerControllers BEFORE the parent
+  // exits, which sends SIGTERM to the child via execFile's signal
+  // option. That kill closes the duplicate-review race: without it
+  // the child can keep running after the parent dies, post a review
+  // the parent never recorded, and the next watcher run would spawn
+  // a second reviewer for the same PR.
+  const controller = new AbortController();
+  inFlightReviewerControllers.add(controller);
+
   try {
     const reviewerEnv = { ...process.env };
 
@@ -198,7 +322,12 @@ async function spawnReviewer({
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       [reviewerPath, args],
-      { env: reviewerEnv, timeout: 5 * 60 * 1000 }
+      {
+        env: reviewerEnv,
+        timeout: 5 * 60 * 1000,
+        signal: controller.signal,
+        killSignal: 'SIGTERM',
+      }
     );
     if (stdout) console.log(`[reviewer:${prNumber}] ${stdout.trim()}`);
     if (stderr) console.error(`[reviewer:${prNumber}] stderr: ${stderr.trim()}`);
@@ -211,6 +340,8 @@ async function spawnReviewer({
       .slice(0, 4000);
     console.error(`[watcher] Reviewer failed for ${repo}#${prNumber}:`, detail || err.message);
     return { ok: false, error: detail || err.message };
+  } finally {
+    inFlightReviewerControllers.delete(controller);
   }
 }
 
@@ -406,7 +537,18 @@ async function pollOnce(octokit) {
       const prTitle = pr.title;
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
-      if (existing?.review_status === 'posted' || existing?.review_status === 'malformed') {
+      // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()
+      // when the watcher restarted with a row stuck in 'reviewing' — i.e.
+      // a reviewer subprocess was in flight when the watcher died and may
+      // have posted a review the parent never recorded. Auto-retrying that
+      // row would risk a duplicate review post on GitHub; the operator
+      // must explicitly clear it via `npm run retrigger-review` after
+      // verifying the actual GitHub PR state.
+      if (
+        existing?.review_status === 'posted' ||
+        existing?.review_status === 'malformed' ||
+        existing?.review_status === 'failed-orphan'
+      ) {
         continue;
       }
 
@@ -533,6 +675,7 @@ function main() {
 
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;
+  const configuredDeadlineMs = config.pollDeadlineMs;
 
   if (Object.prototype.hasOwnProperty.call(config, 'fallbackReviewer')) {
     console.error(
@@ -541,16 +684,80 @@ function main() {
     process.exit(1);
   }
 
+  // Reconcile any rows stuck in 'reviewing' from a previous watcher
+  // run that died mid-spawn before this poll loop touches the queue.
+  // See reconcileOrphanedReviewing for the recovery contract.
+  reconcileOrphanedReviewing();
+
+  // Workload-aware deadline: the previous fixed 10m watchdog tripped
+  // on legitimate org-wide work (a single spawnReviewer can already
+  // consume 5m, and pollOnce processes repos/PRs serially). Resolve
+  // the deadline per-call from the current activeRepos count so the
+  // budget grows with the workload. Operators can still pin a fixed
+  // value via `config.pollDeadlineMs`; an explicit number always
+  // wins over the dynamic default.
+  function resolveDeadlineMsForCall() {
+    if (Number.isFinite(configuredDeadlineMs) && configuredDeadlineMs > 0) {
+      return configuredDeadlineMs;
+    }
+    return computeWorkloadAwarePollDeadlineMs({
+      activeRepoCount: activeRepos.length,
+    });
+  }
+
   const watchMode = config.org
     ? `org: ${config.org} (dynamic discovery, refresh every ${(config.repoRefreshIntervalMs ?? 3_600_000) / 60_000}m)`
     : `repos: ${activeRepos.join(', ')}`;
-  console.log(`[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s`);
+  const deadlineLabel = Number.isFinite(configuredDeadlineMs) && configuredDeadlineMs > 0
+    ? `${configuredDeadlineMs / 1000}s (configured)`
+    : `workload-aware (default floor ${DEFAULT_POLL_DEADLINE_FLOOR_MS / 1000}s)`;
+  console.log(
+    `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | poll deadline: ${deadlineLabel}`
+  );
 
-  pollOnce(octokit).catch((err) => handlePollError(err, 'initial pollOnce'));
+  // Self-scheduling loop. Awaiting safePollOnce before sleeping
+  // guarantees no two polls overlap, so the previous overlap-skip
+  // scheme is no longer needed. Cadence is fixed-rate: the next
+  // start is `lastStart + intervalMs`, and the loop sleeps only the
+  // remaining delay (clamped at zero). This preserves the operator-
+  // expected meaning of `pollIntervalMs` — a 4m poll on a 5m
+  // interval is still ~5m start-to-start, not 9m. The watchdog
+  // deadline inside safePollOnce protects against a single hung
+  // poll wedging the loop forever — on timeout, exitForPollDeadline
+  // aborts in-flight reviewer subprocesses and calls process.exit
+  // so launchd KeepAlive respawns a clean process.
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl: pollOnce,
+    octokit,
+    errorHandler: handlePollError,
+    onTimeout: exitForPollDeadline,
+    deadlineMs: resolveDeadlineMsForCall,
+  });
 
-  setInterval(() => {
-    pollOnce(octokit).catch((err) => handlePollError(err, 'scheduled pollOnce'));
-  }, intervalMs);
+  (async function pollLoop() {
+    let nextStart = Date.now();
+    await safePollOnce('startup pollOnce');
+    nextStart += intervalMs;
+    while (true) {
+      // Fixed-rate cadence: subtract elapsed work from the next
+      // sleep so cadence is start-to-start, not finish-to-start.
+      // Math.max(0, ...) means a poll that ran longer than the
+      // interval starts the next pass immediately rather than
+      // sleeping for a negative delay.
+      const sleepMs = Math.max(0, nextStart - Date.now());
+      // The interval-sleep timer is the only handle keeping the
+      // event loop alive between polls, so it MUST NOT be unref'd.
+      await new Promise((resolve) => setTimeout(resolve, sleepMs));
+      await safePollOnce('scheduled pollOnce');
+      nextStart += intervalMs;
+    }
+  })().catch((err) => {
+    // Should be unreachable — safePollOnce never rejects, it returns
+    // a typed result. This is a backstop for an unexpected throw in
+    // the loop scaffolding itself.
+    console.error('[watcher] poll loop crashed unexpectedly:', err);
+    process.exit(1);
+  });
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

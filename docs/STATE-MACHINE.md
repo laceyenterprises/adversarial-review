@@ -66,8 +66,10 @@ data/reviews.db
 | review_status | Meaning |
 |---|---|
 | `pending` | eligible for watcher review / re-review |
+| `reviewing` | reviewer subprocess in flight; durable claim before spawn |
 | `posted` | review posted successfully |
-| `failed` | review attempt failed |
+| `failed` | review attempt failed (auto-retried by next poll) |
+| `failed-orphan` | watcher restarted while a `reviewing` row was in flight — possible orphan review post on GitHub; sticky, requires operator verification + `npm run retrigger-review` |
 | `malformed` | title guardrail failure; terminal by design |
 
 ### Transitions
@@ -81,11 +83,18 @@ new PR
   └─ valid tagged PR
        └─ pending
             │
-            ├─ successful review post
+            ├─ stmtMarkAttemptStarted (just before spawnReviewer)
+            ▼
+       reviewing
+            │
+            ├─ reviewer subprocess returns ok
             │    └─ posted
             │
-            ├─ review attempt failure
+            ├─ reviewer subprocess fails
             │    └─ failed
+            │
+            ├─ watcher restart while reviewing
+            │    └─ failed-orphan   (sticky, operator-only recovery)
             │
             └─ accepted rereview request from follow-up reconciliation
                  └─ pending
@@ -94,6 +103,10 @@ new PR
 ### Notes
 
 - `malformed` is intentionally sticky.
+- `failed-orphan` is intentionally sticky. It signals the orphan-review-post race the duplicate-review guard is designed to surface. Recovery is operator-only:
+  1. Inspect the GitHub PR. If a review was already posted by the reviewer bot, leave the row alone (the round is effectively done).
+  2. If no orphan review is present, run `npm run retrigger-review --repo <slug> --pr <n> --reason "verified no orphan review"`. The reset clears the sticky state and re-arms `pending`.
+- The watchdog timeout path in `watcher.mjs` aborts every in-flight reviewer subprocess BEFORE exiting, which closes most of the orphan-post window. `failed-orphan` is the durable surface for the residual race where the child posted before SIGTERM took effect.
 - Re-review does **not** happen because of prose. It happens because reconciliation resets the row to `pending`.
 - A PR can move from `posted` back to `pending` only via explicit recovery logic or a valid rereview request.
 

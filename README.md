@@ -110,7 +110,7 @@ This is **bounded and operator-visible**, not an autonomous retry daemon.
                                                     ▼
                          ┌─────────────────────────────────────────────────────────┐
                          │ workspace artifacts                                     │
-                         │   codex-last-message.md                                 │
+                         │   worker-last-message.md                                 │
                          │   remediation-reply.json                                │
                          └─────────────────┬──────────────────────────────────────┘
                                            │
@@ -193,6 +193,8 @@ npm start
 ```bash
 node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerModel":"codex","botTokenEnv":"GH_CODEX_REVIEWER_TOKEN","linearTicketId":"LAC-42"}'
 ```
+
+`reviewer.mjs` derives the durable follow-up `builderTag` from the live PR title when the caller omits it. If the PR title is not canonically tagged, the review run fails rather than queuing an ambiguous remediation job.
 
 ### Create a correctly tagged PR
 

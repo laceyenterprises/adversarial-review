@@ -5,11 +5,13 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  BuilderTagResolutionError,
   REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
   assertClaudeCodeOAuth,
   assertRemediationWorkerOAuth,
   assessWorkerLiveness,
+  backfillClaimedJobBuilderTag,
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,
@@ -398,7 +400,7 @@ test('prepareWorkspaceForJob installs the worker-provenance hook in the workspac
 test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN_AT in spawn env', () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
-  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const outputPath = path.join(workspaceDir, 'worker-last-message.md');
   const logPath = path.join(workspaceDir, 'codex.log');
   const codexHome = path.join(workspaceDir, '.codex');
   const authPath = path.join(codexHome, 'auth.json');
@@ -445,7 +447,7 @@ test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN
 test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided', () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
-  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const outputPath = path.join(workspaceDir, 'worker-last-message.md');
   const logPath = path.join(workspaceDir, 'codex.log');
   const codexHome = path.join(workspaceDir, '.codex');
   const authPath = path.join(codexHome, 'auth.json');
@@ -512,13 +514,15 @@ test('pickRemediationWorkerClass routes builderTag=clio-agent to codex remediato
 });
 
 test('pickRemediationWorkerClass falls back to codex for legacy jobs with no builderTag', () => {
-  // Backward compat for pre-builderTag job records: never reverse-map
-  // from reviewerModel to a builder, since codex reviewer is ambiguous
-  // between [claude-code] and [clio-agent]. Default to codex.
-  assert.equal(pickRemediationWorkerClass({}), 'codex');
-  assert.equal(pickRemediationWorkerClass({ reviewerModel: 'codex' }), 'codex');
+  // claude reviewer still implies a codex-built PR, but codex-reviewed
+  // legacy jobs are ambiguous and must be backfilled before routing.
   assert.equal(pickRemediationWorkerClass({ reviewerModel: 'claude' }), 'codex');
+  assert.throws(
+    () => pickRemediationWorkerClass({ reviewerModel: 'codex', repo: 'laceyenterprises/clio', prNumber: 7 }),
+    BuilderTagResolutionError
+  );
   assert.equal(pickRemediationWorkerClass({ reviewerModel: 'unknown' }), 'codex');
+  assert.equal(pickRemediationWorkerClass({}), 'codex');
   assert.equal(pickRemediationWorkerClass(null), 'codex');
 });
 
@@ -798,7 +802,7 @@ test('assertRemediationWorkerOAuth dispatches "claude-code" through to assertCla
 test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt and output artifact', () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
-  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const outputPath = path.join(workspaceDir, 'worker-last-message.md');
   const logPath = path.join(workspaceDir, 'codex.log');
   const codexHome = path.join(workspaceDir, '.codex');
   const authPath = path.join(codexHome, 'auth.json');
@@ -905,7 +909,7 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
 test('spawnCodexRemediationWorker fails closed on conflicting inherited local OAuth env', () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
-  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const outputPath = path.join(workspaceDir, 'worker-last-message.md');
   const logPath = path.join(workspaceDir, 'codex.log');
   const authRoot = path.join(workspaceDir, 'placey');
   const codexHome = path.join(authRoot, '.codex');
@@ -971,7 +975,7 @@ test('spawnCodexRemediationWorker overrides inherited operator GIT_* env in the 
   // these with the worker identity, not pass them through.
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
-  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const outputPath = path.join(workspaceDir, 'worker-last-message.md');
   const logPath = path.join(workspaceDir, 'codex.log');
   const codexHome = path.join(workspaceDir, '.codex');
   const authPath = path.join(codexHome, 'auth.json');
@@ -1171,8 +1175,8 @@ test('reconcileFollowUpJob stops exited workers for no-progress when the final a
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
-  const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const logPath = path.join(artifactDir, 'codex-worker.log');
+  const outputPath = path.join(artifactDir, 'worker-last-message.md');
+  const logPath = path.join(artifactDir, 'worker.log');
   writeFileSync(outputPath, 'Implemented fix and ran npm test.\n', 'utf8');
   writeFileSync(logPath, 'worker log\n', 'utf8');
 
@@ -1207,6 +1211,40 @@ test('reconcileFollowUpJob stops exited workers for no-progress when the final a
   assert.match(result.job.completion.finalMessageSummary, /Implemented fix and ran npm test/);
 });
 
+test('reconcileFollowUpJob still finds legacy codex-named artifacts after the neutral rename', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 71, reviewPostedAt: '2026-04-21T08:11:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const legacyOutputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(legacyOutputPath, 'Legacy artifact still readable.\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8200,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'worker-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
+    },
+  });
+
+  const result = reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+  });
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.status, 'stopped');
+  assert.match(result.job.completion.finalMessageSummary, /Legacy artifact still readable/);
+});
+
 test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit also exhausts the cap', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, {
@@ -1217,7 +1255,7 @@ test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit al
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
-  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const outputPath = path.join(artifactDir, 'worker-last-message.md');
   writeFileSync(outputPath, 'Implemented fix but no rereview requested.\n', 'utf8');
 
   const spawned = markFollowUpJobSpawned({
@@ -1228,7 +1266,7 @@ test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit al
       state: 'spawned',
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
     },
   });
 
@@ -1252,7 +1290,7 @@ test('reconcileFollowUpJob marks exited workers failed when the final artifact i
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
-  const logPath = path.join(artifactDir, 'codex-worker.log');
+  const logPath = path.join(artifactDir, 'worker.log');
   writeFileSync(logPath, 'worker log\n', 'utf8');
 
   const spawned = markFollowUpJobSpawned({
@@ -1262,7 +1300,7 @@ test('reconcileFollowUpJob marks exited workers failed when the final artifact i
       processId: 8124,
       state: 'spawned',
       workspaceDir: path.relative(rootDir, workspaceDir),
-      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'worker-last-message.md')),
       logPath: path.relative(rootDir, logPath),
     },
   });
@@ -1329,8 +1367,8 @@ test('reconcileInProgressFollowUpJobs leaves live workers in place', () => {
       processId: 8125,
       state: 'spawned',
       workspaceDir: path.relative(rootDir, workspaceDir),
-      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'worker-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
     },
   });
 
@@ -1390,8 +1428,8 @@ test('reconcileFollowUpJob flags suspicious live PIDs for manual inspection inst
       processId: 8127,
       state: 'spawned',
       workspaceDir: path.relative(rootDir, workspaceDir),
-      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'worker-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
     },
   });
 
@@ -1861,6 +1899,129 @@ test('assertClaudeCodeOAuth strips ANTHROPIC_API_KEY before probing so apiKey st
   }
 });
 
+test('assertClaudeCodeOAuth probes with normalized PATH like the spawned worker', async () => {
+  const prevPath = process.env.PATH;
+  process.env.PATH = '/tmp/reduced-path';
+  try {
+    let probeEnv;
+    await assertClaudeCodeOAuth({
+      execFileImpl: async (_cmd, _args, options = {}) => {
+        probeEnv = options.env;
+        return {
+          stdout: JSON.stringify({
+            loggedIn: true,
+            authMethod: 'claude.ai',
+            apiProvider: 'firstParty',
+          }),
+          stderr: '',
+        };
+      },
+    });
+    assert.ok(probeEnv.PATH.startsWith('/opt/homebrew/bin:'), 'normalized PATH prefix should be present');
+    assert.match(probeEnv.PATH, /\/tmp\/reduced-path$/);
+  } finally {
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
+  }
+});
+
+test('backfillClaimedJobBuilderTag upgrades a legacy claimed job from live PR title', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'codex',
+    linearTicketId: 'LAC-207',
+    reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: false,
+  });
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T09:00:00.000Z',
+  });
+
+  const updated = await backfillClaimedJobBuilderTag({
+    rootDir,
+    claimed,
+    execFileImpl: async (_cmd, _args) => ({
+      stdout: JSON.stringify({ title: '[claude-code] fix worker routing' }),
+      stderr: '',
+    }),
+  });
+
+  assert.equal(updated.job.builderTag, 'claude-code');
+  const persisted = JSON.parse(readFileSync(updated.jobPath, 'utf8'));
+  assert.equal(persisted.builderTag, 'claude-code');
+});
+
+test('consumeNextFollowUpJob backfills builderTag before choosing a claude-code worker', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'codex',
+    linearTicketId: 'LAC-207',
+    reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: false,
+  });
+
+  const prevCliPath = process.env.CLAUDE_CODE_CLI_PATH;
+  const prevCli = process.env.CLAUDE_CLI;
+  delete process.env.CLAUDE_CODE_CLI_PATH;
+  delete process.env.CLAUDE_CLI;
+
+  try {
+    const result = await consumeNextFollowUpJob({
+      rootDir,
+      execFileImpl: async (_cmd, args) => {
+        if (args.includes('--json') && args.includes('title')) {
+          return { stdout: JSON.stringify({ title: '[claude-code] fix worker routing' }), stderr: '' };
+        }
+        if (args[0] === 'repo' && args[1] === 'clone') {
+          mkdirSync(path.join(args[3], '.git'), { recursive: true });
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'auth' && args[1] === 'status') {
+          return {
+            stdout: JSON.stringify({
+              loggedIn: true,
+              authMethod: 'claude.ai',
+              apiProvider: 'firstParty',
+            }),
+            stderr: '',
+          };
+        }
+        if (args[0] === 'config' || (args[0] === '-C' && args[2] === 'config')) {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'pr' && args[1] === 'checkout') {
+          return { stdout: '', stderr: '' };
+        }
+        throw new Error(`unexpected execFile call: ${args.join(' ')}`);
+      },
+      spawnImpl: (_cmd, _args, options) => ({ pid: 222, unref() {}, env: options.env }),
+      now: () => '2026-04-21T10:00:00.000Z',
+      promptTemplate: 'Remediation prompt template.',
+    });
+
+    assert.equal(result.consumed, true);
+    assert.equal(result.job.builderTag, 'claude-code');
+    assert.equal(result.job.remediationWorker.model, 'claude-code');
+    assert.match(result.job.remediationWorker.outputPath, /worker-last-message\.md$/);
+    assert.match(result.job.remediationWorker.logPath, /worker\.log$/);
+  } finally {
+    if (prevCliPath === undefined) delete process.env.CLAUDE_CODE_CLI_PATH;
+    else process.env.CLAUDE_CODE_CLI_PATH = prevCliPath;
+    if (prevCli === undefined) delete process.env.CLAUDE_CLI;
+    else process.env.CLAUDE_CLI = prevCli;
+  }
+});
+
 // ── Worker-class metadata propagates through completion ────────────────────
 
 test('reconcileFollowUpJob records worker-class-aware completion source for claude-code workers', () => {
@@ -1875,7 +2036,7 @@ test('reconcileFollowUpJob records worker-class-aware completion source for clau
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
-  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const outputPath = path.join(artifactDir, 'worker-last-message.md');
   writeFileSync(outputPath, 'claude-code worker did the thing.\n', 'utf8');
 
   const spawned = markFollowUpJobSpawned({
@@ -1887,7 +2048,7 @@ test('reconcileFollowUpJob records worker-class-aware completion source for clau
       state: 'spawned',
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
     },
   });
 

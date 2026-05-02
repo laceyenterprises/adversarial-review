@@ -15,12 +15,14 @@ import {
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
+  writeFollowUpJob,
 } from './follow-up-jobs.mjs';
 import {
   buildObviousDocsGuidance,
   collectWorkspaceDocContext,
 } from './prompt-context.mjs';
 import { requestReviewRereview } from './review-state.mjs';
+import { routePR } from './watcher-title-guardrails.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +32,10 @@ const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const WORKER_OUTPUT_BASENAME = 'worker-last-message.md';
+const WORKER_LOG_BASENAME = 'worker.log';
+const LEGACY_WORKER_OUTPUT_BASENAME = 'codex-last-message.md';
+const LEGACY_WORKER_LOG_BASENAME = 'codex-worker.log';
 
 // Default identity each remediation-worker class commits under. Without
 // these, the workspace inherits the operator's global git config and every
@@ -135,6 +141,17 @@ class StartupContractError extends Error {
   }
 }
 
+class BuilderTagResolutionError extends Error {
+  constructor(reason, { repo = null, prNumber = null, title = null } = {}) {
+    super(reason);
+    this.name = 'BuilderTagResolutionError';
+    this.isBuilderTagResolutionError = true;
+    this.repo = repo;
+    this.prNumber = prNumber;
+    this.title = title;
+  }
+}
+
 function resolveCodexCliPath() {
   return process.env.CODEX_CLI_PATH || process.env.CODEX_CLI || 'codex';
 }
@@ -227,12 +244,7 @@ async function assertClaudeCodeOAuth({ execFileImpl = execFileAsync } = {}) {
   // ANTHROPIC_API_KEY set, the CLI may report `authMethod: 'apiKey'` even
   // when the OAuth subscription is also configured, masking the real
   // login state. Mirrors `reviewer.mjs`'s `assertClaudeOAuth` hardening.
-  const probeEnv = { ...process.env };
-  delete probeEnv.ANTHROPIC_API_KEY;
-  delete probeEnv.ANTHROPIC_BASE_URL;
-  delete probeEnv.CLAUDE_CODE_USE_BEDROCK;
-  delete probeEnv.CLAUDE_CODE_USE_VERTEX;
-  delete probeEnv.AWS_BEARER_TOKEN_BEDROCK;
+  const { env: probeEnv } = prepareClaudeCodeRemediationStartupEnv();
 
   let raw;
   try {
@@ -356,6 +368,7 @@ function spawnClaudeCodeRemediationWorker({
     WORKER_RUN_AT: now(),
   };
   if (jobId) env.WORKER_JOB_ID = jobId;
+  else delete env.WORKER_JOB_ID;
 
   // Claude Code in --print mode reads the prompt from stdin and writes the
   // final assistant message to stdout. We capture stdout directly to
@@ -448,10 +461,17 @@ function pickRemediationWorkerClass(job) {
 
   // Legacy fallback for jobs created before builderTag was persisted.
   // claude reviewer unambiguously implies a codex builder. codex reviewer
-  // is ambiguous between [claude-code] and [clio-agent], so fall back to
-  // codex (the SPEC-documented default) rather than guessing claude-code.
+  // is ambiguous between [claude-code] and [clio-agent], so callers should
+  // backfill builderTag from live PR metadata before routing. If they do
+  // not, fail loud rather than silently collapsing to codex.
   if (job?.reviewerModel === 'claude') {
     return 'codex';
+  }
+  if (job?.reviewerModel === 'codex') {
+    throw new BuilderTagResolutionError(
+      `Cannot choose remediation worker for ${job?.repo || '<unknown repo>'}#${job?.prNumber || '<unknown pr>'} without builderTag`,
+      { repo: job?.repo || null, prNumber: job?.prNumber || null }
+    );
   }
   return 'codex';
 }
@@ -919,7 +939,7 @@ function spawnCodexRemediationWorker({
   };
   if (jobId) {
     env.WORKER_JOB_ID = jobId;
-  }
+  } else delete env.WORKER_JOB_ID;
 
   const promptFd = openSync(promptPath, 'r');
   const stdoutFd = openSync(logPath, 'a');
@@ -1022,16 +1042,54 @@ function resolveJobRelativePath(rootDir, relativePath, { label, allowMissing = t
   return absolutePath;
 }
 
+function resolveCompatibleArtifactPath(rootDir, relativePath, {
+  label,
+  workspaceDir = null,
+  preferredBasename,
+  legacyBasenames = [],
+} = {}) {
+  const requestedPath = resolveJobRelativePath(rootDir, relativePath || null, {
+    label,
+  });
+
+  if (requestedPath && existsSync(requestedPath)) {
+    return requestedPath;
+  }
+
+  if (!workspaceDir) {
+    return requestedPath;
+  }
+
+  const artifactDir = join(workspaceDir, '.adversarial-follow-up');
+  const candidates = [preferredBasename, ...legacyBasenames]
+    .filter((value, index, list) => typeof value === 'string' && value && list.indexOf(value) === index)
+    .map((basename) => join(artifactDir, basename));
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return requestedPath;
+}
+
 function buildReconciliationPaths(rootDir, job) {
   const worker = job?.remediationWorker || {};
   const workspaceDir = resolveJobRelativePath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
     label: 'workspaceDir',
   });
-  const outputPath = resolveJobRelativePath(rootDir, worker.outputPath || null, {
+  const outputPath = resolveCompatibleArtifactPath(rootDir, worker.outputPath || null, {
     label: 'outputPath',
+    workspaceDir,
+    preferredBasename: WORKER_OUTPUT_BASENAME,
+    legacyBasenames: [LEGACY_WORKER_OUTPUT_BASENAME],
   });
-  const logPath = resolveJobRelativePath(rootDir, worker.logPath || null, {
+  const logPath = resolveCompatibleArtifactPath(rootDir, worker.logPath || null, {
     label: 'logPath',
+    workspaceDir,
+    preferredBasename: WORKER_LOG_BASENAME,
+    legacyBasenames: [LEGACY_WORKER_LOG_BASENAME],
   });
   const replyPath = resolveJobRelativePath(rootDir, worker.replyPath || job?.remediationReply?.path || null, {
     label: 'replyPath',
@@ -1445,9 +1503,15 @@ async function consumeNextFollowUpJob({
     return { consumed: false, reason: 'no-pending-jobs' };
   }
 
-  const workerClass = pickRemediationWorkerClass(claimed.job);
-
+  let workerClass = null;
   try {
+    const resolvedClaim = await backfillClaimedJobBuilderTag({
+      rootDir,
+      claimed,
+      execFileImpl,
+    });
+    workerClass = pickRemediationWorkerClass(resolvedClaim.job);
+
     // OAuth pre-flight runs inside the try so an expired/missing OAuth
     // session moves the already-claimed job to `failed/` via the catch
     // below, rather than exiting with a still-`in_progress` ledger row.
@@ -1457,7 +1521,7 @@ async function consumeNextFollowUpJob({
 
     const { workspaceDir, workspaceState } = await prepareWorkspaceForJob({
       rootDir,
-      job: claimed.job,
+      job: resolvedClaim.job,
       execFileImpl,
     });
 
@@ -1471,12 +1535,12 @@ async function consumeNextFollowUpJob({
     // branches. The "codex-" prefix is historical; what matters is
     // these are the per-job artifact filenames the prompt and the
     // reconciler agree on.
-    const outputPath = join(artifactDir, 'codex-last-message.md');
-    const logPath = join(artifactDir, 'codex-worker.log');
+    const outputPath = join(artifactDir, WORKER_OUTPUT_BASENAME);
+    const logPath = join(artifactDir, WORKER_LOG_BASENAME);
     const replyPath = join(artifactDir, 'remediation-reply.json');
     const relativeReplyPath = relative(rootDir, replyPath);
     const governingDocContext = collectWorkspaceDocContext(workspaceDir);
-    const prompt = buildRemediationPrompt(claimed.job, {
+    const prompt = buildRemediationPrompt(resolvedClaim.job, {
       template: promptTemplate,
       remediationReplyPath: relativeReplyPath,
       governingDocContext,
@@ -1488,13 +1552,13 @@ async function consumeNextFollowUpJob({
       promptPath,
       outputPath,
       logPath,
-      jobId: claimed.job.jobId,
+      jobId: resolvedClaim.job.jobId,
       spawnImpl,
       now,
     });
 
     const updated = markFollowUpJobSpawned({
-      jobPath: claimed.jobPath,
+      jobPath: resolvedClaim.jobPath,
       spawnedAt: now(),
       worker: {
         ...worker,
@@ -1534,6 +1598,15 @@ async function consumeNextFollowUpJob({
         },
         startupEvidence: err.startupEvidence || null,
       };
+    } else if (err.isBuilderTagResolutionError) {
+      failureCode = 'builder-tag-resolution-failure';
+      failure = {
+        builderTagResolution: {
+          repo: err.repo || null,
+          prNumber: err.prNumber || null,
+          title: err.title || null,
+        },
+      };
     }
 
     const failed = markFollowUpJobFailed({
@@ -1547,6 +1620,60 @@ async function consumeNextFollowUpJob({
     err.followUpJobPath = failed.jobPath;
     throw err;
   }
+}
+
+async function fetchPRTitle(repo, prNumber, { execFileImpl = execFileAsync } = {}) {
+  const { stdout } = await execFileImpl(
+    'gh',
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'title'],
+    { maxBuffer: 1024 * 1024 }
+  );
+  return JSON.parse(stdout)?.title || '';
+}
+
+async function backfillClaimedJobBuilderTag({
+  rootDir = ROOT,
+  claimed,
+  execFileImpl = execFileAsync,
+} = {}) {
+  if (claimed?.job?.builderTag) {
+    return claimed;
+  }
+
+  if (claimed?.job?.reviewerModel === 'claude') {
+    const nextJob = {
+      ...claimed.job,
+      builderTag: 'codex',
+    };
+    writeFollowUpJob(claimed.jobPath, nextJob);
+    return {
+      ...claimed,
+      job: nextJob,
+    };
+  }
+
+  const title = await fetchPRTitle(claimed.job.repo, claimed.job.prNumber, { execFileImpl });
+  const builderTag = routePR(title)?.tag ?? null;
+  if (!builderTag) {
+    throw new BuilderTagResolutionError(
+      `Cannot backfill builderTag for legacy follow-up job ${claimed.job.jobId}: live PR title is not canonically tagged`,
+      {
+        repo: claimed.job.repo,
+        prNumber: claimed.job.prNumber,
+        title,
+      }
+    );
+  }
+
+  const nextJob = {
+    ...claimed.job,
+    builderTag,
+  };
+  writeFollowUpJob(claimed.jobPath, nextJob);
+  return {
+    ...claimed,
+    job: nextJob,
+  };
 }
 
 async function main() {
@@ -1623,6 +1750,9 @@ export {
   spawnRemediationWorker,
   assertClaudeCodeOAuth,
   assertRemediationWorkerOAuth,
+  backfillClaimedJobBuilderTag,
+  BuilderTagResolutionError,
+  fetchPRTitle,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,

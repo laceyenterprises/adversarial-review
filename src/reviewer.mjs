@@ -30,6 +30,7 @@ import {
   fetchLinkedSpecContents,
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
+import { routePR } from './watcher-title-guardrails.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -374,10 +375,31 @@ async function fetchPRDiff(repo, prNumber) {
 async function fetchPRContext(repo, prNumber) {
   const { stdout } = await execFileAsync(
     'gh',
-    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'body,comments,headRefOid'],
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'title,body,comments,headRefOid'],
     { maxBuffer: 10 * 1024 * 1024 }
   );
   return JSON.parse(stdout);
+}
+
+async function resolveBuilderTag({
+  repo,
+  prNumber,
+  builderTag,
+  fetchPRContextImpl = fetchPRContext,
+} = {}) {
+  if (typeof builderTag === 'string' && builderTag.trim()) {
+    return builderTag.trim();
+  }
+
+  const pr = await fetchPRContextImpl(repo, prNumber);
+  const derivedTag = routePR(pr?.title || '')?.tag ?? null;
+  if (!derivedTag) {
+    throw new Error(
+      `Cannot derive builderTag from live PR title for ${repo}#${prNumber}. ` +
+      'A canonical creation-time tag is required.'
+    );
+  }
+  return derivedTag;
 }
 
 // ── AI review via CLI (OAuth only) ──────────────────────────────────────────
@@ -723,12 +745,17 @@ async function main() {
   const critical = isCritical(reviewText);
   const reviewPostedAt = new Date().toISOString();
   try {
+    const effectiveBuilderTag = await resolveBuilderTag({
+      repo,
+      prNumber,
+      builderTag,
+    });
     const { jobPath } = createFollowUpJob({
       rootDir: ROOT,
       repo,
       prNumber,
       reviewerModel: effectiveModel,
-      builderTag: builderTag || null,
+      builderTag: effectiveBuilderTag,
       linearTicketId,
       reviewBody: reviewText,
       reviewPostedAt,
@@ -760,6 +787,7 @@ async function main() {
 }
 
 export {
+  resolveBuilderTag,
   sanitizeCodexReviewPayload,
 };
 

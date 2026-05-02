@@ -65,7 +65,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
-  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const outputPath = path.join(artifactDir, 'worker-last-message.md');
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
 
   const spawned = markFollowUpJobSpawned({
@@ -75,7 +75,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
       processId: 8123,
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
     },
   });
@@ -107,7 +107,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
-  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const outputPath = path.join(artifactDir, 'worker-last-message.md');
   const replyPath = path.join(artifactDir, 'remediation-reply.json');
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
   writeFileSync(replyPath, `${JSON.stringify({
@@ -133,7 +133,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
       processId: 8123,
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
       replyPath: path.relative(rootDir, replyPath),
     },
@@ -173,7 +173,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
-  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const outputPath = path.join(artifactDir, 'worker-last-message.md');
   const replyPath = path.join(artifactDir, 'remediation-reply.json');
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
   writeFileSync(replyPath, `${JSON.stringify({
@@ -199,7 +199,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
       processId: 8123,
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
       replyPath: path.relative(rootDir, replyPath),
     },
@@ -236,8 +236,8 @@ test('reconcileFollowUpJob fails a finished spawned round when output is missing
     worker: {
       processId: 8123,
       workspaceDir: path.relative(rootDir, workspaceDir),
-      outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      outputPath: path.relative(rootDir, path.join(artifactDir, 'worker-last-message.md')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
     },
   });
@@ -266,7 +266,7 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
 
-  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const outputPath = path.join(artifactDir, 'worker-last-message.md');
   const replyPath = path.join(artifactDir, 'remediation-reply.json');
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
   writeFileSync(replyPath, '{"kind":"wrong"}\n', 'utf8');
@@ -278,7 +278,7 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
       processId: 8123,
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
       replyPath: path.relative(rootDir, replyPath),
     },
@@ -311,7 +311,7 @@ test('reconcileFollowUpJob fails a finished spawned round when outputPath escape
       processId: 8123,
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: '../outside.md',
-      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
     },
   });

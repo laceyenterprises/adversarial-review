@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
+import { resolveBuilderTag } from '../src/reviewer.mjs';
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {
   assert.equal(
@@ -68,4 +69,42 @@ test('buildObviousDocsGuidance tells workers to inspect obvious repo docs before
   assert.match(guidance, /README\.md/);
   assert.match(guidance, /SPEC\.md/);
   assert.match(guidance, /go read it directly rather than guessing from the diff alone/i);
+});
+
+test('resolveBuilderTag prefers an explicitly provided builderTag', async () => {
+  const builderTag = await resolveBuilderTag({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 17,
+    builderTag: 'claude-code',
+    fetchPRContextImpl: async () => {
+      throw new Error('should not fetch when builderTag already exists');
+    },
+  });
+
+  assert.equal(builderTag, 'claude-code');
+});
+
+test('resolveBuilderTag derives the builderTag from the live PR title when omitted', async () => {
+  const builderTag = await resolveBuilderTag({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 17,
+    fetchPRContextImpl: async () => ({
+      title: '[codex] tighten remediation routing',
+    }),
+  });
+
+  assert.equal(builderTag, 'codex');
+});
+
+test('resolveBuilderTag fails when the live PR title is not canonically tagged', async () => {
+  await assert.rejects(
+    () => resolveBuilderTag({
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 17,
+      fetchPRContextImpl: async () => ({
+        title: 'tighten remediation routing',
+      }),
+    }),
+    /Cannot derive builderTag/
+  );
 });

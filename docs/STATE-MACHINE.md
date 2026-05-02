@@ -221,7 +221,7 @@ That conservatism is intentional.
 | Class | Typical cause |
 |---|---|
 | launch failure | checkout/auth/workspace prep problem |
-| artifact failure | missing `codex-last-message.md` or invalid `remediation-reply.json` |
+| artifact failure | missing `worker-last-message.md` or invalid `remediation-reply.json` |
 | review failure | reviewer auth/path/token/runtime issue |
 | malformed title | PR missing required creation-time tag |
 

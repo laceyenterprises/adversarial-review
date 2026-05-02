@@ -402,7 +402,7 @@ test('markFollowUpJobFailed preserves remediationWorker metadata for existing ca
       model: 'codex',
       state: 'spawned',
       processId: 8123,
-      outputPath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md',
+      outputPath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/worker-last-message.md',
     },
   });
 
@@ -412,12 +412,12 @@ test('markFollowUpJobFailed preserves remediationWorker metadata for existing ca
     error: new Error('worker crashed'),
     failedAt: '2026-04-21T10:05:00.000Z',
     failure: {
-      finalMessagePath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md',
+      finalMessagePath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/worker-last-message.md',
     },
   });
 
   assert.equal(failed.job.remediationWorker.processId, 8123);
-  assert.equal(failed.job.failure.finalMessagePath, 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md');
+  assert.equal(failed.job.failure.finalMessagePath, 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/worker-last-message.md');
 });
 
 test('markFollowUpJobFailed preserves the supplied failureCode even when failure metadata has its own code field', () => {
@@ -668,7 +668,7 @@ test('markFollowUpJobCompleted moves an in-progress job into completed with reco
     completedAt: '2026-04-21T10:07:00.000Z',
     completion: {
       source: 'codex-output-last-message',
-      finalMessagePath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/codex-last-message.md',
+      finalMessagePath: 'data/follow-up-jobs/workspaces/job/.adversarial-follow-up/worker-last-message.md',
     },
   });
 

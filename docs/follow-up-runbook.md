@@ -66,7 +66,7 @@ data/follow-up-jobs/in-progress/<jobId>.json
   ▼
 detached remediation worker on checked-out PR branch
   │ writes artifacts
-  ├─ codex-last-message.md
+  ├─ worker-last-message.md
   └─ remediation-reply.json
   │
   ├─(operator) npm run follow-up:reconcile
@@ -240,7 +240,7 @@ data/follow-up-jobs/failed/
 
 The detached worker is expected to leave two important artifacts in the workspace:
 
-- final message: `.adversarial-follow-up/codex-last-message.md`
+- final message: `.adversarial-follow-up/worker-last-message.md`
 - reply JSON: `.adversarial-follow-up/remediation-reply.json`
 
 The final message is operator-facing completion text.
@@ -436,17 +436,19 @@ For a spawned or terminalized round, inspect:
 ```text
 data/follow-up-jobs/workspaces/<jobId>/
 data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/prompt.md
-data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/codex-last-message.md
+data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/worker-last-message.md
 data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/remediation-reply.json
-data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/codex-worker.log
+data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/worker.log
 ```
 
 What each tells you:
 
 - `prompt.md`: exact worker contract and trusted metadata passed to the worker
-- `codex-last-message.md`: worker’s final narrative summary, used as the completion artifact
+- `worker-last-message.md`: worker’s final narrative summary, used as the completion artifact
 - `remediation-reply.json`: machine-readable outcome and re-review intent
-- `codex-worker.log`: launch/runtime stderr/stdout trail
+- `worker.log`: launch/runtime stderr/stdout trail
+
+Compatibility note: reconciliation still falls back to legacy `codex-last-message.md` and `codex-worker.log` when older terminal records or workspaces have not been renamed yet.
 
 ### In SQLite
 

@@ -207,7 +207,7 @@ Two agents drive the system:
 
 Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo.
 
-> **The shipped plists are user-bound.** The filename suffix (`.placey.plist`) names the operator the plist's `HOME` and log paths point at. If you are running as `placey`, the manual install below works as-is. If you are running as a different operator, **do not bootstrap the shipped plist directly** — it would write logs to the wrong account and resolve `gh`/Codex auth from the wrong home directory. Copy with the matching suffix and substitute paths first (see `Install for a different user` below).
+> **The shipped plists are user-bound AND host-bound.** The filename suffix (`.placey.plist`) names the operator the plist's `HOME` and log paths point at; the `ProgramArguments` and `WorkingDirectory` paths additionally hardcode this host's Agent OS repo root (`/Users/airlock/agent-os/...`), since `EnvironmentVariables` in launchd plists do not expand shell variables. If you are running as `placey` on this host, the manual install below works as-is. If you are running as a different operator OR on a host where the repo lives elsewhere, **do not bootstrap the shipped plist directly** — it would write logs to the wrong account, resolve `gh`/Codex auth from the wrong home directory, or point at a `ProgramArguments` script that does not exist. Copy with the matching suffix and substitute paths first (see `Install for a different user` below).
 
 #### Install for `placey` (the shipped binding)
 
@@ -218,12 +218,18 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversar
 launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
 ```
 
-#### Install for a different user
+#### Install for a different user or host
 
-Replace `<USER>` with the running operator's username everywhere:
+Two substitutions are required:
+
+- `/Users/placey` → the operator's home (drives `HOME`, log paths)
+- `/Users/airlock/agent-os` → the absolute path to your Agent OS repo root (drives `ProgramArguments` and `WorkingDirectory`; launchd plists cannot expand `$HOME` or any shell variable, so the repo path must be a literal)
+
+Replace `<USER>` with the running operator's username and `<AGENT_OS_ROOT>` with the absolute repo path:
 
 ```bash
-sed "s|/Users/placey|/Users/<USER>|g" \
+sed -e "s|/Users/placey|/Users/<USER>|g" \
+    -e "s|/Users/airlock/agent-os|<AGENT_OS_ROOT>|g" \
   launchd/ai.laceyenterprises.adversarial-follow-up.placey.plist \
   > ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
 plutil -lint ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
@@ -231,7 +237,11 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversar
 launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
 ```
 
-You will also need to add a matching entry to `USER_AGENTS_ONESHOT` in `scripts/os-restart.sh` so the daemon is picked up on a system restart. The corresponding `INSTALLABLE_USER_AGENT_PLISTS` entry must also point at the per-user template (the auto-install path copies the file verbatim — it does not substitute placeholders).
+If your repo is at `/Users/<USER>/agent-os`, the `<USER>` substitution alone covers both — but verify by `grep /Users/airlock ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist` after the `sed`; any remaining hits mean you still need to point them at your repo root.
+
+The tick script honors `AGENT_OS_ROOT` as a runtime override (it defaults to `/Users/airlock/agent-os`), so as a stopgap you can also export `AGENT_OS_ROOT` in the plist's `EnvironmentVariables` to relocate the in-script `WATCHER_DIR` lookup. The launchd-level `ProgramArguments` path still needs to point at the actual script on disk, though, so the substitution above is the complete fix.
+
+You will also need to commit a per-user copy of the plist (e.g. `ai.laceyenterprises.adversarial-follow-up.<that-user>.plist`) and add a matching entry to `USER_AGENTS_ONESHOT` plus `INSTALLABLE_USER_AGENT_PLISTS` in `scripts/os-restart.sh` so the daemon is picked up on a system restart — the auto-install path copies the file verbatim and does not substitute placeholders.
 
 #### Pause / resume
 

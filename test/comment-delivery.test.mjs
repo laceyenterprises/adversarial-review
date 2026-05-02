@@ -17,6 +17,7 @@ import {
   deliveryLockPath,
   deliveryRetryIndexDir,
   deliveryRetryIndexPointerPath,
+  reconstructDeliveryFromRecord,
   recordInitialCommentDelivery,
   releaseDeliveryClaim,
   removeFromDeliveryRetryIndex,
@@ -1191,4 +1192,91 @@ test('retry preserves commentUrl across a still-failing attempt (dedupe token su
   assert.equal(record.commentDelivery.commentUrl,
     'https://github.com/laceyenterprises/demo/pull/21#issuecomment-777',
     'commentUrl is preserved verbatim');
+});
+
+// ── R8 blocking #2: reconstructDeliveryFromRecord uses canonical resolver ──
+//
+// Regression: reconstructDeliveryFromRecord rebuilt workerClass as
+// `record.remediationWorker.model || record.builderTag || 'codex'`,
+// reintroducing the same `[clio-agent] → no-token-mapping` bug that
+// the reconcile path had just been fixed for. Any recovery path
+// (missing/partial commentDelivery, post-crash sidecar replay, stale
+// pointer recovery) for a [clio-agent] PR generated workerClass=
+// 'clio-agent', the comment poster returned 'no-token-mapping', and
+// the retry path dropped the record as non-retryable → permanent
+// silent loss of the terminal PR comment. Fix: share the canonical
+// resolveReconcileWorkerClass with the reconcile path so clio-agent
+// → codex fallback applies in recovery too.
+
+test('reconstructDeliveryFromRecord routes [clio-agent] via canonical resolver, not raw builderTag', () => {
+  const record = {
+    status: 'completed',
+    repo: 'laceyenterprises/demo',
+    prNumber: 19,
+    builderTag: 'clio-agent',
+    reviewerModel: 'codex',
+    // No remediationWorker.model — exercises the legacy path the
+    // reviewer flagged as the silent regression vector.
+    remediationWorker: {
+      processId: 4242,
+      state: 'spawned',
+      replyPath: null,
+    },
+    reReview: { requested: false, reason: null },
+  };
+
+  const reconstructed = reconstructDeliveryFromRecord(record);
+  assert.ok(reconstructed, 'reconstruction must succeed for a complete record');
+  assert.equal(
+    reconstructed.workerClass, 'codex',
+    'clio-agent recovery must map to codex (the bot-token map has no clio-agent entry)'
+  );
+  assert.equal(reconstructed.repo, 'laceyenterprises/demo');
+  assert.equal(reconstructed.prNumber, 19);
+  assert.equal(reconstructed.posted, false);
+});
+
+test('reconstructDeliveryFromRecord prefers worker.model when it has a bot-token mapping', () => {
+  // Even with builderTag='codex', a worker.model='claude-code' should
+  // win because the spawned worker's identity is the most authoritative
+  // signal of what bot owns the post.
+  const record = {
+    status: 'completed',
+    repo: 'laceyenterprises/demo',
+    prNumber: 20,
+    builderTag: 'codex',
+    reviewerModel: 'claude',
+    remediationWorker: {
+      model: 'claude-code',
+      processId: 4243,
+      state: 'spawned',
+      replyPath: null,
+    },
+  };
+  const reconstructed = reconstructDeliveryFromRecord(record);
+  assert.equal(reconstructed.workerClass, 'claude-code');
+});
+
+test('reconstructDeliveryFromRecord falls through to canonical resolver when worker.model is unmappable', () => {
+  // Defensive: if a worker erroneously stamped .model='clio-agent'
+  // (no bot-token mapping), the resolver must fall through to the
+  // job-based mapping rather than returning the unmappable class.
+  const record = {
+    status: 'completed',
+    repo: 'laceyenterprises/demo',
+    prNumber: 21,
+    builderTag: 'clio-agent',
+    reviewerModel: 'codex',
+    remediationWorker: {
+      model: 'clio-agent', // intentional: simulates an erroneous stamp
+      processId: 4244,
+      state: 'spawned',
+      replyPath: null,
+    },
+  };
+  const reconstructed = reconstructDeliveryFromRecord(record);
+  assert.equal(
+    reconstructed.workerClass, 'codex',
+    'unmappable worker.model must fall through to the canonical job mapping'
+  );
 });

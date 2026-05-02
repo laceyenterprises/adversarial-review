@@ -31,6 +31,7 @@ import { randomBytes } from 'node:crypto';
 
 import { getFollowUpJobDir, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
 import { WORKER_CLASS_TO_BOT_TOKEN_ENV, buildRemediationOutcomeCommentBody, postRemediationOutcomeComment } from './pr-comments.mjs';
+import { resolveReconcileWorkerClass } from './worker-class.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -76,6 +77,11 @@ const DELIVERY_CLAIM_STALE_MS = 5 * 60 * 1000; // 5 minutes
 // from this configuration" — retrying achieves nothing. The retry
 // pass skips records with these reasons (but they still stay marked
 // posted=false so an operator sees them).
+//
+// `token-env-missing` is intentionally NOT in this set — it gets the
+// conditional branch below (isTokenAvailableForDelivery) so a daemon
+// restart with the token resolved can re-arm the same record without
+// operator intervention. See the upstream R6 fix.
 const NON_RETRYABLE_DELIVERY_REASONS = new Set([
   'missing-pr-coordinates',
   'no-token-mapping',
@@ -651,9 +657,15 @@ function reconstructDeliveryFromRecord(record) {
   if (!action) return null;
   if (!record?.repo || !record?.prNumber) return null;
 
-  const workerClass = record?.remediationWorker?.model
-    || record?.builderTag
-    || 'codex';
+  // Use the canonical resolver shared with the consume / reconcile
+  // paths. The previous ad-hoc fallback (`worker.model || builderTag ||
+  // 'codex'`) silently re-introduced the `clio-agent → no-token-mapping`
+  // bug for any recovery path (missing/partial commentDelivery, stale
+  // pointer, post-crash replay) when the PR was tagged [clio-agent]:
+  // the comment poster returned `no-token-mapping`, the retry path
+  // dropped the record as non-retryable, and the terminal PR comment
+  // was permanently lost. (PR #18 R8 blocking #2.)
+  const workerClass = resolveReconcileWorkerClass(record, record?.remediationWorker);
 
   // Worker reply artifact is still on disk in the workspace; re-read
   // it so summary / validation / blockers / outcome show up in the

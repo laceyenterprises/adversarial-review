@@ -21,13 +21,13 @@ import {
   collectWorkspaceDocContext,
 } from './prompt-context.mjs';
 import {
-  WORKER_CLASS_TO_BOT_TOKEN_ENV,
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
 } from './pr-comments.mjs';
 import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
 import { redactSensitiveText } from './redaction.mjs';
 import { requestReviewRereview } from './review-state.mjs';
+import { pickRemediationWorkerClass, resolveReconcileWorkerClass } from './worker-class.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -408,50 +408,13 @@ function spawnClaudeCodeRemediationWorker({
 
 // ── Worker-class dispatcher ────────────────────────────────────────────────
 
-// Map a job to the remediation worker class that should handle it. The
-// cross-model rule is: the BUILDER fixes their own code.
-//
-// Routing is keyed off the durable builder tag persisted on the job at
-// creation time:
-//   builderTag='codex'       → codex remediator
-//   builderTag='claude-code' → claude-code remediator
-//   builderTag='clio-agent'  → codex remediator (Clio sub-agent PRs are
-//                              not the same operational entity as the
-//                              local Claude Code CLI, so they fall back
-//                              to codex remediation; aligns with the
-//                              SPEC fallback rule.)
-//
-// Reverse-mapping from `reviewerModel` is unsafe: both [claude-code] and
-// [clio-agent] PRs are reviewed by codex, so reviewerModel='codex' alone
-// cannot distinguish them. We only consult `reviewerModel` for legacy
-// job records (created before builderTag was persisted), and even then
-// only `reviewerModel='claude'` reliably implies a [codex] builder.
-function pickRemediationWorkerClass(job) {
-  const builderTag = job?.builderTag;
-  if (builderTag) {
-    switch (builderTag) {
-      case 'codex':
-        return 'codex';
-      case 'claude-code':
-        return 'claude-code';
-      case 'clio-agent':
-        // No dedicated clio-agent worker class today — fall back to the
-        // SPEC's documented default reviewer/remediator: codex.
-        return 'codex';
-      default:
-        return 'codex';
-    }
-  }
-
-  // Legacy fallback for jobs created before builderTag was persisted.
-  // claude reviewer unambiguously implies a codex builder. codex reviewer
-  // is ambiguous between [claude-code] and [clio-agent], so fall back to
-  // codex (the SPEC-documented default) rather than guessing claude-code.
-  if (job?.reviewerModel === 'claude') {
-    return 'codex';
-  }
-  return 'codex';
-}
+// `pickRemediationWorkerClass` and `resolveReconcileWorkerClass` are the
+// canonical mapping from job → worker class. They live in
+// `./worker-class.mjs` so the comment-delivery recovery path can share
+// the exact same rule without re-introducing the `clio-agent →
+// no-token-mapping` bug. (PR #18 R7 #2 / R8 blocking #2.) Imported at
+// the top of this file and re-exported below for back-compat with
+// existing test imports.
 
 async function assertRemediationWorkerOAuth(workerClass, { execFileImpl } = {}) {
   switch (workerClass) {
@@ -1136,37 +1099,6 @@ function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWor
   }
 
   return { state: 'exited', reason: 'worker-not-running', ageMs };
-}
-
-// Resolve the worker class (codex / claude-code) for a reconcile-time
-// comment. Must reuse the same canonical mapping consume uses
-// (`pickRemediationWorkerClass`), because the bot-token map only
-// covers worker classes that actually have dedicated PATs:
-//
-//   WORKER_CLASS_TO_BOT_TOKEN_ENV = { codex, 'claude-code' }
-//
-// The previous implementation returned `worker.model || job.builderTag
-// || 'codex'`. For `[clio-agent]` PRs that produced
-// `workerClass='clio-agent'`, which has no token mapping → the comment
-// poster returned `no-token-mapping`, which the retry path treats as
-// non-retryable → permanent silent loss of the terminal PR comment.
-// (PR #18 R7 blocking #3.)
-//
-// Strategy:
-//   1. If the spawned worker recorded a `.model` AND that model has a
-//      bot-token mapping, trust it (most authoritative for THIS
-//      worker's actual session — claude-code-spawned workers should
-//      post under the claude-code bot regardless of the PR's tag).
-//   2. Otherwise, fall through to `pickRemediationWorkerClass(job)`
-//      which canonically maps `clio-agent → codex` (since clio-agent
-//      has no dedicated worker class today; consume already does this
-//      at spawn time).
-function resolveReconcileWorkerClass(job, worker) {
-  const recordedModel = worker?.model;
-  if (recordedModel && WORKER_CLASS_TO_BOT_TOKEN_ENV[recordedModel]) {
-    return recordedModel;
-  }
-  return pickRemediationWorkerClass(job);
 }
 
 // Build the comment body + an owed-delivery stub from the same inputs

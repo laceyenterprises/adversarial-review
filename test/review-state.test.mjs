@@ -116,3 +116,139 @@ test('requestReviewRereview preserves attempt history and records rereview metad
   assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
   assert.equal(result.reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
 });
+
+test("requestReviewRereview is atomic: a concurrent watcher claim cannot be overwritten back to pending", () => {
+  // Pre-CAS, this was a SELECT-then-UPDATE: the helper read the row's
+  // status, decided it was eligible, then ran an unconditional UPDATE
+  // setting status='pending'. A watcher process that flipped the row
+  // to 'reviewing' between those two steps would have its claim
+  // overwritten. The fix is a single CAS UPDATE with the eligibility
+  // predicate baked into the WHERE clause; this test verifies the
+  // race is closed by simulating the interleaving directly.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  // Seed at 'failed' so the helper would ordinarily reset it to
+  // 'pending' (without the race protection). Then simulate the race
+  // by flipping the row to 'reviewing' before the helper runs.
+  insertReviewRow(rootDir, {
+    reviewStatus: 'failed',
+    postedAt: null,
+    failedAt: '2026-04-24T12:08:00.000Z',
+    failureMessage: 'transient OAuth blip',
+  });
+  const racingDb = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(racingDb);
+    racingDb.prepare(
+      "UPDATE reviewed_prs SET review_status = 'reviewing', last_attempted_at = ? WHERE pr_number = 10"
+    ).run('2026-04-24T12:09:30.000Z');
+  } finally {
+    racingDb.close();
+  }
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'should be refused — claim is in flight',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'review-in-flight');
+
+  // The row must remain 'reviewing' — the helper must NOT have flipped
+  // it. Pre-CAS, the unconditional UPDATE would have overwritten this
+  // to 'pending'.
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare(
+      'SELECT review_status, rereview_requested_at FROM reviewed_prs WHERE pr_number = 10'
+    ).get();
+    assert.equal(row.review_status, 'reviewing', 'in-flight claim survived the rereview attempt');
+    assert.equal(row.rereview_requested_at, null, 'rereview metadata not written for blocked reset');
+  } finally {
+    db.close();
+  }
+});
+
+test('requestReviewRereview returns review-row-missing when no row exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  // Open + close to materialize the schema without inserting a row.
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  db.close();
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 999,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'no-op',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'review-row-missing');
+});
+
+test("requestReviewRereview returns malformed-title-terminal for malformed rows", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'malformed',
+    reviewer: 'malformed-title',
+    postedAt: null,
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'should be refused',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'malformed-title-terminal');
+});
+
+test("requestReviewRereview returns pr-not-open for closed PRs", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'posted',
+    prState: 'closed',
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'should be refused',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'pr-not-open');
+});
+
+test("requestReviewRereview returns already-pending when row is already 'pending'", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending',
+    postedAt: null,
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'no-op',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'already-pending');
+});

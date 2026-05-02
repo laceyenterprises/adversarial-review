@@ -268,35 +268,75 @@ function requestReviewRereview({
   try {
     ensureReviewStateSchema(db);
 
+    // Single compare-and-swap UPDATE with the eligibility predicate
+    // baked in. The previous SELECT-then-UPDATE shape had a
+    // cross-process race: between reading `review_status` and
+    // performing the unconditional UPDATE, the watcher could claim
+    // the row (flipping it to `'reviewing'`). The unconditional UPDATE
+    // would then overwrite the live claim back to `'pending'`,
+    // recreating the duplicate-spawn race the watcher's in-flight
+    // claim was introduced to prevent.
+    //
+    // The CAS below refuses to reset:
+    //   - `'reviewing'` — the watcher has an active reviewer subprocess.
+    //     The recovery path is letting the watcher restart and flip the
+    //     row to `'failed-orphan'` via reconcileOrphanedReviewing, then
+    //     using `retrigger-review --allow-failed-reset` after operator
+    //     GitHub verification.
+    //   - `'malformed'` — terminal; not a runtime-recoverable state.
+    //   - `'pending'` — already armed for review; no reset needed.
+    //
+    // Any non-matching row is then re-read to classify why the CAS
+    // failed (so callers get the same blocked-reason taxonomy as
+    // before). The classification read happens AFTER the UPDATE, so a
+    // racing claim can no longer slip in between the check and the
+    // mutation.
+    const updateResult = db.prepare(
+      `UPDATE reviewed_prs
+         SET review_status = 'pending',
+             posted_at = NULL,
+             failed_at = NULL,
+             failure_message = NULL,
+             rereview_requested_at = ?,
+             rereview_reason = ?
+       WHERE repo = ?
+         AND pr_number = ?
+         AND pr_state = 'open'
+         AND review_status NOT IN ('reviewing', 'malformed', 'pending')`
+    ).run(
+      requestedAt,
+      reason || 'Re-review requested from remediation reply.',
+      repo,
+      prNumber
+    );
+
+    if (updateResult.changes === 1) {
+      return {
+        triggered: true,
+        status: 'pending',
+        reason: 'review-status-reset',
+        reviewRow: getReviewRow(db, { repo, prNumber }),
+      };
+    }
+
+    // CAS lost. Read the row and classify why so the caller gets a
+    // useful blocked-reason instead of a generic failure. The order
+    // of the checks below mirrors the pre-CAS implementation so
+    // reasons stay backward-compatible with existing callers
+    // (reconcile path, retrigger-review CLI, comment renderer).
     const reviewRow = getReviewRow(db, { repo, prNumber });
     if (!reviewRow) {
       return buildBlockedRereviewResult('review-row-missing');
     }
-
     if (reviewRow.review_status === 'malformed') {
       return buildBlockedRereviewResult('malformed-title-terminal', reviewRow);
     }
-
-    // 'reviewing' is the durable in-flight claim set by the watcher
-    // BEFORE it spawns a reviewer subprocess. Resetting it back to
-    // 'pending' while the subprocess is still running would let the
-    // next watcher poll spawn a second reviewer for the same PR and
-    // recreate the duplicate-post race the in-flight claim was
-    // introduced to prevent. Block at this layer so every caller
-    // (reconcile path, retrigger-review CLI, future operator tools)
-    // gets the same guardrail without having to re-derive it; the
-    // recovery path is to let the watcher restart and turn the row
-    // into 'failed-orphan' via reconcileOrphanedReviewing, then run
-    // retrigger-review with --allow-failed-reset after operator
-    // verification.
     if (reviewRow.review_status === 'reviewing') {
       return buildBlockedRereviewResult('review-in-flight', reviewRow);
     }
-
     if (reviewRow.pr_state !== 'open') {
       return buildBlockedRereviewResult('pr-not-open', reviewRow);
     }
-
     if (reviewRow.review_status === 'pending') {
       return {
         triggered: false,
@@ -305,22 +345,11 @@ function requestReviewRereview({
         reviewRow,
       };
     }
-
-    db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'pending', posted_at = NULL, failed_at = NULL, failure_message = NULL, rereview_requested_at = ?, rereview_reason = ? WHERE repo = ? AND pr_number = ?"
-    ).run(
-      requestedAt,
-      reason || 'Re-review requested from remediation reply.',
-      repo,
-      prNumber
-    );
-
-    return {
-      triggered: true,
-      status: 'pending',
-      reason: 'review-status-reset',
-      reviewRow: getReviewRow(db, { repo, prNumber }),
-    };
+    // Defensive: this branch is unreachable today (every status the
+    // CAS rejects is enumerated above), but if a future review_status
+    // value is added without updating the CAS predicate, surface it
+    // here instead of silently returning success.
+    return buildBlockedRereviewResult('rereview-cas-no-match', reviewRow);
   } finally {
     db.close();
   }

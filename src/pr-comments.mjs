@@ -222,12 +222,25 @@ async function postRemediationOutcomeComment({
     return { posted: false, reason: 'token-env-missing', tokenEnvName, workerClass };
   }
 
+  // Allowlist the gh subprocess env. The daemon's parent env carries
+  // unrelated high-value secrets (OP_SERVICE_ACCOUNT_TOKEN, the
+  // operator's GITHUB_TOKEN, both reviewer PATs, OAuth bearers).
+  // gh only needs PATH (to find its helpers) plus HOME (so it can
+  // resolve its own config / cache dir) plus the GH_TOKEN we want it
+  // to authenticate as. Inheriting the rest broadens blast radius if
+  // gh shells out to a hook, an extension, or any unexpected helper.
+  const allowlistedEnv = {
+    PATH: env.PATH ?? '/usr/bin:/bin',
+    HOME: env.HOME ?? '',
+    GH_TOKEN: token,
+  };
+
   try {
     await execFileImpl(
       'gh',
       ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],
       {
-        env: { ...env, GH_TOKEN: token },
+        env: allowlistedEnv,
         maxBuffer: 5 * 1024 * 1024,
       }
     );

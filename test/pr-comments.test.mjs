@@ -202,6 +202,51 @@ test('postRemediationOutcomeComment posts via gh pr comment with the bot token i
   assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-claude');
 });
 
+test('postRemediationOutcomeComment passes only an allowlisted env to gh', async () => {
+  // The daemon's parent env carries unrelated high-value secrets. The gh
+  // subprocess must NOT see them. Only PATH, HOME, and the selected
+  // GH_TOKEN should reach the child.
+  const calls = [];
+  await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'claude-code',
+    body: 'x',
+    env: {
+      GH_CLAUDE_REVIEWER_TOKEN: 'test-pat-claude',
+      PATH: '/opt/homebrew/bin:/usr/bin',
+      HOME: '/Users/test',
+      // High-value secrets that must NOT leak into the child:
+      OP_SERVICE_ACCOUNT_TOKEN: 'op-secret-XXXXX',
+      GITHUB_TOKEN: 'operator-pat-YYYYY',
+      GH_CODEX_REVIEWER_TOKEN: 'codex-bot-pat-ZZZZZ',
+      ANTHROPIC_AUTH_TOKEN: 'oauth-bearer-WWWWW',
+      // Other unrelated env that's also unnecessary:
+      LINEAR_API_KEY: 'linear-pat-AAAAA',
+      LANG: 'en_US.UTF-8',
+    },
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  const childEnv = calls[0].options.env;
+  assert.deepEqual(
+    Object.keys(childEnv).sort(),
+    ['GH_TOKEN', 'HOME', 'PATH'],
+    `child env must be exactly the allowlist; got: ${Object.keys(childEnv).join(', ')}`
+  );
+  assert.equal(childEnv.GH_TOKEN, 'test-pat-claude');
+  assert.equal(childEnv.PATH, '/opt/homebrew/bin:/usr/bin');
+  assert.equal(childEnv.HOME, '/Users/test');
+  assert.equal(childEnv.OP_SERVICE_ACCOUNT_TOKEN, undefined);
+  assert.equal(childEnv.GITHUB_TOKEN, undefined);
+  assert.equal(childEnv.GH_CODEX_REVIEWER_TOKEN, undefined);
+  assert.equal(childEnv.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(childEnv.LINEAR_API_KEY, undefined);
+});
+
 test('postRemediationOutcomeComment skips with token-env-missing when the env var is absent', async () => {
   // Capture the log call so we know we surfaced it instead of silently swallowing.
   const errors = [];

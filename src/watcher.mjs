@@ -14,6 +14,7 @@ import {
   routePR,
 } from './watcher-title-guardrails.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
+import { buildSafePollOnce } from './watcher-poll-guard.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
@@ -546,11 +547,18 @@ function main() {
     : `repos: ${activeRepos.join(', ')}`;
   console.log(`[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s`);
 
-  pollOnce(octokit).catch((err) => handlePollError(err, 'initial pollOnce'));
+  // Use the same guarded callable for the immediate-on-start poll and
+  // the recurring interval poll. Sharing the in-flight flag matters: if
+  // the initial pollOnce is still running when the first interval tick
+  // fires, the interval tick must observe and skip.
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl: pollOnce,
+    octokit,
+    errorHandler: handlePollError,
+  });
 
-  setInterval(() => {
-    pollOnce(octokit).catch((err) => handlePollError(err, 'scheduled pollOnce'));
-  }, intervalMs);
+  safePollOnce();
+  setInterval(safePollOnce, intervalMs);
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

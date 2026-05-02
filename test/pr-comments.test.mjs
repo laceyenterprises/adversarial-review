@@ -63,10 +63,14 @@ test('buildRemediationOutcomeCommentBody on completed includes summary, validati
   });
   assert.match(body, /Remediation Worker \(claude-code\) — round 2 of 6/);
   assert.match(body, /Outcome:.*completed.*re-review queued/);
+  // Worker-supplied summary/validation/blockers are now fenced (`text)
+  // so injected markdown / mentions / autolinks are inert.
   assert.match(body, /Tightened null handling in the API layer/);
-  assert.match(body, /- npm test/);
-  assert.match(body, /- manual smoke of \/v1\/users/);
-  assert.match(body, /Re-review status:\*\*\s*queued — Want adversarial confirmation\./);
+  assert.match(body, /```text\nnpm test\n```/);
+  assert.match(body, /```text\nmanual smoke of \/v1\/users\n```/);
+  // rereview.reason is rendered inline-safe (backtick-wrapped) so a
+  // worker can't smuggle a mention or autolink into the status line.
+  assert.match(body, /Re-review status:\*\*\s*queued — `Want adversarial confirmation\.`/);
   assert.match(body, /Job: `lac__demo-pr-7-2026-05-01T20-00-00-000Z`/);
 });
 
@@ -139,7 +143,7 @@ test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) flags h
   assert.match(body, /Human intervention required/);
   assert.match(body, /exhausted its bounded round cap/);
   assert.match(body, /Blockers/);
-  assert.match(body, /- Schema migration requires DBA review/);
+  assert.match(body, /```text\nSchema migration requires DBA review\n```/);
   // No re-review requested in this state.
   assert.match(body, /Re-review requested:\*\*\s*no/);
 });
@@ -383,11 +387,13 @@ test('buildRemediationOutcomeCommentBody caps the validation/blockers list size'
     reply: { outcome: 'completed', summary: 'ok', validation: items, blockers: [] },
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
-  // Cap is 25 entries; step-25 onwards must be truncated.
-  assert.match(body, /- step-0$/m);
-  assert.match(body, /- step-24$/m);
-  assert.doesNotMatch(body, /- step-25$/m);
-  assert.doesNotMatch(body, /- step-100$/m);
+  // Cap is 25 entries; step-25 onwards must be truncated. Each entry
+  // is rendered as a fenced bullet so the literal step text appears
+  // inside `text` blocks.
+  assert.match(body, /```text\nstep-0\n```/);
+  assert.match(body, /```text\nstep-24\n```/);
+  assert.doesNotMatch(body, /```text\nstep-25\n```/);
+  assert.doesNotMatch(body, /```text\nstep-100\n```/);
 });
 
 test('buildRemediationOutcomeCommentBody redacts tokens in the rereview reason', () => {
@@ -404,5 +410,89 @@ test('buildRemediationOutcomeCommentBody redacts tokens in the rereview reason',
     },
   });
   assert.doesNotMatch(body, /ghp_aaaaaaaaaaaaaaaaaaaa/);
-  assert.match(body, /Re-review status:.*queued — Need to verify \[REDACTED_GITHUB_TOKEN\] works after rotation/);
+  // Inline-safe rendering: backtick-wrapped so any markdown the worker
+  // tries to smuggle stays inert. Token still got redacted before the
+  // backtick wrap.
+  assert.match(body, /Re-review status:.*queued — `Need to verify \[REDACTED_GITHUB_TOKEN\] works after rotation`/);
+});
+
+// ── Markdown injection mitigations ────────────────────────────────────────
+
+test('worker @mentions inside summary do not render as live mentions (rendered inside fenced code block)', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'Pinging @paul-lacey and @laceyenterprises/security to follow up.',
+      validation: ['ran @ci/tests'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  // The worker's literal text must be present (so the operator still
+  // sees what the worker tried to say) but inside a fenced block, so
+  // GitHub renders it as plaintext rather than firing notifications.
+  assert.match(body, /```text\nPinging @paul-lacey and @laceyenterprises\/security to follow up\.\n```/);
+  assert.match(body, /```text\nran @ci\/tests\n```/);
+});
+
+test('worker injection of headings or task lists is inert (rendered inside fenced code block)', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: '# Hijacked H1 heading\n- [x] Forged task item\n<img src=x onerror=alert(1)>',
+      validation: ['## not actually a heading'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  // Heading / list / HTML stays inert because it's inside the fence.
+  assert.match(body, /```text\n# Hijacked H1 heading\n- \[x\] Forged task item\n<img src=x onerror=alert\(1\)>\n```/);
+  assert.match(body, /```text\n## not actually a heading\n```/);
+});
+
+test('worker text containing backticks does not break out of the fence (auto-grown fence width)', () => {
+  // A worker that drops a "```" run inside its summary would terminate
+  // a 3-backtick fence early and re-enable rendering of subsequent
+  // content. The fence width must auto-grow to be longer than any
+  // backtick run in the content.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'Run ```bash\necho hi\n``` to see output',
+      validation: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  // Fence must be at least 4 backticks (one more than the longest run
+  // inside the content).
+  assert.match(body, /````text\nRun ```bash\necho hi\n``` to see output\n````/);
+});
+
+test('rereview.reason with worker-injected mention is wrapped inline-safe (no live mention)', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: [], blockers: [] },
+    reReview: {
+      requested: true,
+      triggered: true,
+      status: 'pending',
+      reason: 'cc @paul-lacey for visibility',
+    },
+  });
+  // Inline backtick wrap renders the @mention as plain text, not a
+  // GitHub notification. The `@` is still visible to humans reading
+  // the rendered comment.
+  assert.match(body, /Re-review status:.*queued — `cc @paul-lacey for visibility`/);
 });

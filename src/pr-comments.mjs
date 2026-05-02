@@ -45,22 +45,78 @@ function resolveCommentBotTokenEnv(workerClass) {
   return WORKER_CLASS_TO_BOT_TOKEN_ENV[workerClass] || null;
 }
 
-// Render a worker-supplied bullet list with redaction + caps applied.
-// Empty (after filtering) → returns the placeholder text.
+// Wrap untrusted text in a fenced code block so any markdown inside
+// (mentions, autolinks, headings, task lists, raw HTML, issue
+// references like "fixes #123") is rendered as inert plaintext on
+// GitHub. The fence width auto-grows to be longer than any backtick
+// run inside the content — otherwise a worker dumping ```` would
+// terminate our fence early and re-enable rendering of subsequent
+// content.
+function buildSafeFenceWidth(content) {
+  const text = String(content ?? '');
+  let width = 3;
+  // GitHub fences support up to ~10 backticks; any reasonable run is
+  // bounded by the content's longest run + 1.
+  const runs = text.match(/`+/g) || [];
+  for (const run of runs) {
+    if (run.length >= width) {
+      width = run.length + 1;
+    }
+  }
+  return width;
+}
+
+// Wrap a single sanitized string in a code fence. We use `text` as
+// the language hint — that disables syntax highlighting AND ensures
+// the renderer treats the inside as literal characters (no
+// `@mentions`, no autolinks, no GFM extensions).
+function fenceUntrustedText(text) {
+  const fence = '`'.repeat(buildSafeFenceWidth(text));
+  return `${fence}text\n${text}\n${fence}`;
+}
+
+// Render a worker-supplied bullet list with redaction + caps + markdown
+// neutralization. Each item lives inside its own fenced code block so
+// that worker-injected `@org/team` mentions, autolinks, and raw HTML
+// stay inert. Empty (after filtering) → returns the placeholder text.
 function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
   const safe = redactBulletList(items, {
     perItemLimit: BULLET_LIST_PER_ITEM_MAX_CHARS,
     maxItems: BULLET_LIST_MAX_ITEMS,
   });
   if (!safe.length) return emptyText;
-  return safe.map((s) => `- ${s}`).join('\n');
+  // Use a sub-list with each item rendered as a fenced inline-style
+  // block so list structure remains visible but content is inert.
+  return safe.map((s) => `- ${fenceUntrustedText(s)}`).join('\n\n');
 }
 
-// Sanitize a free-text field (summary, rereview.reason). Redacts
-// sensitive substrings and caps length so a runaway worker can't
-// dump megabytes of markdown into a PR comment.
+// Sanitize a free-text field for use in a BLOCK context (the
+// Summary section). Redacts sensitive substrings, caps length, then
+// wraps in a fenced code block so any markdown the worker tried to
+// inject (mentions, autolinks, headings, task lists, HTML) renders
+// as plaintext. Redaction is not sanitization — markdown injection
+// from an untrusted source is a separate concern.
 function sanitizeFreeText(text, limit) {
-  return redactAndCap(String(text ?? '').trim(), limit);
+  const redacted = redactAndCap(String(text ?? '').trim(), limit);
+  if (!redacted) return '';
+  return fenceUntrustedText(redacted);
+}
+
+// Sanitize a free-text field for use INLINE (the rereview status
+// line). Redacts secrets, caps length, collapses whitespace to a
+// single space (no embedded newlines that would break out of the
+// inline context), wraps in single-backtick inline code, and
+// escapes any backticks the content tries to use to break out.
+// Backtick wrapping in GitHub's renderer is sufficient to disable
+// `@mentions`, autolinks, and HTML inside it.
+function sanitizeInlineText(text, limit) {
+  const redacted = redactAndCap(String(text ?? '').trim().replace(/\s+/g, ' '), limit);
+  if (!redacted) return '';
+  // GFM inline code: backticks inside need to be quoted with longer
+  // backtick runs. Easiest robust path: replace any backtick with U+200B
+  // (zero-width space) before wrapping, so the wrapper can stay 1-tick.
+  const safe = redacted.replace(/`/g, '​`​');
+  return `\`${safe}\``;
 }
 
 function buildRemediationOutcomeCommentBody({
@@ -173,14 +229,14 @@ function buildRemediationOutcomeCommentBody({
       lines.push('**Re-review requested:** no');
     }
   } else if (reReview.triggered) {
-    const reasonText = reReview.reason ? sanitizeFreeText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
+    const reasonText = reReview.reason ? sanitizeInlineText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
     lines.push(`**Re-review status:** queued${reasonText ? ` — ${reasonText}` : ''}`);
   } else if (reReview.status === 'already-pending') {
-    const reasonText = reReview.reason ? sanitizeFreeText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
+    const reasonText = reReview.reason ? sanitizeInlineText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
     lines.push(`**Re-review status:** already pending${reasonText ? ` — ${reasonText}` : ''}`);
   } else {
     const blockedReason = reReview.outcomeReason || reReview.status || 'unknown';
-    const reasonText = reReview.reason ? sanitizeFreeText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
+    const reasonText = reReview.reason ? sanitizeInlineText(reReview.reason, REREVIEW_REASON_MAX_CHARS) : '';
     lines.push(`**Re-review status:** **BLOCKED** (\`${blockedReason}\`)${reasonText ? ` — worker reason: ${reasonText}` : ''}`);
   }
 

@@ -557,7 +557,7 @@ test('buildRemediationReply and validateRemediationReply accept a re-review requ
   assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
 });
 
-test('validateRemediationReply rejects non-string validation and blocker entries', () => {
+test('validateRemediationReply rejects non-string validation entries', () => {
   const job = buildFollowUpJob({
     repo: 'laceyenterprises/clio',
     prNumber: 42,
@@ -586,6 +586,23 @@ test('validateRemediationReply rejects non-string validation and blocker entries
     }, { expectedJob: job }),
     /validation\[1\] must be a non-empty string/
   );
+});
+
+test('validateRemediationReply rejects legacy string-array blockers (must be structured objects)', () => {
+  // The original schema treated blockers as a string array. The
+  // updated contract requires per-entry { finding, reasoning } so a
+  // hard-exit blocker on finding 3 of a multi-finding review can be
+  // mapped back to the originating finding. Legacy string entries
+  // are rejected outright — the renderer would have no finding to
+  // anchor the block on.
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 42,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nTighten null handling.',
+    reviewPostedAt: '2026-04-21T07:46:00.000Z',
+    critical: false,
+  });
 
   assert.throws(
     () => validateRemediationReply({
@@ -597,13 +614,94 @@ test('validateRemediationReply rejects non-string validation and blocker entries
       outcome: 'blocked',
       summary: 'Blocked on missing credential.',
       validation: [],
-      blockers: ['waiting on token', '   '],
-      reReview: {
-        requested: false,
-        reason: null,
-      },
+      blockers: ['waiting on token'],
+      reReview: { requested: false, reason: null },
     }, { expectedJob: job }),
-    /blockers\[1\] must be a non-empty string/
+    /blockers\[0\] must be an object/
+  );
+});
+
+test('validateRemediationReply accepts structured blockers with finding+reasoning', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 60,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nThree findings.',
+    reviewPostedAt: '2026-05-02T14:00:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'blocked',
+    summary: 'Hard exit on finding 3.',
+    validation: ['npm test'],
+    blockers: [
+      {
+        finding: 'Reviewer wants a destructive schema migration on a 50M-row table.',
+        reasoning: 'Migration requires DBA approval; not within worker authority.',
+        needsHumanInput: 'DBA approval + maintenance window',
+      },
+    ],
+    reReview: { requested: false, reason: null },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply rejects malformed blockers[] entries', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 61,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T15:00:00.000Z',
+    critical: false,
+  });
+
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'blocked',
+    summary: 'Stopped on a hard exit.',
+    validation: [],
+    addressed: [],
+    pushback: [],
+    reReview: { requested: false, reason: null },
+  };
+
+  // Missing finding.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, blockers: [{ reasoning: 'no finding here' }] },
+      { expectedJob: job }
+    ),
+    /blockers\[0\]\.finding must be a non-empty string/
+  );
+
+  // Has finding but neither reasoning nor needsHumanInput.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, blockers: [{ finding: 'X' }] },
+      { expectedJob: job }
+    ),
+    /blockers\[0\] must include a non-empty reasoning or needsHumanInput field/
+  );
+
+  // String entry rejected (legacy form).
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, blockers: ['string-form'] },
+      { expectedJob: job }
+    ),
+    /blockers\[0\] must be an object/
   );
 });
 
@@ -831,6 +929,336 @@ test('validateRemediationReply rejects malformed pushback[] entries', () => {
       { expectedJob: job }
     ),
     /pushback\[0\] must be an object/
+  );
+});
+
+// ── Cross-field semantic invariants ─────────────────────────────────────────
+//
+// The contract claims: populated `blockers` is a hard exit, so
+// `reReview.requested` must be false. Without these tests the contract
+// is documentation-only — a contradictory reply slips through and
+// corrupts queue state (rereview re-arms while the PR comment also
+// claims human intervention is required).
+
+test('validateRemediationReply rejects populated blockers + reReview.requested = true', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 71,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T16:00:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'partial',
+      summary: 'Asking for re-review while also marking a hard exit.',
+      validation: ['npm test'],
+      blockers: [
+        { finding: 'Need DBA window', reasoning: 'cannot proceed without it' },
+      ],
+      reReview: { requested: true, reason: 'wants confirmation' },
+    }, { expectedJob: job }),
+    /blockers are populated but reReview\.requested is true/
+  );
+});
+
+test('validateRemediationReply rejects outcome=blocked with empty blockers', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 72,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T16:01:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'blocked',
+      summary: 'Blocked but no blockers listed.',
+      validation: [],
+      blockers: [],
+      reReview: { requested: false, reason: null },
+    }, { expectedJob: job }),
+    /outcome is "blocked" but blockers is empty/
+  );
+});
+
+test('validateRemediationReply rejects outcome=blocked with reReview.requested = true', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 73,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T16:02:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'blocked',
+      summary: 'Hard exit but also re-queue.',
+      validation: [],
+      // Note: this trips the populated-blockers-with-rereview rule
+      // first; both rules cover this combination.
+      blockers: [
+        { finding: 'X', reasoning: 'cannot proceed' },
+      ],
+      reReview: { requested: true, reason: 'still want a pass' },
+    }, { expectedJob: job }),
+    /blockers are populated but reReview\.requested is true|outcome is "blocked" but reReview\.requested is true/
+  );
+});
+
+test('validateRemediationReply rejects outcome=completed with non-empty blockers', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 74,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T16:03:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'completed',
+      summary: 'Claims completion while listing blockers.',
+      validation: ['npm test'],
+      blockers: [
+        { finding: 'X', reasoning: 'still pending' },
+      ],
+      reReview: { requested: false, reason: null },
+    }, { expectedJob: job }),
+    /outcome is "completed" but blockers is non-empty/
+  );
+});
+
+test('validateRemediationReply accepts outcome=blocked with reReview.requested = false and a populated blockers list', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 75,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T16:04:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'blocked',
+    summary: 'Hit a hard exit on the destructive migration finding.',
+    validation: ['npm test'],
+    blockers: [
+      {
+        finding: 'Reviewer asks for a destructive schema change.',
+        reasoning: 'Worker has no authority to schedule a DBA window.',
+      },
+    ],
+    reReview: { requested: false, reason: null },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+// ── Placeholder/template-text rejection ─────────────────────────────────────
+
+test('validateRemediationReply rejects placeholder summary text from the prompt template', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 80,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T17:00:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'completed',
+      // Verbatim from the prompt's contract example.
+      summary: 'Replace this with a short remediation summary.',
+      validation: ['npm test'],
+      blockers: [],
+      reReview: { requested: false, reason: null },
+    }, { expectedJob: job }),
+    /summary contains placeholder\/example text/
+  );
+});
+
+test('validateRemediationReply rejects placeholder text in addressed/pushback/blockers entries', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 81,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T17:01:00.000Z',
+    critical: false,
+  });
+
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Did the work.',
+    validation: ['npm test'],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  // Placeholder copied from the prompt into addressed[].finding.
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [
+          {
+            finding: 'Replace with the review finding this entry addresses.',
+            action: 'Real action.',
+          },
+        ],
+      },
+      { expectedJob: job }
+    ),
+    /addressed\[0\]\.finding contains placeholder\/example text/
+  );
+
+  // Placeholder copied into addressed[].action.
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [
+          {
+            finding: 'Real finding.',
+            action: 'Replace with what you did to address it.',
+          },
+        ],
+      },
+      { expectedJob: job }
+    ),
+    /addressed\[0\]\.action contains placeholder\/example text/
+  );
+
+  // Placeholder copied into addressed[].files[].
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [
+          {
+            finding: 'Real finding.',
+            action: 'Real action.',
+            files: ['Optional list of files changed for this finding.'],
+          },
+        ],
+      },
+      { expectedJob: job }
+    ),
+    /addressed\[0\]\.files\[0\] contains placeholder\/example text/
+  );
+
+  // Placeholder copied into pushback[].finding.
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [],
+        pushback: [
+          {
+            finding: 'Replace with a finding you deliberately did NOT change the code on.',
+            reasoning: 'Out of scope.',
+          },
+        ],
+      },
+      { expectedJob: job }
+    ),
+    /pushback\[0\]\.finding contains placeholder\/example text/
+  );
+
+  // Placeholder copied into blockers[].reasoning.
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [],
+        outcome: 'blocked',
+        reReview: { requested: false, reason: null },
+        blockers: [
+          {
+            finding: 'Real blocker finding.',
+            reasoning: 'Replace with one sharp sentence on why you disagreed.',
+          },
+        ],
+      },
+      { expectedJob: job }
+    ),
+    /blockers\[0\]\.reasoning contains placeholder\/example text/
+  );
+});
+
+test('validateRemediationReply rejects placeholder text in reReview.reason', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 82,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T17:02:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'completed',
+      summary: 'Fixed everything.',
+      validation: ['npm test'],
+      blockers: [],
+      reReview: {
+        requested: true,
+        reason: 'Replace with the reason this PR should receive another adversarial review pass.',
+      },
+    }, { expectedJob: job }),
+    /reReview\.reason contains placeholder\/example text/
   );
 });
 

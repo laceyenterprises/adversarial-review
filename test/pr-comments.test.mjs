@@ -139,7 +139,12 @@ test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) flags h
       outcome: 'partial',
       summary: 'Addressed two of three findings; the third needs schema migration.',
       validation: [],
-      blockers: ['Schema migration requires DBA review'],
+      blockers: [
+        {
+          finding: 'Reviewer asks for a destructive schema migration.',
+          reasoning: 'Schema migration requires DBA review.',
+        },
+      ],
     },
   });
   assert.match(body, /round 6 of 6/);
@@ -147,7 +152,11 @@ test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) flags h
   assert.match(body, /Human intervention required/);
   assert.match(body, /exhausted its bounded round cap/);
   assert.match(body, /Blockers/);
-  assert.match(body, /```text\nSchema migration requires DBA review\n```/);
+  // Structured blockers render with both Finding and Reasoning lines
+  // so the next human can map the hard-exit back to the originating
+  // review finding.
+  assert.match(body, /Finding: Reviewer asks for a destructive schema migration\./);
+  assert.match(body, /Reasoning: Schema migration requires DBA review\./);
   // No re-review requested in this state.
   assert.match(body, /Re-review requested:\*\*\s*no/);
 });
@@ -164,7 +173,12 @@ test('buildRemediationOutcomeCommentBody on stopped (worker chose blocked) flags
       outcome: 'blocked',
       summary: 'Cannot proceed without secrets the worker does not have.',
       validation: [],
-      blockers: ['Missing OP_SERVICE_ACCOUNT_TOKEN'],
+      blockers: [
+        {
+          finding: 'Reviewer asks for a fix that needs the deploy bot token.',
+          reasoning: 'Missing OP_SERVICE_ACCOUNT_TOKEN',
+        },
+      ],
     },
   });
   assert.match(body, /Human intervention required/);
@@ -375,7 +389,12 @@ test('worker blockers mask /private/var/folders/ temp paths', () => {
       outcome: 'blocked',
       summary: 'cannot proceed',
       validation: [],
-      blockers: ['Cannot read /private/var/folders/k7/abc123/T/tmp.XXX/data.json'],
+      blockers: [
+        {
+          finding: 'Need to inspect the temp artifact noted in the review.',
+          reasoning: 'Cannot read /private/var/folders/k7/abc123/T/tmp.XXX/data.json',
+        },
+      ],
     },
     reReview: { requested: false },
   });
@@ -433,7 +452,12 @@ test('buildRemediationOutcomeCommentBody redacts tokens in validation and blocke
       outcome: 'completed',
       summary: 'Done.',
       validation: ['curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig" https://example.com/api'],
-      blockers: ['Could not verify token sk-ant-test_xxxxxxxxxxxxxxxxxxxx — please rotate'],
+      blockers: [
+        {
+          finding: 'Reviewer asked us to confirm the bot credential.',
+          reasoning: 'Could not verify token sk-ant-test_xxxxxxxxxxxxxxxxxxxx — please rotate',
+        },
+      ],
     },
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
@@ -695,7 +719,10 @@ test('blockers entries redact /home/<user>/... paths (Linux operator path)', () 
       summary: 'cannot proceed',
       validation: [],
       blockers: [
-        'Cannot read /home/runner/work/adversarial-review/data/reviews.db — permission denied',
+        {
+          finding: 'Reviewer wants logs from the runner host.',
+          reasoning: 'Cannot read /home/runner/work/adversarial-review/data/reviews.db — permission denied',
+        },
       ],
     },
   });
@@ -1058,7 +1085,11 @@ test('buildRemediationOutcomeCommentBody renders all four sections (summary, add
         { finding: 'Reviewer wants a full refactor', reasoning: 'Out of scope.' },
       ],
       blockers: [
-        'Schema migration requires DBA review.',
+        {
+          finding: 'Reviewer asks for the schema migration.',
+          reasoning: 'Schema migration requires DBA review.',
+          needsHumanInput: 'DBA approval + maintenance window',
+        },
       ],
     },
     reReview: { requested: false },
@@ -1068,6 +1099,12 @@ test('buildRemediationOutcomeCommentBody renders all four sections (summary, add
   assert.match(body, /\*\*Addressed findings\*\*/);
   assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
   assert.match(body, /\*\*Blockers\*\*/);
+  // Structured blocker carries the originating review finding and a
+  // needsHumanInput line so the human reviewer can see exactly which
+  // finding was deferred and what input is needed.
+  assert.match(body, /Finding: Reviewer asks for the schema migration\./);
+  assert.match(body, /Reasoning: Schema migration requires DBA review\./);
+  assert.match(body, /Needs human input: DBA approval \+ maintenance window/);
   // Order matters for readability — the reader should see what was
   // done before what wasn't.
   const idxAddressed = body.indexOf('Addressed findings');

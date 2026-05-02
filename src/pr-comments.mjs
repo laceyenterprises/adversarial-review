@@ -153,6 +153,40 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
   return formatRedactedBulletList(formatted, emptyText);
 }
 
+// Render the worker's blockers list. `blockers[]` is the hard-exit
+// slot — findings the worker could not resolve at all and that
+// require human input to move forward. The structured form
+// `{ finding, reasoning?, needsHumanInput? }` ties each blocker back
+// to the originating review finding so the next human can see, for a
+// multi-finding review, exactly which item is unresolved.
+//
+// A legacy reply that still emits string entries (predates the
+// structured contract) renders as a plain bullet — degraded but
+// readable. New replies always come through the validator which
+// rejects strings, so this fallback only fires on imported / hand-
+// edited terminal job records.
+function formatBlockersList(items, emptyText = '_(none reported)_') {
+  if (!Array.isArray(items) || items.length === 0) return emptyText;
+  const formatted = items
+    .map((entry) => {
+      if (typeof entry === 'string') {
+        const trimmed = entry.trim();
+        return trimmed || null;
+      }
+      if (!entry || typeof entry !== 'object') return null;
+      const finding = String(entry.finding ?? '').trim();
+      if (!finding) return null;
+      const reasoning = String(entry.reasoning ?? '').trim();
+      const needsHumanInput = String(entry.needsHumanInput ?? '').trim();
+      const lines = [`Finding: ${finding}`];
+      if (reasoning) lines.push(`Reasoning: ${reasoning}`);
+      if (needsHumanInput) lines.push(`Needs human input: ${needsHumanInput}`);
+      return lines.join('\n');
+    })
+    .filter(Boolean);
+  return formatRedactedBulletList(formatted, emptyText);
+}
+
 // Sanitize a free-text field for use in a BLOCK context (the
 // Summary section). Redacts sensitive substrings (tokens AND
 // host-local filesystem paths — workers run inside a checked-out
@@ -378,7 +412,7 @@ function buildRemediationOutcomeCommentBody({
     lines.push('');
     lines.push('**Blockers**');
     lines.push('');
-    lines.push(formatRedactedBulletList(reply.blockers));
+    lines.push(formatBlockersList(reply.blockers));
   }
 
   // Surface the actual rereview outcome (not just the worker's request bit)

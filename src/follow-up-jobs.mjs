@@ -112,9 +112,10 @@ function buildRemediationReply({
   // section to print." Workers that DO report per-finding state get
   // structured rendering in the public PR comment so the reader can
   // see, for each blocking issue from the adversarial review, whether
-  // it was fixed (`addressed`) or deliberately disagreed with
-  // (`pushback`). `blockers` keeps its prior meaning: hard-exit items
-  // the worker could not resolve at all.
+  // it was fixed (`addressed`), deliberately disagreed with
+  // (`pushback`), or hard-exited on (`blockers`). All three carry a
+  // per-entry `finding` so the next human can map each entry back to
+  // the originating review item without guessing.
   addressed = [],
   pushback = [],
   reReviewRequested = false,
@@ -145,6 +146,36 @@ function buildRemediationReply({
   };
 }
 
+// Known placeholder/template strings that the prompt prefills (or used
+// to prefill) as shape examples for the worker. Templated agent
+// outputs routinely leak example text unchanged when the worker copies
+// the contract verbatim — catching it here keeps the placeholders out
+// of the public PR comment AND prevents a fake-accountability reply
+// from flipping `reReview.requested = true` and burning another round.
+//
+// Both patterns are anchored at the start of the trimmed string so
+// they cannot fire on legitimate prose that happens to mention
+// "replace with" or "optional list of files" in passing — only on
+// strings that lead with the template wording.
+const PLACEHOLDER_PATTERNS = [
+  /^Replace (this )?with\b/i,
+  /^Optional list of files\b/i,
+];
+
+function assertNoPlaceholderText(value, locationLabel) {
+  if (typeof value !== 'string') return;
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  for (const pattern of PLACEHOLDER_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      throw new Error(
+        `Remediation reply ${locationLabel} contains placeholder/example text ` +
+          `from the prompt template; replace it with real content before submitting`
+      );
+    }
+  }
+}
+
 function validateStringArrayField(items, fieldName) {
   if (!Array.isArray(items)) {
     throw new Error(`Remediation reply ${fieldName} must be an array`);
@@ -154,6 +185,7 @@ function validateStringArrayField(items, fieldName) {
     if (typeof item !== 'string' || !item.trim()) {
       throw new Error(`Remediation reply ${fieldName}[${index}] must be a non-empty string`);
     }
+    assertNoPlaceholderText(item, `${fieldName}[${index}]`);
   });
 }
 
@@ -176,6 +208,8 @@ function validateAddressedField(items) {
     if (typeof entry.action !== 'string' || !entry.action.trim()) {
       throw new Error(`Remediation reply addressed[${index}].action must be a non-empty string`);
     }
+    assertNoPlaceholderText(entry.finding, `addressed[${index}].finding`);
+    assertNoPlaceholderText(entry.action, `addressed[${index}].action`);
     if (entry.files !== undefined) {
       if (!Array.isArray(entry.files)) {
         throw new Error(`Remediation reply addressed[${index}].files must be an array if provided`);
@@ -184,6 +218,7 @@ function validateAddressedField(items) {
         if (typeof f !== 'string' || !f.trim()) {
           throw new Error(`Remediation reply addressed[${index}].files[${fi}] must be a non-empty string`);
         }
+        assertNoPlaceholderText(f, `addressed[${index}].files[${fi}]`);
       });
     }
   });
@@ -206,6 +241,50 @@ function validatePushbackField(items) {
     }
     if (typeof entry.reasoning !== 'string' || !entry.reasoning.trim()) {
       throw new Error(`Remediation reply pushback[${index}].reasoning must be a non-empty string`);
+    }
+    assertNoPlaceholderText(entry.finding, `pushback[${index}].finding`);
+    assertNoPlaceholderText(entry.reasoning, `pushback[${index}].reasoning`);
+  });
+}
+
+// blockers[] entries are { finding, reasoning?, needsHumanInput? } —
+// `finding` always required, plus at least one of `reasoning` or
+// `needsHumanInput` (both can be present). Same per-finding shape as
+// addressed[]/pushback[] so the hard-exit path can also identify
+// which review finding it corresponds to. Without this, a multi-
+// finding review that hard-exits on finding 3 produces a blocker the
+// next human cannot trace back to a specific review item — defeats
+// the per-finding accountability contract.
+function validateBlockersField(items) {
+  if (!Array.isArray(items)) {
+    throw new Error('Remediation reply blockers must be an array');
+  }
+  items.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Remediation reply blockers[${index}] must be an object`);
+    }
+    if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
+      throw new Error(`Remediation reply blockers[${index}].finding must be a non-empty string`);
+    }
+    const hasReasoning = typeof entry.reasoning === 'string' && entry.reasoning.trim();
+    const hasNeedsHumanInput = typeof entry.needsHumanInput === 'string' && entry.needsHumanInput.trim();
+    if (!hasReasoning && !hasNeedsHumanInput) {
+      throw new Error(
+        `Remediation reply blockers[${index}] must include a non-empty reasoning or needsHumanInput field`
+      );
+    }
+    if (entry.reasoning !== undefined && !hasReasoning) {
+      throw new Error(`Remediation reply blockers[${index}].reasoning must be a non-empty string when provided`);
+    }
+    if (entry.needsHumanInput !== undefined && !hasNeedsHumanInput) {
+      throw new Error(`Remediation reply blockers[${index}].needsHumanInput must be a non-empty string when provided`);
+    }
+    assertNoPlaceholderText(entry.finding, `blockers[${index}].finding`);
+    if (hasReasoning) {
+      assertNoPlaceholderText(entry.reasoning, `blockers[${index}].reasoning`);
+    }
+    if (hasNeedsHumanInput) {
+      assertNoPlaceholderText(entry.needsHumanInput, `blockers[${index}].needsHumanInput`);
     }
   });
 }
@@ -238,6 +317,7 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
   if (typeof reply.summary !== 'string' || !reply.summary.trim()) {
     throw new Error('Remediation reply summary is required');
   }
+  assertNoPlaceholderText(reply.summary, 'summary');
 
   const allowedOutcomes = new Set(['completed', 'blocked', 'partial']);
   if (!allowedOutcomes.has(reply.outcome)) {
@@ -245,7 +325,7 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
   }
 
   validateStringArrayField(reply.validation, 'validation');
-  validateStringArrayField(reply.blockers, 'blockers');
+  validateBlockersField(reply.blockers);
 
   // addressed[] / pushback[] are additive — replies that omit them
   // entirely are still valid (legacy worker output, jobs created before
@@ -269,6 +349,48 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
 
   if (reply.reReview.requested && (typeof reply.reReview.reason !== 'string' || !reply.reReview.reason.trim())) {
     throw new Error('Remediation reply reReview.reason is required when reReview.requested is true');
+  }
+
+  if (reply.reReview.requested) {
+    assertNoPlaceholderText(reply.reReview.reason, 'reReview.reason');
+  }
+
+  // Cross-field semantic invariants. Without these the prompt's hard
+  // contract ("populate blockers → set reReview.requested = false")
+  // is documentation-only — a contradictory reply slips into
+  // reconciliation and corrupts queue state (e.g. `outcome: blocked`
+  // with `reReview.requested = true` re-arms the watcher AND posts a
+  // PR comment claiming both "human intervention required" and
+  // "re-review queued" for the same unresolved state).
+  const blockersPopulated = reply.blockers.length > 0;
+
+  if (blockersPopulated && reply.reReview.requested) {
+    throw new Error(
+      'Remediation reply contradicts itself: blockers are populated but reReview.requested is true. ' +
+        'A populated blockers list is a hard exit; set reReview.requested = false.'
+    );
+  }
+
+  if (reply.outcome === 'blocked') {
+    if (!blockersPopulated) {
+      throw new Error(
+        'Remediation reply outcome is "blocked" but blockers is empty. ' +
+          'A blocked outcome must list the unresolved blockers.'
+      );
+    }
+    if (reply.reReview.requested) {
+      throw new Error(
+        'Remediation reply outcome is "blocked" but reReview.requested is true. ' +
+          'A blocked outcome must set reReview.requested = false.'
+      );
+    }
+  }
+
+  if (reply.outcome === 'completed' && blockersPopulated) {
+    throw new Error(
+      'Remediation reply outcome is "completed" but blockers is non-empty. ' +
+        'Use outcome "partial" or "blocked" when unresolved blockers remain.'
+    );
   }
 
   if (expectedJob) {

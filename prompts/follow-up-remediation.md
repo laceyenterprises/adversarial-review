@@ -30,18 +30,54 @@ lists in the reply JSON — they are not redundant, they encode
   - `action`: what you actually did — code change, test added, doc
     updated, etc. Be specific; "addressed the issue" is not useful.
   - `files` (optional): the files you changed for this finding.
+
+  Shape (write your own values; do not copy this verbatim):
+
+  ```
+  { "finding": "Race in retry path can double-submit.",
+    "action":  "Added an idempotency token + dedupe check.",
+    "files":   ["src/worker.mjs"] }
+  ```
+
 - `pushback[]` → you read the finding, deliberately decided **not** to
   change the code, and want to record the reasoning. Use this when the
   reviewer is wrong, the finding is out of scope for this PR, or the
   fix would cost more than the bug. Each entry needs:
   - `finding`: the finding you are pushing back on.
   - `reasoning`: why you disagreed (one sentence, sharp).
+
+  Shape:
+
+  ```
+  { "finding":  "Reviewer asked to refactor the entire dispatch module.",
+    "reasoning": "Out of scope for this PR; tracked as separate ticket LAC-99." }
+  ```
+
   Pushback is **not** a hard exit — you should still set
   `reReview.requested = true` if the rest of the review is addressed.
+
 - `blockers[]` → hard exit. You cannot proceed without human input
   (missing secrets, design decision required, architectural
   disagreement large enough that you should not unilaterally resolve
-  it). When you populate `blockers`, set `reReview.requested = false`.
+  it). Each entry needs:
+  - `finding`: the review finding you are blocking on (so the next
+    human can identify which item is unresolved).
+  - `reasoning` and/or `needsHumanInput`: why this is a hard exit and
+    what the human needs to decide / provide. At least one of the two
+    must be present; both can be.
+
+  Shape:
+
+  ```
+  { "finding":         "Reviewer asks for a schema migration on a 50M-row table.",
+    "reasoning":       "Migration is destructive and needs a DBA window I do not have authority to schedule.",
+    "needsHumanInput": "DBA approval + maintenance window" }
+  ```
+
+  When you populate `blockers`, you must also:
+  - set `reReview.requested = false`
+  - set `outcome = "blocked"` (or `"partial"` if you also addressed
+    other findings)
 
 A round that addresses every finding produces an `addressed[]` of
 length N and empty `pushback[]` / `blockers[]`. A round that fixed 4
@@ -49,7 +85,22 @@ of 5 findings and pushed back on the 5th produces `addressed[]` of
 length 4 and `pushback[]` of length 1, with `reReview.requested = true`.
 A round that hits a hard exit on finding 3 produces partial entries in
 `addressed[]` for the work that did happen plus a `blockers[]` entry,
-with `reReview.requested = false`.
+with `reReview.requested = false` and `outcome = "blocked"` (or
+`"partial"`).
+
+The validator enforces these invariants — it will reject a reply that
+sets `reReview.requested = true` while `blockers` is non-empty, a
+reply with `outcome: "blocked"` and an empty `blockers` list, or a
+reply with `outcome: "completed"` and a non-empty `blockers` list.
+Do not try to fight the contract; the constraints exist so the public
+PR comment never claims contradictory things about the same round.
+
+The contract example below uses **empty arrays** for `addressed`,
+`pushback`, and `blockers`. That is intentional — replace the empty
+arrays with the entries you actually want to record. Do **not** copy
+the example shapes from this section verbatim; the validator
+recognizes the prompt's placeholder strings (e.g. anything beginning
+with `Replace with…`) and will reject the reply.
 
 **Why this exists.** The PR comment that gets posted from your reply
 is the only durable record of how you handled each finding. Without

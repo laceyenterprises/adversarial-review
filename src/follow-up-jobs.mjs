@@ -106,6 +106,18 @@ function buildRemediationReply({
   summary,
   validation = [],
   blockers = [],
+  // Per-finding accountability fields. Both default to [] for backward
+  // compatibility — older worker replies that predate this schema
+  // simply omit them, and the renderer treats an empty array as "no
+  // section to print." Workers that DO report per-finding state get
+  // structured rendering in the public PR comment so the reader can
+  // see, for each blocking issue from the adversarial review, whether
+  // it was fixed (`addressed`), deliberately disagreed with
+  // (`pushback`), or hard-exited on (`blockers`). All three carry a
+  // per-entry `finding` so the next human can map each entry back to
+  // the originating review item without guessing.
+  addressed = [],
+  pushback = [],
   reReviewRequested = false,
   reReviewReason = null,
 }) {
@@ -122,6 +134,8 @@ function buildRemediationReply({
     outcome,
     summary,
     validation,
+    addressed,
+    pushback,
     blockers,
     reReview: {
       requested: Boolean(reReviewRequested),
@@ -130,6 +144,53 @@ function buildRemediationReply({
         : null,
     },
   };
+}
+
+// Known placeholder/template strings that the prompt prefills (or used
+// to prefill) as shape examples for the worker. Templated agent
+// outputs routinely leak example text unchanged when the worker copies
+// the contract verbatim — catching it here keeps the placeholders out
+// of the public PR comment AND prevents a fake-accountability reply
+// from flipping `reReview.requested = true` and burning another round.
+//
+// EXACT-STRING matching only. An earlier version of this check used
+// prefix patterns (`/^Replace (this )?with\b/i`, `/^Optional list of
+// files\b/i`) that produced false positives on legitimate review
+// language — a real finding like "Replace this regex; it can backtrack
+// exponentially" or a real action like "Replace with parameterized
+// queries" would hard-fail validation and stop the remediation round
+// as `invalid-remediation-reply`. The exact-string set below covers the
+// strings the current prompt template (`src/follow-up-remediation.mjs`)
+// emits, plus historical placeholders that earlier prompt versions
+// included in the contract example so a worker pulling a stale template
+// still gets caught. Whitespace at either end is trimmed before
+// comparison; otherwise the match is byte-exact.
+const PLACEHOLDER_EXACT_STRINGS = new Set([
+  // Current prompt placeholders.
+  'Replace this with a short remediation summary.',
+  'Replace with validation you ran.',
+  // Historical per-finding placeholders from earlier prompt versions
+  // (commit c74eeb6 era). Workers that reused a stale prompt template
+  // could still emit these.
+  'Replace with the review finding this entry addresses.',
+  'Replace with what you did to address it.',
+  'Optional list of files changed for this finding.',
+  'Replace with a finding you deliberately did NOT change the code on.',
+  'Replace with a finding you deliberately did NOT change the code on. Remove this entry entirely if you addressed everything.',
+  'Replace with one sharp sentence on why you disagreed.',
+  'Replace with the reason this PR should receive another adversarial review pass.',
+]);
+
+function assertNoPlaceholderText(value, locationLabel) {
+  if (typeof value !== 'string') return;
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  if (PLACEHOLDER_EXACT_STRINGS.has(trimmed)) {
+    throw new Error(
+      `Remediation reply ${locationLabel} contains placeholder/example text ` +
+        `from the prompt template; replace it with real content before submitting`
+    );
+  }
 }
 
 function validateStringArrayField(items, fieldName) {
@@ -141,7 +202,236 @@ function validateStringArrayField(items, fieldName) {
     if (typeof item !== 'string' || !item.trim()) {
       throw new Error(`Remediation reply ${fieldName}[${index}] must be a non-empty string`);
     }
+    assertNoPlaceholderText(item, `${fieldName}[${index}]`);
   });
+}
+
+// addressed[] entries are { finding, action, files? } where files is
+// an optional array of strings (the worker can list paths it touched
+// while addressing the finding). Per-entry validation rejects a
+// missing or empty finding/action so the public PR comment never
+// renders an empty bullet, but tolerates files being absent.
+function validateAddressedField(items) {
+  if (!Array.isArray(items)) {
+    throw new Error('Remediation reply addressed must be an array');
+  }
+  items.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Remediation reply addressed[${index}] must be an object`);
+    }
+    if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
+      throw new Error(`Remediation reply addressed[${index}].finding must be a non-empty string`);
+    }
+    if (typeof entry.action !== 'string' || !entry.action.trim()) {
+      throw new Error(`Remediation reply addressed[${index}].action must be a non-empty string`);
+    }
+    assertNoPlaceholderText(entry.finding, `addressed[${index}].finding`);
+    assertNoPlaceholderText(entry.action, `addressed[${index}].action`);
+    if (entry.files !== undefined) {
+      if (!Array.isArray(entry.files)) {
+        throw new Error(`Remediation reply addressed[${index}].files must be an array if provided`);
+      }
+      entry.files.forEach((f, fi) => {
+        if (typeof f !== 'string' || !f.trim()) {
+          throw new Error(`Remediation reply addressed[${index}].files[${fi}] must be a non-empty string`);
+        }
+        assertNoPlaceholderText(f, `addressed[${index}].files[${fi}]`);
+      });
+    }
+  });
+}
+
+// pushback[] entries are { finding, reasoning } — both required and
+// non-empty. This is the slot for "I read the finding, decided not to
+// change the code, here's why." Distinct from blockers (hard exit) and
+// addressed (fix applied).
+function validatePushbackField(items) {
+  if (!Array.isArray(items)) {
+    throw new Error('Remediation reply pushback must be an array');
+  }
+  items.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Remediation reply pushback[${index}] must be an object`);
+    }
+    if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
+      throw new Error(`Remediation reply pushback[${index}].finding must be a non-empty string`);
+    }
+    if (typeof entry.reasoning !== 'string' || !entry.reasoning.trim()) {
+      throw new Error(`Remediation reply pushback[${index}].reasoning must be a non-empty string`);
+    }
+    assertNoPlaceholderText(entry.finding, `pushback[${index}].finding`);
+    assertNoPlaceholderText(entry.reasoning, `pushback[${index}].reasoning`);
+  });
+}
+
+// blockers[] entries are EITHER:
+//   - structured object: { finding, reasoning?, needsHumanInput? }
+//     `finding` always required, plus at least one of `reasoning` or
+//     `needsHumanInput` (both can be present). The structured form
+//     ties each blocker back to the originating review finding so the
+//     next human reading the public PR comment can identify exactly
+//     which item is unresolved.
+//   - legacy non-empty string: free-text blocker description.
+//     Predates the structured contract. The renderer in
+//     `pr-comments.mjs` (line ~172) already handles strings; the
+//     validator must also accept them under `schemaVersion: 1` so
+//     previously-persisted reply artifacts (re-read during
+//     reconciliation and comment recovery) do not become invalid data
+//     after deploy. Keeping `schemaVersion: 1` backward-compatible
+//     here is the cheaper of the two paths the reviewer flagged
+//     (versus bumping to v2 + branched validation + migration tests).
+function validateBlockersField(items) {
+  if (!Array.isArray(items)) {
+    throw new Error('Remediation reply blockers must be an array');
+  }
+  items.forEach((entry, index) => {
+    if (typeof entry === 'string') {
+      if (!entry.trim()) {
+        throw new Error(`Remediation reply blockers[${index}] must be a non-empty string`);
+      }
+      assertNoPlaceholderText(entry, `blockers[${index}]`);
+      return;
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Remediation reply blockers[${index}] must be a non-empty string or an object`);
+    }
+    if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
+      throw new Error(`Remediation reply blockers[${index}].finding must be a non-empty string`);
+    }
+    const hasReasoning = typeof entry.reasoning === 'string' && entry.reasoning.trim();
+    const hasNeedsHumanInput = typeof entry.needsHumanInput === 'string' && entry.needsHumanInput.trim();
+    if (!hasReasoning && !hasNeedsHumanInput) {
+      throw new Error(
+        `Remediation reply blockers[${index}] must include a non-empty reasoning or needsHumanInput field`
+      );
+    }
+    if (entry.reasoning !== undefined && !hasReasoning) {
+      throw new Error(`Remediation reply blockers[${index}].reasoning must be a non-empty string when provided`);
+    }
+    if (entry.needsHumanInput !== undefined && !hasNeedsHumanInput) {
+      throw new Error(`Remediation reply blockers[${index}].needsHumanInput must be a non-empty string when provided`);
+    }
+    assertNoPlaceholderText(entry.finding, `blockers[${index}].finding`);
+    if (hasReasoning) {
+      assertNoPlaceholderText(entry.reasoning, `blockers[${index}].reasoning`);
+    }
+    if (hasNeedsHumanInput) {
+      assertNoPlaceholderText(entry.needsHumanInput, `blockers[${index}].needsHumanInput`);
+    }
+  });
+}
+
+// Parse the `## Blocking Issues` section into structured findings. The
+// reviewer prompt (`prompts/reviewer-prompt.md`) requires:
+//   - one bullet item per finding, each with `File:` / `Lines:` /
+//     `Problem:` / `Why it matters:` / `Recommended fix:` fields
+//   - the literal sentinel `- None.` when the section is empty
+// Two render shapes are both compliant with that prompt:
+//   1. one top-level `- File:` bullet per finding, with the rest of
+//      the fields as 2-space-indented continuation lines (no marker)
+//   2. five top-level bullets per finding (`- File:`, `- Lines:`,
+//      `- Problem:`, `- Why it matters:`, `- Recommended fix:`)
+// Both shapes contain exactly one `- File:` field bullet per finding,
+// so the finding-boundary marker is `- File:` (with optional leading
+// whitespace), not "any column-0 dash."
+//
+// Returns `null` when the section is absent (caller opts out of
+// coverage enforcement). Returns `[]` when the section exists but is
+// empty or contains only the `- None.` sentinel. Returns one entry
+// per finding otherwise, with extracted `file` / `lines` / `problem`
+// fields preserved for diagnostics.
+function parseBlockingFindingsSection(reviewBody) {
+  if (typeof reviewBody !== 'string' || !reviewBody.trim()) return null;
+  const match = reviewBody.match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  if (!match) return null;
+  const section = match[1].trim();
+  if (!section) return [];
+  // The reviewer prompt mandates `- None.` as the explicit empty
+  // sentinel. Recognize it (with or without trailing period; tolerate
+  // case variation) before the count step so an empty section is not
+  // miscounted as a finding.
+  const lines = section.split(/\n/);
+  const isSentinelOnly = lines.every((l) => {
+    const t = l.trim();
+    return t === '' || /^-\s+None\.?$/i.test(t);
+  });
+  if (isSentinelOnly) return [];
+
+  const findings = [];
+  let current = null;
+  for (const raw of lines) {
+    const fileMatch = raw.match(/^[ \t]*-[ \t]+File[ \t]*:[ \t]*(.*)$/i);
+    if (fileMatch) {
+      if (current) findings.push(current);
+      current = { file: fileMatch[1].trim() };
+      continue;
+    }
+    if (!current) continue;
+    const linesField = raw.match(/^[ \t]*(?:-[ \t]+)?Lines[ \t]*:[ \t]*(.*)$/i);
+    if (linesField && current.lines === undefined) {
+      current.lines = linesField[1].trim();
+      continue;
+    }
+    const problemField = raw.match(/^[ \t]*(?:-[ \t]+)?Problem[ \t]*:[ \t]*(.*)$/i);
+    if (problemField && current.problem === undefined) {
+      current.problem = problemField[1].trim();
+    }
+  }
+  if (current) findings.push(current);
+  return findings;
+}
+
+function countBlockingFindingsInReview(reviewBody) {
+  const findings = parseBlockingFindingsSection(reviewBody);
+  return findings === null ? null : findings.length;
+}
+
+// Enforce that the reply records the same number of accountability
+// entries as there are blocking findings in the review body, summed
+// across `addressed[]`, `pushback[]`, and `blockers[]`. Without this
+// the prompt's per-finding contract is documentation-only — a worker
+// can omit findings entirely, claim rereview readiness on a subset of
+// the review, and the public PR comment becomes a misleading durable
+// record.
+//
+// Limit of this check (deliberate, documented): it validates count
+// only. It does NOT verify that the worker's free-form `finding`
+// strings semantically correspond to the parsed review findings — a
+// worker could submit N arbitrary strings and pass. Closing that gap
+// requires a richer schema where the worker references findings by
+// stable IDs the prompt provides; that is a future schema bump
+// (tracked as a known follow-up). Free-form-text uniqueness was
+// previously enforced here but removed because it rejected legitimate
+// replies in which two distinct review findings (e.g. the same bug in
+// two files) collapsed to the same paraphrase, with no benefit since
+// distinct strings are not the same as correct strings.
+//
+// Backward-compat: enforced only when the reply opts into the new
+// schema (signaled by either `addressed` or `pushback` being present)
+// AND we can confidently parse the review body's blocking section.
+// Legacy replies (string-array blockers, no addressed/pushback) skip
+// the check so re-reading old persisted artifacts doesn't fail.
+function validateBlockingCoverage(reply, expectedJob) {
+  if (!expectedJob || typeof expectedJob !== 'object') return;
+  const usesNewSchema = reply.addressed !== undefined || reply.pushback !== undefined;
+  if (!usesNewSchema) return;
+
+  const expected = countBlockingFindingsInReview(expectedJob.reviewBody);
+  if (expected === null || expected === 0) return;
+
+  const addressed = Array.isArray(reply.addressed) ? reply.addressed : [];
+  const pushback = Array.isArray(reply.pushback) ? reply.pushback : [];
+  const blockers = Array.isArray(reply.blockers) ? reply.blockers : [];
+  const total = addressed.length + pushback.length + blockers.length;
+
+  if (total !== expected) {
+    throw new Error(
+      `Remediation reply does not account for every blocking finding: ` +
+        `review has ${expected} blocking issue(s), reply records ${total} ` +
+        `(addressed=${addressed.length}, pushback=${pushback.length}, blockers=${blockers.length}). ` +
+        `Each blocking issue must appear exactly once across addressed[], pushback[], or blockers[].`
+    );
+  }
 }
 
 function validateRemediationReply(reply, { expectedJob = null } = {}) {
@@ -172,6 +462,7 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
   if (typeof reply.summary !== 'string' || !reply.summary.trim()) {
     throw new Error('Remediation reply summary is required');
   }
+  assertNoPlaceholderText(reply.summary, 'summary');
 
   const allowedOutcomes = new Set(['completed', 'blocked', 'partial']);
   if (!allowedOutcomes.has(reply.outcome)) {
@@ -179,7 +470,19 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
   }
 
   validateStringArrayField(reply.validation, 'validation');
-  validateStringArrayField(reply.blockers, 'blockers');
+  validateBlockersField(reply.blockers);
+
+  // addressed[] / pushback[] are additive — replies that omit them
+  // entirely are still valid (legacy worker output, jobs created before
+  // this schema landed). Only validate shape when the fields are
+  // present. Workers that emit them get strict enforcement so a
+  // half-formed entry never reaches the public PR comment renderer.
+  if (reply.addressed !== undefined) {
+    validateAddressedField(reply.addressed);
+  }
+  if (reply.pushback !== undefined) {
+    validatePushbackField(reply.pushback);
+  }
 
   if (!reply.reReview || typeof reply.reReview !== 'object' || Array.isArray(reply.reReview)) {
     throw new Error('Remediation reply reReview must be an object');
@@ -191,6 +494,48 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
 
   if (reply.reReview.requested && (typeof reply.reReview.reason !== 'string' || !reply.reReview.reason.trim())) {
     throw new Error('Remediation reply reReview.reason is required when reReview.requested is true');
+  }
+
+  if (reply.reReview.requested) {
+    assertNoPlaceholderText(reply.reReview.reason, 'reReview.reason');
+  }
+
+  // Cross-field semantic invariants. Without these the prompt's hard
+  // contract ("populate blockers → set reReview.requested = false")
+  // is documentation-only — a contradictory reply slips into
+  // reconciliation and corrupts queue state (e.g. `outcome: blocked`
+  // with `reReview.requested = true` re-arms the watcher AND posts a
+  // PR comment claiming both "human intervention required" and
+  // "re-review queued" for the same unresolved state).
+  const blockersPopulated = reply.blockers.length > 0;
+
+  if (blockersPopulated && reply.reReview.requested) {
+    throw new Error(
+      'Remediation reply contradicts itself: blockers are populated but reReview.requested is true. ' +
+        'A populated blockers list is a hard exit; set reReview.requested = false.'
+    );
+  }
+
+  if (reply.outcome === 'blocked') {
+    if (!blockersPopulated) {
+      throw new Error(
+        'Remediation reply outcome is "blocked" but blockers is empty. ' +
+          'A blocked outcome must list the unresolved blockers.'
+      );
+    }
+    if (reply.reReview.requested) {
+      throw new Error(
+        'Remediation reply outcome is "blocked" but reReview.requested is true. ' +
+          'A blocked outcome must set reReview.requested = false.'
+      );
+    }
+  }
+
+  if (reply.outcome === 'completed' && blockersPopulated) {
+    throw new Error(
+      'Remediation reply outcome is "completed" but blockers is non-empty. ' +
+        'Use outcome "partial" or "blocked" when unresolved blockers remain.'
+    );
   }
 
   if (expectedJob) {
@@ -205,6 +550,8 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
     if (reply.prNumber !== expectedJob.prNumber) {
       throw new Error(`Remediation reply prNumber mismatch: expected ${expectedJob.prNumber}, got ${reply.prNumber}`);
     }
+
+    validateBlockingCoverage(reply, expectedJob);
   }
 
   return reply;

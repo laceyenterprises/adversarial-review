@@ -15,6 +15,111 @@ When you finish:
 - Report any blockers or follow-ups that remain.
 - Write the required remediation reply JSON artifact so re-review requests are machine-readable, not prose-only.
 
+## Per-finding accountability (`addressed[]`, `pushback[]`, `blockers[]`)
+
+The reviewer's blocking issues are the primary contract you must
+respond to. For each blocking issue called out in the adversarial
+review you read above, add exactly one entry to one of these three
+lists in the reply JSON — they are not redundant, they encode
+**different decisions**:
+
+- `addressed[]` → you fixed it. One entry per finding, with:
+  - `finding`: a short quote / paraphrase identifying which review
+    finding this entry corresponds to (so a human reading the PR
+    comment can match it back to the review without guessing).
+  - `action`: what you actually did — code change, test added, doc
+    updated, etc. Be specific; "addressed the issue" is not useful.
+  - `files` (optional): the files you changed for this finding.
+
+  Shape (write your own values; do not copy this verbatim):
+
+  ```
+  { "finding": "Race in retry path can double-submit.",
+    "action":  "Added an idempotency token + dedupe check.",
+    "files":   ["src/worker.mjs"] }
+  ```
+
+- `pushback[]` → you read the finding, deliberately decided **not** to
+  change the code, and want to record the reasoning. Use this when the
+  reviewer is wrong, the finding is out of scope for this PR, or the
+  fix would cost more than the bug. Each entry needs:
+  - `finding`: the finding you are pushing back on.
+  - `reasoning`: why you disagreed (one sentence, sharp).
+
+  Shape:
+
+  ```
+  { "finding":  "Reviewer asked to refactor the entire dispatch module.",
+    "reasoning": "Out of scope for this PR; tracked as separate ticket LAC-99." }
+  ```
+
+  Pushback is **not** a hard exit — you should still set
+  `reReview.requested = true` if the rest of the review is addressed.
+
+- `blockers[]` → hard exit. You cannot proceed without human input
+  (missing secrets, design decision required, architectural
+  disagreement large enough that you should not unilaterally resolve
+  it). Each entry needs:
+  - `finding`: the review finding you are blocking on (so the next
+    human can identify which item is unresolved).
+  - `reasoning` and/or `needsHumanInput`: why this is a hard exit and
+    what the human needs to decide / provide. At least one of the two
+    must be present; both can be.
+
+  Shape:
+
+  ```
+  { "finding":         "Reviewer asks for a schema migration on a 50M-row table.",
+    "reasoning":       "Migration is destructive and needs a DBA window I do not have authority to schedule.",
+    "needsHumanInput": "DBA approval + maintenance window" }
+  ```
+
+  When you populate `blockers`, you must also:
+  - set `reReview.requested = false`
+  - set `outcome = "blocked"` (or `"partial"` if you also addressed
+    other findings)
+
+A round that addresses every finding produces an `addressed[]` of
+length N and empty `pushback[]` / `blockers[]`. A round that fixed 4
+of 5 findings and pushed back on the 5th produces `addressed[]` of
+length 4 and `pushback[]` of length 1, with `reReview.requested = true`.
+A round that hits a hard exit on finding 3 produces partial entries in
+`addressed[]` for the work that did happen plus a `blockers[]` entry,
+with `reReview.requested = false` and `outcome = "blocked"` (or
+`"partial"`).
+
+The validator enforces these invariants — it will reject a reply that
+sets `reReview.requested = true` while `blockers` is non-empty, a
+reply with `outcome: "blocked"` and an empty `blockers` list, a
+reply with `outcome: "completed"` and a non-empty `blockers` list,
+a reply that does not record exactly one entry per blocking finding
+across `addressed[]`, `pushback[]`, and `blockers[]`, or a reply that
+duplicates the same finding across those lists. Do not try to fight
+the contract; the constraints exist so the public PR comment never
+claims contradictory things about the same round.
+
+The contract example below uses **empty arrays** for `addressed`,
+`pushback`, and `blockers`. That is intentional — replace the empty
+arrays with the entries you actually want to record. Do **not** copy
+the example shapes from this section verbatim; the validator
+recognizes the prompt's exact placeholder strings (the
+`Replace this with…` / `Replace with…` / `Optional list of files…`
+sentinels) and will reject the reply. Legitimate review language
+that happens to start with similar wording — e.g.
+`"Replace with parameterized queries"` as a real action, or
+`"Replace this regex; it can backtrack exponentially"` as a real
+finding — is fine; only the byte-exact placeholder strings are
+rejected.
+
+**Why this exists.** The PR comment that gets posted from your reply
+is the only durable record of how you handled each finding. Without
+the per-entry breakdown, all that surfaces to a human reviewer is a
+one-paragraph `summary` and an opaque `Request changes` verdict
+hanging on the PR — which makes it impossible to tell which findings
+you addressed vs disagreed with vs deferred. Per-entry accountability
+is the difference between "the worker did something" and "the worker
+explained itself to the next human in the loop."
+
 ## Convergence rule (load-bearing)
 
 The PR currently carries an adversarial review with verdict `Request changes`. That verdict is what blocks the worker-pool automerge gate. The only way to clear it is to trigger a fresh adversarial review pass that posts a new verdict — typically `Comment only` once the findings are addressed.

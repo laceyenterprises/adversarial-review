@@ -775,15 +775,32 @@ function buildRemediationPrompt(job, {
 } = {}) {
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
+  // The contract example uses empty arrays for the per-finding lists
+  // and a placeholder-free summary. Inline shape examples used to live
+  // in this object, which made it dangerously easy for a worker to
+  // submit the JSON verbatim — the validator now rejects the prompt's
+  // placeholder strings outright, but emitting them in the contract
+  // example invited that failure mode in the first place. The shape
+  // each list expects (and full per-entry examples) is documented in
+  // the "Per-finding accountability" prose section of the prompt
+  // template; the contract here only encodes the schema skeleton.
   const replyContract = buildRemediationReply({
     job,
     outcome: 'completed',
     summary: 'Replace this with a short remediation summary.',
     validation: ['Replace with validation you ran.'],
+    addressed: [],
+    pushback: [],
     blockers: [],
     reReviewRequested: false,
-    reReviewReason: 'Replace with the reason this PR should receive another adversarial review pass.',
   });
+  // The summary/validation slots above still carry placeholder-style
+  // strings only because they are required-non-empty fields and we do
+  // not want the JSON example to be syntactically broken. The
+  // validator's placeholder check rejects those exact strings, so a
+  // worker that copies the contract verbatim still gets a clear
+  // failure rather than a successful publish of fake accountability
+  // data.
   const trustedMetadata = {
     jobId: job.jobId,
     repo: job.repo,

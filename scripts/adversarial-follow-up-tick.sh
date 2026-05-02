@@ -93,16 +93,14 @@ fi
 # daemon process reuse these env vars in-process — no new `op read`
 # subprocess, no new popup. Token rotation requires a daemon restart.
 #
-# DEGRADED MODE: PR comments are documented as best-effort, so a
-# 1Password outage at boot or a missing/rotated bot token must NOT
-# block the daemon from starting consume/reconcile. If a token fails
-# to resolve here, log a warning and continue with the variable
-# unset — the comment poster records the failure under
-# `commentDelivery.reason='token-env-missing'` and the retry pass
-# will pick it up on a future tick once the token is back. Without
-# this downgrade, a transient 1Password outage at the wrong moment
-# turns into a full remediation outage (PR-18 review's "hard startup
-# dependency" finding).
+# DEGRADED MODE: missing PAT does NOT exit. PR comments are documented
+# as best-effort, so a 1Password outage at boot or a missing/rotated
+# bot token must NOT block consume/reconcile. The comment poster
+# records the failure under `commentDelivery.reason='token-env-missing'`
+# (NON_RETRYABLE_DELIVERY_REASONS, so the retry pass doesn't burn
+# attempts hammering an obviously-broken token); the daemon picks up
+# the token on its next start once 1Password is back. R4 review
+# blocking #4 on PR #18.
 GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential' 2>/dev/null || true)
 GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential' 2>/dev/null || true)
 export GH_CLAUDE_REVIEWER_TOKEN

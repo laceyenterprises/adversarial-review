@@ -283,6 +283,18 @@ function buildRemediationOutcomeCommentBody({
 // `gh pr comment` returns sub-second.
 const GH_COMMENT_TIMEOUT_MS = 30_000;
 
+// `gh pr comment` writes the URL of the just-created comment to
+// stdout on success. Shape:
+//   https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>
+// Used as a dedupe token: the retry path checks commentDelivery.commentUrl
+// before re-posting, so a writeTerminalRecord-after-gh-success failure
+// can't produce a duplicate public comment.
+function parseCommentUrlFromStdout(stdout) {
+  if (!stdout) return null;
+  const match = String(stdout).match(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+#issuecomment-\d+/);
+  return match ? match[0] : null;
+}
+
 async function postRemediationOutcomeComment({
   repo,
   prNumber,
@@ -328,7 +340,7 @@ async function postRemediationOutcomeComment({
   };
 
   try {
-    await execFileImpl(
+    const ghResult = await execFileImpl(
       'gh',
       ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],
       {
@@ -338,7 +350,13 @@ async function postRemediationOutcomeComment({
         killSignal: 'SIGTERM',
       }
     );
-    return { posted: true, repo, prNumber, workerClass, tokenEnvName };
+    // gh prints the comment URL to stdout on success. Capture it so
+    // the retry path can dedupe: if a later retry sees the same record
+    // with a commentUrl already populated, it knows a previous attempt
+    // succeeded and must not re-post (which would create a duplicate
+    // public comment).
+    const commentUrl = parseCommentUrlFromStdout(ghResult?.stdout);
+    return { posted: true, repo, prNumber, workerClass, tokenEnvName, commentUrl };
   } catch (err) {
     // execFile with `timeout` SIGTERMs the child when the deadline
     // expires; the resulting error has .killed === true and

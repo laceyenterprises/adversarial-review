@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -509,4 +509,204 @@ test('buildAttemptingDelivery shape carries body + addressing + attempting=true'
   assert.equal(delivery.attempts, 1);
   assert.equal(delivery.body, 'body');
   assert.equal(delivery.repo, 'r');
+});
+
+// ── True durability: commentDelivery is written BEFORE claim acquire ─────
+//
+// R5 review flagged the previous order (claim → pre-stamp) as a
+// durability hole: a crash between claim-acquire and the pre-stamp
+// write would leave a lock file with no commentDelivery field, and
+// the retry scanner filters out records without commentDelivery, so
+// the owed comment would be permanently lost.
+
+test('recordInitialCommentDelivery writes commentDelivery BEFORE acquiring the claim', async () => {
+  // Verify the order by intercepting the lock-file write and
+  // confirming commentDelivery is already on disk by then.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-order.json');
+  writeFileSync(jobPath, JSON.stringify({ jobId: 'job-order', status: 'completed' }, null, 2), 'utf8');
+
+  // We can't easily intercept the FS calls, but we can observe state
+  // at the moment the post fires: commentDelivery must be present.
+  // (Pre-stamp happens before claim → before post, so by the time the
+  // poster runs, the record is already durable.)
+  let observedDuringPost;
+  await recordInitialCommentDelivery({
+    jobPath,
+    body: 'b',
+    repo: 'r',
+    prNumber: 1,
+    workerClass: 'codex',
+    postCommentImpl: async () => {
+      observedDuringPost = JSON.parse(readFileSync(jobPath, 'utf8'));
+      return { posted: true };
+    },
+    now: () => '2026-05-02T03:00:00.000Z',
+    log: { error: () => {} },
+  });
+
+  // commentDelivery must be on disk by the time post fires — it was
+  // written before the claim was even acquired.
+  assert.equal(observedDuringPost.commentDelivery.attempting, true);
+  assert.equal(observedDuringPost.commentDelivery.body, 'b');
+});
+
+test('parseCommentUrlFromStdout (gh stdout) returns the comment URL on success', async () => {
+  // Indirect: postRemediationOutcomeComment captures the URL via
+  // parseCommentUrlFromStdout. Verify the captured URL flows into the
+  // result.posted=true path.
+  const { postRemediationOutcomeComment: post } = await import('../src/pr-comments.mjs');
+  const result = await post({
+    repo: 'laceyenterprises/demo',
+    prNumber: 42,
+    workerClass: 'codex',
+    body: 'x',
+    env: { GH_CODEX_REVIEWER_TOKEN: 'pat', PATH: '/usr/bin', HOME: '/tmp' },
+    execFileImpl: async () => ({
+      stdout: 'https://github.com/laceyenterprises/demo/pull/42#issuecomment-9999\n',
+      stderr: '',
+    }),
+    log: { error: () => {} },
+  });
+  assert.equal(result.posted, true);
+  assert.equal(result.commentUrl, 'https://github.com/laceyenterprises/demo/pull/42#issuecomment-9999');
+});
+
+test('parseCommentUrlFromStdout returns null when gh stdout has no URL', async () => {
+  const { postRemediationOutcomeComment: post } = await import('../src/pr-comments.mjs');
+  const result = await post({
+    repo: 'laceyenterprises/demo',
+    prNumber: 42,
+    workerClass: 'codex',
+    body: 'x',
+    env: { GH_CODEX_REVIEWER_TOKEN: 'pat', PATH: '/usr/bin', HOME: '/tmp' },
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    log: { error: () => {} },
+  });
+  assert.equal(result.posted, true);
+  assert.equal(result.commentUrl, null);
+});
+
+// ── Recovery paths: missing commentDelivery + posted-sidecar dedupe ───────
+//
+// R5 review #1: a writeTerminalRecord failure during pre-stamp leaves
+// a terminal record with no commentDelivery field, and the previous
+// retry filter excluded those as "not candidates" — silent loss of
+// the owed comment. Reconstruction recovers from the record itself
+// plus the worker reply artifact.
+//
+// R5 non-blocking #1: a writeTerminalRecord failure AFTER gh succeeded
+// would leave the record in attempting=true; the next retry would
+// re-post → duplicate public comment. Posted-sidecar (written before
+// the final stamp) lets the retry stamp from the sidecar instead of
+// re-posting.
+
+test('listRetryCandidates reconstructs commentDelivery for terminal records that have none (lost pre-stamp)', async () => {
+  const { listRetryCandidates } = await import('../src/comment-delivery.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-no-delivery.json');
+  // Terminal record with no commentDelivery field — simulating a
+  // crash between mark* and recordInitialCommentDelivery's pre-stamp.
+  writeFileSync(jobPath, JSON.stringify({
+    jobId: 'job-no-delivery',
+    repo: 'laceyenterprises/demo',
+    prNumber: 77,
+    status: 'completed',
+    builderTag: 'codex',
+    remediationWorker: { model: 'codex' },
+    reReview: { requested: false },
+  }, null, 2), 'utf8');
+
+  const candidates = listRetryCandidates(rootDir, { maxAttempts: 5, log: { error: () => {} } });
+  assert.equal(candidates.length, 1, 'a record with no commentDelivery must be picked up as a recovery candidate');
+  assert.equal(candidates[0].reconstructed, true);
+  assert.equal(candidates[0].delivery.repo, 'laceyenterprises/demo');
+  assert.equal(candidates[0].delivery.prNumber, 77);
+  assert.equal(candidates[0].delivery.workerClass, 'codex');
+  assert.ok(candidates[0].delivery.body, 'reconstructed body must be non-empty');
+});
+
+test('retryFailedCommentDeliveries uses posted-sidecar to skip re-post after a previous gh-success / persist-fail', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const jobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-sidecar', 'body-sidecar',
+    'laceyenterprises/demo', 88, 'codex',
+    { posted: false, reason: 'gh-cli-timeout' }
+  );
+
+  // Plant a posted-sidecar simulating the corner case: a previous
+  // attempt's gh call succeeded, but the writeTerminalRecord that
+  // would have stamped posted=true crashed mid-flight. The sidecar
+  // is the durability marker for that case.
+  writeFileSync(`${jobPath}.delivery.posted`, JSON.stringify({
+    posted: true,
+    repo: 'laceyenterprises/demo',
+    prNumber: 88,
+    workerClass: 'codex',
+    attemptedAt: '2026-05-02T03:30:00.000Z',
+    postResult: { posted: true, commentUrl: 'https://github.com/x/y/pull/88#issuecomment-1' },
+  }, null, 2), 'utf8');
+
+  let postCalls = 0;
+  const summary = await retryFailedCommentDeliveries({
+    rootDir,
+    postCommentImpl: async () => { postCalls += 1; return { posted: true }; },
+    log: { error: () => {} },
+  });
+
+  assert.equal(postCalls, 0, 'sidecar recovery must skip the gh re-post entirely');
+  assert.equal(summary.posted, 1, 'the recovery still counts as posted (gh did succeed previously)');
+  const record = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(record.commentDelivery.posted, true);
+  assert.equal(record.commentDelivery.recoveredFromSidecar, true);
+  // Sidecar is cleared after successful recovery.
+  assert.equal(existsSync(`${jobPath}.delivery.posted`), false);
+});
+
+test('recordInitialCommentDelivery leaves a recoverable commentDelivery record even if the claim is held by another process', async () => {
+  // The R5 hole: if a crash happens between claim-acquire and the
+  // commentDelivery write, the record has no commentDelivery → retry
+  // scanner skips it. We simulate the equivalent by holding the claim
+  // BEFORE recordInitialCommentDelivery runs. Under the new order
+  // (pre-stamp → claim), the record still gets the attempting=true
+  // commentDelivery written even though the post is declined.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-recoverable.json');
+  writeFileSync(jobPath, JSON.stringify({ jobId: 'job-recoverable', status: 'completed' }, null, 2), 'utf8');
+
+  // Plant a fresh claim from another "process".
+  writeFileSync(deliveryLockPath(jobPath), JSON.stringify({
+    claimer: 'pid.other',
+    claimedAt: new Date().toISOString(),
+  }), 'utf8');
+
+  let postCalls = 0;
+  await recordInitialCommentDelivery({
+    jobPath,
+    body: 'b',
+    repo: 'r',
+    prNumber: 1,
+    workerClass: 'codex',
+    postCommentImpl: async () => { postCalls += 1; return { posted: true }; },
+    now: () => '2026-05-02T03:00:00.000Z',
+    log: { error: () => {} },
+  });
+
+  // Post was correctly declined (claim held by another process).
+  assert.equal(postCalls, 0);
+  // But the durable signal IS now on disk — the retry pass can pick
+  // it up later (after the other process's claim goes stale, or if
+  // it crashed without finishing).
+  const record = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(record.commentDelivery.attempting, true,
+    'pre-stamp must persist even when claim is held — this is the durability invariant the retry scanner relies on');
+  assert.equal(record.commentDelivery.body, 'b');
+  assert.equal(record.commentDelivery.repo, 'r');
+  assert.equal(record.commentDelivery.prNumber, 1);
 });

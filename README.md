@@ -59,7 +59,7 @@ The pipeline is **automated end-to-end**:
 - a LaunchAgent (`ai.laceyenterprises.adversarial-follow-up`) ticks every 2 min
 - each tick claims one pending job, spawns a detached remediation worker (codex or claude-code, picked from the PR's `builderTag`), then reconciles any in-progress jobs whose worker has exited
 - on every terminal transition (completed / stopped / failed) the reconciler posts a public PR comment under the matching reviewer-bot identity so operators can read the loop status from the PR itself
-- bounded by `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` (in `src/follow-up-jobs.mjs`); `requestReviewRereview` in `src/review-state.mjs` does not implement a per-PR cooldown — the round cap is the only re-arm bound
+- bounded by `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` (in `src/follow-up-jobs.mjs`); `requestReviewRereview` in `src/review-state.mjs` does not implement a per-PR cooldown — the round cap is the only re-arm bound, and each round must end with a fresh adversarial pass plus a worker-written `reReview.requested` decision before the next round can claim the job
 
 Operator-visible state is preserved in `data/follow-up-jobs/` (the durable JSON queue) and `data/reviews.db` (the review ledger). Operators retain explicit control: `npm run follow-up:requeue`, `npm run follow-up:stop`, `npm run retrigger-review` are still the canonical levers when manual intervention is required.
 
@@ -550,6 +550,6 @@ As of 2026-05-01, the pipeline is automated end-to-end:
 - watcher posts reviews
 - follow-up daemon claims jobs every 2 min, spawns workers, reconciles
 - public PR comments narrate every terminal outcome
-- convergence rule + 6-round cap bound the loop (no per-PR rereview cooldown is implemented; the cap is the only re-arm bound)
+- convergence rule + 6-round cap + round-by-round "worker must request rereview" gate bound the loop (no per-PR rereview cooldown is implemented; the cap and the gate are the only re-arm bounds)
 
 This README is optimized for quick scanning. Heavier operator semantics and maintenance detail live in `docs/follow-up-runbook.md`.

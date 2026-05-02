@@ -774,6 +774,12 @@ function markFollowUpJobFailed({
   failureCode = 'worker-failure',
   remediationWorker,
   failure = {},
+  // Optional pre-built commentDelivery shape. When the reconcile path
+  // passes this, the terminal record lands in failed/ with the field
+  // already present — closing the crash window between the atomic
+  // terminal move and the post-move pre-stamp in
+  // `recordInitialCommentDelivery`. Reviewer R5 blocking #1 fix.
+  commentDelivery = null,
 }) {
   return moveTerminalJobRecord({
     rootDir,
@@ -808,6 +814,10 @@ function markFollowUpJobFailed({
         }));
       }
 
+      if (commentDelivery) {
+        nextJob.commentDelivery = commentDelivery;
+      }
+
       return nextJob;
     },
   });
@@ -823,6 +833,7 @@ function markFollowUpJobCompleted({
   reReview,
   finishedAt = new Date().toISOString(),
   completionPreview = null,
+  commentDelivery = null,
 }) {
   const normalizedCompletedAt = completedAt ?? finishedAt;
   const normalizedCompletion = completion || {
@@ -860,6 +871,10 @@ function markFollowUpJobCompleted({
         }));
       }
 
+      if (commentDelivery) {
+        nextJob.commentDelivery = commentDelivery;
+      }
+
       return nextJob;
     },
   });
@@ -878,6 +893,7 @@ function markFollowUpJobStopped({
   reReview,
   completion,
   failure,
+  commentDelivery = null,
 }) {
   return moveTerminalJobRecord({
     rootDir,
@@ -925,6 +941,10 @@ function markFollowUpJobStopped({
           failure: failure ?? round.failure ?? currentJob.failure ?? null,
           stop,
         }));
+      }
+
+      if (commentDelivery) {
+        nextJob.commentDelivery = commentDelivery;
       }
 
       return nextJob;

@@ -24,7 +24,7 @@ import {
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
 } from './pr-comments.mjs';
-import { recordInitialCommentDelivery } from './comment-delivery.mjs';
+import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
 import { redactSensitiveText } from './redaction.mjs';
 import { requestReviewRereview } from './review-state.mjs';
 
@@ -1146,6 +1146,42 @@ function resolveReconcileWorkerClass(job, worker) {
   return worker?.model || job?.builderTag || 'codex';
 }
 
+// Build the comment body + an owed-delivery stub from the same inputs
+// that `postReconcileOutcomeCommentSafe` will eventually use. The
+// caller threads the owed delivery into `markFollowUpJob*`'s
+// `commentDelivery` parameter so the terminal record lands in
+// completed/stopped/failed with `commentDelivery` already present —
+// closing the crash window between the atomic terminal move and the
+// pre-stamp inside `recordInitialCommentDelivery`. (Reviewer R5
+// blocking #1 — recoverable delivery marker BEFORE the crash window.)
+function buildReconcileCommentDelivery({
+  job,
+  worker,
+  action,
+  reply = null,
+  reReview = null,
+  failure = null,
+  now = () => new Date().toISOString(),
+}) {
+  const workerClass = resolveReconcileWorkerClass(job, worker);
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass,
+    action,
+    job,
+    reply,
+    reReview,
+    failure,
+  });
+  const commentDelivery = buildOwedDelivery({
+    body,
+    repo: job?.repo,
+    prNumber: job?.prNumber,
+    workerClass,
+    owedAt: now(),
+  });
+  return { body, workerClass, commentDelivery };
+}
+
 async function postReconcileOutcomeCommentSafe({
   rootDir,
   jobPath,
@@ -1255,6 +1291,10 @@ async function reconcileFollowUpJob({
 
   const completedAt = now();
   if (liveness.state === 'manual-inspection') {
+    const manualInspectionFailure = { code: 'manual-inspection-required', message: liveness.reason };
+    const { commentDelivery: manualInspectionDelivery } = buildReconcileCommentDelivery({
+      job, worker, action: 'failed', failure: manualInspectionFailure, now,
+    });
     const failed = markFollowUpJobFailed({
       rootDir,
       jobPath,
@@ -1275,6 +1315,7 @@ async function reconcileFollowUpJob({
         finalMessagePath: worker.outputPath || null,
         logPath: worker.logPath || null,
       },
+      commentDelivery: manualInspectionDelivery,
     });
 
     await postReconcileOutcomeCommentSafe({
@@ -1283,7 +1324,7 @@ async function reconcileFollowUpJob({
       job: failed.job,
       worker,
       action: 'failed',
-      failure: { code: 'manual-inspection-required', message: liveness.reason },
+      failure: manualInspectionFailure,
       postCommentImpl,
       alreadyTerminal: failed.alreadyTerminal,
       now,
@@ -1302,6 +1343,10 @@ async function reconcileFollowUpJob({
   try {
     paths = buildReconciliationPaths(rootDir, job);
   } catch (err) {
+    const invalidPathFailure = { code: 'invalid-output-path', message: err.message };
+    const { commentDelivery: invalidPathDelivery } = buildReconcileCommentDelivery({
+      job, worker, action: 'failed', failure: invalidPathFailure, now,
+    });
     const failed = markFollowUpJobFailed({
       rootDir,
       jobPath,
@@ -1316,6 +1361,7 @@ async function reconcileFollowUpJob({
       failure: {
         invalidArtifactPaths: true,
       },
+      commentDelivery: invalidPathDelivery,
     });
 
     await postReconcileOutcomeCommentSafe({
@@ -1324,7 +1370,7 @@ async function reconcileFollowUpJob({
       job: failed.job,
       worker,
       action: 'failed',
-      failure: { code: 'invalid-output-path', message: err.message },
+      failure: invalidPathFailure,
       postCommentImpl,
       alreadyTerminal: failed.alreadyTerminal,
       now,
@@ -1363,6 +1409,10 @@ async function reconcileFollowUpJob({
       try {
         reply = readRemediationReplyArtifact(paths.replyPath, { expectedJob: job });
       } catch (err) {
+        const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
+        const { commentDelivery: invalidReplyDelivery } = buildReconcileCommentDelivery({
+          job, worker, action: 'failed', failure: invalidReplyFailure, now,
+        });
         const failed = markFollowUpJobFailed({
           rootDir,
           jobPath,
@@ -1376,6 +1426,7 @@ async function reconcileFollowUpJob({
           failure: {
             remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
           },
+          commentDelivery: invalidReplyDelivery,
         });
 
         await postReconcileOutcomeCommentSafe({
@@ -1384,7 +1435,7 @@ async function reconcileFollowUpJob({
           job: failed.job,
           worker,
           action: 'failed',
-          failure: { code: 'invalid-remediation-reply', message: err.message },
+          failure: invalidReplyFailure,
           postCommentImpl,
           alreadyTerminal: failed.alreadyTerminal,
           now,
@@ -1474,6 +1525,22 @@ async function reconcileFollowUpJob({
       const stopReason = stopCode === 'max-rounds-reached'
         ? `Remediation round ${currentRound || 1} finished without a durable re-review request and reached the max remediation rounds cap (${currentRound}/${maxRounds}); stopping the bounded loop.`
         : `No durable re-review request was recorded after remediation round ${currentRound || 1}; stopping to avoid a silent no-progress loop.`;
+      // Pre-build commentDelivery from the projected stopped-job shape
+      // (the actual stop metadata we'll record) so the body the
+      // walker may later reconstruct from this owed stamp matches
+      // what we'd post live.
+      const projectedStopJob = {
+        ...job,
+        status: 'stopped',
+        remediationPlan: {
+          ...(job.remediationPlan || {}),
+          stop: { code: stopCode, reason: stopReason },
+        },
+      };
+      const { commentDelivery: noProgressDelivery } = buildReconcileCommentDelivery({
+        job: projectedStopJob, worker, action: 'stopped',
+        reply: parsedReply, reReview: rereview, now,
+      });
       const stopped = markFollowUpJobStopped({
         rootDir,
         jobPath,
@@ -1488,6 +1555,7 @@ async function reconcileFollowUpJob({
         remediationReply,
         reReview: rereview,
         stopReason,
+        commentDelivery: noProgressDelivery,
       });
 
       await postReconcileOutcomeCommentSafe({
@@ -1515,6 +1583,18 @@ async function reconcileFollowUpJob({
     if (rereviewBlocked) {
       const blockedReason = rereview.outcomeReason || rereview.status || 'rereview-blocked';
       const stopReasonText = `Worker requested re-review but the watcher refused the reset: ${blockedReason}. The PR's existing adversarial review verdict will not be replaced; human intervention required.`;
+      const projectedStopJob = {
+        ...job,
+        status: 'stopped',
+        remediationPlan: {
+          ...(job.remediationPlan || {}),
+          stop: { code: 'rereview-blocked', reason: stopReasonText },
+        },
+      };
+      const { commentDelivery: blockedDelivery } = buildReconcileCommentDelivery({
+        job: projectedStopJob, worker, action: 'stopped',
+        reply: parsedReply, reReview: rereview, now,
+      });
       const stopped = markFollowUpJobStopped({
         rootDir,
         jobPath,
@@ -1529,6 +1609,7 @@ async function reconcileFollowUpJob({
         remediationReply,
         reReview: rereview,
         stopReason: stopReasonText,
+        commentDelivery: blockedDelivery,
       });
 
       await postReconcileOutcomeCommentSafe({
@@ -1553,6 +1634,10 @@ async function reconcileFollowUpJob({
       };
     }
 
+    const { commentDelivery: completedDelivery } = buildReconcileCommentDelivery({
+      job, worker, action: 'completed',
+      reply: parsedReply, reReview: rereview, now,
+    });
     const completed = markFollowUpJobCompleted({
       rootDir,
       jobPath,
@@ -1564,6 +1649,7 @@ async function reconcileFollowUpJob({
       completion: completionMetadata,
       remediationReply,
       reReview: rereview,
+      commentDelivery: completedDelivery,
     });
 
     await postReconcileOutcomeCommentSafe({
@@ -1592,6 +1678,10 @@ async function reconcileFollowUpJob({
   const failureMessage = finalMessage.exists
     ? 'Remediation worker exited without a non-empty final message artifact.'
     : 'Remediation worker exited before writing the final message artifact.';
+  const artifactFailure = { code: failureCode, message: failureMessage };
+  const { commentDelivery: artifactFailureDelivery } = buildReconcileCommentDelivery({
+    job, worker, action: 'failed', failure: artifactFailure, now,
+  });
   const failed = markFollowUpJobFailed({
     rootDir,
     jobPath,
@@ -1607,6 +1697,7 @@ async function reconcileFollowUpJob({
       finalMessageBytes: finalMessage.bytes,
       logPath: worker.logPath || null,
     },
+    commentDelivery: artifactFailureDelivery,
   });
 
   await postReconcileOutcomeCommentSafe({
@@ -1615,7 +1706,7 @@ async function reconcileFollowUpJob({
     job: failed.job,
     worker,
     action: 'failed',
-    failure: { code: failureCode, message: failureMessage },
+    failure: artifactFailure,
     postCommentImpl,
     alreadyTerminal: failed.alreadyTerminal,
     now,

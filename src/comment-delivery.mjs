@@ -24,13 +24,13 @@
 // Cap: 5 attempts. After that the record stays at posted=false for
 // human inspection; the daemon does not silently keep hammering.
 
-import { closeSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
-import { getFollowUpJobDir } from './follow-up-jobs.mjs';
-import { postRemediationOutcomeComment } from './pr-comments.mjs';
+import { getFollowUpJobDir, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
+import { buildRemediationOutcomeCommentBody, postRemediationOutcomeComment } from './pr-comments.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -63,6 +63,38 @@ const NON_RETRYABLE_DELIVERY_REASONS = new Set([
   'missing-pr-coordinates',
   'no-token-mapping',
 ]);
+
+// Pre-move "comment owed" stamp. Used by reconcile to embed delivery
+// debt into the terminal record atomically with the move-to-terminal
+// write — otherwise there is a crash window where a record can land in
+// completed/stopped/failed without any commentDelivery field, and the
+// retry walker (which historically filtered out missing-delivery
+// records) would skip it forever. With this shape on the record, the
+// retry walker has every field it needs (body, repo, prNumber,
+// workerClass) to deliver without touching any other artifact.
+function buildOwedDelivery({
+  body,
+  repo,
+  prNumber,
+  workerClass,
+  owedAt,
+}) {
+  return {
+    posted: false,
+    attempting: false,
+    reason: null,
+    error: null,
+    timeoutMs: null,
+    attempts: 0,
+    firstAttemptAt: null,
+    lastAttemptAt: null,
+    owedAt,
+    body,
+    repo,
+    prNumber,
+    workerClass,
+  };
+}
 
 function buildPendingDelivery({
   body,
@@ -212,6 +244,75 @@ function releaseDeliveryClaim(jobPath) {
   }
 }
 
+// ── Post-success sidecar (R4 review #2 — dedupe gap) ──────────────────────
+//
+// If `gh pr comment` succeeds but the immediately-following
+// `writeTerminalRecord()` fails (transient FS error, ENOSPC, signal
+// during fsync, etc.), the on-disk record stays in `attempting=true`
+// (or the prior shape) and a later retry will re-post the same public
+// PR comment — duplicate noise visible to humans on the PR.
+//
+// Mitigation: between the gh success and the local stamp, write a
+// `<jobPath>.delivery.posted` sidecar containing the gh result. If the
+// stamp succeeds, the sidecar is removed. If the stamp fails, the
+// sidecar persists and serves as a "posted but not stamped" recovery
+// marker. On retry, if the marker is present, we skip the gh call and
+// just stamp the record from the marker — no duplicate post.
+//
+// This is best-effort durability over the dedupe gap: a crash between
+// gh-success and sidecar-write is still a possible duplicate, but the
+// window is microseconds (a single writeFileSync), much smaller than
+// the seconds-long gh subprocess + record-write window the reviewer
+// flagged.
+
+function postedSidecarPath(jobPath) {
+  return `${jobPath}.delivery.posted`;
+}
+
+function readPostedSidecar(jobPath) {
+  const path = postedSidecarPath(jobPath);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    // Corrupt sidecar → treat as no marker; the next retry will re-post.
+    // That's strictly worse than a clean read but no worse than the
+    // pre-sidecar behavior, so we don't escalate.
+    return null;
+  }
+}
+
+function writePostedSidecar(jobPath, { repo, prNumber, workerClass, postResult, attemptedAt }) {
+  const path = postedSidecarPath(jobPath);
+  try {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        posted: true,
+        repo,
+        prNumber,
+        workerClass,
+        attemptedAt,
+        postResult,
+      }, null, 2),
+      'utf8',
+    );
+    return true;
+  } catch {
+    // Sidecar best-effort. If we can't write it, the existing
+    // attempting=true record + lock-stale window is the fallback.
+    return false;
+  }
+}
+
+function clearPostedSidecar(jobPath) {
+  try {
+    rmSync(postedSidecarPath(jobPath), { force: true });
+  } catch {
+    // Best-effort.
+  }
+}
+
 // Durability-first comment delivery for the reconcile path.
 //
 // Old shape (pre-r3-review): call gh first, stamp commentDelivery
@@ -247,22 +348,20 @@ function recordInitialCommentDelivery({
   }
 
   return (async () => {
-    const claimerId = buildClaimerId();
-    const claim = tryAcquireDeliveryClaim(jobPath, claimerId, { now });
-    if (!claim.acquired) {
-      // Another process owns the live claim — they'll handle the
-      // delivery (or retry will pick it up if they crash). We do
-      // NOT post.
-      log.error?.(
-        `[comment-delivery] declining to post for ${jobPath}: claim held by ${claim.claimer} (${claim.ageMs}ms ago)`
-      );
-      return null;
-    }
-
     const firstAttemptAt = now();
-    // Pre-stamp: write `attempting=true` BEFORE the gh call so a
-    // crash mid-call leaves a recoverable record. The retry pass
-    // will see attempting=true with a stale lock and re-attempt.
+
+    // Pre-stamp commentDelivery BEFORE acquiring the claim. R5 review
+    // flagged the previous order (claim → write commentDelivery) as a
+    // durability hole: a crash between claim-acquire and the
+    // commentDelivery write would leave a lock file with no
+    // commentDelivery field, and the retry scanner filters out records
+    // without commentDelivery — silent loss of the owed comment.
+    //
+    // By writing first, the durable record exists before any crash
+    // window. If two reconcilers race here, both write the same shape
+    // (deterministic from the same job inputs); last-writer-wins is
+    // safe because the content is identical. The claim that follows
+    // arbitrates which one actually posts.
     try {
       const record = readTerminalRecord(jobPath);
       record.commentDelivery = buildAttemptingDelivery({
@@ -276,9 +375,56 @@ function recordInitialCommentDelivery({
       });
       writeTerminalRecord(jobPath, record);
     } catch (err) {
-      log.error?.(`[comment-delivery] failed to pre-stamp ${jobPath}: ${err.message}`);
-      releaseDeliveryClaim(jobPath);
+      // Even if pre-stamp write fails, the retry walker can still
+      // recover via the missing-`commentDelivery` recovery path
+      // (listRetryCandidates → buildRecoveryCandidate). Don't escalate.
+      log.error?.(`[comment-delivery] failed to pre-stamp ${jobPath}: ${err.message} — retry walker will reconstruct from record`);
       return null;
+    }
+
+    const claimerId = buildClaimerId();
+    const claim = tryAcquireDeliveryClaim(jobPath, claimerId, { now });
+    if (!claim.acquired) {
+      // Another process owns the claim — they'll handle the post
+      // (or retry will pick it up if they crash). The pre-stamp
+      // we just wrote means the record is recoverable either way.
+      log.error?.(
+        `[comment-delivery] declining to post for ${jobPath}: claim held by ${claim.claimer} (${claim.ageMs}ms ago)`
+      );
+      return null;
+    }
+
+    // Recovery short-circuit: a posted-sidecar means a previous run
+    // got a successful gh response but crashed before stamping the
+    // record. Re-posting would duplicate the public comment. Just
+    // stamp from the sidecar and clear it. (R4 non-blocking #2 dedupe
+    // gap.)
+    const existingSidecar = readPostedSidecar(jobPath);
+    if (existingSidecar?.posted) {
+      const recoveredAt = now();
+      const recoveredDelivery = {
+        ...buildPendingDelivery({
+          body,
+          repo,
+          prNumber,
+          workerClass,
+          postResult: existingSidecar.postResult || { posted: true },
+          attemptedAt: existingSidecar.attemptedAt || recoveredAt,
+        }),
+        firstAttemptAt,
+        recoveredFromSidecar: true,
+      };
+      try {
+        const record = readTerminalRecord(jobPath);
+        record.commentDelivery = recoveredDelivery;
+        writeTerminalRecord(jobPath, record);
+        clearPostedSidecar(jobPath);
+      } catch (err) {
+        log.error?.(`[comment-delivery] failed to stamp sidecar-recovered delivery on ${jobPath}: ${err.message}`);
+      } finally {
+        releaseDeliveryClaim(jobPath);
+      }
+      return recoveredDelivery;
     }
 
     // Now do the post (or use the precomputed result if a caller is
@@ -298,6 +444,21 @@ function recordInitialCommentDelivery({
     }
 
     const settledAt = now();
+
+    // If gh succeeded, drop a "posted" sidecar BEFORE writing the
+    // final stamp. If the stamp write then fails (FS hiccup, ENOSPC),
+    // the sidecar survives to tell the next retry "this was already
+    // posted; just stamp it, don't re-post." Without this, the same
+    // comment would be reposted on the next tick — the reviewer's R4
+    // non-blocking #2 dedupe gap.
+    if (postResult?.posted) {
+      writePostedSidecar(jobPath, {
+        repo, prNumber, workerClass,
+        postResult,
+        attemptedAt: settledAt,
+      });
+    }
+
     const finalDelivery = {
       ...buildPendingDelivery({
         body,
@@ -314,6 +475,11 @@ function recordInitialCommentDelivery({
       const record = readTerminalRecord(jobPath);
       record.commentDelivery = finalDelivery;
       writeTerminalRecord(jobPath, record);
+      // Final stamp succeeded → sidecar no longer needed. (If the
+      // post failed, no sidecar was written, so this is a no-op.)
+      if (postResult?.posted) {
+        clearPostedSidecar(jobPath);
+      }
     } catch (err) {
       log.error?.(`[comment-delivery] failed to stamp final delivery on ${jobPath}: ${err.message}`);
     } finally {
@@ -344,11 +510,89 @@ function listTerminalJobPaths(rootDir) {
   return out;
 }
 
+// Reconstruct a delivery shape (body + addressing) from a terminal
+// record that has missing or partial commentDelivery metadata. Used
+// when reconcile crashed between the terminal move and the pre-stamp
+// in `recordInitialCommentDelivery` — the record landed in
+// completed/stopped/failed but never got a delivery field, so the
+// retry walker has nothing to retry from. Treat that as "owed but
+// unattempted debt": rebuild the body deterministically from the
+// record fields and the worker reply artifact (still on disk), and
+// hand the retry walker a synthesized candidate.
+//
+// Reviewer's R5 blocking #1 fix: "make the retry path treat
+// missing/partial delivery metadata as recoverable debt instead of
+// 'not a candidate.'"
+function reconstructDeliveryFromRecord(record) {
+  const action = record?.status === 'completed' ? 'completed'
+    : record?.status === 'stopped' ? 'stopped'
+    : record?.status === 'failed' ? 'failed'
+    : null;
+  if (!action) return null;
+  if (!record?.repo || !record?.prNumber) return null;
+
+  const workerClass = record?.remediationWorker?.model
+    || record?.builderTag
+    || 'codex';
+
+  // Worker reply artifact is still on disk in the workspace; re-read
+  // it so summary / validation / blockers / outcome show up in the
+  // recovered comment. If unreadable, fall back to a degraded body
+  // built with reply=null — the action / reReview / failure signal
+  // alone is still informative and far better than no comment.
+  let parsedReply = null;
+  const replyPath = record?.remediationReply?.path || record?.remediationWorker?.replyPath || null;
+  if (replyPath) {
+    try {
+      parsedReply = readRemediationReplyArtifact(replyPath, { expectedJob: record });
+    } catch {
+      parsedReply = null;
+    }
+  }
+
+  let body;
+  try {
+    body = buildRemediationOutcomeCommentBody({
+      workerClass,
+      action,
+      job: record,
+      reply: parsedReply,
+      reReview: record?.reReview || null,
+      failure: record?.failure || null,
+    });
+  } catch {
+    return null;
+  }
+
+  return {
+    posted: false,
+    attempting: false,
+    reason: null,
+    error: null,
+    timeoutMs: null,
+    attempts: 0,
+    firstAttemptAt: null,
+    lastAttemptAt: null,
+    owedAt: null,
+    body,
+    repo: record.repo,
+    prNumber: record.prNumber,
+    workerClass,
+    reconstructed: true,
+  };
+}
+
 // Build a list of retry candidates, sorted by firstAttemptAt
 // ascending so the oldest still-failing comments drain first.
-// Records that aren't candidates (no commentDelivery, posted=true,
-// over the attempts cap, non-retryable reason) are filtered here so
-// the budget cap downstream applies only to actual work.
+// Three candidate sources:
+//   1. existing commentDelivery with posted=false, attempts<cap,
+//      retryable reason — the normal failed-post retry case
+//   2. missing commentDelivery — the record landed in terminal/
+//      without ever getting a delivery field (crash between the
+//      terminal move and pre-stamp). Reconstruct the delivery shape
+//      from the record + worker reply artifact.
+//   3. partial / "owed" commentDelivery (attempts=0, posted=false) —
+//      the pre-move stamp landed but no post attempt ran yet.
 function listRetryCandidates(rootDir, { maxAttempts, log }) {
   const paths = listTerminalJobPaths(rootDir);
   const candidates = [];
@@ -361,14 +605,31 @@ function listRetryCandidates(rootDir, { maxAttempts, log }) {
       continue;
     }
     const delivery = record.commentDelivery;
-    if (!delivery || delivery.posted) continue;
+    if (!delivery) {
+      // Missing — try to reconstruct so the retry walker can post.
+      const reconstructed = reconstructDeliveryFromRecord(record);
+      if (!reconstructed) continue;
+      candidates.push({ jobPath, delivery: reconstructed, record, reconstructed: true });
+      continue;
+    }
+    if (delivery.posted) continue;
     if ((delivery.attempts || 0) >= maxAttempts) continue;
     if (NON_RETRYABLE_DELIVERY_REASONS.has(delivery.reason)) continue;
+    // Partial owed shape with no body? Reconstruct.
+    if (!delivery.body) {
+      const reconstructed = reconstructDeliveryFromRecord(record);
+      if (!reconstructed) continue;
+      candidates.push({ jobPath, delivery: { ...delivery, ...reconstructed }, record, reconstructed: true });
+      continue;
+    }
     candidates.push({ jobPath, delivery, record });
   }
   candidates.sort((a, b) => {
-    const aT = Date.parse(a.delivery.firstAttemptAt || '') || 0;
-    const bT = Date.parse(b.delivery.firstAttemptAt || '') || 0;
+    // Reconstructed / owed records (firstAttemptAt=null) sort to the
+    // front via owedAt → 0 fallback so they drain before failed ones
+    // with a real first-attempt timestamp.
+    const aT = Date.parse(a.delivery.firstAttemptAt || a.delivery.owedAt || '') || 0;
+    const bT = Date.parse(b.delivery.firstAttemptAt || b.delivery.owedAt || '') || 0;
     return aT - bT;
   });
   return candidates;
@@ -416,6 +677,54 @@ async function retryFailedCommentDeliveries({
       continue;
     }
 
+    // Sidecar short-circuit (R4 non-blocking #2 dedupe gap): a
+    // posted-sidecar means a previous attempt got a successful gh
+    // response but crashed before stamping the record. Re-posting
+    // would duplicate the public comment. Just stamp from the
+    // sidecar and clear it.
+    const sidecar = readPostedSidecar(jobPath);
+    if (sidecar?.posted) {
+      const attemptedAt = sidecar.attemptedAt || now();
+      let record;
+      try {
+        record = readTerminalRecord(jobPath);
+      } catch (err) {
+        log.error?.(`[comment-delivery] failed to re-read ${jobPath} for sidecar recovery: ${err.message}`);
+        releaseDeliveryClaim(jobPath);
+        // Treat as posted=true since gh did succeed previously.
+        posted += 1;
+        continue;
+      }
+      const previous = record.commentDelivery || delivery;
+      record.commentDelivery = {
+        ...previous,
+        body: previous.body || delivery.body,
+        repo: previous.repo || delivery.repo,
+        prNumber: previous.prNumber || delivery.prNumber,
+        workerClass: previous.workerClass || delivery.workerClass,
+        attempts: Math.max((previous.attempts || 0), 1),
+        firstAttemptAt: previous.firstAttemptAt || attemptedAt,
+        lastAttemptAt: attemptedAt,
+        attempting: false,
+        posted: true,
+        reason: null,
+        error: null,
+        timeoutMs: null,
+        recoveredFromSidecar: true,
+      };
+      try {
+        writeTerminalRecord(jobPath, record);
+        clearPostedSidecar(jobPath);
+      } catch (err) {
+        log.error?.(`[comment-delivery] failed to stamp sidecar-recovered delivery on ${jobPath}: ${err.message}`);
+      } finally {
+        releaseDeliveryClaim(jobPath);
+      }
+      retried += 1;
+      posted += 1;
+      continue;
+    }
+
     retried += 1;
     /* eslint-disable no-await-in-loop */
     let result;
@@ -437,6 +746,20 @@ async function retryFailedCommentDeliveries({
     /* eslint-enable no-await-in-loop */
 
     const attemptedAt = now();
+
+    // Drop the posted-sidecar BEFORE writing the final stamp (R4
+    // dedupe gap, retry path). Same rationale as
+    // `recordInitialCommentDelivery`.
+    if (result?.posted) {
+      writePostedSidecar(jobPath, {
+        repo: delivery.repo,
+        prNumber: delivery.prNumber,
+        workerClass: delivery.workerClass,
+        postResult: result,
+        attemptedAt,
+      });
+    }
+
     let record;
     try {
       record = readTerminalRecord(jobPath);
@@ -449,7 +772,15 @@ async function retryFailedCommentDeliveries({
     const previous = record.commentDelivery || delivery;
     record.commentDelivery = {
       ...previous,
+      // For reconstructed candidates the existing record had no
+      // body/addressing; fold the reconstructed shape in so the
+      // record gains a complete delivery field.
+      body: previous.body || delivery.body,
+      repo: previous.repo || delivery.repo,
+      prNumber: previous.prNumber || delivery.prNumber,
+      workerClass: previous.workerClass || delivery.workerClass,
       attempts: (previous.attempts || 0) + 1,
+      firstAttemptAt: previous.firstAttemptAt || attemptedAt,
       lastAttemptAt: attemptedAt,
       attempting: false,
       posted: Boolean(result?.posted),
@@ -459,6 +790,9 @@ async function retryFailedCommentDeliveries({
     };
     try {
       writeTerminalRecord(jobPath, record);
+      if (result?.posted) {
+        clearPostedSidecar(jobPath);
+      }
     } catch (err) {
       log.error?.(`[comment-delivery] failed to update ${jobPath}: ${err.message}`);
     } finally {
@@ -477,11 +811,17 @@ export {
   RETRY_BUDGET_PER_TICK,
   DELIVERY_CLAIM_STALE_MS,
   NON_RETRYABLE_DELIVERY_REASONS,
-  buildPendingDelivery,
   buildAttemptingDelivery,
+  buildOwedDelivery,
+  buildPendingDelivery,
+  clearPostedSidecar,
+  deliveryLockPath,
+  listRetryCandidates,
+  postedSidecarPath,
+  reconstructDeliveryFromRecord,
   recordInitialCommentDelivery,
+  releaseDeliveryClaim,
   retryFailedCommentDeliveries,
   tryAcquireDeliveryClaim,
-  releaseDeliveryClaim,
-  deliveryLockPath,
+  writePostedSidecar,
 };

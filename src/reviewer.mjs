@@ -23,7 +23,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { createFollowUpJob } from './follow-up-jobs.mjs';
+import {
+  createFollowUpJob,
+  summarizePRRemediationLedger,
+} from './follow-up-jobs.mjs';
 import {
   buildObviousDocsGuidance,
   extractLinkedRepoDocs,
@@ -789,6 +792,17 @@ async function main() {
   const critical = isCritical(reviewText);
   const reviewPostedAt = new Date().toISOString();
   try {
+    // Carry the PR's prior remediation-round count and the per-job
+    // maxRounds forward into the new follow-up job. Two effects:
+    //   - `claimNextFollowUpJob`'s `currentRound >= maxRounds` guard
+    //     enforces the cap PR-wide, not per-job, so a PR that has
+    //     already exhausted its remediation budget cannot accidentally
+    //     get another worker spawn from a freshly created job.
+    //   - Legacy jobs created with maxRounds=6 keep that cap; we do not
+    //     overwrite it with the current default.
+    const priorLedger = summarizePRRemediationLedger(ROOT, { repo, prNumber });
+    const carriedMaxRounds = priorLedger.latestMaxRounds;
+
     const { jobPath } = createFollowUpJob({
       rootDir: ROOT,
       repo,
@@ -799,6 +813,8 @@ async function main() {
       reviewBody: reviewText,
       reviewPostedAt,
       critical,
+      priorCompletedRounds: priorLedger.completedRoundsForPR,
+      ...(carriedMaxRounds ? { maxRemediationRounds: carriedMaxRounds } : {}),
     });
     console.log(`[reviewer] Follow-up handoff queued at ${jobPath}`);
   } catch (err) {

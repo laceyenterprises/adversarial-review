@@ -59,7 +59,7 @@ The pipeline is **automated end-to-end**:
 - a LaunchAgent (`ai.laceyenterprises.adversarial-follow-up`) ticks every 2 min
 - each tick claims one pending job, spawns a detached remediation worker (codex or claude-code, picked from the PR's `builderTag`), then reconciles any in-progress jobs whose worker has exited
 - on every terminal transition (completed / stopped / failed) the reconciler posts a public PR comment under the matching reviewer-bot identity so operators can read the loop status from the PR itself
-- bounded by `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` (in `src/follow-up-jobs.mjs`); `requestReviewRereview` in `src/review-state.mjs` does not implement a per-PR cooldown — the round cap is the only re-arm bound, and each round must end with a fresh adversarial pass plus a worker-written `reReview.requested` decision before the next round can claim the job
+- bounded by `DEFAULT_MAX_REMEDIATION_ROUNDS = 3` (in `src/follow-up-jobs.mjs`); `requestReviewRereview` in `src/review-state.mjs` does not implement a per-PR cooldown — the round cap is the only re-arm bound, the cap is enforced PR-wide (each new follow-up job is seeded with the PR's prior round count so `claimNextFollowUpJob` stops past the budget), and each round must end with a fresh adversarial pass plus a worker-written `reReview.requested` decision before the next round can claim the job. **Migration note:** jobs persisted before this change (with `maxRounds=6` in their JSON) keep that cap — the watcher carries each PR's persisted `maxRounds` forward instead of substituting the current default, so legacy PRs do not silently lose two rounds of remediation budget mid-deploy.
 
 Operator-visible state is preserved in `data/follow-up-jobs/` (the durable JSON queue) and `data/reviews.db` (the review ledger). Operators retain explicit control: `npm run follow-up:requeue`, `npm run follow-up:stop`, `npm run retrigger-review` are still the canonical levers when manual intervention is required.
 
@@ -70,7 +70,9 @@ A PR's review verdict is what the worker-pool automerge gate watches (it reads t
 - `true` (the default success path) — fresh adversarial pass runs; new verdict replaces the stale `Request changes`; if it lands as `Comment only`, the gate fires automerge
 - `false` — deliberate human-intervention exit; the PR keeps its current verdict; a public PR comment flags that human review is needed (use the `blockers` array to explain)
 
-If the loop reaches the 6-round cap without converging, the job stops with code `max-rounds-reached` and the PR comment explicitly says human intervention is required.
+After the PR has consumed its remediation budget (default 3 rounds), the next adversarial review pass runs with the **lenient final-round threshold** (`prompts/reviewer-prompt-final-round-addendum.md`). That threshold relaxes the *categorization* bar — it stops marginal nits from generating new blocking findings every round and stacking complexity faster than they remove risk. It does **not** relax the merge gate: on the final round, the verdict is only `Comment only` when both `## Blocking issues` and `## Non-blocking issues` are empty. Any remaining finding (blocking or non-blocking) keeps the verdict at `Request changes`, the bounded loop hits `max-rounds-reached` on the next consume attempt, and the system posts a public PR comment saying human intervention is required.
+
+If the loop reaches the 3-round cap without converging, the job stops with code `max-rounds-reached` and the PR comment explicitly says human intervention is required.
 
 ---
 
@@ -365,7 +367,7 @@ Not enough:
 
 The JSON artifact is the contract.
 
-**Convergence rule (see `prompts/follow-up-remediation.md`):** `reReview.requested = true` is the default success path — without it, the PR's stale `Request changes` verdict is never replaced and the worker-pool automerge gate never fires. `false` is reserved for deliberate human-intervention exits (cite the reason in `blockers`). The bounded 6-round loop is the safety net against thrashing.
+**Convergence rule (see `prompts/follow-up-remediation.md`):** `reReview.requested = true` is the default success path — without it, the PR's stale `Request changes` verdict is never replaced and the worker-pool automerge gate never fires. `false` is reserved for deliberate human-intervention exits (cite the reason in `blockers`). The bounded 3-round loop is the safety net against thrashing; the final-round lenient threshold (see `prompts/reviewer-prompt-final-round-addendum.md`) relaxes the categorization bar but never relaxes the merge gate.
 
 ---
 
@@ -550,6 +552,6 @@ As of 2026-05-01, the pipeline is automated end-to-end:
 - watcher posts reviews
 - follow-up daemon claims jobs every 2 min, spawns workers, reconciles
 - public PR comments narrate every terminal outcome
-- convergence rule + 6-round cap + round-by-round "worker must request rereview" gate bound the loop (no per-PR rereview cooldown is implemented; the cap and the gate are the only re-arm bounds)
+- convergence rule + PR-wide 3-round cap + lenient final-round verdict-policy + round-by-round "worker must request rereview" gate bound the loop (no per-PR rereview cooldown is implemented; the cap and the gate are the only re-arm bounds; jobs persisted with the legacy 6-round cap continue to use 6)
 
 This README is optimized for quick scanning. Heavier operator semantics and maintenance detail live in `docs/follow-up-runbook.md`.

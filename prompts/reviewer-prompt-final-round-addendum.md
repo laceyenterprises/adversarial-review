@@ -1,32 +1,27 @@
 # Final-round verdict threshold (load-bearing)
 
-This is the **final** review on this PR. The bounded remediation loop will not run another round after this one. The standard adversarial-review threshold is too strict for the final pass — it produces a death-by-paper-cuts spiral where every remediation round surfaces fresh non-blocking findings and the PR never converges.
+This is the **final** review on this PR. The bounded remediation loop will not run another round after this one. The standard adversarial-review threshold tends to surface fresh non-blocking findings on every round, which can prevent convergence indefinitely. The lenient threshold below changes the **categorization** bar (what counts as blocking vs. non-blocking), but it does **not** change the merge gate. The merge gate downstream of this review reads the `## Verdict` section and treats `Comment only` as an automatic pass — so on the final round we hold a stricter line on what may be merged automatically.
 
-For this review, use the **lenient final-round threshold** below. It is not optional; apply it as the bar for `## Verdict`:
+## Categorization (use on the final round)
 
-## Block (verdict: `Request changes`) ONLY for
+When triaging each issue you find, only escalate to `## Blocking issues` for:
 
 - **Data corruption / data loss risk** — e.g. a write path that can produce inconsistent state, a migration that can drop rows, a delete path without a precondition
 - **Secret leakage to a public surface** — e.g. token / credential / private filesystem path being written to a PR comment, a public log, a GitHub issue body
 - **Security regression** — e.g. auth bypass, privilege escalation, removal of an existing security guard, weakening of a sandboxing or isolation boundary
 - **Broken external contract** — e.g. a public API method's signature changes in a way that will break downstream consumers, a published wire format changes incompatibly, a documented behavior is silently removed
 
-## Pass (verdict: `Comment only`) for everything else
+Everything else (style, naming, formatting, doc tone; edge cases not exercised in production paths; performance issues without user-visible impact; future-proofing concerns; speculative refactors; test gaps without a known bug; internal implementation choices) goes under `## Non-blocking issues`. Use the same File / Lines / Problem / Why-it-matters / Recommended-fix shape so a human follow-up reviewer can act on them without re-reading the diff.
 
-This explicitly includes (downgrade to non-blocking):
+## Verdict policy (do NOT downgrade to `Comment only` to force convergence)
 
-- Style, naming, formatting, doc tone
-- Edge cases that are not actively exercised in production paths
-- Performance issues that don't cause user-visible regressions
-- Future-proofing concerns ("what if X grows", "what if Y becomes contended")
-- Speculative refactors that would improve clarity but aren't required for correctness
-- Test gaps that don't correspond to a known bug
-- Internal implementation choices that work but aren't your preferred approach
+The downstream merge gate auto-merges any PR whose final review verdict is `Comment only`. To keep that gate honest, the final-round verdict mapping is strict:
 
-When you downgrade a finding from blocking to non-blocking, **document it under `## Non-blocking issues`** with the same File / Lines / Problem / Why-it-matters / Recommended-fix shape as a normal finding. The merged PR's reviewers will scan that section to spot anything that warrants a follow-up.
+- **`Comment only`** — only when `## Blocking issues` AND `## Non-blocking issues` are both `- None.`. The PR has nothing the reviewer would want to flag, and it is safe for the gate to merge it without further human attention.
+- **`Request changes`** — whenever `## Blocking issues` OR `## Non-blocking issues` contains any item. This includes the case where the lenient-threshold categorization moved everything out of blocking into non-blocking. The remaining findings exist; the merge gate must not silently land them. The bounded remediation loop will then stop with `max-rounds-reached` (no more rounds left), the system posts a public PR comment saying human intervention is required, and a human decides whether to merge with the known follow-ups or to address them first.
 
-## Why this exists
+The lenient threshold's value is in the **categorization** step (it stops marginal nits from generating new blocking findings every round, which prevents structural-fix complexity from stacking up). It is **not** an off-ramp for unresolved findings to merge silently — the convergence-vs-known-issues tradeoff is a human decision, not a reviewer-prompt decision.
 
-Adversarial review works as a single well-aimed punch, not a sustained dialogue. Rounds 1-2 of remediation catch the structural bugs, edge cases, and security gaps that would have shipped. Past that, marginal rounds add codebase complexity faster than they remove risk: claim locks, sidecars, manifests, caches, recovery paths — each one a real fix for a real concern, but stacked together they make the system harder to reason about than the original gap they were meant to close.
+## When to ship clean (`Comment only`)
 
-The final-round threshold is the off-ramp. The reviewer's job on this round is **not** to find every issue it can; it's to decide whether the PR is worse than the alternative of carrying its remaining findings as known follow-ups.
+Look hard before declaring the review clean — the lenient threshold relaxes the *blocking* bar, not the "look hard" bar. But if after a careful pass you find nothing substantive in either category, say so plainly and emit `Comment only`. That is the convergence path the loop is built for.

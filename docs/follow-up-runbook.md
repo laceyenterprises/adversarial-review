@@ -17,7 +17,7 @@ Use this when a review has already been posted to GitHub and you need to inspect
 - Public PR comments are **idempotent**. Each comment body embeds an HTML-comment marker keyed by `(jobId, round, action)` (prefix `adversarial-review-remediation-marker:`). Before posting, the poster runs a bounded `gh api` lookup on the PR's existing comments and skips the create if a previous attempt already landed on GitHub even though the local CLI saw a timeout. Lookup failures fall through to posting (best-effort: a duplicate is preferable to silent loss).
 - The retry path reads from a dedicated index, not the full terminal history. `data/follow-up-jobs/delivery-retry-index/` holds one pointer file per outstanding `posted=false` delivery; pointers are added on failure and removed on success. The first tick after upgrade walks the existing terminal history once to seed the index (sentinel: `.initialized`), then steady-state ticks read only the index — bounded by retry backlog size, not history size.
 - A new adversarial review pass only happens when the worker writes a **durable machine-readable rereview request** (`reReview.requested = true` in `remediation-reply.json`).
-- Bounding: `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` in `src/follow-up-jobs.mjs`. `requestReviewRereview` in `src/review-state.mjs` does **not** implement a cooldown — it refuses the reset only on hard guardrails (review row missing, malformed-title terminal, PR not open, already pending). The round cap is the only re-arm bound. (An earlier doc claim about a per-PR rereview cooldown was inaccurate.)
+- Bounding: `DEFAULT_MAX_REMEDIATION_ROUNDS = 3` in `src/follow-up-jobs.mjs` (was `6` before 2026-05-02). The cap is enforced **PR-wide**, not per-job. The watcher reads the PR's prior remediation-round count from the durable follow-up-jobs ledger (`summarizePRRemediationLedger`), seeds each new follow-up job's `currentRound` with that count, and carries the *job's persisted* `maxRounds` forward into the next adversarial review pass — so legacy jobs (with `maxRounds=6` in their JSON) keep their original 6-round cap and do not silently lose two rounds of budget mid-deploy. After the cap is consumed, the next review uses the lenient final-round verdict-categorization addendum (`prompts/reviewer-prompt-final-round-addendum.md`); that addendum relaxes the *categorization* bar (style / nits / future-proofing concerns become non-blocking) but does **not** relax the merge gate — the verdict stays `Request changes` whenever any finding remains. `requestReviewRereview` in `src/review-state.mjs` does **not** implement a cooldown — it refuses the reset only on hard guardrails (review row missing, malformed-title terminal, PR not open, already pending). The PR-wide round cap is the only re-arm bound. (An earlier doc claim about a per-PR rereview cooldown was inaccurate.)
 - Reviewer-bot tokens (`GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`) are best-effort: a missing token at startup is logged as a warning, the daemon still runs consume/reconcile, and the comment poster records `token-env-missing` for later retry once the token is restored. A 1Password outage at boot does not block remediation.
 
 Operator levers (still available, override the daemon):
@@ -208,8 +208,8 @@ Initial state:
 
 - `status = "pending"`
 - `remediationPlan.mode = "bounded-manual-rounds"`
-- `remediationPlan.maxRounds = 6` unless overridden at creation
-- `remediationPlan.currentRound = 0`
+- `remediationPlan.maxRounds = 3` unless overridden at creation (legacy jobs persisted with `6` keep `6`)
+- `remediationPlan.currentRound = priorCompletedRoundsForPR` — seeded from the PR's accumulated remediation rounds so the cap is enforced PR-wide; `0` for the very first follow-up job created for a PR
 - `remediationReply.state = "awaiting-worker-write"`
 - `remediationPlan.nextAction.type = "consume-pending-round"`
 
@@ -582,8 +582,9 @@ Usually the answer is already there.
 
 ### 6. Max rounds is a safety rail, not a suggestion
 
-Default max rounds is 6.
-If the loop hits that cap, the correct action is usually human review of strategy, not blind extension.
+Default max rounds is 3 (was 6 before 2026-05-02). The cap is enforced PR-wide: each new follow-up job is seeded with the PR's prior accumulated rounds, so the cap counts the *PR's* remediation cycles, not a single job's. Legacy jobs persisted with `6` keep their original cap; the watcher carries each PR's persisted `maxRounds` forward into the next adversarial review pass.
+
+If the loop hits that cap, the correct action is usually human review of strategy, not blind extension. After the cap is consumed, the next adversarial review pass uses the lenient final-round verdict-categorization addendum — but the merge gate is unchanged: if any finding remains (blocking or non-blocking), the verdict stays `Request changes` and the system posts a public PR comment saying human intervention is required.
 
 ### 7. Be careful with manual DB resets
 

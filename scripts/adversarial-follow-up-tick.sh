@@ -145,9 +145,30 @@ cd "$WATCHER_DIR"
 # reads docs/MACOS-TCC.md and re-drags the affected binary.
 NODE_REAL=$(readlink -f /opt/homebrew/bin/node 2>/dev/null || echo "<missing>")
 CLAUDE_REAL=$(readlink -f /opt/homebrew/bin/claude 2>/dev/null || echo "<missing>")
+# Codex's real Mach-O binary lives under a platform-specific npm
+# sub-package whose path moves on every codex version bump and every
+# fnm node-version change. The user-facing `codex` symlink resolves
+# to a `codex.js` script that *spawns* the real binary, so TCC keys
+# on the spawned binary, not the symlink. Resolve dynamically so the
+# banner stays accurate after upgrades.
+CODEX_SYMLINK=""
+for candidate in /Users/placey/.local/share/fnm/node-versions/*/installation/bin/codex; do
+  [[ -e "$candidate" ]] && CODEX_SYMLINK="$candidate" && break
+done
+if [[ -n "$CODEX_SYMLINK" ]]; then
+  CODEX_JS=$(readlink -f "$CODEX_SYMLINK" 2>/dev/null || true)
+  if [[ -n "$CODEX_JS" ]]; then
+    CODEX_PKG_ROOT="$(cd "$(dirname "$CODEX_JS")/.." 2>/dev/null && pwd || true)"
+    CODEX_REAL=$(/usr/bin/find "$CODEX_PKG_ROOT/node_modules/@openai" \
+      -maxdepth 6 -type f -name codex \
+      -path '*/vendor/aarch64-apple-darwin/codex/codex' 2>/dev/null | head -1)
+  fi
+fi
+CODEX_REAL="${CODEX_REAL:-<unresolved — see docs/MACOS-TCC.md>}"
 echo "[follow-up-tick] TCC subjects (must be in Full Disk Access — see docs/MACOS-TCC.md):"
 echo "[follow-up-tick]   /opt/homebrew/bin/node    -> $NODE_REAL"
 echo "[follow-up-tick]   /opt/homebrew/bin/claude  -> $CLAUDE_REAL"
+echo "[follow-up-tick]   codex (real Mach-O)       -> $CODEX_REAL"
 
 # ── Hand off to the in-process node daemon ────────────────────────────────
 #

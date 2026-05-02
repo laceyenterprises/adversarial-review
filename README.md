@@ -208,7 +208,7 @@ Two agents drive the system:
 
 Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo.
 
-> **One-time macOS step on a fresh machine.** After the LaunchAgents are installed, approve `/opt/homebrew/bin/node` and `/opt/homebrew/bin/claude` in **System Settings → Privacy & Security → Full Disk Access**. Without this, every remediation worker spawn fires a TCC popup ("node would like to access data from other apps"). Use `⌘⇧G` in the file picker to navigate into `/opt` (Finder hides it). Full details and re-approval triggers: `docs/MACOS-TCC.md`.
+> **One-time macOS step on a fresh machine.** After the LaunchAgents are installed, approve **three** binaries in **System Settings → Privacy & Security → Full Disk Access**: `/opt/homebrew/bin/node`, `/opt/homebrew/bin/claude`, and the real Mach-O `codex` binary buried under the npm sub-package (path is dynamic — see `docs/MACOS-TCC.md` for the resolver one-liner). Without this, every remediation worker spawn fires a TCC popup ("node would like to access data from other apps"). Use `⌘⇧G` in the file picker to navigate into `/opt` and `~/.local` (Finder hides them). Full details and re-approval triggers: `docs/MACOS-TCC.md`.
 
 > **The shipped plists are user-bound.** The filename suffix (`.placey.plist`) names the operator the plist's `HOME` and log paths point at. If you are running as `placey`, the manual install below works as-is. If you are running as a different operator, **do not bootstrap the shipped plist directly** — it would write logs to the wrong account and resolve `gh`/Codex auth from the wrong home directory. Copy with the matching suffix and substitute paths first (see `Install for a different user` below).
 

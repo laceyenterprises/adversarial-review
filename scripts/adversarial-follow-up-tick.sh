@@ -92,15 +92,26 @@ fi
 # Resolved ONCE at daemon startup. Subsequent ticks within the same
 # daemon process reuse these env vars in-process — no new `op read`
 # subprocess, no new popup. Token rotation requires a daemon restart.
-export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
-export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+#
+# DEGRADED MODE: PR comments are documented as best-effort, so a
+# 1Password outage at boot or a missing/rotated bot token must NOT
+# block the daemon from starting consume/reconcile. If a token fails
+# to resolve here, log a warning and continue with the variable
+# unset — the comment poster records the failure under
+# `commentDelivery.reason='token-env-missing'` and the retry pass
+# will pick it up on a future tick once the token is back. Without
+# this downgrade, a transient 1Password outage at the wrong moment
+# turns into a full remediation outage (PR-18 review's "hard startup
+# dependency" finding).
+GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential' 2>/dev/null || true)
+GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential' 2>/dev/null || true)
+export GH_CLAUDE_REVIEWER_TOKEN
+export GH_CODEX_REVIEWER_TOKEN
 if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then
-  echo "[follow-up-tick] ERROR: failed to resolve GH_CLAUDE_REVIEWER_TOKEN from 1Password" >&2
-  exit 1
+  echo "[follow-up-tick] WARN: GH_CLAUDE_REVIEWER_TOKEN not resolved at startup — claude-code comment posts will be deferred to retry; consume/reconcile continue." >&2
 fi
 if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
-  echo "[follow-up-tick] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from 1Password" >&2
-  exit 1
+  echo "[follow-up-tick] WARN: GH_CODEX_REVIEWER_TOKEN not resolved at startup — codex comment posts will be deferred to retry; consume/reconcile continue." >&2
 fi
 
 # Codex auth file lives in the running user's home; let the env

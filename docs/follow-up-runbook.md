@@ -15,7 +15,8 @@ Use this when a review has already been posted to GitHub and you need to inspect
 - Advancing from one remediation round to another runs **automatically** via the `ai.laceyenterprises.adversarial-follow-up` LaunchAgent (long-lived, internal 120s tick loop). Each tick runs three steps in order: consume one pending job, reconcile any in-progress jobs whose worker has exited, retry pending PR comment deliveries (bounded by `RETRY_BUDGET_PER_TICK`). The daemon resolves 1Password / `gh` secrets once at startup; subsequent ticks reuse them in-process so no new launchd-spawned subprocess re-prompts macOS for trust.
 - Public PR comments are best-effort but durable: every reconcile-time post attempt is stamped into the terminal job JSON under `commentDelivery`. A failed post (timeout, gh outage, missing token) is retried on subsequent ticks up to `MAX_COMMENT_DELIVERY_ATTEMPTS = 5`. The terminal JSON is the source of truth, not the PR comment.
 - A new adversarial review pass only happens when the worker writes a **durable machine-readable rereview request** (`reReview.requested = true` in `remediation-reply.json`).
-- Bounding: `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` in `src/follow-up-jobs.mjs` plus the per-PR rereview cooldown in `review-state.mjs`.
+- Bounding: `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` in `src/follow-up-jobs.mjs`. `requestReviewRereview` in `src/review-state.mjs` does **not** implement a cooldown — it refuses the reset only on hard guardrails (review row missing, malformed-title terminal, PR not open, already pending). The round cap is the only re-arm bound.
+- Reviewer-bot tokens (`GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`) are best-effort: a missing token at startup is logged as a warning, the daemon still runs consume/reconcile, and the comment poster records `token-env-missing` for later retry once the token is restored. A 1Password outage at boot does not block remediation.
 
 Operator levers (still available, override the daemon):
 
@@ -33,10 +34,10 @@ To pause the daemon during an outage:
 launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-follow-up
 ```
 
-To resume:
+To resume (the install layout deploys the plist with the `.placey` suffix dropped — see README "Install LaunchAgents" — so resume uses the deployed filename, NOT the per-user template name from `launchd/`):
 
 ```bash
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.placey.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
 launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
 ```
 

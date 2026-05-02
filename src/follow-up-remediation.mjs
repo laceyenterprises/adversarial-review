@@ -27,7 +27,7 @@ import {
 } from './pr-comments.mjs';
 import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
 import { redactSensitiveText } from './redaction.mjs';
-import { requestReviewRereview } from './review-state.mjs';
+import { readPRState, requestReviewRereview } from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1364,6 +1364,7 @@ async function reconcileFollowUpJob({
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
+  readPRStateImpl = readPRState,
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
@@ -1383,6 +1384,46 @@ async function reconcileFollowUpJob({
       reason: liveness.reason,
       job,
       jobPath,
+    };
+  }
+
+  // Merge gate: if the operator merged the PR while the worker was
+  // running, none of the downstream reconcile steps will help — the
+  // rereview reset is refused because pr_state != 'open', and the PR
+  // comment lands at the bottom of an already-merged thread. Stop
+  // cleanly with operator-merged-pr so the terminal record explains
+  // what happened. The worker's pushed commits stay on the remote
+  // branch; if they're already in main via the merge, that's the
+  // operator's intent and we don't want to undo it.
+  let prStateProbe = null;
+  try {
+    prStateProbe = readPRStateImpl(rootDir, { repo: job.repo, prNumber: job.prNumber });
+  } catch {
+    prStateProbe = null;
+  }
+  if (prStateProbe?.prState === 'merged') {
+    const mergeStoppedAt = now();
+    const mergeStopReason = `PR ${job.repo}#${job.prNumber} was merged while the remediation worker was running` +
+      `${prStateProbe.mergedAt ? ` (mergedAt=${prStateProbe.mergedAt})` : ''}` +
+      '; stopping the bounded loop instead of advancing the queue or posting a comment on a merged PR.';
+    const stopped = markFollowUpJobStopped({
+      rootDir,
+      jobPath,
+      stoppedAt: mergeStoppedAt,
+      stopCode: 'operator-merged-pr',
+      stopReason: mergeStopReason,
+      sourceStatus: 'in_progress',
+      remediationWorker: {
+        ...worker,
+        state: 'completed-pr-already-merged',
+        reconciledAt: mergeStoppedAt,
+      },
+    });
+    return {
+      action: 'stopped',
+      reason: 'pr-merged',
+      job: stopped.job,
+      jobPath: stopped.jobPath,
     };
   }
 
@@ -1865,6 +1906,7 @@ async function consumeNextFollowUpJob({
   spawnImpl = spawn,
   now = () => new Date().toISOString(),
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
+  readPRStateImpl = readPRState,
 } = {}) {
   // Claim first so we know which worker class we're running. This lets
   // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
@@ -1877,6 +1919,49 @@ async function consumeNextFollowUpJob({
 
   if (!claimed) {
     return { consumed: false, reason: 'no-pending-jobs' };
+  }
+
+  // Merge gate: if the operator already merged the PR, there's nothing
+  // for the remediation worker to do — the branch is gone, the review
+  // verdict no longer matters, and the watcher row will never accept a
+  // rereview reset (`requestReviewRereview` refuses pr_state != 'open').
+  // Spawning a worker would cost an OAuth pre-flight, a 1-2 minute
+  // worker run, and a misleading PR comment on the merged PR. Stop the
+  // job cleanly with an explicit code so operators reading stopped/
+  // can see what happened.
+  //
+  // Errors from the DB read fall through to the existing path — a
+  // missing reviews.db row means the watcher hasn't seen this PR yet,
+  // which is fine; the gate is a positive opt-in, not default-deny.
+  let prState = null;
+  try {
+    prState = readPRStateImpl(rootDir, { repo: claimed.job.repo, prNumber: claimed.job.prNumber });
+  } catch {
+    prState = null;
+  }
+  if (prState?.prState === 'merged') {
+    const stopReason = `PR ${claimed.job.repo}#${claimed.job.prNumber} was merged before remediation could run` +
+      `${prState.mergedAt ? ` (mergedAt=${prState.mergedAt})` : ''}` +
+      '; stopping the bounded loop instead of spawning a worker on a closed branch.';
+    const stoppedAt = now();
+    const stopped = markFollowUpJobStopped({
+      rootDir,
+      jobPath: claimed.jobPath,
+      stoppedAt,
+      stopCode: 'operator-merged-pr',
+      stopReason,
+      sourceStatus: 'in_progress',
+      remediationWorker: {
+        state: 'never-spawned',
+        reconciledAt: stoppedAt,
+      },
+    });
+    return {
+      consumed: false,
+      reason: 'pr-merged',
+      job: stopped.job,
+      jobPath: stopped.jobPath,
+    };
   }
 
   const workerClass = pickRemediationWorkerClass(claimed.job);

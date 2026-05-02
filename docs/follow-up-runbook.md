@@ -131,6 +131,9 @@ in-progress
   ├─ worker exits, no durable rereview request
   │    └─ stopped (code=no-progress)
   │
+  ├─ operator merged the PR before remediation completed
+  │    └─ stopped (code=operator-merged-pr)
+  │
   └─ operator stop
        └─ stopped (code=operator-stop)
 
@@ -328,6 +331,8 @@ The loop is intentionally capped and explicit. A job moves to `data/follow-up-jo
 `no-progress` means the latest remediation round finished without a durable re-review request. This is deliberate: the system stops instead of silently pretending forward progress exists.
 
 `max-rounds-reached` means another round would exceed the stored `remediationPlan.maxRounds` cap.
+
+`operator-merged-pr` means the PR was merged before remediation could complete. The pipeline detects this from the watcher's lifecycle sync (`reviews.db.pr_state = 'merged'`) and stops cleanly instead of spawning a worker on a closed branch or posting a comment on an already-merged PR. Fires from both the consume path (gate before worker spawn) and the reconcile path (gate after worker exit, before rereview reset). The terminal record carries the merged-at timestamp under `remediationPlan.stop.reason`.
 
 ---
 

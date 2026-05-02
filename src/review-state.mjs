@@ -53,6 +53,34 @@ function getReviewRow(db, { repo, prNumber }) {
   return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber) || null;
 }
 
+// Read just the PR-lifecycle columns the watcher's syncPRLifecycle
+// keeps current. Used by the follow-up daemon to short-circuit work
+// on PRs the operator has already merged or closed — no point
+// spawning a remediation worker, posting a comment, or resetting
+// the watcher row when the PR is no longer accepting changes.
+//
+// Returns null when no review row exists yet (e.g. a fresh repo or
+// a job created before the watcher saw the PR). Callers should
+// treat null as "proceed with existing behavior" — the merge gate
+// is a positive opt-in, not a default-deny gate.
+function readPRState(rootDir, { repo, prNumber }) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db
+      .prepare('SELECT pr_state, merged_at, closed_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+      .get(repo, prNumber);
+    if (!row) return null;
+    return {
+      prState: row.pr_state || 'open',
+      mergedAt: row.merged_at || null,
+      closedAt: row.closed_at || null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function buildBlockedRereviewResult(reason, reviewRow = null, extra = {}) {
   return {
     triggered: false,
@@ -121,5 +149,6 @@ export {
   ensureReviewStateSchema,
   openReviewStateDb,
   getReviewRow,
+  readPRState,
   requestReviewRereview,
 };

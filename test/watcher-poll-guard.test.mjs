@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildSafePollOnce,
+  computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_MS,
 } from '../src/watcher-poll-guard.mjs';
 
@@ -221,7 +222,132 @@ test('buildSafePollOnce rejects a non-positive deadlineMs', () => {
   );
 });
 
-test('DEFAULT_POLL_DEADLINE_MS is exported and is a positive number larger than typical poll work', () => {
+test('DEFAULT_POLL_DEADLINE_MS is exported and is large enough for a multi-PR org-wide scan', () => {
   assert.ok(Number.isFinite(DEFAULT_POLL_DEADLINE_MS));
-  assert.ok(DEFAULT_POLL_DEADLINE_MS > 0);
+  // Reviewer subprocess timeout is 5m; a single org-wide poll can
+  // serialize multiple legitimate slow reviews in one pass. The
+  // default must be comfortably larger than that or the watchdog
+  // trips on legitimate work and the watcher restarts before
+  // finishing the batch.
+  const reviewerTimeoutMs = 5 * 60 * 1000;
+  assert.ok(
+    DEFAULT_POLL_DEADLINE_MS > reviewerTimeoutMs * 2,
+    `expected DEFAULT_POLL_DEADLINE_MS (${DEFAULT_POLL_DEADLINE_MS}) > 2 * reviewer timeout (${reviewerTimeoutMs * 2})`
+  );
+});
+
+test('safePollOnce accepts a deadlineMs function and resolves it per call', async () => {
+  let calls = 0;
+  const observed = [];
+  const pollOnceImpl = async () => { calls += 1; };
+
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl,
+    octokit: 'stub',
+    deadlineMs: (source) => {
+      observed.push(source);
+      return 1000;
+    },
+    log: { log: () => {}, error: () => {} },
+  });
+
+  await safePollOnce('startup pollOnce');
+  await safePollOnce('scheduled pollOnce');
+
+  assert.equal(calls, 2);
+  assert.deepEqual(observed, ['startup pollOnce', 'scheduled pollOnce']);
+});
+
+test('safePollOnce throws when deadlineMs function returns a non-positive value', () => {
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl: async () => {},
+    octokit: 'stub',
+    deadlineMs: () => 0,
+    log: { log: () => {}, error: () => {} },
+  });
+
+  // Throws synchronously before pollOnceImpl runs — a misconfigured
+  // dynamic deadline is a bug, not a poll-time failure to swallow.
+  assert.throws(() => safePollOnce(), /positive finite number/);
+});
+
+test('safePollOnce times out using a function-resolved deadline', async () => {
+  let resolveGate;
+  const gate = new Promise((res) => { resolveGate = res; });
+
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl: () => gate,
+    octokit: 'stub',
+    deadlineMs: () => 25,
+    onTimeout: () => {},
+    log: { log: () => {}, error: () => {} },
+  });
+
+  const result = await safePollOnce();
+  assert.equal(result.timedOut, true);
+  assert.equal(result.error.code, 'POLL_DEADLINE_EXCEEDED');
+  resolveGate();
+});
+
+test('computeWorkloadAwarePollDeadlineMs scales with active repo count', () => {
+  const small = computeWorkloadAwarePollDeadlineMs({ activeRepoCount: 1 });
+  const big = computeWorkloadAwarePollDeadlineMs({ activeRepoCount: 12 });
+  assert.ok(big > small, `expected ${big}ms > ${small}ms for higher load`);
+});
+
+test('computeWorkloadAwarePollDeadlineMs honors a non-trivial floor', () => {
+  // A zero-repo or unknown-load case must still get a deadline well
+  // above a single reviewer timeout, otherwise even one slow PR can
+  // trip the watchdog before finishing.
+  const reviewerTimeoutMs = 5 * 60 * 1000;
+  const minimal = computeWorkloadAwarePollDeadlineMs({ activeRepoCount: 0 });
+  assert.ok(
+    minimal > reviewerTimeoutMs * 2,
+    `expected workload-aware floor (${minimal}) > 2 * reviewer timeout`
+  );
+});
+
+test('computeWorkloadAwarePollDeadlineMs covers the worst-case budget for a real org-wide load', () => {
+  // The blocking review finding: 10m default fails when 2-3 slow PRs
+  // legitimately serialize. With our default, even a 10-repo poll
+  // with 5 reviewable PRs each must finish before the deadline.
+  const reviewerTimeoutMs = 5 * 60 * 1000;
+  const apiSlackMs = 5 * 60 * 1000;
+  const repos = 10;
+  const prs = 5;
+  const worstCase = repos * prs * reviewerTimeoutMs + apiSlackMs;
+  const computed = computeWorkloadAwarePollDeadlineMs({
+    activeRepoCount: repos,
+    maxPrsPerRepo: prs,
+  });
+  assert.ok(
+    computed >= worstCase,
+    `expected ${computed}ms >= worst-case ${worstCase}ms`
+  );
+});
+
+test('safePollOnce keeps the watchdog timer ref\'d so a wedged promise still fires onTimeout', async () => {
+  // The reviewer-flagged hang class: pollOnceImpl wedges on a never-
+  // resolved promise with no active I/O handles. If the watchdog
+  // timer were unref'd, Node could exit silently before firing it
+  // and POLL_DEADLINE_EXCEEDED would be lost. With the timer ref'd,
+  // the watchdog must still fire and onTimeout must still be called.
+  let resolveGate;
+  const gate = new Promise((res) => { resolveGate = res; });
+  const timeouts = [];
+
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl: () => gate, // never resolves; no I/O handles
+    octokit: 'stub',
+    deadlineMs: 25,
+    onTimeout: (err, source) => timeouts.push({ code: err.code, source }),
+    log: { log: () => {}, error: () => {} },
+  });
+
+  const result = await safePollOnce('hung-no-handles pollOnce');
+  assert.equal(result.timedOut, true);
+  assert.deepEqual(timeouts, [
+    { code: 'POLL_DEADLINE_EXCEEDED', source: 'hung-no-handles pollOnce' },
+  ]);
+  resolveGate();
 });

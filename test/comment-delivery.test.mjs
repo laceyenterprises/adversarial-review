@@ -710,3 +710,48 @@ test('recordInitialCommentDelivery leaves a recoverable commentDelivery record e
   assert.equal(record.commentDelivery.repo, 'r');
   assert.equal(record.commentDelivery.prNumber, 1);
 });
+
+test('retryFailedCommentDeliveries posts a comment for a terminal record that landed without commentDelivery (lost-pre-stamp recovery)', async () => {
+  // End-to-end of the R5 blocking #1 fix: a terminal record arrives
+  // with no commentDelivery (e.g., reconcile crashed between the
+  // atomic move and the pre-stamp). The retry walker must reconstruct
+  // delivery from the record itself, post, and stamp the record.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'failed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-recovered.json');
+  writeFileSync(jobPath, JSON.stringify({
+    jobId: 'job-recovered',
+    repo: 'laceyenterprises/demo',
+    prNumber: 555,
+    status: 'failed',
+    builderTag: 'codex',
+    remediationWorker: { model: 'codex' },
+    failure: { code: 'artifact-missing-completion', message: 'Worker exited before final-message artifact.' },
+    remediationPlan: { currentRound: 1, maxRounds: 6 },
+  }, null, 2), 'utf8');
+
+  const calls = [];
+  const summary = await retryFailedCommentDeliveries({
+    rootDir,
+    postCommentImpl: async (args) => {
+      calls.push(args);
+      return { posted: true };
+    },
+    now: () => '2026-05-02T05:00:00.000Z',
+    log: { error: () => {} },
+  });
+
+  assert.equal(calls.length, 1, 'reconstructed candidate must be posted');
+  assert.equal(calls[0].repo, 'laceyenterprises/demo');
+  assert.equal(calls[0].prNumber, 555);
+  assert.equal(calls[0].workerClass, 'codex');
+  assert.ok(calls[0].body, 'reconstructed body must be non-empty');
+  assert.equal(summary.posted, 1);
+
+  const record = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(record.commentDelivery.posted, true);
+  assert.equal(record.commentDelivery.repo, 'laceyenterprises/demo');
+  assert.equal(record.commentDelivery.prNumber, 555);
+  assert.equal(record.commentDelivery.workerClass, 'codex');
+});

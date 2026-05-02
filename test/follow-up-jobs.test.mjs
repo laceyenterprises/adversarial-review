@@ -441,6 +441,71 @@ test('markFollowUpJobFailed preserves the supplied failureCode even when failure
   assert.equal(failed.job.remediationPlan.rounds[0].failure.code, 'invalid-remediation-reply');
 });
 
+// R5 review blocking #1: every terminal record must land in failed/
+// (or completed/, stopped/) with `commentDelivery` already populated,
+// so the retry walker has a recoverable shape if the post step
+// crashes before its own pre-stamp. The mark* functions accept an
+// owed-delivery shape and embed it atomically with the move.
+test('markFollowUpJobFailed embeds commentDelivery atomically with the terminal write', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const owed = {
+    posted: false,
+    attempting: false,
+    attempts: 0,
+    body: '### Remediation Worker — failed',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    workerClass: 'codex',
+    owedAt: '2026-04-21T10:05:00.000Z',
+  };
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath: claimed.jobPath,
+    error: new Error('artifact missing'),
+    failedAt: '2026-04-21T10:05:00.000Z',
+    failureCode: 'artifact-missing-completion',
+    commentDelivery: owed,
+  });
+
+  const onDisk = JSON.parse(readFileSync(failed.jobPath, 'utf8'));
+  assert.equal(onDisk.commentDelivery.posted, false);
+  assert.equal(onDisk.commentDelivery.body, '### Remediation Worker — failed');
+  assert.equal(onDisk.commentDelivery.repo, 'laceyenterprises/clio');
+  assert.equal(onDisk.commentDelivery.prNumber, 7);
+  assert.equal(onDisk.commentDelivery.workerClass, 'codex');
+  assert.equal(onDisk.commentDelivery.owedAt, '2026-04-21T10:05:00.000Z');
+});
+
+test('markFollowUpJobCompleted embeds commentDelivery atomically with the terminal write', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  const owed = {
+    posted: false,
+    attempting: false,
+    attempts: 0,
+    body: '### Remediation Worker — completed',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    workerClass: 'codex',
+    owedAt: '2026-04-21T10:06:00.000Z',
+  };
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-21T10:06:00.000Z',
+    commentDelivery: owed,
+  });
+
+  const onDisk = JSON.parse(readFileSync(completed.jobPath, 'utf8'));
+  assert.equal(onDisk.commentDelivery.body, '### Remediation Worker — completed');
+  assert.equal(onDisk.commentDelivery.owedAt, '2026-04-21T10:06:00.000Z');
+});
+
 test('markFollowUpJobSpawned records the expected remediation reply artifact path', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));

@@ -18,10 +18,28 @@
 # - The two reviewer-bot PATs are loaded so the comment poster can
 #   speak as @claude-reviewer-lacey or @codex-reviewer-lacey on the PR
 #   (see src/pr-comments.mjs::WORKER_CLASS_TO_BOT_TOKEN_ENV).
+#
+# ── Per-user paths ────────────────────────────────────────────────────────
+#
+# Most paths are derived at runtime from the principal under whose home
+# dir the LaunchAgent runs (HOME / $UID), not hardcoded to /Users/placey.
+# This means the same script works for a different operator: install the
+# matching plist (e.g. `ai.laceyenterprises.adversarial-follow-up.<user>.plist`)
+# pointing at this script; the Codex auth lookup, the 1Password resolution,
+# and the `gh` token will all resolve from the running user's environment.
+#
+# What's still fixed:
+# - WATCHER_DIR (`AGENT_OS_ROOT/tools/adversarial-review`) — the repo
+#   location is environment-specific by design and matches the watcher
+#   plist convention. Override AGENT_OS_ROOT to relocate.
+# - The op-service-account.env path under agents/clio/credentials/local
+#   — that file pairs a 1Password service-account token with the
+#   running machine and is provisioned out-of-band by `restore.sh`.
 
 set -euo pipefail
 
-WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
+AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
+WATCHER_DIR="$AGENT_OS_ROOT/tools/adversarial-review"
 
 # Sanity gate: better-sqlite3 is a native module and breaks across Node ABI
 # bumps (NODE_MODULE_VERSION mismatch). If the daemon will fail to load
@@ -39,7 +57,7 @@ if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('b
 fi
 
 # Load 1Password service account token (not in LaunchAgent env by default).
-source /Users/airlock/agent-os/agents/clio/credentials/local/op-service-account.env
+source "$AGENT_OS_ROOT/agents/clio/credentials/local/op-service-account.env"
 export OP_SERVICE_ACCOUNT_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
 if [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   echo "[follow-up-tick] ERROR: OP_SERVICE_ACCOUNT_TOKEN not loaded" >&2
@@ -71,8 +89,13 @@ if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   exit 1
 fi
 
-# Codex CLI is shared by the watcher; point at the same OAuth auth file.
-export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json
+# Codex auth file lives in the running user's home; let the env
+# pre-set CODEX_AUTH_PATH override (e.g. via the LaunchAgent plist or
+# a developer shell), otherwise default to "$HOME/.codex/auth.json".
+# The watcher and this daemon must agree on the auth file when run as
+# the same user — the LaunchAgent plist sets HOME explicitly so this
+# resolves to the operator's path even when launchd doesn't carry HOME.
+export CODEX_AUTH_PATH="${CODEX_AUTH_PATH:-$HOME/.codex/auth.json}"
 
 # Scrub direct-provider API keys — remediation workers must use OAuth only.
 unset ANTHROPIC_API_KEY

@@ -1,4 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-user LaunchAgent for the adversarial-review follow-up daemon.
+
+  Filename convention: `.<user>.plist` binds this plist to a specific
+  operator's home directory (matching the watcher's `.placey.plist`).
+  The os-restart auto-install path copies this file verbatim to
+  `~<user>/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist`
+  (deployed name drops the `.placey` suffix). To run the daemon as a
+  different operator, copy this plist as `.<that-user>.plist`,
+  substitute every `/Users/placey` reference with that user's home,
+  and add the matching entry to `os-restart.sh`'s
+  INSTALLABLE_USER_AGENT_PLISTS / USER_AGENTS arrays.
+
+  Why hardcoded paths: `EnvironmentVariables` in launchd plists do not
+  support shell expansion, so `$HOME` cannot be referenced from within
+  this file. The tick script (scripts/adversarial-follow-up-tick.sh)
+  derives CODEX_AUTH_PATH and any user-relative path from `$HOME` at
+  runtime, so the only literal in this plist that has to be edited
+  per-user is HOME itself plus the log paths (which `launchctl` opens
+  before the script runs).
+
+  Not generic / not portable across machines: WorkingDirectory and the
+  ProgramArguments path embed `/Users/airlock/agent-os/`. That is the
+  documented Agent OS root on this host (matching the existing
+  watcher plist). Override AGENT_OS_ROOT inside the tick script if
+  the repo lives elsewhere on a future host.
+-->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -18,10 +45,10 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- HOME is the only per-user value this plist hardcodes; the tick
+             script derives every other user-relative path from it. -->
         <key>HOME</key>
         <string>/Users/placey</string>
-        <key>CODEX_AUTH_PATH</key>
-        <string>/Users/placey/.codex/auth.json</string>
     </dict>
 
     <!-- Fire every 120s. Each tick is a one-shot: claim+spawn one

@@ -760,6 +760,8 @@ async function main() {
 }
 
 export {
+  CLAUDE_CLI,
+  CODEX_CLI,
   sanitizeCodexReviewPayload,
 };
 

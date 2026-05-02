@@ -205,22 +205,42 @@ Two agents drive the system:
 | `ai.laceyenterprises.adversarial-watcher` | KeepAlive (long-lived) | `src/watcher.mjs` — polls for tagged PRs, spawns reviewers |
 | `ai.laceyenterprises.adversarial-follow-up` | StartInterval=120s (one-shot tick) | `scripts/adversarial-follow-up-tick.sh` — consume + reconcile |
 
-Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo. To install one manually:
+Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo.
+
+> **The shipped plists are user-bound.** The filename suffix (`.placey.plist`) names the operator the plist's `HOME` and log paths point at. If you are running as `placey`, the manual install below works as-is. If you are running as a different operator, **do not bootstrap the shipped plist directly** — it would write logs to the wrong account and resolve `gh`/Codex auth from the wrong home directory. Copy with the matching suffix and substitute paths first (see `Install for a different user` below).
+
+#### Install for `placey` (the shipped binding)
 
 ```bash
 cp launchd/ai.laceyenterprises.adversarial-follow-up.placey.plist \
-   ~/Library/LaunchAgents/
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.placey.plist
+   ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
 launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
 ```
 
-To pause the loop during an outage:
+#### Install for a different user
+
+Replace `<USER>` with the running operator's username everywhere:
 
 ```bash
-launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-follow-up
+sed "s|/Users/placey|/Users/<USER>|g" \
+  launchd/ai.laceyenterprises.adversarial-follow-up.placey.plist \
+  > ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
+plutil -lint ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
+launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
 ```
 
-The follow-up daemon resolves the same secrets the watcher does (`OP_SERVICE_ACCOUNT_TOKEN`, `GITHUB_TOKEN`, `GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`, `CODEX_AUTH_PATH`) and uses `unset` to scrub direct-provider API keys before exec — same OAuth-first contract as `src/reviewer.mjs`.
+You will also need to add a matching entry to `USER_AGENTS_ONESHOT` in `scripts/os-restart.sh` so the daemon is picked up on a system restart. The corresponding `INSTALLABLE_USER_AGENT_PLISTS` entry must also point at the per-user template (the auto-install path copies the file verbatim — it does not substitute placeholders).
+
+#### Pause / resume
+
+```bash
+launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-follow-up   # pause
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist  # resume
+```
+
+The follow-up daemon resolves the same secrets the watcher does (`OP_SERVICE_ACCOUNT_TOKEN`, `GITHUB_TOKEN`, `GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`, `CODEX_AUTH_PATH`) and uses `unset` to scrub direct-provider API keys before exec — same OAuth-first contract as `src/reviewer.mjs`. Per-user paths (`CODEX_AUTH_PATH`, log dirs) are derived at runtime from `$HOME` set by the plist; only the WorkingDirectory and `AGENT_OS_ROOT` reference the repo location explicitly.
 
 ---
 
@@ -396,7 +416,19 @@ If a remediation round "finished" but nothing advanced, the first thing to ask i
 - did `remediation-reply.json` exist?
 - did it actually set `reReview.requested = true`?
 
-The PR comment posted at every terminal transition is the operator-facing source of truth — if there's no comment, reconcile didn't run; if the comment says "Re-review requested: no", the worker chose the human-intervention exit.
+**The terminal job JSON is the durable source of truth, not the PR comment.** Each terminal record carries a `commentDelivery` field stamped at the time reconcile attempted to post:
+
+```bash
+jq '.commentDelivery' data/follow-up-jobs/{completed,stopped,failed}/<jobId>.json
+```
+
+If `commentDelivery.posted === false`, the queue advanced but the public PR comment failed (timeout, gh outage, missing token). The retry-comments step at the start of every daemon tick re-attempts up to `MAX_COMMENT_DELIVERY_ATTEMPTS = 5` times — see `src/comment-delivery.mjs`. Reasons in `NON_RETRYABLE_DELIVERY_REASONS` (e.g. `no-token-mapping`) are never retried; those records sit for operator inspection.
+
+So:
+
+- comment present on the PR → reconcile ran AND delivery succeeded.
+- comment missing on the PR → reconcile may still have run; check `commentDelivery.posted` in the terminal record.
+- terminal record has `commentDelivery.posted === false` past 5 attempts → operator inspection needed.
 
 Inspect daemon logs:
 

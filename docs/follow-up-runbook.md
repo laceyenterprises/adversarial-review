@@ -12,7 +12,8 @@ Use this when a review has already been posted to GitHub and you need to inspect
 - The **watcher owns review posting**. Follow-up remediation does not post GitHub reviews directly.
 - The remediation worker works on the **existing PR branch**, commits changes, and pushes that branch.
 - The remediation worker does **not** open a new PR and does **not** merge the PR.
-- Advancing from one remediation round to another runs **automatically** via the `ai.laceyenterprises.adversarial-follow-up` LaunchAgent (StartInterval=120s). The daemon claims pending jobs, spawns workers, reconciles exits, and posts public PR comments at every terminal transition.
+- Advancing from one remediation round to another runs **automatically** via the `ai.laceyenterprises.adversarial-follow-up` LaunchAgent (StartInterval=120s). Each tick runs three steps: retry pending PR comment deliveries, consume one pending job, reconcile any in-progress jobs whose worker has exited.
+- Public PR comments are best-effort but durable: every reconcile-time post attempt is stamped into the terminal job JSON under `commentDelivery`. A failed post (timeout, gh outage, missing token) is retried on subsequent ticks up to `MAX_COMMENT_DELIVERY_ATTEMPTS = 5`. The terminal JSON is the source of truth, not the PR comment.
 - A new adversarial review pass only happens when the worker writes a **durable machine-readable rereview request** (`reReview.requested = true` in `remediation-reply.json`).
 - Bounding: `DEFAULT_MAX_REMEDIATION_ROUNDS = 6` in `src/follow-up-jobs.mjs` plus the per-PR rereview cooldown in `review-state.mjs`.
 

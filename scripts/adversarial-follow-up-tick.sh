@@ -1,23 +1,25 @@
 #!/bin/zsh
 # adversarial-follow-up-tick.sh
 #
-# Long-lived driver for the follow-up remediation pipeline. Resolves
-# secrets ONCE at startup, then loops every 120s running:
+# Startup gate for the follow-up remediation daemon. Validates the
+# native module, resolves secrets ONCE via 1Password / gh, scrubs
+# forbidden env, then `exec`s into the in-process node daemon
+# (scripts/adversarial-follow-up-daemon.mjs) which owns the tick
+# loop.
 #
-#   1. consume   — claim + spawn one pending follow-up job
-#   2. reconcile — finalize in-progress jobs whose worker has exited
-#   3. retry-comments — bounded drain of failed historical PR comment
-#                       deliveries (RETRY_BUDGET_PER_TICK records max)
-#
-# Why long-lived (changed 2026-05-02): the original design was a
-# one-shot tick (script exits, launchd respawns every 120s via
-# StartInterval). That triggered a 1Password / TCC popup storm on
-# every tick because launchd-spawned subprocesses aren't
-# process-trusted by the macOS 1Password app or the macOS privacy
-# gatekeeper the same way an interactive shell's are — each fresh
-# `op read` and `gh auth token` call re-prompted. Converting to
-# long-lived means secrets resolve once at startup (one popup per
-# system boot) and ticks reuse them in-process.
+# Why this shape (changed 2026-05-02 round 2): an earlier revision
+# ran the tick loop in bash and spawned three fresh `node`
+# subprocesses every 120s (consume / reconcile / retry-comments).
+# Each fresh node re-touched ~/.codex/auth.json and worker session
+# dirs, and macOS TCC re-prompted "node would like to access data
+# from other apps" on every tick because launchd-spawned processes
+# don't inherit terminal-session TCC trust. Collapsing the three
+# steps into a single long-lived node process means TCC trust is
+# granted once at startup and reused for the daemon's lifetime.
+# (The earlier revision before this had a launchd StartInterval=120
+# one-shot that re-resolved secrets on every tick — that's what
+# caused the 1Password popup storm; this current shape resolves
+# secrets once and never re-prompts.)
 #
 # Auth policy mirrors the reviewer watcher:
 # - Reviewer/remediator CLIs use OAuth credentials only.
@@ -126,40 +128,25 @@ unset OPENAI_API_KEY
 
 cd "$WATCHER_DIR"
 
-echo "[follow-up-daemon $(date -u +"%Y-%m-%dT%H:%M:%SZ")] startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s)"
-
-# ── Tick loop (runs forever) ───────────────────────────────────────────────
+# ── Hand off to the in-process node daemon ────────────────────────────────
 #
-# Each iteration: consume → reconcile → retry-comments. We never exit
-# cleanly; KeepAlive=SuccessfulExit=false in the plist relaunches on
-# crash. Trap SIGTERM so launchd can stop the daemon gracefully when
-# the operator runs `launchctl bootout`.
-
-trap 'echo "[follow-up-daemon] received SIGTERM — exiting tick loop"; exit 0' TERM INT
-
-while true; do
-  TICK_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-  # Tick step 1: consume one pending job (no-op if queue is empty).
-  # We don't fail the tick on a non-zero exit because consume failures
-  # (e.g., OAuth pre-flight) move the offending job to failed/ via the
-  # in-process catch — the queue keeps moving on the next tick.
-  echo "[follow-up-tick $TICK_TS] consume: starting"
-  /opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-remediation.mjs" || \
-    echo "[follow-up-tick $TICK_TS] consume: exited non-zero (job moved to failed/ — see logs)"
-
-  # Tick step 2: reconcile in-progress jobs (workers may have exited).
-  echo "[follow-up-tick $TICK_TS] reconcile: starting"
-  /opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-reconcile.mjs" || \
-    echo "[follow-up-tick $TICK_TS] reconcile: exited non-zero"
-
-  # Tick step 3: drain any failed historical comment deliveries. Bounded
-  # at RETRY_BUDGET_PER_TICK records per call (see src/comment-delivery.mjs)
-  # so a backlog can't starve future ticks' live work.
-  echo "[follow-up-tick $TICK_TS] retry-comments: starting"
-  /opt/homebrew/bin/node "$WATCHER_DIR/src/follow-up-retry-comments.mjs" || \
-    echo "[follow-up-tick $TICK_TS] retry-comments: exited non-zero"
-
-  echo "[follow-up-tick $TICK_TS] tick complete; sleeping ${TICK_INTERVAL_SECONDS}s"
-  sleep "$TICK_INTERVAL_SECONDS"
-done
+# This bash script's only responsibility is the startup gate — sanity-check
+# the native module, resolve secrets via 1Password and gh, scrub forbidden
+# env, then exec into the node daemon. The daemon owns the tick loop
+# in-process.
+#
+# Why exec instead of spawn: the previous design ran a `while true` loop
+# in bash that spawned three fresh `node` subprocesses every 120s. Each
+# new node process re-touched ~/.codex/auth.json and worker session
+# dirs, and macOS TCC re-prompted "node would like to access data from
+# other apps" on every tick because launchd-spawned processes don't
+# inherit a terminal session's TCC trust. Collapsing the three steps
+# into a single long-lived node process means TCC trust is granted
+# once at startup and reused for the daemon's lifetime.
+#
+# `exec` replaces this bash process with node, so launchd sees the
+# node process directly (cleaner KeepAlive semantics) and signals
+# (SIGTERM from `launchctl bootout`) flow straight to node where it
+# can shut down its tick loop gracefully — see
+# scripts/adversarial-follow-up-daemon.mjs for the SIGTERM trap.
+exec /opt/homebrew/bin/node "$WATCHER_DIR/scripts/adversarial-follow-up-daemon.mjs"

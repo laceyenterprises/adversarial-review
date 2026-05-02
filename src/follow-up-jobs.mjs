@@ -9,12 +9,20 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
-const DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
+const LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
+const DEFAULT_RISK_CLASS = 'medium';
+const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
+  low: 1,
+  medium: 1,
+  high: 2,
+  critical: 3,
+});
+const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
 const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
@@ -45,10 +53,141 @@ function writeFollowUpJob(jobPath, job) {
   writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
 }
 
-function normalizeMaxRounds(maxRounds) {
+function normalizeMaxRounds(maxRounds, { fallback = LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS } = {}) {
   return Number.isInteger(maxRounds) && maxRounds > 0
     ? maxRounds
-    : DEFAULT_MAX_REMEDIATION_ROUNDS;
+    : fallback;
+}
+
+function normalizeRiskClass(riskClass, { fallback = null } = {}) {
+  const normalized = String(riskClass ?? '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(ROUND_BUDGET_BY_RISK_CLASS, normalized)
+    ? normalized
+    : fallback;
+}
+
+function buildRoundBudgetResolution({
+  riskClass = DEFAULT_RISK_CLASS,
+  roundBudget = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS],
+  source = 'default-medium',
+} = {}) {
+  const normalizedRiskClass = normalizeRiskClass(riskClass, { fallback: DEFAULT_RISK_CLASS });
+  const normalizedRoundBudget = normalizeMaxRounds(
+    roundBudget,
+    { fallback: ROUND_BUDGET_BY_RISK_CLASS[normalizedRiskClass] }
+  );
+
+  return {
+    riskClass: normalizedRiskClass,
+    roundBudget: normalizedRoundBudget,
+    source,
+  };
+}
+
+function getProjectsDir(rootDir) {
+  const candidates = [
+    join(rootDir, 'projects'),
+    resolve(rootDir, '..', '..', 'projects'),
+  ];
+
+  return candidates.find((candidate) => existsSync(candidate)) || candidates[0];
+}
+
+function listLinearMappingPaths(dirPath) {
+  if (!existsSync(dirPath)) {
+    return [];
+  }
+
+  const results = [];
+  for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+    const entryPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...listLinearMappingPaths(entryPath));
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith('.linear-mapping.json')) {
+      results.push(entryPath);
+    }
+  }
+  return results.sort();
+}
+
+function readJsonFileIfPresent(filePath) {
+  if (!existsSync(filePath)) {
+    return null;
+  }
+
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}
+
+function resolveRiskClassForLinearTicket(linearTicketId, { rootDir }) {
+  const normalizedTicketId = String(linearTicketId ?? '').trim().toUpperCase();
+  if (!normalizedTicketId) {
+    return buildRoundBudgetResolution({ source: 'default-medium' });
+  }
+
+  const projectsDir = getProjectsDir(rootDir);
+  for (const mappingPath of listLinearMappingPaths(projectsDir)) {
+    try {
+      const mapping = readJsonFileIfPresent(mappingPath);
+      if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) {
+        continue;
+      }
+
+      const ticketEntry = Object.entries(mapping).find(([, ticketId]) => (
+        String(ticketId ?? '').trim().toUpperCase() === normalizedTicketId
+      ));
+      if (!ticketEntry) {
+        continue;
+      }
+
+      const [planTicketId] = ticketEntry;
+      const planPath = mappingPath.replace(/\.linear-mapping\.json$/u, '');
+      const plan = readJsonFileIfPresent(planPath);
+      const planTicket = Array.isArray(plan?.tickets)
+        ? plan.tickets.find((ticket) => String(ticket?.id ?? '').trim() === String(planTicketId).trim())
+        : null;
+      const riskClass = normalizeRiskClass(planTicket?.riskClass);
+
+      if (!riskClass) {
+        continue;
+      }
+
+      return buildRoundBudgetResolution({
+        riskClass,
+        roundBudget: ROUND_BUDGET_BY_RISK_CLASS[riskClass],
+        source: `plan:${planPath}`,
+      });
+    } catch {}
+  }
+
+  return buildRoundBudgetResolution({ source: normalizedTicketId ? 'default-medium' : 'default-medium' });
+}
+
+function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {}) {
+  const persistedRiskClass = normalizeRiskClass(job?.riskClass);
+  const persistedRoundBudget = Number(
+    job?.remediationPlan?.maxRounds
+      || job?.recommendedFollowUpAction?.maxRounds
+  );
+
+  if (persistedRiskClass) {
+    return buildRoundBudgetResolution({
+      riskClass: persistedRiskClass,
+      roundBudget: ROUND_BUDGET_BY_RISK_CLASS[persistedRiskClass],
+      source: 'job-risk-class',
+    });
+  }
+
+  if (preferPersisted && Number.isInteger(persistedRoundBudget) && persistedRoundBudget > 0) {
+    return buildRoundBudgetResolution({
+      riskClass: DEFAULT_RISK_CLASS,
+      roundBudget: persistedRoundBudget,
+      source: 'job-persisted-maxRounds',
+    });
+  }
+
+  return resolveRiskClassForLinearTicket(job?.linearTicketId, { rootDir });
 }
 
 function buildRemediationRoundPlan(maxRounds = DEFAULT_MAX_REMEDIATION_ROUNDS) {
@@ -221,7 +360,8 @@ function readRemediationReplyArtifact(replyPath, { expectedJob = null } = {}) {
 function buildLegacyRemediationPlan(job) {
   const maxRounds = normalizeMaxRounds(
     Number(job?.remediationPlan?.maxRounds)
-      || Number(job?.recommendedFollowUpAction?.maxRounds)
+      || Number(job?.recommendedFollowUpAction?.maxRounds),
+    { fallback: LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS }
   );
   const basePlan = buildRemediationRoundPlan(maxRounds);
   const status = String(job?.status || 'pending');
@@ -335,7 +475,8 @@ function normalizeRemediationPlan(job) {
   if (job?.schemaVersion === FOLLOW_UP_JOB_SCHEMA_VERSION && job?.remediationPlan) {
     const currentRound = Math.max(0, Number(job.remediationPlan.currentRound || 0));
     const maxRounds = normalizeMaxRounds(
-      Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds)
+      Number(job.remediationPlan.maxRounds || job?.recommendedFollowUpAction?.maxRounds),
+      { fallback: LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS }
     );
     const persistedStopReason = typeof job.remediationPlan.stop?.reason === 'string'
       && job.remediationPlan.stop.reason.trim()
@@ -382,9 +523,11 @@ function normalizeFollowUpJob(job) {
     && persistedRemediationReply.path.trim()
     ? persistedRemediationReply.path
     : null;
+  const normalizedRiskClass = normalizeRiskClass(job?.riskClass);
   return {
     ...job,
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+    riskClass: normalizedRiskClass,
     recommendedFollowUpAction: {
       ...buildRecommendedFollowUpAction({ critical: job.critical }),
       ...(job.recommendedFollowUpAction || {}),
@@ -573,6 +716,7 @@ function buildFollowUpJob({
   reviewPostedAt,
   critical,
   maxRemediationRounds = DEFAULT_MAX_REMEDIATION_ROUNDS,
+  riskClass = null,
 }) {
   const createdAt = reviewPostedAt || new Date().toISOString();
   const jobId = `${sanitizeRepo(repo)}-pr-${prNumber}-${sanitizeTimestamp(createdAt)}`;
@@ -591,6 +735,7 @@ function buildFollowUpJob({
     repo,
     prNumber,
     linearTicketId,
+    riskClass: normalizeRiskClass(riskClass),
     reviewerModel,
     critical: Boolean(critical),
     reviewSummary: extractReviewSummary(reviewBody),
@@ -611,16 +756,29 @@ function buildFollowUpJob({
 
 function createFollowUpJob({ rootDir, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
+  const { riskClass, roundBudget } = resolveRoundBudgetForJob(baseJob, {
+    rootDir,
+    preferPersisted: Number.isInteger(jobInput.maxRemediationRounds) && jobInput.maxRemediationRounds > 0,
+  });
+  const resolvedJob = {
+    ...baseJob,
+    riskClass,
+    recommendedFollowUpAction: {
+      ...baseJob.recommendedFollowUpAction,
+      maxRounds: roundBudget,
+    },
+    remediationPlan: buildRemediationRoundPlan(roundBudget),
+  };
   const queueDir = getFollowUpJobDir(rootDir, 'pending');
 
   mkdirSync(queueDir, { recursive: true });
 
   for (let attempt = 0; attempt < MAX_CREATE_ATTEMPTS; attempt += 1) {
     const job = attempt === 0
-      ? baseJob
+      ? resolvedJob
       : {
-          ...baseJob,
-          jobId: `${baseJob.jobId}-${attempt + 1}`,
+          ...resolvedJob,
+          jobId: `${resolvedJob.jobId}-${attempt + 1}`,
         };
     const jobPath = join(queueDir, `${job.jobId}.json`);
 
@@ -636,7 +794,41 @@ function createFollowUpJob({ rootDir, ...jobInput }) {
     }
   }
 
-  throw new Error(`Unable to create unique follow-up job file for ${baseJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
+  throw new Error(`Unable to create unique follow-up job file for ${resolvedJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
+}
+
+function summarizePRRemediationLedger({ rootDir, repo, prNumber }) {
+  const states = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
+  const matchingJobs = states
+    .flatMap((key) => listFollowUpJobsInDir(rootDir, key))
+    .filter((entry) => entry.job.repo === repo && entry.job.prNumber === prNumber);
+
+  if (matchingJobs.length === 0) {
+    const defaultResolution = buildRoundBudgetResolution();
+    return {
+      jobCount: 0,
+      completedRoundsForPR: 0,
+      latestMaxRounds: defaultResolution.roundBudget,
+      latestRiskClass: defaultResolution.riskClass,
+      latestJob: null,
+    };
+  }
+
+  const latestEntry = matchingJobs
+    .slice()
+    .sort((left, right) => String(left.job.createdAt || '').localeCompare(String(right.job.createdAt || '')))
+    .at(-1);
+  const latestResolution = resolveRoundBudgetForJob(latestEntry.job, { rootDir });
+
+  return {
+    jobCount: matchingJobs.length,
+    completedRoundsForPR: matchingJobs.reduce((maxRounds, entry) => (
+      Math.max(maxRounds, Number(entry.job?.remediationPlan?.currentRound || 0))
+    ), 0),
+    latestMaxRounds: latestResolution.roundBudget,
+    latestRiskClass: latestResolution.riskClass,
+    latestJob: latestEntry.job,
+  };
 }
 
 function claimNextFollowUpJob({
@@ -1040,6 +1232,8 @@ export {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
+  LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS,
+  ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
@@ -1063,8 +1257,10 @@ export {
   markFollowUpJobStopped,
   readRemediationReplyArtifact,
   readFollowUpJob,
+  resolveRoundBudgetForJob,
   requeueFollowUpJobForNextRound,
   stopFollowUpJob,
+  summarizePRRemediationLedger,
   validateRemediationReply,
   writeFollowUpJob,
 };

@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
+  ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
@@ -20,8 +21,10 @@ import {
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
   readFollowUpJob,
+  resolveRoundBudgetForJob,
   requeueFollowUpJobForNextRound,
   stopFollowUpJob,
+  summarizePRRemediationLedger,
   validateRemediationReply,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
@@ -37,6 +40,32 @@ function makeJobInput(rootDir) {
     reviewPostedAt: '2026-04-21T08:00:00.000Z',
     critical: true,
   };
+}
+
+function writePlanMappingFixture(rootDir, {
+  planDir = 'projects/example-project',
+  planFile = 'PLAN-track-x.json',
+  planTicketId = 'T1',
+  linearTicketId = 'LAC-207',
+  riskClass = 'medium',
+  corruptPlan = false,
+} = {}) {
+  const planDirPath = path.join(rootDir, planDir);
+  const planPath = path.join(planDirPath, planFile);
+  const mappingPath = `${planPath}.linear-mapping.json`;
+
+  mkdirSync(planDirPath, { recursive: true });
+  writeFileSync(mappingPath, `${JSON.stringify({ [planTicketId]: linearTicketId }, null, 2)}\n`, 'utf8');
+  writeFileSync(
+    planPath,
+    corruptPlan
+      ? '{not-json}\n'
+      : `${JSON.stringify({
+          planSchemaVersion: 1,
+          tickets: [{ id: planTicketId, riskClass }],
+        }, null, 2)}\n`,
+    'utf8'
+  );
 }
 
 test('extractReviewSummary prefers the Summary section when present', () => {
@@ -75,6 +104,7 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.equal(job.sessionHandoff.resumeAvailable, false);
   assert.equal(job.remediationPlan.mode, 'bounded-manual-rounds');
   assert.equal(job.remediationPlan.maxRounds, DEFAULT_MAX_REMEDIATION_ROUNDS);
+  assert.equal(job.riskClass, null);
   assert.deepEqual(job.remediationPlan.rounds, []);
   assert.equal(job.remediationReply.kind, REMEDIATION_REPLY_KIND);
   assert.equal(job.remediationReply.schemaVersion, REMEDIATION_REPLY_SCHEMA_VERSION);
@@ -85,13 +115,19 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
 
 test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pending', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const { job, jobPath } = createFollowUpJob(makeJobInput(rootDir));
+  writePlanMappingFixture(rootDir, { linearTicketId: 'LAC-207', riskClass: 'high' });
+  const { job, jobPath } = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    linearTicketId: 'LAC-207',
+  });
 
   assert.match(jobPath, /data\/follow-up-jobs\/pending\/.+\.json$/);
 
   const persisted = JSON.parse(readFileSync(jobPath, 'utf8'));
   assert.deepEqual(persisted, job);
   assert.equal(persisted.recommendedFollowUpAction.priority, 'high');
+  assert.equal(persisted.riskClass, 'high');
+  assert.equal(persisted.remediationPlan.maxRounds, 2);
 });
 
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {
@@ -149,7 +185,7 @@ test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape',
   const normalized = readFollowUpJob(jobPath);
   assert.equal(normalized.schemaVersion, 2);
   assert.equal(normalized.remediationPlan.mode, 'bounded-manual-rounds');
-  assert.equal(normalized.remediationPlan.maxRounds, DEFAULT_MAX_REMEDIATION_ROUNDS);
+  assert.equal(normalized.remediationPlan.maxRounds, 6);
   assert.equal(normalized.remediationPlan.currentRound, 1);
   assert.equal(normalized.remediationPlan.rounds[0].state, 'completed');
   assert.equal(normalized.remediationPlan.rounds[0].worker.processId, 8123);
@@ -158,6 +194,66 @@ test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape',
   assert.equal(normalized.remediationReply.kind, REMEDIATION_REPLY_KIND);
   assert.equal(normalized.remediationReply.state, 'awaiting-worker-write');
   assert.equal(normalized.remediationReply.path, null);
+});
+
+test('resolveRoundBudgetForJob maps each supported risk class to the expected round budget', () => {
+  for (const [riskClass, expectedBudget] of Object.entries(ROUND_BUDGET_BY_RISK_CLASS)) {
+    const resolution = resolveRoundBudgetForJob({
+      riskClass,
+      remediationPlan: { maxRounds: expectedBudget },
+    }, { rootDir: '/tmp' });
+    assert.equal(resolution.riskClass, riskClass);
+    assert.equal(resolution.roundBudget, expectedBudget);
+  }
+});
+
+test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const resolution = resolveRoundBudgetForJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    linearTicketId: null,
+  }, { rootDir, preferPersisted: false });
+
+  assert.equal(resolution.riskClass, 'medium');
+  assert.equal(resolution.roundBudget, 1);
+});
+
+test('resolveRoundBudgetForJob resolves risk class from plan mapping sidecars', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writePlanMappingFixture(rootDir, {
+    linearTicketId: 'LAC-501',
+    planTicketId: 'PMO-A1',
+    riskClass: 'critical',
+  });
+
+  const resolution = resolveRoundBudgetForJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    linearTicketId: 'LAC-501',
+  }, { rootDir, preferPersisted: false });
+
+  assert.equal(resolution.riskClass, 'critical');
+  assert.equal(resolution.roundBudget, 3);
+});
+
+test('resolveRoundBudgetForJob falls back to medium when the linked plan file is corrupt', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writePlanMappingFixture(rootDir, {
+    linearTicketId: 'LAC-999',
+    planTicketId: 'BROKEN-1',
+    riskClass: 'critical',
+    corruptPlan: true,
+  });
+
+  const resolution = resolveRoundBudgetForJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    linearTicketId: 'LAC-999',
+  }, { rootDir, preferPersisted: false });
+
+  assert.equal(resolution.riskClass, 'medium');
+  assert.equal(resolution.roundBudget, 1);
 });
 
 test('readFollowUpJob whitelists persisted remediationReply fields during normalization', () => {
@@ -801,7 +897,10 @@ test('markFollowUpJobFailed preserves an existing terminal record even if a stal
 
 test('requeueFollowUpJobForNextRound moves a completed job back to pending for the next bounded round', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 2,
+  });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const completed = markFollowUpJobCompleted({
     rootDir,
@@ -836,7 +935,10 @@ test('requeueFollowUpJobForNextRound moves a completed job back to pending for t
 
 test('requeueFollowUpJobForNextRound stops a completed job when no durable re-review request was recorded', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 2,
+  });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const completed = markFollowUpJobCompleted({
     rootDir,

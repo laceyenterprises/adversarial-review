@@ -26,6 +26,23 @@ npm run follow-up:stop -- <job-path> [reason]
 
 ---
 
+## Risk-tiered round budgets
+
+New follow-up jobs derive their default remediation budget from the linked spec ticket's `riskClass`:
+
+| riskClass | remediation rounds |
+|---|---:|
+| `low` | 1 |
+| `medium` | 1 |
+| `high` | 2 |
+| `critical` | 3 |
+
+PRs without a discoverable spec linkage fall back to `medium` -> `1` round.
+
+Legacy in-flight jobs keep their persisted `maxRounds` cap. Do not retroactively rewrite those queue records.
+
+---
+
 ## Mental model
 
 There are two separate state machines here:
@@ -74,7 +91,7 @@ detached remediation worker on checked-out PR branch
 terminal queue state
   ├─ completed/   -> valid rereview request recorded
   ├─ failed/      -> launch/reconcile/artifact failure
-  └─ stopped/     -> bounded stop (no-progress, operator-stop, max-rounds-reached)
+  └─ stopped/     -> bounded stop (no-progress, operator-stop, max-rounds-reached, round-budget-exhausted)
   │
   └─ if rereview requested:
        requestReviewRereview(...)
@@ -112,6 +129,11 @@ in-progress
   │
   └─ operator stop
        └─ stopped (code=operator-stop)
+
+pending/in-progress
+  │
+  └─ claimed round exceeds risk-tier budget
+       └─ stopped (code=round-budget-exhausted)
 
 completed
   │
@@ -187,7 +209,7 @@ Initial state:
 
 - `status = "pending"`
 - `remediationPlan.mode = "bounded-manual-rounds"`
-- `remediationPlan.maxRounds = 6` unless overridden at creation
+- `remediationPlan.maxRounds = riskClass-derived budget` for new jobs
 - `remediationPlan.currentRound = 0`
 - `remediationReply.state = "awaiting-worker-write"`
 - `remediationPlan.nextAction.type = "consume-pending-round"`
@@ -257,6 +279,41 @@ and it is where re-review intent is expressed:
 - if `reReview.requested = true`, `reReview.reason` is required
 
 Prose alone is not enough to trigger another review pass.
+
+---
+
+## Stop codes
+
+### `round-budget-exhausted`
+
+Meaning:
+- the queue record attempted to enter a remediation round that exceeds the PR's risk-tier budget
+- this is the substrate-level refusal for Track A
+
+Typical cause:
+- a legacy job still carries a higher persisted `maxRounds` cap than the PR's current risk-tier policy allows
+- or an operator manually requeued a PR after its allowed round budget was already consumed
+
+Operator action:
+- review the completed remediation rounds already on the PR
+- if the PR is ready, move it to merge/manual integration handling
+- if more remediation is truly required, reopen the underlying spec and justify a higher `riskClass` before requesting another round
+
+### `max-rounds-reached`
+
+Meaning:
+- the job reached its own persisted `maxRounds` cap
+
+Operator action:
+- inspect the prior rounds and decide whether to merge, stop, or create a newly authorized follow-up path
+
+### `operator-stop`
+
+Meaning:
+- an operator explicitly stopped the follow-up loop
+
+Operator action:
+- continue with manual handling
 
 ### 4. Reconcile detached completion
 

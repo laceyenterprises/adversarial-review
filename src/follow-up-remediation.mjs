@@ -15,6 +15,8 @@ import {
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
+  resolveRoundBudgetForJob,
+  writeFollowUpJob,
 } from './follow-up-jobs.mjs';
 import {
   buildObviousDocsGuidance,
@@ -941,6 +943,34 @@ async function consumeNextFollowUpJob({
   }
 
   try {
+    const roundBudgetResolution = resolveRoundBudgetForJob(claimed.job, { rootDir });
+    if (claimed.job?.riskClass !== roundBudgetResolution.riskClass) {
+      claimed.job = {
+        ...claimed.job,
+        riskClass: roundBudgetResolution.riskClass,
+      };
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
+
+    const currentRound = Number(claimed.job?.remediationPlan?.currentRound || 0);
+    if (currentRound > roundBudgetResolution.roundBudget) {
+      const stopped = markFollowUpJobStopped({
+        rootDir,
+        jobPath: claimed.jobPath,
+        stoppedAt: now(),
+        stopCode: 'round-budget-exhausted',
+        sourceStatus: claimed.job.status,
+        stopReason: `Remediation round ${currentRound} exceeds the ${roundBudgetResolution.riskClass} risk-class budget (${roundBudgetResolution.roundBudget}); refusing to spawn another remediation worker.`,
+      });
+
+      return {
+        consumed: false,
+        reason: 'round-budget-exhausted',
+        job: stopped.job,
+        jobPath: stopped.jobPath,
+      };
+    }
+
     const { workspaceDir, workspaceState } = await prepareWorkspaceForJob({
       rootDir,
       job: claimed.job,

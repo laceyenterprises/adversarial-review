@@ -60,7 +60,10 @@ function readReviewRow(rootDir, repo = 'laceyenterprises/clio', prNumber = 7) {
 
 test('reconcileFollowUpJob stops a finished spawned round for no-progress when no re-review is requested', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 2,
+  });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');

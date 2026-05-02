@@ -14,6 +14,10 @@ import {
   routePR,
 } from './watcher-title-guardrails.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
+import {
+  resolveRoundBudgetForJob,
+  summarizePRRemediationLedger,
+} from './follow-up-jobs.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -113,6 +117,50 @@ async function spawnReviewer({ repo, prNumber, reviewerModel, botTokenEnv, linea
     console.error(`[watcher] Reviewer failed for ${repo}#${prNumber}:`, detail || err.message);
     return { ok: false, error: detail || err.message };
   }
+}
+
+function evaluateRoundBudgetForReview({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  linearTicketId,
+  reviewStatus,
+  reviewAttempts = 0,
+  log = console.log,
+}) {
+  if (reviewStatus !== 'pending' || Number(reviewAttempts) <= 0) {
+    return { skip: false };
+  }
+
+  const ledger = summarizePRRemediationLedger({ rootDir, repo, prNumber });
+  const resolution = resolveRoundBudgetForJob({
+    linearTicketId,
+    riskClass: ledger.latestRiskClass,
+    remediationPlan: {
+      maxRounds: ledger.latestMaxRounds,
+    },
+  }, { rootDir });
+
+  if (ledger.completedRoundsForPR < resolution.roundBudget) {
+    return {
+      skip: false,
+      completedRoundsForPR: ledger.completedRoundsForPR,
+      roundBudget: resolution.roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
+
+  log(
+    `[watcher] Skipping rereview for ${repo}#${prNumber}: completed remediation rounds ${ledger.completedRoundsForPR}/${resolution.roundBudget} exhaust the ${resolution.riskClass} risk-class budget. Merge-agent handoff is future Track B work.`
+  );
+
+  return {
+    skip: true,
+    reason: 'round-budget-exhausted',
+    completedRoundsForPR: ledger.completedRoundsForPR,
+    roundBudget: resolution.roundBudget,
+    riskClass: resolution.riskClass,
+  };
 }
 
 // ── Linear state helpers ─────────────────────────────────────────────────────
@@ -369,6 +417,18 @@ async function pollOnce(octokit) {
         stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
       }
 
+      const roundBudgetDecision = evaluateRoundBudgetForReview({
+        rootDir: ROOT,
+        repo: repoPath,
+        prNumber,
+        linearTicketId,
+        reviewStatus: existing?.review_status || 'pending',
+        reviewAttempts: existing?.review_attempts || 0,
+      });
+      if (roundBudgetDecision.skip) {
+        continue;
+      }
+
       const attemptAt = new Date().toISOString();
       stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
       await setLinearInReview(linearTicketId);
@@ -433,5 +493,6 @@ if (isMain) {
 }
 
 export {
+  evaluateRoundBudgetForReview,
   pollOnce,
 };

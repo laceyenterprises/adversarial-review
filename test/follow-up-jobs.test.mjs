@@ -1433,16 +1433,22 @@ test('validateRemediationReply accepts a reply that accounts for every blocking 
   assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
 });
 
-test('validateRemediationReply rejects duplicate findings across addressed[]/pushback[]/blockers[]', () => {
+test('validateRemediationReply tolerates two distinct findings that collapse to the same paraphrase', () => {
+  // Two distinct review findings (different files, same root cause)
+  // can legitimately reduce to the same `finding` string in the
+  // worker reply. Free-form-text uniqueness was previously enforced
+  // here and rejected such replies; that check was removed because
+  // distinct strings are not the same as correct strings, so the
+  // dedup added no real coverage and produced false rejections.
   const reviewBody = [
     '## Summary',
-    'Two problems.',
+    'Same bug, two files.',
     '',
     '## Blocking Issues',
     '- File: src/a.mjs',
-    '  Problem: Same.',
+    '  Problem: Null pointer dereference on retry.',
     '- File: src/b.mjs',
-    '  Problem: Other.',
+    '  Problem: Null pointer dereference on retry.',
   ].join('\n');
 
   const job = buildFollowUpJob({
@@ -1454,26 +1460,132 @@ test('validateRemediationReply rejects duplicate findings across addressed[]/pus
     critical: false,
   });
 
-  assert.throws(
-    () => validateRemediationReply({
-      kind: REMEDIATION_REPLY_KIND,
-      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
-      jobId: job.jobId,
-      repo: job.repo,
-      prNumber: job.prNumber,
-      outcome: 'completed',
-      summary: 'Double-counted one finding.',
-      validation: ['npm test'],
-      addressed: [
-        { finding: 'Same problem.', action: 'Fixed.' },
-        { finding: 'Same problem.', action: 'Fixed again.' },
-      ],
-      pushback: [],
-      blockers: [],
-      reReview: { requested: true, reason: 'Ready.' },
-    }, { expectedJob: job }),
-    /duplicate finding across addressed\[\]\/pushback\[\]\/blockers\[\]/
-  );
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed the null deref in both files.',
+    validation: ['npm test'],
+    addressed: [
+      { finding: 'Null pointer dereference on retry.', action: 'Guarded the retry path in src/a.mjs.' },
+      { finding: 'Null pointer dereference on retry.', action: 'Guarded the retry path in src/b.mjs.' },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Ready.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply skips coverage enforcement when blocking section is empty (`- None.` sentinel)', () => {
+  // The reviewer prompt mandates `- None.` as the explicit empty
+  // sentinel for any zero-finding section. The coverage validator
+  // must recognize it as zero findings; otherwise every valid
+  // remediation reply for a clean review would fail validation and
+  // be routed through `invalid-remediation-reply` instead of
+  // rereview, stalling the convergence loop.
+  const reviewBody = [
+    '## Summary',
+    'No blockers found.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    '',
+    '## Non-blocking Issues',
+    '- File: src/a.mjs',
+    '  Problem: Style nit.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 95,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:05:00.000Z',
+    critical: false,
+  });
+
+  // Worker opts into the new schema with empty addressed[]/pushback[]
+  // because there are zero blocking findings to address. This is the
+  // exact shape that previously failed (counted `- None.` as 1 finding,
+  // demanded 1 entry, rejected as `invalid-remediation-reply`).
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'No blocking findings; nothing to address.',
+    validation: ['npm test'],
+    addressed: [],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Clean review; ready to confirm.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply counts each issue once when fields are emitted as five top-level bullets per issue', () => {
+  // The reviewer prompt does not mandate the indented-continuation
+  // style. A compliant review can emit each per-issue field as its
+  // own top-level `- ` bullet. The previous validator counted every
+  // top-level `- ` line as a finding, so a single issue rendered as
+  // five field bullets was miscounted as five findings, forcing the
+  // worker to fabricate four extra accountability entries to pass.
+  const reviewBody = [
+    '## Summary',
+    'Two issues, each rendered as five top-level field bullets.',
+    '',
+    '## Blocking Issues',
+    '- File: src/a.mjs',
+    '- Lines: 1-5',
+    '- Problem: First problem.',
+    '- Why it matters: First risk.',
+    '- Recommended fix: First fix.',
+    '- File: src/b.mjs',
+    '- Lines: 10-20',
+    '- Problem: Second problem.',
+    '- Why it matters: Second risk.',
+    '- Recommended fix: Second fix.',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 96,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:06:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed both findings.',
+    validation: ['npm test'],
+    addressed: [
+      { finding: 'First problem.', action: 'Applied first fix.' },
+      { finding: 'Second problem.', action: 'Applied second fix.' },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Ready.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
 });
 
 test('validateRemediationReply skips coverage enforcement on legacy replies that omit addressed[]/pushback[]', () => {

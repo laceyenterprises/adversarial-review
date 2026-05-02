@@ -321,30 +321,92 @@ function validateBlockersField(items) {
   });
 }
 
-// Count blocking findings in the reviewer's review body. The reviewer
-// template renders blocking issues under a `## Blocking Issues` (or
-// `## Blocking issues`) heading with one top-level bullet per finding;
-// sub-bullets (file/lines/problem/etc.) are indented and do not match
-// the column-0 anchor. Returns `null` when the section is absent so the
-// caller can opt out of coverage enforcement instead of treating
-// "section missing" as "0 findings."
-function countBlockingFindingsInReview(reviewBody) {
+// Parse the `## Blocking Issues` section into structured findings. The
+// reviewer prompt (`prompts/reviewer-prompt.md`) requires:
+//   - one bullet item per finding, each with `File:` / `Lines:` /
+//     `Problem:` / `Why it matters:` / `Recommended fix:` fields
+//   - the literal sentinel `- None.` when the section is empty
+// Two render shapes are both compliant with that prompt:
+//   1. one top-level `- File:` bullet per finding, with the rest of
+//      the fields as 2-space-indented continuation lines (no marker)
+//   2. five top-level bullets per finding (`- File:`, `- Lines:`,
+//      `- Problem:`, `- Why it matters:`, `- Recommended fix:`)
+// Both shapes contain exactly one `- File:` field bullet per finding,
+// so the finding-boundary marker is `- File:` (with optional leading
+// whitespace), not "any column-0 dash."
+//
+// Returns `null` when the section is absent (caller opts out of
+// coverage enforcement). Returns `[]` when the section exists but is
+// empty or contains only the `- None.` sentinel. Returns one entry
+// per finding otherwise, with extracted `file` / `lines` / `problem`
+// fields preserved for diagnostics.
+function parseBlockingFindingsSection(reviewBody) {
   if (typeof reviewBody !== 'string' || !reviewBody.trim()) return null;
   const match = reviewBody.match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
   if (!match) return null;
-  const section = match[1];
-  const tops = section.match(/^- /gm);
-  return tops ? tops.length : 0;
+  const section = match[1].trim();
+  if (!section) return [];
+  // The reviewer prompt mandates `- None.` as the explicit empty
+  // sentinel. Recognize it (with or without trailing period; tolerate
+  // case variation) before the count step so an empty section is not
+  // miscounted as a finding.
+  const lines = section.split(/\n/);
+  const isSentinelOnly = lines.every((l) => {
+    const t = l.trim();
+    return t === '' || /^-\s+None\.?$/i.test(t);
+  });
+  if (isSentinelOnly) return [];
+
+  const findings = [];
+  let current = null;
+  for (const raw of lines) {
+    const fileMatch = raw.match(/^[ \t]*-[ \t]+File[ \t]*:[ \t]*(.*)$/i);
+    if (fileMatch) {
+      if (current) findings.push(current);
+      current = { file: fileMatch[1].trim() };
+      continue;
+    }
+    if (!current) continue;
+    const linesField = raw.match(/^[ \t]*(?:-[ \t]+)?Lines[ \t]*:[ \t]*(.*)$/i);
+    if (linesField && current.lines === undefined) {
+      current.lines = linesField[1].trim();
+      continue;
+    }
+    const problemField = raw.match(/^[ \t]*(?:-[ \t]+)?Problem[ \t]*:[ \t]*(.*)$/i);
+    if (problemField && current.problem === undefined) {
+      current.problem = problemField[1].trim();
+    }
+  }
+  if (current) findings.push(current);
+  return findings;
 }
 
-// Enforce that every blocking finding in the review is accounted for
-// exactly once across `addressed[]`, `pushback[]`, and `blockers[]`.
-// Without this the prompt's per-finding contract is documentation-only
-// — a worker can omit findings, duplicate one across lists, or claim
-// rereview readiness while only accounting for a subset of the review,
-// and the public PR comment becomes a misleading durable record.
+function countBlockingFindingsInReview(reviewBody) {
+  const findings = parseBlockingFindingsSection(reviewBody);
+  return findings === null ? null : findings.length;
+}
+
+// Enforce that the reply records the same number of accountability
+// entries as there are blocking findings in the review body, summed
+// across `addressed[]`, `pushback[]`, and `blockers[]`. Without this
+// the prompt's per-finding contract is documentation-only — a worker
+// can omit findings entirely, claim rereview readiness on a subset of
+// the review, and the public PR comment becomes a misleading durable
+// record.
 //
-// Backward-compat: enforced only when the reply is using the new
+// Limit of this check (deliberate, documented): it validates count
+// only. It does NOT verify that the worker's free-form `finding`
+// strings semantically correspond to the parsed review findings — a
+// worker could submit N arbitrary strings and pass. Closing that gap
+// requires a richer schema where the worker references findings by
+// stable IDs the prompt provides; that is a future schema bump
+// (tracked as a known follow-up). Free-form-text uniqueness was
+// previously enforced here but removed because it rejected legitimate
+// replies in which two distinct review findings (e.g. the same bug in
+// two files) collapsed to the same paraphrase, with no benefit since
+// distinct strings are not the same as correct strings.
+//
+// Backward-compat: enforced only when the reply opts into the new
 // schema (signaled by either `addressed` or `pushback` being present)
 // AND we can confidently parse the review body's blocking section.
 // Legacy replies (string-array blockers, no addressed/pushback) skip
@@ -369,23 +431,6 @@ function validateBlockingCoverage(reply, expectedJob) {
         `(addressed=${addressed.length}, pushback=${pushback.length}, blockers=${blockers.length}). ` +
         `Each blocking issue must appear exactly once across addressed[], pushback[], or blockers[].`
     );
-  }
-
-  const findings = [
-    ...addressed.map((e) => e?.finding),
-    ...pushback.map((e) => e?.finding),
-    ...blockers.map((e) => (typeof e === 'string' ? e : e?.finding)),
-  ].map((f) => String(f ?? '').trim().toLowerCase()).filter(Boolean);
-
-  const seen = new Set();
-  for (const f of findings) {
-    if (seen.has(f)) {
-      throw new Error(
-        `Remediation reply has a duplicate finding across addressed[]/pushback[]/blockers[]: "${f}". ` +
-          `Each blocking finding must appear exactly once.`
-      );
-    }
-    seen.add(f);
   }
 }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -304,6 +304,244 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
   assert.equal(reconciled.job.failure.code, 'invalid-remediation-reply');
 });
 
+test('reconcileFollowUpJob completes when stdout is empty but the reply.json validates and reReview.requested=true', async () => {
+  // Regression for PR #20 incident: a claude-code worker pushed a
+  // real fix (commit 839ed9c, 9 files / 557 lines) and wrote a valid
+  // remediation-reply.json with reReview.requested=true, but its
+  // `--print`-mode stdout (captured to codex-last-message.md) was
+  // empty because the response was tool-only. The reconciler used to
+  // false-fail this with code `artifact-empty-completion` and post
+  // "Human intervention required" on the PR. The fix: when the
+  // narrative is empty but the reply.json validates, treat the reply
+  // as the durable success signal — `reReview.requested` (per
+  // SPEC.md §5.1.2) decides completed vs stopped, NOT `outcome`.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  // Empty stdout — exactly what claude-code --print produces on a
+  // tool-only response.
+  writeFileSync(outputPath, '', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Pushed a real fix; reply.json is the durable success signal.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Remediation landed; please run a fresh adversarial pass.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 8124,
+      model: 'claude-code',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  const reviewRow = readReviewRow(rootDir);
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'completed', 'must NOT route empty-stdout-with-valid-reply to failed/');
+  assert.equal(reconciled.job.reReview.requested, true);
+  assert.equal(reconciled.job.reReview.triggered, true);
+  assert.equal(reconciled.job.reReview.status, 'pending');
+  // Watcher row IS reset (the user's PR can be re-reviewed).
+  assert.equal(reviewRow.review_status, 'pending');
+  assert.equal(reviewRow.rereview_reason, 'Remediation landed; please run a fresh adversarial pass.');
+  // Completion metadata reflects that success came from the reply,
+  // not the narrative — operators reading the terminal record can
+  // tell which path was taken.
+  assert.equal(reconciled.job.completion.source, 'claude-code-remediation-reply-only');
+  assert.match(reconciled.job.completion.note, /reply contract/i);
+  assert.equal(reconciled.job.completion.finalMessageBytes, 0);
+});
+
+test('reconcileFollowUpJob completes when stdout is empty and reply has reReview.requested=true with non-completed outcome', async () => {
+  // The durable signal per SPEC.md §5.1.2 is `reReview.requested =
+  // true`, NOT `outcome === 'completed'`. A worker may legitimately
+  // request another review pass while reporting `outcome: 'partial'`
+  // (some findings addressed, some still in flight) or even
+  // `outcome: 'blocked'` (worker hit something it could not finish
+  // and wants the next adversarial pass to weigh in). The reconciler
+  // must enter the success branch and accept the rereview reset
+  // regardless of the outcome string. Earlier code keyed the
+  // empty-stdout fallback on `outcome === 'completed'` and would
+  // have wrongly fallen through to `artifact-empty-completion` here.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  writeFileSync(outputPath, '', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'partial',
+    summary: 'Addressed two of three blockers; want a fresh pass before continuing.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Two blockers addressed; please re-review before I tackle the third.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 8125,
+      model: 'claude-code',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  const reviewRow = readReviewRow(rootDir);
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(
+    reconciled.outcome,
+    'completed',
+    'durable signal is reReview.requested, not outcome — must NOT fall through to artifact-empty-completion'
+  );
+  assert.equal(reconciled.job.reReview.requested, true);
+  assert.equal(reconciled.job.reReview.triggered, true);
+  assert.equal(reviewRow.review_status, 'pending');
+  assert.equal(reconciled.job.completion.source, 'claude-code-remediation-reply-only');
+});
+
+test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is empty and reply.json is malformed', async () => {
+  // Companion regression: when stdout is empty AND reply.json exists
+  // but is malformed/mismatched, the prior probe swallowed the
+  // validation error and the reconciler reclassified the job as
+  // generic `artifact-empty-completion`. That hid the real cause and
+  // made operator recovery harder. The fix uses a tri-state probe
+  // (missing | valid | invalid) and routes invalid replies directly
+  // to `invalid-remediation-reply` regardless of stdout state.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  writeFileSync(outputPath, '', 'utf8');
+  // Wrong `kind` -> validateRemediationReply throws.
+  writeFileSync(replyPath, '{"kind":"wrong"}\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 8125,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'failed');
+  assert.equal(
+    reconciled.job.failure.code,
+    'invalid-remediation-reply',
+    'invalid reply must NOT be hidden behind artifact-empty-completion when stdout is also empty'
+  );
+});
+
+test('reconcileFollowUpJob still fails when stdout is empty AND no reply.json exists', async () => {
+  // The fix only treats empty stdout as success when reply.json is the
+  // backup signal. With NEITHER artifact, the worker really did die
+  // before producing any durable success record, and we must keep
+  // routing to failed/ — the operator needs to inspect the worker log.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  // Empty stdout, NO reply.json — true worker death.
+  writeFileSync(outputPath, '', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 8126,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath: path.relative(rootDir, path.join(artifactDir, 'remediation-reply.json')),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'failed');
+  assert.equal(reconciled.job.failure.code, 'artifact-empty-completion');
+});
+
 test('reconcileFollowUpJob fails a finished spawned round when outputPath escapes the repo root', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
@@ -334,4 +572,185 @@ test('reconcileFollowUpJob fails a finished spawned round when outputPath escape
   assert.equal(reconciled.reconciled, true);
   assert.equal(reconciled.outcome, 'failed');
   assert.equal(reconciled.job.failure.code, 'invalid-output-path');
+});
+
+test('reconcileFollowUpJob rejects a replyPath that lexically escapes the workspace', async () => {
+  // Control-plane integrity guard: a stale or forged job record could
+  // record a replyPath like `../outside.json`. With reply.json now a
+  // load-bearing success signal (drives completed/stopped + the watcher
+  // pending reset), we must refuse to read replies from outside the
+  // worker workspace, the same way we already refuse for outputPath.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'narrative\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 9001,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      // Lexical escape: pretend the worker recorded a reply outside the
+      // workspace. Must NOT be trusted as a control-plane success signal.
+      replyPath: path.relative(
+        rootDir,
+        path.join(workspaceDir, '..', 'outside-reply.json'),
+      ),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'failed');
+  assert.equal(reconciled.job.failure.code, 'invalid-output-path');
+  assert.match(reconciled.job.failure.message, /replyPath/);
+});
+
+test('reconcileFollowUpJob rejects a replyPath that resolves through a symlink to outside the workspace', async () => {
+  // Defense in depth: even when replyPath stays lexically inside the
+  // workspace, an attacker (or a stale workspace) could plant a symlink
+  // at .adversarial-follow-up/remediation-reply.json that points at a
+  // file outside the workspace (e.g. a forged reply on the operator's
+  // disk). The reconciler must refuse to follow that symlink, otherwise
+  // the forged reply becomes the durable success signal that drives
+  // completed/stopped + the watcher pending reset.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'narrative\n', 'utf8');
+
+  // Forged reply lives outside the workspace tree but is still a
+  // schema-valid remediation-reply with reReview.requested=true. If the
+  // symlink were followed, this would wrongly drive `completed/` and
+  // reset the watcher row to `pending`.
+  const outsideForgedReply = path.join(rootDir, 'forged-reply.json');
+  writeFileSync(outsideForgedReply, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Forged success signal from outside the workspace.',
+    validation: ['nothing'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Should never be honored.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  symlinkSync(outsideForgedReply, replyPath);
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 9002,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'failed');
+  assert.equal(reconciled.job.failure.code, 'invalid-output-path');
+  assert.match(reconciled.job.failure.message, /replyPath/);
+});
+
+test('reconcileFollowUpJob completes when codex-last-message.md is missing entirely but the reply.json validates and reReview.requested=true', async () => {
+  // Locks in the broadened contract from docs/follow-up-runbook.md:
+  // "missing OR empty final message artifact, with valid reply
+  // artifact". The earlier regression covered the empty-stdout case
+  // (file present, zero bytes); this covers the missing-file case
+  // (worker never created codex-last-message.md at all). A future
+  // refactor of readWorkerFinalMessage / hasNonEmptyNarrative could
+  // silently break this branch without any test failing.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  // Note: outputPath is configured on the worker record below, but the
+  // file is intentionally NOT created — the worker's stdout capture is
+  // missing entirely, not just empty.
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Worker pushed code + wrote reply; never wrote codex-last-message.md.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Remediation landed; please run a fresh adversarial pass.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 9003,
+      model: 'claude-code',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  const reviewRow = readReviewRow(rootDir);
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'completed', 'missing final-message + valid reply must route to completed/');
+  assert.equal(reconciled.job.reReview.requested, true);
+  assert.equal(reconciled.job.reReview.triggered, true);
+  assert.equal(reconciled.job.reReview.status, 'pending');
+  assert.equal(reviewRow.review_status, 'pending');
+  assert.equal(reconciled.job.completion.source, 'claude-code-remediation-reply-only');
+  assert.equal(reconciled.job.completion.finalMessageBytes, 0);
 });

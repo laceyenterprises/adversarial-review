@@ -1488,7 +1488,35 @@ async function reconcileFollowUpJob({
     reconciledAt: completedAt,
   };
 
-  if (finalMessage.exists && String(finalMessage.text).trim()) {
+  // The narrative artifact (final message stdout capture) is one of two
+  // independent success signals; the durable one is the validated
+  // remediation-reply.json. A claude-code worker's `--print` mode can
+  // legitimately produce zero stdout when its response was tool-only
+  // (edits + commit + push + reply.json written via the Write tool, no
+  // textual narrative back). Probe the reply silently here so we can
+  // route those workers through the success path even when the
+  // narrative is empty. The inner block below still re-reads the reply
+  // and fails LOUDLY on invalid JSON / schema violations — that is a
+  // genuine artifact failure and stays a failed/ outcome.
+  //
+  // Concrete incident this guards against: PR #20's first remediation
+  // round (job 2026-05-02T13-40-18-832Z). Worker pushed a real fix
+  // (commit 839ed9c, 9 files / 557 lines / 4 blockers addressed),
+  // wrote a valid reply.json with reReview.requested=true, but
+  // produced empty stdout. Reconciler false-failed the job and posted
+  // "Human intervention required" on the PR.
+  let replyOutcomeProbe = null;
+  if (paths.replyPath) {
+    try {
+      replyOutcomeProbe = readRemediationReplyArtifact(paths.replyPath, { expectedJob: job })?.outcome || null;
+    } catch {
+      replyOutcomeProbe = null;
+    }
+  }
+  const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
+  const replyClaimsCompleted = replyOutcomeProbe === 'completed';
+
+  if (hasNonEmptyNarrative || replyClaimsCompleted) {
     let remediationReply = {
       ...job?.remediationReply,
       state: job?.remediationReply?.path ? 'awaiting-worker-write' : 'not-configured',
@@ -1587,9 +1615,13 @@ async function reconcileFollowUpJob({
     // and operator-visible completion records reflect what actually ran.
     const workerModel = worker?.model || 'codex';
     const completionMetadata = {
-      source: `${workerModel}-output-last-message`,
+      source: hasNonEmptyNarrative
+        ? `${workerModel}-output-last-message`
+        : `${workerModel}-remediation-reply-only`,
       workerModel,
-      note: 'Reconciled from detached worker exit plus non-empty final message artifact.',
+      note: hasNonEmptyNarrative
+        ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
+        : 'Reconciled from detached worker exit plus validated remediation-reply.json (final message artifact was empty; success signaled via the durable reply contract).',
       finalMessagePath: worker.outputPath || null,
       finalMessageBytes: finalMessage.bytes,
       finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),

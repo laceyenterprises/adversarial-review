@@ -895,3 +895,226 @@ test('findExistingRemediationComment returns lookupFailed=lookup-timeout when gh
   assert.equal(result.lookupFailed, true);
   assert.equal(result.reason, 'lookup-timeout');
 });
+
+// ── Per-finding accountability rendering (addressed[] / pushback[]) ─────────
+
+test('buildRemediationOutcomeCommentBody renders addressed[] entries with finding/action/files', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed two findings.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          finding: 'Race in retry path can double-submit.',
+          action: 'Added an idempotency token + dedupe check.',
+          files: ['src/worker.mjs', 'test/worker.test.mjs'],
+        },
+        {
+          finding: 'Missing null check on auth header.',
+          action: 'Added explicit guard + regression test.',
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'two fixed; ready' },
+  });
+
+  assert.match(body, /\*\*Addressed findings\*\*/);
+  assert.match(body, /Finding: Race in retry path can double-submit\./);
+  assert.match(body, /Action: Added an idempotency token \+ dedupe check\./);
+  assert.match(body, /Files: src\/worker\.mjs, test\/worker\.test\.mjs/);
+  // Second entry has no Files: line — verify it doesn't appear
+  // for that block. The full body may have Files: from entry 1
+  // already, so check that Files: appears exactly once.
+  const filesLines = body.match(/^Files: /gm) || [];
+  assert.equal(filesLines.length, 1, 'Files: line only on entries that supply it');
+});
+
+test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding/reasoning', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Two fixed, one pushed back.',
+      validation: ['npm test'],
+      addressed: [],
+      pushback: [
+        {
+          finding: 'Reviewer asked to refactor the entire dispatch module.',
+          reasoning: 'Out of scope for this PR; tracked as separate ticket LAC-99.',
+        },
+      ],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'pushback recorded' },
+  });
+
+  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
+  assert.match(body, /Finding: Reviewer asked to refactor the entire dispatch module\./);
+  assert.match(body, /Reasoning: Out of scope for this PR; tracked as separate ticket LAC-99\./);
+});
+
+test('buildRemediationOutcomeCommentBody omits addressed/pushback sections when empty or absent', () => {
+  // Empty arrays.
+  const bodyEmpty = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed.',
+      validation: ['npm test'],
+      addressed: [],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(bodyEmpty, /Addressed findings/);
+  assert.doesNotMatch(bodyEmpty, /Pushback/);
+
+  // Field absent (legacy reply, e.g. an older job's stored reply).
+  const bodyLegacy = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed.',
+      validation: ['npm test'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(bodyLegacy, /Addressed findings/);
+  assert.doesNotMatch(bodyLegacy, /Pushback/);
+});
+
+test('buildRemediationOutcomeCommentBody redacts host-local paths smuggled into addressed/pushback', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          finding: 'Bug at /Users/airlock/secret-project/src/worker.mjs',
+          action: 'Patched the function in /Users/airlock/secret-project/src/worker.mjs',
+        },
+      ],
+      pushback: [
+        {
+          finding: 'Reviewer at /Users/airlock/private/notes.md asked for X',
+          reasoning: 'Discussed in /private/var/folders/zz/T/scratchpad.md',
+        },
+      ],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+
+  // The redaction pipeline replaces host-local paths with a
+  // <path-redacted> placeholder. We don't pin the exact text — that
+  // belongs to the redaction tests — but assert the operator's home
+  // directory does not appear in the rendered body.
+  assert.doesNotMatch(body, /\/Users\/airlock\/secret-project/);
+  assert.doesNotMatch(body, /\/Users\/airlock\/private/);
+  assert.doesNotMatch(body, /\/private\/var\/folders\/zz/);
+  // Sanity: section headers still render so the operator can tell the
+  // sections existed even after redaction.
+  assert.match(body, /\*\*Addressed findings\*\*/);
+  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
+});
+
+test('buildRemediationOutcomeCommentBody renders all four sections (summary, addressed, pushback, blockers) when populated', () => {
+  // Stopped + worker-blocked: addressed[] documents partial work,
+  // pushback[] documents deliberate disagreement on a separate finding,
+  // blockers[] documents the hard exit. All three coexist.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'stopped',
+    job: {
+      ...makeJob(),
+      remediationPlan: { currentRound: 2, maxRounds: 3, stop: { code: 'no-progress' } },
+    },
+    reply: {
+      outcome: 'blocked',
+      summary: 'Hit a hard exit on the schema migration.',
+      validation: ['npm test'],
+      addressed: [
+        { finding: 'Null-handling bug', action: 'Added a guard.' },
+      ],
+      pushback: [
+        { finding: 'Reviewer wants a full refactor', reasoning: 'Out of scope.' },
+      ],
+      blockers: [
+        'Schema migration requires DBA review.',
+      ],
+    },
+    reReview: { requested: false },
+  });
+
+  assert.match(body, /\*\*Summary\*\*/);
+  assert.match(body, /\*\*Addressed findings\*\*/);
+  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
+  assert.match(body, /\*\*Blockers\*\*/);
+  // Order matters for readability — the reader should see what was
+  // done before what wasn't.
+  const idxAddressed = body.indexOf('Addressed findings');
+  const idxPushback = body.indexOf('Pushback');
+  const idxBlockers = body.indexOf('Blockers');
+  assert.ok(idxAddressed < idxPushback, 'addressed renders before pushback');
+  assert.ok(idxPushback < idxBlockers, 'pushback renders before blockers');
+});
+
+test('buildRemediationOutcomeCommentBody truncates an absurdly long Files: line on an addressed entry', () => {
+  // A worker that decides to dump every file in the repo into one
+  // entry's `files` array would otherwise produce a 50KB Files: line
+  // on the public PR comment. The renderer caps it.
+  const manyFiles = Array.from({ length: 200 }, (_v, i) => `src/file-${i}.mjs`);
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Lots of files.',
+      validation: [],
+      addressed: [
+        {
+          finding: 'Sweeping refactor.',
+          action: 'Touched many files.',
+          files: manyFiles,
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+
+  // The cap is generous (~600 chars) so we don't pin an exact length;
+  // we assert the truncation marker is present and the comment is not
+  // the unbounded ~5KB it would be without truncation. (Each file ~14
+  // chars including ", " separator → 200 × 14 = ~2800 chars without
+  // the cap.)
+  assert.match(body, /Files:.*…/);
+  // The full unbounded join would include "src/file-199.mjs" — the
+  // cap cuts off well before then. Per-bullet redaction may further
+  // cap the entry; either way the highest-numbered file we see should
+  // be far below 199.
+  const fileMatches = body.match(/src\/file-(\d+)\.mjs/g) || [];
+  const numbers = fileMatches.map((m) => Number(m.match(/(\d+)/)[1]));
+  const maxFileNum = numbers.length ? Math.max(...numbers) : 0;
+  assert.ok(maxFileNum < 100, `expected truncation well below 200 files, got max=${maxFileNum}`);
+});

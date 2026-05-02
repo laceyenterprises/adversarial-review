@@ -638,6 +638,202 @@ test('validateRemediationReply rejects a re-review request without a durable rea
   );
 });
 
+test('buildRemediationReply carries addressed[] and pushback[] entries through to the durable reply', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 51,
+    reviewerModel: 'codex',
+    linearTicketId: 'LAC-51',
+    reviewBody: '## Summary\nThree blocking issues.',
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+
+  const reply = buildRemediationReply({
+    job,
+    outcome: 'completed',
+    summary: 'Two findings fixed; pushed back on the third.',
+    validation: ['npm test'],
+    addressed: [
+      {
+        finding: 'Race in retry path can double-submit.',
+        action: 'Added an idempotency token + dedupe check.',
+        files: ['src/worker.mjs'],
+      },
+      {
+        finding: 'Missing null check on auth header.',
+        action: 'Added explicit guard + regression test.',
+      },
+    ],
+    pushback: [
+      {
+        finding: 'Reviewer asked to refactor the entire dispatch module.',
+        reasoning: 'Out of scope for this PR; tracked as separate ticket LAC-99.',
+      },
+    ],
+    blockers: [],
+    reReviewRequested: true,
+    reReviewReason: 'Two of three addressed, one pushback recorded — ready for re-review.',
+  });
+
+  assert.equal(reply.addressed.length, 2);
+  assert.equal(reply.addressed[0].finding, 'Race in retry path can double-submit.');
+  assert.deepEqual(reply.addressed[0].files, ['src/worker.mjs']);
+  assert.equal(reply.pushback.length, 1);
+  assert.equal(reply.pushback[0].reasoning, 'Out of scope for this PR; tracked as separate ticket LAC-99.');
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply tolerates a reply that omits addressed/pushback entirely (legacy compat)', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 52,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nOne tiny fix.',
+    reviewPostedAt: '2026-05-02T11:00:00.000Z',
+    critical: false,
+  });
+
+  const legacyReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready for confirmation' },
+    // No addressed[], no pushback[].
+  };
+
+  assert.deepEqual(validateRemediationReply(legacyReply, { expectedJob: job }), legacyReply);
+});
+
+test('validateRemediationReply rejects malformed addressed[] entries', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 53,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T12:00:00.000Z',
+    critical: false,
+  });
+
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fix.',
+    validation: ['npm test'],
+    blockers: [],
+    pushback: [],
+    reReview: { requested: true, reason: 'go' },
+  };
+
+  // Missing action.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, addressed: [{ finding: 'X', action: '' }] },
+      { expectedJob: job }
+    ),
+    /addressed\[0\]\.action must be a non-empty string/
+  );
+
+  // Missing finding.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, addressed: [{ finding: '', action: 'did the thing' }] },
+      { expectedJob: job }
+    ),
+    /addressed\[0\]\.finding must be a non-empty string/
+  );
+
+  // files present but not an array.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, addressed: [{ finding: 'X', action: 'Y', files: 'a.js' }] },
+      { expectedJob: job }
+    ),
+    /addressed\[0\]\.files must be an array if provided/
+  );
+
+  // files contains a blank string.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, addressed: [{ finding: 'X', action: 'Y', files: ['a.js', '   '] }] },
+      { expectedJob: job }
+    ),
+    /addressed\[0\]\.files\[1\] must be a non-empty string/
+  );
+
+  // Entry is a string (workers sometimes try to send the legacy
+  // string-array shape).
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, addressed: ['Just a string'] },
+      { expectedJob: job }
+    ),
+    /addressed\[0\] must be an object/
+  );
+});
+
+test('validateRemediationReply rejects malformed pushback[] entries', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 54,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T13:00:00.000Z',
+    critical: false,
+  });
+
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fix.',
+    validation: ['npm test'],
+    addressed: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'go' },
+  };
+
+  // Missing reasoning.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, pushback: [{ finding: 'X', reasoning: '' }] },
+      { expectedJob: job }
+    ),
+    /pushback\[0\]\.reasoning must be a non-empty string/
+  );
+
+  // Missing finding.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, pushback: [{ finding: '', reasoning: 'because' }] },
+      { expectedJob: job }
+    ),
+    /pushback\[0\]\.finding must be a non-empty string/
+  );
+
+  // Entry is an array, not an object.
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, pushback: [['X', 'Y']] },
+      { expectedJob: job }
+    ),
+    /pushback\[0\] must be an object/
+  );
+});
+
 test('readRemediationReplyArtifact parses and validates the durable remediation reply file', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const job = buildFollowUpJob({

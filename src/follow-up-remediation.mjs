@@ -780,6 +780,25 @@ function buildRemediationPrompt(job, {
     outcome: 'completed',
     summary: 'Replace this with a short remediation summary.',
     validation: ['Replace with validation you ran.'],
+    // The contract template prefills realistic shape examples for the
+    // per-finding fields so the worker has zero ambiguity about what
+    // each entry must look like. Workers replace these with real
+    // entries, or remove them when not applicable. The validator
+    // rejects empty `finding`/`action`/`reasoning` strings, so the
+    // placeholders here must be replaced before the reply is valid.
+    addressed: [
+      {
+        finding: 'Replace with the review finding this entry addresses.',
+        action: 'Replace with what you did to address it.',
+        files: ['Optional list of files changed for this finding.'],
+      },
+    ],
+    pushback: [
+      {
+        finding: 'Replace with a finding you deliberately did NOT change the code on. Remove this entry entirely if you addressed everything.',
+        reasoning: 'Replace with one sharp sentence on why you disagreed.',
+      },
+    ],
     blockers: [],
     reReviewRequested: false,
     reReviewReason: 'Replace with the reason this PR should receive another adversarial review pass.',

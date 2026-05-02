@@ -106,6 +106,17 @@ function buildRemediationReply({
   summary,
   validation = [],
   blockers = [],
+  // Per-finding accountability fields. Both default to [] for backward
+  // compatibility — older worker replies that predate this schema
+  // simply omit them, and the renderer treats an empty array as "no
+  // section to print." Workers that DO report per-finding state get
+  // structured rendering in the public PR comment so the reader can
+  // see, for each blocking issue from the adversarial review, whether
+  // it was fixed (`addressed`) or deliberately disagreed with
+  // (`pushback`). `blockers` keeps its prior meaning: hard-exit items
+  // the worker could not resolve at all.
+  addressed = [],
+  pushback = [],
   reReviewRequested = false,
   reReviewReason = null,
 }) {
@@ -122,6 +133,8 @@ function buildRemediationReply({
     outcome,
     summary,
     validation,
+    addressed,
+    pushback,
     blockers,
     reReview: {
       requested: Boolean(reReviewRequested),
@@ -140,6 +153,59 @@ function validateStringArrayField(items, fieldName) {
   items.forEach((item, index) => {
     if (typeof item !== 'string' || !item.trim()) {
       throw new Error(`Remediation reply ${fieldName}[${index}] must be a non-empty string`);
+    }
+  });
+}
+
+// addressed[] entries are { finding, action, files? } where files is
+// an optional array of strings (the worker can list paths it touched
+// while addressing the finding). Per-entry validation rejects a
+// missing or empty finding/action so the public PR comment never
+// renders an empty bullet, but tolerates files being absent.
+function validateAddressedField(items) {
+  if (!Array.isArray(items)) {
+    throw new Error('Remediation reply addressed must be an array');
+  }
+  items.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Remediation reply addressed[${index}] must be an object`);
+    }
+    if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
+      throw new Error(`Remediation reply addressed[${index}].finding must be a non-empty string`);
+    }
+    if (typeof entry.action !== 'string' || !entry.action.trim()) {
+      throw new Error(`Remediation reply addressed[${index}].action must be a non-empty string`);
+    }
+    if (entry.files !== undefined) {
+      if (!Array.isArray(entry.files)) {
+        throw new Error(`Remediation reply addressed[${index}].files must be an array if provided`);
+      }
+      entry.files.forEach((f, fi) => {
+        if (typeof f !== 'string' || !f.trim()) {
+          throw new Error(`Remediation reply addressed[${index}].files[${fi}] must be a non-empty string`);
+        }
+      });
+    }
+  });
+}
+
+// pushback[] entries are { finding, reasoning } — both required and
+// non-empty. This is the slot for "I read the finding, decided not to
+// change the code, here's why." Distinct from blockers (hard exit) and
+// addressed (fix applied).
+function validatePushbackField(items) {
+  if (!Array.isArray(items)) {
+    throw new Error('Remediation reply pushback must be an array');
+  }
+  items.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Remediation reply pushback[${index}] must be an object`);
+    }
+    if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
+      throw new Error(`Remediation reply pushback[${index}].finding must be a non-empty string`);
+    }
+    if (typeof entry.reasoning !== 'string' || !entry.reasoning.trim()) {
+      throw new Error(`Remediation reply pushback[${index}].reasoning must be a non-empty string`);
     }
   });
 }
@@ -180,6 +246,18 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
 
   validateStringArrayField(reply.validation, 'validation');
   validateStringArrayField(reply.blockers, 'blockers');
+
+  // addressed[] / pushback[] are additive — replies that omit them
+  // entirely are still valid (legacy worker output, jobs created before
+  // this schema landed). Only validate shape when the fields are
+  // present. Workers that emit them get strict enforcement so a
+  // half-formed entry never reaches the public PR comment renderer.
+  if (reply.addressed !== undefined) {
+    validateAddressedField(reply.addressed);
+  }
+  if (reply.pushback !== undefined) {
+    validatePushbackField(reply.pushback);
+  }
 
   if (!reply.reReview || typeof reply.reReview !== 'object' || Array.isArray(reply.reReview)) {
     throw new Error('Remediation reply reReview must be an object');

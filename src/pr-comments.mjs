@@ -90,6 +90,69 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
   return safe.map((s) => `- ${fenceUntrustedText(s)}`).join('\n\n');
 }
 
+// Length cap on the "Files:" line within an addressed[] entry. The
+// cap is generous enough for a real fix touching ~10 files, but bounds
+// a worker that decides to dump every file in the repo.
+const ADDRESSED_FILES_MAX_CHARS = 600;
+
+// Render the worker's per-finding accountability list. Each entry of
+// `addressed[]` produces a multi-line block:
+//
+//   Finding:   <quoted summary of the review's blocking issue>
+//   Action:    <what the worker did to address it>
+//   Files:     a.js, b.js   ← only when entry.files is non-empty
+//
+// The whole multi-line string is fed through the same redaction +
+// per-item cap pipeline as the existing bullet lists, so an entry
+// that smuggles a token / @mention / autolink stays inert. The cap
+// applies AFTER joining the lines, so an entry that overruns the cap
+// gets visibly truncated rather than silently dropped.
+function formatAddressedList(items, emptyText = '_(none reported)_') {
+  if (!Array.isArray(items) || items.length === 0) return emptyText;
+  const formatted = items
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const finding = String(entry.finding ?? '').trim();
+      const action = String(entry.action ?? '').trim();
+      if (!finding || !action) return null;
+      const filesArr = Array.isArray(entry.files)
+        ? entry.files
+            .filter((f) => typeof f === 'string' && f.trim())
+            .map((f) => f.trim())
+        : [];
+      const lines = [`Finding: ${finding}`, `Action: ${action}`];
+      if (filesArr.length) {
+        let filesLine = `Files: ${filesArr.join(', ')}`;
+        if (filesLine.length > ADDRESSED_FILES_MAX_CHARS) {
+          filesLine = `${filesLine.slice(0, ADDRESSED_FILES_MAX_CHARS - 1)}…`;
+        }
+        lines.push(filesLine);
+      }
+      return lines.join('\n');
+    })
+    .filter(Boolean);
+  return formatRedactedBulletList(formatted, emptyText);
+}
+
+// Render the worker's pushback list. `pushback[]` is for findings the
+// worker read, deliberately decided NOT to change the code on, and
+// wants to record the reasoning. Distinct from `blockers[]` (hard
+// exit) and `addressed[]` (fix applied). Same redaction / caps as
+// the addressed list.
+function formatPushbackList(items, emptyText = '_(none reported)_') {
+  if (!Array.isArray(items) || items.length === 0) return emptyText;
+  const formatted = items
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const finding = String(entry.finding ?? '').trim();
+      const reasoning = String(entry.reasoning ?? '').trim();
+      if (!finding || !reasoning) return null;
+      return `Finding: ${finding}\nReasoning: ${reasoning}`;
+    })
+    .filter(Boolean);
+  return formatRedactedBulletList(formatted, emptyText);
+}
+
 // Sanitize a free-text field for use in a BLOCK context (the
 // Summary section). Redacts sensitive substrings (tokens AND
 // host-local filesystem paths — workers run inside a checked-out
@@ -289,6 +352,26 @@ function buildRemediationOutcomeCommentBody({
     lines.push('**Validation run**');
     lines.push('');
     lines.push(formatRedactedBulletList(reply.validation));
+  }
+
+  // Per-finding accountability surfaces from the new
+  // addressed[] / pushback[] reply fields. Both are optional —
+  // legacy worker replies (or replies that simply didn't hit any
+  // of these cases) just omit the section entirely. The renderer
+  // never emits an empty header to avoid a comment full of
+  // "(none reported)" placeholders for non-applicable cases.
+  if (reply?.addressed?.length) {
+    lines.push('');
+    lines.push('**Addressed findings**');
+    lines.push('');
+    lines.push(formatAddressedList(reply.addressed));
+  }
+
+  if (reply?.pushback?.length) {
+    lines.push('');
+    lines.push('**Pushback (deliberately not changed)**');
+    lines.push('');
+    lines.push(formatPushbackList(reply.pushback));
   }
 
   if (reply?.blockers?.length) {

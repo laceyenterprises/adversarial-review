@@ -1,20 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
   DELIVERY_CLAIM_STALE_MS,
+  DELIVERY_RETRY_INDEX_DIR_NAME,
+  DELIVERY_RETRY_INDEX_INIT_SENTINEL,
   MAX_COMMENT_DELIVERY_ATTEMPTS,
   NON_RETRYABLE_DELIVERY_REASONS,
   RETRY_BUDGET_PER_TICK,
+  addToDeliveryRetryIndex,
   buildAttemptingDelivery,
   buildPendingDelivery,
   deliveryLockPath,
+  deliveryRetryIndexDir,
+  deliveryRetryIndexPointerPath,
   recordInitialCommentDelivery,
   releaseDeliveryClaim,
+  removeFromDeliveryRetryIndex,
   retryFailedCommentDeliveries,
+  seedDeliveryRetryIndexFromHistory,
   tryAcquireDeliveryClaim,
 } from '../src/comment-delivery.mjs';
 import { postRemediationOutcomeComment } from '../src/pr-comments.mjs';
@@ -30,6 +37,7 @@ async function makeFakeTerminalRecord(rootDir, dirKey, jobId, body, repo, prNumb
     status: dirKey === 'completed' ? 'completed' : (dirKey === 'stopped' ? 'stopped' : 'failed'),
   }, null, 2), 'utf8');
   await recordInitialCommentDelivery({
+    rootDir,
     jobPath,
     body,
     repo,
@@ -731,6 +739,12 @@ test('retryFailedCommentDeliveries posts a comment for a terminal record that la
     remediationPlan: { currentRound: 1, maxRounds: 6 },
   }, null, 2), 'utf8');
 
+  // Add a retry-index pointer so the indexed retry path picks the
+  // record up. (Under the post-PR-18 layout, listRetryCandidates
+  // reads from the index, not from the full terminal history; the
+  // upstream test pre-dates that and relied on the legacy scan.)
+  addToDeliveryRetryIndex(rootDir, jobPath);
+
   const calls = [];
   const summary = await retryFailedCommentDeliveries({
     rootDir,
@@ -754,4 +768,222 @@ test('retryFailedCommentDeliveries posts a comment for a terminal record that la
   assert.equal(record.commentDelivery.repo, 'laceyenterprises/demo');
   assert.equal(record.commentDelivery.prNumber, 555);
   assert.equal(record.commentDelivery.workerClass, 'codex');
+});
+
+// ── Retry index (review #5 of PR #18) ──────────────────────────────────────
+// The legacy implementation scanned every file under
+// {completed,stopped,failed} every tick to find retry candidates — O(total
+// terminal history) per tick. The retry index keeps a small set of pointer
+// files for outstanding deliveries so the hot path is bounded by retry
+// backlog size, not history size.
+
+test('exports for the retry index name a stable layout', () => {
+  // These constants are operator-facing (the layout shows up in the
+  // queue dir; runbooks reference it). Lock the names so a refactor
+  // can't silently move the directory.
+  assert.equal(DELIVERY_RETRY_INDEX_DIR_NAME, 'delivery-retry-index');
+  assert.equal(DELIVERY_RETRY_INDEX_INIT_SENTINEL, '.initialized');
+});
+
+test('addToDeliveryRetryIndex / removeFromDeliveryRetryIndex round-trips a pointer', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-roundtrip.json');
+  writeFileSync(jobPath, '{}', 'utf8');
+
+  addToDeliveryRetryIndex(rootDir, jobPath);
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), true);
+  const pointer = JSON.parse(readFileSync(pointerPath, 'utf8'));
+  assert.equal(pointer.jobPath, jobPath);
+
+  removeFromDeliveryRetryIndex(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), false);
+});
+
+test('recordInitialCommentDelivery adds a retry-index pointer on initial failure', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  const jobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-fail', 'body-fail',
+    'laceyenterprises/demo', 1, 'codex',
+    { posted: false, reason: 'gh-cli-timeout', timeoutMs: 30_000 }
+  );
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), true, 'failed delivery must add a retry pointer');
+});
+
+test('recordInitialCommentDelivery does NOT add a retry-index pointer on success', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  const jobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-ok', 'body-ok',
+    'laceyenterprises/demo', 2, 'codex',
+    { posted: true }
+  );
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), false, 'successful delivery must not pollute the retry index');
+});
+
+test('recordInitialCommentDelivery does NOT add a pointer for non-retryable reasons', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  const jobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-nr', 'body-nr',
+    'laceyenterprises/demo', 3, 'codex',
+    { posted: false, reason: 'no-token-mapping' }
+  );
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), false, 'non-retryable reasons must not enter the retry index');
+});
+
+test('retryFailedCommentDeliveries removes the pointer when a retry succeeds', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  const jobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-retry-ok', 'body',
+    'laceyenterprises/demo', 4, 'codex',
+    { posted: false, reason: 'gh-cli-timeout', timeoutMs: 30_000 }
+  );
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), true, 'precondition: pointer exists before retry');
+
+  await retryFailedCommentDeliveries({
+    rootDir,
+    postCommentImpl: async () => ({ posted: true }),
+    log: { error: () => {} },
+  });
+  assert.equal(existsSync(pointerPath), false, 'successful retry must drop the retry pointer');
+});
+
+test('retryFailedCommentDeliveries keeps the pointer when a retry still fails', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  const jobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-retry-stillbad', 'body',
+    'laceyenterprises/demo', 5, 'codex',
+    { posted: false, reason: 'gh-cli-failure', error: 'HTTP 502' }
+  );
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), true);
+
+  await retryFailedCommentDeliveries({
+    rootDir,
+    postCommentImpl: async () => ({ posted: false, reason: 'gh-cli-failure', error: 'HTTP 502' }),
+    log: { error: () => {} },
+  });
+  assert.equal(existsSync(pointerPath), true, 'still-failing retry must keep the pointer');
+});
+
+test('seedDeliveryRetryIndexFromHistory backfills pre-index posted=false records once', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  // Plant a legacy posted=false record by hand WITHOUT going through
+  // recordInitialCommentDelivery (so no pointer exists yet) — this
+  // simulates an upgrade where the index didn't exist when the
+  // delivery first failed.
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, 'job-legacy.json');
+  writeFileSync(jobPath, JSON.stringify({
+    jobId: 'job-legacy',
+    repo: 'laceyenterprises/demo',
+    prNumber: 6,
+    status: 'completed',
+    commentDelivery: {
+      posted: false,
+      attempting: false,
+      reason: 'gh-cli-timeout',
+      attempts: 1,
+      firstAttemptAt: '2026-05-02T01:00:00.000Z',
+      lastAttemptAt: '2026-05-02T01:00:00.000Z',
+      body: 'legacy body',
+      repo: 'laceyenterprises/demo',
+      prNumber: 6,
+      workerClass: 'codex',
+    },
+  }, null, 2), 'utf8');
+
+  const result = seedDeliveryRetryIndexFromHistory(rootDir, {
+    maxAttempts: MAX_COMMENT_DELIVERY_ATTEMPTS,
+    log: { error: () => {} },
+  });
+  assert.equal(result.seeded, 1);
+  assert.equal(result.skipped, false);
+
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  assert.equal(existsSync(pointerPath), true, 'legacy record must be seeded into the retry index');
+
+  const sentinelPath = path.join(deliveryRetryIndexDir(rootDir), DELIVERY_RETRY_INDEX_INIT_SENTINEL);
+  assert.equal(existsSync(sentinelPath), true);
+
+  // Second call must short-circuit (sentinel present).
+  const secondResult = seedDeliveryRetryIndexFromHistory(rootDir, {
+    maxAttempts: MAX_COMMENT_DELIVERY_ATTEMPTS,
+    log: { error: () => {} },
+  });
+  assert.equal(secondResult.skipped, true);
+  assert.equal(secondResult.seeded, 0);
+});
+
+test('retryFailedCommentDeliveries reads from the index, not the full terminal history', async () => {
+  // Plant 5 successful (posted=true) records by hand — these would
+  // pollute a full-history scan but must NOT show up as retry
+  // candidates from the index. Only the one failed record below
+  // gets a pointer.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < 5; i += 1) {
+    writeFileSync(path.join(dir, `job-noise-${i}.json`), JSON.stringify({
+      jobId: `job-noise-${i}`,
+      status: 'completed',
+      commentDelivery: { posted: true, attempts: 1, body: 'b', repo: 'r', prNumber: 1, workerClass: 'codex' },
+    }, null, 2), 'utf8');
+  }
+  // Seed the index sentinel (without scanning) so the seed pass doesn't
+  // pick up the noise records as candidates and add bogus pointers.
+  // This simulates a clean post-upgrade state.
+  const indexDir = deliveryRetryIndexDir(rootDir);
+  mkdirSync(indexDir, { recursive: true });
+  writeFileSync(path.join(indexDir, DELIVERY_RETRY_INDEX_INIT_SENTINEL), '\n', 'utf8');
+
+  // Add one failed record via the supported API so the index pointer
+  // gets written.
+  const failedJobPath = await makeFakeTerminalRecord(
+    rootDir, 'completed', 'job-real-fail', 'body',
+    'laceyenterprises/demo', 99, 'codex',
+    { posted: false, reason: 'gh-cli-timeout', timeoutMs: 30_000 }
+  );
+  assert.equal(
+    existsSync(deliveryRetryIndexPointerPath(rootDir, failedJobPath)),
+    true,
+    'failed record gets indexed via the supported API'
+  );
+
+  const calls = [];
+  const summary = await retryFailedCommentDeliveries({
+    rootDir,
+    postCommentImpl: async (args) => { calls.push(args); return { posted: true }; },
+    log: { error: () => {} },
+  });
+  assert.equal(summary.scanned, 1, 'only the one indexed candidate is scanned, not the 6 terminal records');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body, 'body');
+});
+
+test('listRetryCandidates prunes pointers whose terminal record was deleted', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retry-index-'));
+  const indexDir = deliveryRetryIndexDir(rootDir);
+  mkdirSync(indexDir, { recursive: true });
+  writeFileSync(path.join(indexDir, DELIVERY_RETRY_INDEX_INIT_SENTINEL), '\n', 'utf8');
+
+  // Plant a dangling pointer with no underlying record.
+  const danglingJobPath = path.join(rootDir, 'data', 'follow-up-jobs', 'completed', 'job-gone.json');
+  addToDeliveryRetryIndex(rootDir, danglingJobPath);
+  const danglingPointer = deliveryRetryIndexPointerPath(rootDir, danglingJobPath);
+  assert.equal(existsSync(danglingPointer), true);
+
+  const summary = await retryFailedCommentDeliveries({
+    rootDir,
+    postCommentImpl: async () => { throw new Error('must not post for a missing record'); },
+    log: { error: () => {} },
+  });
+  assert.equal(summary.scanned, 0, 'dangling pointer must not become a candidate');
+  assert.equal(existsSync(danglingPointer), false, 'dangling pointer must be pruned');
 });

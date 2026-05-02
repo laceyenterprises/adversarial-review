@@ -2,8 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  REMEDIATION_COMMENT_MARKER_PREFIX,
   WORKER_CLASS_TO_BOT_TOKEN_ENV,
   buildRemediationOutcomeCommentBody,
+  buildRemediationOutcomeCommentMarker,
+  extractRemediationCommentMarker,
+  findExistingRemediationComment,
   postRemediationOutcomeComment,
   resolveCommentBotTokenEnv,
 } from '../src/pr-comments.mjs';
@@ -554,4 +558,264 @@ test('failure.message preserves non-path identifiers (code names like manual-ins
     failure: { code: 'manual-inspection-required', message: 'Worker PID 8123 still running past runtime cap' },
   });
   assert.match(body, /Reason: `Worker PID 8123 still running past runtime cap`/);
+});
+
+// ── Worker-supplied PUBLIC field path redaction (review #1 of PR #18) ──────
+// Worker output crosses the trust boundary into a public PR comment. Beyond
+// tokens, it can echo absolute filesystem paths from logs / stack traces —
+// /Users/<operator>/..., /private/var/folders/... — which leak operator
+// usernames, repo layout, and machine-local filesystem details. The
+// public-safe path masking must run on every worker-supplied field that
+// reaches the comment body.
+
+test('summary redacts /Users/<user>/... paths echoed by the worker', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'Read prompt at /Users/airlock/agent-os/tools/adversarial-review/.adversarial-follow-up/prompt.md and patched it.',
+      validation: ['npm test'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(body, /\/Users\/airlock/);
+  assert.doesNotMatch(body, /agent-os\/tools\/adversarial-review/);
+  // Basename survives so an operator can still recognize what was referenced.
+  assert.match(body, /<path-redacted>\/prompt\.md/);
+});
+
+test('validation entries redact /private/var/folders/... temp paths', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'claude-code',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'ok',
+      validation: [
+        'wrote scratch artifact at /private/var/folders/k7/abc123/T/foo/artifact.json then removed it',
+      ],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(body, /\/private\/var\/folders/);
+  assert.match(body, /<path-redacted>\/artifact\.json/);
+});
+
+test('blockers entries redact /home/<user>/... paths (Linux operator path)', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'stopped',
+    job: {
+      ...makeJob({ builderTag: 'codex' }),
+      remediationPlan: { currentRound: 1, maxRounds: 6, stop: { code: 'no-progress' } },
+    },
+    reply: {
+      outcome: 'blocked',
+      summary: 'cannot proceed',
+      validation: [],
+      blockers: [
+        'Cannot read /home/runner/work/adversarial-review/data/reviews.db — permission denied',
+      ],
+    },
+  });
+  assert.doesNotMatch(body, /\/home\/runner/);
+  assert.match(body, /<path-redacted>\/reviews\.db/);
+});
+
+test('reReview.reason redacts host-local paths inline (in the status line)', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: [], blockers: [] },
+    reReview: {
+      requested: true,
+      triggered: true,
+      status: 'pending',
+      reason: 'Confirm fix at /Users/placey/agent-os/tools/adversarial-review/src/pr-comments.mjs',
+    },
+  });
+  assert.doesNotMatch(body, /\/Users\/placey/);
+  // Basename survives in the inline-wrapped status line.
+  assert.match(body, /Re-review status:.*queued — `Confirm fix at <path-redacted>\/pr-comments\.mjs`/);
+});
+
+// ── Idempotency marker (review #4 of PR #18) ───────────────────────────────
+
+test('buildRemediationOutcomeCommentMarker derives a stable id from jobId+round+action', () => {
+  const a = buildRemediationOutcomeCommentMarker({
+    jobId: 'lac__demo-pr-7-2026-05-01T20-00-00-000Z',
+    round: 2,
+    action: 'completed',
+  });
+  const b = buildRemediationOutcomeCommentMarker({
+    jobId: 'lac__demo-pr-7-2026-05-01T20-00-00-000Z',
+    round: 2,
+    action: 'completed',
+  });
+  assert.equal(a, b, 'same inputs must produce the same marker');
+  assert.ok(a.startsWith(REMEDIATION_COMMENT_MARKER_PREFIX + ':'), 'marker carries the well-known prefix');
+
+  const different = buildRemediationOutcomeCommentMarker({
+    jobId: 'lac__demo-pr-7-2026-05-01T20-00-00-000Z',
+    round: 3,
+    action: 'completed',
+  });
+  assert.notEqual(a, different, 'different round must produce a different marker');
+});
+
+test('comment body includes the dedupe marker as an HTML comment', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: [], blockers: [] },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  const expectedMarker = buildRemediationOutcomeCommentMarker({
+    jobId: 'lac__demo-pr-7-2026-05-01T20-00-00-000Z',
+    round: 2,
+    action: 'completed',
+  });
+  assert.ok(
+    body.includes(`<!-- ${expectedMarker} -->`),
+    `body must embed the marker as an HTML comment; got:\n${body}`
+  );
+  assert.equal(extractRemediationCommentMarker(body), expectedMarker);
+});
+
+test('postRemediationOutcomeComment skips the create when an existing comment carries the marker', async () => {
+  const calls = [];
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: [], blockers: [] },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  const marker = extractRemediationCommentMarker(body);
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'codex',
+    body,
+    env: { GH_CODEX_REVIEWER_TOKEN: 'pat', PATH: '/usr/bin', HOME: '/tmp' },
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    findExistingImpl: async ({ marker: lookupMarker }) => {
+      assert.equal(lookupMarker, marker, 'dedup lookup must search by the body marker');
+      return { found: true, marker: lookupMarker, commentId: 12345 };
+    },
+    log: { error: () => {} },
+  });
+  assert.equal(result.posted, true);
+  assert.equal(result.deduped, true);
+  assert.equal(result.commentId, 12345);
+  assert.equal(calls.length, 0, 'must not invoke gh pr comment when a duplicate already exists');
+});
+
+test('postRemediationOutcomeComment posts when the dedup lookup finds nothing', async () => {
+  const calls = [];
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: [], blockers: [] },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'codex',
+    body,
+    env: { GH_CODEX_REVIEWER_TOKEN: 'pat', PATH: '/usr/bin', HOME: '/tmp' },
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    findExistingImpl: async () => ({ found: false }),
+    log: { error: () => {} },
+  });
+  assert.equal(result.posted, true);
+  assert.equal(result.deduped, undefined);
+  assert.equal(calls.length, 1, 'must invoke gh pr comment exactly once when no duplicate is found');
+  assert.equal(calls[0].args[0], 'pr');
+  assert.equal(calls[0].args[1], 'comment');
+});
+
+test('postRemediationOutcomeComment falls through to post when the dedup lookup itself fails', async () => {
+  // A flake in the lookup path must NOT silently suppress the post —
+  // we'd rather risk a duplicate than leave the PR with no comment.
+  const calls = [];
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: { outcome: 'completed', summary: 'ok', validation: [], blockers: [] },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'codex',
+    body,
+    env: { GH_CODEX_REVIEWER_TOKEN: 'pat', PATH: '/usr/bin', HOME: '/tmp' },
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    findExistingImpl: async () => ({ found: false, lookupFailed: true, reason: 'lookup-timeout' }),
+    log: { error: () => {} },
+  });
+  assert.equal(result.posted, true);
+  assert.equal(calls.length, 1, 'lookup failure must not block the post');
+});
+
+test('findExistingRemediationComment finds the marker in a previously-posted comment', async () => {
+  const calls = [];
+  const result = await findExistingRemediationComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    marker: 'adversarial-review-remediation-marker:job-x:r2:completed',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return {
+        stdout:
+          '{"id":1,"body":"unrelated comment"}\n' +
+          '{"id":2,"body":"<!-- adversarial-review-remediation-marker:job-x:r2:completed -->\\nSome body"}\n',
+        stderr: '',
+      };
+    },
+    env: {},
+    log: { error: () => {} },
+  });
+  assert.equal(result.found, true);
+  assert.equal(result.commentId, 2);
+  assert.equal(calls[0].args[0], 'api');
+});
+
+test('findExistingRemediationComment returns lookupFailed=lookup-timeout when gh times out', async () => {
+  const result = await findExistingRemediationComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    marker: 'adversarial-review-remediation-marker:job-x:r2:completed',
+    execFileImpl: async () => {
+      const err = new Error('SIGTERM');
+      err.killed = true;
+      err.signal = 'SIGTERM';
+      throw err;
+    },
+    env: {},
+    log: { error: () => {} },
+  });
+  assert.equal(result.found, false);
+  assert.equal(result.lookupFailed, true);
+  assert.equal(result.reason, 'lookup-timeout');
 });

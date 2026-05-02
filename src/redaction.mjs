@@ -77,22 +77,46 @@ function redactAndCap(text, limit = 2000) {
   return `${redacted.slice(0, limit - 1)}…`;
 }
 
+// Combined token + filesystem-path redaction for worker-supplied text
+// that crosses the trust boundary into a public PR comment. A worker
+// runs inside a checked-out workspace and reads logs / artifacts /
+// stack traces, so its `summary`, `validation`, `blockers`, and
+// `reReview.reason` fields can echo `/Users/<operator>/...`,
+// `/private/var/folders/...`, or similar host-local paths verbatim.
+// Republishing those leaks operator usernames, repo layout, and
+// machine-local filesystem details to every PR reader.
+//
+// Order: tokens first, then paths. A token-shaped substring inside a
+// path (rare but possible — e.g. a temp dir whose name happens to
+// match `sk-...`) is masked to its label before path masking sees it.
+function redactPublicSafeText(text, limit = 2000) {
+  const redacted = redactPathlikeText(redactSensitiveText(text));
+  if (redacted.length <= limit) return redacted;
+  return `${redacted.slice(0, limit - 1)}…`;
+}
+
 // Redact a worker-supplied list (validation steps, blockers). Drops
 // non-string and empty entries, redacts each remaining entry, caps each
 // entry's length, and caps the total list size so a malicious or
 // runaway worker can't post a 50-MB markdown comment.
-function redactBulletList(items, { perItemLimit = 400, maxItems = 25 } = {}) {
+//
+// Public-safe: applies BOTH token redaction and host-path redaction so
+// validation/blockers entries posted to the PR can't leak filesystem
+// layout. The `redactItem` seam is left in case a non-public caller
+// needs token-only redaction; default is the public-safe path.
+function redactBulletList(items, { perItemLimit = 400, maxItems = 25, redactItem = redactPublicSafeText } = {}) {
   const arr = Array.isArray(items) ? items : [];
   return arr
     .filter((s) => typeof s === 'string' && s.trim())
     .slice(0, maxItems)
-    .map((s) => redactAndCap(String(s).trim(), perItemLimit));
+    .map((s) => redactItem(String(s).trim(), perItemLimit));
 }
 
 export {
   REDACTION_PATTERNS,
   redactSensitiveText,
   redactPathlikeText,
+  redactPublicSafeText,
   redactAndCap,
   redactBulletList,
 };

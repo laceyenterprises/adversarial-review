@@ -1225,6 +1225,7 @@ async function postReconcileOutcomeCommentSafe({
     });
     if (jobPath) {
       await recordInitialCommentDelivery({
+        rootDir,
         jobPath,
         body,
         repo: job?.repo,

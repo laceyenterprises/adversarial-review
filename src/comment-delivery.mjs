@@ -24,8 +24,8 @@
 // Cap: 5 attempts. After that the record stays at posted=false for
 // human inspection; the daemon does not silently keep hammering.
 
-import { closeSync, existsSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync, renameSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
@@ -34,6 +34,23 @@ import { buildRemediationOutcomeCommentBody, postRemediationOutcomeComment } fro
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+
+// Dedicated retry index. Each pointer is a small JSON file naming the
+// terminal job that owes a comment retry. We add pointers when an
+// initial post fails (or stays in-flight on crash) and remove them on
+// success. The retry tick walks only this directory instead of every
+// file under {completed,stopped,failed} — the previous scan was O(total
+// terminal history) per tick and grew without bound. See PR #18 review.
+//
+// Layout: `data/follow-up-jobs/delivery-retry-index/<jobId>.json`
+// Pointer body: { jobPath: "<abs path to terminal job>" }
+//
+// `.initialized` sentinel records that we've seeded the index from the
+// existing terminal history (one-time migration). Without this, an
+// upgrade dropping the legacy scan would silently lose retry candidates
+// that pre-date the index.
+const DELIVERY_RETRY_INDEX_DIR_NAME = 'delivery-retry-index';
+const DELIVERY_RETRY_INDEX_INIT_SENTINEL = '.initialized';
 
 // Maximum number of times the retry pass will re-attempt a failed
 // comment. After this, the record sits in terminal/ with posted=false
@@ -329,6 +346,7 @@ function clearPostedSidecar(jobPath) {
 // pass running on the same record skips while we own it. The lock
 // is released after the result is stamped.
 function recordInitialCommentDelivery({
+  rootDir = ROOT,
   jobPath,
   body,
   repo,
@@ -338,6 +356,7 @@ function recordInitialCommentDelivery({
   postCommentArgs = null,
   now = () => new Date().toISOString(),
   log = console,
+  maxAttempts = MAX_COMMENT_DELIVERY_ATTEMPTS,
   // Test seam: lets callers verify the in-flight stamp without a
   // full async post. Production path leaves this null and the post
   // is done internally.
@@ -486,8 +505,74 @@ function recordInitialCommentDelivery({
       releaseDeliveryClaim(jobPath);
     }
 
+    // Maintain the retry index from the same code path that owns the
+    // delivery record. Pointer added when delivery still owes a retry,
+    // removed otherwise — so the index never includes posted=true
+    // records or hits the cap on its own.
+    try {
+      if (deliveryWarrantsRetry(finalDelivery, maxAttempts)) {
+        addToDeliveryRetryIndex(rootDir, jobPath);
+      } else {
+        removeFromDeliveryRetryIndex(rootDir, jobPath);
+      }
+    } catch (err) {
+      log.error?.(`[comment-delivery] failed to update retry index for ${jobPath}: ${err.message}`);
+    }
+
     return finalDelivery;
   })();
+}
+
+function deliveryRetryIndexDir(rootDir) {
+  return join(rootDir, 'data', 'follow-up-jobs', DELIVERY_RETRY_INDEX_DIR_NAME);
+}
+
+function ensureDeliveryRetryIndexDir(rootDir) {
+  const dir = deliveryRetryIndexDir(rootDir);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function deliveryRetryIndexPointerName(jobPath) {
+  // Pointers are named after the terminal job's basename so two different
+  // jobIds with identical filenames in different terminal dirs can't
+  // collide. The basename is unique per job (jobId-based filenames are
+  // generated upstream).
+  return basename(jobPath);
+}
+
+function deliveryRetryIndexPointerPath(rootDir, jobPath) {
+  return join(deliveryRetryIndexDir(rootDir), deliveryRetryIndexPointerName(jobPath));
+}
+
+function addToDeliveryRetryIndex(rootDir, jobPath) {
+  ensureDeliveryRetryIndexDir(rootDir);
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  const tmp = `${pointerPath}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmp, `${JSON.stringify({ jobPath }, null, 2)}\n`, 'utf8');
+  renameSync(tmp, pointerPath);
+}
+
+function removeFromDeliveryRetryIndex(rootDir, jobPath) {
+  const pointerPath = deliveryRetryIndexPointerPath(rootDir, jobPath);
+  try {
+    rmSync(pointerPath, { force: true });
+  } catch {
+    // Best-effort cleanup. A leftover pointer for an already-posted
+    // record is harmless: the next retry pass reads the actual record,
+    // sees posted=true, removes the pointer.
+  }
+}
+
+// Determine whether a delivery state warrants an entry in the retry
+// index. Posted records and non-retryable reasons stay out of the
+// index entirely so the retry tick never even sees them.
+function deliveryWarrantsRetry(delivery, maxAttempts) {
+  if (!delivery) return false;
+  if (delivery.posted) return false;
+  if ((delivery.attempts || 0) >= maxAttempts) return false;
+  if (NON_RETRYABLE_DELIVERY_REASONS.has(delivery.reason)) return false;
+  return true;
 }
 
 function listTerminalJobPaths(rootDir) {
@@ -520,9 +605,9 @@ function listTerminalJobPaths(rootDir) {
 // record fields and the worker reply artifact (still on disk), and
 // hand the retry walker a synthesized candidate.
 //
-// Reviewer's R5 blocking #1 fix: "make the retry path treat
-// missing/partial delivery metadata as recoverable debt instead of
-// 'not a candidate.'"
+// Upstream R5 blocking #1 fix preserved through the retry-index
+// rewrite: even when reading from the index, a pointer can lead to a
+// record whose pre-stamp never landed.
 function reconstructDeliveryFromRecord(record) {
   const action = record?.status === 'completed' ? 'completed'
     : record?.status === 'stopped' ? 'stopped'
@@ -582,48 +667,148 @@ function reconstructDeliveryFromRecord(record) {
   };
 }
 
-// Build a list of retry candidates, sorted by firstAttemptAt
-// ascending so the oldest still-failing comments drain first.
-// Three candidate sources:
-//   1. existing commentDelivery with posted=false, attempts<cap,
-//      retryable reason — the normal failed-post retry case
-//   2. missing commentDelivery — the record landed in terminal/
-//      without ever getting a delivery field (crash between the
-//      terminal move and pre-stamp). Reconstruct the delivery shape
-//      from the record + worker reply artifact.
-//   3. partial / "owed" commentDelivery (attempts=0, posted=false) —
-//      the pre-move stamp landed but no post attempt ran yet.
-function listRetryCandidates(rootDir, { maxAttempts, log }) {
+// Does this terminal record still owe a comment retry? Used both at
+// seed time (decide whether to add a pointer) and at candidate-list
+// time (decide whether to keep the pointer). Treats missing /
+// body-less commentDelivery as recoverable debt — the retry walker
+// will reconstruct the body before attempting.
+function recordOwesRetry(record, maxAttempts) {
+  if (!record) return false;
+  const status = record.status;
+  if (status !== 'completed' && status !== 'stopped' && status !== 'failed') return false;
+  if (!record.repo || !record.prNumber) return false;
+  const delivery = record.commentDelivery;
+  if (!delivery) return true; // missing — reconstructable debt
+  if (delivery.posted) return false;
+  if ((delivery.attempts || 0) >= maxAttempts) return false;
+  if (NON_RETRYABLE_DELIVERY_REASONS.has(delivery.reason)) return false;
+  return true; // delivery without body is still owed and reconstructable
+}
+
+// One-time migration: the first time the retry tick runs after this
+// change deploys, the index is empty but legacy terminal records may
+// still carry posted=false (or missing) deliveries that need retry.
+// Walk the terminal history once, write pointers for every record
+// that owes a retry, then drop the sentinel so subsequent ticks skip
+// the scan.
+function seedDeliveryRetryIndexFromHistory(rootDir, { maxAttempts, log }) {
+  const dir = ensureDeliveryRetryIndexDir(rootDir);
+  const sentinelPath = join(dir, DELIVERY_RETRY_INDEX_INIT_SENTINEL);
+  if (existsSync(sentinelPath)) return { seeded: 0, skipped: true };
+
+  let seeded = 0;
   const paths = listTerminalJobPaths(rootDir);
-  const candidates = [];
   for (const jobPath of paths) {
     let record;
     try {
       record = readTerminalRecord(jobPath);
     } catch (err) {
-      log?.error?.(`[comment-delivery] cannot parse ${jobPath}: ${err.message}`);
+      log?.error?.(`[comment-delivery] cannot parse ${jobPath} during index seed: ${err.message}`);
+      continue;
+    }
+    if (recordOwesRetry(record, maxAttempts)) {
+      try {
+        addToDeliveryRetryIndex(rootDir, jobPath);
+        seeded += 1;
+      } catch (err) {
+        log?.error?.(`[comment-delivery] failed to seed retry pointer for ${jobPath}: ${err.message}`);
+      }
+    }
+  }
+
+  // Sentinel last so a crash mid-seed retries the seed on next tick
+  // instead of leaving a partial index.
+  try {
+    writeFileSync(sentinelPath, `${new Date().toISOString()}\n`, 'utf8');
+  } catch (err) {
+    log?.error?.(`[comment-delivery] failed to write retry-index sentinel: ${err.message}`);
+  }
+  return { seeded, skipped: false };
+}
+
+// Build a list of retry candidates from the index, sorted by
+// firstAttemptAt ascending so the oldest still-failing comments drain
+// first. Stale pointers (record gone, already posted, over the cap,
+// non-retryable reason) are pruned during read so the index stays
+// small without a separate sweep.
+//
+// Implicit seed: if the index has never been seeded, walk terminal
+// history once to backfill pointers. This makes a direct call to
+// listRetryCandidates work on a fresh queue without a separate seed
+// step (the retry tick still calls seed explicitly to make the
+// migration boundary obvious).
+function listRetryCandidates(rootDir, { maxAttempts, log }) {
+  seedDeliveryRetryIndexFromHistory(rootDir, { maxAttempts, log });
+  let entries;
+  try {
+    entries = readdirSync(deliveryRetryIndexDir(rootDir));
+  } catch {
+    return [];
+  }
+
+  const candidates = [];
+  for (const name of entries) {
+    if (!name.endsWith('.json')) continue;
+    const pointerPath = join(deliveryRetryIndexDir(rootDir), name);
+    let pointer;
+    try {
+      pointer = JSON.parse(readFileSync(pointerPath, 'utf8'));
+    } catch (err) {
+      log?.error?.(`[comment-delivery] cannot parse retry pointer ${pointerPath}: ${err.message}`);
+      // Drop unreadable pointers — they would otherwise keep retrying
+      // forever with no record to update.
+      try { rmSync(pointerPath, { force: true }); } catch {}
+      continue;
+    }
+    const jobPath = pointer?.jobPath;
+    if (!jobPath) {
+      try { rmSync(pointerPath, { force: true }); } catch {}
+      continue;
+    }
+    let record;
+    try {
+      record = readTerminalRecord(jobPath);
+    } catch (err) {
+      log?.error?.(`[comment-delivery] cannot parse ${jobPath} (referenced by ${name}): ${err.message}`);
+      // The pointed-to record was deleted (operator cleanup, manual
+      // requeue) — drop the dangling pointer.
+      try { rmSync(pointerPath, { force: true }); } catch {}
+      continue;
+    }
+    if (!recordOwesRetry(record, maxAttempts)) {
+      // Posted, capped, or non-retryable — drop the pointer so the
+      // index reflects "nothing to do here". On a posted=true record
+      // this is the normal cleanup path; on capped/non-retryable it
+      // matches the legacy scan's filter behavior.
+      try { rmSync(pointerPath, { force: true }); } catch {}
       continue;
     }
     const delivery = record.commentDelivery;
     if (!delivery) {
-      // Missing — try to reconstruct so the retry walker can post.
+      // Missing — reconstruct so the retry walker can post (R5 #1
+      // crash-window recovery).
       const reconstructed = reconstructDeliveryFromRecord(record);
-      if (!reconstructed) continue;
+      if (!reconstructed) {
+        try { rmSync(pointerPath, { force: true }); } catch {}
+        continue;
+      }
       candidates.push({ jobPath, delivery: reconstructed, record, reconstructed: true });
       continue;
     }
-    if (delivery.posted) continue;
-    if ((delivery.attempts || 0) >= maxAttempts) continue;
-    if (NON_RETRYABLE_DELIVERY_REASONS.has(delivery.reason)) continue;
-    // Partial owed shape with no body? Reconstruct.
     if (!delivery.body) {
+      // Partial owed shape — reconstruct the body, keep the
+      // attempts/firstAttemptAt accounting from the existing record.
       const reconstructed = reconstructDeliveryFromRecord(record);
-      if (!reconstructed) continue;
+      if (!reconstructed) {
+        try { rmSync(pointerPath, { force: true }); } catch {}
+        continue;
+      }
       candidates.push({ jobPath, delivery: { ...delivery, ...reconstructed }, record, reconstructed: true });
       continue;
     }
     candidates.push({ jobPath, delivery, record });
   }
+
   candidates.sort((a, b) => {
     // Reconstructed / owed records (firstAttemptAt=null) sort to the
     // front via owedAt → 0 fallback so they drain before failed ones
@@ -652,6 +837,13 @@ async function retryFailedCommentDeliveries({
   maxAttempts = MAX_COMMENT_DELIVERY_ATTEMPTS,
   budget = RETRY_BUDGET_PER_TICK,
 } = {}) {
+  // One-time backfill: if the retry index hasn't been seeded yet,
+  // walk the existing terminal history once so any pre-index
+  // posted=false records get picked up. Subsequent ticks read only
+  // the index. This is bounded by terminal history size on first run
+  // only; the steady-state hot path is the index walk below.
+  seedDeliveryRetryIndexFromHistory(rootDir, { maxAttempts, log });
+
   const candidates = listRetryCandidates(rootDir, { maxAttempts, log });
   const scanned = candidates.length;
   let retried = 0;
@@ -799,6 +991,20 @@ async function retryFailedCommentDeliveries({
       releaseDeliveryClaim(jobPath);
     }
 
+    // Maintain the retry index in step with the updated record.
+    // Successful posts (and capped/non-retryable terminal states) drop
+    // out of the index; still-failing ones stay in (their pointer was
+    // already there since this candidate came from the index).
+    try {
+      if (deliveryWarrantsRetry(record.commentDelivery, maxAttempts)) {
+        addToDeliveryRetryIndex(rootDir, jobPath);
+      } else {
+        removeFromDeliveryRetryIndex(rootDir, jobPath);
+      }
+    } catch (err) {
+      log.error?.(`[comment-delivery] failed to update retry index for ${jobPath}: ${err.message}`);
+    }
+
     if (result?.posted) posted += 1;
     else failed += 1;
   }
@@ -810,18 +1016,26 @@ export {
   MAX_COMMENT_DELIVERY_ATTEMPTS,
   RETRY_BUDGET_PER_TICK,
   DELIVERY_CLAIM_STALE_MS,
+  DELIVERY_RETRY_INDEX_DIR_NAME,
+  DELIVERY_RETRY_INDEX_INIT_SENTINEL,
   NON_RETRYABLE_DELIVERY_REASONS,
+  addToDeliveryRetryIndex,
   buildAttemptingDelivery,
   buildOwedDelivery,
   buildPendingDelivery,
   clearPostedSidecar,
   deliveryLockPath,
+  deliveryRetryIndexDir,
+  deliveryRetryIndexPointerPath,
   listRetryCandidates,
   postedSidecarPath,
   reconstructDeliveryFromRecord,
   recordInitialCommentDelivery,
+  recordOwesRetry,
   releaseDeliveryClaim,
+  removeFromDeliveryRetryIndex,
   retryFailedCommentDeliveries,
+  seedDeliveryRetryIndexFromHistory,
   tryAcquireDeliveryClaim,
   writePostedSidecar,
 };

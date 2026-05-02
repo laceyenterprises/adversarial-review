@@ -20,7 +20,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { redactAndCap, redactBulletList, redactPathlikeText, redactSensitiveText } from './redaction.mjs';
+import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -91,26 +91,29 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
 }
 
 // Sanitize a free-text field for use in a BLOCK context (the
-// Summary section). Redacts sensitive substrings, caps length, then
-// wraps in a fenced code block so any markdown the worker tried to
-// inject (mentions, autolinks, headings, task lists, HTML) renders
-// as plaintext. Redaction is not sanitization — markdown injection
-// from an untrusted source is a separate concern.
+// Summary section). Redacts sensitive substrings (tokens AND
+// host-local filesystem paths — workers run inside a checked-out
+// workspace and can echo `/Users/<operator>/...` from a log line into
+// `summary`), caps length, then wraps in a fenced code block so any
+// markdown the worker tried to inject (mentions, autolinks, headings,
+// task lists, HTML) renders as plaintext. Redaction is not
+// sanitization — markdown injection from an untrusted source is a
+// separate concern.
 function sanitizeFreeText(text, limit) {
-  const redacted = redactAndCap(String(text ?? '').trim(), limit);
+  const redacted = redactPublicSafeText(String(text ?? '').trim(), limit);
   if (!redacted) return '';
   return fenceUntrustedText(redacted);
 }
 
 // Sanitize a free-text field for use INLINE (the rereview status
-// line). Redacts secrets, caps length, collapses whitespace to a
-// single space (no embedded newlines that would break out of the
-// inline context), wraps in single-backtick inline code, and
-// escapes any backticks the content tries to use to break out.
+// line). Redacts tokens AND host-local paths, caps length, collapses
+// whitespace to a single space (no embedded newlines that would break
+// out of the inline context), wraps in single-backtick inline code,
+// and escapes any backticks the content tries to use to break out.
 // Backtick wrapping in GitHub's renderer is sufficient to disable
 // `@mentions`, autolinks, and HTML inside it.
 function sanitizeInlineText(text, limit) {
-  const redacted = redactAndCap(String(text ?? '').trim().replace(/\s+/g, ' '), limit);
+  const redacted = redactPublicSafeText(String(text ?? '').trim().replace(/\s+/g, ' '), limit);
   if (!redacted) return '';
   // GFM inline code: backticks inside need to be quoted with longer
   // backtick runs. Easiest robust path: replace any backtick with U+200B
@@ -138,6 +141,50 @@ function sanitizeFailureText(text) {
   return `${pathSafe.slice(0, FAILURE_MESSAGE_MAX_CHARS - 1)}…`;
 }
 
+// Deterministic dedupe marker baked into every remediation outcome
+// comment. It encodes (jobId, round, action) so the same logical
+// comment always carries the same identifier across tick retries.
+//
+// Why we need it: `gh pr comment` can time out AFTER GitHub accepted
+// the create. The local poster sees `gh-cli-timeout`, the delivery
+// record stays `posted=false`, the next tick retries — and without
+// this marker it would post a duplicate of the comment that already
+// landed. The poster's pre-post dedup check looks for this marker
+// in existing comments before re-issuing the create.
+//
+// Format: HTML comment so GitHub's renderer drops it. Stable string
+// constants (no whitespace, no markdown) so a substring match against
+// `body` survives any GitHub-side normalization (line ending changes,
+// trailing newlines, etc.).
+const REMEDIATION_COMMENT_MARKER_PREFIX = 'adversarial-review-remediation-marker';
+
+function sanitizeMarkerComponent(value) {
+  // The marker lives inside an HTML comment, so we need to keep
+  // anything that could close the comment (`-->`) or carry whitespace
+  // out of the literal. Worker-controlled values never reach this
+  // function — the components are jobId / action / round which we
+  // synthesize ourselves — but defense-in-depth is cheap.
+  return String(value ?? 'unknown').replace(/[^A-Za-z0-9_.:-]/g, '_');
+}
+
+function buildRemediationOutcomeCommentMarker({ jobId, round, action }) {
+  const safeJob = sanitizeMarkerComponent(jobId);
+  const safeRound = sanitizeMarkerComponent(round);
+  const safeAction = sanitizeMarkerComponent(action);
+  return `${REMEDIATION_COMMENT_MARKER_PREFIX}:${safeJob}:r${safeRound}:${safeAction}`;
+}
+
+function extractRemediationCommentMarker(body) {
+  if (!body) return null;
+  // Match the literal HTML comment we emit in the body. Anchored on
+  // the prefix so an unrelated marker (e.g. an operator-pasted block)
+  // can't accidentally match.
+  const match = String(body).match(
+    new RegExp(`<!--\\s*(${REMEDIATION_COMMENT_MARKER_PREFIX}:[^\\s]+)\\s*-->`)
+  );
+  return match ? match[1] : null;
+}
+
 function buildRemediationOutcomeCommentBody({
   workerClass,
   action,
@@ -150,8 +197,17 @@ function buildRemediationOutcomeCommentBody({
   const maxRounds = Number(job?.remediationPlan?.maxRounds || 0) || null;
   const roundLabel = maxRounds ? `${round} of ${maxRounds}` : String(round);
   const headerClass = workerClass || 'unknown';
+  const marker = buildRemediationOutcomeCommentMarker({
+    jobId: job?.jobId,
+    round,
+    action,
+  });
   const lines = [];
 
+  // Marker first so a substring search hits the smallest possible
+  // span at the top of the body. HTML comments don't render in
+  // GitHub markdown so this is invisible to PR readers.
+  lines.push(`<!-- ${marker} -->`);
   lines.push(`### Remediation Worker (${headerClass}) — round ${roundLabel}`);
   lines.push('');
 
@@ -286,13 +342,97 @@ const GH_COMMENT_TIMEOUT_MS = 30_000;
 // `gh pr comment` writes the URL of the just-created comment to
 // stdout on success. Shape:
 //   https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>
-// Used as a dedupe token: the retry path checks commentDelivery.commentUrl
-// before re-posting, so a writeTerminalRecord-after-gh-success failure
-// can't produce a duplicate public comment.
+// Used as a dedupe token in the posted-sidecar (R4 #2 dedupe gap):
+// the retry path checks commentDelivery.commentUrl before re-posting,
+// so a writeTerminalRecord-after-gh-success failure can't produce a
+// duplicate public comment.
 function parseCommentUrlFromStdout(stdout) {
   if (!stdout) return null;
   const match = String(stdout).match(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+#issuecomment-\d+/);
   return match ? match[0] : null;
+}
+
+// Hard cap on the dedup-lookup gh-api call. The lookup runs before
+// every post (initial + retry) so it must stay fast; if the API
+// hangs, we'd rather post a duplicate than block reconcile.
+const GH_LOOKUP_TIMEOUT_MS = 15_000;
+
+// Dedup-check failures we must NOT treat as authoritative "no
+// duplicate exists". Each one means we couldn't read the existing
+// comment list — fall back to posting (best-effort), since refusing
+// would leave the PR silent forever.
+const DEDUP_LOOKUP_FALLTHROUGH_REASONS = new Set(['lookup-timeout', 'lookup-failure']);
+
+// List existing PR comments and return the body marker (if any) that
+// matches our remediation marker prefix. Returns:
+//   { found: true,  marker, commentId? } when an existing comment
+//                                         already carries this round's
+//                                         marker (post must be skipped)
+//   { found: false }                      when no existing comment
+//                                         carries it (proceed to post)
+//   { found: false, lookupFailed: true,
+//     reason }                            when the lookup itself
+//                                         failed; caller should fall
+//                                         through to posting
+//
+// `gh api` is used (not `gh pr view --json comments`) because the
+// pagination story is simpler and the response shape is stable
+// across gh versions. `--paginate` walks every page so a chatty PR
+// with > 30 comments still returns the full body list.
+async function findExistingRemediationComment({
+  repo,
+  prNumber,
+  marker,
+  execFileImpl,
+  env,
+  log,
+  timeoutMs = GH_LOOKUP_TIMEOUT_MS,
+}) {
+  if (!marker) return { found: false };
+  try {
+    const { stdout } = await execFileImpl(
+      'gh',
+      [
+        'api',
+        '--paginate',
+        `repos/${repo}/issues/${encodeURIComponent(prNumber)}/comments`,
+        '-q',
+        '.[] | {id: .id, body: .body}',
+      ],
+      {
+        env,
+        maxBuffer: 25 * 1024 * 1024,
+        timeout: timeoutMs,
+        killSignal: 'SIGTERM',
+      }
+    );
+    // jq's compact output emits one JSON object per line.
+    const lines = String(stdout).split('\n').filter(Boolean);
+    for (const line of lines) {
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const body = entry?.body || '';
+      if (body.includes(marker)) {
+        return { found: true, marker, commentId: entry?.id ?? null };
+      }
+    }
+    return { found: false };
+  } catch (err) {
+    if (err && err.killed === true) {
+      log.error?.(
+        `[pr-comments] dedup lookup timed out on ${repo}#${prNumber} after ${timeoutMs}ms — falling through to post`
+      );
+      return { found: false, lookupFailed: true, reason: 'lookup-timeout' };
+    }
+    log.error?.(
+      `[pr-comments] dedup lookup failed on ${repo}#${prNumber}: ${err.message} — falling through to post`
+    );
+    return { found: false, lookupFailed: true, reason: 'lookup-failure', error: err.message };
+  }
 }
 
 async function postRemediationOutcomeComment({
@@ -304,6 +444,10 @@ async function postRemediationOutcomeComment({
   env = process.env,
   log = console,
   timeoutMs = GH_COMMENT_TIMEOUT_MS,
+  // Test seam: skip the dedup lookup entirely. Production callers
+  // never set this — the dedup check is the whole point of the
+  // idempotency contract.
+  findExistingImpl = findExistingRemediationComment,
 }) {
   if (!repo || !prNumber) {
     log.error?.('[pr-comments] skipping comment: missing repo or prNumber');
@@ -338,6 +482,42 @@ async function postRemediationOutcomeComment({
     HOME: env.HOME ?? '',
     GH_TOKEN: token,
   };
+
+  // Pre-post dedup: if `gh pr comment` previously timed out AFTER
+  // GitHub accepted the create, the comment landed on the PR but our
+  // delivery record stayed `posted=false`. The next retry would post
+  // a duplicate identical comment (review #4 of PR #18). Look for
+  // our deterministic marker in existing comments first; if present,
+  // skip the create and return the existing comment id.
+  const marker = extractRemediationCommentMarker(body);
+  if (marker) {
+    const existing = await findExistingImpl({
+      repo,
+      prNumber,
+      marker,
+      execFileImpl,
+      env: allowlistedEnv,
+      log,
+    });
+    if (existing.found) {
+      return {
+        posted: true,
+        deduped: true,
+        repo,
+        prNumber,
+        workerClass,
+        tokenEnvName,
+        marker: existing.marker,
+        commentId: existing.commentId ?? null,
+      };
+    }
+    if (existing.lookupFailed && !DEDUP_LOOKUP_FALLTHROUGH_REASONS.has(existing.reason)) {
+      // Defensive: if findExistingImpl ever returns a lookupFailed
+      // reason we don't know about, stay loud — we'd rather log + post
+      // than silently swallow an unfamiliar failure mode.
+      log.error?.(`[pr-comments] dedup lookup returned unknown failure reason: ${existing.reason}`);
+    }
+  }
 
   try {
     const ghResult = await execFileImpl(
@@ -377,7 +557,12 @@ async function postRemediationOutcomeComment({
 
 export {
   WORKER_CLASS_TO_BOT_TOKEN_ENV,
+  REMEDIATION_COMMENT_MARKER_PREFIX,
   buildRemediationOutcomeCommentBody,
+  buildRemediationOutcomeCommentMarker,
+  extractRemediationCommentMarker,
+  findExistingRemediationComment,
+  parseCommentUrlFromStdout,
   postRemediationOutcomeComment,
   resolveCommentBotTokenEnv,
 };

@@ -2151,3 +2151,167 @@ test('reconcileFollowUpJob does not throw when postCommentImpl rejects (best-eff
   });
   assert.equal(result.action, 'stopped');
 });
+
+// ── Reconcile: blocked rereview outcomes (regression coverage) ─────────────
+//
+// These tests cover the gap PR #18's review flagged: when the worker
+// requests rereview but `requestReviewRereview` refuses the reset, the
+// previous (buggy) behavior was to mark the job `completed` and post a
+// "re-review queued" PR comment anyway. The fix gates the `completed`
+// transition on `triggered === true` (or status === 'already-pending')
+// and routes refused cases to `stopped` with stopCode `rereview-blocked`.
+//
+// Each test stubs `requestReviewRereviewImpl` to return one of the four
+// outcome shapes from review-state.mjs::requestReviewRereview and asserts
+// both the queue transition and the rendered PR comment.
+
+function makeBlockedRereviewFixture(rootDir, prNumber) {
+  const { claimed } = makeQueuedJob(rootDir, { prNumber, builderTag: 'codex', reviewerModel: 'claude' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  writeFileSync(outputPath, 'Worker did the thing.\n', 'utf8');
+  writeFileSync(replyPath, JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Worker thought it addressed all findings.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: { requested: true, reason: 'Confirm fix.' },
+  }), 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9600 + prNumber,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+  return { claimed, spawned };
+}
+
+test('reconcile routes blocked rereview (review-row-missing) to stopped, NOT completed', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { spawned } = makeBlockedRereviewFixture(rootDir, 60);
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    requestReviewRereviewImpl: () => ({
+      triggered: false,
+      status: 'blocked',
+      reason: 'review-row-missing',
+    }),
+    postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
+  });
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.reason, 'rereview-blocked');
+  assert.equal(result.job.remediationPlan.stop.code, 'rereview-blocked');
+  assert.equal(result.job.reReview.requested, true);
+  assert.equal(result.job.reReview.triggered, false);
+  assert.equal(result.job.reReview.outcomeReason, 'review-row-missing');
+  // Comment must surface the actual outcome, not a misleading "queued".
+  assert.equal(commentCalls.length, 1);
+  assert.match(commentCalls[0].body, /Outcome:.*stopped.*rereview-blocked/);
+  assert.match(commentCalls[0].body, /watcher refused the reset.*review-row-missing/);
+  assert.doesNotMatch(commentCalls[0].body, /re-review queued/);
+});
+
+test('reconcile routes blocked rereview (pr-not-open) to stopped with the closed-PR reason in the comment', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { spawned } = makeBlockedRereviewFixture(rootDir, 61);
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    requestReviewRereviewImpl: () => ({
+      triggered: false,
+      status: 'blocked',
+      reason: 'pr-not-open',
+      reviewRow: { repo: 'laceyenterprises/clio', pr_number: 61, pr_state: 'closed' },
+    }),
+    postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
+  });
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'rereview-blocked');
+  assert.equal(result.job.reReview.outcomeReason, 'pr-not-open');
+  assert.match(commentCalls[0].body, /pr-not-open/);
+});
+
+test('reconcile routes blocked rereview (malformed-title-terminal) to stopped', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { spawned } = makeBlockedRereviewFixture(rootDir, 62);
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    requestReviewRereviewImpl: () => ({
+      triggered: false,
+      status: 'blocked',
+      reason: 'malformed-title-terminal',
+      reviewRow: { repo: 'laceyenterprises/clio', pr_number: 62, review_status: 'malformed' },
+    }),
+    postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
+  });
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'rereview-blocked');
+  assert.equal(result.job.reReview.outcomeReason, 'malformed-title-terminal');
+  assert.match(commentCalls[0].body, /malformed-title-terminal/);
+});
+
+test('reconcile treats already-pending as a benign success (still completed, comment notes no reset needed)', async () => {
+  // already-pending is structurally `triggered: false`, but the watcher
+  // row is already at status='pending' so a fresh review pass IS coming
+  // — it just wasn't a new reset. Operators should see this as a normal
+  // completion, not a blocked outcome.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { spawned } = makeBlockedRereviewFixture(rootDir, 63);
+
+  const commentCalls = [];
+  const result = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    requestReviewRereviewImpl: () => ({
+      triggered: false,
+      status: 'already-pending',
+      reason: 'review-already-pending',
+      reviewRow: { repo: 'laceyenterprises/clio', pr_number: 63, review_status: 'pending' },
+    }),
+    postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
+  });
+
+  assert.equal(result.action, 'completed');
+  assert.match(commentCalls[0].body, /re-review already pending — no reset needed/);
+  assert.match(commentCalls[0].body, /Re-review status:.*already pending/);
+  assert.doesNotMatch(commentCalls[0].body, /BLOCKED/);
+});

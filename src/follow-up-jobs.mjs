@@ -14,7 +14,16 @@ import { basename, join } from 'node:path';
 const MAX_CREATE_ATTEMPTS = 100;
 
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
-const DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
+// Bounded remediation cap. Was 6 (PR #18 era); dropped to 3 after
+// observing diminishing returns past round 3 — rounds 1-3 caught real
+// structural bugs, edge cases, and security regressions; rounds 4-7
+// produced mostly duplicate findings and stacked complexity faster
+// than they removed risk. Pairs with a lenient final-round verdict
+// threshold in the reviewer prompt (the final-round review only blocks
+// on data corruption / secret leakage / security regression /
+// broken external contract; everything else becomes a non-blocking
+// note for human review). See prompts/reviewer-prompt-final-round-addendum.md.
+const DEFAULT_MAX_REMEDIATION_ROUNDS = 3;
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
 const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
 const FOLLOW_UP_JOB_DIRS = Object.freeze({

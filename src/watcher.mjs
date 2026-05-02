@@ -16,6 +16,7 @@ import {
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
+import { DEFAULT_MAX_REMEDIATION_ROUNDS } from './follow-up-jobs.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -151,11 +152,37 @@ function resolveCodexReviewerEnv(reviewerEnv) {
 
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
-async function spawnReviewer({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId, builderTag }) {
+async function spawnReviewer({
+  repo,
+  prNumber,
+  reviewerModel,
+  botTokenEnv,
+  linearTicketId,
+  builderTag,
+  reviewAttemptNumber,
+  maxRemediationRounds,
+}) {
   const reviewerPath = join(__dirname, 'reviewer.mjs');
-  const args = JSON.stringify({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId, builderTag });
+  const args = JSON.stringify({
+    repo,
+    prNumber,
+    reviewerModel,
+    botTokenEnv,
+    linearTicketId,
+    builderTag,
+    reviewAttemptNumber,
+    maxRemediationRounds,
+  });
 
-  console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})`);
+  const finalRound = (
+    Number.isFinite(reviewAttemptNumber) &&
+    Number.isFinite(maxRemediationRounds) &&
+    reviewAttemptNumber > maxRemediationRounds
+  );
+  const roundLabel = Number.isFinite(reviewAttemptNumber)
+    ? ` attempt=${reviewAttemptNumber}/${1 + Number(maxRemediationRounds || 0)}${finalRound ? ' [FINAL — lenient threshold]' : ''}`
+    : '';
+  console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
   try {
     const reviewerEnv = { ...process.env };
@@ -442,6 +469,14 @@ async function pollOnce(octokit) {
       stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
       await setLinearInReview(linearTicketId);
 
+      // Compute the (1-indexed) attempt number for this review pass.
+      // existing?.review_attempts is incremented only by stmtMarkPosted /
+      // stmtMarkFailed, so before either fires it represents the count
+      // of *prior* attempts. The reviewer uses this together with
+      // maxRemediationRounds to decide whether to apply the lenient
+      // final-round verdict threshold.
+      const reviewAttemptNumber = (existing?.review_attempts || 0) + 1;
+
       const result = await spawnReviewer({
         repo: repoPath,
         prNumber,
@@ -449,6 +484,8 @@ async function pollOnce(octokit) {
         botTokenEnv: route.botTokenEnv,
         linearTicketId,
         builderTag: route.tag,
+        reviewAttemptNumber,
+        maxRemediationRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
       });
 
       if (result.ok) {

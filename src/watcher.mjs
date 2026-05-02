@@ -16,6 +16,10 @@ import {
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
+import {
+  DEFAULT_MAX_REMEDIATION_ROUNDS,
+  summarizePRRemediationLedger,
+} from './follow-up-jobs.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -151,11 +155,37 @@ function resolveCodexReviewerEnv(reviewerEnv) {
 
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
-async function spawnReviewer({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId, builderTag }) {
+async function spawnReviewer({
+  repo,
+  prNumber,
+  reviewerModel,
+  botTokenEnv,
+  linearTicketId,
+  builderTag,
+  reviewAttemptNumber,
+  maxRemediationRounds,
+}) {
   const reviewerPath = join(__dirname, 'reviewer.mjs');
-  const args = JSON.stringify({ repo, prNumber, reviewerModel, botTokenEnv, linearTicketId, builderTag });
+  const args = JSON.stringify({
+    repo,
+    prNumber,
+    reviewerModel,
+    botTokenEnv,
+    linearTicketId,
+    builderTag,
+    reviewAttemptNumber,
+    maxRemediationRounds,
+  });
 
-  console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})`);
+  const finalRound = (
+    Number.isFinite(reviewAttemptNumber) &&
+    Number.isFinite(maxRemediationRounds) &&
+    reviewAttemptNumber > maxRemediationRounds
+  );
+  const roundLabel = Number.isFinite(reviewAttemptNumber)
+    ? ` attempt=${reviewAttemptNumber}/${1 + Number(maxRemediationRounds || 0)}${finalRound ? ' [FINAL — lenient threshold]' : ''}`
+    : '';
+  console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
   try {
     const reviewerEnv = { ...process.env };
@@ -442,6 +472,30 @@ async function pollOnce(octokit) {
       stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
       await setLinearInReview(linearTicketId);
 
+      // Final-round inputs come from the durable per-PR follow-up ledger,
+      // not from `reviewed_prs.review_attempts`. Two reasons (reviewer
+      // blocking issues #1 and #2):
+      //
+      //   1. `review_attempts` is incremented for failed posts / OAuth
+      //      crashes / reviewer timeouts as well as successful posts. A
+      //      transient post failure should not count as a remediation
+      //      cycle and must not silently trip the lenient threshold.
+      //
+      //   2. `maxRemediationRounds` must come from the job's persisted
+      //      cap, not the global default. A legacy job created with the
+      //      old 6-round cap must be allowed to use all 6 rounds, even
+      //      though new jobs default to 3.
+      //
+      // `summarizePRRemediationLedger` reads currentRound from terminal
+      // follow-up jobs (the only place a remediation cycle is actually
+      // recorded as completed) and the latest job's persisted maxRounds.
+      const ledger = summarizePRRemediationLedger(ROOT, {
+        repo: repoPath,
+        prNumber,
+      });
+      const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
+      const maxRemediationRounds = ledger.latestMaxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS;
+
       const result = await spawnReviewer({
         repo: repoPath,
         prNumber,
@@ -449,6 +503,8 @@ async function pollOnce(octokit) {
         botTokenEnv: route.botTokenEnv,
         linearTicketId,
         builderTag: route.tag,
+        reviewAttemptNumber,
+        maxRemediationRounds,
       });
 
       if (result.ok) {

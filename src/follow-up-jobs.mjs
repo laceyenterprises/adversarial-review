@@ -14,7 +14,16 @@ import { basename, join } from 'node:path';
 const MAX_CREATE_ATTEMPTS = 100;
 
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
-const DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
+// Bounded remediation cap. Was 6 (PR #18 era); dropped to 3 after
+// observing diminishing returns past round 3 — rounds 1-3 caught real
+// structural bugs, edge cases, and security regressions; rounds 4-7
+// produced mostly duplicate findings and stacked complexity faster
+// than they removed risk. Pairs with a lenient final-round verdict
+// threshold in the reviewer prompt (the final-round review only blocks
+// on data corruption / secret leakage / security regression /
+// broken external contract; everything else becomes a non-blocking
+// note for human review). See prompts/reviewer-prompt-final-round-addendum.md.
+const DEFAULT_MAX_REMEDIATION_ROUNDS = 3;
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
 const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
@@ -455,6 +464,118 @@ function listFollowUpJobsInDir(rootDir, key) {
     }));
 }
 
+// Per-PR remediation ledger summary. The bounded loop's "round number"
+// must be derived from the durable follow-up-jobs ledger (the only
+// counter that actually advances when remediation work completes), not
+// from `reviewed_prs.review_attempts` (which also increments on
+// transient post / OAuth / reviewer-crash failures and would silently
+// trip the lenient final-round threshold on infrastructure flakiness).
+//
+// `currentRound` on terminal jobs is *cumulative* for the PR: each new
+// follow-up job is seeded from the PR's prior accumulated count
+// (`buildFollowUpJob` -> `priorCompletedRounds`), and `claimNext...`
+// then increments it by exactly one. The PR-wide consumed-round count
+// is therefore `max(currentRound)` across terminal jobs, NOT the sum.
+// Summing would double-count: 3 sequential remediation cycles produce
+// terminal `currentRound` stamps of 1, 2, 3 — a sum of 6 would
+// prematurely trip `max-rounds-reached` at round 2 on the new 3-round
+// default cap, and at round 3 on the legacy 6-round cap.
+//
+// `latestMaxRounds` is read from the most-recent job (by terminal /
+// claim / create timestamp). Jobs created with the legacy 6-round cap
+// must continue to use 6 as their bound — this is what the reviewer's
+// blocking issue #2 calls out: do not substitute the global default.
+//
+// Pending and in-progress jobs are intentionally excluded from
+// `completedRoundsForPR`: pending hasn't consumed a round yet, and
+// in-progress is mid-flight (the round it's running has not yet
+// produced a terminal outcome the gate can react to).
+//
+// Resilience: a single corrupt or unreadable JSON file in any of the
+// scanned directories must NOT silently zero out the directory's
+// contribution to the ledger for unrelated PRs. Errors are caught
+// per-file (logged + skipped), not per-directory.
+function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
+  const targetRepo = String(repo ?? '');
+  const targetPr = Number(prNumber);
+  if (!targetRepo || !Number.isFinite(targetPr)) {
+    return { completedRoundsForPR: 0, latestMaxRounds: null, latestJobId: null };
+  }
+
+  let completedRoundsForPR = 0;
+  let latestJob = null;
+  let latestTimestamp = '';
+
+  const allKeys = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
+  const terminalKeys = new Set(['completed', 'failed', 'stopped']);
+
+  for (const key of allKeys) {
+    const dir = getFollowUpJobDir(rootDir, key);
+    if (!existsSync(dir)) continue;
+
+    let names;
+    try {
+      names = readdirSync(dir).filter((name) => name.endsWith('.json'));
+    } catch (err) {
+      console.error(
+        `[follow-up-jobs] Failed to list ${key} directory while summarizing ` +
+          `PR ledger for ${targetRepo}#${targetPr}: ${err?.message || err}`,
+      );
+      continue;
+    }
+
+    for (const name of names) {
+      const jobPath = join(dir, name);
+      let job;
+      try {
+        job = readFollowUpJob(jobPath);
+      } catch (err) {
+        // Per-file fail-soft: a single bad JSON record cannot remove
+        // history for unrelated PRs in the same directory. Logging
+        // the bad path keeps the failure visible to operators.
+        console.error(
+          `[follow-up-jobs] Skipping unreadable ledger record ${jobPath} ` +
+            `while summarizing PR ledger for ${targetRepo}#${targetPr}: ` +
+            `${err?.message || err}`,
+        );
+        continue;
+      }
+      if (!job) continue;
+      if (job.repo !== targetRepo) continue;
+      if (Number(job.prNumber) !== targetPr) continue;
+
+      if (terminalKeys.has(key)) {
+        const cur = Number(job?.remediationPlan?.currentRound || 0);
+        if (Number.isFinite(cur) && cur > completedRoundsForPR) {
+          completedRoundsForPR = cur;
+        }
+      }
+
+      const ts = job?.completedAt
+        || job?.failedAt
+        || job?.stoppedAt
+        || job?.claimedAt
+        || job?.createdAt
+        || '';
+      if (ts > latestTimestamp) {
+        latestTimestamp = ts;
+        latestJob = job;
+      }
+    }
+  }
+
+  const latestMaxRoundsRaw = Number(latestJob?.remediationPlan?.maxRounds);
+  const latestMaxRounds = Number.isFinite(latestMaxRoundsRaw) && latestMaxRoundsRaw > 0
+    ? latestMaxRoundsRaw
+    : null;
+
+  return {
+    completedRoundsForPR,
+    latestMaxRounds,
+    latestJobId: latestJob?.jobId || null,
+  };
+}
+
 function sanitizeRepo(repo) {
   return String(repo ?? '').replace(/\//g, '__').replace(/[^a-zA-Z0-9_.-]/g, '-');
 }
@@ -574,10 +695,29 @@ function buildFollowUpJob({
   reviewPostedAt,
   critical,
   maxRemediationRounds = DEFAULT_MAX_REMEDIATION_ROUNDS,
+  // Number of remediation rounds this PR has already completed across
+  // earlier follow-up jobs. The auto-flow creates one new follow-up job
+  // per adversarial review pass, so the bounded cap must be enforced
+  // PR-wide, not per-job. Seeding `currentRound` with the PR's prior
+  // count means `claimNextFollowUpJob`'s `currentRound >= maxRounds`
+  // guard naturally stops the job after the PR exhausts its budget,
+  // even though each individual job is freshly created.
+  priorCompletedRounds = 0,
 }) {
   const createdAt = reviewPostedAt || new Date().toISOString();
   const jobId = `${sanitizeRepo(repo)}-pr-${prNumber}-${sanitizeTimestamp(createdAt)}`;
-  const remediationPlan = buildRemediationRoundPlan(maxRemediationRounds);
+  const basePlan = buildRemediationRoundPlan(maxRemediationRounds);
+  const seededRounds = Number.isFinite(Number(priorCompletedRounds)) && priorCompletedRounds > 0
+    ? Math.floor(Number(priorCompletedRounds))
+    : 0;
+  const remediationPlan = {
+    ...basePlan,
+    currentRound: seededRounds,
+    nextAction: {
+      ...basePlan.nextAction,
+      round: seededRounds + 1,
+    },
+  };
 
   return {
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -804,7 +944,13 @@ function markFollowUpJobFailed({
         },
       };
 
-      if (currentJob?.remediationPlan?.currentRound > 0) {
+      // `currentRound` may be > 0 either because a worker has been
+      // claimed/spawned for this job (a `rounds[]` entry exists) OR
+      // because the job was created with a seeded count from the
+      // PR-wide ledger (no `rounds[]` entry yet). Only update the
+      // round entry when one actually exists; otherwise the top-level
+      // failure metadata is the only place to record the outcome.
+      if (currentJob?.remediationPlan?.currentRound > 0 && getCurrentRound(nextJob)) {
         nextJob = updateCurrentRound(nextJob, (round) => ({
           ...round,
           state: 'failed',
@@ -859,7 +1005,7 @@ function markFollowUpJobCompleted({
         },
       };
 
-      if (currentJob?.remediationPlan?.currentRound > 0) {
+      if (currentJob?.remediationPlan?.currentRound > 0 && getCurrentRound(nextJob)) {
         nextJob = updateCurrentRound(nextJob, (round) => ({
           ...round,
           state: 'completed',
@@ -929,7 +1075,7 @@ function markFollowUpJobStopped({
         },
       };
 
-      if (currentRound > 0) {
+      if (currentRound > 0 && getCurrentRound(nextJob)) {
         nextJob = updateCurrentRound(nextJob, (round) => ({
           ...round,
           state: 'stopped',
@@ -1092,6 +1238,7 @@ export {
   readFollowUpJob,
   requeueFollowUpJobForNextRound,
   stopFollowUpJob,
+  summarizePRRemediationLedger,
   validateRemediationReply,
   writeFollowUpJob,
 };

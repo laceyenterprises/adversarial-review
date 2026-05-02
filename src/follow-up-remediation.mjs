@@ -1,8 +1,8 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
@@ -1092,6 +1092,62 @@ function resolveJobRelativePath(rootDir, relativePath, { label, allowMissing = t
   return absolutePath;
 }
 
+// Resolve a path to its on-disk real path so symlinks cannot be used to
+// escape the workspace. When the leaf file is missing, we still walk up
+// to the longest existing ancestor and realpath that, then re-attach
+// the missing tail — that way a symlinked workspace or symlinked
+// .adversarial-follow-up/ is still caught even before the worker has
+// written its artifact.
+function resolveRealPath(candidate) {
+  if (existsSync(candidate)) {
+    return realpathSync.native?.(candidate) ?? realpathSync(candidate);
+  }
+
+  const tail = [];
+  let current = candidate;
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) {
+      return candidate;
+    }
+    tail.unshift(basename(current));
+    current = parent;
+  }
+
+  const realParent = realpathSync.native?.(current) ?? realpathSync(current);
+  return join(realParent, ...tail);
+}
+
+// Workspace containment guard for worker-written artifacts. Performs both
+// a lexical check (catches `../escape` paths from a forged or stale job
+// record) and a realpath check (catches in-workspace symlinks pointing
+// outside the workspace). Without the realpath leg, a symlink planted
+// inside `.adversarial-follow-up/` could redirect reconcile to read a
+// forged remediation-reply.json from anywhere on disk and drive
+// `completed`/`stopped` plus a watcher-row reset off it.
+function assertContainedInWorkspace(label, workspaceDir, candidate) {
+  if (!workspaceDir || !candidate) return;
+
+  const lexicalRel = relative(workspaceDir, candidate);
+  if (lexicalRel.startsWith('..') || lexicalRel === '' || isAbsolute(lexicalRel)) {
+    throw new Error(`Invalid ${label}: path escapes workspaceDir`);
+  }
+
+  if (existsSync(candidate)) {
+    const stat = lstatSync(candidate);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Invalid ${label}: symbolic links are not allowed`);
+    }
+  }
+
+  const realCandidate = resolveRealPath(candidate);
+  const realWorkspace = resolveRealPath(workspaceDir);
+  const realRel = relative(realWorkspace, realCandidate);
+  if (realRel.startsWith('..') || realRel === '' || isAbsolute(realRel)) {
+    throw new Error(`Invalid ${label}: resolved path escapes workspaceDir`);
+  }
+}
+
 function buildReconciliationPaths(rootDir, job) {
   const worker = job?.remediationWorker || {};
   const workspaceDir = resolveJobRelativePath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
@@ -1107,19 +1163,9 @@ function buildReconciliationPaths(rootDir, job) {
     label: 'replyPath',
   });
 
-  if (workspaceDir && outputPath) {
-    const relativeToWorkspace = relative(workspaceDir, outputPath);
-    if (relativeToWorkspace.startsWith('..') || relativeToWorkspace === '') {
-      throw new Error('Invalid outputPath: path escapes workspaceDir');
-    }
-  }
-
-  if (workspaceDir && logPath) {
-    const relativeToWorkspace = relative(workspaceDir, logPath);
-    if (relativeToWorkspace.startsWith('..') || relativeToWorkspace === '') {
-      throw new Error('Invalid logPath: path escapes workspaceDir');
-    }
-  }
+  assertContainedInWorkspace('outputPath', workspaceDir, outputPath);
+  assertContainedInWorkspace('logPath', workspaceDir, logPath);
+  assertContainedInWorkspace('replyPath', workspaceDir, replyPath);
 
   return {
     workspaceDir,

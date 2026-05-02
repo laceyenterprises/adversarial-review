@@ -67,6 +67,19 @@ function exitForSqliteOrphan(err, contextLabel) {
   setImmediate(() => process.exit(SQLITE_ORPHAN_EXIT_CODE));
 }
 
+// Pure decision helpers so the process-level wiring is unit-testable.
+// `kind: 'orphan-exit'` → exit 75; `kind: 'crash-after-log'` → exit 1.
+// Adding a process-level `unhandledRejection` listener changes Node's
+// default semantics (the default is to crash-and-respawn under launchd
+// KeepAlive), so it MUST also crash for non-orphan rejections — anything
+// less leaves the daemon limping with stale timers and partial state.
+function classifyFailureForRecovery(err) {
+  if (isSqliteOrphanError(err)) {
+    return { kind: 'orphan-exit', code: SQLITE_ORPHAN_EXIT_CODE };
+  }
+  return { kind: 'crash-after-log', code: 1 };
+}
+
 function handlePollError(err, source = 'pollOnce') {
   if (isSqliteOrphanError(err)) {
     exitForSqliteOrphan(err, source);
@@ -78,23 +91,25 @@ function handlePollError(err, source = 'pollOnce') {
 // Belt-and-suspenders: in case a synchronous SqliteError escapes a
 // catch (e.g. from an unawaited promise chain or a setInterval handler
 // that re-throws synchronously), catch it at the process level and
-// route through the same recovery.
+// route through the same recovery. Non-orphan failures still crash
+// (exit 1, launchd respawns) so we never silently swallow them.
 process.on('uncaughtException', (err) => {
-  if (isSqliteOrphanError(err)) {
+  const action = classifyFailureForRecovery(err);
+  if (action.kind === 'orphan-exit') {
     exitForSqliteOrphan(err, 'uncaughtException');
     return;
   }
   console.error('[watcher] uncaughtException:', err);
-  // Non-orphan uncaught exceptions: re-throw default behavior is
-  // crash-and-respawn, which is also what we want.
-  setImmediate(() => process.exit(1));
+  setImmediate(() => process.exit(action.code));
 });
 process.on('unhandledRejection', (err) => {
-  if (isSqliteOrphanError(err)) {
+  const action = classifyFailureForRecovery(err);
+  if (action.kind === 'orphan-exit') {
     exitForSqliteOrphan(err, 'unhandledRejection');
     return;
   }
   console.error('[watcher] unhandledRejection:', err);
+  setImmediate(() => process.exit(action.code));
 });
 
 const stmtGetReviewRow = db.prepare(
@@ -127,6 +142,94 @@ const stmtMarkMerged = db.prepare(
 const stmtMarkClosed = db.prepare(
   "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = ? WHERE repo = ? AND pr_number = ?"
 );
+
+// ── Pre-spawn idempotency (orphan-recovery reconciliation) ──────────────────
+//
+// In the SQLITE_READONLY_DBMOVED orphan-recovery path the previous tick
+// may have already done the side-effects we're about to retry: the
+// reviewer child posted the GitHub review, returned exit 0, and the
+// watcher then crashed at `stmtMarkPosted.run(...)` before the durable
+// `posted` transition landed. On respawn the row is still `pending`
+// even though the review is already on GitHub. Without a check the
+// next tick re-spawns the reviewer, posts a SECOND review under the
+// same bot identity, and queues a DUPLICATE follow-up job.
+//
+// The cheapest reliable signal of "did we already post for this attempt
+// cycle?" is GitHub itself. We list reviews by the reviewer-bot user
+// and look for our header marker. To distinguish a real prior attempt
+// from a legitimate re-review request (where the previous post is
+// real and intentional but we WANT a fresh post), we use a cycle-
+// boundary cutoff: any review submitted at or after
+// `MAX(rereview_requested_at, reviewed_at)` belongs to THIS cycle.
+//
+// We only run this check when `existing.last_attempted_at` is set
+// (i.e., not a first-ever attempt). On first attempts the GitHub
+// query has nothing to find anyway, so we save the API call.
+//
+// Bot identities are owned by the auth token used by the reviewer
+// (claude-reviewer-lacey / codex-reviewer-lacey). Hard-coding the
+// expected logins here lets us filter out body-text false positives.
+const REVIEWER_BOT_LOGIN = Object.freeze({
+  claude: 'claude-reviewer-lacey',
+  codex: 'codex-reviewer-lacey',
+});
+
+const REVIEWER_HEADER_NEEDLE = Object.freeze({
+  claude: '## Adversarial Review — Claude (claude-reviewer-lacey)',
+  codex: '## Adversarial Review — Codex (codex-reviewer-lacey)',
+});
+
+function computeCycleStartMs({ rereviewRequestedAt, reviewedAt }) {
+  const rereviewMs = rereviewRequestedAt ? new Date(rereviewRequestedAt).getTime() : 0;
+  const reviewedMs = reviewedAt ? new Date(reviewedAt).getTime() : 0;
+  // Math.max returns NaN if any arg is NaN, which would silently match
+  // every review. Treat NaN as 0 so we still gate on cycle boundary.
+  const cutoff = Math.max(
+    Number.isFinite(rereviewMs) ? rereviewMs : 0,
+    Number.isFinite(reviewedMs) ? reviewedMs : 0,
+  );
+  return cutoff;
+}
+
+async function findOrphanRecoverableReview({
+  octokit,
+  owner,
+  repo,
+  prNumber,
+  reviewerModel,
+  reviewedAt,
+  rereviewRequestedAt,
+  lastAttemptedAt,
+}) {
+  if (!lastAttemptedAt) return { match: null };
+
+  const expectedLogin = REVIEWER_BOT_LOGIN[reviewerModel];
+  const headerNeedle = REVIEWER_HEADER_NEEDLE[reviewerModel];
+  if (!expectedLogin || !headerNeedle) return { match: null };
+
+  const cutoffMs = computeCycleStartMs({ rereviewRequestedAt, reviewedAt });
+
+  let reviews;
+  try {
+    reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 100,
+    });
+  } catch (err) {
+    return { error: err };
+  }
+
+  const match = reviews.find((r) => {
+    if (r?.user?.login !== expectedLogin) return false;
+    if (typeof r.body !== 'string' || !r.body.includes(headerNeedle)) return false;
+    const submittedMs = r.submitted_at ? new Date(r.submitted_at).getTime() : 0;
+    return submittedMs >= cutoffMs;
+  }) || null;
+
+  return { match };
+}
 
 // ── Author tag detection ─────────────────────────────────────────────────────
 
@@ -442,6 +545,46 @@ async function pollOnce(octokit) {
       stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
       await setLinearInReview(linearTicketId);
 
+      // Orphan-recovery reconciliation: if a prior tick already posted
+      // the GitHub review under the bot identity for THIS attempt cycle
+      // but the watcher crashed before durably marking the row `posted`
+      // (typical SQLITE_READONLY_DBMOVED window), don't re-spawn — that
+      // would post a duplicate review and queue a duplicate follow-up
+      // job. We pass `existing.last_attempted_at` (the snapshot value
+      // BEFORE this tick's stmtMarkAttemptStarted) so first-ever
+      // attempts skip the GitHub call.
+      const recovery = await findOrphanRecoverableReview({
+        octokit,
+        owner,
+        repo,
+        prNumber,
+        reviewerModel: route.reviewerModel,
+        reviewedAt: existing?.reviewed_at,
+        rereviewRequestedAt: existing?.rereview_requested_at,
+        lastAttemptedAt: existing?.last_attempted_at,
+      });
+
+      if (recovery.error) {
+        // Conservatively fail the attempt instead of risking a duplicate
+        // post. The next poll will retry; the row stays visible.
+        const detail = `Orphan-recovery idempotency check failed: ${recovery.error.message || recovery.error}`;
+        console.error(`[watcher] ${detail} for ${repoPath}#${prNumber}`);
+        stmtMarkFailed.run(new Date().toISOString(), detail, repoPath, prNumber);
+        await runPrltSync();
+        continue;
+      }
+
+      if (recovery.match) {
+        console.log(
+          `[watcher] Idempotent recovery for ${repoPath}#${prNumber}: ` +
+          `found existing ${route.reviewerModel} review by ${recovery.match.user?.login} ` +
+          `at ${recovery.match.submitted_at}; marking posted without re-spawning reviewer.`
+        );
+        stmtMarkPosted.run(new Date().toISOString(), repoPath, prNumber);
+        await runPrltSync();
+        continue;
+      }
+
       const result = await spawnReviewer({
         repo: repoPath,
         prNumber,
@@ -504,4 +647,10 @@ if (isMain) {
 
 export {
   pollOnce,
+  classifyFailureForRecovery,
+  computeCycleStartMs,
+  findOrphanRecoverableReview,
+  REVIEWER_BOT_LOGIN,
+  REVIEWER_HEADER_NEEDLE,
+  SQLITE_ORPHAN_EXIT_CODE,
 };

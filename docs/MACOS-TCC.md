@@ -20,13 +20,15 @@ When the adversarial-review stack runs on a fresh Mac (or after Homebrew bumps `
 
 ## Why this is needed
 
-The follow-up daemon (long-lived) and the watcher (long-lived) both run as the `airlock` user, but the codex CLI's OAuth credentials live under `/Users/placey/.codex/...`. Every time the daemon spawns a remediation worker, it `exec`s a fresh subprocess that:
+The shipped LaunchAgent plists (`launchd/ai.laceyenterprises.adversarial-{watcher,follow-up}.placey.plist`) bind the daemon and the watcher to the operator account named in the filename suffix — by default `placey`, with `HOME=/Users/placey` and Codex OAuth credentials at `$HOME/.codex/auth.json`. Both processes run under the operator that runs `launchctl bootstrap gui/$UID …` for the deployed plist; they are not pinned to a fixed user across the codebase. (Cross-user execution — e.g., a daemon running as one operator with `HOME` pointed at another operator's home directory — is a host-specific override, not the default behavior.)
 
-- reads `/Users/placey/.codex/auth.json` (cross-user filesystem read)
-- runs `codex`, which is a **two-stage launcher**: the symlink resolves to a `codex.js` script (run by node via `#!/usr/bin/env node`), and that script in turn `spawn`s the real Mach-O `codex` binary that ships inside the platform-specific npm sub-package (`@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex`). Both node *and* the real codex binary are independent TCC subjects.
+Every time the daemon spawns a remediation worker, it `exec`s a fresh subprocess that:
+
+- reads `$HOME/.codex/auth.json` (or whatever `CODEX_AUTH_PATH` is set to)
+- runs `codex`, which is a **two-stage launcher**: the symlink resolves to a `codex.js` script (run by node via `#!/usr/bin/env node`), and that script in turn `spawn`s the real Mach-O `codex` binary that ships inside the platform-specific npm sub-package (e.g. `@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex` on Apple Silicon, `codex-darwin-x64/vendor/x86_64-apple-darwin/...` on Intel). Both node *and* the real codex binary are independent TCC subjects.
 - may run `claude` (a real Mach-O binary at `/opt/homebrew/Caskroom/claude-code/<version>/claude`)
 
-Cross-user reads under another user's home are exactly the boundary macOS TCC enforces under **Files and Folders** / **App Management** / **Full Disk Access**. The daemon's own long-lived `node` process is approved once (and stays approved — that's why the per-tick loop is silent), but each fresh subprocess runs as a new TCC subject, and each unfamiliar binary re-prompts.
+Reads under a user's home directory are exactly the boundary macOS TCC enforces under **Files and Folders** / **App Management** / **Full Disk Access**. The daemon's own long-lived `node` process is approved once (and stays approved — that's why the per-tick loop is silent), but each fresh subprocess runs as a new TCC subject, and each unfamiliar binary re-prompts.
 
 Approving the binaries at the OS layer once removes the prompts permanently — until the binary's hash changes (Homebrew/Caskroom version bump, fnm reinstall, codex package upgrade), which moves the real path and resets the approval. When that happens, you re-approve the one that moved.
 
@@ -36,24 +38,42 @@ The minimum set, in order:
 
 1. **`/opt/homebrew/bin/node`** — runs the daemon, runs `codex.js` (via the `#!/usr/bin/env node` shebang since `PATH` puts `/opt/homebrew/bin` first), runs the watcher's reviewer subprocess.
 2. **`/opt/homebrew/bin/claude`** — the Claude Code CLI. Used by the claude-code remediation worker class and by the Claude reviewer path.
-3. **The real `codex` Mach-O binary**, which is the child process `codex.js` spawns. The path is *not* the user-known `/Users/<user>/.local/share/fnm/.../bin/codex` symlink — that resolves to `codex.js`, a script. The actual TCC subject is the binary inside the platform-specific npm sub-package. Resolve it dynamically:
+3. **The real `codex` Mach-O binary**, which is the child process `codex.js` spawns. The path is *not* the user-known `/Users/<user>/.local/share/fnm/.../bin/codex` symlink — that resolves to `codex.js`, a script. The actual TCC subject is the binary inside the platform-specific npm sub-package. Resolve it dynamically through the same env contract the remediation worker uses (`src/follow-up-remediation.mjs::resolveCodexCliPath`): `$CODEX_CLI_PATH`, then `$CODEX_CLI`, then `command -v codex`. The resolver below asserts a single concrete path before deriving the vendor binary, so a multi-version `fnm` install can't silently approve the wrong one:
 
    ```bash
-   /opt/homebrew/bin/node -e "
-   const path = require('path');
-   const triple = process.platform === 'darwin' && process.arch === 'arm64'
-     ? 'aarch64-apple-darwin'
-     : 'x86_64-apple-darwin';
-   const codexJs = require('child_process')
-     .execSync('readlink -f /Users/placey/.local/share/fnm/node-versions/*/installation/bin/codex')
-     .toString().trim();
-   console.log(path.join(path.dirname(codexJs), '..', 'node_modules',
-     '@openai', 'codex-' + (process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64'),
-     'vendor', triple, 'codex', 'codex'));
-   "
+   /opt/homebrew/bin/node -e '
+     const { execSync } = require("child_process");
+     const { existsSync } = require("fs");
+     const path = require("path");
+
+     function resolveCodexExe() {
+       for (const c of [process.env.CODEX_CLI_PATH, process.env.CODEX_CLI]) {
+         if (c && existsSync(c)) return c;
+       }
+       try {
+         const out = execSync("command -v codex", { shell: "/bin/zsh", encoding: "utf8" }).trim();
+         return out || null;
+       } catch { return null; }
+     }
+     const codex = resolveCodexExe();
+     if (!codex) {
+       console.error("codex executable not resolvable via $CODEX_CLI_PATH, $CODEX_CLI, or PATH");
+       process.exit(2);
+     }
+     const real = execSync("readlink -f " + JSON.stringify(codex), { encoding: "utf8" }).trim();
+     if (!real || real.includes("\n")) {
+       console.error("ambiguous readlink result for " + codex + ": " + JSON.stringify(real));
+       process.exit(2);
+     }
+     const arm = process.arch === "arm64";
+     const triple = arm ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+     const subPkg = arm ? "codex-darwin-arm64" : "codex-darwin-x64";
+     console.log(path.join(path.dirname(real), "..", "node_modules",
+       "@openai", subPkg, "vendor", triple, "codex", "codex"));
+   '
    ```
 
-   That prints the absolute path. Drag it into Full Disk Access via `⌘⇧G` in the file picker.
+   That prints the absolute path of the binary the worker will actually exec. Drag it into Full Disk Access via `⌘⇧G` in the file picker. If the resolver exits non-zero, do not guess a path — set `CODEX_CLI_PATH` to the executable the worker is configured to run and rerun.
 
 Notes:
 

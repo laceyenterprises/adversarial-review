@@ -149,22 +149,47 @@ CLAUDE_REAL=$(readlink -f /opt/homebrew/bin/claude 2>/dev/null || echo "<missing
 # sub-package whose path moves on every codex version bump and every
 # fnm node-version change. The user-facing `codex` symlink resolves
 # to a `codex.js` script that *spawns* the real binary, so TCC keys
-# on the spawned binary, not the symlink. Resolve dynamically so the
-# banner stays accurate after upgrades.
-CODEX_SYMLINK=""
-for candidate in /Users/placey/.local/share/fnm/node-versions/*/installation/bin/codex; do
-  [[ -e "$candidate" ]] && CODEX_SYMLINK="$candidate" && break
-done
-if [[ -n "$CODEX_SYMLINK" ]]; then
-  CODEX_JS=$(readlink -f "$CODEX_SYMLINK" 2>/dev/null || true)
-  if [[ -n "$CODEX_JS" ]]; then
-    CODEX_PKG_ROOT="$(cd "$(dirname "$CODEX_JS")/.." 2>/dev/null && pwd || true)"
-    CODEX_REAL=$(/usr/bin/find "$CODEX_PKG_ROOT/node_modules/@openai" \
-      -maxdepth 6 -type f -name codex \
-      -path '*/vendor/aarch64-apple-darwin/codex/codex' 2>/dev/null | head -1)
+# on the spawned binary, not the symlink. Resolve through the same
+# env contract the worker uses (src/follow-up-remediation.mjs::
+# resolveCodexCliPath): $CODEX_CLI_PATH, then $CODEX_CLI, then
+# `command -v codex`. Branch on runtime arch for the vendor triple.
+# Fail closed on ambiguous multi-version readlink output so the
+# banner doesn't silently point operators at a stale install.
+CODEX_REAL=""
+codex_resolution_note=""
+codex_exe="${CODEX_CLI_PATH:-${CODEX_CLI:-}}"
+if [[ -z "$codex_exe" || ! -e "$codex_exe" ]]; then
+  codex_exe=$(command -v codex 2>/dev/null || true)
+fi
+if [[ -z "$codex_exe" || ! -e "$codex_exe" ]]; then
+  codex_resolution_note='codex executable not resolvable via $CODEX_CLI_PATH, $CODEX_CLI, or PATH'
+else
+  codex_real_target=$(readlink -f "$codex_exe" 2>/dev/null || true)
+  if [[ -z "$codex_real_target" ]]; then
+    codex_resolution_note="readlink -f failed for $codex_exe"
+  elif [[ "$codex_real_target" == *$'\n'* ]]; then
+    codex_resolution_note="ambiguous readlink result for $codex_exe — resolve $CODEX_CLI_PATH explicitly"
+  else
+    case "$(/usr/bin/uname -m)" in
+      arm64)  codex_triple="aarch64-apple-darwin"; codex_subpkg="codex-darwin-arm64" ;;
+      x86_64) codex_triple="x86_64-apple-darwin"; codex_subpkg="codex-darwin-x64" ;;
+      *)      codex_triple=""; codex_subpkg="" ;;
+    esac
+    if [[ -z "$codex_triple" ]]; then
+      codex_resolution_note="unsupported macOS arch: $(/usr/bin/uname -m)"
+    else
+      codex_candidate="$(dirname "$codex_real_target")/../node_modules/@openai/$codex_subpkg/vendor/$codex_triple/codex/codex"
+      if [[ -f "$codex_candidate" ]]; then
+        CODEX_REAL="$(cd "$(dirname "$codex_candidate")" && pwd)/codex"
+      else
+        codex_resolution_note="vendor binary not found at expected path: $codex_candidate"
+      fi
+    fi
   fi
 fi
-CODEX_REAL="${CODEX_REAL:-<unresolved — see docs/MACOS-TCC.md>}"
+if [[ -z "$CODEX_REAL" ]]; then
+  CODEX_REAL="<unresolved: ${codex_resolution_note:-unknown reason} — see docs/MACOS-TCC.md>"
+fi
 echo "[follow-up-tick] TCC subjects (must be in Full Disk Access — see docs/MACOS-TCC.md):"
 echo "[follow-up-tick]   /opt/homebrew/bin/node    -> $NODE_REAL"
 echo "[follow-up-tick]   /opt/homebrew/bin/claude  -> $CLAUDE_REAL"

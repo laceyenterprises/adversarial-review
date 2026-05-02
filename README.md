@@ -29,6 +29,7 @@ Start here depending on what you need:
 - **Operating the remediation loop:** `docs/follow-up-runbook.md`
 - **Understanding states and transitions:** `docs/STATE-MACHINE.md`
 - **Debugging auth/runtime scars:** `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md`
+- **Silencing macOS TCC popups on worker spawn:** `docs/MACOS-TCC.md`
 - **Changing behavior in code:** `src/watcher.mjs`, `src/reviewer.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-remediation.mjs`
 
 Fast triage:
@@ -206,6 +207,8 @@ Two agents drive the system:
 | `ai.laceyenterprises.adversarial-follow-up` | KeepAlive (long-lived, internal 120s loop) | `scripts/adversarial-follow-up-tick.sh` — consume + reconcile + retry-comments |
 
 Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo.
+
+> **One-time macOS step on a fresh machine.** After the LaunchAgents are installed, approve `/opt/homebrew/bin/node` and `/opt/homebrew/bin/claude` in **System Settings → Privacy & Security → Full Disk Access**. Without this, every remediation worker spawn fires a TCC popup ("node would like to access data from other apps"). Use `⌘⇧G` in the file picker to navigate into `/opt` (Finder hides it). Full details and re-approval triggers: `docs/MACOS-TCC.md`.
 
 > **The shipped plists are user-bound.** The filename suffix (`.placey.plist`) names the operator the plist's `HOME` and log paths point at. If you are running as `placey`, the manual install below works as-is. If you are running as a different operator, **do not bootstrap the shipped plist directly** — it would write logs to the wrong account and resolve `gh`/Codex auth from the wrong home directory. Copy with the matching suffix and substitute paths first (see `Install for a different user` below).
 
@@ -528,6 +531,7 @@ docs/
   follow-up-runbook.md
   STATE-MACHINE.md
   INCIDENT-2026-04-21-ACPX-codex-exec-regression.md
+  MACOS-TCC.md
 ```
 
 ---

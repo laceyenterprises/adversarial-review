@@ -128,6 +128,27 @@ unset OPENAI_API_KEY
 
 cd "$WATCHER_DIR"
 
+# ── TCC reminder banner ────────────────────────────────────────────────────
+#
+# The daemon's own `node` process is approved at TCC once the operator
+# has dragged /opt/homebrew/bin/node into Full Disk Access. Per-spawn
+# remediation worker subprocesses (codex, claude) are *separate* TCC
+# subjects and need their own approval — the operator handles that
+# once via System Settings (see docs/MACOS-TCC.md). We log the
+# currently-resolved underlying binary paths so operators can confirm
+# the FDA list still matches the live install after a Homebrew bump.
+#
+# This is intentionally a single log line, not a check — checking
+# whether a path is FDA-approved requires private TCC APIs. The
+# documented signal that approval has lapsed is "TCC popups start
+# firing on remediation worker spawn"; when that happens the operator
+# reads docs/MACOS-TCC.md and re-drags the affected binary.
+NODE_REAL=$(readlink -f /opt/homebrew/bin/node 2>/dev/null || echo "<missing>")
+CLAUDE_REAL=$(readlink -f /opt/homebrew/bin/claude 2>/dev/null || echo "<missing>")
+echo "[follow-up-tick] TCC subjects (must be in Full Disk Access — see docs/MACOS-TCC.md):"
+echo "[follow-up-tick]   /opt/homebrew/bin/node    -> $NODE_REAL"
+echo "[follow-up-tick]   /opt/homebrew/bin/claude  -> $CLAUDE_REAL"
+
 # ── Hand off to the in-process node daemon ────────────────────────────────
 #
 # This bash script's only responsibility is the startup gate — sanity-check

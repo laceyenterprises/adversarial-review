@@ -15,6 +15,7 @@ import {
 } from './watcher-title-guardrails.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -27,6 +28,74 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 
 const db = openReviewStateDb(ROOT);
 ensureReviewStateSchema(db);
+
+// ── Inode-orphan recovery ───────────────────────────────────────────────────
+//
+// SQLite returns SQLITE_READONLY_DBMOVED when the file behind a long-
+// open database connection has been replaced on disk (the inode the
+// connection holds no longer matches the path). better-sqlite3 surfaces
+// it as `err.code === 'SQLITE_READONLY_DBMOVED'`. This is a real bite
+// in operations because the watcher opens the DB once at module load
+// time and reuses it for the process's lifetime — anything that
+// replaces `data/reviews.db` (git checkout that touches the file, an
+// adversarial-review submodule reset, a `restore.sh` run, a backup
+// rollback) leaves the watcher writing to the orphaned inode forever.
+// The classic scar from PR #18: a 6-hour readonly-loop window where
+// every poll's writes silently failed and the reviews-ledger lost
+// dozens of rows.
+//
+// All prepared statements are bound to the connection above, so we
+// can't fix an orphaned handle in place. The cleanest recovery is to
+// exit cleanly and let launchd's KeepAlive respawn us with a fresh
+// connection. ThrottleInterval=30 in the plist caps the respawn rate.
+//
+// We use exit code 75 (BSD `EX_TEMPFAIL`) for documentation only;
+// KeepAlive=true respawns regardless of exit code.
+const SQLITE_ORPHAN_EXIT_CODE = 75;
+
+function exitForSqliteOrphan(err, contextLabel) {
+  console.error(
+    `[watcher] FATAL: SQLite database file was replaced on disk while we held it open ` +
+    `(SQLITE_READONLY_DBMOVED in ${contextLabel}); exiting so launchd KeepAlive can respawn ` +
+    `us with a fresh handle. Original error: ${err?.message || err}`
+  );
+  // Allow the log line to flush before exit.
+  process.exitCode = SQLITE_ORPHAN_EXIT_CODE;
+  // setImmediate → next tick gives stdout/stderr a chance to flush
+  // before the process disappears. process.exit immediately would
+  // sometimes truncate the message.
+  setImmediate(() => process.exit(SQLITE_ORPHAN_EXIT_CODE));
+}
+
+function handlePollError(err, source = 'pollOnce') {
+  if (isSqliteOrphanError(err)) {
+    exitForSqliteOrphan(err, source);
+    return;
+  }
+  console.error('[watcher] Poll error:', err);
+}
+
+// Belt-and-suspenders: in case a synchronous SqliteError escapes a
+// catch (e.g. from an unawaited promise chain or a setInterval handler
+// that re-throws synchronously), catch it at the process level and
+// route through the same recovery.
+process.on('uncaughtException', (err) => {
+  if (isSqliteOrphanError(err)) {
+    exitForSqliteOrphan(err, 'uncaughtException');
+    return;
+  }
+  console.error('[watcher] uncaughtException:', err);
+  // Non-orphan uncaught exceptions: re-throw default behavior is
+  // crash-and-respawn, which is also what we want.
+  setImmediate(() => process.exit(1));
+});
+process.on('unhandledRejection', (err) => {
+  if (isSqliteOrphanError(err)) {
+    exitForSqliteOrphan(err, 'unhandledRejection');
+    return;
+  }
+  console.error('[watcher] unhandledRejection:', err);
+});
 
 const stmtGetReviewRow = db.prepare(
   'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
@@ -421,10 +490,10 @@ function main() {
     : `repos: ${activeRepos.join(', ')}`;
   console.log(`[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s`);
 
-  pollOnce(octokit).catch((err) => console.error('[watcher] Poll error:', err));
+  pollOnce(octokit).catch((err) => handlePollError(err, 'initial pollOnce'));
 
   setInterval(() => {
-    pollOnce(octokit).catch((err) => console.error('[watcher] Poll error:', err));
+    pollOnce(octokit).catch((err) => handlePollError(err, 'scheduled pollOnce'));
   }, intervalMs);
 }
 

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -23,12 +23,21 @@ import {
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
   remediationWorkerGitIdentity,
+  resetOAuthPreflightCache,
   resolveClaudeCodeCliPath,
   resolveJobRelativePath,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnRemediationWorker,
 } from '../src/follow-up-remediation.mjs';
+
+// The OAuth pre-flight caches its result at module scope so per-tick
+// reads of ~/.codex/auth.json don't trigger macOS TCC popups in
+// production. Tests that exercise the pre-flight need a fresh cache
+// per case — clear it between tests.
+beforeEach(() => {
+  resetOAuthPreflightCache();
+});
 import { collectWorkspaceDocContext } from '../src/prompt-context.mjs';
 import {
   claimNextFollowUpJob,
@@ -700,6 +709,79 @@ function fakeClaudeAuthStatus(payload) {
     return { stdout: JSON.stringify(payload), stderr: '' };
   };
 }
+
+// ── OAuth pre-flight per-process caching ──────────────────────────────────
+//
+// macOS Sequoia / Sonoma fires "node would like to access data from
+// other apps" TCC prompts on every read of files in app-claimed dirs
+// (~/.codex, ~/.claude). The pre-flight caches its first result for
+// the daemon's lifetime so the per-tick read disappears.
+
+test('assertClaudeCodeOAuth caches success across calls (no second execFile invocation)', async () => {
+  let probeCalls = 0;
+  const probeImpl = async (cmd, args) => {
+    probeCalls += 1;
+    if (!String(cmd).endsWith('claude') || args[0] !== 'auth') {
+      throw new Error(`unexpected call: ${cmd} ${args.join(' ')}`);
+    }
+    return {
+      stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+      stderr: '',
+    };
+  };
+
+  // First call: actually probes.
+  await assertClaudeCodeOAuth({ execFileImpl: probeImpl });
+  // Second call: must hit the cache, NOT re-probe.
+  await assertClaudeCodeOAuth({ execFileImpl: probeImpl });
+  await assertClaudeCodeOAuth({ execFileImpl: probeImpl });
+  assert.equal(probeCalls, 1, 'subsequent calls within the same process must use the cached result, not re-probe');
+});
+
+test('assertClaudeCodeOAuth caches the first failure and re-throws without re-probing', async () => {
+  let probeCalls = 0;
+  const probeImpl = async () => {
+    probeCalls += 1;
+    return {
+      stdout: JSON.stringify({ loggedIn: false }),
+      stderr: '',
+    };
+  };
+
+  await assert.rejects(() => assertClaudeCodeOAuth({ execFileImpl: probeImpl }), /not logged in/);
+  await assert.rejects(() => assertClaudeCodeOAuth({ execFileImpl: probeImpl }), /not logged in/);
+  assert.equal(probeCalls, 1, 'cached failures must re-throw the SAME error without re-probing');
+});
+
+test('resetOAuthPreflightCache lets a new daemon instance re-probe', async () => {
+  let probeCalls = 0;
+  const probeImpl = async () => {
+    probeCalls += 1;
+    return {
+      stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+      stderr: '',
+    };
+  };
+  await assertClaudeCodeOAuth({ execFileImpl: probeImpl });
+  resetOAuthPreflightCache();
+  await assertClaudeCodeOAuth({ execFileImpl: probeImpl });
+  assert.equal(probeCalls, 2, 'cache reset must force a fresh probe on the next call');
+});
+
+test('resetOAuthPreflightCache(workerClass) only resets the named class', async () => {
+  let probeCalls = 0;
+  const probeImpl = async () => {
+    probeCalls += 1;
+    return {
+      stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+      stderr: '',
+    };
+  };
+  await assertClaudeCodeOAuth({ execFileImpl: probeImpl });
+  resetOAuthPreflightCache('codex'); // not claude-code
+  await assertClaudeCodeOAuth({ execFileImpl: probeImpl });
+  assert.equal(probeCalls, 1, 'resetting a different class must not invalidate this one');
+});
 
 test('assertClaudeCodeOAuth resolves on healthy claude.ai/firstParty auth', async () => {
   const result = await assertClaudeCodeOAuth({

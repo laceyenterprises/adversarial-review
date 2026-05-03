@@ -1296,7 +1296,15 @@ function makeQueuedJob(rootDir, overrides = {}) {
   return { created, claimed };
 }
 
-test('consumeNextFollowUpJob stops round 2 for a medium-risk legacy job with round-budget-exhausted', async () => {
+test('consumeNextFollowUpJob honors persisted maxRounds=2 on a medium-risk legacy job (riskClass downgrade is suppressed)', async () => {
+  // Reviewer blocking finding: `resolveRoundBudgetForJob` used to give
+  // `riskClass` precedence over the persisted `remediationPlan.maxRounds`.
+  // For a legacy job carried forward with `riskClass='medium'` and
+  // `maxRounds=2`, the consume gate would collapse the budget back to
+  // the medium-tier 1 round, refuse to spawn round 2, and stop the
+  // PR with `round-budget-exhausted` despite a persisted budget that
+  // explicitly allowed round 2. Persisted state must now win — the
+  // legacy job runs round 2 as originally budgeted.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -1328,6 +1336,7 @@ test('consumeNextFollowUpJob stops round 2 for a medium-risk legacy job with rou
 
   writeFollowUpJob(created.jobPath, {
     ...created.job,
+    riskClass: 'medium',
     remediationPlan: {
       ...created.job.remediationPlan,
       maxRounds: 2,
@@ -1336,19 +1345,29 @@ test('consumeNextFollowUpJob stops round 2 for a medium-risk legacy job with rou
     },
   });
 
+  const spawnCalls = [];
   const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob({
     rootDir,
     now: () => '2026-04-21T10:30:00.000Z',
+    execFileImpl: async (command, args) => {
+      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      }
+      return { stdout: '', stderr: '' };
+    },
+    spawnImpl: (command, args, options) => {
+      spawnCalls.push({ command, args, options });
+      return { pid: 9001, unref() {} };
+    },
     promptTemplate: 'You are a remediation worker.',
   }));
 
-  assert.equal(result.consumed, false);
-  assert.equal(result.reason, 'round-budget-exhausted');
-  assert.match(result.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
-  assert.equal(result.job.status, 'stopped');
-  assert.equal(result.job.remediationPlan.stop.code, 'round-budget-exhausted');
-  assert.equal(result.job.riskClass, 'medium');
-  assert.match(result.job.remediationPlan.stop.reason, /medium risk-class budget \(1\)/);
+  assert.equal(result.consumed, true, 'persisted maxRounds=2 must let round 2 spawn');
+  assert.equal(result.job.status, 'in_progress');
+  assert.equal(result.job.riskClass, 'medium', 'riskClass must be preserved on the record');
+  assert.equal(result.job.remediationPlan.maxRounds, 2, 'persisted maxRounds must not be downgraded');
+  assert.equal(result.job.remediationPlan.currentRound, 2);
+  assert.equal(spawnCalls.length, 1);
 });
 
 test('consumeNextFollowUpJob still spawns when a high-risk job enters round 2 within budget', async () => {
@@ -2165,6 +2184,57 @@ test('reconcileFollowUpJob records worker-class-aware completion source for clau
     'completion.source must reflect the actual worker class, not be hardcoded to codex'
   );
   assert.equal(result.job.completion.workerModel, 'claude-code');
+});
+
+// ── Consume-time stop branches: never-spawned tagging + comment delivery ───
+
+test('consumeNextFollowUpJob marks lifecycle-stop for a closed PR with never-spawned, posts a PR comment, and stamps commentDelivery', async () => {
+  // Reviewer blocking finding: consume-time stops (operator-merged-pr,
+  // operator-closed-pr, round-budget-exhausted) used to skip the
+  // commentDelivery stamp + retry-index pointer. Once the retry-index
+  // sentinel `.initialized` exists, the retry walker scans only the
+  // index — so a consume-time stop after first-init was permanently
+  // invisible on the PR. The fix routes consume-time stops through the
+  // same buildReconcileCommentDelivery + recordInitialCommentDelivery
+  // path reconcile uses, so the terminal record carries a delivery
+  // record and the public PR comment is posted (or queued for retry).
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 81,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    reviewBody: '## Summary\nFix the thing.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: false,
+  });
+
+  const commentCalls = [];
+  const result = await consumeNextFollowUpJob({
+    rootDir,
+    now: () => '2026-04-21T10:00:00.000Z',
+    promptTemplate: 'Remediation prompt template.',
+    resolvePRLifecycleImpl: async () => ({ prState: 'closed', closedAt: '2026-04-21T09:30:00.000Z', source: 'gh' }),
+    postCommentImpl: async (args) => {
+      commentCalls.push(args);
+      return { posted: true };
+    },
+  });
+
+  assert.equal(result.consumed, false);
+  assert.equal(result.reason, 'pr-closed');
+  assert.equal(result.job.status, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'operator-closed-pr');
+  assert.equal(result.job.remediationWorker?.state, 'never-spawned',
+    'consume-time stops must tag the worker as never-spawned so the round is excluded from the PR ledger');
+  assert.ok(result.job.commentDelivery, 'consume-time stops must stamp commentDelivery before the post');
+  assert.equal(result.job.commentDelivery.repo, 'laceyenterprises/clio');
+  assert.equal(result.job.commentDelivery.prNumber, 81);
+
+  assert.equal(commentCalls.length, 1, 'consume-time lifecycle stop must post one PR comment');
+  assert.match(commentCalls[0].body, /Remediation Worker/);
+  assert.match(commentCalls[0].body, /operator-closed-pr/);
 });
 
 // ── reconcile → public PR comment integration ──────────────────────────────

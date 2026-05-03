@@ -24,8 +24,10 @@ import {
   getFollowUpJobDir,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
+  markFollowUpJobStopped,
   readFollowUpJob,
   summarizePRRemediationLedger,
+  writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import {
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
@@ -411,6 +413,49 @@ test('summarizePRRemediationLedger does not double-count failed and stopped inte
     prNumber: 7,
   });
   assert.equal(ledger.completedRoundsForPR, 1);
+});
+
+test('summarizePRRemediationLedger excludes never-spawned terminal jobs from the round count', () => {
+  // Reviewer blocking finding: `claimNextFollowUpJob` increments
+  // `currentRound` before consume-time pre-spawn gates run (lifecycle,
+  // round-budget, OAuth, workspace prep). When one of those gates
+  // refuses, the terminal record carries the bumped round count even
+  // though no worker ever started — and the previous ledger counted
+  // it, permanently burning a round of remediation budget on a closed
+  // PR or an OAuth hiccup. The fix tags those records with
+  // `remediationWorker.state == 'never-spawned'`; the ledger now
+  // excludes them so the PR-wide count reflects only rounds that
+  // actually ran a worker.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T08:30:00.000Z' });
+
+  // Simulate a consume-time stop (lifecycle gate or round-budget gate
+  // refused to spawn) by writing the never-spawned worker tag into the
+  // record before moving it to stopped/.
+  writeFollowUpJob(claimed.jobPath, {
+    ...claimed.job,
+    remediationWorker: { state: 'never-spawned', reconciledAt: '2026-04-21T08:31:00.000Z' },
+  });
+  markFollowUpJobStopped({
+    rootDir,
+    jobPath: claimed.jobPath,
+    stoppedAt: '2026-04-21T08:31:00.000Z',
+    stopCode: 'operator-closed-pr',
+    stopReason: 'PR was closed before remediation could run.',
+    remediationWorker: { state: 'never-spawned', reconciledAt: '2026-04-21T08:31:00.000Z' },
+    sourceStatus: 'in_progress',
+  });
+
+  const ledger = summarizePRRemediationLedger(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+  });
+  assert.equal(
+    ledger.completedRoundsForPR,
+    0,
+    'never-spawned terminal jobs must not contribute to the PR-wide round count',
+  );
 });
 
 test('a transient watcher post-failure (modeled as review_attempts++) does NOT trip the final-round threshold via the ledger', () => {

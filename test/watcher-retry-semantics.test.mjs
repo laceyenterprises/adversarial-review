@@ -264,6 +264,64 @@ test("requestReviewRereview accepts 'failed-orphan' rows so retrigger-review can
   }
 });
 
+test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forward (does not downgrade via riskClass)', () => {
+  // Reviewer blocking finding: `resolveRoundBudgetForJob` previously
+  // gave persisted `riskClass` precedence over persisted `maxRounds`.
+  // For a legacy job written with `riskClass='medium'` AND
+  // `maxRounds=6`, the watcher's rereview gate would resolve the
+  // budget to the medium-tier 1 round and immediately skip the
+  // rereview after a single completed remediation cycle — losing five
+  // rounds of legacy budget mid-deploy. The migration guarantee is
+  // that persisted maxRounds wins; a legacy 6-round PR keeps all six.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 6,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewBody: '## Summary\nLegacy budget.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-22T05:22:42.212Z',
+    critical: false,
+    maxRemediationRounds: 6,
+  });
+  // Force the legacy persisted shape on disk: riskClass='medium' next
+  // to maxRounds=6. With the bug, the watcher's resolution would
+  // collapse to medium-tier 1 round.
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-22T05:25:00.000Z',
+  });
+  markFollowUpJobCompleted({
+    rootDir,
+    jobPath: claimed.jobPath,
+    completedAt: '2026-04-22T05:30:00.000Z',
+    completion: { source: 'test-fixture' },
+    reReview: {
+      requested: true,
+      status: 'pending',
+      reason: 'Please re-review.',
+      triggered: true,
+      requestedAt: '2026-04-22T05:30:00.000Z',
+    },
+  });
+
+  const decision = evaluateRoundBudgetForReview({
+    rootDir,
+    repo: created.job.repo,
+    prNumber: created.job.prNumber,
+    linearTicketId: null,
+    reviewStatus: 'pending',
+    reviewAttempts: 1,
+    log: () => {},
+  });
+
+  assert.equal(decision.skip, false, 'a legacy 6-round PR must NOT be skipped after a single completed round');
+  assert.equal(decision.completedRoundsForPR, 1);
+  assert.equal(decision.roundBudget, 6, 'persisted maxRounds=6 must win over the medium-tier downgrade');
+});
+
 test('evaluateRoundBudgetForReview skips rereview spawn when completed rounds exhaust the budget', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');

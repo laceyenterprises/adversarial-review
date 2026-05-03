@@ -186,19 +186,28 @@ function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {})
       || job?.recommendedFollowUpAction?.maxRounds
   );
 
+  // Persisted state is authoritative once it exists. Migration guarantee:
+  // a legacy job persisted with `maxRounds=6` (created under the older
+  // uniform-cap regime) must not be silently downgraded by recomputing
+  // the budget from the current ROUND_BUDGET_BY_RISK_CLASS table. Spec
+  // risk-tier changes for an already-created job require an explicit
+  // migration, not an implicit override of the JSON record. Without
+  // this precedence the legacy `maxRounds=6` job would collapse to the
+  // `medium=1` budget and lose five rounds of remediation budget mid-
+  // deploy.
+  if (preferPersisted && Number.isInteger(persistedRoundBudget) && persistedRoundBudget > 0) {
+    return buildRoundBudgetResolution({
+      riskClass: persistedRiskClass || DEFAULT_RISK_CLASS,
+      roundBudget: persistedRoundBudget,
+      source: 'job-persisted-maxRounds',
+    });
+  }
+
   if (persistedRiskClass) {
     return buildRoundBudgetResolution({
       riskClass: persistedRiskClass,
       roundBudget: ROUND_BUDGET_BY_RISK_CLASS[persistedRiskClass],
       source: 'job-risk-class',
-    });
-  }
-
-  if (preferPersisted && Number.isInteger(persistedRoundBudget) && persistedRoundBudget > 0) {
-    return buildRoundBudgetResolution({
-      riskClass: DEFAULT_RISK_CLASS,
-      roundBudget: persistedRoundBudget,
-      source: 'job-persisted-maxRounds',
     });
   }
 
@@ -1041,9 +1050,22 @@ function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
       if (Number(job.prNumber) !== targetPr) continue;
 
       if (terminalKeys.has(key)) {
-        const cur = Number(job?.remediationPlan?.currentRound || 0);
-        if (Number.isFinite(cur) && cur > completedRoundsForPR) {
-          completedRoundsForPR = cur;
+        // `claimNextFollowUpJob` increments `currentRound` on claim,
+        // before consume-time pre-spawn gates (lifecycle, round-budget,
+        // OAuth pre-flight, workspace prep) run. When one of those gates
+        // refuses, the terminal record carries the bumped count even
+        // though no remediation worker ever started — the consume site
+        // tags those records with `remediationWorker.state ==
+        // 'never-spawned'`. Treat them as non-counting here so the PR-
+        // wide ledger reflects only rounds that actually ran a worker.
+        // Without this exclusion, a single closed/merged PR check or
+        // OAuth hiccup permanently burns a round of remediation budget.
+        const neverSpawned = job?.remediationWorker?.state === 'never-spawned';
+        if (!neverSpawned) {
+          const cur = Number(job?.remediationPlan?.currentRound || 0);
+          if (Number.isFinite(cur) && cur > completedRoundsForPR) {
+            completedRoundsForPR = cur;
+          }
         }
       }
 

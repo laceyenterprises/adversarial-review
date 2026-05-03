@@ -3,3 +3,9 @@ package-lock.json
 data/
 *.log
 /reviews.db
+# Per-job remediation runtime artifacts (worker prompt, last-message,
+# reply JSON, logs). These are generated each round and must never be
+# committed; a stale snapshot leaks PR-specific state into the repo
+# (e.g. PR #15 remediation-reply.json was carried as a tracked file
+# until PR #127's round-2 review flagged it as drift).
+.adversarial-follow-up/

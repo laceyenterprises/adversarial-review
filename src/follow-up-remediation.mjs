@@ -2098,6 +2098,7 @@ async function consumeNextFollowUpJob({
   now = () => new Date().toISOString(),
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
+  postCommentImpl = postRemediationOutcomeComment,
   log = console,
 } = {}) {
   // Claim first so we know which worker class we're running. This lets
@@ -2143,8 +2144,9 @@ async function consumeNextFollowUpJob({
   });
   if (lifecycleStop) {
     const stoppedAt = now();
-    const stopped = markFollowUpJobStopped({
+    const stopped = await stopConsumedJobWithComment({
       rootDir,
+      job: claimed.job,
       jobPath: claimed.jobPath,
       stoppedAt,
       stopCode: lifecycleStop.stopCode,
@@ -2154,6 +2156,9 @@ async function consumeNextFollowUpJob({
         state: 'never-spawned',
         reconciledAt: stoppedAt,
       },
+      postCommentImpl,
+      now,
+      log,
     });
     return {
       consumed: false,
@@ -2164,6 +2169,11 @@ async function consumeNextFollowUpJob({
   }
 
   const workerClass = pickRemediationWorkerClass(claimed.job);
+  // Track whether spawn was actually attempted. If the catch below
+  // fires before this flips to true, we mark the failed record as
+  // never-spawned so the PR-wide ledger does not count this round —
+  // an OAuth/workspace-prep failure burned no remediation budget.
+  let spawnAttempted = false;
 
   try {
     // Round-budget check first (cheap, short-circuits before any
@@ -2184,13 +2194,22 @@ async function consumeNextFollowUpJob({
 
     const currentRound = Number(claimed.job?.remediationPlan?.currentRound || 0);
     if (currentRound > roundBudgetResolution.roundBudget) {
-      const stopped = markFollowUpJobStopped({
+      const stoppedAt = now();
+      const stopped = await stopConsumedJobWithComment({
         rootDir,
+        job: claimed.job,
         jobPath: claimed.jobPath,
-        stoppedAt: now(),
+        stoppedAt,
         stopCode: 'round-budget-exhausted',
         sourceStatus: claimed.job.status,
         stopReason: `Remediation round ${currentRound} exceeds the ${roundBudgetResolution.riskClass} risk-class budget (${roundBudgetResolution.roundBudget}); refusing to spawn another remediation worker.`,
+        remediationWorker: {
+          state: 'never-spawned',
+          reconciledAt: stoppedAt,
+        },
+        postCommentImpl,
+        now,
+        log,
       });
 
       return {
@@ -2236,6 +2255,7 @@ async function consumeNextFollowUpJob({
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
 
+    spawnAttempted = true;
     const worker = spawnRemediationWorker(workerClass, {
       workspaceDir,
       promptPath,
@@ -2289,6 +2309,16 @@ async function consumeNextFollowUpJob({
       };
     }
 
+    // If we never made it to the spawn call, this round burned no
+    // remediation budget — tag the failed record with `never-spawned`
+    // so summarizePRRemediationLedger excludes it from the PR-wide
+    // count. Without this, an OAuth/workspace-prep failure permanently
+    // consumes a round and can trip the final-round threshold for a PR
+    // that never actually ran a worker.
+    const remediationWorker = spawnAttempted
+      ? undefined
+      : { state: 'never-spawned', reconciledAt: now() };
+
     const failed = markFollowUpJobFailed({
       rootDir,
       jobPath: claimed.jobPath,
@@ -2296,10 +2326,75 @@ async function consumeNextFollowUpJob({
       failedAt: now(),
       failureCode,
       failure,
+      remediationWorker,
     });
     err.followUpJobPath = failed.jobPath;
     throw err;
   }
+}
+
+// Stamp a comment-delivery record onto a consume-time terminal job
+// before publishing the public PR comment. Mirrors the reconcile-side
+// flow (`buildReconcileCommentDelivery` → `markFollowUpJob*` →
+// `recordInitialCommentDelivery`) so consume-time stops land in
+// stopped/ with a `commentDelivery` field and a retry-index pointer.
+// Without this stamp, the retry-index sentinel (`.initialized`) makes
+// the post-init retry walker scan only the index — consume-side
+// stopped records that bypass the initial post would be invisible to
+// the retry path forever, breaking the contract that every terminal
+// transition is operator-visible on the PR.
+async function stopConsumedJobWithComment({
+  rootDir,
+  job,
+  jobPath,
+  stoppedAt,
+  stopCode,
+  stopReason,
+  sourceStatus,
+  remediationWorker,
+  postCommentImpl,
+  now,
+  log,
+}) {
+  // Build the comment body and an owed-delivery stub from the same
+  // shape reconcile uses, so the terminal record lands with
+  // commentDelivery already present (closes the crash window between
+  // the atomic terminal move and any post-move stamping).
+  const { commentDelivery: owedDelivery } = buildReconcileCommentDelivery({
+    job,
+    worker: remediationWorker,
+    action: 'stopped',
+    now,
+  });
+
+  const stopped = markFollowUpJobStopped({
+    rootDir,
+    jobPath,
+    stoppedAt,
+    stopCode,
+    stopReason,
+    sourceStatus,
+    remediationWorker,
+    commentDelivery: owedDelivery,
+  });
+
+  // Hand off to recordInitialCommentDelivery so the post + retry-index
+  // pointer + claim lock all run through the same path the reconcile
+  // site uses. Failures inside the post path stay non-fatal — the
+  // owed-delivery stamp + retry pointer already make the comment
+  // recoverable on the next retry tick.
+  await postReconcileOutcomeCommentSafe({
+    rootDir,
+    jobPath: stopped.jobPath,
+    job: stopped.job,
+    worker: remediationWorker,
+    action: 'stopped',
+    postCommentImpl,
+    now,
+    log,
+  });
+
+  return stopped;
 }
 
 async function main() {

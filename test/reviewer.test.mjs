@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { CLAUDE_CLI, LAUNCHCTL, spawnClaude } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {
@@ -68,4 +69,32 @@ test('buildObviousDocsGuidance tells workers to inspect obvious repo docs before
   assert.match(guidance, /README\.md/);
   assert.match(guidance, /SPEC\.md/);
   assert.match(guidance, /go read it directly rather than guessing from the diff alone/i);
+});
+
+test('spawnClaude wraps claude in launchctl asuser on darwin', async () => {
+  const calls = [];
+  const result = { stdout: '{"loggedIn":true}', stderr: '' };
+
+  const actual = await spawnClaude(['auth', 'status'], {
+    platform: 'darwin',
+    uid: 501,
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return result;
+    },
+    env: { PATH: process.env.PATH },
+    timeout: 10_000,
+  });
+
+  assert.equal(actual, result);
+  assert.deepEqual(calls, [
+    {
+      command: LAUNCHCTL,
+      args: ['asuser', '501', CLAUDE_CLI, 'auth', 'status'],
+      options: {
+        env: { PATH: process.env.PATH },
+        timeout: 10_000,
+      },
+    },
+  ]);
 });

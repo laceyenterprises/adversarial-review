@@ -129,6 +129,7 @@ async function spawnCaptured(command, args, { env, cwd, timeout = 0, maxBuffer =
 // Must NOT have ANTHROPIC_API_KEY in env when validating or invoking,
 // otherwise the CLI may report API-key auth instead of its native login state.
 const CLAUDE_CLI = '/opt/homebrew/bin/claude';
+const LAUNCHCTL = '/bin/launchctl';
 
 // ACPX-local Codex adapter path. The reviewer keeps wrapper-owned completion
 // semantics: ACPX/Codex does the work, and the outer wrapper owns parsing /
@@ -160,8 +161,7 @@ async function assertClaudeOAuth() {
   let stdout = '';
   let stderr = '';
   try {
-    ({ stdout, stderr } = await execFileAsync(
-      CLAUDE_CLI,
+    ({ stdout, stderr } = await spawnClaude(
       ['auth', 'status'],
       { env, timeout: 10_000 }
     ));
@@ -179,6 +179,32 @@ async function assertClaudeOAuth() {
   if (text.includes('"loggedin": false') || text.includes('not logged in') || text.includes('login required')) {
     throw new OAuthError('claude', `Claude CLI reports not logged in: ${(stdout || stderr).trim()}`);
   }
+}
+
+async function spawnClaude(args, options = {}) {
+  const {
+    execFileImpl = execFileAsync,
+    platform = process.platform,
+    uid = typeof process.getuid === 'function' ? process.getuid() : null,
+    ...execOptions
+  } = options;
+
+  if (platform === 'darwin') {
+    if (!existsSync(LAUNCHCTL)) {
+      throw new Error(`launchctl not found at ${LAUNCHCTL}`);
+    }
+    if (!Number.isInteger(uid)) {
+      throw new Error('Cannot resolve current uid for launchctl asuser');
+    }
+
+    return execFileImpl(
+      LAUNCHCTL,
+      ['asuser', String(uid), CLAUDE_CLI, ...args],
+      execOptions
+    );
+  }
+
+  return execFileImpl(CLAUDE_CLI, args, execOptions);
 }
 
 function resolveCodexAuthPath() {
@@ -443,8 +469,7 @@ async function reviewWithClaude(diff, extraContext = '', { isFinalRound = false 
 
   let stdout, stderr;
   try {
-    ({ stdout, stderr } = await execFileAsync(
-      CLAUDE_CLI,
+    ({ stdout, stderr } = await spawnClaude(
       ['--print', '--permission-mode', 'bypassPermissions', prompt],
       {
         env,
@@ -843,7 +868,9 @@ async function main() {
 
 export {
   CLAUDE_CLI,
+  LAUNCHCTL,
   CODEX_CLI,
+  spawnClaude,
   sanitizeCodexReviewPayload,
   buildReviewerPromptPrefix,
   isFinalReviewRound,

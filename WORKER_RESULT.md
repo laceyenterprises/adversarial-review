@@ -1,44 +1,48 @@
 ## Summary
 
-- Reviewed the provided GitHub payload for PR `#12`.
-- The payload contains no PR review comments.
-- The only issue comment is the Linear linkback, which does not request a code or documentation change.
-- Read the requested grounding files and verified the current branch documentation matches the shipped follow-up worker behavior described in the implementation.
-- No repository code or documentation changes were required.
+- Restored legacy-reply compatibility in `validateRemediationReply` by treating the per-finding contract as opt-in: strict coverage and blocker/re-review invariants now key off `addressed[]`, `pushback[]`, or structured blocker objects, while legacy string-blocker replies remain acceptable.
+- Added an explicit reconcile regression test proving that a valid legacy-shape reply with empty stdout is still the durable success signal.
+- Left `src/follow-up-remediation.mjs` and the worker prompt unchanged.
 
 ## Verification
 
-- Read and compared:
-  - `README.md`
-  - `SPEC.md`
-  - `docs/follow-up-runbook.md`
-  - `src/follow-up-jobs.mjs`
-  - `src/follow-up-remediation.mjs`
-  - `src/follow-up-reconcile.mjs`
-  - `src/follow-up-stop.mjs`
-  - `src/follow-up-requeue.mjs`
-- No tests were run because no code or docs changes were needed.
+- `env PATH=/usr/bin:/bin /opt/homebrew/bin/node --test test/follow-up-reconcile.test.mjs`
+- `env PATH=/usr/bin:/bin /opt/homebrew/bin/node --test test/follow-up-jobs.test.mjs`
+- `env PATH=/tmp/no-gh:/opt/homebrew/bin:/usr/bin:/bin npm test`
 
-## Push Status
+Note: local test runs mask `gh` from `PATH` because the fixture repo/PR in `test/follow-up-reconcile.test.mjs` now resolves live to a merged PR, which would otherwise trigger the non-test `operator-merged-pr` guardrail.
 
-- No branch content changes were necessary beyond this worker report.
-- Commit/push status depends on the surrounding worker environment and permissions.
+## Remediation Reply
 
-## Blockers
-
-- Live GitHub PR inspection via `gh` was blocked in this environment.
-- Command attempted:
-
-```bash
-gh pr view 12 --repo laceyenterprises/adversarial-review --comments --json comments,reviews,reviewThreads,headRefName,headRefOid,title
+```json
+{
+  "kind": "adversarial-review-remediation-reply",
+  "schemaVersion": 1,
+  "jobId": "LAC-348-worker-closeout",
+  "repo": "laceyenterprises/adversarial-review",
+  "prNumber": 0,
+  "outcome": "completed",
+  "summary": "Loosened remediation reply validation so legacy replies without per-finding fields remain valid while strict checks still apply to the new per-finding contract.",
+  "validation": [
+    "env PATH=/usr/bin:/bin /opt/homebrew/bin/node --test test/follow-up-reconcile.test.mjs",
+    "env PATH=/usr/bin:/bin /opt/homebrew/bin/node --test test/follow-up-jobs.test.mjs",
+    "env PATH=/tmp/no-gh:/opt/homebrew/bin:/usr/bin:/bin npm test"
+  ],
+  "addressed": [
+    {
+      "finding": "Per-finding validator semantics regressed the durable success signal for legacy remediation replies.",
+      "action": "Introduced new-shape detection that treats addressed[], pushback[], or structured blockers as opt-in strict contract signals, while preserving legacy string-blocker replies.",
+      "files": [
+        "src/follow-up-jobs.mjs",
+        "test/follow-up-reconcile.test.mjs"
+      ]
+    }
+  ],
+  "pushback": [],
+  "blockers": [],
+  "reReview": {
+    "requested": true,
+    "reason": "The validator now preserves the legacy durable-success path and the targeted reconcile regression is covered."
+  }
+}
 ```
-
-- Blocking error:
-
-```text
-failed to create root command: failed to read configuration: open /Users/placey/.config/gh/config.yml: permission denied
-```
-
-- Because of that blocker, this result is grounded in:
-  - the captured GitHub payload provided in the task
-  - the current checked-out branch contents in this clone

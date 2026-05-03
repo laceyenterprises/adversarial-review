@@ -389,6 +389,61 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
   assert.equal(reconciled.job.completion.finalMessageBytes, 0);
 });
 
+test('reconcileFollowUpJob honors a valid LEGACY-shape reply (no addressed[]) as the durable success signal when stdout is empty', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  writeFileSync(outputPath, '', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Legacy reply shape still counts as the durable remediation success signal.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Legacy worker reply is valid and ready for another adversarial pass.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-05-02T13:01:00.000Z',
+    worker: {
+      processId: 8124,
+      model: 'claude-code',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath: path.relative(rootDir, replyPath),
+    },
+  });
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T13:05:00.000Z',
+    isProcessAliveImpl: () => false,
+  });
+
+  const reviewRow = readReviewRow(rootDir);
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'completed');
+  assert.equal(reconciled.job.reReview.triggered, true);
+  assert.equal(reviewRow.review_status, 'pending');
+});
+
 test('reconcileFollowUpJob completes when stdout is empty and reply has reReview.requested=true with non-completed outcome', async () => {
   // The durable signal per SPEC.md §5.1.2 is `reReview.requested =
   // true`, NOT `outcome === 'completed'`. A worker may legitimately

@@ -109,7 +109,7 @@ data/follow-up-jobs/in-progress/<jobId>.json
 detached remediation worker on checked-out PR branch
   │ writes artifacts
   ├─ workspace: prompt.md / codex-last-message.md / codex-worker.log
-  └─ HQ: dispatch/remediation-replies/<lrq>/remediation-reply.json
+  └─ HQ: dispatch/remediation-replies/<storage-key>/remediation-reply.json
   │
   ├─(operator) npm run follow-up:reconcile
   ▼
@@ -295,7 +295,7 @@ The detached worker is expected to leave two important workspace artifacts plus 
 
 - final message: `.adversarial-follow-up/codex-last-message.md`
 - worker log: `.adversarial-follow-up/codex-worker.log`
-- reply JSON: `~/agent-os-hq/dispatch/remediation-replies/<lrq>/remediation-reply.json`
+- reply JSON: `~/agent-os-hq/dispatch/remediation-replies/<storage-key>/remediation-reply.json`
 
 The worktree's `.adversarial-follow-up/` directory is now a prompt/log sandbox only. It should not contain `remediation-reply.json` for newly spawned jobs.
 
@@ -536,14 +536,14 @@ data/follow-up-jobs/workspaces/<jobId>/
 data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/prompt.md
 data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/codex-last-message.md
 data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/codex-worker.log
-~/agent-os-hq/dispatch/remediation-replies/<lrq>/remediation-reply.json
+~/agent-os-hq/dispatch/remediation-replies/<storage-key>/remediation-reply.json
 ```
 
 What each tells you:
 
 - `prompt.md`: exact worker contract and trusted metadata passed to the worker
 - `codex-last-message.md`: worker’s final narrative summary, used as the completion artifact
-- `~/agent-os-hq/dispatch/remediation-replies/<lrq>/remediation-reply.json`: machine-readable outcome and re-review intent
+- `~/agent-os-hq/dispatch/remediation-replies/<storage-key>/remediation-reply.json`: machine-readable outcome and re-review intent
 - `codex-worker.log`: launch/runtime stderr/stdout trail
 
 ### In SQLite
@@ -616,10 +616,12 @@ Common reasons:
 
 ### 1. Check the durable artifact before debugging control flow
 
+The HQ directory name is the persisted reply storage key: `<launchRequestId>` when the job carries one, otherwise `<jobId>`.
+
 If a rereview didn’t happen, first inspect:
 
 ```bash
-jq '.' ~/agent-os-hq/dispatch/remediation-replies/<lrq>/remediation-reply.json
+jq '.' ~/agent-os-hq/dispatch/remediation-replies/<storage-key>/remediation-reply.json
 ```
 
 The most common root cause is simply that `reReview.requested` was absent or false.
@@ -694,7 +696,7 @@ Both paths converge on the same TCC subjects, but their CLI resolution is **diff
 ### A. “A remediation worker finished. Why didn’t we get another review?”
 
 1. run `npm run follow-up:reconcile`
-2. inspect `~/agent-os-hq/dispatch/remediation-replies/<lrq>/remediation-reply.json`
+2. inspect `~/agent-os-hq/dispatch/remediation-replies/<storage-key>/remediation-reply.json`
 3. verify `reReview.requested = true`
 4. inspect `data/reviews.db` row for the PR
 5. confirm the PR is still `pr_state='open'`

@@ -35,11 +35,12 @@ const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
+const DEFAULT_HQ_ROOT = join(homedir(), 'agent-os-hq');
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const VALID_REPLY_STORAGE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 
 // Default identity each remediation-worker class commits under. Without
 // these, the workspace inherits the operator's global git config and every
@@ -139,29 +140,54 @@ function resolveCodexCliPath() {
   return process.env.CODEX_CLI_PATH || process.env.CODEX_CLI || 'codex';
 }
 
-function resolveHqRoot(env = process.env) {
-  return resolve(env.HQ_ROOT || DEFAULT_HQ_ROOT);
+function validateReplyStorageKey(key, label = 'replyStorageKey') {
+  const value = String(key ?? '').trim();
+  if (!value) {
+    throw new Error(`Cannot resolve remediation reply storage key: missing ${label}`);
+  }
+  if (!VALID_REPLY_STORAGE_KEY.test(value)) {
+    throw new Error(
+      `Invalid ${label}: ${JSON.stringify(value)} must match ${VALID_REPLY_STORAGE_KEY} ` +
+      'and cannot contain path separators or traversal segments'
+    );
+  }
+  return value;
+}
+
+function resolveHqRoot(env = process.env, { requireExists = false } = {}) {
+  const root = resolve(env.HQ_ROOT || DEFAULT_HQ_ROOT);
+  if (requireExists && !existsSync(root)) {
+    throw new Error(
+      `HQ remediation root does not exist: ${root}. ` +
+      'Set HQ_ROOT to an existing agent-os-hq checkout before consuming follow-up jobs.'
+    );
+  }
+  return root;
 }
 
 function resolveHqReplyPath({ hqRoot, launchRequestId }) {
-  const replyDir = join(hqRoot, 'dispatch', 'remediation-replies', launchRequestId);
+  const replyStorageKey = validateReplyStorageKey(launchRequestId, 'launchRequestId');
+  const replyPath = resolveHqReplyArtifactPath(
+    join(hqRoot, 'dispatch', 'remediation-replies', replyStorageKey, 'remediation-reply.json'),
+    { hqRoot }
+  );
   return {
-    replyDir,
-    replyPath: join(replyDir, 'remediation-reply.json'),
+    replyDir: dirname(replyPath),
+    replyPath,
   };
 }
 
-function resolveReplyStorageKey(job, env = process.env) {
-  const launchRequestId = typeof job?.launchRequestId === 'string' && job.launchRequestId.trim()
-    ? job.launchRequestId.trim()
-    : typeof env.LAUNCH_REQUEST_ID === 'string' && env.LAUNCH_REQUEST_ID.trim()
-      ? env.LAUNCH_REQUEST_ID.trim()
+function resolveReplyStorageKey(job) {
+  const persistedKey = typeof job?.replyStorageKey === 'string' && job.replyStorageKey.trim()
+    ? job.replyStorageKey.trim()
+    : typeof job?.launchRequestId === 'string' && job.launchRequestId.trim()
+      ? job.launchRequestId.trim()
       : null;
-  if (launchRequestId) {
-    return launchRequestId;
+  if (persistedKey) {
+    return validateReplyStorageKey(persistedKey, 'replyStorageKey');
   }
   if (typeof job?.jobId === 'string' && job.jobId.trim()) {
-    return job.jobId.trim();
+    return validateReplyStorageKey(job.jobId.trim(), 'jobId');
   }
   throw new Error('Cannot resolve remediation reply storage key: missing launchRequestId and jobId');
 }
@@ -1164,6 +1190,25 @@ function resolveHqReplyArtifactPath(replyPath, { hqRoot, allowMissing = true } =
     throw new Error('Invalid replyPath: path does not exist');
   }
 
+  const replyDir = dirname(absolutePath);
+  if (existsSync(replyDir) && lstatSync(replyDir).isSymbolicLink()) {
+    throw new Error('Invalid replyPath: symbolic links are not allowed for reply directories');
+  }
+  if (existsSync(absolutePath) && lstatSync(absolutePath).isSymbolicLink()) {
+    throw new Error('Invalid replyPath: symbolic links are not allowed');
+  }
+
+  const realReplyRoot = resolveRealPath(hqReplyRoot);
+  const realReplyPath = resolveRealPath(absolutePath);
+  const realRelativeToReplyRoot = relative(realReplyRoot, realReplyPath);
+  if (
+    realRelativeToReplyRoot.startsWith('..')
+    || realRelativeToReplyRoot === ''
+    || isAbsolute(realRelativeToReplyRoot)
+  ) {
+    throw new Error('Invalid replyPath: resolved path escapes HQ remediation reply root');
+  }
+
   return absolutePath;
 }
 
@@ -1226,9 +1271,10 @@ function assertContainedInWorkspace(label, workspaceDir, candidate) {
 function buildReconciliationPaths(rootDir, job) {
   const worker = job?.remediationWorker || {};
   const hqRoot = resolveHqRoot();
+  const replyStorageKey = resolveReplyStorageKey(job);
   const { replyPath: expectedHqReplyPath } = resolveHqReplyPath({
     hqRoot,
-    launchRequestId: resolveReplyStorageKey(job),
+    launchRequestId: replyStorageKey,
   });
   const workspaceDir = resolveJobRelativePath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
     label: 'workspaceDir',
@@ -2325,10 +2371,18 @@ async function consumeNextFollowUpJob({
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
     resetWorkspaceDir(artifactDir);
     mkdirSync(artifactDir, { recursive: true });
-    const hqRoot = resolveHqRoot();
+    const hqRoot = resolveHqRoot(process.env, { requireExists: true });
+    const replyStorageKey = resolveReplyStorageKey(claimed.job);
+    if (claimed.job.replyStorageKey !== replyStorageKey) {
+      claimed.job = {
+        ...claimed.job,
+        replyStorageKey,
+      };
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
     const { replyDir, replyPath } = resolveHqReplyPath({
       hqRoot,
-      launchRequestId: resolveReplyStorageKey(claimed.job),
+      launchRequestId: replyStorageKey,
     });
     mkdirSync(replyDir, { recursive: true });
 

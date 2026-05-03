@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,22 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-reconcile.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+
+let previousHqRoot;
+
+beforeEach(() => {
+  previousHqRoot = process.env.HQ_ROOT;
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-hq-'));
+  process.env.HQ_ROOT = hqRoot;
+});
+
+afterEach(() => {
+  if (previousHqRoot === undefined) {
+    delete process.env.HQ_ROOT;
+  } else {
+    process.env.HQ_ROOT = previousHqRoot;
+  }
+});
 
 function makeJobInput(rootDir) {
   return {

@@ -1,8 +1,8 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   REMEDIATION_WORKER_TRAILER_CLASS,
@@ -74,7 +74,9 @@ function makeJob(overrides = {}) {
 async function withOAuthTestEnv(workDir, run) {
   const authDir = path.join(workDir, '.codex');
   const authPath = path.join(authDir, 'auth.json');
+  const hqRoot = path.join(workDir, 'agent-os-hq');
   mkdirSync(authDir, { recursive: true });
+  mkdirSync(hqRoot, { recursive: true });
   writeFileSync(authPath, JSON.stringify({
     auth_mode: 'chatgpt',
     tokens: {
@@ -87,11 +89,13 @@ async function withOAuthTestEnv(workDir, run) {
   const originalCliPath = process.env.CODEX_CLI_PATH;
   const originalCodexHome = process.env.CODEX_HOME;
   const originalHome = process.env.HOME;
+  const originalHqRoot = process.env.HQ_ROOT;
 
   process.env.CODEX_AUTH_PATH = authPath;
   process.env.CODEX_CLI_PATH = '/usr/bin/true';
   process.env.CODEX_HOME = authDir;
   process.env.HOME = workDir;
+  process.env.HQ_ROOT = hqRoot;
 
   try {
     return await run();
@@ -116,11 +120,17 @@ async function withOAuthTestEnv(workDir, run) {
     } else {
       process.env.HOME = originalHome;
     }
+    if (originalHqRoot === undefined) {
+      delete process.env.HQ_ROOT;
+    } else {
+      process.env.HQ_ROOT = originalHqRoot;
+    }
   }
 }
 
 async function withHqRootEnv(hqRoot, run) {
   const originalHqRoot = process.env.HQ_ROOT;
+  mkdirSync(hqRoot, { recursive: true });
   process.env.HQ_ROOT = hqRoot;
   try {
     return await run();
@@ -235,12 +245,39 @@ test('resolveJobRelativePath rejects traversal outside the follow-up root', () =
 
 test('resolveReplyStorageKey prefers launchRequestId and falls back to jobId', () => {
   assert.equal(
-    resolveReplyStorageKey(makeJob({ launchRequestId: 'lrq_abc' }), {}),
+    resolveReplyStorageKey(makeJob({ launchRequestId: 'lrq_abc' })),
     'lrq_abc'
   );
   assert.equal(
-    resolveReplyStorageKey(makeJob(), {}),
+    resolveReplyStorageKey(makeJob()),
     makeJob().jobId
+  );
+});
+
+test('resolveReplyStorageKey ignores LAUNCH_REQUEST_ID and validates traversal inputs', () => {
+  const previous = process.env.LAUNCH_REQUEST_ID;
+  process.env.LAUNCH_REQUEST_ID = '../tmp/pwn';
+  try {
+    assert.equal(resolveReplyStorageKey(makeJob()), makeJob().jobId);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.LAUNCH_REQUEST_ID;
+    } else {
+      process.env.LAUNCH_REQUEST_ID = previous;
+    }
+  }
+
+  assert.throws(
+    () => resolveReplyStorageKey(makeJob({ launchRequestId: '../tmp/pwn' })),
+    /Invalid replyStorageKey/
+  );
+  assert.throws(
+    () => resolveReplyStorageKey(makeJob({ launchRequestId: 'foo/bar' })),
+    /Invalid replyStorageKey/
+  );
+  assert.throws(
+    () => resolveHqReplyPath({ hqRoot: '/tmp/hq-root', launchRequestId: '..' }),
+    /Invalid/
   );
 });
 
@@ -248,6 +285,14 @@ test('resolveHqRoot honors HQ_ROOT when set', async () => {
   await withHqRootEnv('/tmp/custom-hq-root', async () => {
     assert.equal(resolveHqRoot(), '/tmp/custom-hq-root');
   });
+});
+
+test('resolveHqRoot defaults under the current home directory and can require an existing root', () => {
+  assert.equal(resolveHqRoot({}), path.join(homedir(), 'agent-os-hq'));
+  assert.throws(
+    () => resolveHqRoot({ HQ_ROOT: path.join(tmpdir(), 'missing-hq-root-does-not-exist') }, { requireExists: true }),
+    /HQ remediation root does not exist/
+  );
 });
 
 test('prepareWorkspaceForJob clones missing repos and checks out the PR branch', async () => {
@@ -1858,6 +1903,7 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
           'remediation-reply.json'
         )
       );
+      assert.equal(result.job.replyStorageKey, created.job.jobId);
       assert.equal(
         existsSync(path.join(rootDir, result.job.remediationWorker.workspaceDir, '.adversarial-follow-up', 'remediation-reply.json')),
         false
@@ -1929,6 +1975,56 @@ test('reconcileFollowUpJob reads remediation replies from HQ storage before any 
       false
     );
     assert.deepEqual(warnings, []);
+  });
+});
+
+test('reconcileFollowUpJob rejects HQ remediation reply symlink targets', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'hq');
+  const outsideDir = path.join(rootDir, 'outside');
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 181 });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const symlinkReplyDir = path.join(hqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId);
+  const outsideReplyPath = path.join(outsideDir, 'remediation-reply.json');
+
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.dirname(symlinkReplyDir), { recursive: true });
+  mkdirSync(outsideDir, { recursive: true });
+  writeFileSync(outputPath, 'worker output\n', 'utf8');
+  writeValidReply(outsideReplyPath, claimed.job, {
+    reReview: { requested: true, reason: 'Ready for another adversarial pass.' },
+  });
+  symlinkSync(outsideDir, symlinkReplyDir, 'dir');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9516,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath: path.join(symlinkReplyDir, 'remediation-reply.json'),
+    },
+  });
+
+  await withHqRootEnv(hqRoot, async () => {
+    const result = await reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:30:00.000Z',
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => null,
+    });
+
+    assert.equal(result.action, 'failed');
+    assert.equal(result.reason, 'invalid-worker-paths');
+    assert.equal(result.job.status, 'failed');
   });
 });
 

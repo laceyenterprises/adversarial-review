@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
+
+const {
+  CLAUDE_STRIPPED_ENV_VARS,
+  ENV_BIN,
+  LAUNCHCTL,
+  spawnClaude,
+} = __test__;
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {
   assert.equal(
@@ -68,4 +76,81 @@ test('buildObviousDocsGuidance tells workers to inspect obvious repo docs before
   assert.match(guidance, /README\.md/);
   assert.match(guidance, /SPEC\.md/);
   assert.match(guidance, /go read it directly rather than guessing from the diff alone/i);
+});
+
+test('spawnClaude wraps claude in launchctl asuser on darwin', async () => {
+  const calls = [];
+  const result = { stdout: '{"loggedIn":true}', stderr: '' };
+
+  const actual = await spawnClaude(['auth', 'status'], {
+    platform: 'darwin',
+    uid: 501,
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return result;
+    },
+    env: { PATH: process.env.PATH },
+    timeout: 10_000,
+  });
+
+  assert.equal(actual, result);
+  assert.deepEqual(calls, [
+    {
+      command: LAUNCHCTL,
+      args: ['asuser', '501', ENV_BIN, ...CLAUDE_STRIPPED_ENV_VARS.flatMap((name) => ['-u', name]), CLAUDE_CLI, 'auth', 'status'],
+      options: {
+        env: { PATH: process.env.PATH },
+        timeout: 10_000,
+      },
+    },
+  ]);
+});
+
+test('spawnClaude invokes claude directly on non-darwin platforms', async () => {
+  const calls = [];
+
+  await spawnClaude(['auth', 'status'], {
+    platform: 'linux',
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { stdout: 'ok', stderr: '' };
+    },
+    env: { PATH: process.env.PATH },
+  });
+
+  assert.deepEqual(calls, [
+    {
+      command: CLAUDE_CLI,
+      args: ['auth', 'status'],
+      options: {
+        env: { PATH: process.env.PATH },
+      },
+    },
+  ]);
+});
+
+test('spawnClaude rejects invalid darwin uids', async () => {
+  await assert.rejects(
+    () => spawnClaude(['auth', 'status'], { platform: 'darwin', uid: 0 }),
+    /Cannot resolve a non-root user uid/
+  );
+  await assert.rejects(
+    () => spawnClaude(['auth', 'status'], { platform: 'darwin', uid: null }),
+    /Cannot resolve a non-root user uid/
+  );
+});
+
+test('spawnClaude classifies launchctl session failures separately from oauth failures', async () => {
+  await assert.rejects(
+    () => spawnClaude(['auth', 'status'], {
+      platform: 'darwin',
+      uid: 501,
+      execFileImpl: async () => {
+        const err = new Error('Command failed');
+        err.stderr = 'Could not find domain for user 501';
+        throw err;
+      },
+    }),
+    (err) => err?.isLaunchctlSessionError === true && /bootstrap failed/i.test(err.message)
+  );
 });

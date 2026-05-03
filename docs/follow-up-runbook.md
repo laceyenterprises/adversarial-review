@@ -45,6 +45,10 @@ launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
 
 Daemon log: `~/Library/Logs/adversarial-follow-up.log`.
 
+## Auth-context troubleshooting
+
+Claude Code OAuth is stored in the macOS Keychain (`Claude Code-credentials`), not in a file like Codex's `~/.codex/auth.json`. When `reviewer.mjs` is launched from a LaunchAgent, direct subprocess execs of the Claude CLI can miss the user's Aqua/keychain context even though they run as the same uid. The reviewer now routes all Claude probe and review calls through `/bin/launchctl asuser $UID /opt/homebrew/bin/claude ...` on Darwin so launchd-spawned reviews inherit the correct login/keychain context. If Claude auth starts failing again from automation, verify that wrapped command succeeds before debugging higher-level retry behavior.
+
 ---
 
 ## Risk-tiered round budgets

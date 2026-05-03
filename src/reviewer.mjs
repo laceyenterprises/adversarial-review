@@ -13,7 +13,9 @@
  * Claude reviews MUST use OAuth (claude CLI), never ANTHROPIC_API_KEY.
  * Codex reviews MUST use OAuth (codex CLI), never OPENAI_API_KEY.
  * If OAuth credentials are missing or expired → STOP and alert Paul via Clio.
- * API key fallback is intentionally NOT implemented here.
+ * API key fallback is intentionally NOT implemented here. On Darwin,
+ * Claude is launched via `launchctl asuser`, so the wrapped command also
+ * explicitly unsets API-key env vars inside the target process.
  * ────────────────────────────────────────────────────────────────────────────
  */
 
@@ -129,6 +131,9 @@ async function spawnCaptured(command, args, { env, cwd, timeout = 0, maxBuffer =
 // Must NOT have ANTHROPIC_API_KEY in env when validating or invoking,
 // otherwise the CLI may report API-key auth instead of its native login state.
 const CLAUDE_CLI = '/opt/homebrew/bin/claude';
+const LAUNCHCTL = '/bin/launchctl';
+const ENV_BIN = '/usr/bin/env';
+const CLAUDE_STRIPPED_ENV_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'];
 
 // ACPX-local Codex adapter path. The reviewer keeps wrapper-owned completion
 // semantics: ACPX/Codex does the work, and the outer wrapper owns parsing /
@@ -160,12 +165,14 @@ async function assertClaudeOAuth() {
   let stdout = '';
   let stderr = '';
   try {
-    ({ stdout, stderr } = await execFileAsync(
-      CLAUDE_CLI,
+    ({ stdout, stderr } = await spawnClaude(
       ['auth', 'status'],
       { env, timeout: 10_000 }
     ));
   } catch (err) {
+    if (err?.isLaunchctlSessionError) {
+      throw err;
+    }
     stdout = err.stdout || '';
     stderr = err.stderr || '';
     const msg = `${err.message || ''}\n${stdout}\n${stderr}`.toLowerCase();
@@ -179,6 +186,44 @@ async function assertClaudeOAuth() {
   if (text.includes('"loggedin": false') || text.includes('not logged in') || text.includes('login required')) {
     throw new OAuthError('claude', `Claude CLI reports not logged in: ${(stdout || stderr).trim()}`);
   }
+}
+
+async function spawnClaude(args, options = {}) {
+  const {
+    execFileImpl = execFileAsync,
+    platform = process.platform,
+    uid = typeof process.getuid === 'function' ? process.getuid() : null,
+    ...execOptions
+  } = options;
+
+  if (platform === 'darwin') {
+    if (!Number.isInteger(uid) || uid <= 0) {
+      throw new Error('Cannot resolve a non-root user uid for launchctl asuser');
+    }
+
+    try {
+      return await execFileImpl(
+        LAUNCHCTL,
+        [
+          'asuser',
+          String(uid),
+          ENV_BIN,
+          ...CLAUDE_STRIPPED_ENV_VARS.flatMap((name) => ['-u', name]),
+          CLAUDE_CLI,
+          ...args,
+        ],
+        execOptions
+      );
+    } catch (err) {
+      const details = `${err?.message || ''}\n${err?.stdout || ''}\n${err?.stderr || ''}`;
+      if (isLaunchctlSessionFailure(details)) {
+        throw new LaunchctlSessionError(details.trim(), { cause: err, stdout: err?.stdout, stderr: err?.stderr });
+      }
+      throw err;
+    }
+  }
+
+  return execFileImpl(CLAUDE_CLI, args, execOptions);
 }
 
 function resolveCodexAuthPath() {
@@ -248,6 +293,17 @@ class OAuthError extends Error {
   }
 }
 
+class LaunchctlSessionError extends Error {
+  constructor(reason, { cause, stdout = '', stderr = '' } = {}) {
+    super(`Claude launchctl session bootstrap failed: ${reason}`);
+    this.name = 'LaunchctlSessionError';
+    this.cause = cause;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.isLaunchctlSessionError = true;
+  }
+}
+
 // ── Utility functions ────────────────────────────────────────────────────────
 
 function looksLikeRuntimeJunk(text) {
@@ -283,6 +339,10 @@ function previewText(text, limit = 200) {
   const normalized = String(text ?? '').replace(/\r\n/g, '\n').trim();
   if (!normalized) return '<empty>';
   return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized;
+}
+
+function isLaunchctlSessionFailure(text) {
+  return /(launchctl|bootstrap failed|could not find domain|input\/output error|not privileged to set domain|gui\/\d+)/i.test(String(text ?? ''));
 }
 
 // ── Adversarial prompt (NON-NEGOTIABLE) ──────────────────────────────────────
@@ -443,8 +503,7 @@ async function reviewWithClaude(diff, extraContext = '', { isFinalRound = false 
 
   let stdout, stderr;
   try {
-    ({ stdout, stderr } = await execFileAsync(
-      CLAUDE_CLI,
+    ({ stdout, stderr } = await spawnClaude(
       ['--print', '--permission-mode', 'bypassPermissions', prompt],
       {
         env,
@@ -453,6 +512,9 @@ async function reviewWithClaude(diff, extraContext = '', { isFinalRound = false 
       }
     ));
   } catch (err) {
+    if (err?.isLaunchctlSessionError) {
+      throw err;
+    }
     // Detect OAuth expiry in error output
     const msg = (err.message || '') + (err.stderr || '');
     if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('oauth') || msg.includes('login')) {
@@ -841,6 +903,14 @@ async function main() {
   console.log(`[reviewer] Done: ${repo}#${prNumber}`);
 }
 
+const __test__ = {
+  LAUNCHCTL,
+  ENV_BIN,
+  CLAUDE_STRIPPED_ENV_VARS,
+  spawnClaude,
+  isLaunchctlSessionFailure,
+};
+
 export {
   CLAUDE_CLI,
   CODEX_CLI,
@@ -849,6 +919,7 @@ export {
   isFinalReviewRound,
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
+  __test__,
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

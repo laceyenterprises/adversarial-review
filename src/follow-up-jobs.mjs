@@ -540,6 +540,17 @@ function countBlockingFindingsInReview(reviewBody) {
   return findings === null ? null : findings.length;
 }
 
+function usesPerFindingReplyContract(reply) {
+  if (!reply || typeof reply !== 'object') return false;
+  if (reply.addressed !== undefined || reply.pushback !== undefined) {
+    return true;
+  }
+
+  return Array.isArray(reply.blockers) && reply.blockers.some(
+    (entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
+  );
+}
+
 // Enforce that the reply records the same number of accountability
 // entries as there are blocking findings in the review body, summed
 // across `addressed[]`, `pushback[]`, and `blockers[]`. Without this
@@ -561,13 +572,14 @@ function countBlockingFindingsInReview(reviewBody) {
 // distinct strings are not the same as correct strings.
 //
 // Backward-compat: enforced only when the reply opts into the new
-// schema (signaled by either `addressed` or `pushback` being present)
-// AND we can confidently parse the review body's blocking section.
-// Legacy replies (string-array blockers, no addressed/pushback) skip
-// the check so re-reading old persisted artifacts doesn't fail.
+// schema (signaled by `addressed[]`, `pushback[]`, or structured
+// blocker objects) AND we can confidently parse the review body's
+// blocking section. Legacy replies (string-array blockers, no
+// addressed/pushback) skip the check so re-reading old persisted
+// artifacts doesn't fail.
 function validateBlockingCoverage(reply, expectedJob) {
   if (!expectedJob || typeof expectedJob !== 'object') return;
-  const usesNewSchema = reply.addressed !== undefined || reply.pushback !== undefined;
+  const usesNewSchema = usesPerFindingReplyContract(reply);
   if (!usesNewSchema) return;
 
   const expected = countBlockingFindingsInReview(expectedJob.reviewBody);
@@ -661,9 +673,10 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
   // with `reReview.requested = true` re-arms the watcher AND posts a
   // PR comment claiming both "human intervention required" and
   // "re-review queued" for the same unresolved state).
+  const usesNewSchema = usesPerFindingReplyContract(reply);
   const blockersPopulated = reply.blockers.length > 0;
 
-  if (blockersPopulated && reply.reReview.requested) {
+  if (usesNewSchema && blockersPopulated && reply.reReview.requested) {
     throw new Error(
       'Remediation reply contradicts itself: blockers are populated but reReview.requested is true. ' +
         'A populated blockers list is a hard exit; set reReview.requested = false.'
@@ -677,7 +690,7 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
           'A blocked outcome must list the unresolved blockers.'
       );
     }
-    if (reply.reReview.requested) {
+    if (usesNewSchema && reply.reReview.requested) {
       throw new Error(
         'Remediation reply outcome is "blocked" but reReview.requested is true. ' +
           'A blocked outcome must set reReview.requested = false.'
@@ -685,7 +698,7 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
     }
   }
 
-  if (reply.outcome === 'completed' && blockersPopulated) {
+  if (usesNewSchema && reply.outcome === 'completed' && blockersPopulated) {
     throw new Error(
       'Remediation reply outcome is "completed" but blockers is non-empty. ' +
         'Use outcome "partial" or "blocked" when unresolved blockers remain.'

@@ -35,6 +35,7 @@ const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
@@ -136,6 +137,33 @@ class StartupContractError extends Error {
 
 function resolveCodexCliPath() {
   return process.env.CODEX_CLI_PATH || process.env.CODEX_CLI || 'codex';
+}
+
+function resolveHqRoot(env = process.env) {
+  return resolve(env.HQ_ROOT || DEFAULT_HQ_ROOT);
+}
+
+function resolveHqReplyPath({ hqRoot, launchRequestId }) {
+  const replyDir = join(hqRoot, 'dispatch', 'remediation-replies', launchRequestId);
+  return {
+    replyDir,
+    replyPath: join(replyDir, 'remediation-reply.json'),
+  };
+}
+
+function resolveReplyStorageKey(job, env = process.env) {
+  const launchRequestId = typeof job?.launchRequestId === 'string' && job.launchRequestId.trim()
+    ? job.launchRequestId.trim()
+    : typeof env.LAUNCH_REQUEST_ID === 'string' && env.LAUNCH_REQUEST_ID.trim()
+      ? env.LAUNCH_REQUEST_ID.trim()
+      : null;
+  if (launchRequestId) {
+    return launchRequestId;
+  }
+  if (typeof job?.jobId === 'string' && job.jobId.trim()) {
+    return job.jobId.trim();
+  }
+  throw new Error('Cannot resolve remediation reply storage key: missing launchRequestId and jobId');
 }
 
 function resolveCodexAuthPath() {
@@ -1111,6 +1139,34 @@ function resolveJobRelativePath(rootDir, relativePath, { label, allowMissing = t
   return absolutePath;
 }
 
+function resolveHqReplyArtifactPath(replyPath, { hqRoot, allowMissing = true } = {}) {
+  if (!replyPath) {
+    return null;
+  }
+
+  const value = String(replyPath);
+  if (!isAbsolute(value)) {
+    throw new Error('Invalid replyPath: HQ remediation reply paths must be absolute');
+  }
+
+  const absolutePath = resolve(value);
+  const hqReplyRoot = join(resolve(hqRoot), 'dispatch', 'remediation-replies');
+  const relativeToReplyRoot = relative(hqReplyRoot, absolutePath);
+  if (
+    relativeToReplyRoot.startsWith('..')
+    || relativeToReplyRoot === ''
+    || isAbsolute(relativeToReplyRoot)
+  ) {
+    throw new Error('Invalid replyPath: path escapes HQ remediation reply root');
+  }
+
+  if (!allowMissing && !existsSync(absolutePath)) {
+    throw new Error('Invalid replyPath: path does not exist');
+  }
+
+  return absolutePath;
+}
+
 // Resolve a path to its on-disk real path so symlinks cannot be used to
 // escape the workspace. When the leaf file is missing, we still walk up
 // to the longest existing ancestor and realpath that, then re-attach
@@ -1169,6 +1225,11 @@ function assertContainedInWorkspace(label, workspaceDir, candidate) {
 
 function buildReconciliationPaths(rootDir, job) {
   const worker = job?.remediationWorker || {};
+  const hqRoot = resolveHqRoot();
+  const { replyPath: expectedHqReplyPath } = resolveHqReplyPath({
+    hqRoot,
+    launchRequestId: resolveReplyStorageKey(job),
+  });
   const workspaceDir = resolveJobRelativePath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
     label: 'workspaceDir',
   });
@@ -1178,19 +1239,29 @@ function buildReconciliationPaths(rootDir, job) {
   const logPath = resolveJobRelativePath(rootDir, worker.logPath || null, {
     label: 'logPath',
   });
-  const replyPath = resolveJobRelativePath(rootDir, worker.replyPath || job?.remediationReply?.path || null, {
-    label: 'replyPath',
-  });
+  const storedReplyPath = worker.replyPath || job?.remediationReply?.path || null;
+  let replyPath = expectedHqReplyPath;
+  let legacyReplyPath = join(workspaceDir, '.adversarial-follow-up', 'remediation-reply.json');
+  if (storedReplyPath && isAbsolute(storedReplyPath)) {
+    replyPath = resolveHqReplyArtifactPath(storedReplyPath, { hqRoot });
+  } else if (storedReplyPath) {
+    legacyReplyPath = resolveJobRelativePath(rootDir, storedReplyPath, {
+      label: 'replyPath',
+    });
+  }
 
   assertContainedInWorkspace('outputPath', workspaceDir, outputPath);
   assertContainedInWorkspace('logPath', workspaceDir, logPath);
-  assertContainedInWorkspace('replyPath', workspaceDir, replyPath);
+  if (legacyReplyPath) {
+    assertContainedInWorkspace('legacyReplyPath', workspaceDir, legacyReplyPath);
+  }
 
   return {
     workspaceDir,
     outputPath,
     logPath,
     replyPath,
+    legacyReplyPath,
   };
 }
 
@@ -1704,6 +1775,24 @@ async function reconcileFollowUpJob({
       };
     } catch (err) {
       replyProbe = { state: 'invalid', error: err };
+    }
+  } else if (
+    paths.legacyReplyPath
+    && paths.legacyReplyPath !== paths.replyPath
+    && existsSync(paths.legacyReplyPath)
+  ) {
+    log.warn?.(
+      `[follow-up-remediation] Legacy remediation reply fallback used for ${job.jobId}; ` +
+      `worktree reply paths are deprecated and will be removed after the cutover window.`
+    );
+    try {
+      replyProbe = {
+        state: 'valid',
+        reply: readRemediationReplyArtifact(paths.legacyReplyPath, { expectedJob: job }),
+        fallbackPath: paths.legacyReplyPath,
+      };
+    } catch (err) {
+      replyProbe = { state: 'invalid', error: err, fallbackPath: paths.legacyReplyPath };
     }
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
@@ -2236,6 +2325,12 @@ async function consumeNextFollowUpJob({
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
     resetWorkspaceDir(artifactDir);
     mkdirSync(artifactDir, { recursive: true });
+    const hqRoot = resolveHqRoot();
+    const { replyDir, replyPath } = resolveHqReplyPath({
+      hqRoot,
+      launchRequestId: resolveReplyStorageKey(claimed.job),
+    });
+    mkdirSync(replyDir, { recursive: true });
 
     const promptPath = join(artifactDir, 'prompt.md');
     // Output / log filenames are kept generic across worker classes so
@@ -2245,12 +2340,10 @@ async function consumeNextFollowUpJob({
     // reconciler agree on.
     const outputPath = join(artifactDir, 'codex-last-message.md');
     const logPath = join(artifactDir, 'codex-worker.log');
-    const replyPath = join(artifactDir, 'remediation-reply.json');
-    const relativeReplyPath = relative(rootDir, replyPath);
     const governingDocContext = collectWorkspaceDocContext(workspaceDir);
     const prompt = buildRemediationPrompt(claimed.job, {
       template: promptTemplate,
-      remediationReplyPath: relativeReplyPath,
+      remediationReplyPath: replyPath,
       governingDocContext,
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
@@ -2276,7 +2369,7 @@ async function consumeNextFollowUpJob({
         promptPath: relative(rootDir, worker.promptPath),
         outputPath: relative(rootDir, worker.outputPath),
         logPath: relative(rootDir, worker.logPath),
-        replyPath: relativeReplyPath,
+        replyPath,
       },
     });
 
@@ -2484,7 +2577,10 @@ export {
   reconcileInProgressFollowUpJobs,
   resolveCodexCliPath,
   resolveCodexAuthPath,
+  resolveHqReplyPath,
+  resolveHqRoot,
   resolveJobRelativePath,
+  resolveReplyStorageKey,
   summarizeWorkerFinalMessage,
   assessWorkerLiveness,
   spawnCodexRemediationWorker,

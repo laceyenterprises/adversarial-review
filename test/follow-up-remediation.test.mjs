@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  LEGACY_REPLY_PRE_COMMIT_HOOK_SRC,
   REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
   assertClaudeCodeOAuth,
@@ -167,6 +168,8 @@ function writeValidReply(replyPath, job, overrides = {}) {
 test('buildRemediationPrompt carries job context and follow-up operating rules', () => {
   const prompt = buildRemediationPrompt(makeJob(), {
     template: 'You are a remediation worker.',
+    hqRoot: '/tmp/hq-root',
+    launchRequestId: 'lrq_123',
   });
 
   assert.match(prompt, /Trusted Job Metadata/);
@@ -180,7 +183,7 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /Do not create an autonomous retry loop inside the worker/);
   assert.match(prompt, /Do not open a new PR/);
   assert.match(prompt, /Use OAuth-backed authentication only/);
-  assert.match(prompt, /Write a machine-readable remediation reply JSON file/);
+  assert.match(prompt, /Required Remediation Reply Contract/);
   assert.match(prompt, /"kind": "adversarial-review-remediation-reply"/);
   assert.match(prompt, /"requested": false/);
   assert.match(prompt, /Handle token refresh before retrying/);
@@ -195,6 +198,8 @@ test('buildRemediationPrompt includes the durable remediation reply artifact pat
   const prompt = buildRemediationPrompt(makeJob(), {
     template: 'You are a remediation worker.',
     remediationReplyPath: replyPath,
+    hqRoot,
+    launchRequestId: 'lrq_123',
   });
 
   assert.match(
@@ -206,6 +211,8 @@ test('buildRemediationPrompt includes the durable remediation reply artifact pat
 test('buildRemediationPrompt can include governing repo docs and fallback guidance', () => {
   const prompt = buildRemediationPrompt(makeJob(), {
     template: 'You are a remediation worker.',
+    hqRoot: '/tmp/hq-root',
+    launchRequestId: 'lrq_123',
     governingDocContext: '\n\n## Additional Governing Repo Docs\n### README.md\n\n```md\nhello\n```',
   });
 
@@ -550,11 +557,17 @@ test('prepareWorkspaceForJob installs the worker-provenance hook in the workspac
   });
 
   const hookPath = path.join(result.workspaceDir, '.git', 'hooks', 'commit-msg');
+  const preCommitHookPath = path.join(result.workspaceDir, '.git', 'hooks', 'pre-commit');
   assert.equal(existsSync(hookPath), true, 'hook should be installed at .git/hooks/commit-msg');
+  assert.equal(existsSync(preCommitHookPath), true, 'legacy reply guard should be installed at .git/hooks/pre-commit');
   // Hook content should match the source.
   assert.equal(
     readFileSync(hookPath, 'utf8'),
     readFileSync(WORKER_PROVENANCE_HOOK_SRC, 'utf8')
+  );
+  assert.equal(
+    readFileSync(preCommitHookPath, 'utf8'),
+    readFileSync(LEGACY_REPLY_PRE_COMMIT_HOOK_SRC, 'utf8')
   );
 });
 
@@ -2327,7 +2340,7 @@ test('integration: real git commit runs the chained pre-existing hook before our
 
 // ── OAuth pre-flight queue semantics ───────────────────────────────────────
 
-test('consumeNextFollowUpJob moves a claimed job to failed/ when claude-code OAuth pre-flight throws', async () => {
+test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre-flight throws', async () => {
   // The bug this guards against: if OAuth pre-flight runs *outside* the
   // failure-handled try/catch, an expired/missing OAuth session leaves
   // the already-claimed job stranded in `in-progress/` while the process
@@ -2335,12 +2348,9 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when claude-code OAu
   // failures become terminal queue state (failed/), not orphaned claims.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
-  // Override the claude CLI path to a bare command name so the pre-flight
-  // does not hit the existsSync gate before our injected execFileImpl.
-  const prevCliPath = process.env.CLAUDE_CODE_CLI_PATH;
-  const prevCli = process.env.CLAUDE_CLI;
-  delete process.env.CLAUDE_CODE_CLI_PATH;
-  delete process.env.CLAUDE_CLI;
+  const prevAuthPath = process.env.CODEX_AUTH_PATH;
+  const prevHome = process.env.HOME;
+  const missingAuthPath = path.join(rootDir, 'missing-auth.json');
 
   try {
     createFollowUpJob({
@@ -2348,28 +2358,23 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when claude-code OAu
       repo: 'laceyenterprises/clio',
       prNumber: 7,
       reviewerModel: 'codex',
-      builderTag: 'claude-code',
+      builderTag: 'codex',
       linearTicketId: 'LAC-207',
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
       reviewPostedAt: '2026-04-21T08:00:00.000Z',
       critical: true,
     });
 
-    // execFileImpl: fail the `claude auth status --json` probe.
-    const execFileImpl = async (cmd, args) => {
-      if (String(cmd).endsWith('claude') && args[0] === 'auth' && args[1] === 'status') {
-        throw new Error('not logged in');
-      }
-      throw new Error(`unexpected execFile call: ${cmd} ${args.join(' ')}`);
-    };
+    process.env.CODEX_AUTH_PATH = missingAuthPath;
+    process.env.HOME = rootDir;
 
     await assert.rejects(
       () => consumeNextFollowUpJob({
         rootDir,
-        execFileImpl,
         spawnImpl: () => { throw new Error('worker should not have spawned'); },
         now: () => '2026-04-21T10:00:00.000Z',
         promptTemplate: 'Remediation prompt template.',
+        resolvePRLifecycleImpl: async () => null,
       }),
       (err) => {
         assert.equal(err.isOAuthError, true, 'OAuth error should propagate');
@@ -2395,13 +2400,13 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when claude-code OAu
     const failedJob = JSON.parse(readFileSync(path.join(failedDir, failedFiles[0]), 'utf8'));
     assert.equal(failedJob.status, 'failed');
     assert.equal(failedJob.failure.code, 'oauth-preflight-failure');
-    assert.equal(failedJob.failure.oauthError.model, 'claude-code');
-    assert.match(failedJob.failure.oauthError.reason, /not logged in/);
+    assert.equal(failedJob.failure.oauthError.model, 'codex');
+    assert.match(failedJob.failure.oauthError.reason, /auth\.json missing/i);
   } finally {
-    if (prevCliPath === undefined) delete process.env.CLAUDE_CODE_CLI_PATH;
-    else process.env.CLAUDE_CODE_CLI_PATH = prevCliPath;
-    if (prevCli === undefined) delete process.env.CLAUDE_CLI;
-    else process.env.CLAUDE_CLI = prevCli;
+    if (prevAuthPath === undefined) delete process.env.CODEX_AUTH_PATH;
+    else process.env.CODEX_AUTH_PATH = prevAuthPath;
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
   }
 });
 

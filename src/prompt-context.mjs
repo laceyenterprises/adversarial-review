@@ -17,12 +17,21 @@ function formatFencedBlock(text, language = 'text') {
 }
 
 export function interpolatePromptTemplate(template, variables = {}) {
-  return String(template ?? '').replace(/\$\{([A-Z0-9_]+)\}/g, (match, key) => {
+  const content = String(template ?? '');
+  const missing = new Set();
+  const rendered = content.replace(/\$\{([A-Z0-9_]+)\}/g, (match, key) => {
     if (!Object.prototype.hasOwnProperty.call(variables, key)) {
+      missing.add(key);
       return match;
     }
     return String(variables[key]);
   });
+  if (missing.size) {
+    throw new Error(
+      `interpolatePromptTemplate missing variables: ${[...missing].sort().join(', ')}`
+    );
+  }
+  return rendered;
 }
 
 export function parseGitHubBlobPath(url, expectedRepo) {

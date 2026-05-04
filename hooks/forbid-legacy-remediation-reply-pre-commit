@@ -1,0 +1,24 @@
+#!/bin/bash
+# managed-by: adversarial-review-forbid-legacy-remediation-reply
+# pre-commit hook rejecting staged legacy remediation reply artifacts
+
+set -eu
+
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+CHAINED_HOOK="$HOOK_DIR/pre-commit.forbid-legacy-remediation-reply-chain"
+if [[ -x "$CHAINED_HOOK" ]]; then
+  "$CHAINED_HOOK" "$@"
+fi
+
+staged_paths="$(
+  git diff --cached --name-only --diff-filter=ACMR -- .adversarial-follow-up 2>/dev/null || true
+)"
+
+if [[ -n "$staged_paths" ]]; then
+  echo "pre-commit: refusing to commit staged .adversarial-follow-up artifacts." >&2
+  echo "Use the HQ remediation reply artifact path instead and unstage the legacy path before committing." >&2
+  echo "Suggested cleanup:" >&2
+  echo "  git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true" >&2
+  echo "  git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true" >&2
+  exit 1
+fi

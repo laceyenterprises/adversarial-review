@@ -1,14 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  LEGACY_REPLY_PRE_COMMIT_HOOK_SRC,
   REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
   REMEDIATION_REPLY_SENTINEL_FILENAME,
   buildRemediationPrompt,
   consumeNextFollowUpJob,
+  installLegacyReplyGuardHook,
   prepareHqReplyLandingPad,
   reconcileFollowUpJob,
   resolveHqReplyPath,
@@ -130,7 +132,13 @@ function makeQueuedJob(rootDir, overrides = {}) {
 
 test('buildRemediationPrompt instructs workers to use only the HQ reply path and forbids the legacy worktree path', () => {
   const prompt = buildRemediationPrompt(makeJob(), {
-    template: 'Reply path: ${HQ_ROOT}/dispatch/remediation-replies/${LRQ_ID}/remediation-reply.json',
+    template: [
+      'Reply path: ${HQ_ROOT}/dispatch/remediation-replies/${LRQ_ID}/remediation-reply.json',
+      'Do NOT write or commit `.adversarial-follow-up/remediation-reply.json`.',
+      'Cleanup:',
+      `- ${REMEDIATION_LEGACY_UNSTAGE_COMMANDS[0]}`,
+      `- ${REMEDIATION_LEGACY_UNSTAGE_COMMANDS[1]}`,
+    ].join('\n'),
     remediationReplyPath: '/tmp/hq/dispatch/remediation-replies/lrq_428/remediation-reply.json',
     hqRoot: '/tmp/hq',
     launchRequestId: 'lrq_428',
@@ -143,8 +151,21 @@ test('buildRemediationPrompt instructs workers to use only the HQ reply path and
   }
 });
 
-test('prepareHqReplyLandingPad creates the canonical HQ directory and sentinel', () => {
+test('buildRemediationPrompt throws when HQ reply interpolation inputs are missing', () => {
+  assert.throws(
+    () => buildRemediationPrompt(makeJob(), {
+      template: 'Reply path: ${HQ_ROOT}/dispatch/remediation-replies/${LRQ_ID}/remediation-reply.json',
+      launchRequestId: 'lrq_428',
+    }),
+    /buildRemediationPrompt requires hqRoot and launchRequestId/
+  );
+});
+
+test('prepareHqReplyLandingPad creates the canonical HQ directory, removes stale replies, and writes the sentinel', () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-hq-'));
+  const staleReplyPath = path.join(hqRoot, 'dispatch', 'remediation-replies', 'lrq_428', 'remediation-reply.json');
+  mkdirSync(path.dirname(staleReplyPath), { recursive: true });
+  writeFileSync(staleReplyPath, '{"stale":true}\n', 'utf8');
   const landingPad = prepareHqReplyLandingPad({
     hqRoot,
     launchRequestId: 'lrq_428',
@@ -154,6 +175,7 @@ test('prepareHqReplyLandingPad creates the canonical HQ directory and sentinel',
     landingPad.replyPath,
     path.join(hqRoot, 'dispatch', 'remediation-replies', 'lrq_428', 'remediation-reply.json'),
   );
+  assert.equal(existsSync(landingPad.replyPath), false);
   assert.equal(existsSync(landingPad.sentinelPath), true);
   assert.equal(
     readFileSync(landingPad.sentinelPath, 'utf8'),
@@ -180,7 +202,10 @@ test('consumeNextFollowUpJob exports HQ_ROOT/LRQ_ID and pre-creates the HQ landi
     let capturedEnv;
     const result = await consumeNextFollowUpJob({
       rootDir,
-      promptTemplate: 'Reply path: ${HQ_ROOT}/dispatch/remediation-replies/${LRQ_ID}/remediation-reply.json',
+      promptTemplate: [
+        'Reply path: ${HQ_ROOT}/dispatch/remediation-replies/${LRQ_ID}/remediation-reply.json',
+        'Do NOT write or commit `.adversarial-follow-up/remediation-reply.json`; that path is forbidden.',
+      ].join('\n'),
       now: () => '2026-05-04T09:30:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
@@ -229,7 +254,37 @@ test('legacy cleanup commands keep the worktree remediation reply out of the com
   assert.doesNotMatch(diff, /\.adversarial-follow-up\/remediation-reply\.json/);
 });
 
-test('reconcileFollowUpJob prefers the HQ reply path and warns only on the legacy fallback', async () => {
+test('installLegacyReplyGuardHook rejects staged legacy remediation replies in real git commits', () => {
+  const repoDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-git-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', repoDir], { stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir, stdio: 'ignore' });
+  installLegacyReplyGuardHook(repoDir);
+
+  const hookPath = path.join(repoDir, '.git', 'hooks', 'pre-commit');
+  assert.equal(existsSync(hookPath), true);
+  assert.equal(
+    readFileSync(hookPath, 'utf8'),
+    readFileSync(LEGACY_REPLY_PRE_COMMIT_HOOK_SRC, 'utf8')
+  );
+
+  writeFileSync(path.join(repoDir, 'keep.txt'), 'base\n', 'utf8');
+  execFileSync('git', ['add', 'keep.txt'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'base'], { cwd: repoDir, stdio: 'ignore' });
+
+  mkdirSync(path.join(repoDir, '.adversarial-follow-up'), { recursive: true });
+  writeFileSync(path.join(repoDir, '.adversarial-follow-up', 'remediation-reply.json'), '{"legacy":true}\n', 'utf8');
+  execFileSync('git', ['add', '.adversarial-follow-up/remediation-reply.json'], { cwd: repoDir, stdio: 'ignore' });
+
+  const result = spawnSync('git', ['commit', '-m', 'forbidden'], {
+    cwd: repoDir,
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /refusing to commit staged \.adversarial-follow-up artifacts/i);
+});
+
+test('reconcileFollowUpJob prefers the HQ reply path, rejects forbidden legacy replies, and warns only on migration-window fallback', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'hq');
   const { claimed } = makeQueuedJob(rootDir);
@@ -282,6 +337,56 @@ test('reconcileFollowUpJob prefers the HQ reply path and warns only on the legac
 
     assert.equal(result.action, 'completed');
     assert.equal(result.job.remediationReply.path, replyPath);
+    assert.deepEqual(warnings, []);
+  });
+
+  const forbiddenRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const forbiddenHqRoot = path.join(forbiddenRoot, 'hq');
+  const { claimed: forbiddenClaimed } = makeQueuedJob(forbiddenRoot, { prNumber: 430 });
+  const forbiddenWorkspaceDir = path.join(forbiddenRoot, 'data', 'follow-up-jobs', 'workspaces', forbiddenClaimed.job.jobId);
+  const forbiddenArtifactDir = path.join(forbiddenWorkspaceDir, '.adversarial-follow-up');
+  mkdirSync(forbiddenArtifactDir, { recursive: true });
+  const forbiddenOutputPath = path.join(forbiddenArtifactDir, 'codex-last-message.md');
+  const forbiddenLegacyReplyPath = path.join(forbiddenArtifactDir, 'remediation-reply.json');
+  writeFileSync(forbiddenOutputPath, 'worker output\n', 'utf8');
+  writeValidReply(forbiddenLegacyReplyPath, forbiddenClaimed.job, {
+    addressed: [{ finding: 'legacy path used', action: 'worker wrote the wrong artifact path' }],
+    reReview: { requested: true, reason: 'should not matter' },
+  });
+  const forbiddenReply = resolveHqReplyPath({
+    hqRoot: forbiddenHqRoot,
+    launchRequestId: forbiddenClaimed.job.jobId,
+  });
+  mkdirSync(forbiddenReply.replyDir, { recursive: true });
+
+  const forbiddenSpawned = markFollowUpJobSpawned({
+    jobPath: forbiddenClaimed.jobPath,
+    spawnedAt: '2026-05-04T09:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9003,
+      state: 'spawned',
+      workspaceDir: path.relative(forbiddenRoot, forbiddenWorkspaceDir),
+      outputPath: path.relative(forbiddenRoot, forbiddenOutputPath),
+      logPath: path.relative(forbiddenRoot, path.join(forbiddenArtifactDir, 'codex-worker.log')),
+      replyPath: forbiddenReply.replyPath,
+    },
+  });
+
+  await withHqRootEnv(forbiddenHqRoot, async () => {
+    const warnings = [];
+    const result = await reconcileFollowUpJob({
+      rootDir: forbiddenRoot,
+      job: forbiddenSpawned.job,
+      jobPath: forbiddenSpawned.jobPath,
+      now: () => '2026-05-04T09:30:00.000Z',
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => null,
+      log: { warn: (message) => warnings.push(message), error: () => {} },
+    });
+
+    assert.equal(result.action, 'failed');
+    assert.equal(result.job.failure.code, 'legacy-remediation-reply-forbidden');
     assert.deepEqual(warnings, []);
   });
 

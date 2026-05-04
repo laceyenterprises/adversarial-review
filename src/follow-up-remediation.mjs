@@ -45,6 +45,7 @@ const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
 ];
+const LEGACY_REPLY_PRE_COMMIT_HOOK_SRC = join(ROOT, 'hooks', 'forbid-legacy-remediation-reply-pre-commit');
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -92,6 +93,8 @@ const WORKER_PROVENANCE_HOOK_SENTINEL = 'managed-by: adversarial-review-worker-p
 // provenance trailers, so existing commit policy (DCO/signoff, message
 // validation, etc.) is preserved instead of silently disabled.
 const WORKER_PROVENANCE_CHAINED_HOOK_FILENAME = 'commit-msg.worker-provenance-chain';
+const LEGACY_REPLY_PRE_COMMIT_HOOK_SENTINEL = 'managed-by: adversarial-review-forbid-legacy-remediation-reply';
+const LEGACY_REPLY_PRE_COMMIT_CHAINED_HOOK_FILENAME = 'pre-commit.forbid-legacy-remediation-reply-chain';
 
 // Each class supports an env-var override for ops flexibility:
 //
@@ -188,6 +191,7 @@ function resolveHqReplyPath({ hqRoot, launchRequestId }) {
 function prepareHqReplyLandingPad({ hqRoot, launchRequestId }) {
   const { replyDir, replyPath } = resolveHqReplyPath({ hqRoot, launchRequestId });
   mkdirSync(replyDir, { recursive: true });
+  rmSync(replyPath, { force: true });
   const sentinelPath = join(replyDir, REMEDIATION_REPLY_SENTINEL_FILENAME);
   writeFileSync(sentinelPath, REMEDIATION_REPLY_SENTINEL_CONTENTS, 'utf8');
   return { replyDir, replyPath, sentinelPath };
@@ -502,6 +506,7 @@ function spawnClaudeCodeRemediationWorker({
     LRQ_ID: launchRequestId,
   };
   if (jobId) env.WORKER_JOB_ID = jobId;
+  else delete env.WORKER_JOB_ID;
 
   // Claude Code in --print mode reads the prompt from stdin and writes the
   // final assistant message to stdout. We capture stdout directly to
@@ -817,6 +822,9 @@ function buildRemediationPrompt(job, {
   launchRequestId = null,
   governingDocContext = '',
 } = {}) {
+  if (!hqRoot || !launchRequestId) {
+    throw new Error('buildRemediationPrompt requires hqRoot and launchRequestId');
+  }
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
   // The contract example uses empty arrays for the per-finding lists
@@ -859,8 +867,8 @@ function buildRemediationPrompt(job, {
     remediationReplyArtifact: remediationReplyPath,
   };
   const interpolatedTemplate = interpolatePromptTemplate(template, {
-    HQ_ROOT: hqRoot || '[missing HQ_ROOT]',
-    LRQ_ID: launchRequestId || '[missing LRQ_ID]',
+    HQ_ROOT: hqRoot,
+    LRQ_ID: launchRequestId,
   });
 
   return `${interpolatedTemplate}
@@ -883,14 +891,9 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
 - Run the smallest relevant validation before finishing.
-- Write the remediation reply JSON ONLY to the HQ artifact path from the trusted metadata. Do NOT write or commit \`.adversarial-follow-up/remediation-reply.json\`; that path is forbidden.
-- Before \`git commit\`, run the legacy artifact cleanup commands below so \`.adversarial-follow-up/\` stays out of the PR commit:
-  - \`${REMEDIATION_LEGACY_UNSTAGE_COMMANDS[0]}\`
-  - \`${REMEDIATION_LEGACY_UNSTAGE_COMMANDS[1]}\`
 - Commit the remediation changes and push the PR branch.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
-- Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.
 - Convergence rule (load-bearing): if you believe the review findings are addressed, set \`reReview.requested\` to \`true\` in that JSON reply — this is the default success path. The PR's existing \`Request changes\` verdict is what blocks the automerge gate, and only a fresh adversarial pass can replace it. Set \`reReview.requested\` to \`false\` ONLY when you are deliberately exiting and a human needs to step in (use the \`blockers\` array to explain). Do not rely on prose alone.
 - When \`reReview.requested\` is \`true\`, \`reReview.reason\` MUST be a short non-empty string explaining why the PR is ready for another adversarial pass — \`null\` is rejected by the validator. The \`reReview.reason\` field is \`null\` ONLY when \`requested\` is \`false\`.
 - In your final message, report validation run and files changed.
@@ -953,6 +956,7 @@ async function prepareWorkspaceForJob({
   // current source — guaranteeing the deployed hook never drifts from
   // the version checked into this branch.
   installWorkerProvenanceHook(workspaceDir);
+  installLegacyReplyGuardHook(workspaceDir);
 
   await execFileImpl('gh', ['pr', 'checkout', String(job.prNumber)], {
     cwd: workspaceDir,
@@ -991,12 +995,38 @@ function resolveEffectiveGitHooksDir(workspaceDir, { execFileSyncImpl = execFile
 }
 
 function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFileSync } = {}) {
+  return installManagedGitHook(workspaceDir, {
+    hookName: 'commit-msg',
+    sourcePath: WORKER_PROVENANCE_HOOK_SRC,
+    sentinel: WORKER_PROVENANCE_HOOK_SENTINEL,
+    chainedHookFilename: WORKER_PROVENANCE_CHAINED_HOOK_FILENAME,
+    execFileSyncImpl,
+  });
+}
+
+function installLegacyReplyGuardHook(workspaceDir, { execFileSyncImpl = execFileSync } = {}) {
+  return installManagedGitHook(workspaceDir, {
+    hookName: 'pre-commit',
+    sourcePath: LEGACY_REPLY_PRE_COMMIT_HOOK_SRC,
+    sentinel: LEGACY_REPLY_PRE_COMMIT_HOOK_SENTINEL,
+    chainedHookFilename: LEGACY_REPLY_PRE_COMMIT_CHAINED_HOOK_FILENAME,
+    execFileSyncImpl,
+  });
+}
+
+function installManagedGitHook(workspaceDir, {
+  hookName,
+  sourcePath,
+  sentinel,
+  chainedHookFilename,
+  execFileSyncImpl = execFileSync,
+} = {}) {
   const hooksDir = resolveEffectiveGitHooksDir(workspaceDir, { execFileSyncImpl });
   if (!existsSync(hooksDir)) {
     mkdirSync(hooksDir, { recursive: true });
   }
-  const dest = join(hooksDir, 'commit-msg');
-  const chainedDest = join(hooksDir, WORKER_PROVENANCE_CHAINED_HOOK_FILENAME);
+  const dest = join(hooksDir, hookName);
+  const chainedDest = join(hooksDir, chainedHookFilename);
 
   // If a commit-msg hook already exists at the dest and it isn't ours, move
   // it aside so our wrapper can chain to it instead of clobbering it. Repo
@@ -1009,7 +1039,7 @@ function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFile
     } catch {
       existing = '';
     }
-    const isAlreadyOurs = existing.includes(WORKER_PROVENANCE_HOOK_SENTINEL);
+    const isAlreadyOurs = existing.includes(sentinel);
     if (!isAlreadyOurs && !existsSync(chainedDest)) {
       renameSync(dest, chainedDest);
       try {
@@ -1026,7 +1056,7 @@ function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFile
     // the source on this branch.
   }
 
-  copyFileSync(WORKER_PROVENANCE_HOOK_SRC, dest);
+  copyFileSync(sourcePath, dest);
   chmodSync(dest, 0o755);
   return dest;
 }
@@ -1064,6 +1094,8 @@ function spawnCodexRemediationWorker({
   };
   if (jobId) {
     env.WORKER_JOB_ID = jobId;
+  } else {
+    delete env.WORKER_JOB_ID;
   }
 
   const promptFd = openSync(promptPath, 'r');
@@ -1290,9 +1322,11 @@ function buildReconciliationPaths(rootDir, job) {
   const storedReplyPath = worker.replyPath || job?.remediationReply?.path || null;
   let replyPath = expectedHqReplyPath;
   let legacyReplyPath = join(workspaceDir, '.adversarial-follow-up', 'remediation-reply.json');
+  let allowLegacyReplyFallback = false;
   if (storedReplyPath && isAbsolute(storedReplyPath)) {
     replyPath = resolveHqReplyArtifactPath(storedReplyPath, { hqRoot });
   } else if (storedReplyPath) {
+    allowLegacyReplyFallback = true;
     legacyReplyPath = resolveJobRelativePath(rootDir, storedReplyPath, {
       label: 'replyPath',
     });
@@ -1310,6 +1344,7 @@ function buildReconciliationPaths(rootDir, job) {
     logPath,
     replyPath,
     legacyReplyPath,
+    allowLegacyReplyFallback,
   };
 }
 
@@ -1829,18 +1864,29 @@ async function reconcileFollowUpJob({
     && paths.legacyReplyPath !== paths.replyPath
     && existsSync(paths.legacyReplyPath)
   ) {
-    log.warn?.(
-      `[follow-up-remediation] WARNING legacy remediation reply fallback used for ${job.jobId}; ` +
-      `worker wrote .adversarial-follow-up/remediation-reply.json instead of HQ storage.`
-    );
-    try {
+    if (!paths.allowLegacyReplyFallback) {
       replyProbe = {
-        state: 'valid',
-        reply: readRemediationReplyArtifact(paths.legacyReplyPath, { expectedJob: job }),
+        state: 'forbidden-legacy',
+        error: new Error(
+          `Legacy remediation reply path is forbidden for ${job.jobId}; ` +
+          `expected HQ reply at ${paths.replyPath}`
+        ),
         fallbackPath: paths.legacyReplyPath,
       };
-    } catch (err) {
-      replyProbe = { state: 'invalid', error: err, fallbackPath: paths.legacyReplyPath };
+    } else {
+      log.warn?.(
+        `[follow-up-remediation] WARNING legacy remediation reply fallback used for ${job.jobId}; ` +
+        `worker wrote .adversarial-follow-up/remediation-reply.json instead of HQ storage.`
+      );
+      try {
+        replyProbe = {
+          state: 'valid',
+          reply: readRemediationReplyArtifact(paths.legacyReplyPath, { expectedJob: job }),
+          fallbackPath: paths.legacyReplyPath,
+        };
+      } catch (err) {
+        replyProbe = { state: 'invalid', error: err, fallbackPath: paths.legacyReplyPath };
+      }
     }
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
@@ -1860,10 +1906,14 @@ async function reconcileFollowUpJob({
   // worker actually did instead of just "did not produce a usable
   // remediation reply". The salvaged reply is best-effort and not
   // persisted to the job record.
-  if (replyProbe.state === 'invalid') {
+  if (replyProbe.state === 'invalid' || replyProbe.state === 'forbidden-legacy') {
     const err = replyProbe.error;
-    const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
-    const salvagedReply = paths.replyPath ? salvagePartialRemediationReply(paths.replyPath) : null;
+    const failureCode = replyProbe.state === 'forbidden-legacy'
+      ? 'legacy-remediation-reply-forbidden'
+      : 'invalid-remediation-reply';
+    const invalidReplyFailure = { code: failureCode, message: err.message };
+    const salvagedReplyPath = replyProbe.fallbackPath || paths.replyPath;
+    const salvagedReply = salvagedReplyPath ? salvagePartialRemediationReply(salvagedReplyPath) : null;
     const { commentDelivery: invalidReplyDelivery } = buildReconcileCommentDelivery({
       job, worker, action: 'failed', reply: salvagedReply, failure: invalidReplyFailure, now,
     });
@@ -1871,7 +1921,7 @@ async function reconcileFollowUpJob({
       rootDir,
       jobPath,
       failedAt: completedAt,
-      failureCode: 'invalid-remediation-reply',
+      failureCode,
       error: err,
       remediationWorker: {
         ...workerState,
@@ -2626,8 +2676,10 @@ async function main() {
 
 export {
   FOLLOW_UP_PROMPT_PATH,
+  LEGACY_REPLY_PRE_COMMIT_HOOK_SRC,
   REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
+  installLegacyReplyGuardHook,
   installWorkerProvenanceHook,
   OAuthError,
   StartupContractError,

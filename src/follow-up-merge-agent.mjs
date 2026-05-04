@@ -8,8 +8,7 @@ import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 const execFileAsync = promisify(execFile);
 
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
-const DEFAULT_DISPATCH_WINDOW_MINUTES = 10;
-const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck']);
+const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'do-not-merge']);
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED', 'WAITING', 'REQUESTED']);
 
@@ -31,12 +30,29 @@ function normalizeLabelNames(labels) {
 function extractOperatorNotes(prBody) {
   const text = String(prBody ?? '').trim();
   if (!text) return null;
-  return text.slice(0, 2_000);
+  return [
+    'BEGIN UNTRUSTED PR BODY NOTES',
+    text.slice(0, 2_000),
+    'END UNTRUSTED PR BODY NOTES',
+  ].join('\n');
 }
 
 function extractReviewVerdict(reviewBody) {
   const match = String(reviewBody ?? '').match(/##\s+Verdict\s*\n([^\n]+)/i);
   return match ? match[1].trim() : null;
+}
+
+function normalizeReviewVerdict(verdict) {
+  const text = String(verdict ?? '')
+    .replace(/[*_`~]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!text) return null;
+  if (text.startsWith('request changes')) return 'request-changes';
+  if (text.startsWith('comment only')) return 'comment-only';
+  if (text.startsWith('approved')) return 'approved';
+  return 'unknown';
 }
 
 function summarizeChecksConclusion(statusCheckRollup) {
@@ -78,6 +94,19 @@ function mergeAgentPromptDir(rootDir) {
   return join(getFollowUpJobDir(rootDir, 'pending'), '..', 'merge-agent-prompts');
 }
 
+function sanitizeDispatchPathSegment(value) {
+  return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
+function mergeAgentDispatchFilePath(rootDir, job) {
+  const safeRepo = sanitizeDispatchPathSegment(String(job?.repo ?? '').replace(/\//g, '__'));
+  const safeSha = sanitizeDispatchPathSegment(String(job?.headSha || 'no-sha'));
+  return join(
+    mergeAgentDispatchDir(rootDir),
+    `${safeRepo}-pr-${Number(job?.prNumber)}-${safeSha}.json`
+  );
+}
+
 function listMergeAgentDispatches(rootDir) {
   const dir = mergeAgentDispatchDir(rootDir);
   try {
@@ -93,6 +122,14 @@ function listMergeAgentDispatches(rootDir) {
       .filter(Boolean);
   } catch {
     return [];
+  }
+}
+
+function getRecordedMergeAgentDispatch(rootDir, job) {
+  try {
+    return JSON.parse(readFileSync(mergeAgentDispatchFilePath(rootDir, job), 'utf8'));
+  } catch {
+    return null;
   }
 }
 
@@ -138,12 +175,21 @@ function buildMergeAgentPrompt(job) {
 }
 
 function pickMergeAgentDispatch(job, {
-  now = isoNow(),
   recentDispatches = [],
-  windowMinutes = DEFAULT_DISPATCH_WINDOW_MINUTES,
 } = {}) {
-  if (String(job?.lastVerdict ?? '').trim() === 'Request changes') {
+  const normalizedVerdict = normalizeReviewVerdict(job?.lastVerdict);
+  if (normalizedVerdict === null) {
+    return 'skip-no-verdict';
+  }
+  if (normalizedVerdict === 'request-changes') {
     return 'skip-request-changes';
+  }
+  if (normalizedVerdict === 'unknown') {
+    return 'skip-unknown-verdict';
+  }
+
+  if (String(job?.prState ?? '').trim().toLowerCase() !== 'open' || Boolean(job?.merged)) {
+    return 'skip-pr-not-open';
   }
 
   if (String(job?.mergeable ?? '').trim().toUpperCase() !== 'MERGEABLE') {
@@ -158,20 +204,31 @@ function pickMergeAgentDispatch(job, {
   const checksConclusion = job?.checksConclusion == null
     ? null
     : String(job.checksConclusion).trim().toUpperCase();
-  if (checksConclusion !== null && checksConclusion !== 'SUCCESS') {
+  if (checksConclusion === 'PENDING') {
     return 'skip-checks-pending';
   }
+  if (checksConclusion !== null && checksConclusion !== 'SUCCESS') {
+    return 'skip-checks-failed';
+  }
 
-  const windowMs = Math.max(0, Number(windowMinutes) || 0) * 60 * 1000;
-  const nowMs = Date.parse(now);
+  const latestFollowUpJobStatus = String(job?.latestFollowUpJobStatus ?? '').trim().toLowerCase();
+  if (latestFollowUpJobStatus === 'pending' || latestFollowUpJobStatus === 'in-progress') {
+    return 'skip-remediation-active';
+  }
+
+  const remediationCurrentRound = Number(job?.remediationCurrentRound);
+  const remediationMaxRounds = Number(job?.remediationMaxRounds);
+  if (!Number.isFinite(remediationCurrentRound) || !Number.isFinite(remediationMaxRounds) || remediationMaxRounds <= 0) {
+    return 'skip-remediation-state-unknown';
+  }
+  if (remediationCurrentRound < remediationMaxRounds) {
+    return 'skip-remediation-claimable';
+  }
+
   const alreadyDispatched = recentDispatches.some((entry) => (
     String(entry?.repo ?? '') === String(job?.repo ?? '')
     && Number(entry?.prNumber) === Number(job?.prNumber)
     && String(entry?.headSha ?? '') === String(job?.headSha ?? '')
-    && Number.isFinite(Date.parse(entry?.dispatchedAt))
-    && Number.isFinite(nowMs)
-    && (nowMs - Date.parse(entry.dispatchedAt)) >= 0
-    && (nowMs - Date.parse(entry.dispatchedAt)) < windowMs
   ));
   if (alreadyDispatched) {
     return 'skip-already-dispatched';
@@ -188,10 +245,7 @@ function recordMergeAgentDispatch(rootDir, job, {
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
-  const safeRepo = String(job.repo).replace(/\//g, '__');
-  const safeSha = String(job.headSha || 'no-sha').replace(/[^A-Za-z0-9._-]/g, '-');
-  const safeTs = String(dispatchedAt).replace(/[:.]/g, '-');
-  const filePath = join(dir, `${safeRepo}-pr-${job.prNumber}-${safeSha}-${safeTs}.json`);
+  const filePath = mergeAgentDispatchFilePath(rootDir, job);
   const doc = {
     schemaVersion: MERGE_AGENT_DISPATCH_SCHEMA_VERSION,
     repo: job.repo,
@@ -211,12 +265,34 @@ function recordMergeAgentDispatch(rootDir, job, {
 function writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt = isoNow() } = {}) {
   const dir = mergeAgentPromptDir(rootDir);
   mkdirSync(dir, { recursive: true });
-  const safeRepo = String(job.repo).replace(/\//g, '__');
-  const safeSha = String(job.headSha || 'no-sha').replace(/[^A-Za-z0-9._-]/g, '-');
-  const safeTs = String(dispatchedAt).replace(/[:.]/g, '-');
+  const safeRepo = sanitizeDispatchPathSegment(String(job.repo).replace(/\//g, '__'));
+  const safeSha = sanitizeDispatchPathSegment(String(job.headSha || 'no-sha'));
+  const safeTs = sanitizeDispatchPathSegment(String(dispatchedAt));
   const filePath = join(dir, `${safeRepo}-pr-${job.prNumber}-${safeSha}-${safeTs}.md`);
   writeFileSync(filePath, prompt, 'utf8');
   return filePath;
+}
+
+function parseMergeAgentDispatchOutput(stdout) {
+  const text = String(stdout ?? '').trim();
+  if (!text) {
+    throw new Error('hq dispatch returned empty stdout');
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {}
+
+  const lines = text.split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const candidate = lines.slice(index).join('\n').trim();
+    if (!candidate.startsWith('{')) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {}
+  }
+
+  throw new Error('hq dispatch did not return machine-readable JSON');
 }
 
 async function dispatchMergeAgentForPR({
@@ -231,9 +307,13 @@ async function dispatchMergeAgentForPR({
   labels,
   operatorNotes,
   lastVerdict,
+  prState = 'open',
+  merged = false,
+  latestFollowUpJobStatus = null,
+  remediationCurrentRound = null,
+  remediationMaxRounds = null,
   execFileImpl = execFileAsync,
   now = isoNow(),
-  windowMinutes = DEFAULT_DISPATCH_WINDOW_MINUTES,
   hqPath = 'hq',
 } = {}) {
   const job = {
@@ -247,12 +327,15 @@ async function dispatchMergeAgentForPR({
     labels,
     operatorNotes,
     lastVerdict,
+    prState,
+    merged,
+    latestFollowUpJobStatus,
+    remediationCurrentRound,
+    remediationMaxRounds,
   };
-  const recentDispatches = listMergeAgentDispatches(rootDir);
+  const recordedDispatch = getRecordedMergeAgentDispatch(rootDir, job);
   const decision = pickMergeAgentDispatch(job, {
-    now,
-    recentDispatches,
-    windowMinutes,
+    recentDispatches: recordedDispatch ? [recordedDispatch] : [],
   });
   if (decision !== 'dispatch') {
     return { decision };
@@ -260,7 +343,6 @@ async function dispatchMergeAgentForPR({
 
   const prompt = buildMergeAgentPrompt(job);
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
-  recordMergeAgentDispatch(rootDir, job, { dispatchedAt: now, prompt });
 
   const args = [
     'dispatch',
@@ -272,11 +354,7 @@ async function dispatchMergeAgentForPR({
     '--prompt', promptPath,
   ];
   const { stdout } = await execFileImpl(hqPath, args, { maxBuffer: 5 * 1024 * 1024 });
-
-  let parsed = null;
-  try {
-    parsed = JSON.parse(String(stdout || '').trim());
-  } catch {}
+  const parsed = parseMergeAgentDispatchOutput(stdout);
 
   recordMergeAgentDispatch(rootDir, job, {
     dispatchedAt: now,
@@ -305,7 +383,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       '--repo',
       repo,
       '--json',
-      'mergeable,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup',
+      'mergeable,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt',
     ],
     { maxBuffer: 5 * 1024 * 1024 }
   );
@@ -320,6 +398,10 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     checksConclusion: summarizeChecksConclusion(parsed.statusCheckRollup),
     labels: parsed.labels || [],
     operatorNotes: extractOperatorNotes(parsed.body),
+    prState: parsed.mergedAt ? 'merged' : String(parsed.state || 'unknown').trim().toLowerCase(),
+    merged: Boolean(parsed.mergedAt),
+    closedAt: parsed.closedAt || null,
+    mergedAt: parsed.mergedAt || null,
   };
 }
 
@@ -331,11 +413,13 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
   return {
     ...candidate,
     lastVerdict: extractReviewVerdict(latestJob?.reviewBody),
+    latestFollowUpJobStatus: latestJob?.status || null,
+    remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
+    remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
   };
 }
 
 export {
-  DEFAULT_DISPATCH_WINDOW_MINUTES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
   dispatchMergeAgentForPR,

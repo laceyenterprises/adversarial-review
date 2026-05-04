@@ -621,6 +621,7 @@ async function pollOnce(octokit) {
     for (const pr of prs) {
       const prNumber = pr.number;
       const prTitle = pr.title;
+      const prState = String(pr.state || '').trim().toLowerCase();
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
       // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()
@@ -634,6 +635,10 @@ async function pollOnce(octokit) {
         existing?.review_status === 'malformed' ||
         existing?.review_status === 'failed-orphan'
       ) {
+        continue;
+      }
+
+      if (prState && prState !== 'open') {
         continue;
       }
 

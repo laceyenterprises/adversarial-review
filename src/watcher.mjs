@@ -22,6 +22,13 @@ import {
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
+  CASCADE_FAILURE_CAP,
+  classifyReviewerFailure,
+  clearCascadeState,
+  recordCascadeFailure,
+  shouldBackoffReviewerSpawn,
+} from './reviewer-cascade.mjs';
+import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
@@ -199,6 +206,10 @@ const stmtMarkMalformed = db.prepare(
 //   - `review_status = 'failed'` — automatic-retry path; the pre-CAS
 //     code treated `failed` as eligible for retry on the next poll,
 //     and we preserve that contract here.
+//   - `review_status = 'pending-upstream'` — upstream-cascade backoff
+//     path. pollOnce gates this state on file-backed nextRetryAfter,
+//     and once that window expires the row may be reclaimed for
+//     another attempt without burning review_attempts.
 //
 // Terminal statuses (`posted`, `malformed`) and the durable in-flight
 // states (`reviewing`, `failed-orphan`) are NOT reclaimable by this
@@ -219,13 +230,19 @@ const stmtMarkAttemptStarted = db.prepare(
          failure_message = NULL
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status IN ('pending', 'failed')`
+     AND review_status IN ('pending', 'failed', 'pending-upstream')`
 );
 const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+);
+const stmtMarkCascadeFailed = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
+);
+const stmtMarkPendingUpstream = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
 );
 const stmtListReviewing = db.prepare(
   "SELECT repo, pr_number, last_attempted_at FROM reviewed_prs WHERE review_status = 'reviewing'"
@@ -380,8 +397,13 @@ async function spawnReviewer({
       .join('\n')
       .trim()
       .slice(0, 4000);
-    console.error(`[watcher] Reviewer failed for ${repo}#${prNumber}:`, detail || err.message);
-    return { ok: false, error: detail || err.message };
+    return {
+      ok: false,
+      error: detail || err.message,
+      exitCode: Number.isInteger(err?.code) ? err.code : null,
+      stderr: String(err?.stderr || detail || ''),
+      failureClass: classifyReviewerFailure(err?.stderr || detail || '', err?.code),
+    };
   } finally {
     inFlightReviewerControllers.delete(controller);
   }
@@ -700,10 +722,6 @@ async function pollOnce(octokit) {
 
       const linearTicketId = extractLinearTicketId(prTitle);
       if (!existing) {
-        console.log(
-          `[watcher] New PR ${repoPath}#${prNumber}: "${prTitle}" → ${route.reviewerModel}` +
-            (linearTicketId ? ` (${linearTicketId})` : '')
-        );
         stmtCreateReviewRow.run(
           repoPath,
           prNumber,
@@ -713,13 +731,29 @@ async function pollOnce(octokit) {
           linearTicketId,
           'pending'
         );
+      }
+      stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
+
+      const current = stmtGetReviewRow.get(repoPath, prNumber);
+      const cascadeGate = shouldBackoffReviewerSpawn(ROOT, {
+        repo: repoPath,
+        prNumber,
+      });
+      if (cascadeGate.shouldBackoff) {
+        continue;
+      }
+
+      if (!existing) {
+        console.log(
+          `[watcher] New PR ${repoPath}#${prNumber}: "${prTitle}" → ${route.reviewerModel}` +
+            (linearTicketId ? ` (${linearTicketId})` : '')
+        );
       } else {
         console.log(
           `[watcher] Retrying PR ${repoPath}#${prNumber}: "${prTitle}" → ${route.reviewerModel}` +
             (linearTicketId ? ` (${linearTicketId})` : '') +
-            ` | previous status=${existing.review_status}`
+            ` | previous status=${current?.review_status || existing.review_status}`
         );
-        stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
       }
 
       const roundBudgetDecision = evaluateRoundBudgetForReview({
@@ -786,8 +820,44 @@ async function pollOnce(octokit) {
 
       if (result.ok) {
         stmtMarkPosted.run(new Date().toISOString(), repoPath, prNumber);
+        clearCascadeState(ROOT, { repo: repoPath, prNumber });
       } else {
-        stmtMarkFailed.run(new Date().toISOString(), result.error || 'Unknown reviewer failure', repoPath, prNumber);
+        const failureAt = new Date().toISOString();
+        const failureClass = result.failureClass || 'unknown';
+        if (failureClass === 'cascade') {
+          const cascadeState = recordCascadeFailure(ROOT, {
+            repo: repoPath,
+            prNumber,
+            failedAt: failureAt,
+          });
+          const cascadeMessage =
+            result.error ||
+            'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.';
+          if (cascadeState.consecutiveCascadeFailures >= CASCADE_FAILURE_CAP) {
+            stmtMarkPendingUpstream.run(failureAt, cascadeMessage, repoPath, prNumber);
+            console.warn(
+              `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveCascadeFailures} cascade failures; will resume when upstream recovers`
+            );
+          } else {
+            stmtMarkCascadeFailed.run(failureAt, cascadeMessage, repoPath, prNumber);
+          }
+          console.warn(
+            `[watcher] Reviewer cascade-class failure on #${prNumber} (consecutive=${cascadeState.consecutiveCascadeFailures}); backing off ${cascadeState.backoffMinutes}m`
+          );
+        } else {
+          clearCascadeState(ROOT, { repo: repoPath, prNumber });
+          stmtMarkFailed.run(failureAt, result.error || 'Unknown reviewer failure', repoPath, prNumber);
+          const updatedRow = stmtGetReviewRow.get(repoPath, prNumber);
+          if (failureClass === 'bug') {
+            console.warn(
+              `[watcher] Reviewer bug-class failure on #${prNumber} (attempt ${updatedRow.review_attempts}/${1 + Number(maxRemediationRounds || 0)})`
+            );
+          } else {
+            console.warn(
+              `[watcher] Reviewer unknown-class failure on #${prNumber}; counting against attempt budget (${updatedRow.review_attempts}/${1 + Number(maxRemediationRounds || 0)})`
+            );
+          }
+        }
       }
 
       // Sync prlt after each new PR picked up
@@ -901,6 +971,7 @@ if (isMain) {
 }
 
 export {
+  classifyReviewerFailure,
   evaluateRoundBudgetForReview,
   pollOnce,
 };

@@ -1,0 +1,108 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const CASCADE_BACKOFF_MINUTES = [1, 2, 4, 8, 15];
+const CASCADE_FAILURE_CAP = 5;
+const CASCADE_STATE_DIR = ['data', 'cascade-state'];
+
+function classifyReviewerFailure(stderr, exitCode) {
+  const text = String(stderr || '');
+  const lower = text.toLowerCase();
+  const mentionsReal429 = /\b429\b|too many requests|http\s*429/.test(lower);
+  const mentionsRateLimit = /rate.?limit/.test(lower);
+  const mentionsCascade =
+    /all upstream attempts failed|upstream[._ -]?failed|cascade/.test(lower) ||
+    (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
+    /timeout.*retries|retries.*timeout/.test(lower) ||
+    /(http|status|response)\s+5\d\d\b/.test(lower);
+
+  if ((mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
+    return 'cascade';
+  }
+
+  if (exitCode === 127 || /typeerror|syntaxerror|cannot find/.test(lower)) {
+    return 'bug';
+  }
+
+  return 'unknown';
+}
+
+function getCascadeStateDir(rootDir) {
+  return join(rootDir, ...CASCADE_STATE_DIR);
+}
+
+function getCascadeStatePath(rootDir, { repo, prNumber }) {
+  const safeRepo = String(repo || '')
+    .trim()
+    .replace(/[\\/]+/g, '__');
+  return join(getCascadeStateDir(rootDir), `${safeRepo}__${Number(prNumber)}.json`);
+}
+
+function readCascadeState(rootDir, { repo, prNumber }) {
+  const path = getCascadeStatePath(rootDir, { repo, prNumber });
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeCascadeState(rootDir, { repo, prNumber }, state) {
+  mkdirSync(getCascadeStateDir(rootDir), { recursive: true });
+  const path = getCascadeStatePath(rootDir, { repo, prNumber });
+  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  return state;
+}
+
+function clearCascadeState(rootDir, { repo, prNumber }) {
+  rmSync(getCascadeStatePath(rootDir, { repo, prNumber }), { force: true });
+}
+
+function resolveCascadeBackoffMinutes(consecutiveCascadeFailures) {
+  const index = Math.max(
+    0,
+    Math.min(CASCADE_BACKOFF_MINUTES.length - 1, Number(consecutiveCascadeFailures || 1) - 1)
+  );
+  return CASCADE_BACKOFF_MINUTES[index];
+}
+
+function recordCascadeFailure(rootDir, { repo, prNumber, failedAt = new Date().toISOString() }) {
+  const previous = readCascadeState(rootDir, { repo, prNumber });
+  const previousCount = Number(previous?.consecutiveCascadeFailures || 0);
+  const consecutiveCascadeFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
+  const backoffMinutes = resolveCascadeBackoffMinutes(consecutiveCascadeFailures);
+  const failedAtMs = Date.parse(failedAt);
+  const nextRetryAfter = new Date(failedAtMs + (backoffMinutes * 60_000)).toISOString();
+  return writeCascadeState(rootDir, { repo, prNumber }, {
+    consecutiveCascadeFailures,
+    lastFailureAt: failedAt,
+    nextRetryAfter,
+    backoffMinutes,
+  });
+}
+
+function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().toISOString() }) {
+  const state = readCascadeState(rootDir, { repo, prNumber });
+  if (!state?.nextRetryAfter) {
+    return { shouldBackoff: false, state: null };
+  }
+
+  const nowMs = Date.parse(now);
+  const nextRetryMs = Date.parse(state.nextRetryAfter);
+  if (!Number.isFinite(nowMs) || !Number.isFinite(nextRetryMs) || nowMs >= nextRetryMs) {
+    return { shouldBackoff: false, state };
+  }
+
+  return { shouldBackoff: true, state };
+}
+
+export {
+  CASCADE_FAILURE_CAP,
+  classifyReviewerFailure,
+  clearCascadeState,
+  getCascadeStatePath,
+  readCascadeState,
+  recordCascadeFailure,
+  resolveCascadeBackoffMinutes,
+  shouldBackoffReviewerSpawn,
+};

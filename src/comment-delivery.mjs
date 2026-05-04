@@ -620,9 +620,10 @@ function reconstructDeliveryFromRecord(record) {
     || record?.builderTag
     || 'codex';
 
-  // Worker reply artifact is still on disk in the workspace; re-read
-  // it so summary / validation / blockers / outcome show up in the
-  // recovered comment. If unreadable, fall back to a degraded body
+  // Worker reply artifact is still on disk (now under HQ dispatch
+  // storage for new jobs; workspace path only for old in-flight jobs);
+  // re-read it so summary / validation / blockers / outcome show up in
+  // the recovered comment. If unreadable, fall back to a degraded body
   // built with reply=null — the action / reReview / failure signal
   // alone is still informative and far better than no comment.
   let parsedReply = null;

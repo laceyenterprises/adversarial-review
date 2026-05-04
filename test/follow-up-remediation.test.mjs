@@ -164,9 +164,29 @@ function writeValidReply(replyPath, job, overrides = {}) {
   }, null, 2)}\n`, 'utf8');
 }
 
+const TEST_HQ_ROOT = '/tmp/adversarial-review-hq';
+const TEST_LAUNCH_REQUEST_ID = 'lrq_test';
+
+function testReplyContext(overrides = {}) {
+  return {
+    hqRoot: TEST_HQ_ROOT,
+    launchRequestId: TEST_LAUNCH_REQUEST_ID,
+    ...overrides,
+  };
+}
+
+function prepareCanonicalReply(rootDir, job, overrides = {}) {
+  const hqRoot = path.join(rootDir, 'hq');
+  const launchRequestId = overrides.launchRequestId || job.jobId;
+  const { replyDir, replyPath } = resolveHqReplyPath({ hqRoot, launchRequestId });
+  mkdirSync(replyDir, { recursive: true });
+  return { hqRoot, launchRequestId, replyDir, replyPath };
+}
+
 test('buildRemediationPrompt carries job context and follow-up operating rules', () => {
   const prompt = buildRemediationPrompt(makeJob(), {
     template: 'You are a remediation worker.',
+    ...testReplyContext(),
   });
 
   assert.match(prompt, /Trusted Job Metadata/);
@@ -195,6 +215,8 @@ test('buildRemediationPrompt includes the durable remediation reply artifact pat
   const prompt = buildRemediationPrompt(makeJob(), {
     template: 'You are a remediation worker.',
     remediationReplyPath: replyPath,
+    hqRoot,
+    launchRequestId: 'lrq_123',
   });
 
   assert.match(
@@ -207,6 +229,7 @@ test('buildRemediationPrompt can include governing repo docs and fallback guidan
   const prompt = buildRemediationPrompt(makeJob(), {
     template: 'You are a remediation worker.',
     governingDocContext: '\n\n## Additional Governing Repo Docs\n### README.md\n\n```md\nhello\n```',
+    ...testReplyContext(),
   });
 
   assert.match(prompt, /Additional Governing Repo Docs/);
@@ -603,6 +626,7 @@ test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN
       promptPath,
       outputPath,
       logPath,
+      ...testReplyContext(),
       jobId: 'job-abc-123',
       now: () => '2026-05-01T20:00:00Z',
       spawnImpl: (_cmd, _args, opts) => {
@@ -647,6 +671,7 @@ test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided'
       promptPath,
       outputPath,
       logPath,
+      ...testReplyContext(),
       // jobId deliberately omitted
       now: () => '2026-05-01T20:00:00Z',
       spawnImpl: (_cmd, _args, opts) => {
@@ -741,6 +766,7 @@ test('spawnRemediationWorker dispatches "codex" to spawnCodexRemediationWorker',
   try {
     const result = spawnRemediationWorker('codex', {
       workspaceDir, promptPath, outputPath, logPath,
+      ...testReplyContext(),
       spawnImpl: (cmd) => {
         invokedCli = cmd;
         return { pid: 111, unref() {} };
@@ -768,6 +794,7 @@ test('spawnRemediationWorker dispatches "claude-code" to spawnClaudeCodeRemediat
   let invokedArgs;
   const result = spawnRemediationWorker('claude-code', {
     workspaceDir, promptPath, outputPath, logPath,
+    ...testReplyContext(),
     spawnImpl: (cmd, args) => {
       invokedCli = cmd;
       invokedArgs = args;
@@ -851,6 +878,7 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
     promptPath,
     outputPath,
     logPath,
+    ...testReplyContext(),
     jobId: 'claude-code-job-xyz',
     now: () => '2026-05-01T21:00:00Z',
     spawnImpl: (_cmd, _args, opts) => {
@@ -1081,6 +1109,7 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
       promptPath,
       outputPath,
       logPath,
+      ...testReplyContext(),
       spawnImpl: (command, args, options) => {
         spawnCalls.push({ command, args, options });
         return {
@@ -1186,6 +1215,7 @@ test('spawnCodexRemediationWorker fails closed on conflicting inherited local OA
         promptPath,
         outputPath,
         logPath,
+        ...testReplyContext(),
       }),
       (error) => {
         assert.equal(error.name, 'StartupContractError');
@@ -1262,6 +1292,7 @@ test('spawnCodexRemediationWorker overrides inherited operator GIT_* env in the 
       promptPath,
       outputPath,
       logPath,
+      ...testReplyContext(),
       spawnImpl: (command, args, options) => {
         spawnCalls.push({ command, args, options });
         return { pid: 8424, unref() {} };
@@ -2028,7 +2059,7 @@ test('reconcileFollowUpJob rejects HQ remediation reply symlink targets', async 
   });
 });
 
-test('reconcileFollowUpJob falls back to the legacy workspace reply path once and warns', async () => {
+test('reconcileFollowUpJob rejects the legacy workspace reply path', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'hq');
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 19 });
@@ -2057,7 +2088,6 @@ test('reconcileFollowUpJob falls back to the legacy workspace reply path once an
   });
 
   await withHqRootEnv(hqRoot, async () => {
-    const warnings = [];
     const result = await reconcileFollowUpJob({
       rootDir,
       job: spawned.job,
@@ -2065,13 +2095,12 @@ test('reconcileFollowUpJob falls back to the legacy workspace reply path once an
       now: () => '2026-04-21T10:30:00.000Z',
       isWorkerRunning: () => false,
       resolvePRLifecycleImpl: async () => null,
-      log: { warn: (msg) => warnings.push(msg), error: () => {} },
+      log: { warn: () => {}, error: () => {} },
     });
 
-    assert.equal(result.action, 'stopped');
-    assert.equal(result.job.remediationReply.state, 'worker-wrote-reply');
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /legacy remediation reply fallback used/i);
+    assert.equal(result.action, 'failed');
+    assert.equal(result.job.failure.code, 'invalid-remediation-reply');
+    assert.match(result.job.failure.message, /legacy remediation reply path is forbidden/i);
   });
 });
 
@@ -2327,22 +2356,26 @@ test('integration: real git commit runs the chained pre-existing hook before our
 
 // ── OAuth pre-flight queue semantics ───────────────────────────────────────
 
-test('consumeNextFollowUpJob moves a claimed job to failed/ when claude-code OAuth pre-flight throws', async () => {
+test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre-flight throws', async () => {
   // The bug this guards against: if OAuth pre-flight runs *outside* the
   // failure-handled try/catch, an expired/missing OAuth session leaves
   // the already-claimed job stranded in `in-progress/` while the process
   // exits with code 2. The runbook contract is that launch-preparation
   // failures become terminal queue state (failed/), not orphaned claims.
+  //
+  // LAC-358 hard-switches consume-time remediation through the codex
+  // worker class, so this regression test must exercise codex OAuth,
+  // not the dormant claude-code launch path.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-
-  // Override the claude CLI path to a bare command name so the pre-flight
-  // does not hit the existsSync gate before our injected execFileImpl.
-  const prevCliPath = process.env.CLAUDE_CODE_CLI_PATH;
-  const prevCli = process.env.CLAUDE_CLI;
-  delete process.env.CLAUDE_CODE_CLI_PATH;
-  delete process.env.CLAUDE_CLI;
+  const prevAuthPath = process.env.CODEX_AUTH_PATH;
+  const prevCodexHome = process.env.CODEX_HOME;
+  const prevHome = process.env.HOME;
 
   try {
+    process.env.CODEX_AUTH_PATH = path.join(rootDir, 'missing-auth.json');
+    process.env.CODEX_HOME = path.join(rootDir, '.codex');
+    process.env.HOME = rootDir;
+
     createFollowUpJob({
       rootDir,
       repo: 'laceyenterprises/clio',
@@ -2355,21 +2388,13 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when claude-code OAu
       critical: true,
     });
 
-    // execFileImpl: fail the `claude auth status --json` probe.
-    const execFileImpl = async (cmd, args) => {
-      if (String(cmd).endsWith('claude') && args[0] === 'auth' && args[1] === 'status') {
-        throw new Error('not logged in');
-      }
-      throw new Error(`unexpected execFile call: ${cmd} ${args.join(' ')}`);
-    };
-
     await assert.rejects(
       () => consumeNextFollowUpJob({
         rootDir,
-        execFileImpl,
         spawnImpl: () => { throw new Error('worker should not have spawned'); },
         now: () => '2026-04-21T10:00:00.000Z',
         promptTemplate: 'Remediation prompt template.',
+        resolvePRLifecycleImpl: async () => null,
       }),
       (err) => {
         assert.equal(err.isOAuthError, true, 'OAuth error should propagate');
@@ -2395,13 +2420,15 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when claude-code OAu
     const failedJob = JSON.parse(readFileSync(path.join(failedDir, failedFiles[0]), 'utf8'));
     assert.equal(failedJob.status, 'failed');
     assert.equal(failedJob.failure.code, 'oauth-preflight-failure');
-    assert.equal(failedJob.failure.oauthError.model, 'claude-code');
-    assert.match(failedJob.failure.oauthError.reason, /not logged in/);
+    assert.equal(failedJob.failure.oauthError.model, 'codex');
+    assert.match(failedJob.failure.oauthError.reason, /OAuth auth\.json missing/);
   } finally {
-    if (prevCliPath === undefined) delete process.env.CLAUDE_CODE_CLI_PATH;
-    else process.env.CLAUDE_CODE_CLI_PATH = prevCliPath;
-    if (prevCli === undefined) delete process.env.CLAUDE_CLI;
-    else process.env.CLAUDE_CLI = prevCli;
+    if (prevAuthPath === undefined) delete process.env.CODEX_AUTH_PATH;
+    else process.env.CODEX_AUTH_PATH = prevAuthPath;
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCodexHome;
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
   }
 });
 
@@ -2550,7 +2577,7 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
   writeFileSync(outputPath, 'Worker did the thing.\n', 'utf8');
   writeFileSync(replyPath, JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -2575,12 +2602,12 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
   const commentCalls = [];
-  const result = await reconcileFollowUpJob({
+  const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -2591,7 +2618,7 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
       commentCalls.push(args);
       return { posted: true };
     },
-  });
+  }));
 
   assert.equal(result.action, 'stopped');
   assert.equal(commentCalls.length, 1, 'reconcile must post exactly one comment per terminal transition');
@@ -2610,7 +2637,7 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
   writeFileSync(outputPath, 'Worker did the thing.\n', 'utf8');
   writeFileSync(replyPath, JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -2635,12 +2662,12 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
   const commentCalls = [];
-  const result = await reconcileFollowUpJob({
+  const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -2661,7 +2688,7 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
       commentCalls.push(args);
       return { posted: true };
     },
-  });
+  }));
 
   assert.equal(result.action, 'completed');
   assert.equal(commentCalls.length, 1);
@@ -2804,7 +2831,7 @@ function makeBlockedRereviewFixture(rootDir, prNumber) {
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job);
   writeFileSync(outputPath, 'Worker did the thing.\n', 'utf8');
   writeFileSync(replyPath, JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -2829,7 +2856,7 @@ function makeBlockedRereviewFixture(rootDir, prNumber) {
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
   return { claimed, spawned };
@@ -2840,7 +2867,7 @@ test('reconcile routes blocked rereview (review-row-missing) to stopped, NOT com
   const { spawned } = makeBlockedRereviewFixture(rootDir, 60);
 
   const commentCalls = [];
-  const result = await reconcileFollowUpJob({
+  const result = await withHqRootEnv(path.join(rootDir, 'hq'), async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -2853,7 +2880,7 @@ test('reconcile routes blocked rereview (review-row-missing) to stopped, NOT com
       reason: 'review-row-missing',
     }),
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  });
+  }));
 
   assert.equal(result.action, 'stopped');
   assert.equal(result.reason, 'rereview-blocked');
@@ -2873,7 +2900,7 @@ test('reconcile routes blocked rereview (pr-not-open) to stopped with the closed
   const { spawned } = makeBlockedRereviewFixture(rootDir, 61);
 
   const commentCalls = [];
-  const result = await reconcileFollowUpJob({
+  const result = await withHqRootEnv(path.join(rootDir, 'hq'), async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -2887,7 +2914,7 @@ test('reconcile routes blocked rereview (pr-not-open) to stopped with the closed
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 61, pr_state: 'closed' },
     }),
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  });
+  }));
 
   assert.equal(result.action, 'stopped');
   assert.equal(result.job.remediationPlan.stop.code, 'rereview-blocked');
@@ -2900,7 +2927,7 @@ test('reconcile routes blocked rereview (malformed-title-terminal) to stopped', 
   const { spawned } = makeBlockedRereviewFixture(rootDir, 62);
 
   const commentCalls = [];
-  const result = await reconcileFollowUpJob({
+  const result = await withHqRootEnv(path.join(rootDir, 'hq'), async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -2914,7 +2941,7 @@ test('reconcile routes blocked rereview (malformed-title-terminal) to stopped', 
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 62, review_status: 'malformed' },
     }),
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  });
+  }));
 
   assert.equal(result.action, 'stopped');
   assert.equal(result.job.remediationPlan.stop.code, 'rereview-blocked');
@@ -2931,7 +2958,7 @@ test('reconcile treats already-pending as a benign success (still completed, com
   const { spawned } = makeBlockedRereviewFixture(rootDir, 63);
 
   const commentCalls = [];
-  const result = await reconcileFollowUpJob({
+  const result = await withHqRootEnv(path.join(rootDir, 'hq'), async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -2945,7 +2972,7 @@ test('reconcile treats already-pending as a benign success (still completed, com
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 63, review_status: 'pending' },
     }),
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  });
+  }));
 
   assert.equal(result.action, 'completed');
   assert.match(commentCalls[0].body, /re-review already pending — no reset needed/);
@@ -2973,7 +3000,7 @@ test('reconcile does NOT post when the terminal move was already done by another
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
   writeFileSync(outputPath, 'Worker output.\n', 'utf8');
   writeFileSync(replyPath, JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -2998,7 +3025,7 @@ test('reconcile does NOT post when the terminal move was already done by another
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
@@ -3014,7 +3041,7 @@ test('reconcile does NOT post when the terminal move was already done by another
   );
 
   const commentCalls = [];
-  const result = await reconcileFollowUpJob({
+  const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -3022,7 +3049,7 @@ test('reconcile does NOT post when the terminal move was already done by another
     isWorkerRunning: () => false,
     resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  });
+  }));
 
   // Reconcile still completes (returns a terminal action), but does
   // NOT post — process A owns the comment.
@@ -3054,7 +3081,7 @@ test('reconcile routes [clio-agent] PRs through the codex bot, not a non-existen
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
   writeFileSync(outputPath, 'Worker output.\n', 'utf8');
   writeFileSync(replyPath, JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -3082,12 +3109,12 @@ test('reconcile routes [clio-agent] PRs through the codex bot, not a non-existen
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
   const commentCalls = [];
-  const result = await reconcileFollowUpJob({
+  const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -3095,7 +3122,7 @@ test('reconcile routes [clio-agent] PRs through the codex bot, not a non-existen
     isWorkerRunning: () => false,
     resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  });
+  }));
 
   assert.equal(result.action, 'stopped'); // no rereview requested
   assert.equal(commentCalls.length, 1);
@@ -3120,7 +3147,7 @@ test('reconcile prefers worker.model when it has a bot-token mapping', async () 
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
   writeFileSync(outputPath, 'Worker output.\n', 'utf8');
   writeFileSync(replyPath, JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -3145,12 +3172,12 @@ test('reconcile prefers worker.model when it has a bot-token mapping', async () 
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
   const commentCalls = [];
-  await reconcileFollowUpJob({
+  await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -3158,7 +3185,7 @@ test('reconcile prefers worker.model when it has a bot-token mapping', async () 
     isWorkerRunning: () => false,
     resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  });
+  }));
 
   assert.equal(commentCalls.length, 1);
   assert.equal(
@@ -3182,7 +3209,7 @@ test('reconcile falls through to pickRemediationWorkerClass when worker.model is
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
   writeFileSync(outputPath, 'Worker output.\n', 'utf8');
   writeFileSync(replyPath, JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -3207,12 +3234,12 @@ test('reconcile falls through to pickRemediationWorkerClass when worker.model is
       workspaceDir: path.relative(rootDir, workspaceDir),
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
   const commentCalls = [];
-  await reconcileFollowUpJob({
+  await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
     jobPath: spawned.jobPath,
@@ -3220,7 +3247,7 @@ test('reconcile falls through to pickRemediationWorkerClass when worker.model is
     isWorkerRunning: () => false,
     resolvePRLifecycleImpl: async () => null,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
-  });
+  }));
 
   assert.equal(commentCalls.length, 1);
   assert.equal(

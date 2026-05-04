@@ -39,12 +39,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const DEFAULT_HQ_ROOT = join(homedir(), 'agent-os-hq');
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
-const REMEDIATION_REPLY_SENTINEL_FILENAME = '.hq-remediation-reply-path-ready';
-const REMEDIATION_REPLY_SENTINEL_CONTENTS = 'Use the sibling remediation-reply.json path; do not write .adversarial-follow-up/remediation-reply.json.\n';
 const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
 ];
+const WORKSPACE_ARTIFACT_EXCLUDE_ENTRY = '.adversarial-follow-up/';
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -185,12 +184,26 @@ function resolveHqReplyPath({ hqRoot, launchRequestId }) {
   };
 }
 
+function requireWorkerReplyContext({ hqRoot, launchRequestId }) {
+  const normalizedHqRoot = String(hqRoot ?? '').trim();
+  if (!normalizedHqRoot) {
+    throw new Error('Missing hqRoot for remediation reply path');
+  }
+  if (!isAbsolute(normalizedHqRoot)) {
+    throw new Error(`Invalid hqRoot: expected absolute path, got ${JSON.stringify(normalizedHqRoot)}`);
+  }
+  const normalizedLaunchRequestId = validateReplyStorageKey(launchRequestId, 'launchRequestId');
+  return {
+    hqRoot: resolve(normalizedHqRoot),
+    launchRequestId: normalizedLaunchRequestId,
+  };
+}
+
 function prepareHqReplyLandingPad({ hqRoot, launchRequestId }) {
-  const { replyDir, replyPath } = resolveHqReplyPath({ hqRoot, launchRequestId });
+  const required = requireWorkerReplyContext({ hqRoot, launchRequestId });
+  const { replyDir, replyPath } = resolveHqReplyPath(required);
   mkdirSync(replyDir, { recursive: true });
-  const sentinelPath = join(replyDir, REMEDIATION_REPLY_SENTINEL_FILENAME);
-  writeFileSync(sentinelPath, REMEDIATION_REPLY_SENTINEL_CONTENTS, 'utf8');
-  return { replyDir, replyPath, sentinelPath };
+  return { replyDir, replyPath };
 }
 
 function resolveReplyStorageKey(job) {
@@ -482,8 +495,8 @@ function spawnClaudeCodeRemediationWorker({
   promptPath,
   outputPath,
   logPath,
-  hqRoot = process.env.HQ_ROOT || '',
-  launchRequestId = '',
+  hqRoot,
+  launchRequestId,
   jobId = null,
   workerClass = 'claude-code-remediation',
   spawnImpl = spawn,
@@ -491,6 +504,7 @@ function spawnClaudeCodeRemediationWorker({
 }) {
   const claudeCli = resolveClaudeCodeCliPath();
   const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv();
+  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
 
   // Same worker-provenance env as the Codex spawn. The commit-msg hook
   // installed in the workspace reads these and stamps trailers.
@@ -498,10 +512,11 @@ function spawnClaudeCodeRemediationWorker({
     ...baseEnv,
     WORKER_CLASS: workerClass,
     WORKER_RUN_AT: now(),
-    HQ_ROOT: hqRoot,
-    LRQ_ID: launchRequestId,
+    HQ_ROOT: replyContext.hqRoot,
+    LRQ_ID: replyContext.launchRequestId,
   };
   if (jobId) env.WORKER_JOB_ID = jobId;
+  else delete env.WORKER_JOB_ID;
 
   // Claude Code in --print mode reads the prompt from stdin and writes the
   // final assistant message to stdout. We capture stdout directly to
@@ -813,10 +828,11 @@ function resetWorkspaceDir(workspaceDir) {
 function buildRemediationPrompt(job, {
   template = loadFollowUpPromptTemplate(ROOT),
   remediationReplyPath = job?.remediationReply?.path || null,
-  hqRoot = null,
-  launchRequestId = null,
+  hqRoot,
+  launchRequestId,
   governingDocContext = '',
 } = {}) {
+  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
   // The contract example uses empty arrays for the per-finding lists
@@ -859,9 +875,9 @@ function buildRemediationPrompt(job, {
     remediationReplyArtifact: remediationReplyPath,
   };
   const interpolatedTemplate = interpolatePromptTemplate(template, {
-    HQ_ROOT: hqRoot || '[missing HQ_ROOT]',
-    LRQ_ID: launchRequestId || '[missing LRQ_ID]',
-  });
+    HQ_ROOT: replyContext.hqRoot,
+    LRQ_ID: replyContext.launchRequestId,
+  }, { strict: true });
 
   return `${interpolatedTemplate}
 
@@ -883,10 +899,6 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
 - Run the smallest relevant validation before finishing.
-- Write the remediation reply JSON ONLY to the HQ artifact path from the trusted metadata. Do NOT write or commit \`.adversarial-follow-up/remediation-reply.json\`; that path is forbidden.
-- Before \`git commit\`, run the legacy artifact cleanup commands below so \`.adversarial-follow-up/\` stays out of the PR commit:
-  - \`${REMEDIATION_LEGACY_UNSTAGE_COMMANDS[0]}\`
-  - \`${REMEDIATION_LEGACY_UNSTAGE_COMMANDS[1]}\`
 - Commit the remediation changes and push the PR branch.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
@@ -1036,8 +1048,8 @@ function spawnCodexRemediationWorker({
   promptPath,
   outputPath,
   logPath,
-  hqRoot = process.env.HQ_ROOT || '',
-  launchRequestId = '',
+  hqRoot,
+  launchRequestId,
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
   jobId = null,
   spawnImpl = spawn,
@@ -1046,6 +1058,7 @@ function spawnCodexRemediationWorker({
   const codexCli = resolveCodexCliPath();
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
   const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({ gitIdentity });
+  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
 
   // Worker-provenance env. The commit-msg hook installed by
   // prepareWorkspaceForJob reads these at commit time and appends matching
@@ -1059,12 +1072,12 @@ function spawnCodexRemediationWorker({
     ...baseEnv,
     WORKER_CLASS: REMEDIATION_WORKER_TRAILER_CLASS,
     WORKER_RUN_AT: now(),
-    HQ_ROOT: hqRoot,
-    LRQ_ID: launchRequestId,
+    HQ_ROOT: replyContext.hqRoot,
+    LRQ_ID: replyContext.launchRequestId,
   };
   if (jobId) {
     env.WORKER_JOB_ID = jobId;
-  }
+  } else delete env.WORKER_JOB_ID;
 
   const promptFd = openSync(promptPath, 'r');
   const stdoutFd = openSync(logPath, 'a');
@@ -1238,6 +1251,26 @@ function resolveRealPath(candidate) {
 
   const realParent = realpathSync.native?.(current) ?? realpathSync(current);
   return join(realParent, ...tail);
+}
+
+async function ensureWorkspaceArtifactExclude(workspaceDir, {
+  execFileImpl = execFileAsync,
+  entry = WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
+} = {}) {
+  const { stdout } = await execFileImpl('git', ['rev-parse', '--git-path', 'info/exclude'], {
+    cwd: workspaceDir,
+  });
+  const gitPath = String(stdout ?? '').trim() || '.git/info/exclude';
+  const excludePath = resolve(workspaceDir, gitPath);
+  const existing = existsSync(excludePath) ? readFileSync(excludePath, 'utf8') : '';
+  const lines = existing.split(/\r?\n/);
+  if (lines.includes(entry)) {
+    return excludePath;
+  }
+  const prefix = existing && !existing.endsWith('\n') ? '\n' : '';
+  mkdirSync(dirname(excludePath), { recursive: true });
+  writeFileSync(excludePath, `${existing}${prefix}${entry}\n`, 'utf8');
+  return excludePath;
 }
 
 // Workspace containment guard for worker-written artifacts. Performs both
@@ -1829,19 +1862,13 @@ async function reconcileFollowUpJob({
     && paths.legacyReplyPath !== paths.replyPath
     && existsSync(paths.legacyReplyPath)
   ) {
-    log.warn?.(
-      `[follow-up-remediation] WARNING legacy remediation reply fallback used for ${job.jobId}; ` +
-      `worker wrote .adversarial-follow-up/remediation-reply.json instead of HQ storage.`
-    );
-    try {
-      replyProbe = {
-        state: 'valid',
-        reply: readRemediationReplyArtifact(paths.legacyReplyPath, { expectedJob: job }),
-        fallbackPath: paths.legacyReplyPath,
-      };
-    } catch (err) {
-      replyProbe = { state: 'invalid', error: err, fallbackPath: paths.legacyReplyPath };
-    }
+    replyProbe = {
+      state: 'invalid',
+      error: new Error(
+        `Legacy remediation reply path is forbidden for new remediation rounds: ${paths.legacyReplyPath}`
+      ),
+      fallbackPath: paths.legacyReplyPath,
+    };
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
 
@@ -1863,7 +1890,8 @@ async function reconcileFollowUpJob({
   if (replyProbe.state === 'invalid') {
     const err = replyProbe.error;
     const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
-    const salvagedReply = paths.replyPath ? salvagePartialRemediationReply(paths.replyPath) : null;
+    const salvagePath = replyProbe.fallbackPath || paths.replyPath;
+    const salvagedReply = salvagePath ? salvagePartialRemediationReply(salvagePath) : null;
     const { commentDelivery: invalidReplyDelivery } = buildReconcileCommentDelivery({
       job, worker, action: 'failed', reply: salvagedReply, failure: invalidReplyFailure, now,
     });
@@ -2382,6 +2410,7 @@ async function consumeNextFollowUpJob({
       job: claimed.job,
       execFileImpl,
     });
+    await ensureWorkspaceArtifactExclude(workspaceDir, { execFileImpl });
 
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
     resetWorkspaceDir(artifactDir);
@@ -2664,8 +2693,8 @@ export {
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,
-  REMEDIATION_REPLY_SENTINEL_FILENAME,
   REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
+  WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

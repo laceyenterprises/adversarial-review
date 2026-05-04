@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
-  REMEDIATION_REPLY_SENTINEL_FILENAME,
+  WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
   buildRemediationPrompt,
   consumeNextFollowUpJob,
   prepareHqReplyLandingPad,
@@ -130,20 +130,19 @@ function makeQueuedJob(rootDir, overrides = {}) {
 
 test('buildRemediationPrompt instructs workers to use only the HQ reply path and forbids the legacy worktree path', () => {
   const prompt = buildRemediationPrompt(makeJob(), {
-    template: 'Reply path: ${HQ_ROOT}/dispatch/remediation-replies/${LRQ_ID}/remediation-reply.json',
     remediationReplyPath: '/tmp/hq/dispatch/remediation-replies/lrq_428/remediation-reply.json',
     hqRoot: '/tmp/hq',
     launchRequestId: 'lrq_428',
   });
 
-  assert.match(prompt, /Reply path: \/tmp\/hq\/dispatch\/remediation-replies\/lrq_428\/remediation-reply\.json/);
+  assert.match(prompt, /\/tmp\/hq\/dispatch\/remediation-replies\/lrq_428\/remediation-reply\.json/);
   assert.match(prompt, /Do NOT write or commit `.adversarial-follow-up\/remediation-reply\.json`/);
   for (const command of REMEDIATION_LEGACY_UNSTAGE_COMMANDS) {
     assert.match(prompt, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 });
 
-test('prepareHqReplyLandingPad creates the canonical HQ directory and sentinel', () => {
+test('prepareHqReplyLandingPad creates the canonical HQ directory', () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-hq-'));
   const landingPad = prepareHqReplyLandingPad({
     hqRoot,
@@ -154,15 +153,10 @@ test('prepareHqReplyLandingPad creates the canonical HQ directory and sentinel',
     landingPad.replyPath,
     path.join(hqRoot, 'dispatch', 'remediation-replies', 'lrq_428', 'remediation-reply.json'),
   );
-  assert.equal(existsSync(landingPad.sentinelPath), true);
-  assert.equal(
-    readFileSync(landingPad.sentinelPath, 'utf8'),
-    'Use the sibling remediation-reply.json path; do not write .adversarial-follow-up/remediation-reply.json.\n',
-  );
-  assert.equal(path.basename(landingPad.sentinelPath), REMEDIATION_REPLY_SENTINEL_FILENAME);
+  assert.equal(existsSync(landingPad.replyDir), true);
 });
 
-test('consumeNextFollowUpJob exports HQ_ROOT/LRQ_ID and pre-creates the HQ landing pad', async () => {
+test('consumeNextFollowUpJob exports HQ_ROOT/LRQ_ID, pre-creates the HQ landing pad, and excludes workspace artifacts from staging', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   await withOAuthTestEnv(rootDir, async (hqRoot) => {
@@ -198,13 +192,14 @@ test('consumeNextFollowUpJob exports HQ_ROOT/LRQ_ID and pre-creates the HQ landi
     const replyDir = path.join(hqRoot, 'dispatch', 'remediation-replies', lrqId);
     const promptPath = path.join(rootDir, result.job.remediationWorker.promptPath);
     const prompt = readFileSync(promptPath, 'utf8');
+    const excludePath = path.join(rootDir, result.job.workspaceDir, '.git', 'info', 'exclude');
 
     assert.equal(result.consumed, true);
     assert.equal(capturedEnv.HQ_ROOT, hqRoot);
     assert.equal(capturedEnv.LRQ_ID, lrqId);
-    assert.equal(existsSync(path.join(replyDir, REMEDIATION_REPLY_SENTINEL_FILENAME)), true);
+    assert.equal(existsSync(replyDir), true);
+    assert.match(readFileSync(excludePath, 'utf8'), new RegExp(`^${WORKSPACE_ARTIFACT_EXCLUDE_ENTRY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
     assert.match(prompt, new RegExp(`${hqRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/dispatch/remediation-replies/${lrqId}/remediation-reply\\.json`));
-    assert.match(prompt, /that path is forbidden/i);
   });
 });
 
@@ -219,17 +214,20 @@ test('legacy cleanup commands keep the worktree remediation reply out of the com
 
   mkdirSync(path.join(repoDir, '.adversarial-follow-up'), { recursive: true });
   writeFileSync(path.join(repoDir, '.adversarial-follow-up', 'remediation-reply.json'), '{"legacy":true}\n', 'utf8');
+  writeFileSync(path.join(repoDir, '.adversarial-follow-up', 'prompt.md'), 'prompt\n', 'utf8');
+  writeFileSync(path.join(repoDir, '.adversarial-follow-up', 'codex-last-message.md'), 'last message\n', 'utf8');
+  writeFileSync(path.join(repoDir, '.adversarial-follow-up', 'codex-worker.log'), 'worker log\n', 'utf8');
   writeFileSync(path.join(repoDir, 'keep.txt'), 'updated\n', 'utf8');
-  execFileSync('git', ['add', 'keep.txt', '.adversarial-follow-up/remediation-reply.json'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['add', 'keep.txt', '.adversarial-follow-up'], { cwd: repoDir, stdio: 'ignore' });
   execFileSync('sh', ['-lc', REMEDIATION_LEGACY_UNSTAGE_COMMANDS.join('\n')], { cwd: repoDir, stdio: 'ignore' });
   execFileSync('git', ['commit', '-m', 'remediation'], { cwd: repoDir, stdio: 'ignore' });
 
   const diff = execFileSync('git', ['diff', '--name-only', 'HEAD~1'], { cwd: repoDir, encoding: 'utf8' });
   assert.match(diff, /^keep\.txt$/m);
-  assert.doesNotMatch(diff, /\.adversarial-follow-up\/remediation-reply\.json/);
+  assert.doesNotMatch(diff, /\.adversarial-follow-up\//);
 });
 
-test('reconcileFollowUpJob prefers the HQ reply path and warns only on the legacy fallback', async () => {
+test('reconcileFollowUpJob prefers the HQ reply path and rejects the legacy fallback', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'hq');
   const { claimed } = makeQueuedJob(rootDir);
@@ -263,7 +261,6 @@ test('reconcileFollowUpJob prefers the HQ reply path and warns only on the legac
   });
 
   await withHqRootEnv(hqRoot, async () => {
-    const warnings = [];
     const result = await reconcileFollowUpJob({
       rootDir,
       job: spawned.job,
@@ -277,12 +274,11 @@ test('reconcileFollowUpJob prefers the HQ reply path and warns only on the legac
         reason: 'review-status-reset',
         reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
       }),
-      log: { warn: (message) => warnings.push(message), error: () => {} },
+      log: { warn: () => {}, error: () => {} },
     });
 
     assert.equal(result.action, 'completed');
     assert.equal(result.job.remediationReply.path, replyPath);
-    assert.deepEqual(warnings, []);
   });
 
   const fallbackRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
@@ -313,7 +309,6 @@ test('reconcileFollowUpJob prefers the HQ reply path and warns only on the legac
   });
 
   await withHqRootEnv(fallbackHqRoot, async () => {
-    const warnings = [];
     const result = await reconcileFollowUpJob({
       rootDir: fallbackRoot,
       job: fallbackSpawned.job,
@@ -321,11 +316,12 @@ test('reconcileFollowUpJob prefers the HQ reply path and warns only on the legac
       now: () => '2026-05-04T09:30:00.000Z',
       isWorkerRunning: () => false,
       resolvePRLifecycleImpl: async () => null,
-      log: { warn: (message) => warnings.push(message), error: () => {} },
+      log: { warn: () => {}, error: () => {} },
     });
 
-    assert.equal(result.action, 'stopped');
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /legacy remediation reply fallback used/i);
+    assert.equal(result.action, 'failed');
+    assert.equal(result.reason, 'invalid-remediation-reply');
+    assert.equal(result.job.failure.code, 'invalid-remediation-reply');
+    assert.match(result.job.failure.message, /legacy remediation reply path is forbidden/i);
   });
 });

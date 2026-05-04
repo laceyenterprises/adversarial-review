@@ -11,6 +11,7 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import {
   consumeNextFollowUpJob,
+  lifecycleStopDecision,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
 } from '../src/follow-up-remediation.mjs';
@@ -200,6 +201,33 @@ test('consumeNextFollowUpJob proceeds normally when live lookup reports open', a
   }));
 });
 
+test('lifecycleStopDecision lets stale-drift suppress an open PR but keeps merged precedence', () => {
+  assert.deepEqual(
+    lifecycleStopDecision(
+      { source: 'live', prState: 'open', labels: [{ name: 'stale-drift' }] },
+      { repo: 'laceyenterprises/clio', prNumber: 102, site: 'consume' }
+    ),
+    {
+      stopCode: 'stale-drift',
+      actionReason: 'stale-drift',
+      workerState: 'never-spawned',
+      stopReason: 'PR #102 carries the stale-drift label; skipping remediation spawn.',
+      logMessage: '[watcher] Skipping remediation for #102: stale-drift label set',
+    }
+  );
+
+  const merged = lifecycleStopDecision(
+    {
+      source: 'live',
+      prState: 'merged',
+      mergedAt: '2026-05-02T10:30:00.000Z',
+      labels: [{ name: 'stale-drift' }],
+    },
+    { repo: 'laceyenterprises/clio', prNumber: 102, site: 'consume' }
+  );
+  assert.equal(merged.stopCode, 'operator-merged-pr');
+});
+
 test('consumeNextFollowUpJob proceeds normally when resolvePRLifecycle throws (lookup unavailable)', async () => {
   // Defensive: a resolver throw must not block consume. The gate is
   // best-effort — when we can't tell, we proceed and let downstream
@@ -219,6 +247,42 @@ test('consumeNextFollowUpJob proceeds normally when resolvePRLifecycle throws (l
       throw new Error('lifecycle resolver crashed');
     },
   }));
+});
+
+test('consumeNextFollowUpJob stops stale-drift without posting a PR comment', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = setupPendingJob(rootDir, { prNumber: 104 });
+
+  let postCommentFired = false;
+  const result = await consumeNextFollowUpJob({
+    rootDir,
+    promptTemplate: 'unused',
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    spawnImpl: () => {
+      throw new Error('worker should not spawn');
+    },
+    postCommentImpl: async () => {
+      postCommentFired = true;
+      return { posted: true };
+    },
+    now: () => '2026-05-02T11:00:00.000Z',
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergedAt: null,
+      closedAt: null,
+      labels: [{ name: 'stale-drift' }],
+    }),
+  });
+
+  assert.equal(result.consumed, false);
+  assert.equal(result.reason, 'stale-drift');
+  assert.equal(postCommentFired, false);
+
+  const stopped = findStoppedJobOnDisk(rootDir, created.job.jobId);
+  assert.ok(stopped);
+  assert.equal(stopped.json.remediationPlan.stop.code, 'stale-drift');
+  assert.equal(stopped.json.remediationWorker.state, 'never-spawned');
 });
 
 // ── reconcile path ───────────────────────────────────────────────────────────
@@ -324,6 +388,38 @@ test('reconcileFollowUpJob short-circuits to stopped/operator-closed-pr when liv
   // terminated PR.
   assert.equal(rereviewFired, false, 'rereview reset must not fire on closed PR');
   assert.equal(postCommentFired, false, 'PR comment must not fire on closed PR');
+});
+
+test('reconcileFollowUpJob preserves spawned-worker semantics on stale-drift stop', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const spawned = spawnedJobFixture(rootDir, 211);
+
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-05-02T11:05:00.000Z',
+    isWorkerRunning: () => false,
+    postCommentImpl: () => {
+      throw new Error('PR comment must not fire on stale-drift reconcile stop');
+    },
+    requestReviewRereviewImpl: () => {
+      throw new Error('rereview reset must not fire on stale-drift reconcile stop');
+    },
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergedAt: null,
+      closedAt: null,
+      labels: [{ name: 'stale-drift' }],
+    }),
+  });
+
+  assert.equal(reconciled.action, 'stopped');
+  assert.equal(reconciled.reason, 'stale-drift');
+  assert.equal(reconciled.job.remediationPlan.stop.code, 'stale-drift');
+  assert.equal(reconciled.job.remediationWorker.state, 'stopped-stale-drift');
+  assert.equal(reconciled.job.remediationWorker.processId, 9876);
 });
 
 test('reconcileFollowUpJob proceeds normally when live lookup reports open', async () => {
@@ -437,8 +533,8 @@ test('consumeNextFollowUpJob falls back to mirror when live lookup fails', async
   const db = openReviewStateDb(rootDir);
   ensureReviewStateSchema(db);
   db.prepare(
-    'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, merged_at, review_status) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(created.job.repo, 140, '2026-05-02T10:00:00.000Z', 'codex', 'merged', '2026-05-02T10:30:00.000Z', 'posted');
+    'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, merged_at, review_status, labels_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(created.job.repo, 140, '2026-05-02T10:00:00.000Z', 'codex', 'merged', '2026-05-02T10:30:00.000Z', 'posted', JSON.stringify([{ name: 'stale-drift' }]));
   db.close();
 
   let spawnFired = false;
@@ -481,6 +577,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
         state: 'MERGED',
         mergedAt: '2026-05-02T10:30:00.000Z',
         closedAt: null,
+        labels: [{ name: 'stale-drift' }],
       }),
     }),
   });
@@ -489,6 +586,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
     prState: 'merged',
     mergedAt: '2026-05-02T10:30:00.000Z',
     closedAt: null,
+    labels: [{ name: 'stale-drift' }],
   });
 });
 
@@ -501,6 +599,7 @@ test('fetchLivePRLifecycle parses CLOSED state from gh pr view JSON', async () =
         state: 'CLOSED',
         mergedAt: null,
         closedAt: '2026-05-02T10:45:00.000Z',
+        labels: [],
       }),
     }),
   });
@@ -509,6 +608,7 @@ test('fetchLivePRLifecycle parses CLOSED state from gh pr view JSON', async () =
     prState: 'closed',
     mergedAt: null,
     closedAt: '2026-05-02T10:45:00.000Z',
+    labels: [],
   });
 });
 
@@ -562,6 +662,7 @@ test('resolvePRLifecycle persists live observation back to the mirror', async ()
         state: 'MERGED',
         mergedAt: '2026-05-02T10:30:00.000Z',
         closedAt: null,
+        labels: [{ name: 'stale-drift' }],
       }),
     }),
   });
@@ -570,9 +671,45 @@ test('resolvePRLifecycle persists live observation back to the mirror', async ()
   const verifyDb = openReviewStateDb(rootDir);
   ensureReviewStateSchema(verifyDb);
   const row = verifyDb
-    .prepare('SELECT pr_state, merged_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+    .prepare('SELECT pr_state, merged_at, labels_json FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
     .get('laceyenterprises/clio', 150);
   verifyDb.close();
   assert.equal(row.pr_state, 'merged');
   assert.equal(row.merged_at, '2026-05-02T10:30:00.000Z');
+  assert.deepEqual(JSON.parse(row.labels_json), [{ name: 'stale-drift' }]);
+});
+
+test('resolvePRLifecycle mirror fallback preserves labels for stale-drift checks', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  db.prepare(
+    'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, labels_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(
+    'laceyenterprises/clio',
+    151,
+    '2026-05-02T10:00:00.000Z',
+    'codex',
+    'open',
+    'posted',
+    JSON.stringify([{ name: 'stale-drift' }])
+  );
+  db.close();
+
+  const lifecycle = await resolvePRLifecycle(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 151,
+    execFileImpl: async () => {
+      throw new Error('gh unavailable');
+    },
+  });
+
+  assert.deepEqual(lifecycle, {
+    source: 'mirror',
+    prState: 'open',
+    mergedAt: null,
+    closedAt: null,
+    labels: [{ name: 'stale-drift' }],
+  });
 });

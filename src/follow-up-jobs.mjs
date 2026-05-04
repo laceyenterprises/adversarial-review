@@ -1670,6 +1670,9 @@ function markFollowUpJobCompleted({
   });
 }
 
+// Intentionally synchronous today: stopped/ failed/ completed queue
+// transitions use rename + writeFileSync so callers can treat the on-disk
+// terminal record as durable immediately after return.
 function markFollowUpJobStopped({
   rootDir,
   jobPath,

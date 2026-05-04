@@ -2,8 +2,8 @@ function normalizeLabelNames(labels) {
   if (!Array.isArray(labels)) return [];
   return labels
     .map((entry) => {
-      if (typeof entry === 'string') return entry.trim();
-      if (entry && typeof entry.name === 'string') return entry.name.trim();
+      if (typeof entry === 'string') return entry.trim().toLowerCase();
+      if (entry && typeof entry.name === 'string') return entry.name.trim().toLowerCase();
       return '';
     })
     .filter(Boolean);
@@ -22,14 +22,17 @@ function shouldSkipReviewerForStaleDrift(pr) {
   };
 }
 
-function staleDriftStopDecision(lifecycle, { prNumber } = {}) {
+function staleDriftStopDecision(lifecycle, { prNumber, site } = {}) {
   if (!hasStaleDriftLabel(lifecycle?.labels)) return null;
+  const renderedPrNumber = prNumber == null ? 'unknown' : prNumber;
   return {
     stopCode: 'stale-drift',
     actionReason: 'stale-drift',
-    workerState: 'never-spawned',
-    stopReason: `PR #${prNumber} carries the stale-drift label; skipping remediation spawn.`,
-    logMessage: `[watcher] Skipping remediation for #${prNumber}: stale-drift label set`,
+    workerState: site === 'consume' ? 'never-spawned' : 'stopped-stale-drift',
+    stopReason: site === 'consume'
+      ? `PR #${renderedPrNumber} carries the stale-drift label; skipping remediation spawn.`
+      : `PR #${renderedPrNumber} carries the stale-drift label; stopping remediation after the worker already ran.`,
+    logMessage: `[watcher] Skipping remediation for #${renderedPrNumber}: stale-drift label set`,
   };
 }
 

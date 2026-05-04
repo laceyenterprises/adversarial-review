@@ -737,6 +737,9 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null } = {}) {
     HOME: authHome,
   };
   delete env.OPENAI_API_KEY;
+  delete env.WORKER_CLASS;
+  delete env.WORKER_JOB_ID;
+  delete env.WORKER_RUN_AT;
 
   // Belt-and-suspenders: even though `prepareWorkspaceForJob` writes
   // `git config user.name/.email` locally to the workspace, git's documented
@@ -1606,9 +1609,14 @@ async function resolveJobPRLifecycleSafe({
 // Map a lifecycle observation to a stop decision (or null when the gate
 // should let the flow through). Centralized so the consume + reconcile
 // sites can't drift out of sync on which states stop and what stop code
-// they emit.
+// they emit. Precedence is deliberate: merged/closed PR lifecycle beats
+// stale-drift for stop-code reporting, but stale-drift still suppresses
+// automation on otherwise-open PRs.
 //
 // Stop codes:
+//   - stale-drift — operator explicitly labeled the PR to suppress
+//     remediation; for consume this prevents a spawn, for reconcile it
+//     records that a previously spawned worker should not advance the loop.
 //   - operator-merged-pr — PR was merged. Worker's pushed commits may
 //     already be in main; don't undo, don't reset the watcher row.
 //   - operator-closed-pr — PR was closed unmerged. Same gate as merged
@@ -1617,11 +1625,10 @@ async function resolveJobPRLifecycleSafe({
 //     shipped this" from "we abandoned this".
 function lifecycleStopDecision(lifecycle, { repo, prNumber, site }) {
   if (!lifecycle) return null;
-  const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber });
-  if (staleDriftStop) {
+  const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber, site });
+  if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') {
     return staleDriftStop;
   }
-  if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') return null;
 
   const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
   const tail = site === 'consume'
@@ -2334,7 +2341,7 @@ async function consumeNextFollowUpJob({
     const stoppedAt = now();
     let stopped;
     if (lifecycleStop.stopCode === 'stale-drift') {
-      stopped = markFollowUpJobStopped({
+      stopped = await markFollowUpJobStopped({
         rootDir,
         jobPath: claimed.jobPath,
         stoppedAt,

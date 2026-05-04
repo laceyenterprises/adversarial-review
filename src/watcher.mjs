@@ -38,6 +38,7 @@ import {
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
+import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -175,6 +176,9 @@ const stmtCreateReviewRow = db.prepare(
 );
 const stmtUpdateReviewRouting = db.prepare(
   'UPDATE reviewed_prs SET reviewer = ?, linear_ticket = COALESCE(?, linear_ticket) WHERE repo = ? AND pr_number = ?'
+);
+const stmtUpdateReviewLabels = db.prepare(
+  'UPDATE reviewed_prs SET labels_json = ? WHERE repo = ? AND pr_number = ?'
 );
 const stmtMarkMalformed = db.prepare(
   "UPDATE reviewed_prs SET reviewer = 'malformed-title', review_status = 'malformed', failure_message = ?, failed_at = ?, last_attempted_at = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
@@ -717,6 +721,11 @@ async function pollOnce(octokit) {
       const prNumber = pr.number;
       const prTitle = pr.title;
       const prState = String(pr.state || '').trim().toLowerCase();
+      const staleDriftSkip = shouldSkipReviewerForStaleDrift(pr);
+      if (staleDriftSkip) {
+        console.log(staleDriftSkip.message);
+        continue;
+      }
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
       // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()
@@ -790,6 +799,13 @@ async function pollOnce(octokit) {
           repoPath,
           prNumber
         );
+        stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(pr.labels) ? pr.labels : []), repoPath, prNumber);
+        continue;
+      }
+
+      const staleDriftSkip = shouldSkipReviewerForStaleDrift(pr);
+      if (staleDriftSkip) {
+        console.log(staleDriftSkip.message);
         continue;
       }
 
@@ -829,6 +845,7 @@ async function pollOnce(octokit) {
             ` | previous status=${current?.review_status || existing.review_status}`
         );
       }
+      stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(pr.labels) ? pr.labels : []), repoPath, prNumber);
 
       const roundBudgetDecision = evaluateRoundBudgetForReview({
         rootDir: ROOT,

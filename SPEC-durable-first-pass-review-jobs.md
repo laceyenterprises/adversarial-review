@@ -258,6 +258,17 @@ The current system has multiple distinct ownership planes:
 - `HOME`
 - OAuth/auth file owner
 - GitHub CLI state owner
+
+## 13. `stale-drift` operator label
+
+`stale-drift` is an explicit operator override that suppresses automated review work on an open PR.
+
+- Watcher behavior: after malformed-title evaluation, the watcher skips first-pass review when the PR has a `stale-drift` label.
+- Follow-up behavior: the consume path stops without spawning a remediation worker when the PR is open and labeled `stale-drift`.
+- Reconcile behavior: if a worker was already spawned and the label appears before reconcile, the job stops with `stopCode=stale-drift` and preserves the fact that a worker had already run.
+- Precedence: merged / closed PR states outrank `stale-drift` for follow-up stop-code reporting. A merged labeled PR records `operator-merged-pr`; a closed labeled PR records `operator-closed-pr`.
+- Re-arming: removing the label only affects future watcher / follow-up passes. It does not automatically requeue a stopped remediation job; operators still use the documented requeue / retrigger commands.
+- Failure mode: when live `gh pr view` succeeds, the current label set is mirrored into `reviews.db`. If a later consume/reconcile attempt has to fall back to the mirror, the last mirrored label snapshot is used for `stale-drift` checks rather than silently treating labels as absent.
 - readable source tree owner
 
 The refactor must not hide these behind “it should work” assumptions.

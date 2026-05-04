@@ -32,6 +32,7 @@ import {
 import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
 import { redactSensitiveText } from './redaction.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
+import { staleDriftStopDecision } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -736,6 +737,9 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null } = {}) {
     HOME: authHome,
   };
   delete env.OPENAI_API_KEY;
+  delete env.WORKER_CLASS;
+  delete env.WORKER_JOB_ID;
+  delete env.WORKER_RUN_AT;
 
   // Belt-and-suspenders: even though `prepareWorkspaceForJob` writes
   // `git config user.name/.email` locally to the workspace, git's documented
@@ -1605,9 +1609,14 @@ async function resolveJobPRLifecycleSafe({
 // Map a lifecycle observation to a stop decision (or null when the gate
 // should let the flow through). Centralized so the consume + reconcile
 // sites can't drift out of sync on which states stop and what stop code
-// they emit.
+// they emit. Precedence is deliberate: merged/closed PR lifecycle beats
+// stale-drift for stop-code reporting, but stale-drift still suppresses
+// automation on otherwise-open PRs.
 //
 // Stop codes:
+//   - stale-drift — operator explicitly labeled the PR to suppress
+//     remediation; for consume this prevents a spawn, for reconcile it
+//     records that a previously spawned worker should not advance the loop.
 //   - operator-merged-pr — PR was merged. Worker's pushed commits may
 //     already be in main; don't undo, don't reset the watcher row.
 //   - operator-closed-pr — PR was closed unmerged. Same gate as merged
@@ -1616,7 +1625,10 @@ async function resolveJobPRLifecycleSafe({
 //     shipped this" from "we abandoned this".
 function lifecycleStopDecision(lifecycle, { repo, prNumber, site }) {
   if (!lifecycle) return null;
-  if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') return null;
+  const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber, site });
+  if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') {
+    return staleDriftStop;
+  }
 
   const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
   const tail = site === 'consume'
@@ -2323,23 +2335,42 @@ async function consumeNextFollowUpJob({
     site: 'consume',
   });
   if (lifecycleStop) {
+    if (lifecycleStop.logMessage) {
+      log.log?.(lifecycleStop.logMessage);
+    }
     const stoppedAt = now();
-    const stopped = await stopConsumedJobWithComment({
-      rootDir,
-      job: claimed.job,
-      jobPath: claimed.jobPath,
-      stoppedAt,
-      stopCode: lifecycleStop.stopCode,
-      stopReason: lifecycleStop.stopReason,
-      sourceStatus: 'in_progress',
-      remediationWorker: {
-        state: 'never-spawned',
-        reconciledAt: stoppedAt,
-      },
-      postCommentImpl,
-      now,
-      log,
-    });
+    let stopped;
+    if (lifecycleStop.stopCode === 'stale-drift') {
+      stopped = await markFollowUpJobStopped({
+        rootDir,
+        jobPath: claimed.jobPath,
+        stoppedAt,
+        stopCode: lifecycleStop.stopCode,
+        stopReason: lifecycleStop.stopReason,
+        sourceStatus: 'in_progress',
+        remediationWorker: {
+          state: 'never-spawned',
+          reconciledAt: stoppedAt,
+        },
+      });
+    } else {
+      stopped = await stopConsumedJobWithComment({
+        rootDir,
+        job: claimed.job,
+        jobPath: claimed.jobPath,
+        stoppedAt,
+        stopCode: lifecycleStop.stopCode,
+        stopReason: lifecycleStop.stopReason,
+        sourceStatus: 'in_progress',
+        remediationWorker: {
+          state: 'never-spawned',
+          reconciledAt: stoppedAt,
+        },
+        postCommentImpl,
+        now,
+        log,
+      });
+    }
     return {
       consumed: false,
       reason: lifecycleStop.actionReason,
@@ -2678,6 +2709,7 @@ export {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  lifecycleStopDecision,
   resolveCodexCliPath,
   resolveCodexAuthPath,
   resolveHqReplyPath,

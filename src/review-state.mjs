@@ -35,6 +35,7 @@ function ensureReviewStateSchema(db) {
       failure_message   TEXT,
       rereview_requested_at TEXT,
       rereview_reason   TEXT,
+      labels_json       TEXT,
       UNIQUE(repo, pr_number)
     )
   `);
@@ -51,6 +52,7 @@ function ensureReviewStateSchema(db) {
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN failure_message TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN rereview_requested_at TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN rereview_reason TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN labels_json TEXT`); } catch {}
 }
 
 function getReviewRow(db, { repo, prNumber }) {
@@ -72,13 +74,21 @@ function readPRState(rootDir, { repo, prNumber }) {
   try {
     ensureReviewStateSchema(db);
     const row = db
-      .prepare('SELECT pr_state, merged_at, closed_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+      .prepare('SELECT pr_state, merged_at, closed_at, labels_json FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
       .get(repo, prNumber);
     if (!row) return null;
+    let labels = [];
+    try {
+      const parsed = JSON.parse(row.labels_json || '[]');
+      if (Array.isArray(parsed)) labels = parsed;
+    } catch {
+      labels = [];
+    }
     return {
       prState: row.pr_state || 'open',
       mergedAt: row.merged_at || null,
       closedAt: row.closed_at || null,
+      labels,
     };
   } finally {
     db.close();
@@ -130,7 +140,7 @@ async function fetchLivePRLifecycle({
         '--repo',
         repo,
         '--json',
-        'state,mergedAt,closedAt',
+        'state,mergedAt,closedAt,labels',
       ],
       {
         maxBuffer: 1 * 1024 * 1024,
@@ -157,6 +167,7 @@ async function fetchLivePRLifecycle({
     prState,
     mergedAt: parsed.mergedAt || null,
     closedAt: parsed.closedAt || null,
+    labels: Array.isArray(parsed.labels) ? parsed.labels : [],
   };
 }
 
@@ -165,7 +176,7 @@ async function fetchLivePRLifecycle({
 // of the system (e.g. requestReviewRereview's pr_state guardrail) see a
 // consistent picture. No-op when there's no review row yet — we don't
 // fabricate one because the watcher owns row creation.
-function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, closedAt }) {
+function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, closedAt, labels }) {
   if (prState !== 'merged' && prState !== 'closed' && prState !== 'open') return;
   const db = openReviewStateDb(rootDir);
   try {
@@ -177,16 +188,16 @@ function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, cl
 
     if (prState === 'merged') {
       db.prepare(
-        "UPDATE reviewed_prs SET pr_state = 'merged', merged_at = COALESCE(?, merged_at) WHERE repo = ? AND pr_number = ?"
-      ).run(mergedAt || null, repo, prNumber);
+        "UPDATE reviewed_prs SET pr_state = 'merged', merged_at = COALESCE(?, merged_at), labels_json = COALESCE(?, labels_json) WHERE repo = ? AND pr_number = ?"
+      ).run(mergedAt || null, Array.isArray(labels) ? JSON.stringify(labels) : null, repo, prNumber);
     } else if (prState === 'closed') {
       db.prepare(
-        "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = COALESCE(?, closed_at) WHERE repo = ? AND pr_number = ?"
-      ).run(closedAt || null, repo, prNumber);
+        "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = COALESCE(?, closed_at), labels_json = COALESCE(?, labels_json) WHERE repo = ? AND pr_number = ?"
+      ).run(closedAt || null, Array.isArray(labels) ? JSON.stringify(labels) : null, repo, prNumber);
     } else {
       db.prepare(
-        "UPDATE reviewed_prs SET pr_state = 'open' WHERE repo = ? AND pr_number = ?"
-      ).run(repo, prNumber);
+        "UPDATE reviewed_prs SET pr_state = 'open', labels_json = COALESCE(?, labels_json) WHERE repo = ? AND pr_number = ?"
+      ).run(Array.isArray(labels) ? JSON.stringify(labels) : null, repo, prNumber);
     }
   } finally {
     db.close();
@@ -201,7 +212,7 @@ function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, cl
 // punching through with "open" when we have no information.
 //
 // Returns:
-//   - { source: 'live' | 'mirror', prState, mergedAt, closedAt } when we
+//   - { source: 'live' | 'mirror', prState, mergedAt, closedAt, labels } when we
 //     have a state we trust (live succeeded, or mirror had a row)
 //   - null when neither source returns information; callers treat this
 //     as "proceed with existing behavior" because the gate is positive
@@ -226,6 +237,7 @@ async function resolvePRLifecycle(rootDir, {
         prState: live.prState,
         mergedAt: live.mergedAt,
         closedAt: live.closedAt,
+        labels: live.labels,
       });
     } catch {
       // Persisting back to the mirror is best-effort. If the DB is

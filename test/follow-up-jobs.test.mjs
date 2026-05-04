@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -41,6 +41,59 @@ function makeJobInput(rootDir) {
     reviewPostedAt: '2026-04-21T08:00:00.000Z',
     critical: true,
   };
+}
+
+const MISSING_REMEDIATION_WORKER = Symbol('missing-remediation-worker');
+
+function writeLedgerTerminalJob(rootDir, {
+  fileName,
+  remediationWorker = MISSING_REMEDIATION_WORKER,
+  currentRound = 1,
+  status = 'completed',
+} = {}) {
+  const dir = getFollowUpJobDir(rootDir, status);
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, fileName);
+  const job = {
+    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+    kind: 'adversarial-review-follow-up',
+    status,
+    jobId: fileName.replace(/\.json$/, ''),
+    createdAt: '2026-05-04T12:00:00.000Z',
+    completedAt: '2026-05-04T12:05:00.000Z',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 199,
+    reviewerModel: 'codex',
+    critical: true,
+    reviewSummary: 'summary',
+    reviewBody: 'body',
+    recommendedFollowUpAction: {
+      type: 'address-adversarial-review',
+      priority: 'high',
+      executionModel: 'bounded-manual-rounds',
+      maxRounds: 3,
+    },
+    remediationPlan: {
+      mode: 'bounded-manual-rounds',
+      maxRounds: 3,
+      currentRound,
+      rounds: [],
+      stop: null,
+      nextAction: null,
+    },
+    remediationReply: {
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      state: 'awaiting-worker-write',
+      path: null,
+    },
+  };
+
+  if (remediationWorker !== MISSING_REMEDIATION_WORKER) {
+    job.remediationWorker = remediationWorker;
+  }
+
+  writeFollowUpJob(jobPath, job);
 }
 
 function writePlanMappingFixture(rootDir, {
@@ -255,6 +308,38 @@ test('resolveRoundBudgetForJob falls back to medium when the linked plan file is
 
   assert.equal(resolution.riskClass, 'medium');
   assert.equal(resolution.roundBudget, 1);
+});
+
+test('summarizePRRemediationLedger excludes terminal jobs without a spawned remediation worker', () => {
+  const cases = [
+    ['null remediationWorker', null, 0],
+    ['missing remediationWorker', MISSING_REMEDIATION_WORKER, 0],
+    ['never-spawned remediationWorker', { state: 'never-spawned' }, 0],
+    ['spawned remediationWorker', { state: 'spawned' }, 2],
+    ['completed remediationWorker', { state: 'completed' }, 2],
+    ['array remediationWorker', [], 0],
+    ['malformed remediationWorker', 'corrupt-worker-shape', 0],
+  ];
+
+  for (const [label, remediationWorker, expectedRounds] of cases) {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+    try {
+      writeLedgerTerminalJob(rootDir, {
+        fileName: `${label.replace(/\s+/g, '-')}.json`,
+        remediationWorker,
+        currentRound: 2,
+      });
+
+      const summary = summarizePRRemediationLedger(rootDir, {
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 199,
+      });
+
+      assert.equal(summary.completedRoundsForPR, expectedRounds, label);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
 });
 
 test('readFollowUpJob whitelists persisted remediationReply fields during normalization', () => {

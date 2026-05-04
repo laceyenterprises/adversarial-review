@@ -803,11 +803,8 @@ async function pollOnce(octokit) {
         continue;
       }
 
-      const staleDriftSkip = shouldSkipReviewerForStaleDrift(pr);
-      if (staleDriftSkip) {
-        console.log(staleDriftSkip.message);
-        continue;
-      }
+      // (stale-drift check already ran at the top of the per-PR loop;
+      // duplicate block removed — caused SyntaxError on import per LAC-439.)
 
       const linearTicketId = extractLinearTicketId(prTitle);
       if (!existing) {

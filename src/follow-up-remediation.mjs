@@ -15,6 +15,7 @@ import {
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
+  salvagePartialRemediationReply,
   resolveRoundBudgetForJob,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
@@ -887,6 +888,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 ## Required Operating Rules
 - Work on the PR branch that is already checked out in this repository clone.
 - This is one bounded remediation round. Do not create an autonomous retry loop inside the worker.
+- Before making code changes, rebase the PR branch onto the upstream \`main\` branch (\`git fetch origin && git rebase origin/main\`) so the remediation lands on top of current trunk. If the rebase produces conflicts, resolve them as part of this round — it is remediation work, not a blocker, unless resolving the conflict requires a design decision you cannot make on your own (in which case record it under \`blockers[]\`). After resolving conflicts, re-run the relevant tests so the rebase outcome is validated alongside the original fix.
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
 - Run the smallest relevant validation before finishing.
@@ -895,6 +897,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
 - Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.
 - Convergence rule (load-bearing): if you believe the review findings are addressed, set \`reReview.requested\` to \`true\` in that JSON reply — this is the default success path. The PR's existing \`Request changes\` verdict is what blocks the automerge gate, and only a fresh adversarial pass can replace it. Set \`reReview.requested\` to \`false\` ONLY when you are deliberately exiting and a human needs to step in (use the \`blockers\` array to explain). Do not rely on prose alone.
+- When \`reReview.requested\` is \`true\`, \`reReview.reason\` MUST be a short non-empty string explaining why the PR is ready for another adversarial pass — \`null\` is rejected by the validator. The \`reReview.reason\` field is \`null\` ONLY when \`requested\` is \`false\`.
 - In your final message, report validation run and files changed.
 
 ## Required Remediation Reply Contract
@@ -1847,11 +1850,23 @@ async function reconcileFollowUpJob({
   // stdout is empty or non-empty. Route it directly to
   // `invalid-remediation-reply` so the operator gets the real cause
   // instead of a misleading `artifact-empty-completion`.
+  //
+  // Salvage path: even though strict validation rejected the reply,
+  // the file may still contain a renderable summary / addressed[] /
+  // pushback[] / blockers[]. Pull those out and pass them into the
+  // failure comment so the worker's point-by-point response is not
+  // dropped just because (e.g.) `reReview.reason` was null. State
+  // machine stays strict — round still routes to `failed/`, watcher
+  // does NOT rearm — but the operator-facing comment shows what the
+  // worker actually did instead of just "did not produce a usable
+  // remediation reply". The salvaged reply is best-effort and not
+  // persisted to the job record.
   if (replyProbe.state === 'invalid') {
     const err = replyProbe.error;
     const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
+    const salvagedReply = paths.replyPath ? salvagePartialRemediationReply(paths.replyPath) : null;
     const { commentDelivery: invalidReplyDelivery } = buildReconcileCommentDelivery({
-      job, worker, action: 'failed', failure: invalidReplyFailure, now,
+      job, worker, action: 'failed', reply: salvagedReply, failure: invalidReplyFailure, now,
     });
     const failed = markFollowUpJobFailed({
       rootDir,
@@ -1875,6 +1890,7 @@ async function reconcileFollowUpJob({
       job: failed.job,
       worker,
       action: 'failed',
+      reply: salvagedReply,
       failure: invalidReplyFailure,
       postCommentImpl,
       alreadyTerminal: failed.alreadyTerminal,

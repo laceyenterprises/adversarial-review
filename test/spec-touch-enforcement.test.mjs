@@ -1,46 +1,56 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ADVERSARIAL_PROMPT } from '../src/reviewer.mjs';
+import { detectSpecTouchViolations } from '../src/reviewer.mjs';
 
-function renderPromptWithDiff(diff) {
-  return `${ADVERSARIAL_PROMPT}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\n\`\`\``;
-}
-
-test('mock PR with public function signature change and no SPEC touch is covered by the blocking spec-touch rule', () => {
-  const prompt = renderPromptWithDiff(`
-diff --git a/modules/example/lib/python/example/service.py b/modules/example/lib/python/example/service.py
+test('flags tracked public Python contract changes in session-ledger when no canonical spec doc is touched', () => {
+  const violations = detectSpecTouchViolations(`
+diff --git a/platform/session-ledger/src/session_ledger/db.py b/platform/session-ledger/src/session_ledger/db.py
 @@
--def fetch_widget(widget_id: str) -> Widget:
-+def fetch_widget(widget_id: str, include_deleted: bool = False) -> Widget:
+-def lease_job(job_id: str) -> Lease:
++def lease_job(job_id: str, timeout_s: int = 30) -> Lease:
 `);
 
-  assert.match(prompt, /Treat silent spec drift as a blocking issue\./);
-  assert.match(prompt, /Public function or method signature changes in `modules\/\*\/lib\/python\/\*\*\/\*\.py`/);
-  assert.match(prompt, /Contract changed without spec update\./);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].project, 'session-ledger');
+  assert.match(violations[0].message, /no canonical spec doc for `session-ledger` was touched/i);
 });
 
-test('mock PR with the same public contract change plus SPEC touch is explicitly exempted from the blocking spec-touch rule', () => {
-  const prompt = renderPromptWithDiff(`
-diff --git a/modules/example/lib/python/example/service.py b/modules/example/lib/python/example/service.py
+test('does not flag tracked contract changes when a canonical docs/SPEC path is touched in the same diff', () => {
+  const violations = detectSpecTouchViolations(`
+diff --git a/platform/session-ledger/src/session_ledger/db.py b/platform/session-ledger/src/session_ledger/db.py
 @@
--def fetch_widget(widget_id: str) -> Widget:
-+def fetch_widget(widget_id: str, include_deleted: bool = False) -> Widget:
-diff --git a/projects/example/SPEC.md b/projects/example/SPEC.md
+-def lease_job(job_id: str) -> Lease:
++def lease_job(job_id: str, timeout_s: int = 30) -> Lease:
+diff --git a/docs/SPEC-session-ledger.md b/docs/SPEC-session-ledger.md
 @@
-+- Document fetch_widget include_deleted semantics.
++Document lease_job timeout semantics.
 `);
 
-  assert.match(prompt, /Do NOT trigger this rule when the relevant `projects\/<project>\/SPEC\.md` is touched in the same PR\./);
+  assert.deepEqual(violations, []);
 });
 
-test('mock PR with private or internal function change and no SPEC touch is explicitly excluded', () => {
-  const prompt = renderPromptWithDiff(`
-diff --git a/modules/example/lib/python/example/service.py b/modules/example/lib/python/example/service.py
+test('treats underscore-prefixed Python defs as private and excluded', () => {
+  const violations = detectSpecTouchViolations(`
+diff --git a/modules/example/server/service.py b/modules/example/server/service.py
 @@
 -def _normalize_widget(raw: dict[str, object]) -> Widget:
 +def _normalize_widget(raw: dict[str, object], cache: Cache | None = None) -> Widget:
 `);
 
-  assert.match(prompt, /Do NOT trigger this rule for private or internal implementation changes that do not alter a public contract\./);
+  assert.deepEqual(violations, []);
+});
+
+test('accepts module-local SPEC docs for worker-pool CLI contract changes', () => {
+  const violations = detectSpecTouchViolations(`
+diff --git a/modules/worker-pool/bin/hq-requeue b/modules/worker-pool/bin/hq-requeue
+@@
+-  parser.add_argument('--limit', type=int)
++  parser.add_argument('--limit', type=int, default=20)
+diff --git a/modules/worker-pool/SPEC.md b/modules/worker-pool/SPEC.md
+@@
++Document the default requeue limit.
+`);
+
+  assert.deepEqual(violations, []);
 });

@@ -393,6 +393,126 @@ function isFinalReviewRound({ reviewAttemptNumber, maxRemediationRounds }) {
   return attempt > cap;
 }
 
+function parseDiffFiles(diffText) {
+  const diff = String(diffText ?? '').replace(/\r\n/g, '\n');
+  const matches = [...diff.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)];
+  return matches.map((match, index) => {
+    const oldPath = match[1];
+    const newPath = match[2];
+    const start = match.index ?? 0;
+    const end = index + 1 < matches.length ? (matches[index + 1].index ?? diff.length) : diff.length;
+    return {
+      oldPath,
+      newPath,
+      path: newPath === '/dev/null' ? oldPath : newPath,
+      patch: diff.slice(start, end),
+    };
+  });
+}
+
+function deriveSpecTouchProject(path) {
+  const normalizedPath = String(path ?? '');
+  let match = normalizedPath.match(/^(?:projects|modules|tools)\/([^/]+)\/SPEC\.md$/);
+  if (match) return match[1];
+  match = normalizedPath.match(/^docs\/(?:SPEC|RUNBOOK)-(.+?)\.md$/);
+  if (match) return match[1];
+  return null;
+}
+
+function specTouchMatchesProject(path, project) {
+  if (!path || !project) return false;
+  const normalizedPath = String(path);
+  const normalizedProject = String(project);
+  return (
+    normalizedPath === `projects/${normalizedProject}/SPEC.md` ||
+    normalizedPath === `modules/${normalizedProject}/SPEC.md` ||
+    normalizedPath === `tools/${normalizedProject}/SPEC.md` ||
+    normalizedPath === `docs/SPEC-${normalizedProject}.md` ||
+    normalizedPath.startsWith(`docs/SPEC-${normalizedProject}-`) ||
+    normalizedPath === `docs/RUNBOOK-${normalizedProject}.md` ||
+    normalizedPath.startsWith(`docs/RUNBOOK-${normalizedProject}-`)
+  );
+}
+
+function describeTrackedContractChange({ path, patch }) {
+  if (/^platform\/session-ledger\/src\/.*\.py$/.test(path)) {
+    const signatureMatch = patch.match(/^[+-]def\s+([A-Za-z][A-Za-z0-9_]*)\s*\(/m);
+    if (signatureMatch) {
+      return {
+        project: 'session-ledger',
+        thing: `public Python signature \`${signatureMatch[1]}(...)\` in \`${path}\``,
+      };
+    }
+  }
+
+  if (/^modules\/([^/]+)\/(?:lib\/python|lib|server)\/.*\.py$/.test(path)) {
+    const project = path.match(/^modules\/([^/]+)\//)?.[1];
+    const signatureMatch = patch.match(/^[+-]def\s+([A-Za-z][A-Za-z0-9_]*)\s*\(/m);
+    if (project && signatureMatch) {
+      return {
+        project,
+        thing: `public Python signature \`${signatureMatch[1]}(...)\` in \`${path}\``,
+      };
+    }
+  }
+
+  if (/^platform\/session-ledger\/src\/session_ledger\/migrations\/.+\.sql$/.test(path)) {
+    return {
+      project: 'session-ledger',
+      thing: `SQL migration \`${path}\``,
+    };
+  }
+
+  if (/worker_events/i.test(path)) {
+    return {
+      project: path.match(/^modules\/([^/]+)\//)?.[1] || 'worker-pool',
+      thing: `worker_events payload shape in \`${path}\``,
+    };
+  }
+
+  if (/^modules\/worker-pool\/bin\/hq(?:-[^/]+)?$/.test(path)) {
+    return {
+      project: 'worker-pool',
+      thing: `CLI contract in \`${path}\``,
+    };
+  }
+
+  return null;
+}
+
+function detectSpecTouchViolations(diffText) {
+  const files = parseDiffFiles(diffText);
+  const touchedSpecProjects = new Set(
+    files
+      .map((file) => deriveSpecTouchProject(file.path))
+      .filter(Boolean)
+  );
+
+  const violations = [];
+  for (const file of files) {
+    const contract = describeTrackedContractChange(file);
+    if (!contract) continue;
+
+    const publicSignatureNames = [...file.patch.matchAll(/^[+-]def\s+([A-Za-z][A-Za-z0-9_]*)\s*\(/gm)].map((match) => match[1]);
+    if (publicSignatureNames.length > 0 && publicSignatureNames.every((name) => name.startsWith('_'))) {
+      continue;
+    }
+
+    const specTouched =
+      touchedSpecProjects.has(contract.project) ||
+      files.some((candidate) => specTouchMatchesProject(candidate.path, contract.project));
+    if (specTouched) continue;
+
+    violations.push({
+      project: contract.project,
+      thing: contract.thing,
+      message: `Contract changed without spec update. The diff modifies ${contract.thing} but no canonical spec doc for \`${contract.project}\` was touched. Update the corresponding SPEC/RUNBOOK entry or revert the contract change.`,
+    });
+  }
+
+  return violations;
+}
+
 // ── Critical-issue detection ─────────────────────────────────────────────────
 
 const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
@@ -917,6 +1037,7 @@ export {
   sanitizeCodexReviewPayload,
   buildReviewerPromptPrefix,
   isFinalReviewRound,
+  detectSpecTouchViolations,
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
   __test__,

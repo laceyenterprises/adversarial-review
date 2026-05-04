@@ -35,14 +35,16 @@ Output requirements:
 
 Spec coverage check:
 - Treat silent spec drift as a blocking issue.
-- If the PR diff includes any of the following public-contract changes and the diff does NOT touch the corresponding `projects/<project>/SPEC.md`, file a blocking issue:
-  - Public function or method signature changes in `modules/*/lib/python/**/*.py`, including parameter list changes, return-type changes, or docstring contract changes
+- If the PR diff includes any of the following tracked contract changes and the diff does NOT touch a canonical spec doc for the same project, file a blocking issue:
+  - Public Python signature changes in `platform/session-ledger/src/**/*.py`, `modules/*/lib/python/**/*.py`, or `modules/*/{lib,server}/**/*.py`, including parameter-list, return-type, or docstring contract changes
   - New or altered SQL migrations in `platform/session-ledger/src/session_ledger/migrations/*.sql`
-  - New or altered `worker_events` payload shapes
-  - New or altered CLI subcommands or flags in `modules/worker-pool/bin/hq` or sibling shims
-- Use this exact blocking-issue message when the rule triggers:
-  - `Contract changed without spec update. The diff modifies <thing> but \`projects/<project>/SPEC.md\` was not touched. Either update the spec to match, or revert the contract change. Spec-as-source-of-truth is load-bearing — silent drift is the dominant maintenance risk per the operator retrospective 2026-05-04.`
+  - New or altered `worker_events` payload shapes in files whose path includes `worker_events`
+  - New or altered CLI subcommands or flags in `modules/worker-pool/bin/hq` or `modules/worker-pool/bin/hq-*`
+- Treat these as canonical spec-doc locations for a project: `projects/<project>/SPEC.md`, `modules/<project>/SPEC.md`, `tools/<project>/SPEC.md`, `docs/SPEC-<project>*.md`, or `docs/RUNBOOK-<project>*.md`. For this repo, the canonical spec is `tools/adversarial-review/SPEC.md`; `docs/SPEC-adversarial-review-auto-remediation.md` is a companion operator contract.
+- Use this blocking-issue template when the rule triggers, substituting `<thing>` with the changed contract and `<project>` with the canonical project name:
+  - `Contract changed without spec update. The diff modifies <thing> but no canonical spec doc for <project> was touched. Update the corresponding SPEC/RUNBOOK entry or revert the contract change.`
+- Use a diff-visible heuristic for "public" Python changes: non-underscore top-level defs count as public unless nearby context clearly marks them internal; underscore-prefixed defs are usually private. If the diff alone cannot prove the contract is public, say so.
 - Do NOT trigger this rule for private or internal implementation changes that do not alter a public contract.
-- Do NOT trigger this rule when the relevant `projects/<project>/SPEC.md` is touched in the same PR.
+- Do NOT trigger this rule when the same PR also touches a canonical spec doc for that project.
 
 If you find nothing substantive, say so plainly — but look hard first.

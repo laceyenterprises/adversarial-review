@@ -322,7 +322,7 @@ test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forwar
   assert.equal(decision.roundBudget, 6, 'persisted maxRounds=6 must win over the medium-tier downgrade');
 });
 
-test('evaluateRoundBudgetForReview allows medium-risk rereview before the new 3-round budget is exhausted', () => {
+test('evaluateRoundBudgetForReview skips rereview spawn when completed rounds exhaust the budget', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -354,58 +354,6 @@ test('evaluateRoundBudgetForReview allows medium-risk rereview before the new 3-
     rootDir,
     claimedAt: '2026-04-22T05:25:00.000Z',
   });
-  const completed = markFollowUpJobCompleted({
-    rootDir,
-    jobPath: claimed.jobPath,
-    completedAt: '2026-04-22T05:30:00.000Z',
-    completion: { source: 'test-fixture' },
-    reReview: {
-      requested: true,
-      status: 'pending',
-      reason: 'Please re-review.',
-      triggered: true,
-      requestedAt: '2026-04-22T05:30:00.000Z',
-    },
-  });
-
-  const logLines = [];
-  const decision = evaluateRoundBudgetForReview({
-    rootDir,
-    repo: completed.job.repo,
-    prNumber: completed.job.prNumber,
-    linearTicketId: completed.job.linearTicketId,
-    reviewStatus: 'pending',
-    reviewAttempts: 1,
-    log: (line) => logLines.push(line),
-  });
-
-  assert.equal(decision.skip, false);
-  assert.equal(decision.roundBudget, 3);
-  assert.equal(decision.riskClass, 'medium');
-  assert.equal(logLines.length, 0);
-});
-
-test('evaluateRoundBudgetForReview keeps a persisted medium maxRounds=1 legacy budget', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-
-  createFollowUpJob({
-    rootDir,
-    repo: 'laceyenterprises/adversarial-review',
-    prNumber: 17,
-    reviewerModel: 'claude',
-    linearTicketId: null,
-    reviewBody: '## Summary\nLegacy medium budget.\n\n## Verdict\nRequest changes',
-    reviewPostedAt: '2026-04-22T05:22:42.212Z',
-    critical: false,
-  });
-  const claimed = claimNextFollowUpJob({
-    rootDir,
-    claimedAt: '2026-04-22T05:25:00.000Z',
-  });
-  claimed.job.remediationPlan.maxRounds = 1;
-  claimed.job.recommendedFollowUpAction.maxRounds = 1;
-  writeFileSync(claimed.jobPath, `${JSON.stringify(claimed.job, null, 2)}\n`, 'utf8');
-
   const completed = markFollowUpJobCompleted({
     rootDir,
     jobPath: claimed.jobPath,

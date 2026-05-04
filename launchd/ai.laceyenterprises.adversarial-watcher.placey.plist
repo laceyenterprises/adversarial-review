@@ -22,6 +22,14 @@
         <string>/Users/placey</string>
         <key>CODEX_AUTH_PATH</key>
         <string>/Users/placey/.codex/auth.json</string>
+        <!-- HQ lives under the airlock-managed Agent OS control-plane root.
+             The watcher itself does not consume HQ_ROOT today, but pinning
+             it here is the documented contract for higher-trust workers
+             (codex / claude-code) that run as placey but spawn remediation
+             through HQ-owned infrastructure. See projects/agent-os-trust/
+             RUNBOOK-cross-tier-spawn.md for the operating contract. -->
+        <key>HQ_ROOT</key>
+        <string>/Users/airlock/agent-os-hq</string>
     </dict>
 
     <key>RunAtLoad</key>

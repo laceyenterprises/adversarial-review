@@ -370,6 +370,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
     jobPath: spawned.jobPath,
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -435,6 +436,7 @@ test('reconcileFollowUpJob honors a valid LEGACY-shape reply (no addressed[]) as
     jobPath: spawned.jobPath,
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -500,6 +502,7 @@ test('reconcileFollowUpJob completes when stdout is empty and reply has reReview
     jobPath: spawned.jobPath,
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -554,6 +557,7 @@ test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is emp
     jobPath: spawned.jobPath,
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -598,6 +602,7 @@ test('reconcileFollowUpJob still fails when stdout is empty AND no reply.json ex
     jobPath: spawned.jobPath,
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -676,6 +681,7 @@ test('reconcileFollowUpJob rejects a replyPath that lexically escapes the worksp
     jobPath: spawned.jobPath,
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -743,6 +749,7 @@ test('reconcileFollowUpJob rejects a replyPath that resolves through a symlink t
     jobPath: spawned.jobPath,
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -806,6 +813,7 @@ test('reconcileFollowUpJob completes when codex-last-message.md is missing entir
     jobPath: spawned.jobPath,
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   const reviewRow = readReviewRow(rootDir);

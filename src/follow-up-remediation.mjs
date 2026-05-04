@@ -542,11 +542,10 @@ function spawnClaudeCodeRemediationWorker({
 // codex worker class, regardless of the original PR builderTag. Rationale:
 // feedback_prefer_codex_for_heavy_work.md documents claude-code silent-hang
 // failures and the current trust gap for unattended heavy work. Revisit
-// this only after the claude-code path shows no silent hangs across N
-// consecutive [claude-code] PRs over M weeks; when that gate passes, this
-// can revert to per-tag routing. builderTag remains load-bearing elsewhere
-// for attribution and history; only worker-class selection is pinned here.
-function pickRemediationWorkerClass(job) {
+// only after feedback memory is updated to remove that trust gap; until
+// then, builderTag remains durable job-ledger metadata while execution,
+// commit trailers, and reconcile-time bot identity all reflect codex.
+function pickRemediationWorkerClass(_job) {
   return 'codex';
 }
 

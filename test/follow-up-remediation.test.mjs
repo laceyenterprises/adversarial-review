@@ -668,19 +668,54 @@ test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided'
 
 // ── worker-class dispatcher (LAC-358 hard-switch) ──────────────────────────
 
-test('pickRemediationWorkerClass always routes through codex', () => {
-  for (const [label, job] of [
-    ['builderTag=codex', { builderTag: 'codex', reviewerModel: 'claude' }],
-    ['builderTag=claude-code', { builderTag: 'claude-code', reviewerModel: 'codex' }],
-    ['builderTag=clio-agent', { builderTag: 'clio-agent', reviewerModel: 'codex' }],
-    ['legacy reviewerModel=claude', { reviewerModel: 'claude' }],
-    ['legacy reviewerModel=codex', { reviewerModel: 'codex' }],
-    ['legacy reviewerModel=unknown', { reviewerModel: 'unknown' }],
-    ['empty job', {}],
-    ['null job', null],
-  ]) {
-    assert.equal(pickRemediationWorkerClass(job), 'codex', label);
-  }
+test('pickRemediationWorkerClass routes builderTag=codex to codex during LAC-358 override', () => {
+  assert.equal(
+    pickRemediationWorkerClass({ builderTag: 'codex', reviewerModel: 'claude' }),
+    'codex'
+  );
+});
+
+test('pickRemediationWorkerClass routes builderTag=claude-code to codex during LAC-358 override', () => {
+  assert.equal(
+    pickRemediationWorkerClass({ builderTag: 'claude-code', reviewerModel: 'codex' }),
+    'codex'
+  );
+});
+
+test.skip('pickRemediationWorkerClass routes builderTag=clio-agent to codex remediator (not claude-code)', () => {
+  // Preserve the historical bug shape for the eventual LAC-358 revert:
+  // do not reverse-map reviewerModel='codex' back to claude-code for
+  // [clio-agent] jobs. While the global codex override is active, the
+  // assertion stays skipped rather than deleted.
+  const job = { builderTag: 'clio-agent', reviewerModel: 'codex' };
+  assert.equal(pickRemediationWorkerClass(job), 'codex');
+});
+
+test('pickRemediationWorkerClass routes builderTag=clio-agent to codex during LAC-358 override', () => {
+  assert.equal(
+    pickRemediationWorkerClass({ builderTag: 'clio-agent', reviewerModel: 'codex' }),
+    'codex'
+  );
+});
+
+test('pickRemediationWorkerClass routes legacy reviewerModel=claude to codex during LAC-358 override', () => {
+  assert.equal(pickRemediationWorkerClass({ reviewerModel: 'claude' }), 'codex');
+});
+
+test('pickRemediationWorkerClass routes legacy reviewerModel=codex to codex during LAC-358 override', () => {
+  assert.equal(pickRemediationWorkerClass({ reviewerModel: 'codex' }), 'codex');
+});
+
+test('pickRemediationWorkerClass routes legacy reviewerModel=unknown to codex during LAC-358 override', () => {
+  assert.equal(pickRemediationWorkerClass({ reviewerModel: 'unknown' }), 'codex');
+});
+
+test('pickRemediationWorkerClass routes empty jobs to codex during LAC-358 override', () => {
+  assert.equal(pickRemediationWorkerClass({}), 'codex');
+});
+
+test('pickRemediationWorkerClass routes null jobs to codex during LAC-358 override', () => {
+  assert.equal(pickRemediationWorkerClass(null), 'codex');
 });
 
 test('spawnRemediationWorker dispatches "codex" to spawnCodexRemediationWorker', () => {

@@ -66,6 +66,30 @@ For each issue: state the file, line(s), the problem, and the recommended fix.
 If you find nothing substantive, say so plainly — but look hard first.  
 \`\`\`
 
+\#\#\# Spec-touch enforcement
+
+The reviewer prompt treats silent contract drift as a blocking issue. The rule is intentionally scoped to explicit ownership mappings instead of "any Python anywhere," because remediation only converges when the changed-path \-\> governing-spec mapping is deterministic.
+
+Current ownership map:
+
+\- `modules/worker-pool/lib/python/**/*.py` \-\> `projects/worker-pool/SPEC.md`  
+\- `modules/main-catchup/lib/python/**/*.py` \-\> `projects/main-catchup/SPEC.md`  
+\- `platform/session-ledger/src/session_ledger/**/*.py` \-\> `docs/SPEC-session-ledger-control-plane.md`  
+\- `platform/session-ledger/src/session_ledger/migrations/*.sql` \-\> `docs/SPEC-session-ledger-control-plane.md`  
+\- `modules/worker-pool/bin/hq` and `modules/worker-pool/lib/hq-\*.sh` \-\> `projects/worker-pool/SPEC.md`
+
+Trigger only on public contract changes in those paths:
+
+\- public Python function or method signature changes (parameter lists or return types only)  
+\- new or altered SQL migrations in session\-ledger  
+\- new or altered `hq` CLI subcommands or flags
+
+Do **not** trigger on private `_helpers`, cosmetic docstring edits, or unanchored mentions of `worker_events`. The earlier unscoped `worker_events` bullet was removed because it lacked a stable file/schema anchor and created false\-positive / false\-negative churn.
+
+When the reviewer blocks on this rule, the message is a template with filled slots, not a byte\-exact literal: `Contract changed without spec update. The diff modifies {thing} in {path}, but {specPath} was not touched. Either update the governing spec to match, or revert the contract change. Spec\-as\-source\-of\-truth is load\-bearing; silent drift is the dominant maintenance risk from the 2026\-05\-04 operator retrospective.`
+
+Final\-round interaction is explicit: spec\-touch findings stay **blocking** on the lenient final round because they are broken external\-contract drift, not documentation nits. The lenient addendum still governs everything else.
+
 \---
 
 \#\# System Architecture

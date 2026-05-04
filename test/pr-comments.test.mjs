@@ -154,9 +154,12 @@ test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) flags h
   assert.match(body, /Blockers/);
   // Structured blockers render with both Finding and Reasoning lines
   // so the next human can map the hard-exit back to the originating
-  // review finding.
-  assert.match(body, /Finding: Reviewer asks for a destructive schema migration\./);
-  assert.match(body, /Reasoning: Schema migration requires DBA review\./);
+  // review finding. New format: bold labels outside fenced blocks,
+  // untrusted content inside.
+  assert.match(body, /\*\*Finding\*\*/);
+  assert.match(body, /Reviewer asks for a destructive schema migration\./);
+  assert.match(body, /\*\*Reasoning\*\*/);
+  assert.match(body, /Schema migration requires DBA review\./);
   // No re-review requested in this state.
   assert.match(body, /Re-review requested:\*\*\s*no/);
 });
@@ -952,14 +955,22 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   });
 
   assert.match(body, /\*\*Addressed findings\*\*/);
-  assert.match(body, /Finding: Race in retry path can double-submit\./);
-  assert.match(body, /Action: Added an idempotency token \+ dedupe check\./);
-  assert.match(body, /Files: src\/worker\.mjs, test\/worker\.test\.mjs/);
+  // New format: numbered list with bold labels outside fenced blocks.
+  // Untrusted finding/action text stays inside fences, files render
+  // as inline-coded paths so a worker-supplied path can't break out
+  // of the inline-code wrapper.
+  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /Race in retry path can double-submit\./);
+  assert.match(body, /\*\*Action\*\*/);
+  assert.match(body, /Added an idempotency token \+ dedupe check\./);
+  assert.match(body, /\*\*Files:\*\* `src\/worker\.mjs`, `test\/worker\.test\.mjs`/);
   // Second entry has no Files: line — verify it doesn't appear
-  // for that block. The full body may have Files: from entry 1
-  // already, so check that Files: appears exactly once.
-  const filesLines = body.match(/^Files: /gm) || [];
+  // for that block. The full body may have **Files:** from entry 1
+  // already, so check that **Files:** appears exactly once.
+  const filesLines = body.match(/\*\*Files:\*\*/g) || [];
   assert.equal(filesLines.length, 1, 'Files: line only on entries that supply it');
+  // Both entries should be numbered.
+  assert.match(body, /2\. \*\*Finding\*\*/);
 });
 
 test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding/reasoning', () => {
@@ -984,8 +995,10 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
   });
 
   assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
-  assert.match(body, /Finding: Reviewer asked to refactor the entire dispatch module\./);
-  assert.match(body, /Reasoning: Out of scope for this PR; tracked as separate ticket LAC-99\./);
+  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /Reviewer asked to refactor the entire dispatch module\./);
+  assert.match(body, /\*\*Reasoning\*\*/);
+  assert.match(body, /Out of scope for this PR; tracked as separate ticket LAC-99\./);
 });
 
 test('buildRemediationOutcomeCommentBody omits addressed/pushback sections when empty or absent', () => {
@@ -1102,9 +1115,10 @@ test('buildRemediationOutcomeCommentBody renders all four sections (summary, add
   // Structured blocker carries the originating review finding and a
   // needsHumanInput line so the human reviewer can see exactly which
   // finding was deferred and what input is needed.
-  assert.match(body, /Finding: Reviewer asks for the schema migration\./);
-  assert.match(body, /Reasoning: Schema migration requires DBA review\./);
-  assert.match(body, /Needs human input: DBA approval \+ maintenance window/);
+  assert.match(body, /Reviewer asks for the schema migration\./);
+  assert.match(body, /Schema migration requires DBA review\./);
+  assert.match(body, /\*\*Needs human input\*\*/);
+  assert.match(body, /DBA approval \+ maintenance window/);
   // Order matters for readability — the reader should see what was
   // done before what wasn't.
   const idxAddressed = body.indexOf('Addressed findings');
@@ -1142,10 +1156,10 @@ test('buildRemediationOutcomeCommentBody truncates an absurdly long Files: line 
 
   // The cap is generous (~600 chars) so we don't pin an exact length;
   // we assert the truncation marker is present and the comment is not
-  // the unbounded ~5KB it would be without truncation. (Each file ~14
-  // chars including ", " separator → 200 × 14 = ~2800 chars without
-  // the cap.)
-  assert.match(body, /Files:.*…/);
+  // the unbounded ~5KB it would be without truncation. (Each file
+  // wrapped in inline backticks is ~17 chars + ", " → 200 × 19 = ~3800
+  // chars without the cap.)
+  assert.match(body, /\*\*Files:\*\*.*…/);
   // The full unbounded join would include "src/file-199.mjs" — the
   // cap cuts off well before then. Per-bullet redaction may further
   // cap the entry; either way the highest-numbered file we see should
@@ -1183,4 +1197,70 @@ test('buildRemediationOutcomeCommentBody renders round-budget-exhausted with ris
   assert.match(body, /completed: 1/);
   assert.match(body, /reopen the linked spec to justify a higher.*riskClass/);
   assert.match(body, /Human intervention required/);
+});
+
+test('buildRemediationOutcomeCommentBody salvages worker response on invalid-remediation-reply failure', () => {
+  // Strict validator rejected the reply (e.g. reReview.reason was null
+  // while requested was true), but the rest of the worker's output —
+  // summary, addressed[], pushback[], blockers[] — parsed cleanly. The
+  // failure comment must surface the recovered worker response so the
+  // operator can see the point-by-point work the worker did, instead
+  // of the generic "did not produce a usable remediation reply"
+  // message that would otherwise drop everything on the floor.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'failed',
+    job: makeJob(),
+    reply: {
+      summary: 'Preserved opened_at, made events idempotent, verified cascades.',
+      validation: ['python3 platform/session-ledger/tests/test_turn_observability.py'],
+      addressed: [
+        {
+          finding: 'turn_attempts upsert overwrites opened_at on partial updates.',
+          action: 'Changed conflict update to preserve opened_at and other nullable fields.',
+          files: ['platform/session-ledger/src/session_ledger/db.py'],
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    failure: {
+      code: 'invalid-remediation-reply',
+      message: 'Remediation reply reReview.reason is required when reReview.requested is true',
+    },
+  });
+
+  assert.match(body, /Outcome:.*failed/);
+  assert.match(body, /Reason: `Remediation reply reReview\.reason is required/);
+  // Soft human-intervention message — not the "did not produce a
+  // usable remediation reply" line, since we DID recover content.
+  assert.match(body, /failed strict schema validation.*recovered below/);
+  // Salvaged sections render below the failure header.
+  assert.match(body, /\*\*Summary\*\*/);
+  assert.match(body, /Preserved opened_at, made events idempotent/);
+  assert.match(body, /\*\*Addressed findings\*\*/);
+  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /turn_attempts upsert overwrites opened_at on partial updates\./);
+  assert.match(body, /\*\*Files:\*\* `platform\/session-ledger\/src\/session_ledger\/db\.py`/);
+});
+
+test('buildRemediationOutcomeCommentBody on invalid-remediation-reply with no salvageable content keeps the original failure message', () => {
+  // When the reply file was unparseable / empty, the salvage path
+  // returns nothing renderable. The failure comment falls back to the
+  // original "did not produce a usable remediation reply" line so the
+  // operator knows there was no worker response to inspect.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'failed',
+    job: makeJob(),
+    reply: null,
+    failure: {
+      code: 'invalid-remediation-reply',
+      message: 'Failed to read remediation reply artifact',
+    },
+  });
+
+  assert.match(body, /Outcome:.*failed/);
+  assert.match(body, /did not produce a usable remediation reply/);
+  assert.doesNotMatch(body, /failed strict schema validation/);
 });

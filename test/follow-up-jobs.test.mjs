@@ -20,6 +20,7 @@ import {
   markFollowUpJobFailed,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
+  salvagePartialRemediationReply,
   readFollowUpJob,
   resolveRoundBudgetForJob,
   requeueFollowUpJobForNextRound,
@@ -1807,6 +1808,100 @@ test('readRemediationReplyArtifact wraps parse and validation errors with artifa
     () => readRemediationReplyArtifact(invalidReplyPath, { expectedJob: job }),
     /Failed to read remediation reply artifact at .*invalid-reply\.json.*validation\[1\] must be a non-empty string/
   );
+});
+
+test('salvagePartialRemediationReply returns null when the file is not parseable JSON', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(replyPath, '{ not-json', 'utf8');
+  assert.equal(salvagePartialRemediationReply(replyPath), null);
+});
+
+test('salvagePartialRemediationReply returns null when the JSON is not an object', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(replyPath, '"a string"', 'utf8');
+  assert.equal(salvagePartialRemediationReply(replyPath), null);
+  writeFileSync(replyPath, '[1,2,3]', 'utf8');
+  assert.equal(salvagePartialRemediationReply(replyPath), null);
+});
+
+test('salvagePartialRemediationReply returns null when the JSON object has no renderable fields', () => {
+  // Garbage object — no summary / addressed / pushback / blockers /
+  // validation. Salvage path returns null so the renderer falls back
+  // to the plain failure message.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(replyPath, JSON.stringify({ kind: 'something-else', random: 'noise' }), 'utf8');
+  assert.equal(salvagePartialRemediationReply(replyPath), null);
+});
+
+test('salvagePartialRemediationReply extracts renderable fields from a malformed reply', () => {
+  // The exact failure mode that landed PR #168 in failed/: the worker
+  // produced a structurally valid JSON with addressed[] entries and a
+  // summary, but reReview.reason was null while requested was true so
+  // strict validation rejected it. The salvage path should still
+  // return the renderable subset.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(replyPath, JSON.stringify({
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: 'lac__demo-pr-168-2026-05-04T03-05-43-585Z',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 168,
+    outcome: 'completed',
+    summary: 'Preserved opened_at; idempotent events; cascade verified.',
+    validation: ['python3 platform/session-ledger/tests/test_turn_observability.py'],
+    addressed: [
+      {
+        finding: 'turn_attempts upsert overwrites opened_at on partial updates.',
+        action: 'Changed conflict update to preserve opened_at and other nullable fields.',
+        files: ['platform/session-ledger/src/session_ledger/db.py'],
+      },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: null },
+  }), 'utf8');
+
+  const partial = salvagePartialRemediationReply(replyPath);
+  assert.ok(partial, 'salvage must return a partial reply object');
+  assert.equal(partial.summary, 'Preserved opened_at; idempotent events; cascade verified.');
+  assert.deepEqual(partial.validation, ['python3 platform/session-ledger/tests/test_turn_observability.py']);
+  assert.equal(partial.addressed.length, 1);
+  assert.equal(partial.addressed[0].finding, 'turn_attempts upsert overwrites opened_at on partial updates.');
+  // Empty arrays should be omitted (so the renderer doesn't print an
+  // empty section header).
+  assert.equal(partial.pushback, undefined);
+  assert.equal(partial.blockers, undefined);
+});
+
+test('salvagePartialRemediationReply drops malformed entries inside arrays', () => {
+  // Type-checks per entry: a wrong-shape addressed item must be
+  // filtered out so the renderer never receives a half-formed object.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(replyPath, JSON.stringify({
+    summary: 'mixed',
+    addressed: [
+      { finding: 'good', action: 'fixed it' },
+      { finding: 'no action' }, // missing action
+      'string-not-object', // not an object
+      { finding: '', action: 'empty finding' }, // empty finding
+    ],
+    blockers: [
+      'legacy-string-blocker',
+      { finding: 'structured-blocker', reasoning: 'why' },
+      { reasoning: 'no finding' }, // missing finding
+    ],
+  }), 'utf8');
+
+  const partial = salvagePartialRemediationReply(replyPath);
+  assert.ok(partial);
+  assert.equal(partial.addressed.length, 1);
+  assert.equal(partial.addressed[0].action, 'fixed it');
+  assert.equal(partial.blockers.length, 2);
 });
 
 test('markFollowUpJobCompleted moves an in-progress job into completed with reconciliation context', () => {

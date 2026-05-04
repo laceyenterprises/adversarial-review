@@ -741,6 +741,64 @@ function readRemediationReplyArtifact(replyPath, { expectedJob = null } = {}) {
   }
 }
 
+// Best-effort recovery of renderable fields from a remediation reply
+// that did NOT pass strict validation. Returns null when the file
+// cannot even be parsed as JSON. When the file IS valid JSON, returns
+// only the fields the PR-comment renderer can use, with conservative
+// type checks so we don't pass garbage into the comment body. Strict
+// validation still gates the state machine — this helper is only for
+// salvaging the worker's prose for the operator-facing failure comment
+// so a single contract violation doesn't throw away the worker's
+// point-by-point response.
+function salvagePartialRemediationReply(replyPath) {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(replyPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+
+  const isStr = (v) => typeof v === 'string' && v.trim().length > 0;
+  const partial = {};
+
+  if (isStr(raw.summary)) {
+    partial.summary = raw.summary;
+  }
+
+  if (Array.isArray(raw.validation)) {
+    const v = raw.validation.filter(isStr);
+    if (v.length) partial.validation = v;
+  }
+
+  if (Array.isArray(raw.addressed)) {
+    const a = raw.addressed.filter(
+      (e) => e && typeof e === 'object' && !Array.isArray(e) && isStr(e.finding) && isStr(e.action)
+    );
+    if (a.length) partial.addressed = a;
+  }
+
+  if (Array.isArray(raw.pushback)) {
+    const p = raw.pushback.filter(
+      (e) => e && typeof e === 'object' && !Array.isArray(e) && isStr(e.finding) && isStr(e.reasoning)
+    );
+    if (p.length) partial.pushback = p;
+  }
+
+  if (Array.isArray(raw.blockers)) {
+    const b = raw.blockers.filter((e) => {
+      if (typeof e === 'string') return e.trim().length > 0;
+      if (!e || typeof e !== 'object' || Array.isArray(e)) return false;
+      return isStr(e.finding);
+    });
+    if (b.length) partial.blockers = b;
+  }
+
+  return Object.keys(partial).length ? partial : null;
+}
+
 function buildLegacyRemediationPlan(job) {
   const maxRounds = normalizeMaxRounds(
     Number(job?.remediationPlan?.maxRounds)
@@ -1805,6 +1863,7 @@ export {
   markFollowUpJobSpawned,
   markFollowUpJobStopped,
   readRemediationReplyArtifact,
+  salvagePartialRemediationReply,
   readFollowUpJob,
   resolveRoundBudgetForJob,
   requeueFollowUpJobForNextRound,

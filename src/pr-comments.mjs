@@ -90,67 +90,152 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
   return safe.map((s) => `- ${fenceUntrustedText(s)}`).join('\n\n');
 }
 
-// Length cap on the "Files:" line within an addressed[] entry. The
-// cap is generous enough for a real fix touching ~10 files, but bounds
-// a worker that decides to dump every file in the repo.
+// Caps on the per-entry rendered output. Files line is generous enough
+// for a real fix touching ~10 files, but bounded so a runaway worker
+// can't dump every file in the repo (the joined-line cap is what
+// enforces the bound; the count is allowed to be high since each path
+// is short and per-line truncation still kicks in). Per-entry text
+// caps apply independently to finding/action/reasoning so one long
+// action does not crowd out the others.
 const ADDRESSED_FILES_MAX_CHARS = 600;
+const PER_ENTRY_FIELD_MAX_CHARS = 800;
+
+// Indent every line of `text` with `prefix`. Used to align fenced code
+// blocks under markdown list items so GFM renders them as part of the
+// numbered item rather than breaking the list.
+function indentBlock(text, prefix) {
+  return String(text ?? '')
+    .split('\n')
+    .map((line) => (line.length ? `${prefix}${line}` : prefix.replace(/\s+$/, '')))
+    .join('\n');
+}
+
+// Wrap a path in inline backticks for inline-code rendering. Backticks
+// inside the path are stripped defensively so a worker-supplied path
+// can't break out of the wrapper. Empty or whitespace-only input
+// returns null so the caller can omit the entry entirely.
+function safeInlineCode(text) {
+  const stripped = String(text ?? '').replace(/`/g, '').trim();
+  if (!stripped) return null;
+  return `\`${stripped}\``;
+}
+
+// Render a fenced text block at `indentLevel` spaces of indent so the
+// fenced content nests under a markdown list item. The fence width
+// auto-grows to outrun any backtick run inside the content (same
+// guarantee as fenceUntrustedText).
+function indentedFencedText(text, indentLevel = 3) {
+  const prefix = ' '.repeat(indentLevel);
+  return indentBlock(fenceUntrustedText(text), prefix);
+}
 
 // Render the worker's per-finding accountability list. Each entry of
-// `addressed[]` produces a multi-line block:
+// `addressed[]` produces a numbered point-by-point block:
 //
-//   Finding:   <quoted summary of the review's blocking issue>
-//   Action:    <what the worker did to address it>
-//   Files:     a.js, b.js   ← only when entry.files is non-empty
+//   1. **Finding**
 //
-// The whole multi-line string is fed through the same redaction +
-// per-item cap pipeline as the existing bullet lists, so an entry
-// that smuggles a token / @mention / autolink stays inert. The cap
-// applies AFTER joining the lines, so an entry that overruns the cap
-// gets visibly truncated rather than silently dropped.
+//      ```text
+//      <quoted summary of the review's blocking issue>
+//      ```
+//
+//      **Action**
+//
+//      ```text
+//      <what the worker did to address it>
+//      ```
+//
+//      **Files:** `a.js`, `b.js`   ← only when entry.files is non-empty
+//
+// The structure puts bold labels OUTSIDE fenced blocks so they render
+// as markdown, while untrusted finding/action text stays INSIDE fences
+// and remains inert (no @mentions / autolinks / GFM extensions reach
+// the PR thread). Files are inline-coded paths with backticks stripped
+// so a worker-injected ` cannot break out of the inline-code wrapper.
 function formatAddressedList(items, emptyText = '_(none reported)_') {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
-  const formatted = items
+  const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
       const finding = String(entry.finding ?? '').trim();
       const action = String(entry.action ?? '').trim();
       if (!finding || !action) return null;
-      const filesArr = Array.isArray(entry.files)
+      const files = Array.isArray(entry.files)
         ? entry.files
             .filter((f) => typeof f === 'string' && f.trim())
-            .map((f) => f.trim())
+            .map((f) => safeInlineCode(redactPublicSafeText(f.trim(), 200)))
+            .filter(Boolean)
         : [];
-      const lines = [`Finding: ${finding}`, `Action: ${action}`];
-      if (filesArr.length) {
-        let filesLine = `Files: ${filesArr.join(', ')}`;
+      return {
+        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
+        action: redactPublicSafeText(action, PER_ENTRY_FIELD_MAX_CHARS),
+        files,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, BULLET_LIST_MAX_ITEMS);
+
+  if (!entries.length) return emptyText;
+
+  return entries
+    .map((entry, index) => {
+      const lines = [
+        `${index + 1}. **Finding**`,
+        '',
+        indentedFencedText(entry.finding),
+        '',
+        '   **Action**',
+        '',
+        indentedFencedText(entry.action),
+      ];
+      if (entry.files.length) {
+        let filesLine = `   **Files:** ${entry.files.join(', ')}`;
         if (filesLine.length > ADDRESSED_FILES_MAX_CHARS) {
           filesLine = `${filesLine.slice(0, ADDRESSED_FILES_MAX_CHARS - 1)}…`;
         }
+        lines.push('');
         lines.push(filesLine);
       }
       return lines.join('\n');
     })
-    .filter(Boolean);
-  return formatRedactedBulletList(formatted, emptyText);
+    .join('\n\n');
 }
 
 // Render the worker's pushback list. `pushback[]` is for findings the
 // worker read, deliberately decided NOT to change the code on, and
 // wants to record the reasoning. Distinct from `blockers[]` (hard
-// exit) and `addressed[]` (fix applied). Same redaction / caps as
-// the addressed list.
+// exit) and `addressed[]` (fix applied). Same numbered point-by-point
+// shape as addressed entries, with **Reasoning** in place of **Action**.
 function formatPushbackList(items, emptyText = '_(none reported)_') {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
-  const formatted = items
+  const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
       const finding = String(entry.finding ?? '').trim();
       const reasoning = String(entry.reasoning ?? '').trim();
       if (!finding || !reasoning) return null;
-      return `Finding: ${finding}\nReasoning: ${reasoning}`;
+      return {
+        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
+        reasoning: redactPublicSafeText(reasoning, PER_ENTRY_FIELD_MAX_CHARS),
+      };
     })
-    .filter(Boolean);
-  return formatRedactedBulletList(formatted, emptyText);
+    .filter(Boolean)
+    .slice(0, BULLET_LIST_MAX_ITEMS);
+
+  if (!entries.length) return emptyText;
+
+  return entries
+    .map((entry, index) => {
+      return [
+        `${index + 1}. **Finding**`,
+        '',
+        indentedFencedText(entry.finding),
+        '',
+        '   **Reasoning**',
+        '',
+        indentedFencedText(entry.reasoning),
+      ].join('\n');
+    })
+    .join('\n\n');
 }
 
 // Render the worker's blockers list. `blockers[]` is the hard-exit
@@ -161,30 +246,65 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
 // multi-finding review, exactly which item is unresolved.
 //
 // A legacy reply that still emits string entries (predates the
-// structured contract) renders as a plain bullet — degraded but
-// readable. New replies always come through the validator which
-// rejects strings, so this fallback only fires on imported / hand-
-// edited terminal job records.
+// structured contract) renders as a numbered text block with the
+// string treated as the finding. New replies always come through the
+// validator which rejects strings, so this fallback only fires on
+// imported / hand-edited terminal job records.
 function formatBlockersList(items, emptyText = '_(none reported)_') {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
-  const formatted = items
+  const entries = items
     .map((entry) => {
       if (typeof entry === 'string') {
         const trimmed = entry.trim();
-        return trimmed || null;
+        if (!trimmed) return null;
+        return {
+          finding: redactPublicSafeText(trimmed, PER_ENTRY_FIELD_MAX_CHARS),
+          reasoning: '',
+          needsHumanInput: '',
+        };
       }
       if (!entry || typeof entry !== 'object') return null;
       const finding = String(entry.finding ?? '').trim();
       if (!finding) return null;
-      const reasoning = String(entry.reasoning ?? '').trim();
-      const needsHumanInput = String(entry.needsHumanInput ?? '').trim();
-      const lines = [`Finding: ${finding}`];
-      if (reasoning) lines.push(`Reasoning: ${reasoning}`);
-      if (needsHumanInput) lines.push(`Needs human input: ${needsHumanInput}`);
+      return {
+        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
+        reasoning: redactPublicSafeText(
+          String(entry.reasoning ?? '').trim(),
+          PER_ENTRY_FIELD_MAX_CHARS,
+        ),
+        needsHumanInput: redactPublicSafeText(
+          String(entry.needsHumanInput ?? '').trim(),
+          PER_ENTRY_FIELD_MAX_CHARS,
+        ),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, BULLET_LIST_MAX_ITEMS);
+
+  if (!entries.length) return emptyText;
+
+  return entries
+    .map((entry, index) => {
+      const lines = [
+        `${index + 1}. **Finding**`,
+        '',
+        indentedFencedText(entry.finding),
+      ];
+      if (entry.reasoning) {
+        lines.push('');
+        lines.push('   **Reasoning**');
+        lines.push('');
+        lines.push(indentedFencedText(entry.reasoning));
+      }
+      if (entry.needsHumanInput) {
+        lines.push('');
+        lines.push('   **Needs human input**');
+        lines.push('');
+        lines.push(indentedFencedText(entry.needsHumanInput));
+      }
       return lines.join('\n');
     })
-    .filter(Boolean);
-  return formatRedactedBulletList(formatted, emptyText);
+    .join('\n\n');
 }
 
 // Sanitize a free-text field for use in a BLOCK context (the
@@ -384,9 +504,30 @@ function buildRemediationOutcomeCommentBody({
       lines.push('Reason: unknown — check the daemon logs.');
     }
     lines.push('');
-    lines.push(
-      '> **Human intervention required.** The worker did not produce a usable remediation reply. Inspect `data/follow-up-jobs/failed/` for the job record and the worker logs.'
+    // Salvage path: when the failure code is invalid-remediation-reply
+    // AND we recovered renderable fields from the malformed reply,
+    // soften the human-intervention message so it acknowledges the
+    // recovered worker response below instead of claiming the worker
+    // produced nothing usable. The state machine still treated this
+    // round as failed; the operator just gets the worker's
+    // point-by-point response alongside the contract-violation reason.
+    const hasSalvagedContent = Boolean(
+      reply
+        && (reply.summary
+          || reply.validation?.length
+          || reply.addressed?.length
+          || reply.pushback?.length
+          || reply.blockers?.length)
     );
+    if (hasSalvagedContent && failure?.code === 'invalid-remediation-reply') {
+      lines.push(
+        '> **Human intervention required.** The worker\'s reply failed strict schema validation (see Reason above), but its point-by-point response was recovered below. Inspect the recovered response, decide whether to accept the work or re-arm.'
+      );
+    } else {
+      lines.push(
+        '> **Human intervention required.** The worker did not produce a usable remediation reply. Inspect `data/follow-up-jobs/failed/` for the job record and the worker logs.'
+      );
+    }
   }
 
   // Worker-supplied fields below are *untrusted*. They go through

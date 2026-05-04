@@ -9,6 +9,11 @@ Work mode:
 - Update tests and docs when the code change warrants it.
 - Avoid speculative refactors that are not needed to resolve the review findings.
 
+Before you start changing code:
+- Rebase the PR branch onto the upstream `main` branch (`git fetch origin && git rebase origin/main`) so your remediation lands on top of the current trunk and does not collide with merges that happened during review.
+- If the rebase produces conflicts, resolve them in this round — that is part of getting the PR back into good shape. Treat it as remediation work, not a blocker, unless the conflict requires a design decision you cannot make on your own (in which case use `blockers[]`).
+- After resolving conflicts, re-run the relevant tests so the rebase outcome is validated, not just the original fix.
+
 When you finish:
 - Summarize what you changed.
 - Report the validation you ran.

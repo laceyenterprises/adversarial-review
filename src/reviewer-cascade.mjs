@@ -1,26 +1,30 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const CASCADE_BACKOFF_MINUTES = [1, 2, 4, 8, 15];
 const CASCADE_FAILURE_CAP = 5;
 const CASCADE_STATE_DIR = ['data', 'cascade-state'];
 
-function classifyReviewerFailure(stderr, exitCode) {
+const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
+
+function classifyReviewerFailure(stderr, exitCode, errorCode = null) {
   const text = String(stderr || '');
   const lower = text.toLowerCase();
-  const mentionsReal429 = /\b429\b|too many requests|http\s*429/.test(lower);
+  const normalizedErrorCode = String(errorCode || '').toUpperCase();
+  const mentionsReal429 =
+    /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
   const mentionsRateLimit = /rate.?limit/.test(lower);
   const mentionsCascade =
     /all upstream attempts failed|upstream[._ -]?failed|cascade/.test(lower) ||
     (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
     /timeout.*retries|retries.*timeout/.test(lower) ||
-    /(http|status|response)\s+5\d\d\b/.test(lower);
+    /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
 
   if ((mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
   }
 
-  if (exitCode === 127 || /typeerror|syntaxerror|cannot find/.test(lower)) {
+  if (exitCode === 127 || BUG_ERROR_CODES.has(normalizedErrorCode) || /typeerror|syntaxerror|cannot find/.test(lower)) {
     return 'bug';
   }
 
@@ -32,10 +36,20 @@ function getCascadeStateDir(rootDir) {
 }
 
 function getCascadeStatePath(rootDir, { repo, prNumber }) {
-  const safeRepo = String(repo || '')
-    .trim()
-    .replace(/[\\/]+/g, '__');
-  return join(getCascadeStateDir(rootDir), `${safeRepo}__${Number(prNumber)}.json`);
+  const normalizedPrNumber = Number(prNumber);
+  if (!Number.isInteger(normalizedPrNumber) || normalizedPrNumber <= 0) {
+    throw new TypeError(`Invalid PR number for cascade state: ${prNumber}`);
+  }
+
+  const normalizedRepo = String(repo || '').trim();
+  if (!normalizedRepo) {
+    throw new TypeError('Repo slug is required for cascade state');
+  }
+
+  return join(
+    getCascadeStateDir(rootDir),
+    `${encodeURIComponent(normalizedRepo)}__${normalizedPrNumber}.json`
+  );
 }
 
 function readCascadeState(rootDir, { repo, prNumber }) {
@@ -50,7 +64,16 @@ function readCascadeState(rootDir, { repo, prNumber }) {
 function writeCascadeState(rootDir, { repo, prNumber }, state) {
   mkdirSync(getCascadeStateDir(rootDir), { recursive: true });
   const path = getCascadeStatePath(rootDir, { repo, prNumber });
-  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  const tmpPath = `${path}.tmp`;
+  const payload = `${JSON.stringify(state, null, 2)}\n`;
+  const tmpFd = openSync(tmpPath, 'w');
+  try {
+    writeFileSync(tmpFd, payload, 'utf8');
+    fsyncSync(tmpFd);
+  } finally {
+    closeSync(tmpFd);
+  }
+  renameSync(tmpPath, path);
   return state;
 }
 
@@ -89,7 +112,11 @@ function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().
 
   const nowMs = Date.parse(now);
   const nextRetryMs = Date.parse(state.nextRetryAfter);
-  if (!Number.isFinite(nowMs) || !Number.isFinite(nextRetryMs) || nowMs >= nextRetryMs) {
+  if (!Number.isFinite(nowMs) || !Number.isFinite(nextRetryMs)) {
+    return { shouldBackoff: true, state };
+  }
+
+  if (nowMs >= nextRetryMs) {
     return { shouldBackoff: false, state };
   }
 

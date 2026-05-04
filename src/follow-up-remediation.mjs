@@ -515,6 +515,7 @@ function spawnClaudeCodeRemediationWorker({
     HQ_ROOT: replyContext.hqRoot,
     LRQ_ID: replyContext.launchRequestId,
   };
+  delete env.WORKER_JOB_ID;
   if (jobId) env.WORKER_JOB_ID = jobId;
   else delete env.WORKER_JOB_ID;
 
@@ -1075,6 +1076,7 @@ function spawnCodexRemediationWorker({
     HQ_ROOT: replyContext.hqRoot,
     LRQ_ID: replyContext.launchRequestId,
   };
+  delete env.WORKER_JOB_ID;
   if (jobId) {
     env.WORKER_JOB_ID = jobId;
   } else delete env.WORKER_JOB_ID;

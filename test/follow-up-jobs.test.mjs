@@ -43,6 +43,57 @@ function makeJobInput(rootDir) {
   };
 }
 
+function writeLedgerTerminalJob(rootDir, {
+  fileName,
+  remediationWorker,
+  currentRound = 1,
+  status = 'completed',
+} = {}) {
+  const dir = getFollowUpJobDir(rootDir, status);
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, fileName);
+  const job = {
+    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+    kind: 'adversarial-review-follow-up',
+    status,
+    jobId: fileName.replace(/\.json$/, ''),
+    createdAt: '2026-05-04T12:00:00.000Z',
+    completedAt: '2026-05-04T12:05:00.000Z',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 199,
+    reviewerModel: 'codex',
+    critical: true,
+    reviewSummary: 'summary',
+    reviewBody: 'body',
+    recommendedFollowUpAction: {
+      type: 'address-adversarial-review',
+      priority: 'high',
+      executionModel: 'bounded-manual-rounds',
+      maxRounds: 3,
+    },
+    remediationPlan: {
+      mode: 'bounded-manual-rounds',
+      maxRounds: 3,
+      currentRound,
+      rounds: [],
+      stop: null,
+      nextAction: null,
+    },
+    remediationReply: {
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      state: 'awaiting-worker-write',
+      path: null,
+    },
+  };
+
+  if (arguments[1] && Object.prototype.hasOwnProperty.call(arguments[1], 'remediationWorker')) {
+    job.remediationWorker = remediationWorker;
+  }
+
+  writeFollowUpJob(jobPath, job);
+}
+
 function writePlanMappingFixture(rootDir, {
   planDir = 'projects/example-project',
   planFile = 'PLAN-track-x.json',
@@ -255,6 +306,32 @@ test('resolveRoundBudgetForJob falls back to medium when the linked plan file is
 
   assert.equal(resolution.riskClass, 'medium');
   assert.equal(resolution.roundBudget, 1);
+});
+
+test('summarizePRRemediationLedger excludes terminal jobs without a spawned remediation worker', () => {
+  const cases = [
+    ['null remediationWorker', null, 0],
+    ['missing remediationWorker', undefined, 0],
+    ['never-spawned remediationWorker', { state: 'never-spawned' }, 0],
+    ['completed remediationWorker', { state: 'completed' }, 2],
+    ['malformed remediationWorker', 'corrupt-worker-shape', 0],
+  ];
+
+  for (const [label, remediationWorker, expectedRounds] of cases) {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+    writeLedgerTerminalJob(rootDir, {
+      fileName: `${label.replace(/\s+/g, '-')}.json`,
+      remediationWorker,
+      currentRound: 2,
+    });
+
+    const summary = summarizePRRemediationLedger(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 199,
+    });
+
+    assert.equal(summary.completedRoundsForPR, expectedRounds, label);
+  }
 });
 
 test('readFollowUpJob whitelists persisted remediationReply fields during normalization', () => {

@@ -1132,7 +1132,12 @@ function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
         // wide ledger reflects only rounds that actually ran a worker.
         // Without this exclusion, a single closed/merged PR check or
         // OAuth hiccup permanently burns a round of remediation budget.
-        const neverSpawned = job?.remediationWorker?.state === 'never-spawned';
+        const remediationWorker = job?.remediationWorker;
+        const neverSpawned = (
+          remediationWorker == null
+          || typeof remediationWorker !== 'object'
+          || remediationWorker?.state === 'never-spawned'
+        );
         if (!neverSpawned) {
           const cur = Number(job?.remediationPlan?.currentRound || 0);
           if (Number.isFinite(cur) && cur > completedRoundsForPR) {

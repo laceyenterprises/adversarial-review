@@ -32,6 +32,7 @@ import {
 import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
 import { redactSensitiveText } from './redaction.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
+import { staleDriftStopDecision } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1616,6 +1617,10 @@ async function resolveJobPRLifecycleSafe({
 //     shipped this" from "we abandoned this".
 function lifecycleStopDecision(lifecycle, { repo, prNumber, site }) {
   if (!lifecycle) return null;
+  const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber });
+  if (staleDriftStop) {
+    return staleDriftStop;
+  }
   if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') return null;
 
   const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
@@ -2323,23 +2328,42 @@ async function consumeNextFollowUpJob({
     site: 'consume',
   });
   if (lifecycleStop) {
+    if (lifecycleStop.logMessage) {
+      log.log?.(lifecycleStop.logMessage);
+    }
     const stoppedAt = now();
-    const stopped = await stopConsumedJobWithComment({
-      rootDir,
-      job: claimed.job,
-      jobPath: claimed.jobPath,
-      stoppedAt,
-      stopCode: lifecycleStop.stopCode,
-      stopReason: lifecycleStop.stopReason,
-      sourceStatus: 'in_progress',
-      remediationWorker: {
-        state: 'never-spawned',
-        reconciledAt: stoppedAt,
-      },
-      postCommentImpl,
-      now,
-      log,
-    });
+    let stopped;
+    if (lifecycleStop.stopCode === 'stale-drift') {
+      stopped = markFollowUpJobStopped({
+        rootDir,
+        jobPath: claimed.jobPath,
+        stoppedAt,
+        stopCode: lifecycleStop.stopCode,
+        stopReason: lifecycleStop.stopReason,
+        sourceStatus: 'in_progress',
+        remediationWorker: {
+          state: 'never-spawned',
+          reconciledAt: stoppedAt,
+        },
+      });
+    } else {
+      stopped = await stopConsumedJobWithComment({
+        rootDir,
+        job: claimed.job,
+        jobPath: claimed.jobPath,
+        stoppedAt,
+        stopCode: lifecycleStop.stopCode,
+        stopReason: lifecycleStop.stopReason,
+        sourceStatus: 'in_progress',
+        remediationWorker: {
+          state: 'never-spawned',
+          reconciledAt: stoppedAt,
+        },
+        postCommentImpl,
+        now,
+        log,
+      });
+    }
     return {
       consumed: false,
       reason: lifecycleStop.actionReason,
@@ -2678,6 +2702,7 @@ export {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  lifecycleStopDecision,
   resolveCodexCliPath,
   resolveCodexAuthPath,
   resolveHqReplyPath,

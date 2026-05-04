@@ -38,6 +38,7 @@ import {
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
+import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -717,6 +718,11 @@ async function pollOnce(octokit) {
       const prNumber = pr.number;
       const prTitle = pr.title;
       const prState = String(pr.state || '').trim().toLowerCase();
+      const staleDriftSkip = shouldSkipReviewerForStaleDrift(pr);
+      if (staleDriftSkip) {
+        console.log(staleDriftSkip.message);
+        continue;
+      }
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
       // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()

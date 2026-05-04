@@ -146,7 +146,16 @@ GitHub PR opened
 \- Follow-up remediation must not remain an implicit one-shot with no durable path for a second bounded pass
 \- Each follow-up job must carry an explicit bounded remediation plan:
 \- \`mode = bounded-manual-rounds\`
-\- \`maxRounds\` cap stored durably in the job record; current bounded default is \`3\` (was \`6\` before the 2026-05-02 three-round-convergence change). The cap is enforced PR-wide: each new follow-up job is seeded with the PR's prior accumulated remediation rounds so \`claimNextFollowUpJob\` stops the bounded loop once the PR exhausts its budget. Jobs persisted with the legacy \`6\` cap keep that cap, and the watcher carries each PR's persisted \`maxRounds\` forward into the next adversarial review pass instead of substituting the global default. After the cap is consumed, the next adversarial review pass runs with the lenient final-round verdict-categorization addendum (\`prompts/reviewer-prompt-final-round-addendum.md\`); that addendum relaxes the categorization bar so non-critical findings move to \`## Non-blocking issues\`, but it does not relax the merge gate — the verdict stays \`Request changes\` whenever any finding remains, so PRs with known unresolved issues do not silently auto-merge.
+\- \`maxRounds\` cap stored durably in the job record. Current risk-tier table:
+
+| Risk class | Round budget |
+|------------|--------------|
+| low        | 1            |
+| medium     | 3            |
+| high       | 3            |
+| critical   | 3            |
+
+The cap is enforced PR-wide: each new follow-up job is seeded with the PR's prior accumulated remediation rounds so \`claimNextFollowUpJob\` stops the bounded loop once the PR exhausts its budget. Jobs persisted with the legacy \`6\` cap or any earlier persisted \`maxRounds\` value keep that cap, and the watcher carries each PR's persisted \`maxRounds\` forward into the next adversarial review pass instead of substituting the global default. Medium and high were too tight against the current reviewer's blocking-issue threshold; bumping them to \`3\` lets remediation iterate to a real verdict before the lenient final-round addendum activates. After the cap is consumed, the next adversarial review pass runs with the lenient final-round verdict-categorization addendum (\`prompts/reviewer-prompt-final-round-addendum.md\`); that addendum relaxes the categorization bar so non-critical findings move to \`## Non-blocking issues\`, but it does not relax the merge gate — the verdict stays \`Request changes\` whenever any finding remains, so PRs with known unresolved issues do not silently auto-merge.
 \- \`currentRound\` plus append-only \`rounds[]\` history for operator inspection
 \- Starting a worker consumes exactly one round and records round claim/spawn metadata durably
 \- Advancing to another round must remain explicit and operator-visible; do not hide it inside an autonomous retry loop

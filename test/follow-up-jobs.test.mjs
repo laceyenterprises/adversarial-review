@@ -217,7 +217,20 @@ test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
+  assert.equal(resolution.roundBudget, 3);
+});
+
+test('resolveRoundBudgetForJob keeps a persisted legacy maxRounds=1 on medium-risk jobs', () => {
+  const resolution = resolveRoundBudgetForJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    riskClass: 'medium',
+    remediationPlan: { maxRounds: 1 },
+  }, { rootDir: '/tmp' });
+
+  assert.equal(resolution.riskClass, 'medium');
   assert.equal(resolution.roundBudget, 1);
+  assert.equal(resolution.source, 'job-persisted-maxRounds');
 });
 
 test('resolveRoundBudgetForJob resolves risk class from plan mapping sidecars', () => {
@@ -254,7 +267,7 @@ test('resolveRoundBudgetForJob falls back to medium when the linked plan file is
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
-  assert.equal(resolution.roundBudget, 1);
+  assert.equal(resolution.roundBudget, 3);
 });
 
 test('readFollowUpJob whitelists persisted remediationReply fields during normalization', () => {

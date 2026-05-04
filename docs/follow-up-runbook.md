@@ -59,11 +59,11 @@ New follow-up jobs derive their default remediation budget from the linked spec 
 | riskClass | remediation rounds |
 |---|---:|
 | `low` | 1 |
-| `medium` | 1 |
+| `medium` | 3 |
 | `high` | 3 |
 | `critical` | 3 |
 
-Correctly marked high-priority/high-severity security tickets must receive the `high` tier and therefore 3 rounds — adversarial remediation has the best risk/reward on security/high-severity work. Set this on the linked plan ticket via `riskClass: high` (or `critical`). PRs without a discoverable spec linkage fall back to `medium` -> `1` round.
+Medium and high both stay at 3 rounds because the current reviewer's blocking-issue threshold was exhausting the loop before the lenient final-round addendum could fire. Correctly marked high-priority/high-severity security tickets must still receive the `high` tier and therefore 3 rounds — adversarial remediation has the best risk/reward on security/high-severity work. Set this on the linked plan ticket via `riskClass: high` (or `critical`). PRs without a discoverable spec linkage fall back to `medium` -> `3` rounds.
 
 Legacy in-flight jobs keep their persisted `maxRounds` cap. Do not retroactively rewrite those queue records.
 
@@ -241,7 +241,7 @@ Initial state:
 
 - `status = "pending"`
 - `remediationPlan.mode = "bounded-manual-rounds"`
-- `remediationPlan.maxRounds = riskClass-derived budget` for new jobs (`low/medium = 1`, `high/critical = 3`); legacy jobs persisted with `3` or `6` keep their persisted cap
+- `remediationPlan.maxRounds = riskClass-derived budget` for new jobs (`low = 1`, `medium/high/critical = 3`); legacy jobs persisted with `1`, `3`, or `6` keep their persisted cap
 - `remediationPlan.currentRound = priorCompletedRoundsForPR` — seeded from the PR's accumulated remediation rounds so the cap is enforced PR-wide; `0` for the very first follow-up job created for a PR
 - `remediationReply.state = "awaiting-worker-write"`
 - `remediationPlan.nextAction.type = "consume-pending-round"`
@@ -663,7 +663,7 @@ Usually the answer is already there.
 
 ### 6. Max rounds is a safety rail, not a suggestion
 
-Default max rounds is risk-tiered: low/medium tickets get 1 round, while high-priority/high-severity security tickets correctly marked as `high` or `critical` get 3 rounds (the historic default cap; was 6 before 2026-05-02). The cap is enforced PR-wide: each new follow-up job is seeded with the PR's prior accumulated rounds, so the cap counts the *PR's* remediation cycles, not a single job's. Legacy jobs persisted with `6` keep their original cap; the watcher carries each PR's persisted `maxRounds` forward into the next adversarial review pass.
+Default max rounds is risk-tiered: low tickets get 1 round, while medium/high/critical tickets get 3 rounds. Medium and high were raised because the current reviewer was blocking too aggressively for a 1-round medium budget to reach a meaningful final verdict. The cap is enforced PR-wide: each new follow-up job is seeded with the PR's prior accumulated rounds, so the cap counts the *PR's* remediation cycles, not a single job's. Legacy jobs persisted with `1`, `3`, or `6` keep their original cap; the watcher carries each PR's persisted `maxRounds` forward into the next adversarial review pass.
 
 If the loop hits that cap, the correct action is usually human review of strategy, not blind extension. After the cap is consumed, the next adversarial review pass uses the lenient final-round verdict-categorization addendum — but the merge gate is unchanged: if any finding remains (blocking or non-blocking), the verdict stays `Request changes` and the system posts a public PR comment saying human intervention is required.
 

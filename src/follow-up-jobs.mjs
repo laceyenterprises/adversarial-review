@@ -1126,17 +1126,29 @@ function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
         // before consume-time pre-spawn gates (lifecycle, round-budget,
         // OAuth pre-flight, workspace prep) run. When one of those gates
         // refuses, the terminal record carries the bumped count even
-        // though no remediation worker ever started — the consume site
-        // tags those records with `remediationWorker.state ==
-        // 'never-spawned'`. Treat them as non-counting here so the PR-
-        // wide ledger reflects only rounds that actually ran a worker.
-        // Without this exclusion, a single closed/merged PR check or
-        // OAuth hiccup permanently burns a round of remediation budget.
+        // though no remediation worker ever started. The intended tag for
+        // that path is `remediationWorker.state === 'never-spawned'`, but
+        // we also treat missing/null/malformed `remediationWorker` payloads
+        // as never-spawned here so a pre-spawn stop that forgot to stamp
+        // the tag does not permanently burn PR-wide budget. The tradeoff is
+        // that a corrupted real worker payload can overstate remaining
+        // budget, so unexpected non-object shapes are logged for operators.
         const remediationWorker = job?.remediationWorker;
+        const hasObjectWorkerShape = (
+          remediationWorker != null
+          && typeof remediationWorker === 'object'
+          && !Array.isArray(remediationWorker)
+        );
+        if (remediationWorker != null && !hasObjectWorkerShape) {
+          console.warn(
+            `[follow-up-jobs] Treating malformed remediationWorker as never-spawned ` +
+              `while summarizing PR ledger for ${targetRepo}#${targetPr} from ${jobPath}`,
+          );
+        }
         const neverSpawned = (
           remediationWorker == null
-          || typeof remediationWorker !== 'object'
-          || remediationWorker?.state === 'never-spawned'
+          || !hasObjectWorkerShape
+          || remediationWorker.state === 'never-spawned'
         );
         if (!neverSpawned) {
           const cur = Number(job?.remediationPlan?.currentRound || 0);

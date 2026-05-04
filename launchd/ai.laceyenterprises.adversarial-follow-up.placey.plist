@@ -61,11 +61,6 @@
              script derives every other user-relative path from it. -->
         <key>HOME</key>
         <string>/Users/placey</string>
-        <!-- HQ lives under the airlock-managed Agent OS control-plane root on this host;
-             do not derive it from HOME because this LaunchAgent intentionally runs as
-             placey for Codex OAuth/TCC access. -->
-        <key>HQ_ROOT</key>
-        <string>/Users/airlock/agent-os-hq</string>
     </dict>
 
     <!-- Long-lived: the script runs an internal `while true; sleep 120`

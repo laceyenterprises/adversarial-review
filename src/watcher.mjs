@@ -26,6 +26,11 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
+import {
+  buildMergeAgentDispatchJob,
+  dispatchMergeAgentForPR,
+  fetchMergeAgentCandidate,
+} from './follow-up-merge-agent.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -616,6 +621,7 @@ async function pollOnce(octokit) {
     for (const pr of prs) {
       const prNumber = pr.number;
       const prTitle = pr.title;
+      const prState = String(pr.state || '').trim().toLowerCase();
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
       // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()
@@ -626,10 +632,35 @@ async function pollOnce(octokit) {
       // must explicitly clear it via `npm run retrigger-review` after
       // verifying the actual GitHub PR state.
       if (
-        existing?.review_status === 'posted' ||
         existing?.review_status === 'malformed' ||
         existing?.review_status === 'failed-orphan'
       ) {
+        continue;
+      }
+
+      if (prState && prState !== 'open') {
+        continue;
+      }
+
+      if (existing?.review_status === 'posted') {
+        try {
+          const candidate = await fetchMergeAgentCandidate(repoPath, prNumber, {
+            execFileImpl: execFileAsync,
+          });
+          const dispatchJob = buildMergeAgentDispatchJob(ROOT, candidate);
+          const dispatched = await dispatchMergeAgentForPR({
+            rootDir: ROOT,
+            ...dispatchJob,
+          });
+          console.log(
+            `[watcher] merge-agent decision for ${repoPath}#${prNumber}: ${dispatched.decision}`
+          );
+        } catch (err) {
+          console.error(
+            `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:`,
+            err?.message || err
+          );
+        }
         continue;
       }
 

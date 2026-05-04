@@ -538,48 +538,14 @@ function spawnClaudeCodeRemediationWorker({
 
 // ── Worker-class dispatcher ────────────────────────────────────────────────
 
-// Map a job to the remediation worker class that should handle it. The
-// cross-model rule is: the BUILDER fixes their own code.
-//
-// Routing is keyed off the durable builder tag persisted on the job at
-// creation time:
-//   builderTag='codex'       → codex remediator
-//   builderTag='claude-code' → claude-code remediator
-//   builderTag='clio-agent'  → codex remediator (Clio sub-agent PRs are
-//                              not the same operational entity as the
-//                              local Claude Code CLI, so they fall back
-//                              to codex remediation; aligns with the
-//                              SPEC fallback rule.)
-//
-// Reverse-mapping from `reviewerModel` is unsafe: both [claude-code] and
-// [clio-agent] PRs are reviewed by codex, so reviewerModel='codex' alone
-// cannot distinguish them. We only consult `reviewerModel` for legacy
-// job records (created before builderTag was persisted), and even then
-// only `reviewerModel='claude'` reliably implies a [codex] builder.
-function pickRemediationWorkerClass(job) {
-  const builderTag = job?.builderTag;
-  if (builderTag) {
-    switch (builderTag) {
-      case 'codex':
-        return 'codex';
-      case 'claude-code':
-        return 'claude-code';
-      case 'clio-agent':
-        // No dedicated clio-agent worker class today — fall back to the
-        // SPEC's documented default reviewer/remediator: codex.
-        return 'codex';
-      default:
-        return 'codex';
-    }
-  }
-
-  // Legacy fallback for jobs created before builderTag was persisted.
-  // claude reviewer unambiguously implies a codex builder. codex reviewer
-  // is ambiguous between [claude-code] and [clio-agent], so fall back to
-  // codex (the SPEC-documented default) rather than guessing claude-code.
-  if (job?.reviewerModel === 'claude') {
-    return 'codex';
-  }
+// LAC-358 hard-switch: always route follow-up remediation through the
+// codex worker class, regardless of the original PR builderTag. Rationale:
+// feedback_prefer_codex_for_heavy_work.md documents claude-code silent-hang
+// failures and the current trust gap for unattended heavy work. Revisit
+// only after feedback memory is updated to remove that trust gap; until
+// then, builderTag remains durable job-ledger metadata while execution,
+// commit trailers, and reconcile-time bot identity all reflect codex.
+function pickRemediationWorkerClass(_job) {
   return 'codex';
 }
 

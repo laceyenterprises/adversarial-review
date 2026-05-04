@@ -33,4 +33,16 @@ Output requirements:
 - If you find nothing substantive, still output the full five-section contract and put the explanation in ## Summary rather than inventing extra sections
 - If you are uncertain, preserve the section contract anyway and state the uncertainty inside the relevant section body
 
+Spec coverage check:
+- Treat silent spec drift as a blocking issue.
+- If the PR diff includes any of the following public-contract changes and the diff does NOT touch the corresponding `projects/<project>/SPEC.md`, file a blocking issue:
+  - Public function or method signature changes in `modules/*/lib/python/**/*.py`, including parameter list changes, return-type changes, or docstring contract changes
+  - New or altered SQL migrations in `platform/session-ledger/src/session_ledger/migrations/*.sql`
+  - New or altered `worker_events` payload shapes
+  - New or altered CLI subcommands or flags in `modules/worker-pool/bin/hq` or sibling shims
+- Use this exact blocking-issue message when the rule triggers:
+  - `Contract changed without spec update. The diff modifies <thing> but \`projects/<project>/SPEC.md\` was not touched. Either update the spec to match, or revert the contract change. Spec-as-source-of-truth is load-bearing — silent drift is the dominant maintenance risk per the operator retrospective 2026-05-04.`
+- Do NOT trigger this rule for private or internal implementation changes that do not alter a public contract.
+- Do NOT trigger this rule when the relevant `projects/<project>/SPEC.md` is touched in the same PR.
+
 If you find nothing substantive, say so plainly — but look hard first.

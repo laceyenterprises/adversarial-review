@@ -66,6 +66,10 @@ For each issue: state the file, line(s), the problem, and the recommended fix.
 If you find nothing substantive, say so plainly — but look hard first.  
 \`\`\`
 
+\#\#\# Spec-touch enforcement
+
+The reviewer prompt treats silent contract drift as a blocking issue. If a PR changes a public Python signature under `modules/*/lib/python/**/*.py` (including parameter list, return type, or docstring contract), adds or alters a SQL migration under `platform/session-ledger/src/session_ledger/migrations/*.sql`, changes a `worker_events` payload shape, or adds/changes CLI subcommands or flags in `modules/worker-pool/bin/hq` or sibling shims, the reviewer must block unless the same PR also touches the corresponding `projects/<project>/SPEC.md`. Private/internal implementation changes are excluded; the rule exists to keep specs load-bearing as the source of truth.
+
 \---
 
 \#\# System Architecture

@@ -703,7 +703,7 @@ test('reconcileFollowUpJob rejects a replyPath that lexically escapes the worksp
   assert.equal(reconciled.reconciled, true);
   assert.equal(reconciled.outcome, 'failed');
   assert.equal(reconciled.job.failure.code, 'invalid-output-path');
-  assert.match(reconciled.job.failure.message, /replyPath/);
+  assert.match(reconciled.job.failure.message, /(legacyReplyPath|replyPath)/);
 });
 
 test('reconcileFollowUpJob rejects a replyPath that resolves through a symlink to outside the workspace', async () => {
@@ -771,7 +771,7 @@ test('reconcileFollowUpJob rejects a replyPath that resolves through a symlink t
   assert.equal(reconciled.reconciled, true);
   assert.equal(reconciled.outcome, 'failed');
   assert.equal(reconciled.job.failure.code, 'invalid-output-path');
-  assert.match(reconciled.job.failure.message, /replyPath/);
+  assert.match(reconciled.job.failure.message, /(legacyReplyPath|replyPath)/);
 });
 
 test('reconcileFollowUpJob completes when codex-last-message.md is missing entirely but the reply.json validates and reReview.requested=true', async () => {

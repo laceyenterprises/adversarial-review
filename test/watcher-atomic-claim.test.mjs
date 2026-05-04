@@ -18,11 +18,17 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 const CLAIM_SQL = `UPDATE reviewed_prs
      SET review_status = 'reviewing',
          last_attempted_at = ?,
-         failed_at = NULL,
-         failure_message = NULL
+         failed_at = CASE
+           WHEN review_status = 'pending-upstream' THEN failed_at
+           ELSE NULL
+         END,
+         failure_message = CASE
+           WHEN review_status = 'pending-upstream' THEN failure_message
+           ELSE NULL
+         END
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status IN ('pending', 'failed')`;
+     AND review_status IN ('pending', 'failed', 'pending-upstream')`;
 
 const REPO = 'laceyenterprises/agent-os';
 const PR = 999;
@@ -91,6 +97,22 @@ test('atomic claim succeeds for a failed row (preserves auto-retry contract)', (
   const row = readRow(db);
   assert.equal(row.review_status, 'reviewing');
   assert.equal(row.failure_message, null, 'previous failure_message is cleared on re-claim');
+});
+
+test('atomic claim succeeds for a pending-upstream row once backoff has expired', () => {
+  const db = setupDb();
+  seedReviewRow(db, { reviewStatus: 'pending-upstream', failureMessage: 'LiteLLM upstream cascade' });
+
+  const claim = db.prepare(CLAIM_SQL).run(
+    '2026-05-02T18:10:00.000Z',
+    REPO,
+    PR
+  );
+
+  assert.equal(claim.changes, 1, 'pending-upstream rows must be reclaimable after the watcher backoff gate opens');
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.failure_message, 'LiteLLM upstream cascade', 'cascade audit trail must survive pending-upstream reclaim');
 });
 
 test('atomic claim refuses when status is already reviewing (in-flight claim)', () => {

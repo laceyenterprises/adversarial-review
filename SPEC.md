@@ -161,11 +161,20 @@ GitHub PR opened
 \- Remediation output must expose a durable machine-readable reply contract in addition to any prose final message
 \- The contract must not hide a re-review request only inside Markdown text
 \- Each follow-up job must carry explicit remediation-reply metadata, including the expected artifact path once a worker is spawned
+\- The ONLY canonical remediation-reply location is \`HQ_ROOT/dispatch/remediation-replies/<LRQ_ID>/remediation-reply.json\`
+\- Legacy worktree path \`.adversarial-follow-up/remediation-reply.json\` is forbidden for new remediation rounds and must never be committed in a PR branch
 \- The worker reply artifact must be JSON with a stable kind/schema, job identity, outcome summary, validation/blocker fields, and a \`reReview\` object
 \- Durable re-review request signal in this slice: \`reReview.requested = true\`
 \- If \`reReview.requested\` is true, the reply must also include a short operator-visible reason
 \- \`LAC-210\` consumes this reply contract during reconciliation: a valid explicit request resets watcher delivery state to a durable pending re-review, while blocked paths remain operator-visible and do not bypass malformed-title or closed/merged safeguards
 \- This still must not create an implicit infinite autonomous loop; remediation-round caps and explicit terminal states remain authoritative, and manual/operator recovery semantics remain documented for blocked or invalid reply cases
+
+Worker prompt env contract for the canonical reply path:
+
+| Env var | Required value | Purpose |
+|---|---|---|
+| \`HQ_ROOT\` | absolute path to the HQ checkout | base directory for durable remediation-reply storage |
+| \`LRQ_ID\` | launch request id / reply storage key for the round | selects \`dispatch/remediation-replies/<LRQ_ID>/\` |
 
 \#\#\# 5\.2 Remediation worker launch contract (new hardening requirements)
 \- A detached remediation launch must not treat \"process spawned\" as equivalent to \"durable worker established\"

@@ -22,6 +22,7 @@ import {
 import {
   buildObviousDocsGuidance,
   collectWorkspaceDocContext,
+  interpolatePromptTemplate,
 } from './prompt-context.mjs';
 import {
   WORKER_CLASS_TO_BOT_TOKEN_ENV,
@@ -38,6 +39,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const DEFAULT_HQ_ROOT = join(homedir(), 'agent-os-hq');
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
+const REMEDIATION_REPLY_SENTINEL_FILENAME = '.hq-remediation-reply-path-ready';
+const REMEDIATION_REPLY_SENTINEL_CONTENTS = 'Use the sibling remediation-reply.json path; do not write .adversarial-follow-up/remediation-reply.json.\n';
+const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
+  'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
+  'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
+];
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -176,6 +183,14 @@ function resolveHqReplyPath({ hqRoot, launchRequestId }) {
     replyDir: dirname(replyPath),
     replyPath,
   };
+}
+
+function prepareHqReplyLandingPad({ hqRoot, launchRequestId }) {
+  const { replyDir, replyPath } = resolveHqReplyPath({ hqRoot, launchRequestId });
+  mkdirSync(replyDir, { recursive: true });
+  const sentinelPath = join(replyDir, REMEDIATION_REPLY_SENTINEL_FILENAME);
+  writeFileSync(sentinelPath, REMEDIATION_REPLY_SENTINEL_CONTENTS, 'utf8');
+  return { replyDir, replyPath, sentinelPath };
 }
 
 function resolveReplyStorageKey(job) {
@@ -467,6 +482,8 @@ function spawnClaudeCodeRemediationWorker({
   promptPath,
   outputPath,
   logPath,
+  hqRoot = process.env.HQ_ROOT || '',
+  launchRequestId = '',
   jobId = null,
   workerClass = 'claude-code-remediation',
   spawnImpl = spawn,
@@ -481,6 +498,8 @@ function spawnClaudeCodeRemediationWorker({
     ...baseEnv,
     WORKER_CLASS: workerClass,
     WORKER_RUN_AT: now(),
+    HQ_ROOT: hqRoot,
+    LRQ_ID: launchRequestId,
   };
   if (jobId) env.WORKER_JOB_ID = jobId;
 
@@ -794,6 +813,8 @@ function resetWorkspaceDir(workspaceDir) {
 function buildRemediationPrompt(job, {
   template = loadFollowUpPromptTemplate(ROOT),
   remediationReplyPath = job?.remediationReply?.path || null,
+  hqRoot = null,
+  launchRequestId = null,
   governingDocContext = '',
 } = {}) {
   const criticality = job.critical ? 'critical' : 'non-critical';
@@ -837,8 +858,12 @@ function buildRemediationPrompt(job, {
     maxRemediationRounds: Number(job?.remediationPlan?.maxRounds || 1),
     remediationReplyArtifact: remediationReplyPath,
   };
+  const interpolatedTemplate = interpolatePromptTemplate(template, {
+    HQ_ROOT: hqRoot || '[missing HQ_ROOT]',
+    LRQ_ID: launchRequestId || '[missing LRQ_ID]',
+  });
 
-  return `${template}
+  return `${interpolatedTemplate}
 
 ## Trusted Job Metadata
 ${formatFencedBlock(JSON.stringify(trustedMetadata, null, 2), 'json')}
@@ -858,6 +883,10 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
 - Run the smallest relevant validation before finishing.
+- Write the remediation reply JSON ONLY to the HQ artifact path from the trusted metadata. Do NOT write or commit \`.adversarial-follow-up/remediation-reply.json\`; that path is forbidden.
+- Before \`git commit\`, run the legacy artifact cleanup commands below so \`.adversarial-follow-up/\` stays out of the PR commit:
+  - \`${REMEDIATION_LEGACY_UNSTAGE_COMMANDS[0]}\`
+  - \`${REMEDIATION_LEGACY_UNSTAGE_COMMANDS[1]}\`
 - Commit the remediation changes and push the PR branch.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
@@ -1007,6 +1036,8 @@ function spawnCodexRemediationWorker({
   promptPath,
   outputPath,
   logPath,
+  hqRoot = process.env.HQ_ROOT || '',
+  launchRequestId = '',
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
   jobId = null,
   spawnImpl = spawn,
@@ -1028,6 +1059,8 @@ function spawnCodexRemediationWorker({
     ...baseEnv,
     WORKER_CLASS: REMEDIATION_WORKER_TRAILER_CLASS,
     WORKER_RUN_AT: now(),
+    HQ_ROOT: hqRoot,
+    LRQ_ID: launchRequestId,
   };
   if (jobId) {
     env.WORKER_JOB_ID = jobId;
@@ -1797,8 +1830,8 @@ async function reconcileFollowUpJob({
     && existsSync(paths.legacyReplyPath)
   ) {
     log.warn?.(
-      `[follow-up-remediation] Legacy remediation reply fallback used for ${job.jobId}; ` +
-      `worktree reply paths are deprecated and will be removed after the cutover window.`
+      `[follow-up-remediation] WARNING legacy remediation reply fallback used for ${job.jobId}; ` +
+      `worker wrote .adversarial-follow-up/remediation-reply.json instead of HQ storage.`
     );
     try {
       replyProbe = {
@@ -2362,11 +2395,10 @@ async function consumeNextFollowUpJob({
       };
       writeFollowUpJob(claimed.jobPath, claimed.job);
     }
-    const { replyDir, replyPath } = resolveHqReplyPath({
+    const { replyPath } = prepareHqReplyLandingPad({
       hqRoot,
       launchRequestId: replyStorageKey,
     });
-    mkdirSync(replyDir, { recursive: true });
 
     const promptPath = join(artifactDir, 'prompt.md');
     // Output / log filenames are kept generic across worker classes so
@@ -2380,6 +2412,8 @@ async function consumeNextFollowUpJob({
     const prompt = buildRemediationPrompt(claimed.job, {
       template: promptTemplate,
       remediationReplyPath: replyPath,
+      hqRoot,
+      launchRequestId: replyStorageKey,
       governingDocContext,
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
@@ -2390,6 +2424,8 @@ async function consumeNextFollowUpJob({
       promptPath,
       outputPath,
       logPath,
+      hqRoot,
+      launchRequestId: replyStorageKey,
       jobId: claimed.job.jobId,
       spawnImpl,
       now,
@@ -2614,6 +2650,7 @@ export {
   resolveCodexCliPath,
   resolveCodexAuthPath,
   resolveHqReplyPath,
+  prepareHqReplyLandingPad,
   resolveHqRoot,
   resolveJobRelativePath,
   resolveReplyStorageKey,
@@ -2627,6 +2664,8 @@ export {
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,
+  REMEDIATION_REPLY_SENTINEL_FILENAME,
+  REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

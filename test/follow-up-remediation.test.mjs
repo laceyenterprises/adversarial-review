@@ -2071,7 +2071,7 @@ test('reconcileFollowUpJob falls back to the legacy workspace reply path once an
     assert.equal(result.action, 'stopped');
     assert.equal(result.job.remediationReply.state, 'worker-wrote-reply');
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /Legacy remediation reply fallback used/);
+    assert.match(warnings[0], /legacy remediation reply fallback used/i);
   });
 });
 

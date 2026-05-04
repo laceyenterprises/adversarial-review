@@ -16,6 +16,15 @@ function formatFencedBlock(text, language = 'text') {
   return `${fence}${language}\n${content}\n${fence}`;
 }
 
+export function interpolatePromptTemplate(template, variables = {}) {
+  return String(template ?? '').replace(/\$\{([A-Z0-9_]+)\}/g, (match, key) => {
+    if (!Object.prototype.hasOwnProperty.call(variables, key)) {
+      return match;
+    }
+    return String(variables[key]);
+  });
+}
+
 export function parseGitHubBlobPath(url, expectedRepo) {
   const match = String(url ?? '').match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/blob\/[^/]+\/(.+)$/i);
   if (!match) return null;

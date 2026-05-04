@@ -26,6 +26,7 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
+import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -616,6 +617,11 @@ async function pollOnce(octokit) {
     for (const pr of prs) {
       const prNumber = pr.number;
       const prTitle = pr.title;
+      const staleDriftSkip = shouldSkipReviewerForStaleDrift(pr);
+      if (staleDriftSkip) {
+        console.log(staleDriftSkip.message);
+        continue;
+      }
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
       // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()

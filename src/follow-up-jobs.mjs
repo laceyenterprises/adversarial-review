@@ -18,9 +18,10 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 // spec (`projects/pr-merge-orchestration/SPEC.md` §3.1). Was uniformly
 // 6 in PR #18's era, dropped to a uniform 3 after observing
 // diminishing returns past round 3, then dropped to a default of 1
-// (`medium` risk) under the spec, with higher tiers (`high=2`,
-// `critical=3`) reserved for the PRs that genuinely need more
-// iteration. Pairs with a lenient final-round verdict threshold in
+// (`medium` risk) under the spec. Security/high-severity work is
+// intentionally promoted to the 3-round budget when correctly marked
+// as `high` or `critical`; those changes are where extra adversarial
+// remediation has the best risk/reward. Pairs with a lenient final-round verdict threshold in
 // the reviewer prompt (the final-round review only blocks on data
 // corruption / secret leakage / security regression / broken
 // external contract; everything else becomes a non-blocking note for
@@ -34,7 +35,7 @@ const DEFAULT_RISK_CLASS = 'medium';
 const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
   low: 1,
   medium: 1,
-  high: 2,
+  high: 3,
   critical: 3,
 });
 const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];

@@ -127,7 +127,7 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   assert.deepEqual(persisted, job);
   assert.equal(persisted.recommendedFollowUpAction.priority, 'high');
   assert.equal(persisted.riskClass, 'high');
-  assert.equal(persisted.remediationPlan.maxRounds, 2);
+  assert.equal(persisted.remediationPlan.maxRounds, 3);
 });
 
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {

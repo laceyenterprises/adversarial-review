@@ -1370,7 +1370,7 @@ test('consumeNextFollowUpJob honors persisted maxRounds=2 on a medium-risk legac
   assert.equal(spawnCalls.length, 1);
 });
 
-test('consumeNextFollowUpJob still spawns when a high-risk job enters round 2 within budget', async () => {
+test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 within budget', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -1402,8 +1402,8 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 2 wi
     ...created.job,
     remediationPlan: {
       ...created.job.remediationPlan,
-      currentRound: 1,
-      rounds: [{ round: 1, state: 'completed' }],
+      currentRound: 2,
+      rounds: [{ round: 1, state: 'completed' }, { round: 2, state: 'completed' }],
     },
   });
 
@@ -1429,7 +1429,7 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 2 wi
 
   assert.equal(result.consumed, true);
   assert.equal(result.job.status, 'in_progress');
-  assert.equal(result.job.remediationPlan.currentRound, 2);
+  assert.equal(result.job.remediationPlan.currentRound, 3);
   assert.equal(result.job.remediationWorker.processId, 8127);
   assert.equal(result.job.riskClass, 'high');
   assert.equal(spawnCalls.length, 1);

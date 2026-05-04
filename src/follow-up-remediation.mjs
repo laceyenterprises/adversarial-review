@@ -22,6 +22,7 @@ import {
 import {
   buildObviousDocsGuidance,
   collectWorkspaceDocContext,
+  interpolatePromptTemplate,
 } from './prompt-context.mjs';
 import {
   WORKER_CLASS_TO_BOT_TOKEN_ENV,
@@ -38,6 +39,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const DEFAULT_HQ_ROOT = join(homedir(), 'agent-os-hq');
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
+const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
+  'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
+  'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
+];
+const WORKSPACE_ARTIFACT_EXCLUDE_ENTRY = '.adversarial-follow-up/';
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -176,6 +182,28 @@ function resolveHqReplyPath({ hqRoot, launchRequestId }) {
     replyDir: dirname(replyPath),
     replyPath,
   };
+}
+
+function requireWorkerReplyContext({ hqRoot, launchRequestId }) {
+  const normalizedHqRoot = String(hqRoot ?? '').trim();
+  if (!normalizedHqRoot) {
+    throw new Error('Missing hqRoot for remediation reply path');
+  }
+  if (!isAbsolute(normalizedHqRoot)) {
+    throw new Error(`Invalid hqRoot: expected absolute path, got ${JSON.stringify(normalizedHqRoot)}`);
+  }
+  const normalizedLaunchRequestId = validateReplyStorageKey(launchRequestId, 'launchRequestId');
+  return {
+    hqRoot: resolve(normalizedHqRoot),
+    launchRequestId: normalizedLaunchRequestId,
+  };
+}
+
+function prepareHqReplyLandingPad({ hqRoot, launchRequestId }) {
+  const required = requireWorkerReplyContext({ hqRoot, launchRequestId });
+  const { replyDir, replyPath } = resolveHqReplyPath(required);
+  mkdirSync(replyDir, { recursive: true });
+  return { replyDir, replyPath };
 }
 
 function resolveReplyStorageKey(job) {
@@ -467,6 +495,8 @@ function spawnClaudeCodeRemediationWorker({
   promptPath,
   outputPath,
   logPath,
+  hqRoot,
+  launchRequestId,
   jobId = null,
   workerClass = 'claude-code-remediation',
   spawnImpl = spawn,
@@ -474,6 +504,7 @@ function spawnClaudeCodeRemediationWorker({
 }) {
   const claudeCli = resolveClaudeCodeCliPath();
   const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv();
+  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
 
   // Same worker-provenance env as the Codex spawn. The commit-msg hook
   // installed in the workspace reads these and stamps trailers.
@@ -481,8 +512,11 @@ function spawnClaudeCodeRemediationWorker({
     ...baseEnv,
     WORKER_CLASS: workerClass,
     WORKER_RUN_AT: now(),
+    HQ_ROOT: replyContext.hqRoot,
+    LRQ_ID: replyContext.launchRequestId,
   };
   if (jobId) env.WORKER_JOB_ID = jobId;
+  else delete env.WORKER_JOB_ID;
 
   // Claude Code in --print mode reads the prompt from stdin and writes the
   // final assistant message to stdout. We capture stdout directly to
@@ -794,8 +828,11 @@ function resetWorkspaceDir(workspaceDir) {
 function buildRemediationPrompt(job, {
   template = loadFollowUpPromptTemplate(ROOT),
   remediationReplyPath = job?.remediationReply?.path || null,
+  hqRoot,
+  launchRequestId,
   governingDocContext = '',
 } = {}) {
+  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
   // The contract example uses empty arrays for the per-finding lists
@@ -837,8 +874,12 @@ function buildRemediationPrompt(job, {
     maxRemediationRounds: Number(job?.remediationPlan?.maxRounds || 1),
     remediationReplyArtifact: remediationReplyPath,
   };
+  const interpolatedTemplate = interpolatePromptTemplate(template, {
+    HQ_ROOT: replyContext.hqRoot,
+    LRQ_ID: replyContext.launchRequestId,
+  }, { strict: true });
 
-  return `${template}
+  return `${interpolatedTemplate}
 
 ## Trusted Job Metadata
 ${formatFencedBlock(JSON.stringify(trustedMetadata, null, 2), 'json')}
@@ -1007,6 +1048,8 @@ function spawnCodexRemediationWorker({
   promptPath,
   outputPath,
   logPath,
+  hqRoot,
+  launchRequestId,
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
   jobId = null,
   spawnImpl = spawn,
@@ -1015,6 +1058,7 @@ function spawnCodexRemediationWorker({
   const codexCli = resolveCodexCliPath();
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
   const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({ gitIdentity });
+  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
 
   // Worker-provenance env. The commit-msg hook installed by
   // prepareWorkspaceForJob reads these at commit time and appends matching
@@ -1028,10 +1072,12 @@ function spawnCodexRemediationWorker({
     ...baseEnv,
     WORKER_CLASS: REMEDIATION_WORKER_TRAILER_CLASS,
     WORKER_RUN_AT: now(),
+    HQ_ROOT: replyContext.hqRoot,
+    LRQ_ID: replyContext.launchRequestId,
   };
   if (jobId) {
     env.WORKER_JOB_ID = jobId;
-  }
+  } else delete env.WORKER_JOB_ID;
 
   const promptFd = openSync(promptPath, 'r');
   const stdoutFd = openSync(logPath, 'a');
@@ -1205,6 +1251,26 @@ function resolveRealPath(candidate) {
 
   const realParent = realpathSync.native?.(current) ?? realpathSync(current);
   return join(realParent, ...tail);
+}
+
+async function ensureWorkspaceArtifactExclude(workspaceDir, {
+  execFileImpl = execFileAsync,
+  entry = WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
+} = {}) {
+  const { stdout } = await execFileImpl('git', ['rev-parse', '--git-path', 'info/exclude'], {
+    cwd: workspaceDir,
+  });
+  const gitPath = String(stdout ?? '').trim() || '.git/info/exclude';
+  const excludePath = resolve(workspaceDir, gitPath);
+  const existing = existsSync(excludePath) ? readFileSync(excludePath, 'utf8') : '';
+  const lines = existing.split(/\r?\n/);
+  if (lines.includes(entry)) {
+    return excludePath;
+  }
+  const prefix = existing && !existing.endsWith('\n') ? '\n' : '';
+  mkdirSync(dirname(excludePath), { recursive: true });
+  writeFileSync(excludePath, `${existing}${prefix}${entry}\n`, 'utf8');
+  return excludePath;
 }
 
 // Workspace containment guard for worker-written artifacts. Performs both
@@ -1796,19 +1862,13 @@ async function reconcileFollowUpJob({
     && paths.legacyReplyPath !== paths.replyPath
     && existsSync(paths.legacyReplyPath)
   ) {
-    log.warn?.(
-      `[follow-up-remediation] Legacy remediation reply fallback used for ${job.jobId}; ` +
-      `worktree reply paths are deprecated and will be removed after the cutover window.`
-    );
-    try {
-      replyProbe = {
-        state: 'valid',
-        reply: readRemediationReplyArtifact(paths.legacyReplyPath, { expectedJob: job }),
-        fallbackPath: paths.legacyReplyPath,
-      };
-    } catch (err) {
-      replyProbe = { state: 'invalid', error: err, fallbackPath: paths.legacyReplyPath };
-    }
+    replyProbe = {
+      state: 'invalid',
+      error: new Error(
+        `Legacy remediation reply path is forbidden for new remediation rounds: ${paths.legacyReplyPath}`
+      ),
+      fallbackPath: paths.legacyReplyPath,
+    };
   }
   const hasNonEmptyNarrative = finalMessage.exists && Boolean(String(finalMessage.text).trim());
 
@@ -1830,7 +1890,8 @@ async function reconcileFollowUpJob({
   if (replyProbe.state === 'invalid') {
     const err = replyProbe.error;
     const invalidReplyFailure = { code: 'invalid-remediation-reply', message: err.message };
-    const salvagedReply = paths.replyPath ? salvagePartialRemediationReply(paths.replyPath) : null;
+    const salvagePath = replyProbe.fallbackPath || paths.replyPath;
+    const salvagedReply = salvagePath ? salvagePartialRemediationReply(salvagePath) : null;
     const { commentDelivery: invalidReplyDelivery } = buildReconcileCommentDelivery({
       job, worker, action: 'failed', reply: salvagedReply, failure: invalidReplyFailure, now,
     });
@@ -2349,6 +2410,7 @@ async function consumeNextFollowUpJob({
       job: claimed.job,
       execFileImpl,
     });
+    await ensureWorkspaceArtifactExclude(workspaceDir, { execFileImpl });
 
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
     resetWorkspaceDir(artifactDir);
@@ -2362,11 +2424,10 @@ async function consumeNextFollowUpJob({
       };
       writeFollowUpJob(claimed.jobPath, claimed.job);
     }
-    const { replyDir, replyPath } = resolveHqReplyPath({
+    const { replyPath } = prepareHqReplyLandingPad({
       hqRoot,
       launchRequestId: replyStorageKey,
     });
-    mkdirSync(replyDir, { recursive: true });
 
     const promptPath = join(artifactDir, 'prompt.md');
     // Output / log filenames are kept generic across worker classes so
@@ -2380,6 +2441,8 @@ async function consumeNextFollowUpJob({
     const prompt = buildRemediationPrompt(claimed.job, {
       template: promptTemplate,
       remediationReplyPath: replyPath,
+      hqRoot,
+      launchRequestId: replyStorageKey,
       governingDocContext,
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
@@ -2390,6 +2453,8 @@ async function consumeNextFollowUpJob({
       promptPath,
       outputPath,
       logPath,
+      hqRoot,
+      launchRequestId: replyStorageKey,
       jobId: claimed.job.jobId,
       spawnImpl,
       now,
@@ -2614,6 +2679,7 @@ export {
   resolveCodexCliPath,
   resolveCodexAuthPath,
   resolveHqReplyPath,
+  prepareHqReplyLandingPad,
   resolveHqRoot,
   resolveJobRelativePath,
   resolveReplyStorageKey,
@@ -2627,6 +2693,8 @@ export {
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,
+  REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
+  WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

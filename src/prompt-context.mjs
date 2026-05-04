@@ -16,6 +16,25 @@ function formatFencedBlock(text, language = 'text') {
   return `${fence}${language}\n${content}\n${fence}`;
 }
 
+export function interpolatePromptTemplate(template, variables = {}, { strict = false } = {}) {
+  const missingKeys = new Set();
+  const rendered = String(template ?? '').replace(/\$\{([A-Z0-9_]+)\}/g, (match, key) => {
+    if (!Object.prototype.hasOwnProperty.call(variables, key)) {
+      missingKeys.add(key);
+      return match;
+    }
+    return String(variables[key]);
+  });
+
+  if (strict && missingKeys.size) {
+    throw new Error(
+      `Prompt template contains unknown placeholders: ${[...missingKeys].sort().join(', ')}`
+    );
+  }
+
+  return rendered;
+}
+
 export function parseGitHubBlobPath(url, expectedRepo) {
   const match = String(url ?? '').match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/blob\/[^/]+\/(.+)$/i);
   if (!match) return null;

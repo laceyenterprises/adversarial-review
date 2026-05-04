@@ -140,6 +140,47 @@ test('consumeNextFollowUpJob short-circuits to stopped/operator-closed-pr when l
   assert.equal(stopped.json.remediationWorker.state, 'never-spawned');
 });
 
+test('consumeNextFollowUpJob short-circuits stale-drift only before spawn and suppresses the PR comment', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = setupPendingJob(rootDir, { prNumber: 111 });
+
+  let spawnFired = false;
+  const commentCalls = [];
+
+  const result = await consumeNextFollowUpJob({
+    rootDir,
+    promptTemplate: 'unused',
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    spawnImpl: () => {
+      spawnFired = true;
+      return { pid: 9999, unref() {} };
+    },
+    postCommentImpl: async (args) => {
+      commentCalls.push(args);
+      return { posted: true };
+    },
+    now: () => '2026-05-02T11:00:00.000Z',
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergedAt: null,
+      closedAt: null,
+      labels: [{ name: 'stale-drift' }],
+    }),
+  });
+
+  assert.equal(result.consumed, false);
+  assert.equal(result.reason, 'stale-drift');
+  assert.equal(spawnFired, false, 'must NOT spawn a worker when stale-drift is present before consume');
+  assert.equal(commentCalls.length, 0, 'stale-drift consume stop must not post a PR comment');
+
+  const stopped = findStoppedJobOnDisk(rootDir, created.job.jobId);
+  assert.ok(stopped, 'job must land in stopped/');
+  assert.equal(stopped.json.remediationPlan.stop.code, 'stale-drift');
+  assert.equal(stopped.json.remediationWorker.state, 'never-spawned');
+  assert.match(stopped.json.remediationPlan.stop.reason, /stale-drift label/);
+});
+
 // Helper for the "lifecycle gate did NOT fire" assertions below. The
 // downstream path throws (OAuth or workspace prep), which proves the
 // gate let the flow through. We capture the thrown error and confirm
@@ -489,6 +530,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
     prState: 'merged',
     mergedAt: '2026-05-02T10:30:00.000Z',
     closedAt: null,
+    labels: [],
   });
 });
 
@@ -509,6 +551,7 @@ test('fetchLivePRLifecycle parses CLOSED state from gh pr view JSON', async () =
     prState: 'closed',
     mergedAt: null,
     closedAt: '2026-05-02T10:45:00.000Z',
+    labels: [],
   });
 });
 

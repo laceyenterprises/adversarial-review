@@ -31,7 +31,7 @@ import {
 import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
 import { redactSensitiveText } from './redaction.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
-import { staleDriftStopDecision } from './stale-drift.mjs';
+import { STALE_DRIFT_STOP_CODE, staleDriftStopDecision } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1549,40 +1549,37 @@ async function resolveJobPRLifecycleSafe({
 //     shipped this" from "we abandoned this".
 function lifecycleStopDecision(lifecycle, { repo, prNumber, site }) {
   if (!lifecycle) return null;
-  const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber });
-  if (staleDriftStop) {
-    return staleDriftStop;
-  }
-  if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') return null;
-
-  const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
-  const tail = site === 'consume'
-    ? 'stopping the bounded loop instead of spawning a worker on a closed branch.'
-    : 'stopping the bounded loop instead of advancing the queue or posting a comment on a closed PR.';
-
-  if (lifecycle.prState === 'merged') {
-    const mergedTail = site === 'consume'
+  if (lifecycle.prState === 'merged' || lifecycle.prState === 'closed') {
+    const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
+    const tail = site === 'consume'
       ? 'stopping the bounded loop instead of spawning a worker on a closed branch.'
-      : 'stopping the bounded loop instead of advancing the queue or posting a comment on a merged PR.';
-    const verb = site === 'consume' ? 'was merged before remediation could run' : 'was merged while the remediation worker was running';
+      : 'stopping the bounded loop instead of advancing the queue or posting a comment on a closed PR.';
+
+    if (lifecycle.prState === 'merged') {
+      const mergedTail = site === 'consume'
+        ? 'stopping the bounded loop instead of spawning a worker on a closed branch.'
+        : 'stopping the bounded loop instead of advancing the queue or posting a comment on a merged PR.';
+      const verb = site === 'consume' ? 'was merged before remediation could run' : 'was merged while the remediation worker was running';
+      return {
+        stopCode: 'operator-merged-pr',
+        actionReason: 'pr-merged',
+        workerState: site === 'consume' ? 'never-spawned' : 'completed-pr-already-merged',
+        stopReason: `PR ${repo}#${prNumber} ${verb}` +
+          `${lifecycle.mergedAt ? ` (mergedAt=${lifecycle.mergedAt})` : ''}${sourceTag}; ${mergedTail}`,
+      };
+    }
+
+    const verb = site === 'consume' ? 'was closed before remediation could run' : 'was closed while the remediation worker was running';
     return {
-      stopCode: 'operator-merged-pr',
-      actionReason: 'pr-merged',
-      workerState: site === 'consume' ? 'never-spawned' : 'completed-pr-already-merged',
+      stopCode: 'operator-closed-pr',
+      actionReason: 'pr-closed',
+      workerState: site === 'consume' ? 'never-spawned' : 'completed-pr-already-closed',
       stopReason: `PR ${repo}#${prNumber} ${verb}` +
-        `${lifecycle.mergedAt ? ` (mergedAt=${lifecycle.mergedAt})` : ''}${sourceTag}; ${mergedTail}`,
+        `${lifecycle.closedAt ? ` (closedAt=${lifecycle.closedAt})` : ''}${sourceTag}; ${tail}`,
     };
   }
 
-  // closed (unmerged)
-  const verb = site === 'consume' ? 'was closed before remediation could run' : 'was closed while the remediation worker was running';
-  return {
-    stopCode: 'operator-closed-pr',
-    actionReason: 'pr-closed',
-    workerState: site === 'consume' ? 'never-spawned' : 'completed-pr-already-closed',
-    stopReason: `PR ${repo}#${prNumber} ${verb}` +
-      `${lifecycle.closedAt ? ` (closedAt=${lifecycle.closedAt})` : ''}${sourceTag}; ${tail}`,
-  };
+  return staleDriftStopDecision(lifecycle, { prNumber, site });
 }
 
 async function reconcileFollowUpJob({
@@ -2270,7 +2267,7 @@ async function consumeNextFollowUpJob({
     }
     const stoppedAt = now();
     let stopped;
-    if (lifecycleStop.stopCode === 'stale-drift') {
+    if (lifecycleStop.stopCode === STALE_DRIFT_STOP_CODE) {
       stopped = markFollowUpJobStopped({
         rootDir,
         jobPath: claimed.jobPath,
@@ -2279,7 +2276,7 @@ async function consumeNextFollowUpJob({
         stopReason: lifecycleStop.stopReason,
         sourceStatus: 'in_progress',
         remediationWorker: {
-          state: 'never-spawned',
+          state: lifecycleStop.workerState,
           reconciledAt: stoppedAt,
         },
       });

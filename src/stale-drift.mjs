@@ -1,3 +1,5 @@
+const STALE_DRIFT_STOP_CODE = 'stale-drift';
+
 function normalizeLabelNames(labels) {
   if (!Array.isArray(labels)) return [];
   return labels
@@ -22,10 +24,12 @@ function shouldSkipReviewerForStaleDrift(pr) {
   };
 }
 
-function staleDriftStopDecision(lifecycle, { prNumber } = {}) {
+function staleDriftStopDecision(lifecycle, { prNumber, site } = {}) {
+  if (site !== 'consume') return null;
+  if (lifecycle?.prState !== 'open') return null;
   if (!hasStaleDriftLabel(lifecycle?.labels)) return null;
   return {
-    stopCode: 'stale-drift',
+    stopCode: STALE_DRIFT_STOP_CODE,
     actionReason: 'stale-drift',
     workerState: 'never-spawned',
     stopReason: `PR #${prNumber} carries the stale-drift label; skipping remediation spawn.`,
@@ -36,6 +40,7 @@ function staleDriftStopDecision(lifecycle, { prNumber } = {}) {
 export {
   hasStaleDriftLabel,
   normalizeLabelNames,
+  STALE_DRIFT_STOP_CODE,
   shouldSkipReviewerForStaleDrift,
   staleDriftStopDecision,
 };

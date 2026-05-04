@@ -666,56 +666,21 @@ test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided'
   assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'WORKER_JOB_ID'), false);
 });
 
-// ── worker-class dispatcher (cross-model rule) ─────────────────────────────
+// ── worker-class dispatcher (LAC-358 hard-switch) ──────────────────────────
 
-test('pickRemediationWorkerClass routes builderTag=codex to codex remediator', () => {
-  // The PR was BUILT by codex. Per cross-model rule, the builder fixes
-  // its own findings, so the remediator is codex.
-  const job = { builderTag: 'codex', reviewerModel: 'claude' };
-  assert.equal(pickRemediationWorkerClass(job), 'codex');
-});
-
-test('pickRemediationWorkerClass routes builderTag=claude-code to claude-code remediator', () => {
-  // The PR was BUILT by claude-code. Builder fixes its own findings.
-  const job = { builderTag: 'claude-code', reviewerModel: 'codex' };
-  assert.equal(pickRemediationWorkerClass(job), 'claude-code');
-});
-
-test('pickRemediationWorkerClass routes builderTag=clio-agent to codex remediator (not claude-code)', () => {
-  // [clio-agent] PRs are reviewed by codex (same as [claude-code]), but
-  // they must NOT be remediated by the local Claude Code CLI: a Clio
-  // sub-agent is a different operational entity. With no dedicated
-  // clio-agent worker class today, fall back to codex remediation per
-  // SPEC.md's documented default. The bug we are guarding against here
-  // is reverse-mapping reviewerModel='codex' → claude-code, which
-  // misroutes every [clio-agent] follow-up job.
-  const job = { builderTag: 'clio-agent', reviewerModel: 'codex' };
-  assert.equal(pickRemediationWorkerClass(job), 'codex');
-});
-
-test('pickRemediationWorkerClass falls back to codex for legacy jobs with no builderTag', () => {
-  // Backward compat for pre-builderTag job records: never reverse-map
-  // from reviewerModel to a builder, since codex reviewer is ambiguous
-  // between [claude-code] and [clio-agent]. Default to codex.
-  assert.equal(pickRemediationWorkerClass({}), 'codex');
-  assert.equal(pickRemediationWorkerClass({ reviewerModel: 'codex' }), 'codex');
-  assert.equal(pickRemediationWorkerClass({ reviewerModel: 'claude' }), 'codex');
-  assert.equal(pickRemediationWorkerClass({ reviewerModel: 'unknown' }), 'codex');
-  assert.equal(pickRemediationWorkerClass(null), 'codex');
-});
-
-test('pickRemediationWorkerClass: builderTag overrides reviewerModel even when they would conflict', () => {
-  // Defensive: builderTag is the authoritative routing input. If a job
-  // record somehow carries a builderTag that does not match the
-  // reviewerModel-derived guess, follow builderTag.
-  assert.equal(
-    pickRemediationWorkerClass({ builderTag: 'claude-code', reviewerModel: 'claude' }),
-    'claude-code'
-  );
-  assert.equal(
-    pickRemediationWorkerClass({ builderTag: 'codex', reviewerModel: 'codex' }),
-    'codex'
-  );
+test('pickRemediationWorkerClass always routes through codex', () => {
+  for (const [label, job] of [
+    ['builderTag=codex', { builderTag: 'codex', reviewerModel: 'claude' }],
+    ['builderTag=claude-code', { builderTag: 'claude-code', reviewerModel: 'codex' }],
+    ['builderTag=clio-agent', { builderTag: 'clio-agent', reviewerModel: 'codex' }],
+    ['legacy reviewerModel=claude', { reviewerModel: 'claude' }],
+    ['legacy reviewerModel=codex', { reviewerModel: 'codex' }],
+    ['legacy reviewerModel=unknown', { reviewerModel: 'unknown' }],
+    ['empty job', {}],
+    ['null job', null],
+  ]) {
+    assert.equal(pickRemediationWorkerClass(job), 'codex', label);
+  }
 });
 
 test('spawnRemediationWorker dispatches "codex" to spawnCodexRemediationWorker', () => {

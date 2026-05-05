@@ -23,6 +23,7 @@ import {
   openReviewStateDb,
   requestReviewRereview,
 } from './review-state.mjs';
+import { bumpRemediationBudget } from './operator-retrigger-helpers.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -45,6 +46,16 @@ Required:
 
 Optional:
   --root-dir <path>       Adversarial-review tool root (default: this script's parent).
+  --bump-budget <N>       Also bump the latest follow-up job's remediation
+                          maxRounds by N (default: 1) so the watcher's
+                          round-budget gate re-arms for one fresh remediation
+                          cycle. Operator default — re-review without a
+                          budget bump produces a deny:budget-exhausted on
+                          the first finding, which is rarely what you want.
+  --no-bump-budget        Opt out of the budget bump. Use when you want a
+                          surgical re-review (e.g., reviewer just panicked
+                          on transient infra; you want it to retry without
+                          stretching the budget envelope).
   --allow-failed-reset    Permit retriggering a row whose review_status is 'failed'.
                           Refused by default because the watcher already retries
                           'failed' rows automatically, and the reset clears
@@ -80,6 +91,8 @@ function parseArgs(argv) {
         'reason-file': { type: 'string' },
         'reason-stdin': { type: 'boolean', default: false },
         'root-dir': { type: 'string' },
+        'bump-budget': { type: 'string' },
+        'no-bump-budget': { type: 'boolean', default: false },
         'allow-failed-reset': { type: 'boolean', default: false },
         quiet: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
@@ -114,10 +127,26 @@ function parseArgs(argv) {
     );
   }
 
+  if (parsed.values['bump-budget'] !== undefined && parsed.values['no-bump-budget']) {
+    throw new UsageError('--bump-budget and --no-bump-budget are mutually exclusive');
+  }
+
+  let bumpBudget = 1; // operator default: bump by 1
+  if (parsed.values['no-bump-budget']) {
+    bumpBudget = 0;
+  } else if (parsed.values['bump-budget'] !== undefined) {
+    const n = Number.parseInt(parsed.values['bump-budget'], 10);
+    if (!Number.isInteger(n) || n < 0 || String(n) !== parsed.values['bump-budget'].trim()) {
+      throw new UsageError(`--bump-budget must be a non-negative integer (got: ${parsed.values['bump-budget']})`);
+    }
+    bumpBudget = n;
+  }
+
   return {
     values: {
       ...parsed.values,
       pr: prNumber,
+      bumpBudget,
     },
     reasonSource: reasonSources[0],
   };
@@ -162,6 +191,7 @@ function main(argv, {
   stdinReader = readStdinSync,
   rereview = requestReviewRereview,
   readReviewRow = readReviewRowSafely,
+  bumpBudget = bumpRemediationBudget,
 } = {}) {
   let parsed;
   try {
@@ -269,17 +299,57 @@ function main(argv, {
     return 4;
   }
 
+  // Per-PR remediation budget bump. Operator default: bump by 1 so the
+  // re-arm of first-pass review is not immediately throttled by an
+  // already-exhausted round-budget gate (the LAC-439 / round-1-only bind
+  // for medium-risk PRs). Skipped when --no-bump-budget or --bump-budget=0.
+  let bumpResult = null;
+  if (values.bumpBudget > 0 && (result.triggered || result.status === 'already-pending')) {
+    try {
+      bumpResult = bumpBudget({
+        rootDir,
+        repo: values.repo,
+        prNumber: values.pr,
+        bumpBy: values.bumpBudget,
+        reason: `retrigger-review: ${reason.trim()}`,
+        by: 'operator-cli',
+      });
+    } catch (err) {
+      // Budget bump is best-effort. The re-review has already been re-armed;
+      // log and continue rather than blocking the whole operation. Operator
+      // can run retrigger-remediation separately if they want to retry.
+      stderr.write(`warning: budget bump failed: ${err.message}\n`);
+    }
+  }
+
   if (result.triggered) {
     emit(values.quiet, stdout,
       `triggered: ${target} — review_status reset to 'pending'\n` +
       `  rereview_requested_at: ${result.reviewRow.rereview_requested_at}\n` +
       `  watcher will pick this up on its next poll\n`);
+    if (bumpResult) {
+      if (bumpResult.bumped) {
+        emit(values.quiet, stdout,
+          `  remediation budget bumped: maxRounds ${bumpResult.priorMaxRounds} → ${bumpResult.newMaxRounds}\n` +
+          `  (latest follow-up job: ${bumpResult.jobPath})\n`);
+      } else if (bumpResult.reason === 'no-job-found') {
+        emit(values.quiet, stdout,
+          `  remediation budget bump: no-op (no prior follow-up job for this PR)\n`);
+      } else {
+        emit(values.quiet, stdout,
+          `  remediation budget bump: skipped (${bumpResult.reason})\n`);
+      }
+    }
     return 0;
   }
 
   if (result.status === 'already-pending') {
     emit(values.quiet, stdout,
       `already-pending: ${target} is already queued for review; no change\n`);
+    if (bumpResult && bumpResult.bumped) {
+      emit(values.quiet, stdout,
+        `  remediation budget bumped anyway: maxRounds ${bumpResult.priorMaxRounds} → ${bumpResult.newMaxRounds}\n`);
+    }
     return 0;
   }
 

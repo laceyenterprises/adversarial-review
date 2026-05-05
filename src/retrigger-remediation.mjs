@@ -167,6 +167,16 @@ function emit(stream, message, quiet) {
   if (!quiet) stream.write(message);
 }
 
+function appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr }) {
+  try {
+    appendAuditRow(auditRootDir, row);
+    return true;
+  } catch (err) {
+    stderr.write(`error: could not append operator mutation audit row: ${err.message}\n`);
+    return false;
+  }
+}
+
 function resolveAuditRootDir(values, rootDir) {
   if (values['hq-root']) {
     throw new UsageError('--hq-root is no longer supported; use --audit-root-dir');
@@ -360,7 +370,9 @@ function main(argv, {
     idempotencyKey,
     outcome: 'bumped',
   });
-  appendAuditRow(auditRootDir, row);
+  if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+    return EXIT_RUNTIME;
+  }
   emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
   return 0;
 }

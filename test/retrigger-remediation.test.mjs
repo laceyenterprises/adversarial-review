@@ -195,3 +195,39 @@ test('retrigger-remediation rejects legacy --hq-root', () => {
   assert.equal(rc, 2);
   assert.match(err.text(), /--hq-root is no longer supported/);
 });
+
+test('retrigger-remediation returns runtime exit code with concise stderr when terminal audit append fails after requeue succeeds', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  const { jobPath } = makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 1,
+      currentRound: 1,
+      stop: { code: 'max-rounds-reached', reason: 'cap' },
+      nextAction: null,
+    },
+  });
+
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'grant one more round',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    appendAuditRow: () => {
+      throw new Error('disk full');
+    },
+  });
+
+  assert.equal(rc, 4);
+  const job = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(job.status, 'pending');
+  assert.equal(job.remediationPlan.maxRounds, 2);
+  assert.match(err.text(), /error: could not append operator mutation audit row: disk full/);
+  assert.doesNotMatch(err.text(), /Error: disk full/);
+  assert.doesNotMatch(err.text(), /\n\s+at\s/);
+});

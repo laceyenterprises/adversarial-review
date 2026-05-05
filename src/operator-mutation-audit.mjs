@@ -99,14 +99,14 @@ function assertNoIdempotencyMismatch(existingRow, requestFingerprint) {
 
 function appendOperatorMutationAuditRow(rootDir, row) {
   const filePath = monthFilePath(rootDir, row.ts);
-  mkdirSync(operatorMutationsDir(rootDir), { recursive: true });
-  const fd = openSync(filePath, 'a', 0o640);
   const line = `${JSON.stringify(row)}\n`;
   if (Buffer.byteLength(line, 'utf8') > MAX_AUDIT_ROW_BYTES) {
     const err = new Error(`Operator mutation audit row exceeds ${MAX_AUDIT_ROW_BYTES} bytes`);
     err.code = 'AUDIT_ROW_TOO_LARGE';
     throw err;
   }
+  mkdirSync(operatorMutationsDir(rootDir), { recursive: true });
+  const fd = openSync(filePath, 'a', 0o640);
   try {
     writeSync(fd, line, null, 'utf8');
     fsyncSync(fd);

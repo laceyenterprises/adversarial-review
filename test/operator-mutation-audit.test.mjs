@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -70,6 +70,7 @@ test('appendOperatorMutationAuditRow writes ledgers with 0640 permissions', () =
 
 test('appendOperatorMutationAuditRow rejects oversized rows', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-mutation-audit-'));
+  const monthPath = path.join(rootDir, 'data', 'operator-mutations', '2026-05.jsonl');
   assert.throws(
     () => appendOperatorMutationAuditRow(rootDir, {
       ts: '2026-05-05T05:00:00.000Z',
@@ -82,4 +83,5 @@ test('appendOperatorMutationAuditRow rejects oversized rows', () => {
     }),
     /exceeds 4096 bytes/
   );
+  assert.equal(existsSync(monthPath), false);
 });

@@ -437,6 +437,38 @@ test('retrigger-review returns runtime exit code with concise stderr when rerevi
   assert.doesNotMatch(err.text(), /\n\s+at\s/);
 });
 
+test('retrigger-review returns runtime exit code with concise stderr when terminal audit append fails after rereview succeeds', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, { reviewStatus: 'posted' });
+
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    appendAuditRow: () => {
+      throw new Error('disk full');
+    },
+  });
+
+  assert.equal(rc, 4);
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+      .get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+  } finally {
+    db.close();
+  }
+  assert.match(err.text(), /error: could not append operator mutation audit row: disk full/);
+  assert.doesNotMatch(err.text(), /Error: disk full/);
+  assert.doesNotMatch(err.text(), /\n\s+at\s/);
+});
+
 test('retrigger-review returns runtime exit code when readReviewRow throws', () => {
   const err = makeCaptureStream();
   const rc = main([

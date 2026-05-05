@@ -200,6 +200,16 @@ function emit(stream, message, quiet) {
   if (!quiet) stream.write(message);
 }
 
+function appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr }) {
+  try {
+    appendAuditRow(auditRootDir, row);
+    return true;
+  } catch (err) {
+    stderr.write(`error: could not append operator mutation audit row: ${err.message}\n`);
+    return false;
+  }
+}
+
 function buildReviewAuditOutcome({ reviewStatus, budgetResult, bumpRequested, latestJob }) {
   const reviewPrefix = reviewStatus === 'already-pending' ? 'already-pending' : 'triggered';
   if (budgetResult?.bumped) return `${reviewPrefix}+bumped`;
@@ -427,7 +437,9 @@ function main(argv, {
       latestJob,
     }),
   });
-  appendAuditRow(auditRootDir, row);
+  if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+    return EXIT_RUNTIME;
+  }
   emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
   return 0;
 }

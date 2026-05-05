@@ -9,71 +9,59 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
 
-function fsyncDir(dirPath) {
-  let dirFd;
-  try {
-    dirFd = openSync(dirPath, 'r');
-    fsyncSync(dirFd);
-  } catch {
-    // Best-effort directory fsync. Some filesystems and platforms refuse it.
-  } finally {
-    if (dirFd !== undefined) {
-      try {
-        closeSync(dirFd);
-      } catch {}
-    }
-  }
+function uniqueTmpPath(filePath) {
+  return join(
+    dirname(filePath),
+    `.${basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+  );
 }
 
-function writeTempFileAtomic(targetPath, content, {
-  mode = 0o640,
-} = {}) {
-  const dirPath = dirname(targetPath);
-  mkdirSync(dirPath, { recursive: true });
-  const tempPath = join(dirPath, `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`);
-  let tempFd;
+function makeExistsError(filePath) {
+  const err = new Error(`EEXIST: file already exists, open '${filePath}'`);
+  err.code = 'EEXIST';
+  err.path = filePath;
+  return err;
+}
+
+function writeFileAtomic(filePath, content, { overwrite = true } = {}) {
+  const parentDir = dirname(filePath);
+  mkdirSync(parentDir, { recursive: true });
+
+  const tmpPath = uniqueTmpPath(filePath);
+  let tmpFd = null;
+
   try {
-    tempFd = openSync(tempPath, 'wx', mode);
-    writeFileSync(tempFd, content, 'utf8');
-    fsyncSync(tempFd);
-    closeSync(tempFd);
-    tempFd = undefined;
-    return tempPath;
+    tmpFd = openSync(tmpPath, 'wx', 0o600);
+    writeFileSync(tmpFd, content, 'utf8');
+    fsyncSync(tmpFd);
+    closeSync(tmpFd);
+    tmpFd = null;
+
+    if (overwrite) {
+      renameSync(tmpPath, filePath);
+      return;
+    }
+
+    try {
+      linkSync(tmpPath, filePath);
+    } catch (err) {
+      if (err?.code === 'EEXIST') {
+        throw makeExistsError(filePath);
+      }
+      throw err;
+    } finally {
+      rmSync(tmpPath, { force: true });
+    }
   } catch (err) {
-    if (tempFd !== undefined) {
+    if (tmpFd !== null) {
       try {
-        closeSync(tempFd);
+        closeSync(tmpFd);
       } catch {}
     }
-    rmSync(tempPath, { force: true });
+    rmSync(tmpPath, { force: true });
     throw err;
   }
 }
 
-function writeFileAtomic(targetPath, content, options = {}) {
-  const tempPath = writeTempFileAtomic(targetPath, content, options);
-  try {
-    renameSync(tempPath, targetPath);
-    fsyncDir(dirname(targetPath));
-  } catch (err) {
-    rmSync(tempPath, { force: true });
-    throw err;
-  }
-}
-
-function writeFileAtomicExclusive(targetPath, content, options = {}) {
-  const tempPath = writeTempFileAtomic(targetPath, content, options);
-  try {
-    linkSync(tempPath, targetPath);
-    fsyncDir(dirname(targetPath));
-  } finally {
-    rmSync(tempPath, { force: true });
-  }
-}
-
-export {
-  writeFileAtomic,
-  writeFileAtomicExclusive,
-};
+export { writeFileAtomic };

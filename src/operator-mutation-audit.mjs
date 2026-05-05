@@ -1,0 +1,102 @@
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  writeSync,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+
+const EX_USAGE = 64;
+const EX_DATAERR = 65;
+
+function buildRequestFingerprint({ verb, repo, pr, reason }) {
+  return `${verb}:${repo}:${pr}:${reason}`;
+}
+
+function digestSha256(text) {
+  return `sha256:${createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex')}`;
+}
+
+function resolveIdempotencyKey({ verb, repo, pr, reason, idempotencyKey }) {
+  const requestFingerprint = buildRequestFingerprint({ verb, repo, pr, reason });
+  return {
+    requestFingerprint,
+    idempotencyKey: idempotencyKey || digestSha256(requestFingerprint),
+  };
+}
+
+function operatorMutationsDir(hqRoot) {
+  return join(hqRoot, 'dispatch', 'operator-mutations');
+}
+
+function monthFilePath(hqRoot, ts) {
+  return join(operatorMutationsDir(hqRoot), `${String(ts).slice(0, 7)}.jsonl`);
+}
+
+function listJsonlFiles(dirPath) {
+  if (!existsSync(dirPath)) return [];
+  return readdirSync(dirPath)
+    .filter((name) => name.endsWith('.jsonl'))
+    .sort()
+    .map((name) => join(dirPath, name));
+}
+
+function buildExistingFingerprint(row) {
+  return buildRequestFingerprint({
+    verb: row.verb,
+    repo: row.repo,
+    pr: row.pr,
+    reason: row.reason,
+  });
+}
+
+function findOperatorMutationAuditRow(hqRoot, idempotencyKey) {
+  for (const filePath of listJsonlFiles(operatorMutationsDir(hqRoot))) {
+    const lines = readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+    for (const line of lines) {
+      const row = JSON.parse(line);
+      if (row.idempotencyKey === idempotencyKey) {
+        return row;
+      }
+    }
+  }
+  return null;
+}
+
+function assertNoIdempotencyMismatch(existingRow, requestFingerprint) {
+  if (!existingRow) return;
+  if (buildExistingFingerprint(existingRow) !== requestFingerprint) {
+    const err = new Error('IDEMPOTENCY_KEY_MISMATCH');
+    err.code = 'IDEMPOTENCY_KEY_MISMATCH';
+    err.exitCode = EX_DATAERR;
+    throw err;
+  }
+}
+
+function appendOperatorMutationAuditRow(hqRoot, row) {
+  const filePath = monthFilePath(hqRoot, row.ts);
+  mkdirSync(operatorMutationsDir(hqRoot), { recursive: true });
+  const fd = openSync(filePath, 'a', 0o644);
+  try {
+    writeSync(fd, `${JSON.stringify(row)}\n`, null, 'utf8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return filePath;
+}
+
+export {
+  EX_DATAERR,
+  EX_USAGE,
+  appendOperatorMutationAuditRow,
+  assertNoIdempotencyMismatch,
+  digestSha256,
+  findOperatorMutationAuditRow,
+  resolveIdempotencyKey,
+};

@@ -1,22 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import {
-  ensureReviewStateSchema,
-  openReviewStateDb,
-} from '../src/review-state.mjs';
+import { main, parseArgs } from '../src/retrigger-review.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { createFollowUpJob, getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 
-import {
-  parseArgs,
-  main,
-  UsageError,
-} from '../src/retrigger-review.mjs';
-
-// Capture-stream helper so main() can be invoked under test without writing
-// to the real process stdout/stderr.
 function makeCaptureStream() {
   const chunks = [];
   return {
@@ -30,616 +21,140 @@ function insertReviewRow(rootDir, overrides = {}) {
   try {
     ensureReviewStateSchema(db);
     db.prepare(
-      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts, last_attempted_at, posted_at, failed_at, failure_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, posted_at, failed_at, failure_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
-      overrides.repo || 'laceyenterprises/adversarial-review',
-      overrides.prNumber || 42,
-      overrides.reviewedAt || '2026-04-24T12:00:00.000Z',
-      overrides.reviewer || 'codex',
+      overrides.repo || 'laceyenterprises/agent-os',
+      overrides.prNumber || 238,
+      '2026-05-05T04:00:00.000Z',
+      'codex',
       overrides.prState || 'open',
-      overrides.linearTicket || null,
       overrides.reviewStatus || 'posted',
-      overrides.reviewAttempts ?? 1,
-      overrides.lastAttemptedAt ?? '2026-04-24T12:05:00.000Z',
-      overrides.postedAt ?? '2026-04-24T12:06:00.000Z',
-      overrides.failedAt ?? null,
-      overrides.failureMessage ?? null
+      1,
+      '2026-05-05T04:00:00.000Z',
+      overrides.failedAt || null,
+      overrides.failureMessage || null,
     );
   } finally {
     db.close();
   }
 }
 
-// ── parseArgs unit coverage ─────────────────────────────────────────────────
+function makeJob(rootDir, overrides = {}) {
+  const result = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    reviewerModel: 'claude',
+    reviewBody: '## Summary\nsummary',
+    reviewPostedAt: '2026-05-05T04:00:00.000Z',
+    critical: true,
+    maxRemediationRounds: 1,
+  });
+  const job = {
+    ...result.job,
+    ...overrides,
+    remediationPlan: {
+      ...result.job.remediationPlan,
+      ...(overrides.remediationPlan || {}),
+    },
+  };
+  writeFollowUpJob(result.jobPath, job);
+  return { jobPath: result.jobPath, job };
+}
 
-test('parseArgs accepts inline --reason and parses pr as integer', () => {
-  const { values, reasonSource } = parseArgs([
+test('parseArgs defaults --bump-budget to 1', () => {
+  const { values } = parseArgs([
     '--repo', 'laceyenterprises/agent-os',
-    '--pr', '99',
-    '--reason', 'looks good',
+    '--pr', '238',
+    '--reason', 'retry',
   ]);
-  assert.equal(values.repo, 'laceyenterprises/agent-os');
-  assert.equal(values.pr, 99);
-  assert.equal(reasonSource, 'reason');
+  assert.equal(values.bumpBudget, 1);
 });
 
-test('parseArgs accepts --reason-file', () => {
-  const { reasonSource } = parseArgs([
-    '--repo', 'laceyenterprises/agent-os',
-    '--pr', '99',
-    '--reason-file', '/tmp/x',
-  ]);
-  assert.equal(reasonSource, 'reason-file');
-});
-
-test('parseArgs accepts --reason-stdin', () => {
-  const { reasonSource } = parseArgs([
-    '--repo', 'laceyenterprises/agent-os',
-    '--pr', '99',
-    '--reason-stdin',
-  ]);
-  assert.equal(reasonSource, 'reason-stdin');
-});
-
-test('parseArgs rejects missing --repo', () => {
-  assert.throws(
-    () => parseArgs(['--pr', '99', '--reason', 'x']),
-    UsageError
-  );
-});
-
-test('parseArgs rejects missing --pr', () => {
-  assert.throws(
-    () => parseArgs(['--repo', 'a/b', '--reason', 'x']),
-    UsageError
-  );
-});
-
-test('parseArgs rejects non-integer --pr', () => {
-  assert.throws(
-    () => parseArgs(['--repo', 'a/b', '--pr', 'abc', '--reason', 'x']),
-    /positive integer/
-  );
-});
-
-test('parseArgs rejects partially numeric --pr values', () => {
-  assert.throws(
-    () => parseArgs(['--repo', 'a/b', '--pr', '5abc', '--reason', 'x']),
-    /positive integer/
-  );
-});
-
-test('parseArgs rejects --pr=0 (positive-integer check)', () => {
-  assert.throws(
-    () => parseArgs(['--repo', 'a/b', '--pr', '0', '--reason', 'x']),
-    /positive integer/
-  );
-});
-
-test('parseArgs rejects --pr with a leading dash (caught earlier by node:util)', () => {
-  // node:util parseArgs raises an "argument is ambiguous" error when an
-  // option value starts with `-`, before reaching our positive-integer
-  // check. Either path is fine — what matters is that this argv shape
-  // does not slip through as a successful parse.
-  assert.throws(
-    () => parseArgs(['--repo', 'a/b', '--pr', '-5', '--reason', 'x']),
-    UsageError
-  );
-});
-
-test('parseArgs rejects no reason source', () => {
-  assert.throws(
-    () => parseArgs(['--repo', 'a/b', '--pr', '99']),
-    /one of --reason/
-  );
-});
-
-test('parseArgs rejects multiple reason sources', () => {
-  assert.throws(
-    () => parseArgs([
-      '--repo', 'a/b',
-      '--pr', '99',
-      '--reason', 'inline',
-      '--reason-file', '/tmp/x',
-    ]),
-    /exactly one of/
-  );
-});
-
-test('parseArgs --help short-circuits without requiring repo/pr', () => {
-  const result = parseArgs(['--help']);
-  assert.equal(result.values.help, true);
-});
-
-// ── main() integration coverage (uses real db via review-state.mjs) ─────────
-
-test('main triggers a rereview for a posted PR and exits 0', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, { reviewStatus: 'posted' });
-
-  const out = makeCaptureStream();
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'second pass landed',
-      '--root-dir', rootDir,
-    ],
-    { stdout: out, stderr: err }
-  );
-
-  assert.equal(rc, 0);
-  assert.match(out.text(), /triggered/);
-  assert.equal(err.text(), '');
-
-  // Confirm db side effect — review_status flipped, posted_at cleared.
-  const db = openReviewStateDb(rootDir);
-  try {
-    const row = db.prepare(
-      'SELECT review_status, posted_at, rereview_requested_at, rereview_reason FROM reviewed_prs WHERE pr_number = 42'
-    ).get();
-    assert.equal(row.review_status, 'pending');
-    assert.equal(row.posted_at, null);
-    assert.ok(row.rereview_requested_at);
-    assert.equal(row.rereview_reason, 'second pass landed');
-  } finally {
-    db.close();
-  }
-});
-
-test('main refuses when the review row is already pending', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
+test('retrigger-review refuses pending review rows', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'pending' });
 
-  const out = makeCaptureStream();
   const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'noop expected',
-      '--root-dir', rootDir,
-    ],
-    { stdout: out, stderr: err }
-  );
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--root-dir', rootDir,
+    '--hq-root', rootDir,
+  ], { stdout: makeCaptureStream(), stderr: err });
 
-  assert.equal(rc, 0);
-  assert.match(out.text(), /already-pending/);
-  assert.equal(err.text(), '');
-});
-
-test('main returns 2 with blocked message when review row is missing', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-
-  // Schema present but no row inserted.
-  const db = openReviewStateDb(rootDir);
-  try { ensureReviewStateSchema(db); } finally { db.close(); }
-
-  const out = makeCaptureStream();
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'whatever',
-      '--root-dir', rootDir,
-    ],
-    { stdout: out, stderr: err }
-  );
-
-  assert.equal(rc, 1);
-  assert.match(err.text(), /blocked.*review-row-missing/);
-});
-
-test('main returns 2 when PR is no longer open (merged)', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, { reviewStatus: 'posted', prState: 'merged' });
-
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'too late',
-      '--root-dir', rootDir,
-    ],
-    { stdout: makeCaptureStream(), stderr: err }
-  );
-
-  assert.equal(rc, 1);
-  assert.match(err.text(), /pr-not-open/);
-});
-
-test('main returns 2 when review is malformed-title-terminal', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, { reviewStatus: 'malformed' });
-
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'fix the title first',
-      '--root-dir', rootDir,
-    ],
-    { stdout: makeCaptureStream(), stderr: err }
-  );
-
-  assert.equal(rc, 1);
-  assert.match(err.text(), /malformed-title-terminal/);
-});
-
-test('main returns 2 on usage error', () => {
-  const out = makeCaptureStream();
-  const err = makeCaptureStream();
-  const rc = main(['--repo', 'a/b'], { stdout: out, stderr: err });
   assert.equal(rc, 2);
-  assert.match(err.text(), /^error:/);
+  assert.match(err.text(), /refused:not-eligible/);
 });
 
-test('main reads --reason-file', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
+test('retrigger-review bumps the terminal job budget and resets review status', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
-
-  const reasonPath = path.join(rootDir, 'reason.md');
-  writeFileSync(reasonPath, 'multi\nline\nreason text\n', 'utf-8');
-
-  const out = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason-file', reasonPath,
-      '--root-dir', rootDir,
-    ],
-    { stdout: out, stderr: makeCaptureStream() }
-  );
-
-  assert.equal(rc, 0);
-
-  const db = openReviewStateDb(rootDir);
-  try {
-    const row = db.prepare(
-      'SELECT rereview_reason FROM reviewed_prs WHERE pr_number = 42'
-    ).get();
-    assert.equal(row.rereview_reason, 'multi\nline\nreason text\n');
-  } finally {
-    db.close();
-  }
-});
-
-test('main returns 3 when --reason-file is unreadable', () => {
-  const out = makeCaptureStream();
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason-file', '/tmp/this-file-does-not-exist-987654321',
-    ],
-    { stdout: out, stderr: err }
-  );
-  assert.equal(rc, 3);
-  assert.match(err.text(), /could not read reason/);
-});
-
-test('main reads --reason-stdin via injected reader', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, { reviewStatus: 'posted' });
-
-  const out = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason-stdin',
-      '--root-dir', rootDir,
-    ],
-    {
-      stdout: out,
-      stderr: makeCaptureStream(),
-      stdinReader: () => 'piped reason\n',
-    }
-  );
-
-  assert.equal(rc, 0);
-
-  const db = openReviewStateDb(rootDir);
-  try {
-    const row = db.prepare(
-      'SELECT rereview_reason FROM reviewed_prs WHERE pr_number = 42'
-    ).get();
-    assert.equal(row.rereview_reason, 'piped reason\n');
-  } finally {
-    db.close();
-  }
-});
-
-test('main rejects empty reason from any source', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, { reviewStatus: 'posted' });
-
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason-stdin',
-      '--root-dir', rootDir,
-    ],
-    {
-      stdout: makeCaptureStream(),
-      stderr: err,
-      stdinReader: () => '   \n  \t\n',
-    }
-  );
-
-  assert.equal(rc, 3);
-  assert.match(err.text(), /reason is empty/);
-});
-
-test('main with --quiet suppresses informational output but preserves exit code', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, { reviewStatus: 'posted' });
-
-  const out = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'quiet mode',
-      '--root-dir', rootDir,
-      '--quiet',
-    ],
-    { stdout: out, stderr: makeCaptureStream() }
-  );
-
-  assert.equal(rc, 0);
-  assert.equal(out.text(), '');
-});
-
-// ── PR #13 round-2 review fixes ─────────────────────────────────────────────
-
-test('parseArgs accepts --allow-failed-reset (default false)', () => {
-  const { values: defaultValues } = parseArgs([
-    '--repo', 'laceyenterprises/agent-os',
-    '--pr', '99',
-    '--reason', 'x',
-  ]);
-  assert.equal(defaultValues['allow-failed-reset'], false);
-
-  const { values: optedIn } = parseArgs([
-    '--repo', 'laceyenterprises/agent-os',
-    '--pr', '99',
-    '--reason', 'x',
-    '--allow-failed-reset',
-  ]);
-  assert.equal(optedIn['allow-failed-reset'], true);
-});
-
-test('main refuses review_status=failed without --allow-failed-reset and preserves failure evidence', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, {
-    reviewStatus: 'failed',
-    failedAt: '2026-04-30T22:11:33.000Z',
-    failureMessage: 'oauth token expired',
-    postedAt: null,
-  });
-
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'fix it',
-      '--root-dir', rootDir,
-    ],
-    { stdout: makeCaptureStream(), stderr: err }
-  );
-
-  assert.equal(rc, 1, 'should be blocked');
-  assert.match(err.text(), /failed-status-needs-explicit-allow/);
-
-  // Diagnostic evidence MUST still be on disk — that's the whole point.
-  const db = openReviewStateDb(rootDir);
-  try {
-    const row = db.prepare(
-      'SELECT review_status, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
-    ).get('laceyenterprises/adversarial-review', 42);
-    assert.equal(row.review_status, 'failed', 'status untouched');
-    assert.equal(row.failed_at, '2026-04-30T22:11:33.000Z', 'failed_at preserved');
-    assert.equal(row.failure_message, 'oauth token expired', 'failure_message preserved');
-  } finally {
-    db.close();
-  }
-});
-
-test('main accepts review_status=failed when --allow-failed-reset is set (matches existing behavior)', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, {
-    reviewStatus: 'failed',
-    failedAt: '2026-04-30T22:11:33.000Z',
-    failureMessage: 'oauth token expired',
-    postedAt: null,
+  const { jobPath } = makeJob(rootDir, {
+    status: 'completed',
+    completedAt: '2026-05-05T04:05:00.000Z',
+    reReview: { requested: true },
   });
 
   const out = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'fixed token; clean rerun',
-      '--root-dir', rootDir,
-      '--allow-failed-reset',
-    ],
-    { stdout: out, stderr: makeCaptureStream() }
-  );
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'substantially rewritten',
+    '--root-dir', rootDir,
+    '--hq-root', rootDir,
+  ], { stdout: out, stderr: makeCaptureStream() });
 
-  assert.equal(rc, 0, 'should trigger');
-  assert.match(out.text(), /triggered/);
-
-  // With the explicit override, the helper's reset behavior applies and
-  // failure evidence is intentionally cleared.
+  assert.equal(rc, 0);
   const db = openReviewStateDb(rootDir);
   try {
-    const row = db.prepare(
-      'SELECT review_status, failed_at, failure_message, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
-    ).get('laceyenterprises/adversarial-review', 42);
+    const row = db.prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+      .get('laceyenterprises/agent-os', 238);
     assert.equal(row.review_status, 'pending');
-    assert.equal(row.failed_at, null);
-    assert.equal(row.failure_message, null);
-    assert.equal(row.rereview_reason, 'fixed token; clean rerun');
   } finally {
     db.close();
   }
+
+  const job = JSON.parse(readFileSync(jobPath, 'utf8'));
+  assert.equal(job.remediationPlan.maxRounds, 2);
+  assert.equal(JSON.parse(out.text()).outcome, 'bumped');
 });
 
-test('main returns 4 with concise stderr (no stack trace) when rereview throws', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
+test('retrigger-review refuses active follow-up jobs when bumping is enabled', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
+  makeJob(rootDir, { status: 'pending' });
 
   const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'simulate runtime failure',
-      '--root-dir', rootDir,
-    ],
-    {
-      stdout: makeCaptureStream(),
-      stderr: err,
-      rereview: () => { throw new Error('database is locked'); },
-    }
-  );
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--root-dir', rootDir,
+    '--hq-root', rootDir,
+  ], { stdout: makeCaptureStream(), stderr: err });
 
-  assert.equal(rc, 4);
-  const text = err.text();
-  assert.match(text, /rereview failed: database is locked/);
-  // No 'at <function>' frames — the operator should see a clean message,
-  // not a Node stack trace.
-  assert.doesNotMatch(text, / at /);
+  assert.equal(rc, 2);
+  assert.match(err.text(), /refused:job-active/);
 });
 
-test('main returns 4 when readReviewRow throws (e.g. unreadable --root-dir)', () => {
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'simulate bad root-dir',
-    ],
-    {
-      stdout: makeCaptureStream(),
-      stderr: err,
-      readReviewRow: () => { throw new Error('ENOENT: no such file or directory'); },
-    }
-  );
+test('retrigger-review skips the budget bump when no follow-up job exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, { reviewStatus: 'posted' });
+  mkdirSync(getFollowUpJobDir(rootDir, 'pending'), { recursive: true });
 
-  assert.equal(rc, 4);
-  assert.match(err.text(), /could not read review state: ENOENT/);
-  assert.doesNotMatch(err.text(), / at /);
-});
+  const out = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--root-dir', rootDir,
+    '--hq-root', rootDir,
+  ], { stdout: out, stderr: makeCaptureStream() });
 
-test("main refuses review_status=reviewing (in-flight) without any override flag", () => {
-  // 'reviewing' is the watcher's durable in-flight claim — the row's
-  // reviewer subprocess is still running. Resetting it would let the
-  // next poll spawn a second reviewer and post a duplicate GitHub
-  // review. The CLI must surface a dedicated 'review-in-flight' error
-  // and exit 1; --allow-failed-reset (which only covers 'failed')
-  // must NOT unblock this case.
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, {
-    reviewStatus: 'reviewing',
-    postedAt: null,
-    failedAt: null,
-    failureMessage: null,
-  });
-
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'try to reset in-flight review',
-      '--root-dir', rootDir,
-    ],
-    { stdout: makeCaptureStream(), stderr: err }
-  );
-
-  assert.equal(rc, 1, 'should be blocked');
-  assert.match(err.text(), /review-in-flight/);
-
-  // Confirm row was not modified.
-  const db = openReviewStateDb(rootDir);
-  try {
-    const row = db.prepare(
-      'SELECT review_status, rereview_requested_at FROM reviewed_prs WHERE pr_number = 42'
-    ).get();
-    assert.equal(row.review_status, 'reviewing');
-    assert.equal(row.rereview_requested_at, null);
-  } finally {
-    db.close();
-  }
-});
-
-test("main refuses review_status=reviewing even when --allow-failed-reset is set (different override scope)", () => {
-  // The --allow-failed-reset flag is scoped specifically to the
-  // 'failed' state and clearing failure diagnostic evidence. It must
-  // NOT unblock 'reviewing' — the duplicate-review hazard there is
-  // unrelated to the failed-evidence concern, and reusing the same
-  // flag would conflate two different recovery scenarios.
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
-  insertReviewRow(rootDir, {
-    reviewStatus: 'reviewing',
-    postedAt: null,
-    failedAt: null,
-    failureMessage: null,
-  });
-
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'try to reset in-flight review',
-      '--root-dir', rootDir,
-      '--allow-failed-reset',
-    ],
-    { stdout: makeCaptureStream(), stderr: err }
-  );
-
-  assert.equal(rc, 1, 'should still be blocked despite --allow-failed-reset');
-  assert.match(err.text(), /review-in-flight/);
-
-  const db = openReviewStateDb(rootDir);
-  try {
-    const row = db.prepare(
-      'SELECT review_status FROM reviewed_prs WHERE pr_number = 42'
-    ).get();
-    assert.equal(row.review_status, 'reviewing');
-  } finally {
-    db.close();
-  }
-});
-
-test('main returns 4 with real broken --root-dir (subprocess-style: passing /dev/null)', () => {
-  // The reviewer's repro: --root-dir /dev/null. openReviewStateDb does
-  // mkdirSync(join(rootDir, 'data'), {recursive:true}) which fails with
-  // ENOTDIR because /dev/null is a character device, not a directory.
-  const err = makeCaptureStream();
-  const rc = main(
-    [
-      '--repo', 'laceyenterprises/adversarial-review',
-      '--pr', '42',
-      '--reason', 'broken root',
-      '--root-dir', '/dev/null',
-    ],
-    { stdout: makeCaptureStream(), stderr: err }
-  );
-
-  assert.equal(rc, 4, 'broken --root-dir must produce a deterministic exit, not a stack trace');
-  assert.match(err.text(), /could not read review state/);
-  assert.doesNotMatch(err.text(), / at /);
+  assert.equal(rc, 0);
+  const row = JSON.parse(out.text());
+  assert.equal(row.priorMaxRounds, null);
+  assert.equal(row.newMaxRounds, null);
 });

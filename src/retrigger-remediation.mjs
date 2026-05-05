@@ -4,58 +4,25 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
+import { bumpRemediationBudget, findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import {
-  appendJobOperatorAudit,
-  beginIdempotentMutation,
-  bumpRemediationBudget,
-  currentMaxRounds,
-  defaultIdempotencyKey,
-  emitOperatorMutationAudit,
-  ensureIdempotency,
-  latestFollowUpJobForPr,
-  recordIdempotentMutation,
-  requestFingerprint,
-} from './operator-retrigger-helpers.mjs';
+  EX_DATAERR,
+  EX_USAGE,
+  appendOperatorMutationAuditRow,
+  assertNoIdempotencyMismatch,
+  findOperatorMutationAuditRow,
+  resolveIdempotencyKey,
+} from './operator-mutation-audit.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
 
 const USAGE = `\
-retrigger-remediation — force one off-cycle remediation round for a PR
-
 Usage:
   node src/retrigger-remediation.mjs --repo <owner/repo> --pr <number> --reason "..."
-  node src/retrigger-remediation.mjs --repo <owner/repo> --pr <number> --reason-file <path>
-  node src/retrigger-remediation.mjs --repo <owner/repo> --pr <number> --reason-stdin < reason.md
-
-Required:
-  --repo <owner/repo>     Repository the PR lives in.
-  --pr <number>           PR number.
-  Exactly one of:
-    --reason "..."        Reason text inline.
-    --reason-file <path>  Read reason from a file.
-    --reason-stdin        Read reason from stdin.
-
-Optional:
-  --root-dir <path>       Adversarial-review tool root (default: this script's parent).
-  --audit-root-dir <path> Base directory for durable operator mutation records
-                          (default: --root-dir, stored under data/operator-mutations/).
-  --operator <ref>        Operator identity written to the audit row.
-  --bump-budget <N>       Increment remediationPlan.maxRounds by N (default: 1).
-  --no-bump-budget        Requeue without changing remediationPlan.maxRounds.
-  --idempotency-key <key> Override the default sha256(verb:repo:pr:reason) key.
-  --force-replay          Re-open an in-flight idempotency record after a
-                          crash/interrupted operator run.
-  --quiet                 Suppress informational stdout.
-  -h, --help              Show this help.
-
-Exit codes:
-  0  requeued or replayed
-  1  blocked (no follow-up job, ineligible job state, or an in-flight
-     idempotency record)
-  2  usage error (missing/invalid args)
-  3  reason-input I/O error (e.g. --reason-file path unreadable)
-  4  runtime error (could not write queue/audit state)
+                                     [--bump-budget <N>]
+                                     [--idempotency-key <key>]
+                                     [--root-dir <path>] [--hq-root <path>]
 `;
 
 class UsageError extends Error {}
@@ -71,13 +38,10 @@ function parseArgs(argv) {
         reason: { type: 'string' },
         'reason-file': { type: 'string' },
         'reason-stdin': { type: 'boolean', default: false },
-        'root-dir': { type: 'string' },
-        'audit-root-dir': { type: 'string' },
-        operator: { type: 'string' },
         'bump-budget': { type: 'string' },
-        'no-bump-budget': { type: 'boolean', default: false },
         'idempotency-key': { type: 'string' },
-        'force-replay': { type: 'boolean', default: false },
+        'root-dir': { type: 'string' },
+        'hq-root': { type: 'string' },
         quiet: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -92,130 +56,110 @@ function parseArgs(argv) {
   if (!parsed.values.repo || !parsed.values.pr) {
     throw new UsageError('--repo and --pr are required');
   }
-
-  const prNumber = Number.parseInt(parsed.values.pr, 10);
-  if (!Number.isFinite(prNumber) || prNumber <= 0 || String(prNumber) !== parsed.values.pr.trim()) {
+  const pr = Number.parseInt(parsed.values.pr, 10);
+  if (!Number.isInteger(pr) || pr <= 0) {
     throw new UsageError(`--pr must be a positive integer (got: ${parsed.values.pr})`);
   }
-
   const reasonSources = ['reason', 'reason-file', 'reason-stdin'].filter(
     (key) => parsed.values[key] !== undefined && parsed.values[key] !== false
   );
-  if (reasonSources.length === 0) {
-    throw new UsageError('one of --reason, --reason-file, or --reason-stdin is required');
+  if (reasonSources.length !== 1) {
+    throw new UsageError('pass exactly one of --reason, --reason-file, or --reason-stdin');
   }
-  if (reasonSources.length > 1) {
-    throw new UsageError(
-      `pass exactly one of --reason / --reason-file / --reason-stdin (got: ${reasonSources.join(', ')})`
-    );
+  const bumpBudgetRaw = parsed.values['bump-budget'] ?? '1';
+  const bumpBudget = Number.parseInt(String(bumpBudgetRaw), 10);
+  if (!Number.isInteger(bumpBudget) || bumpBudget <= 0) {
+    throw new UsageError(`--bump-budget must be a positive integer (got: ${bumpBudgetRaw})`);
   }
-  if (parsed.values['bump-budget'] !== undefined && parsed.values['no-bump-budget']) {
-    throw new UsageError('--bump-budget and --no-bump-budget are mutually exclusive');
-  }
-
-  let bumpBudget = 1;
-  if (parsed.values['no-bump-budget']) {
-    bumpBudget = 0;
-  } else if (parsed.values['bump-budget'] !== undefined) {
-    const n = Number.parseInt(parsed.values['bump-budget'], 10);
-    if (!Number.isInteger(n) || n < 0 || String(n) !== parsed.values['bump-budget'].trim()) {
-      throw new UsageError(`--bump-budget must be a non-negative integer (got: ${parsed.values['bump-budget']})`);
-    }
-    bumpBudget = n;
-  }
-
   return {
     values: {
       ...parsed.values,
-      pr: prNumber,
+      pr,
       bumpBudget,
     },
     reasonSource: reasonSources[0],
   };
 }
 
-function readStdinSync() {
-  return readFileSync(0, 'utf-8');
-}
-
 function readReasonFromSource(values, reasonSource, { stdinReader = readStdinSync } = {}) {
   if (reasonSource === 'reason') return values.reason;
-  if (reasonSource === 'reason-file') return readFileSync(values['reason-file'], 'utf-8');
+  if (reasonSource === 'reason-file') return readFileSync(values['reason-file'], 'utf8');
   return stdinReader();
 }
 
-function emit(quiet, stream, msg) {
-  if (!quiet) stream.write(msg);
+function readStdinSync() {
+  return readFileSync(0, 'utf8');
 }
 
-function evaluateEligibility(job) {
-  if (!job) {
-    return { eligible: false, code: 'no-job', detail: 'no follow-up job exists for this PR' };
+function remediationEligibility(job) {
+  if (!job) return { ok: false, outcome: 'refused:no-job', detail: 'no-job' };
+  if (job.status === 'pending' || job.status === 'inProgress') {
+    return { ok: false, outcome: 'refused:job-active', detail: job.status };
   }
-  if (job.status === 'pending' || job.status === 'in_progress') {
-    return { eligible: false, code: 'job-active', detail: `latest job ${job.jobId} is ${job.status}` };
-  }
-  if (job.status === 'failed') {
-    return { eligible: true };
-  }
-  if (job.status === 'completed') {
-    if (job?.reReview?.requested === true) {
-      return { eligible: true };
-    }
-    return { eligible: false, code: 'completed-no-rereview', detail: `latest job ${job.jobId} completed without a durable rereview request` };
+  if (job.status === 'completed' && job?.reReview?.requested !== true) {
+    return { ok: false, outcome: 'refused:not-eligible', detail: 'completed-without-rereview-request' };
   }
   if (job.status === 'stopped') {
-    const stopCode = String(job?.remediationPlan?.stop?.code || '');
-    if (['max-rounds-reached', 'round-budget-exhausted'].includes(stopCode)) {
-      return { eligible: true };
+    const stopCode = job?.remediationPlan?.stop?.code || null;
+    if (!['max-rounds-reached', 'round-budget-exhausted'].includes(stopCode)) {
+      return { ok: false, outcome: 'refused:not-eligible', detail: `stopped:${stopCode || 'unknown'}` };
     }
-    return { eligible: false, code: 'stopped-not-requeueable', detail: `latest job ${job.jobId} is stopped:${stopCode || 'unknown'}` };
   }
-  return { eligible: false, code: 'not-eligible', detail: `latest job ${job.jobId} is ${job.status}` };
+  if (!['completed', 'failed', 'stopped'].includes(job.status)) {
+    return { ok: false, outcome: 'refused:not-eligible', detail: job.status };
+  }
+  return { ok: true, outcome: 'bumped', detail: job.status };
 }
 
-function handleIdempotencyPrecheck({ stdout, stderr, quiet, target, auditRootDir, values, ts, fingerprint, verb, reason }) {
-  const idempotencyKey = values['idempotency-key'] || defaultIdempotencyKey({
-    verb,
-    repo: values.repo,
-    pr: values.pr,
+function makeAuditRow({
+  ts,
+  repo,
+  pr,
+  reason,
+  operator,
+  priorMaxRounds,
+  newMaxRounds,
+  jobKey,
+  idempotencyKey,
+  outcome,
+}) {
+  return {
+    ts,
+    verb: 'hq.adversarial.retrigger-remediation',
+    repo,
+    pr,
     reason,
-  });
-  try {
-    const priorAuditRow = ensureIdempotency(auditRootDir, {
-      ts,
-      idempotencyKey,
-      requestFingerprint: fingerprint,
-    });
-    if (priorAuditRow) {
-      emit(quiet, stdout, `replayed: ${target} (${priorAuditRow.outcome})\n`);
-      return { replayed: true, idempotencyKey };
-    }
-  } catch (err) {
-    if (err.code === 'IDEMPOTENCY_KEY_IN_FLIGHT') {
-      stderr.write(`blocked (idempotency-in-flight): ${target} already has an unfinished operator mutation for this key\n`);
-      return { blocked: true, rc: 1, idempotencyKey };
-    }
-    if (err.code === 'IDEMPOTENCY_KEY_MISMATCH') {
-      stderr.write(`blocked (idempotency-key-mismatch): ${target} reused an idempotency key for a different request\n`);
-      return { blocked: true, rc: 1, idempotencyKey };
-    }
-    throw err;
-  }
-  return { idempotencyKey };
+    operator,
+    priorMaxRounds,
+    newMaxRounds,
+    jobKey,
+    idempotencyKey,
+    outcome,
+  };
 }
 
-function main(argv, { stdout = process.stdout, stderr = process.stderr, stdinReader = readStdinSync } = {}) {
+function emit(stream, message, quiet) {
+  if (!quiet) stream.write(message);
+}
+
+function main(argv, {
+  stdout = process.stdout,
+  stderr = process.stderr,
+  stdinReader = readStdinSync,
+  latestJobFinder = findLatestFollowUpJob,
+  bumpBudgetImpl = bumpRemediationBudget,
+  requeueImpl = requeueFollowUpJobForNextRound,
+  findAuditRow = findOperatorMutationAuditRow,
+  appendAuditRow = appendOperatorMutationAuditRow,
+} = {}) {
   let parsed;
   try {
     parsed = parseArgs(argv);
   } catch (err) {
-    if (err instanceof UsageError) {
-      stderr.write(`error: ${err.message}\n\n${USAGE}`);
-      return 2;
-    }
-    throw err;
+    stderr.write(`error: ${err.message}\n\n${USAGE}`);
+    return EX_USAGE;
   }
+
   const { values, reasonSource } = parsed;
   if (values.help) {
     stdout.write(USAGE);
@@ -227,136 +171,162 @@ function main(argv, { stdout = process.stdout, stderr = process.stderr, stdinRea
     reason = readReasonFromSource(values, reasonSource, { stdinReader });
   } catch (err) {
     stderr.write(`error: could not read reason: ${err.message}\n`);
-    return 3;
+    return EX_USAGE;
   }
-  if (!reason?.trim()) {
-    stderr.write('error: reason is empty after reading\n');
-    return 3;
+  if (!reason || !reason.trim()) {
+    stderr.write('error: --reason is required and must not be empty\n');
+    return EX_USAGE;
   }
 
   const rootDir = values['root-dir'] ? resolve(values['root-dir']) : DEFAULT_ROOT_DIR;
-  const auditRootDir = values['audit-root-dir'] ? resolve(values['audit-root-dir']) : rootDir;
-  const target = `${values.repo}#${values.pr}`;
+  const hqRoot = values['hq-root'] ? resolve(values['hq-root']) : rootDir;
   const ts = new Date().toISOString();
-  const verb = 'hq.adversarial.retrigger-remediation';
-  const fingerprint = requestFingerprint({
-    verb,
+  const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
+  const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
+    verb: 'hq.adversarial.retrigger-remediation',
     repo: values.repo,
     pr: values.pr,
     reason,
-    bumpBudget: values.bumpBudget,
-    bumpBudgetEnabled: values.bumpBudget > 0,
+    idempotencyKey: values['idempotency-key'],
   });
-
-  const precheck = handleIdempotencyPrecheck({
-    stdout,
-    stderr,
-    quiet: values.quiet,
-    target,
-    auditRootDir,
-    values,
-    ts,
-    fingerprint,
-    verb,
-    reason,
-  });
-  if (precheck.replayed) return 0;
-  if (precheck.blocked) return precheck.rc;
-
-  const latest = latestFollowUpJobForPr(rootDir, { repo: values.repo, pr: values.pr });
-  const eligibility = evaluateEligibility(latest?.job || null);
-  if (!eligibility.eligible) {
-    stderr.write(`blocked (${eligibility.code}): ${target} ${eligibility.detail}\n`);
-    return 1;
-  }
 
   try {
-    beginIdempotentMutation(auditRootDir, {
-      ts,
-      idempotencyKey: precheck.idempotencyKey,
-      requestFingerprint: fingerprint,
-      forceReplay: values['force-replay'],
-    });
+    const existingRow = findAuditRow(hqRoot, idempotencyKey);
+    assertNoIdempotencyMismatch(existingRow, requestFingerprint);
+    if (existingRow) {
+      emit(stdout, `${JSON.stringify(existingRow)}\n`, values.quiet);
+      return 0;
+    }
   } catch (err) {
-    if (err.code === 'IDEMPOTENCY_KEY_IN_FLIGHT') {
-      stderr.write(`blocked (idempotency-in-flight): ${target} already has an unfinished operator mutation for this key\n`);
-      return 1;
-    }
-    if (err.code === 'IDEMPOTENCY_KEY_MISMATCH') {
-      stderr.write(`blocked (idempotency-key-mismatch): ${target} reused an idempotency key for a different request\n`);
-      return 1;
-    }
-    stderr.write(`error: could not open idempotency record: ${err.message}\n`);
-    return 4;
+    stderr.write(`error: ${err.message}\n`);
+    return err.exitCode || EX_DATAERR;
   }
 
-  let bumped = {
-    bumped: false,
-    priorMaxRounds: currentMaxRounds(latest.job),
-    newMaxRounds: currentMaxRounds(latest.job),
-    jobPath: latest.jobPath,
-    job: latest.job,
-  };
-  try {
-    if (values.bumpBudget > 0) {
-      bumped = bumpRemediationBudget({
-        rootDir,
-        repo: values.repo,
-        prNumber: values.pr,
-        bumpBy: values.bumpBudget,
-        latestJobRecord: latest,
-      });
-      if (!bumped.bumped) {
-        stderr.write(`blocked (${bumped.reason}): ${target} could not bump the remediation budget\n`);
-        return 1;
-      }
-    }
-    const requeued = requeueFollowUpJobForNextRound({
-      rootDir,
-      jobPath: bumped.jobPath || latest.jobPath,
-      requestedAt: ts,
-      requestedBy: values.operator || 'operator',
-      reason: reason.trim(),
-    });
-    const auditRow = {
+  const latest = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
+  const eligibility = remediationEligibility(latest?.job || null);
+  if (!eligibility.ok) {
+    const row = makeAuditRow({
       ts,
-      verb,
       repo: values.repo,
       pr: values.pr,
-      reason: reason.trim(),
-      operator: values.operator || 'operator',
-      priorMaxRounds: bumped.priorMaxRounds,
-      newMaxRounds: currentMaxRounds(requeued.job),
-      jobKey: requeued.job.jobId,
-      idempotencyKey: precheck.idempotencyKey,
-      outcome: 'requeued',
-    };
-    appendJobOperatorAudit(requeued.jobPath, auditRow, { requestFingerprint: fingerprint });
-    emitOperatorMutationAudit(auditRootDir, auditRow);
-    recordIdempotentMutation(auditRootDir, {
-      ts,
-      idempotencyKey: precheck.idempotencyKey,
-      requestFingerprint: fingerprint,
-      auditRow,
+      reason,
+      operator,
+      priorMaxRounds: latest?.job?.remediationPlan?.maxRounds ?? null,
+      newMaxRounds: latest?.job?.remediationPlan?.maxRounds ?? null,
+      jobKey: latest?.job?.jobId || null,
+      idempotencyKey,
+      outcome: eligibility.outcome,
     });
-
-    emit(values.quiet, stdout,
-      `requeued: ${target} -> ${requeued.job.status}\n` +
-      `  maxRounds: ${auditRow.priorMaxRounds ?? 'unchanged'} -> ${auditRow.newMaxRounds ?? 'unchanged'}\n`);
-    return 0;
-  } catch (err) {
-    stderr.write(`error: remediation retrigger failed: ${err.message}\n`);
-    return 4;
+    appendAuditRow(hqRoot, row);
+    stderr.write(`${eligibility.outcome}: ${values.repo}#${values.pr} (${eligibility.detail})\n`);
+    return 2;
   }
+
+  let budgetResult;
+  try {
+    budgetResult = bumpBudgetImpl({
+      rootDir,
+      repo: values.repo,
+      prNumber: values.pr,
+      bumpBudget: values.bumpBudget,
+      auditEntry: {
+        ts,
+        verb: 'hq.adversarial.retrigger-remediation',
+        reason,
+        requestFingerprint,
+        idempotencyKey,
+        auditRow: null,
+      },
+    });
+  } catch (err) {
+    stderr.write(`error: ${err.message}\n`);
+    return err.code === 'IDEMPOTENCY_KEY_MISMATCH' ? EX_DATAERR : EX_DATAERR;
+  }
+
+  if (!budgetResult.bumped) {
+    const outcome = budgetResult.reason === 'job-active'
+      ? 'refused:job-active'
+      : 'refused:no-job';
+    const row = makeAuditRow({
+      ts,
+      repo: values.repo,
+      pr: values.pr,
+      reason,
+      operator,
+      priorMaxRounds: latest?.job?.remediationPlan?.maxRounds ?? null,
+      newMaxRounds: latest?.job?.remediationPlan?.maxRounds ?? null,
+      jobKey: latest?.job?.jobId || null,
+      idempotencyKey,
+      outcome,
+    });
+    appendAuditRow(hqRoot, row);
+    stderr.write(`${outcome}: ${values.repo}#${values.pr}\n`);
+    return 2;
+  }
+
+  let requeueResult;
+  try {
+    requeueResult = requeueImpl({
+      rootDir,
+      jobPath: budgetResult.jobPath,
+      requestedAt: ts,
+      requestedBy: operator,
+      reason,
+    });
+  } catch (err) {
+    const row = makeAuditRow({
+      ts,
+      repo: values.repo,
+      pr: values.pr,
+      reason,
+      operator,
+      priorMaxRounds: budgetResult.priorMaxRounds,
+      newMaxRounds: budgetResult.newMaxRounds,
+      jobKey: budgetResult.job?.jobId || latest?.job?.jobId || null,
+      idempotencyKey,
+      outcome: 'refused:not-eligible',
+    });
+    appendAuditRow(hqRoot, row);
+    stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (${err.message})\n`);
+    return 2;
+  }
+
+  if (requeueResult.job.status !== 'pending') {
+    const row = makeAuditRow({
+      ts,
+      repo: values.repo,
+      pr: values.pr,
+      reason,
+      operator,
+      priorMaxRounds: budgetResult.priorMaxRounds,
+      newMaxRounds: budgetResult.newMaxRounds,
+      jobKey: requeueResult.job.jobId,
+      idempotencyKey,
+      outcome: 'refused:not-eligible',
+    });
+    appendAuditRow(hqRoot, row);
+    stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (requeue did not produce pending)\n`);
+    return 2;
+  }
+
+  const row = makeAuditRow({
+    ts,
+    repo: values.repo,
+    pr: values.pr,
+    reason,
+    operator,
+    priorMaxRounds: budgetResult.priorMaxRounds,
+    newMaxRounds: budgetResult.newMaxRounds,
+    jobKey: requeueResult.job.jobId,
+    idempotencyKey,
+    outcome: 'bumped',
+  });
+  appendAuditRow(hqRoot, row);
+  emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
+  return 0;
 }
 
-export {
-  main,
-  parseArgs,
-  readReasonFromSource,
-  UsageError,
-  USAGE,
-};
+export { UsageError, USAGE, main, parseArgs, readReasonFromSource };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   process.exit(main(process.argv.slice(2)));

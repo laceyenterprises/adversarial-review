@@ -13,7 +13,8 @@
     "follow-up:reconcile": "node src/follow-up-reconcile.mjs",
     "follow-up:requeue": "node src/follow-up-requeue.mjs",
     "follow-up:stop": "node src/follow-up-stop.mjs",
-    "retrigger-review": "node src/retrigger-review.mjs"
+    "retrigger-review": "node src/retrigger-review.mjs",
+    "retrigger-remediation": "node src/retrigger-remediation.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

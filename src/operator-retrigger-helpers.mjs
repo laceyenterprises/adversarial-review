@@ -1,30 +1,8 @@
-// operator-retrigger-helpers.mjs — shared helpers for the operator-driven
-// off-cycle retrigger surfaces (`retrigger-review`, `retrigger-remediation`).
-//
-// Why this exists: the watcher's natural budget loop is the canonical path —
-// risk-tier round budgets, cascade-suppression, attempt counters all do the
-// right thing under normal operation. But there are real cases where an
-// operator (or a session that just substantially rewrote the PR) needs to
-// force a fresh cycle outside that loop. Without these helpers, "force a
-// fresh cycle" became "edit the SQLite file by hand" — the LAC-439 footgun
-// that produced silent no-ops because the watcher gates on review_status,
-// not on rereview_requested_at alone.
-//
-// The two operations:
-//
-//   bumpRemediationBudget(...) — find the latest terminal follow-up job for
-//     a PR and increase its `remediationPlan.maxRounds` by N. Watcher's
-//     `summarizePRRemediationLedger` reads `latestMaxRounds` from this same
-//     field, so the next pass sees a higher cap and re-arms the gate.
-//     Audit row appended to `operatorRetriggerAudit[]` on the same job
-//     record so the override is reconstructable.
-//
-//   (re-arming the review row itself stays in retrigger-review.mjs via the
-//    existing `requestReviewRereview` atomic transition.)
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
-import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-
+import { writeFileAtomic, writeFileAtomicExclusive } from './atomic-write.mjs';
 import {
   FOLLOW_UP_JOB_DIRS,
   ROUND_BUDGET_BY_RISK_CLASS,
@@ -34,29 +12,204 @@ import {
 } from './follow-up-jobs.mjs';
 
 const DEFAULT_RISK_CLASS = 'medium';
+const DEFAULT_FILE_MODE = 0o640;
 
-/**
- * Find the latest follow-up job for (repo, prNumber) across every directory
- * the watcher reads. "Latest" = the row with the largest of
- * (completedAt | failedAt | stoppedAt | claimedAt | createdAt).
- *
- * Mirrors `summarizePRRemediationLedger`'s scan exactly so the bump targets
- * the same row the gate will read on its next pass. If no job exists, the
- * gate has no `latestMaxRounds` to read either, and a bump is a no-op
- * relative to the budget calculation — we surface that explicitly so the
- * operator knows the bump did not take effect.
- */
-function findLatestJobForPR(rootDir, { repo, prNumber }) {
+function sha256(value) {
+  return `sha256:${createHash('sha256').update(String(value)).digest('hex')}`;
+}
+
+function defaultIdempotencyKey({ verb, repo, pr, reason }) {
+  return sha256(`${verb}:${repo}:${pr}:${reason}`);
+}
+
+function requestFingerprint({ verb, repo, pr, reason, bumpBudget, bumpBudgetEnabled }) {
+  return sha256(JSON.stringify({
+    verb,
+    repo,
+    pr,
+    reason,
+    bumpBudget,
+    bumpBudgetEnabled,
+  }));
+}
+
+function operatorMutationsDir(auditRootDir) {
+  return resolve(auditRootDir, 'data', 'operator-mutations');
+}
+
+function monthStamp(ts = new Date().toISOString()) {
+  return String(ts).slice(0, 7);
+}
+
+function sanitizeKey(value) {
+  return encodeURIComponent(String(value)).replace(/%/g, '_');
+}
+
+function auditLogPath(auditRootDir, ts, idempotencyKey) {
+  return join(
+    operatorMutationsDir(auditRootDir),
+    'audit',
+    monthStamp(ts),
+    `${sanitizeKey(idempotencyKey)}.json`
+  );
+}
+
+function idempotencyRecordPath(auditRootDir, idempotencyKey) {
+  return join(
+    operatorMutationsDir(auditRootDir),
+    'idempotency',
+    `${sanitizeKey(idempotencyKey)}.json`
+  );
+}
+
+function readJsonFile(filePath) {
+  if (!existsSync(filePath)) return null;
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}
+
+function readIdempotencyRecord(auditRootDir, idempotencyKey) {
+  return readJsonFile(idempotencyRecordPath(auditRootDir, idempotencyKey));
+}
+
+function writeJsonFile(filePath, payload, { exclusive = false } = {}) {
+  const content = `${JSON.stringify(payload, null, 2)}\n`;
+  if (exclusive) {
+    writeFileAtomicExclusive(filePath, content, { mode: DEFAULT_FILE_MODE });
+    return;
+  }
+  writeFileAtomic(filePath, content, { mode: DEFAULT_FILE_MODE });
+}
+
+function beginIdempotentMutation(auditRootDir, {
+  ts,
+  idempotencyKey,
+  requestFingerprint: fingerprint,
+  forceReplay = false,
+}) {
+  const recordPath = idempotencyRecordPath(auditRootDir, idempotencyKey);
+  const nextRecord = {
+    idempotencyKey,
+    requestFingerprint: fingerprint,
+    status: 'in-flight',
+    startedAt: ts,
+    updatedAt: ts,
+    auditRow: null,
+  };
+
+  try {
+    writeJsonFile(recordPath, nextRecord, { exclusive: true });
+    return { state: 'started', recordPath };
+  } catch (err) {
+    if (err?.code !== 'EEXIST') throw err;
+  }
+
+  const existing = readIdempotencyRecord(auditRootDir, idempotencyKey);
+  if (!existing) {
+    throw new Error(`Idempotency record exists but is unreadable for key ${idempotencyKey}`);
+  }
+  if (existing.requestFingerprint !== fingerprint) {
+    const err = new Error('IDEMPOTENCY_KEY_MISMATCH');
+    err.code = 'IDEMPOTENCY_KEY_MISMATCH';
+    throw err;
+  }
+  if (existing.status === 'committed') {
+    return {
+      state: 'replay',
+      recordPath,
+      auditRow: existing.auditRow || null,
+    };
+  }
+  if (!forceReplay) {
+    const err = new Error('IDEMPOTENCY_KEY_IN_FLIGHT');
+    err.code = 'IDEMPOTENCY_KEY_IN_FLIGHT';
+    throw err;
+  }
+
+  writeJsonFile(recordPath, {
+    ...existing,
+    status: 'in-flight',
+    updatedAt: ts,
+  });
+  return { state: 'started', recordPath, forceReplay: true };
+}
+
+function recordIdempotentMutation(auditRootDir, {
+  ts,
+  idempotencyKey,
+  requestFingerprint: fingerprint,
+  auditRow,
+}) {
+  const recordPath = idempotencyRecordPath(auditRootDir, idempotencyKey);
+  const existing = readIdempotencyRecord(auditRootDir, idempotencyKey);
+  if (existing && existing.requestFingerprint !== fingerprint) {
+    const err = new Error('IDEMPOTENCY_KEY_MISMATCH');
+    err.code = 'IDEMPOTENCY_KEY_MISMATCH';
+    throw err;
+  }
+  writeJsonFile(recordPath, {
+    ...(existing || {}),
+    idempotencyKey,
+    requestFingerprint: fingerprint,
+    status: 'committed',
+    startedAt: existing?.startedAt || ts,
+    updatedAt: ts,
+    auditRow,
+  });
+}
+
+function ensureIdempotency(auditRootDir, {
+  idempotencyKey,
+  requestFingerprint: fingerprint,
+}) {
+  const existing = readIdempotencyRecord(auditRootDir, idempotencyKey);
+  if (!existing) return null;
+  if (existing.requestFingerprint !== fingerprint) {
+    const err = new Error('IDEMPOTENCY_KEY_MISMATCH');
+    err.code = 'IDEMPOTENCY_KEY_MISMATCH';
+    throw err;
+  }
+  if (existing.status === 'committed') {
+    return existing.auditRow || null;
+  }
+  const err = new Error('IDEMPOTENCY_KEY_IN_FLIGHT');
+  err.code = 'IDEMPOTENCY_KEY_IN_FLIGHT';
+  throw err;
+}
+
+function emitOperatorMutationAudit(auditRootDir, auditRow) {
+  writeJsonFile(auditLogPath(auditRootDir, auditRow.ts, auditRow.idempotencyKey), auditRow);
+}
+
+function appendJobOperatorAudit(jobPath, auditRow, { requestFingerprint: fingerprint }) {
+  const job = readFollowUpJob(jobPath);
+  const history = Array.isArray(job.operatorRetriggerAudit) ? job.operatorRetriggerAudit : [];
+  job.operatorRetriggerAudit = history.concat({
+    ...auditRow,
+    requestFingerprint: fingerprint,
+  });
+  writeFollowUpJob(jobPath, job);
+  return { job, jobPath };
+}
+
+function comparableJobTimestamp(job) {
+  return job.completedAt
+    || job.failedAt
+    || job.stoppedAt
+    || job.claimedAt
+    || job.pendingAt
+    || job.createdAt
+    || null;
+}
+
+function latestFollowUpJobForPr(rootDir, { repo, pr, prNumber }) {
   const targetRepo = String(repo ?? '');
-  const targetPr = Number(prNumber);
+  const targetPr = Number(pr ?? prNumber);
   if (!targetRepo || !Number.isFinite(targetPr)) {
     return null;
   }
 
-  let latestJob = null;
-  let latestJobPath = null;
-  let latestJobKey = null;
-  let latestTimestamp = '';
+  let latest = null;
+  let latestTs = null;
 
   for (const key of Object.keys(FOLLOW_UP_JOB_DIRS)) {
     const dir = getFollowUpJobDir(rootDir, key);
@@ -64,7 +217,7 @@ function findLatestJobForPR(rootDir, { repo, prNumber }) {
 
     let names;
     try {
-      names = readdirSync(dir).filter((n) => n.endsWith('.json'));
+      names = readdirSync(dir).filter((entry) => entry.endsWith('.json')).sort();
     } catch {
       continue;
     }
@@ -77,100 +230,77 @@ function findLatestJobForPR(rootDir, { repo, prNumber }) {
       } catch {
         continue;
       }
-      if (!job) continue;
-      if (job.repo !== targetRepo) continue;
-      if (Number(job.prNumber) !== targetPr) continue;
+      if (job.repo !== targetRepo || Number(job.prNumber) !== targetPr) continue;
 
-      const ts = job.completedAt
-        || job.failedAt
-        || job.stoppedAt
-        || job.claimedAt
-        || job.createdAt
-        || '';
-      if (ts > latestTimestamp) {
-        latestTimestamp = ts;
-        latestJob = job;
-        latestJobPath = jobPath;
-        latestJobKey = key;
+      const ts = comparableJobTimestamp(job);
+      const jobId = String(job.jobId || '');
+      const latestJobId = String(latest?.job?.jobId || '');
+      if (
+        !latest
+        || (ts && (!latestTs || ts > latestTs || (ts === latestTs && jobId > latestJobId)))
+        || (!ts && !latestTs && jobId > latestJobId)
+      ) {
+        latest = { job, jobPath, jobKey: key };
+        latestTs = ts;
       }
     }
   }
 
-  if (!latestJob) return null;
-  return { job: latestJob, jobPath: latestJobPath, jobKey: latestJobKey };
+  return latest;
 }
 
-/**
- * Bump the latest job's `remediationPlan.maxRounds` by `bumpBy` (default 1).
- * Atomic-write the updated job back. Append an entry to
- * `operatorRetriggerAudit[]` capturing prior/new values, reason, actor, and
- * timestamp.
- *
- * Returns:
- *   { bumped: true, jobPath, jobKey, priorMaxRounds, newMaxRounds, bumpBy }
- *     — the bump took effect.
- *   { bumped: false, reason: 'no-job-found' }
- *     — there is no follow-up job for this PR yet (no remediation has ever
- *       been planned). Operator should retrigger review first; the resulting
- *       remediation cycle will create the first job, and any subsequent
- *       budget bump can land on it.
- *   { bumped: false, reason: 'invalid-bump-by', bumpBy }
- *     — bumpBy is not a positive integer.
- */
+function findLatestJobForPR(rootDir, { repo, prNumber }) {
+  return latestFollowUpJobForPr(rootDir, { repo, prNumber });
+}
+
+function currentMaxRounds(job) {
+  const value = Number(job?.remediationPlan?.maxRounds);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function defaultMaxRounds(job) {
+  return ROUND_BUDGET_BY_RISK_CLASS[String(job?.riskClass ?? '').trim().toLowerCase()]
+    || ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
+}
+
 function bumpRemediationBudget({
   rootDir,
   repo,
+  pr,
   prNumber,
   bumpBy = 1,
-  reason,
-  by = 'operator',
+  latestJobRecord = latestFollowUpJobForPr(rootDir, { repo, pr: pr ?? prNumber }),
 }) {
   if (!Number.isInteger(bumpBy) || bumpBy <= 0) {
     return { bumped: false, reason: 'invalid-bump-by', bumpBy };
   }
-  if (!reason || !String(reason).trim()) {
-    return { bumped: false, reason: 'reason-required' };
-  }
-
-  const found = findLatestJobForPR(rootDir, { repo, prNumber });
-  if (!found) {
+  if (!latestJobRecord) {
     return { bumped: false, reason: 'no-job-found' };
   }
 
-  const { job, jobPath, jobKey } = found;
+  const { jobPath, jobKey } = latestJobRecord;
+  const job = readFollowUpJob(jobPath);
+  if (job.status === 'pending' || job.status === 'in_progress') {
+    return { bumped: false, reason: 'job-active', job, jobPath };
+  }
 
-  const persistedMax = Number(job?.remediationPlan?.maxRounds);
-  const priorMaxRounds = Number.isInteger(persistedMax) && persistedMax > 0
-    ? persistedMax
-    : (ROUND_BUDGET_BY_RISK_CLASS[String(job?.riskClass ?? '').trim().toLowerCase()]
-       || ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS]);
-
+  const priorMaxRounds = currentMaxRounds(job) || defaultMaxRounds(job);
   const newMaxRounds = priorMaxRounds + bumpBy;
-
-  const updated = {
+  const nextJob = {
     ...job,
-    remediationPlan: {
-      ...(job?.remediationPlan || {}),
+    recommendedFollowUpAction: {
+      ...(job.recommendedFollowUpAction || {}),
       maxRounds: newMaxRounds,
     },
-    operatorRetriggerAudit: [
-      ...(Array.isArray(job?.operatorRetriggerAudit) ? job.operatorRetriggerAudit : []),
-      {
-        at: new Date().toISOString(),
-        by: String(by),
-        reason: String(reason).trim(),
-        priorMaxRounds,
-        newMaxRounds,
-        bumpBy,
-        operation: 'bump-remediation-budget',
-      },
-    ],
+    remediationPlan: {
+      ...(job.remediationPlan || {}),
+      maxRounds: newMaxRounds,
+    },
   };
-
-  writeFollowUpJob(jobPath, updated);
-
+  writeFollowUpJob(jobPath, nextJob);
   return {
     bumped: true,
+    job: nextJob,
     jobPath,
     jobKey,
     priorMaxRounds,
@@ -180,6 +310,16 @@ function bumpRemediationBudget({
 }
 
 export {
-  findLatestJobForPR,
+  appendJobOperatorAudit,
+  beginIdempotentMutation,
   bumpRemediationBudget,
+  currentMaxRounds,
+  defaultIdempotencyKey,
+  emitOperatorMutationAudit,
+  ensureIdempotency,
+  findLatestJobForPR,
+  latestFollowUpJobForPr,
+  operatorMutationsDir,
+  recordIdempotentMutation,
+  requestFingerprint,
 };

@@ -1,15 +1,13 @@
 import {
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
   renameSync,
   rmSync,
-  writeFileSync,
 } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
+import { writeFileAtomic, writeFileAtomicExclusive } from './atomic-write.mjs';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
@@ -66,7 +64,7 @@ function ensureFollowUpJobDirs(rootDir) {
 }
 
 function writeFollowUpJob(jobPath, job) {
-  writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+  writeFileAtomic(jobPath, `${JSON.stringify(job, null, 2)}\n`);
 }
 
 function normalizeMaxRounds(maxRounds, { fallback = LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS } = {}) {
@@ -1271,9 +1269,8 @@ function moveTerminalJobRecord({
 
   const nextJob = buildNextJob(currentJob);
 
-  let terminalFd;
   try {
-    terminalFd = openSync(terminalPath, 'wx');
+    writeFileAtomicExclusive(terminalPath, `${JSON.stringify(nextJob, null, 2)}\n`);
   } catch (err) {
     if (err?.code === 'EEXIST' && existsSync(terminalPath)) {
       rmSync(jobPath, { force: true });
@@ -1281,21 +1278,7 @@ function moveTerminalJobRecord({
     }
     throw err;
   }
-
-  try {
-    writeFileSync(terminalFd, `${JSON.stringify(nextJob, null, 2)}\n`, 'utf8');
-    closeSync(terminalFd);
-    terminalFd = null;
-    rmSync(jobPath, { force: true });
-  } catch (err) {
-    if (terminalFd !== undefined && terminalFd !== null) {
-      try {
-        closeSync(terminalFd);
-      } catch {}
-    }
-    rmSync(terminalPath, { force: true });
-    throw err;
-  }
+  rmSync(jobPath, { force: true });
 
   return { job: nextJob, jobPath: terminalPath, alreadyTerminal: false };
 }
@@ -1416,10 +1399,7 @@ function createFollowUpJob({ rootDir, ...jobInput }) {
     const jobPath = join(queueDir, `${job.jobId}.json`);
 
     try {
-      writeFileSync(jobPath, `${JSON.stringify(job, null, 2)}\n`, {
-        encoding: 'utf8',
-        flag: 'wx',
-      });
+      writeFileAtomicExclusive(jobPath, `${JSON.stringify(job, null, 2)}\n`);
       return { job, jobPath };
     } catch (err) {
       if (err?.code === 'EEXIST') continue;
@@ -1763,8 +1743,19 @@ function requeueFollowUpJobForNextRound({
       : 'max-rounds-reached',
   });
 
-  if (!['completed', 'failed'].includes(currentJob.status)) {
+  if (!['completed', 'failed', 'stopped'].includes(currentJob.status)) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
+  }
+
+  if (
+    currentJob.status === 'stopped'
+    && !['max-rounds-reached', 'round-budget-exhausted'].includes(
+      String(currentJob?.remediationPlan?.stop?.code || '')
+    )
+  ) {
+    throw new Error(
+      `Cannot requeue follow-up job ${currentJob.jobId} from stopped:${currentJob?.remediationPlan?.stop?.code || 'unknown'}`
+    );
   }
 
   if (currentRound >= maxRounds) {

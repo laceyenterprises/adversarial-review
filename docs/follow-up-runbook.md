@@ -29,6 +29,7 @@ npm run follow-up:reconcile                       # reconcile in-progress jobs (
 npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
 npm run follow-up:stop -- <job-path> [reason]     # stop an in-progress job
 npm run retrigger-review -- --repo <slug> --pr <n> --reason "<why>"  # force a re-review pass
+npm run retrigger-remediation -- --repo <slug> --pr <n> --reason "<why>"  # bump/requeue one remediation round
 ```
 
 To pause the daemon during an outage:
@@ -284,6 +285,8 @@ Current worker authority and expectations:
 - do not open a new PR
 - do not merge the PR
 
+Operator-triggered retriggers use a separate durable ledger under `data/operator-mutations/` by default. The storage is repo-local so the CLIs stay writable under the normal `placey` runtime account; `--audit-root-dir` can relocate that ledger when an operator intentionally wants it elsewhere. Each mutation writes one per-key idempotency record plus one audit record, and a crash that lands after the in-flight record but before commit blocks replay until the operator reruns with `--force-replay`.
+
 If launch preparation fails, the claimed job moves to:
 
 ```text
@@ -341,6 +344,7 @@ Meaning:
 
 Operator action:
 - inspect the prior rounds and decide whether to merge, stop, or create a newly authorized follow-up path
+- `npm run retrigger-remediation -- --repo <slug> --pr <n> --reason "<why>"` is the canonical operator path when you are intentionally authorizing one more round
 
 ### `operator-stop`
 
@@ -349,6 +353,15 @@ Meaning:
 
 Operator action:
 - continue with manual handling
+
+## Operator retrigger contracts
+
+`retrigger-review` and `retrigger-remediation` are distinct surfaces and are intentionally idempotent:
+
+- `retrigger-review` resets the watcher row back to `review_status='pending'`. Its exit-code contract is stable: `0=triggered/already-pending`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
+- `retrigger-remediation` requeues the latest terminal follow-up job and optionally bumps `remediationPlan.maxRounds`. It only accepts terminal jobs in `failed`, `completed` with `reReview.requested=true`, or `stopped:{max-rounds-reached,round-budget-exhausted}`.
+- Both commands default their durable mutation ledger to `data/operator-mutations/` under the tool root, not `HQ_ROOT/dispatch/`, so they remain writable from the documented `placey` LaunchAgent topology.
+- Both commands derive a default idempotency key from `(verb, repo, pr, reason)`. A committed key replays as a no-op success. An unfinished key is treated as crash recovery and is blocked unless the operator passes `--force-replay`.
 
 ### 4. Reconcile detached completion
 

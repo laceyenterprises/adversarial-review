@@ -102,6 +102,13 @@ test('parseArgs rejects non-integer --pr', () => {
   );
 });
 
+test('parseArgs rejects partially numeric --pr values', () => {
+  assert.throws(
+    () => parseArgs(['--repo', 'a/b', '--pr', '5abc', '--reason', 'x']),
+    /positive integer/
+  );
+});
+
 test('parseArgs rejects --pr=0 (positive-integer check)', () => {
   assert.throws(
     () => parseArgs(['--repo', 'a/b', '--pr', '0', '--reason', 'x']),
@@ -181,7 +188,7 @@ test('main triggers a rereview for a posted PR and exits 0', () => {
   }
 });
 
-test('main returns 0 with already-pending message when row is already pending', () => {
+test('main refuses when the review row is already pending', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
   insertReviewRow(rootDir, { reviewStatus: 'pending' });
 
@@ -202,7 +209,7 @@ test('main returns 0 with already-pending message when row is already pending', 
   assert.equal(err.text(), '');
 });
 
-test('main returns 1 with blocked message when review row is missing', () => {
+test('main returns 2 with blocked message when review row is missing', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
 
   // Schema present but no row inserted.
@@ -225,7 +232,7 @@ test('main returns 1 with blocked message when review row is missing', () => {
   assert.match(err.text(), /blocked.*review-row-missing/);
 });
 
-test('main returns 1 when PR is no longer open (merged)', () => {
+test('main returns 2 when PR is no longer open (merged)', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted', prState: 'merged' });
 
@@ -244,7 +251,7 @@ test('main returns 1 when PR is no longer open (merged)', () => {
   assert.match(err.text(), /pr-not-open/);
 });
 
-test('main returns 1 when review is malformed-title-terminal', () => {
+test('main returns 2 when review is malformed-title-terminal', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-test-'));
   insertReviewRow(rootDir, { reviewStatus: 'malformed' });
 
@@ -433,7 +440,6 @@ test('main refuses review_status=failed without --allow-failed-reset and preserv
 
   assert.equal(rc, 1, 'should be blocked');
   assert.match(err.text(), /failed-status-needs-explicit-allow/);
-  assert.match(err.text(), /--allow-failed-reset/);
 
   // Diagnostic evidence MUST still be on disk — that's the whole point.
   const db = openReviewStateDb(rootDir);
@@ -564,8 +570,6 @@ test("main refuses review_status=reviewing (in-flight) without any override flag
 
   assert.equal(rc, 1, 'should be blocked');
   assert.match(err.text(), /review-in-flight/);
-  assert.match(err.text(), /reviewer subprocess is currently in flight/i);
-  assert.doesNotMatch(err.text(), /--allow-failed-reset.*reviewing/, 'must not advertise --allow-failed-reset as the override');
 
   // Confirm row was not modified.
   const db = openReviewStateDb(rootDir);

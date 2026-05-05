@@ -6,8 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
 import { bumpRemediationBudget, findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import {
-  EX_DATAERR,
-  EX_USAGE,
   appendOperatorMutationAuditRow,
   assertNoIdempotencyMismatch,
   findOperatorMutationAuditRow,
@@ -17,6 +15,10 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
+const EXIT_BLOCKED = 1;
+const EXIT_USAGE = 2;
+const EXIT_REASON_INPUT = 3;
+const EXIT_RUNTIME = 4;
 
 const USAGE = `\
 Usage:
@@ -24,6 +26,13 @@ Usage:
                                      [--bump-budget <N>]
                                      [--idempotency-key <key>]
                                      [--root-dir <path>] [--audit-root-dir <path>]
+
+Exit codes:
+  0 success (requeued and budget updated, or idempotent replay of a prior success)
+  1 blocked / refused (no eligible terminal job, active job, or requeue refused)
+  2 usage error
+  3 reason input error (--reason-file/--reason-stdin unreadable or empty reason)
+  4 runtime error
 `;
 
 class UsageError extends Error {}
@@ -168,7 +177,7 @@ function main(argv, {
     parsed = parseArgs(argv);
   } catch (err) {
     stderr.write(`error: ${err.message}\n\n${USAGE}`);
-    return EX_USAGE;
+    return EXIT_USAGE;
   }
 
   const { values, reasonSource } = parsed;
@@ -182,11 +191,11 @@ function main(argv, {
     reason = readReasonFromSource(values, reasonSource, { stdinReader });
   } catch (err) {
     stderr.write(`error: could not read reason: ${err.message}\n`);
-    return EX_USAGE;
+    return EXIT_REASON_INPUT;
   }
   if (!reason || !reason.trim()) {
     stderr.write('error: --reason is required and must not be empty\n');
-    return EX_USAGE;
+    return EXIT_REASON_INPUT;
   }
 
   const rootDir = values['root-dir'] ? resolve(values['root-dir']) : DEFAULT_ROOT_DIR;
@@ -195,7 +204,7 @@ function main(argv, {
     auditRootDir = resolveAuditRootDir(values, rootDir);
   } catch (err) {
     stderr.write(`error: ${err.message}\n\n${USAGE}`);
-    return EX_USAGE;
+    return EXIT_USAGE;
   }
   const ts = new Date().toISOString();
   const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
@@ -216,7 +225,7 @@ function main(argv, {
     }
   } catch (err) {
     stderr.write(`error: ${err.message}\n`);
-    return err.exitCode || EX_DATAERR;
+    return EXIT_RUNTIME;
   }
 
   const latest = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
@@ -236,7 +245,7 @@ function main(argv, {
     });
     appendAuditRow(auditRootDir, row);
     stderr.write(`${eligibility.outcome}: ${values.repo}#${values.pr} (${eligibility.detail})\n`);
-    return 2;
+    return EXIT_BLOCKED;
   }
 
   let budgetResult;
@@ -257,7 +266,7 @@ function main(argv, {
     });
   } catch (err) {
     stderr.write(`error: ${err.message}\n`);
-    return err.code === 'IDEMPOTENCY_KEY_MISMATCH' ? EX_DATAERR : EX_DATAERR;
+    return EXIT_RUNTIME;
   }
 
   if (!budgetResult.bumped) {
@@ -278,7 +287,7 @@ function main(argv, {
     });
     appendAuditRow(auditRootDir, row);
     stderr.write(`${outcome}: ${values.repo}#${values.pr}\n`);
-    return 2;
+    return EXIT_BLOCKED;
   }
 
   let requeueResult;
@@ -305,7 +314,7 @@ function main(argv, {
     });
     appendAuditRow(auditRootDir, row);
     stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (${err.message})\n`);
-    return 2;
+    return EXIT_BLOCKED;
   }
 
   if (requeueResult.job.status !== 'pending') {
@@ -323,7 +332,7 @@ function main(argv, {
     });
     appendAuditRow(auditRootDir, row);
     stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (requeue did not produce pending)\n`);
-    return 2;
+    return EXIT_BLOCKED;
   }
 
   const row = makeAuditRow({

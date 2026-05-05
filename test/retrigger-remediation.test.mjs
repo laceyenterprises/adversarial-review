@@ -50,7 +50,7 @@ test('retrigger-remediation refuses when no job exists', () => {
     '--hq-root', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
-  assert.equal(rc, 2);
+  assert.equal(rc, 1);
   assert.match(err.text(), /refused:no-job/);
 });
 
@@ -66,7 +66,7 @@ test('retrigger-remediation refuses active jobs', () => {
     '--hq-root', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
-  assert.equal(rc, 2);
+  assert.equal(rc, 1);
   assert.match(err.text(), /refused:job-active/);
 });
 
@@ -136,7 +136,7 @@ test('retrigger-remediation re-evaluates retries after a refused row with the sa
   ];
 
   const firstErr = makeCaptureStream();
-  assert.equal(main(args, { stdout: makeCaptureStream(), stderr: firstErr }), 2);
+  assert.equal(main(args, { stdout: makeCaptureStream(), stderr: firstErr }), 1);
   assert.match(firstErr.text(), /refused:no-job/);
 
   makeJob(rootDir, {
@@ -154,4 +154,29 @@ test('retrigger-remediation re-evaluates retries after a refused row with the sa
   const secondRc = main(args, { stdout: out, stderr: makeCaptureStream() });
   assert.equal(secondRc, 0);
   assert.equal(JSON.parse(out.text()).outcome, 'bumped');
+});
+
+test('retrigger-remediation returns reason-input exit code for unreadable reason file', () => {
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason-file', '/path/does/not/exist.txt',
+  ], { stdout: makeCaptureStream(), stderr: err });
+
+  assert.equal(rc, 3);
+  assert.match(err.text(), /could not read reason/);
+});
+
+test('retrigger-remediation help documents stable exit codes', () => {
+  const out = makeCaptureStream();
+  const rc = main(['--help'], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+  });
+
+  assert.equal(rc, 0);
+  assert.match(out.text(), /Exit codes:/);
+  assert.match(out.text(), /0 success/);
+  assert.match(out.text(), /4 runtime error/);
 });

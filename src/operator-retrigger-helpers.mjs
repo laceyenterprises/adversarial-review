@@ -49,6 +49,13 @@ function findLatestFollowUpJob(rootDir, { repo, prNumber }) {
   return latest;
 }
 
+function normalizeRiskClass(riskClass) {
+  const normalized = String(riskClass ?? '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(ROUND_BUDGET_BY_RISK_CLASS, normalized)
+    ? normalized
+    : 'medium';
+}
+
 function buildJobScopedIdempotentResult(existingEntry, jobPath) {
   return {
     bumped: true,
@@ -91,7 +98,7 @@ function bumpRemediationBudget({
     return buildJobScopedIdempotentResult(existingEntry, jobPath);
   }
 
-  const fallbackRiskClass = currentJob?.riskClass || 'medium';
+  const fallbackRiskClass = normalizeRiskClass(currentJob?.riskClass);
   const defaultMaxRounds = ROUND_BUDGET_BY_RISK_CLASS[fallbackRiskClass] || ROUND_BUDGET_BY_RISK_CLASS.medium;
   const priorMaxRounds = Number(currentJob?.remediationPlan?.maxRounds ?? defaultMaxRounds);
   const newMaxRounds = priorMaxRounds + Number(bumpBudget);

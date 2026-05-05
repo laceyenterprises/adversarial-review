@@ -35,6 +35,9 @@ function operatorMutationsDir(rootDir) {
 }
 
 function monthFilePath(rootDir, ts) {
+  if (!/^\d{4}-\d{2}/.test(String(ts ?? ''))) {
+    throw new Error(`Invalid operator mutation timestamp: ${ts}`);
+  }
   return join(operatorMutationsDir(rootDir), `${String(ts).slice(0, 7)}.jsonl`);
 }
 
@@ -58,8 +61,17 @@ function buildExistingFingerprint(row) {
 function findOperatorMutationAuditRow(rootDir, idempotencyKey) {
   for (const filePath of listJsonlFiles(operatorMutationsDir(rootDir))) {
     const lines = readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-    for (const line of lines) {
-      const row = JSON.parse(line);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      let row;
+      try {
+        row = JSON.parse(line);
+      } catch (err) {
+        process.stderr.write(
+          `warning: skipping malformed operator mutation audit row in ${filePath}:${index + 1} (${err.message})\n`
+        );
+        continue;
+      }
       if (row.idempotencyKey === idempotencyKey) {
         return row;
       }
@@ -81,7 +93,7 @@ function assertNoIdempotencyMismatch(existingRow, requestFingerprint) {
 function appendOperatorMutationAuditRow(rootDir, row) {
   const filePath = monthFilePath(rootDir, row.ts);
   mkdirSync(operatorMutationsDir(rootDir), { recursive: true });
-  const fd = openSync(filePath, 'a', 0o644);
+  const fd = openSync(filePath, 'a', 0o640);
   try {
     writeSync(fd, `${JSON.stringify(row)}\n`, null, 'utf8');
     fsyncSync(fd);

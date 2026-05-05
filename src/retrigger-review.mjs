@@ -173,6 +173,13 @@ function emit(stream, message, quiet) {
   if (!quiet) stream.write(message);
 }
 
+function buildReviewAuditOutcome({ reviewStatus, budgetResult, bumpRequested, latestJob }) {
+  const reviewPrefix = reviewStatus === 'already-pending' ? 'already-pending' : 'triggered';
+  if (budgetResult?.bumped) return `${reviewPrefix}+bumped`;
+  if (bumpRequested && !latestJob) return `${reviewPrefix}:no-job`;
+  return reviewPrefix;
+}
+
 function writeReviewRefusal(stderr, { repo, pr, refusalReason }) {
   if (refusalReason === 'reviewing') {
     stderr.write(
@@ -290,18 +297,6 @@ function main(argv, {
     idempotencyKey,
   };
 
-  if (reviewRow?.review_status === 'pending') {
-    const row = makeAuditRow({
-      ...baseAudit,
-      priorMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
-      newMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
-      outcome: 'already-pending',
-    });
-    appendAuditRow(auditRootDir, row);
-    emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
-    return 0;
-  }
-
   const refusalReason = refuseReasonForReviewRow(reviewRow, {
     allowFailedReset: values['allow-failed-reset'],
   });
@@ -352,6 +347,23 @@ function main(argv, {
     }
   }
 
+  if (reviewRow?.review_status === 'pending') {
+    const row = makeAuditRow({
+      ...baseAudit,
+      priorMaxRounds: budgetResult?.priorMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
+      newMaxRounds: budgetResult?.newMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
+      outcome: buildReviewAuditOutcome({
+        reviewStatus: 'already-pending',
+        budgetResult,
+        bumpRequested: !values['no-bump-budget'],
+        latestJob,
+      }),
+    });
+    appendAuditRow(auditRootDir, row);
+    emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
+    return 0;
+  }
+
   let result;
   try {
     result = rereview({
@@ -381,7 +393,12 @@ function main(argv, {
     ...baseAudit,
     priorMaxRounds: budgetResult?.priorMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
     newMaxRounds: budgetResult?.newMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
-    outcome: 'bumped',
+    outcome: buildReviewAuditOutcome({
+      reviewStatus: result.status,
+      budgetResult,
+      bumpRequested: !values['no-bump-budget'],
+      latestJob,
+    }),
   });
   appendAuditRow(auditRootDir, row);
   emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);

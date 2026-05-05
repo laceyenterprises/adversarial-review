@@ -53,6 +53,17 @@ test('appendOperatorMutationAuditRow rejects invalid timestamps', () => {
   );
 });
 
+test('appendOperatorMutationAuditRow rejects impossible months', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-mutation-audit-'));
+  assert.throws(
+    () => appendOperatorMutationAuditRow(rootDir, {
+      ts: '2026-13-05T05:00:00.000Z',
+      idempotencyKey: 'wanted',
+    }),
+    /Invalid operator mutation timestamp/
+  );
+});
+
 test('appendOperatorMutationAuditRow writes ledgers with 0640 permissions', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-mutation-audit-'));
   const filePath = appendOperatorMutationAuditRow(rootDir, {
@@ -84,4 +95,27 @@ test('appendOperatorMutationAuditRow rejects oversized rows', () => {
     /exceeds 4096 bytes/
   );
   assert.equal(existsSync(monthPath), false);
+});
+
+test('findOperatorMutationAuditRow prefers the newest committed row across months', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-mutation-audit-'));
+  const auditDir = path.join(rootDir, 'data', 'operator-mutations');
+  mkdirSync(auditDir, { recursive: true });
+  writeFileSync(
+    path.join(auditDir, '2026-04.jsonl'),
+    `${JSON.stringify({ idempotencyKey: 'shared', outcome: 'bumped', ts: '2026-04-30T23:59:59.000Z' })}\n`,
+    'utf8'
+  );
+  writeFileSync(
+    path.join(auditDir, '2026-05.jsonl'),
+    [
+      JSON.stringify({ idempotencyKey: 'shared', outcome: 'refused:job-active', ts: '2026-05-01T00:00:00.000Z' }),
+      JSON.stringify({ idempotencyKey: 'shared', outcome: 'bumped', ts: '2026-05-02T00:00:00.000Z' }),
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  const row = findOperatorMutationAuditRow(rootDir, 'shared');
+  assert.equal(row.ts, '2026-05-02T00:00:00.000Z');
 });

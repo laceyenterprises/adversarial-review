@@ -6,7 +6,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
-  writeSync,
+  writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -36,7 +36,7 @@ function operatorMutationsDir(rootDir) {
 }
 
 function monthFilePath(rootDir, ts) {
-  if (!/^\d{4}-\d{2}/.test(String(ts ?? ''))) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])(?:$|T|-)/.test(String(ts ?? ''))) {
     throw new Error(`Invalid operator mutation timestamp: ${ts}`);
   }
   return join(operatorMutationsDir(rootDir), `${String(ts).slice(0, 7)}.jsonl`);
@@ -47,6 +47,7 @@ function listJsonlFiles(dirPath) {
   return readdirSync(dirPath)
     .filter((name) => name.endsWith('.jsonl'))
     .sort()
+    .reverse()
     .map((name) => join(dirPath, name));
 }
 
@@ -70,11 +71,10 @@ function fsyncParentDir(dirPath) {
 
 function findOperatorMutationAuditRow(rootDir, idempotencyKey) {
   let latestMatch = null;
-  let latestCommittedMatch = null;
 
   for (const filePath of listJsonlFiles(operatorMutationsDir(rootDir))) {
     const lines = readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-    for (let index = 0; index < lines.length; index += 1) {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
       const line = lines[index];
       let row;
       try {
@@ -88,12 +88,12 @@ function findOperatorMutationAuditRow(rootDir, idempotencyKey) {
       if (row.idempotencyKey === idempotencyKey) {
         latestMatch = row;
         if (isCommittedOperatorMutationOutcome(row.outcome)) {
-          latestCommittedMatch = row;
+          return row;
         }
       }
     }
   }
-  return latestCommittedMatch || latestMatch || null;
+  return latestMatch || null;
 }
 
 function assertNoIdempotencyMismatch(existingRow, requestFingerprint) {
@@ -117,7 +117,7 @@ function appendOperatorMutationAuditRow(rootDir, row) {
   mkdirSync(operatorMutationsDir(rootDir), { recursive: true });
   const fd = openSync(filePath, 'a', 0o640);
   try {
-    writeSync(fd, line, null, 'utf8');
+    writeFileSync(fd, line, 'utf8');
     fsyncSync(fd);
   } finally {
     closeSync(fd);

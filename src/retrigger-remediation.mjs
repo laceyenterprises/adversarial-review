@@ -178,6 +178,26 @@ function appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr }) {
   }
 }
 
+function appendIdempotencyMismatchAudit({
+  appendAuditRow,
+  auditRootDir,
+  baseAudit,
+  stderr,
+}) {
+  const row = makeAuditRow({
+    ...baseAudit,
+    priorMaxRounds: null,
+    newMaxRounds: null,
+    jobKey: null,
+    outcome: 'refused:idempotency-mismatch',
+  });
+  if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+    return false;
+  }
+  stderr.write(`refused:idempotency-mismatch: ${baseAudit.repo}#${baseAudit.pr}\n`);
+  return true;
+}
+
 function resolveAuditRootDir(values, rootDir) {
   if (values['hq-root']) {
     throw new UsageError('--hq-root is no longer supported; use --audit-root-dir');
@@ -258,17 +278,14 @@ function main(argv, {
     }
   } catch (err) {
     if (err?.exitCode === EX_DATAERR || err?.code === 'IDEMPOTENCY_KEY_MISMATCH') {
-      const row = makeAuditRow({
-        ...baseAudit,
-        priorMaxRounds: null,
-        newMaxRounds: null,
-        jobKey: null,
-        outcome: 'refused:idempotency-mismatch',
-      });
-      if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      if (!appendIdempotencyMismatchAudit({
+        appendAuditRow,
+        auditRootDir,
+        baseAudit,
+        stderr,
+      })) {
         return EXIT_RUNTIME;
       }
-      stderr.write(`refused:idempotency-mismatch: ${values.repo}#${values.pr}\n`);
       return EXIT_USAGE;
     }
     stderr.write(`error: ${err.message}\n`);
@@ -294,6 +311,17 @@ function main(argv, {
         },
       });
     } catch (err) {
+      if (err?.code === 'IDEMPOTENCY_KEY_MISMATCH') {
+        if (!appendIdempotencyMismatchAudit({
+          appendAuditRow,
+          auditRootDir,
+          baseAudit,
+          stderr,
+        })) {
+          return EXIT_RUNTIME;
+        }
+        return EXIT_USAGE;
+      }
       stderr.write(`error: ${err.message}\n`);
       return EXIT_RUNTIME;
     }
@@ -360,6 +388,17 @@ function main(argv, {
       },
     });
   } catch (err) {
+    if (err?.code === 'IDEMPOTENCY_KEY_MISMATCH') {
+      if (!appendIdempotencyMismatchAudit({
+        appendAuditRow,
+        auditRootDir,
+        baseAudit,
+        stderr,
+      })) {
+        return EXIT_RUNTIME;
+      }
+      return EXIT_USAGE;
+    }
     stderr.write(`error: ${err.message}\n`);
     return EXIT_RUNTIME;
   }
@@ -397,12 +436,12 @@ function main(argv, {
       priorMaxRounds: budgetResult.priorMaxRounds,
       newMaxRounds: budgetResult.newMaxRounds,
       jobKey: budgetResult.job?.jobId || latest?.job?.jobId || null,
-      outcome: 'refused:not-eligible',
+      outcome: 'refused:requeue-failed',
     });
     if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
       return EXIT_RUNTIME;
     }
-    stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (${err.message})\n`);
+    stderr.write(`refused:requeue-failed: ${values.repo}#${values.pr} (${err.message})\n`);
     return EXIT_BLOCKED;
   }
 
@@ -412,12 +451,12 @@ function main(argv, {
       priorMaxRounds: budgetResult.priorMaxRounds,
       newMaxRounds: budgetResult.newMaxRounds,
       jobKey: requeueResult.job.jobId,
-      outcome: 'refused:not-eligible',
+      outcome: 'refused:requeue-failed',
     });
     if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
       return EXIT_RUNTIME;
     }
-    stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (requeue did not produce pending)\n`);
+    stderr.write(`refused:requeue-failed: ${values.repo}#${values.pr} (requeue did not produce pending)\n`);
     return EXIT_BLOCKED;
   }
 

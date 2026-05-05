@@ -37,3 +37,32 @@ test('writeFileAtomic defaults to group-readable file permissions', () => {
 
   assert.equal(statSync(targetPath).mode & 0o777, 0o644);
 });
+
+test('writeFileAtomic treats parent-dir fsync failures as best-effort after overwrite commit', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'atomic-write-'));
+  const targetPath = path.join(rootDir, 'job.json');
+
+  assert.doesNotThrow(() => {
+    writeFileAtomic(targetPath, '{"ok":true}\n', {
+      fsyncParentDirImpl: () => {
+        throw new Error('parent fsync unavailable');
+      },
+    });
+  });
+  assert.equal(readFileSync(targetPath, 'utf8'), '{"ok":true}\n');
+});
+
+test('writeFileAtomic treats parent-dir fsync failures as best-effort after link commit', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'atomic-write-'));
+  const targetPath = path.join(rootDir, 'job.json');
+
+  assert.doesNotThrow(() => {
+    writeFileAtomic(targetPath, '{"ok":true}\n', {
+      overwrite: false,
+      fsyncParentDirImpl: () => {
+        throw new Error('parent fsync unavailable');
+      },
+    });
+  });
+  assert.equal(readFileSync(targetPath, 'utf8'), '{"ok":true}\n');
+});

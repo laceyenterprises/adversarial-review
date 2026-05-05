@@ -35,7 +35,20 @@ function fsyncParentDir(dirPath) {
   }
 }
 
-function writeFileAtomic(filePath, content, { overwrite = true, mode = DEFAULT_FILE_MODE } = {}) {
+function bestEffortFsyncParentDir(dirPath, fsyncParentDirImpl) {
+  try {
+    fsyncParentDirImpl(dirPath);
+  } catch {
+    // The file/link is already visible at its final path; treat parent-dir
+    // sync as best-effort rather than misreporting the write as failed.
+  }
+}
+
+function writeFileAtomic(
+  filePath,
+  content,
+  { overwrite = true, mode = DEFAULT_FILE_MODE, fsyncParentDirImpl = fsyncParentDir } = {}
+) {
   const parentDir = dirname(filePath);
   mkdirSync(parentDir, { recursive: true });
 
@@ -51,13 +64,13 @@ function writeFileAtomic(filePath, content, { overwrite = true, mode = DEFAULT_F
 
     if (overwrite) {
       renameSync(tmpPath, filePath);
-      fsyncParentDir(parentDir);
+      bestEffortFsyncParentDir(parentDir, fsyncParentDirImpl);
       return;
     }
 
     try {
       linkSync(tmpPath, filePath);
-      fsyncParentDir(parentDir);
+      bestEffortFsyncParentDir(parentDir, fsyncParentDirImpl);
     } catch (err) {
       if (err?.code === 'EEXIST') {
         throw makeExistsError(filePath);

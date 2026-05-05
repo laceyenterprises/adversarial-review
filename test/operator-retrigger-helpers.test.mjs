@@ -154,6 +154,11 @@ test('bumpRemediationBudget bumps terminal job budgets atomically', () => {
   assert.equal(result.newMaxRounds, 4);
   const persisted = JSON.parse(readFileSync(jobPath, 'utf8'));
   assert.equal(persisted.remediationPlan.maxRounds, 4);
+  assert.equal(
+    persisted.recommendedFollowUpAction?.maxRounds,
+    2,
+    'original recommendation should remain as created'
+  );
 });
 
 test('bumpRemediationBudget falls back to the job risk-class budget when maxRounds is missing', () => {

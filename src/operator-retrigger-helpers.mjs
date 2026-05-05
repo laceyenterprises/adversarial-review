@@ -148,12 +148,6 @@ function bumpRemediationBudget({
       ...currentJob.remediationPlan,
       maxRounds: newMaxRounds,
     },
-    recommendedFollowUpAction: currentJob.recommendedFollowUpAction
-      ? {
-          ...currentJob.recommendedFollowUpAction,
-          maxRounds: newMaxRounds,
-        }
-      : currentJob.recommendedFollowUpAction,
   }, nextAuditEntry);
 
   writeFollowUpJob(jobPath, nextJob);

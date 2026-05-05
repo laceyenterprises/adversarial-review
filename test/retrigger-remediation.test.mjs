@@ -324,3 +324,100 @@ test('retrigger-remediation maps idempotency mismatches to usage and writes a re
   assert.match(err.text(), /refused:idempotency-mismatch/);
   assert.equal(rows.at(-1)?.outcome, 'refused:idempotency-mismatch');
 });
+
+test('retrigger-remediation maps job-audit idempotency mismatches to usage on active-job replay', () => {
+  const rows = [];
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'grant one more round',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    latestJobFinder: () => ({ job: { status: 'pending', jobId: 'job-1', remediationPlan: { maxRounds: 2 } } }),
+    bumpBudgetImpl: () => {
+      const mismatch = new Error('IDEMPOTENCY_KEY_MISMATCH');
+      mismatch.code = 'IDEMPOTENCY_KEY_MISMATCH';
+      throw mismatch;
+    },
+    appendAuditRow: (_rootDir, row) => {
+      rows.push(row);
+    },
+  });
+
+  assert.equal(rc, 2);
+  assert.match(err.text(), /refused:idempotency-mismatch/);
+  assert.equal(rows.at(-1)?.outcome, 'refused:idempotency-mismatch');
+});
+
+test('retrigger-remediation maps job-audit idempotency mismatches to usage after eligibility check', () => {
+  const rows = [];
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'grant one more round',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    latestJobFinder: () => ({
+      job: {
+        status: 'stopped',
+        jobId: 'job-1',
+        remediationPlan: { maxRounds: 2, stop: { code: 'max-rounds-reached' } },
+      },
+    }),
+    bumpBudgetImpl: () => {
+      const mismatch = new Error('IDEMPOTENCY_KEY_MISMATCH');
+      mismatch.code = 'IDEMPOTENCY_KEY_MISMATCH';
+      throw mismatch;
+    },
+    appendAuditRow: (_rootDir, row) => {
+      rows.push(row);
+    },
+  });
+
+  assert.equal(rc, 2);
+  assert.match(err.text(), /refused:idempotency-mismatch/);
+  assert.equal(rows.at(-1)?.outcome, 'refused:idempotency-mismatch');
+});
+
+test('retrigger-remediation records requeue failures after a successful budget bump', () => {
+  const rows = [];
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'grant one more round',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    latestJobFinder: () => ({
+      job: {
+        status: 'stopped',
+        jobId: 'job-1',
+        remediationPlan: { maxRounds: 1, stop: { code: 'max-rounds-reached' } },
+      },
+    }),
+    bumpBudgetImpl: () => ({
+      bumped: true,
+      jobPath: '/tmp/job-1.json',
+      job: { jobId: 'job-1' },
+      priorMaxRounds: 1,
+      newMaxRounds: 2,
+    }),
+    requeueImpl: () => {
+      throw new Error('writeFollowUpJob failed');
+    },
+    appendAuditRow: (_rootDir, row) => {
+      rows.push(row);
+    },
+  });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /refused:requeue-failed/);
+  assert.equal(rows.at(-1)?.outcome, 'refused:requeue-failed');
+  assert.equal(rows.at(-1)?.priorMaxRounds, 1);
+  assert.equal(rows.at(-1)?.newMaxRounds, 2);
+});

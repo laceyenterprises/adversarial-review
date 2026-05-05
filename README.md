@@ -409,7 +409,7 @@ npm run retrigger-remediation -- \
   --reason "operator approved one more remediation pass"
 ```
 
-This path is for the follow-up queue, not the watcher row: it optionally bumps `remediationPlan.maxRounds`, then requeues the latest terminal follow-up job when the stop reason is `max-rounds-reached` or `round-budget-exhausted` (or when the last terminal job failed, or completed with a durable rereview request). Both operator CLIs write durable mutation records under `data/operator-mutations/` by default, keyed by idempotency key, so a replay after a successful run is a no-op and a replay after a crash is blocked until the operator explicitly passes `--force-replay`.
+This path is for the follow-up queue, not the watcher row: it optionally bumps `remediationPlan.maxRounds`, then requeues the latest terminal follow-up job when the stop reason is `max-rounds-reached` or `round-budget-exhausted` (or when the last terminal job failed, or completed with a durable rereview request). Both operator CLIs write durable mutation records under `data/operator-mutations/` by default; a replay of a previously successful idempotency key is a no-op, while previously refused attempts are treated as history and the CLI re-checks current eligibility on retry.
 
 **Emergency-only direct SQL** (use only if the npm script is unavailable, e.g. partial repo state during an incident):
 

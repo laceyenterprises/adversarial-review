@@ -30,12 +30,12 @@ function resolveIdempotencyKey({ verb, repo, pr, reason, idempotencyKey }) {
   };
 }
 
-function operatorMutationsDir(hqRoot) {
-  return join(hqRoot, 'dispatch', 'operator-mutations');
+function operatorMutationsDir(rootDir) {
+  return join(rootDir, 'data', 'operator-mutations');
 }
 
-function monthFilePath(hqRoot, ts) {
-  return join(operatorMutationsDir(hqRoot), `${String(ts).slice(0, 7)}.jsonl`);
+function monthFilePath(rootDir, ts) {
+  return join(operatorMutationsDir(rootDir), `${String(ts).slice(0, 7)}.jsonl`);
 }
 
 function listJsonlFiles(dirPath) {
@@ -55,8 +55,8 @@ function buildExistingFingerprint(row) {
   });
 }
 
-function findOperatorMutationAuditRow(hqRoot, idempotencyKey) {
-  for (const filePath of listJsonlFiles(operatorMutationsDir(hqRoot))) {
+function findOperatorMutationAuditRow(rootDir, idempotencyKey) {
+  for (const filePath of listJsonlFiles(operatorMutationsDir(rootDir))) {
     const lines = readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
     for (const line of lines) {
       const row = JSON.parse(line);
@@ -78,9 +78,9 @@ function assertNoIdempotencyMismatch(existingRow, requestFingerprint) {
   }
 }
 
-function appendOperatorMutationAuditRow(hqRoot, row) {
-  const filePath = monthFilePath(hqRoot, row.ts);
-  mkdirSync(operatorMutationsDir(hqRoot), { recursive: true });
+function appendOperatorMutationAuditRow(rootDir, row) {
+  const filePath = monthFilePath(rootDir, row.ts);
+  mkdirSync(operatorMutationsDir(rootDir), { recursive: true });
   const fd = openSync(filePath, 'a', 0o644);
   try {
     writeSync(fd, `${JSON.stringify(row)}\n`, null, 'utf8');
@@ -91,6 +91,10 @@ function appendOperatorMutationAuditRow(hqRoot, row) {
   return filePath;
 }
 
+function isCommittedOperatorMutationOutcome(outcome) {
+  return typeof outcome === 'string' && !outcome.startsWith('refused:');
+}
+
 export {
   EX_DATAERR,
   EX_USAGE,
@@ -98,5 +102,6 @@ export {
   assertNoIdempotencyMismatch,
   digestSha256,
   findOperatorMutationAuditRow,
+  isCommittedOperatorMutationOutcome,
   resolveIdempotencyKey,
 };

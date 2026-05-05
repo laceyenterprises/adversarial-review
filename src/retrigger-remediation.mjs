@@ -11,6 +11,7 @@ import {
   appendOperatorMutationAuditRow,
   assertNoIdempotencyMismatch,
   findOperatorMutationAuditRow,
+  isCommittedOperatorMutationOutcome,
   resolveIdempotencyKey,
 } from './operator-mutation-audit.mjs';
 
@@ -22,7 +23,7 @@ Usage:
   node src/retrigger-remediation.mjs --repo <owner/repo> --pr <number> --reason "..."
                                      [--bump-budget <N>]
                                      [--idempotency-key <key>]
-                                     [--root-dir <path>] [--hq-root <path>]
+                                     [--root-dir <path>] [--audit-root-dir <path>]
 `;
 
 class UsageError extends Error {}
@@ -41,6 +42,7 @@ function parseArgs(argv) {
         'bump-budget': { type: 'string' },
         'idempotency-key': { type: 'string' },
         'root-dir': { type: 'string' },
+        'audit-root-dir': { type: 'string' },
         'hq-root': { type: 'string' },
         quiet: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
@@ -142,6 +144,15 @@ function emit(stream, message, quiet) {
   if (!quiet) stream.write(message);
 }
 
+function resolveAuditRootDir(values, rootDir) {
+  const auditRootDir = values['audit-root-dir'] ? resolve(values['audit-root-dir']) : null;
+  const legacyAuditRootDir = values['hq-root'] ? resolve(values['hq-root']) : null;
+  if (auditRootDir && legacyAuditRootDir && auditRootDir !== legacyAuditRootDir) {
+    throw new UsageError('--audit-root-dir and --hq-root must point to the same path when both are provided');
+  }
+  return auditRootDir || legacyAuditRootDir || rootDir;
+}
+
 function main(argv, {
   stdout = process.stdout,
   stderr = process.stderr,
@@ -179,7 +190,13 @@ function main(argv, {
   }
 
   const rootDir = values['root-dir'] ? resolve(values['root-dir']) : DEFAULT_ROOT_DIR;
-  const hqRoot = values['hq-root'] ? resolve(values['hq-root']) : rootDir;
+  let auditRootDir;
+  try {
+    auditRootDir = resolveAuditRootDir(values, rootDir);
+  } catch (err) {
+    stderr.write(`error: ${err.message}\n\n${USAGE}`);
+    return EX_USAGE;
+  }
   const ts = new Date().toISOString();
   const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
   const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
@@ -191,9 +208,9 @@ function main(argv, {
   });
 
   try {
-    const existingRow = findAuditRow(hqRoot, idempotencyKey);
+    const existingRow = findAuditRow(auditRootDir, idempotencyKey);
     assertNoIdempotencyMismatch(existingRow, requestFingerprint);
-    if (existingRow) {
+    if (existingRow && isCommittedOperatorMutationOutcome(existingRow.outcome)) {
       emit(stdout, `${JSON.stringify(existingRow)}\n`, values.quiet);
       return 0;
     }
@@ -217,7 +234,7 @@ function main(argv, {
       idempotencyKey,
       outcome: eligibility.outcome,
     });
-    appendAuditRow(hqRoot, row);
+    appendAuditRow(auditRootDir, row);
     stderr.write(`${eligibility.outcome}: ${values.repo}#${values.pr} (${eligibility.detail})\n`);
     return 2;
   }
@@ -259,7 +276,7 @@ function main(argv, {
       idempotencyKey,
       outcome,
     });
-    appendAuditRow(hqRoot, row);
+    appendAuditRow(auditRootDir, row);
     stderr.write(`${outcome}: ${values.repo}#${values.pr}\n`);
     return 2;
   }
@@ -286,7 +303,7 @@ function main(argv, {
       idempotencyKey,
       outcome: 'refused:not-eligible',
     });
-    appendAuditRow(hqRoot, row);
+    appendAuditRow(auditRootDir, row);
     stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (${err.message})\n`);
     return 2;
   }
@@ -304,7 +321,7 @@ function main(argv, {
       idempotencyKey,
       outcome: 'refused:not-eligible',
     });
-    appendAuditRow(hqRoot, row);
+    appendAuditRow(auditRootDir, row);
     stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (requeue did not produce pending)\n`);
     return 2;
   }
@@ -321,7 +338,7 @@ function main(argv, {
     idempotencyKey,
     outcome: 'bumped',
   });
-  appendAuditRow(hqRoot, row);
+  appendAuditRow(auditRootDir, row);
   emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
   return 0;
 }

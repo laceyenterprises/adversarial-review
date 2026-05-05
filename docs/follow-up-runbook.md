@@ -285,7 +285,7 @@ Current worker authority and expectations:
 - do not open a new PR
 - do not merge the PR
 
-Operator-triggered retriggers use a separate durable ledger under `data/operator-mutations/` by default. The storage is repo-local so the CLIs stay writable under the normal `placey` runtime account; `--audit-root-dir` can relocate that ledger when an operator intentionally wants it elsewhere. Each mutation writes one per-key idempotency record plus one audit record, and a crash that lands after the in-flight record but before commit blocks replay until the operator reruns with `--force-replay`.
+Operator-triggered retriggers use a separate durable ledger under `data/operator-mutations/` by default. The storage is repo-local so the CLIs stay writable under the normal `placey` runtime account; `--audit-root-dir` can relocate that ledger when an operator intentionally wants it elsewhere. Successful mutations are idempotent by key; previously refused attempts stay in the ledger for operator history but do not block a later retry after conditions change.
 
 If launch preparation fails, the claimed job moves to:
 
@@ -361,7 +361,7 @@ Operator action:
 - `retrigger-review` resets the watcher row back to `review_status='pending'`. Its exit-code contract is stable: `0=triggered/already-pending`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
 - `retrigger-remediation` requeues the latest terminal follow-up job and optionally bumps `remediationPlan.maxRounds`. It only accepts terminal jobs in `failed`, `completed` with `reReview.requested=true`, or `stopped:{max-rounds-reached,round-budget-exhausted}`.
 - Both commands default their durable mutation ledger to `data/operator-mutations/` under the tool root, not `HQ_ROOT/dispatch/`, so they remain writable from the documented `placey` LaunchAgent topology.
-- Both commands derive a default idempotency key from `(verb, repo, pr, reason)`. A committed key replays as a no-op success. An unfinished key is treated as crash recovery and is blocked unless the operator passes `--force-replay`.
+- Both commands derive a default idempotency key from `(verb, repo, pr, reason)`. A previously successful key replays as a no-op success; a previously refused key is re-evaluated so operators can retry after state changes without minting a new key.
 
 ### 4. Reconcile detached completion
 

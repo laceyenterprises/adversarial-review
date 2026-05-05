@@ -1,4 +1,9 @@
-import { listFollowUpJobsInDir, readFollowUpJob, writeFollowUpJob } from './follow-up-jobs.mjs';
+import {
+  ROUND_BUDGET_BY_RISK_CLASS,
+  listFollowUpJobsInDir,
+  readFollowUpJob,
+  writeFollowUpJob,
+} from './follow-up-jobs.mjs';
 
 const FOLLOW_UP_STATUS_KEYS = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
 
@@ -86,7 +91,9 @@ function bumpRemediationBudget({
     return buildJobScopedIdempotentResult(existingEntry, jobPath);
   }
 
-  const priorMaxRounds = Number(currentJob?.remediationPlan?.maxRounds || 0);
+  const fallbackRiskClass = currentJob?.riskClass || 'medium';
+  const defaultMaxRounds = ROUND_BUDGET_BY_RISK_CLASS[fallbackRiskClass] || ROUND_BUDGET_BY_RISK_CLASS.medium;
+  const priorMaxRounds = Number(currentJob?.remediationPlan?.maxRounds ?? defaultMaxRounds);
   const newMaxRounds = priorMaxRounds + Number(bumpBudget);
   const nextAuditEntry = {
     ...auditEntry,

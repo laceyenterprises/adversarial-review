@@ -1271,13 +1271,17 @@ function moveTerminalJobRecord({
 
   try {
     writeFileAtomic(terminalPath, `${JSON.stringify(nextJob, null, 2)}\n`, { overwrite: false });
-    rmSync(jobPath, { force: true });
   } catch (err) {
     if (err?.code === 'EEXIST' && existsSync(terminalPath)) {
       rmSync(jobPath, { force: true });
       return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
     }
-    rmSync(terminalPath, { force: true });
+    throw err;
+  }
+
+  try {
+    rmSync(jobPath, { force: true });
+  } catch (err) {
     throw err;
   }
 

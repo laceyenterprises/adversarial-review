@@ -11,23 +11,27 @@ import {
 } from './review-state.mjs';
 import { bumpRemediationBudget, findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import {
-  EX_DATAERR,
-  EX_USAGE,
   appendOperatorMutationAuditRow,
   assertNoIdempotencyMismatch,
   findOperatorMutationAuditRow,
+  isCommittedOperatorMutationOutcome,
   resolveIdempotencyKey,
 } from './operator-mutation-audit.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
+const EXIT_BLOCKED = 1;
+const EXIT_USAGE = 2;
+const EXIT_REASON_INPUT = 3;
+const EXIT_RUNTIME = 4;
 
 const USAGE = `\
 Usage:
   node src/retrigger-review.mjs --repo <owner/repo> --pr <number> --reason "..."
                                 [--bump-budget <N> | --no-bump-budget]
                                 [--idempotency-key <key>]
-                                [--root-dir <path>] [--hq-root <path>]
+                                [--allow-failed-reset]
+                                [--root-dir <path>] [--audit-root-dir <path>]
 `;
 
 class UsageError extends Error {}
@@ -47,7 +51,9 @@ function parseArgs(argv) {
         'no-bump-budget': { type: 'boolean', default: false },
         'idempotency-key': { type: 'string' },
         'root-dir': { type: 'string' },
+        'audit-root-dir': { type: 'string' },
         'hq-root': { type: 'string' },
+        'allow-failed-reset': { type: 'boolean', default: false },
         quiet: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -115,10 +121,22 @@ function readReviewRowSafely({ rootDir, repo, prNumber }) {
   }
 }
 
-function refuseReasonForReviewRow(reviewRow) {
+function resolveAuditRootDir(values, rootDir) {
+  const auditRootDir = values['audit-root-dir'] ? resolve(values['audit-root-dir']) : null;
+  const legacyAuditRootDir = values['hq-root'] ? resolve(values['hq-root']) : null;
+  if (auditRootDir && legacyAuditRootDir && auditRootDir !== legacyAuditRootDir) {
+    throw new UsageError('--audit-root-dir and --hq-root must point to the same path when both are provided');
+  }
+  return auditRootDir || legacyAuditRootDir || rootDir;
+}
+
+function refuseReasonForReviewRow(reviewRow, { allowFailedReset = false } = {}) {
   if (!reviewRow) return 'review-row-missing';
   if (reviewRow.pr_state !== 'open') return 'pr-not-open';
-  if (['pending', 'reviewing', 'malformed'].includes(reviewRow.review_status)) {
+  if (reviewRow.review_status === 'failed' && !allowFailedReset) {
+    return 'failed';
+  }
+  if (['reviewing', 'malformed'].includes(reviewRow.review_status)) {
     return reviewRow.review_status;
   }
   return null;
@@ -155,6 +173,37 @@ function emit(stream, message, quiet) {
   if (!quiet) stream.write(message);
 }
 
+function writeReviewRefusal(stderr, { repo, pr, refusalReason }) {
+  if (refusalReason === 'reviewing') {
+    stderr.write(
+      [
+        `refused:not-eligible: ${repo}#${pr} (reviewing)`,
+        'A reviewer subprocess is currently in flight; resetting now would queue a second reviewer and risk a duplicate GitHub review.',
+        'Recovery path:',
+        '1. Wait for the watcher to finish or reconcile the orphaned reviewing row.',
+        '2. If the watcher died, run reconcileOrphanedReviewing before retrying this command.',
+        '',
+      ].join('\n')
+    );
+    return;
+  }
+
+  if (refusalReason === 'failed') {
+    stderr.write(
+      [
+        `refused:not-eligible: ${repo}#${pr} (failed)`,
+        'The watcher already retries failed review rows automatically.',
+        'Resetting now would clear failed_at and failure_message before an operator can inspect the diagnostic evidence.',
+        'Re-run with --allow-failed-reset only after reviewing the failure.',
+        '',
+      ].join('\n')
+    );
+    return;
+  }
+
+  stderr.write(`refused:not-eligible: ${repo}#${pr} (${refusalReason})\n`);
+}
+
 function main(argv, {
   stdout = process.stdout,
   stderr = process.stderr,
@@ -171,7 +220,7 @@ function main(argv, {
     parsed = parseArgs(argv);
   } catch (err) {
     stderr.write(`error: ${err.message}\n\n${USAGE}`);
-    return EX_USAGE;
+    return EXIT_USAGE;
   }
 
   const { values, reasonSource } = parsed;
@@ -185,15 +234,21 @@ function main(argv, {
     reason = readReasonFromSource(values, reasonSource, { stdinReader });
   } catch (err) {
     stderr.write(`error: could not read reason: ${err.message}\n`);
-    return EX_USAGE;
+    return EXIT_REASON_INPUT;
   }
   if (!reason || !reason.trim()) {
     stderr.write('error: --reason is required and must not be empty\n');
-    return EX_USAGE;
+    return EXIT_REASON_INPUT;
   }
 
   const rootDir = values['root-dir'] ? resolve(values['root-dir']) : DEFAULT_ROOT_DIR;
-  const hqRoot = values['hq-root'] ? resolve(values['hq-root']) : rootDir;
+  let auditRootDir;
+  try {
+    auditRootDir = resolveAuditRootDir(values, rootDir);
+  } catch (err) {
+    stderr.write(`error: ${err.message}\n\n${USAGE}`);
+    return EXIT_USAGE;
+  }
   const ts = new Date().toISOString();
   const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
   const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
@@ -205,15 +260,15 @@ function main(argv, {
   });
 
   try {
-    const existingRow = findAuditRow(hqRoot, idempotencyKey);
+    const existingRow = findAuditRow(auditRootDir, idempotencyKey);
     assertNoIdempotencyMismatch(existingRow, requestFingerprint);
-    if (existingRow) {
+    if (existingRow && isCommittedOperatorMutationOutcome(existingRow.outcome)) {
       emit(stdout, `${JSON.stringify(existingRow)}\n`, values.quiet);
       return 0;
     }
   } catch (err) {
     stderr.write(`error: ${err.message}\n`);
-    return err.exitCode || EX_DATAERR;
+    return EXIT_RUNTIME;
   }
 
   let reviewRow;
@@ -221,7 +276,7 @@ function main(argv, {
     reviewRow = readReviewRow({ rootDir, repo: values.repo, prNumber: values.pr });
   } catch (err) {
     stderr.write(`error: could not read review state: ${err.message}\n`);
-    return EX_DATAERR;
+    return EXIT_RUNTIME;
   }
 
   const latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
@@ -235,7 +290,21 @@ function main(argv, {
     idempotencyKey,
   };
 
-  const refusalReason = refuseReasonForReviewRow(reviewRow);
+  if (reviewRow?.review_status === 'pending') {
+    const row = makeAuditRow({
+      ...baseAudit,
+      priorMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
+      newMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
+      outcome: 'already-pending',
+    });
+    appendAuditRow(auditRootDir, row);
+    emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
+    return 0;
+  }
+
+  const refusalReason = refuseReasonForReviewRow(reviewRow, {
+    allowFailedReset: values['allow-failed-reset'],
+  });
   if (refusalReason) {
     const row = makeAuditRow({
       ...baseAudit,
@@ -243,9 +312,9 @@ function main(argv, {
       newMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
       outcome: 'refused:not-eligible',
     });
-    appendAuditRow(hqRoot, row);
-    stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (${refusalReason})\n`);
-    return 2;
+    appendAuditRow(auditRootDir, row);
+    writeReviewRefusal(stderr, { repo: values.repo, pr: values.pr, refusalReason });
+    return EXIT_BLOCKED;
   }
 
   let budgetResult = null;
@@ -267,7 +336,7 @@ function main(argv, {
       });
     } catch (err) {
       stderr.write(`error: ${err.message}\n`);
-      return err.code === 'IDEMPOTENCY_KEY_MISMATCH' ? EX_DATAERR : EX_DATAERR;
+      return EXIT_RUNTIME;
     }
 
     if (!budgetResult.bumped && budgetResult.reason === 'job-active') {
@@ -277,9 +346,9 @@ function main(argv, {
         newMaxRounds: latestJob.job.remediationPlan?.maxRounds ?? null,
         outcome: 'refused:job-active',
       });
-      appendAuditRow(hqRoot, row);
+      appendAuditRow(auditRootDir, row);
       stderr.write(`refused:job-active: ${values.repo}#${values.pr}\n`);
-      return 2;
+      return EXIT_BLOCKED;
     }
   }
 
@@ -293,7 +362,7 @@ function main(argv, {
     });
   } catch (err) {
     stderr.write(`error: rereview failed: ${err.message}\n`);
-    return EX_DATAERR;
+    return EXIT_RUNTIME;
   }
 
   if (!result.triggered && result.status !== 'already-pending') {
@@ -303,9 +372,9 @@ function main(argv, {
       newMaxRounds: budgetResult?.newMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
       outcome: 'refused:not-eligible',
     });
-    appendAuditRow(hqRoot, row);
+    appendAuditRow(auditRootDir, row);
     stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (${result.reason})\n`);
-    return 2;
+    return EXIT_BLOCKED;
   }
 
   const row = makeAuditRow({
@@ -314,7 +383,7 @@ function main(argv, {
     newMaxRounds: budgetResult?.newMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
     outcome: 'bumped',
   });
-  appendAuditRow(hqRoot, row);
+  appendAuditRow(auditRootDir, row);
   emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
   return 0;
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -99,4 +99,59 @@ test('retrigger-remediation bumps and requeues eligible stopped jobs', () => {
   const latest = findLatestFollowUpJob(rootDir, { repo: 'laceyenterprises/agent-os', prNumber: 238 });
   assert.equal(latest.job.status, 'pending');
   assert.equal(latest.job.remediationPlan.maxRounds, 2);
+});
+
+test('retrigger-remediation writes the audit ledger under data/operator-mutations by default', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 1,
+      currentRound: 1,
+      stop: { code: 'max-rounds-reached', reason: 'cap' },
+      nextAction: null,
+    },
+  });
+
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'grant one more round',
+    '--root-dir', rootDir,
+  ], { stdout: makeCaptureStream(), stderr: makeCaptureStream() });
+
+  assert.equal(rc, 0);
+  assert.equal(existsSync(path.join(rootDir, 'data', 'operator-mutations')), true);
+});
+
+test('retrigger-remediation re-evaluates retries after a refused row with the same idempotency key', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  const args = [
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'extra round',
+    '--idempotency-key', 'shared-key',
+    '--root-dir', rootDir,
+  ];
+
+  const firstErr = makeCaptureStream();
+  assert.equal(main(args, { stdout: makeCaptureStream(), stderr: firstErr }), 2);
+  assert.match(firstErr.text(), /refused:no-job/);
+
+  makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 1,
+      currentRound: 1,
+      stop: { code: 'max-rounds-reached', reason: 'cap' },
+      nextAction: null,
+    },
+  });
+
+  const out = makeCaptureStream();
+  const secondRc = main(args, { stdout: out, stderr: makeCaptureStream() });
+  assert.equal(secondRc, 0);
+  assert.equal(JSON.parse(out.text()).outcome, 'bumped');
 });

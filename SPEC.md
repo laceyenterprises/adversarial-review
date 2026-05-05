@@ -211,11 +211,8 @@ Worker prompt env contract for the canonical reply path:
 \- \`stopped:round-budget-exhausted\`
 \- Operator-triggered mutations must be durably audited on the job record (\`operatorRetriggerAudit[]\`) and in a repo-local operator-mutation ledger under \`data/operator-mutations/\` by default; alternate roots may be configured explicitly
 \- Operator-triggered mutations must be idempotent across calendar boundaries; the key space is global, not monthly
-\- The durable idempotency contract is two-phase:
-\- write an \`in-flight\` idempotency record before mutating queue or review state
-\- upgrade that record to \`committed\` after the mutation and audit write complete
-\- a replay of a \`committed\` key is a no-op success
-\- a replay of an \`in-flight\` key is blocked unless the operator explicitly forces crash recovery
+\- A replay of a previously successful operator-mutation key is a no-op success
+\- Previously refused operator-mutation keys remain visible in the ledger for operator history but do not block a later retry after state changes
 \- Existing public CLI contracts remain stable: blocked operator outcomes must stay distinct from usage errors in exit codes and docs
 
 \#\#\# 5\.2 Remediation worker launch contract (new hardening requirements)

@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  ROUND_BUDGET_BY_RISK_CLASS,
   createFollowUpJob,
+  readFollowUpJob,
   requeueFollowUpJobForNextRound,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
@@ -107,6 +109,43 @@ test('bumpRemediationBudget bumps terminal job budgets atomically', () => {
   assert.equal(result.newMaxRounds, 4);
   const persisted = JSON.parse(readFileSync(jobPath, 'utf8'));
   assert.equal(persisted.remediationPlan.maxRounds, 4);
+});
+
+test('bumpRemediationBudget falls back to the job risk-class budget when maxRounds is missing', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
+  const { jobPath } = makeJob(rootDir, {
+    status: 'failed',
+    failedAt: '2026-05-05T04:05:00.000Z',
+    riskClass: 'critical',
+    remediationPlan: {
+      currentRound: 0,
+      rounds: [],
+      stop: null,
+      nextAction: null,
+    },
+  });
+  const persistedBefore = JSON.parse(readFileSync(jobPath, 'utf8'));
+  delete persistedBefore.remediationPlan.maxRounds;
+  if (persistedBefore.recommendedFollowUpAction) {
+    delete persistedBefore.recommendedFollowUpAction.maxRounds;
+  }
+  writeFileSync(jobPath, `${JSON.stringify(persistedBefore, null, 2)}\n`, 'utf8');
+  const normalizedMissingMaxRounds = readFollowUpJob(jobPath);
+
+  const result = bumpRemediationBudget({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    bumpBudget: 1,
+    auditEntry: makeAuditEntry('idem:risk-fallback'),
+  });
+
+  assert.ok(
+    normalizedMissingMaxRounds.remediationPlan.maxRounds >= ROUND_BUDGET_BY_RISK_CLASS.medium,
+    'missing maxRounds should normalize to a non-zero risk-tier budget'
+  );
+  assert.equal(result.priorMaxRounds, normalizedMissingMaxRounds.remediationPlan.maxRounds);
+  assert.equal(result.newMaxRounds, normalizedMissingMaxRounds.remediationPlan.maxRounds + 1);
 });
 
 test('same idempotency key returns the same audit row on repeated bump', () => {

@@ -1282,6 +1282,7 @@ function moveTerminalJobRecord({
   try {
     rmSync(jobPath, { force: true });
   } catch (err) {
+    rmSync(terminalPath, { force: true });
     throw err;
   }
 

@@ -1,6 +1,9 @@
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   ROUND_BUDGET_BY_RISK_CLASS,
-  listFollowUpJobsInDir,
+  getFollowUpJobDir,
   readFollowUpJob,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
@@ -37,12 +40,26 @@ function findOperatorAuditEntry(job, idempotencyKey) {
 function findLatestFollowUpJob(rootDir, { repo, prNumber }) {
   let latest = null;
   for (const key of FOLLOW_UP_STATUS_KEYS) {
-    for (const entry of listFollowUpJobsInDir(rootDir, key)) {
-      if (entry.job.repo !== repo || Number(entry.job.prNumber) !== Number(prNumber)) {
+    const dir = getFollowUpJobDir(rootDir, key);
+    if (!existsSync(dir)) continue;
+
+    for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.json')).sort()) {
+      const jobPath = join(dir, name);
+      let job;
+      try {
+        job = readFollowUpJob(jobPath);
+      } catch (err) {
+        console.error(
+          `[operator-retrigger] Skipping unreadable follow-up job while scanning ${key} for ` +
+            `${repo}#${prNumber}: ${jobPath} (${err?.message || err})`
+        );
         continue;
       }
-      if (!latest || latestJobTimestamp(entry.job) > latestJobTimestamp(latest.job)) {
-        latest = entry;
+      if (job.repo !== repo || Number(job.prNumber) !== Number(prNumber)) {
+        continue;
+      }
+      if (!latest || latestJobTimestamp(job) > latestJobTimestamp(latest.job)) {
+        latest = { job, jobPath };
       }
     }
   }

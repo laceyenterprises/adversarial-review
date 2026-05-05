@@ -23,9 +23,23 @@ const EXIT_RUNTIME = 4;
 const USAGE = `\
 Usage:
   node src/retrigger-remediation.mjs --repo <owner/repo> --pr <number> --reason "..."
-                                     [--bump-budget <N>]
-                                     [--idempotency-key <key>]
-                                     [--root-dir <path>] [--audit-root-dir <path>]
+                                     [options]
+
+Required:
+  --repo <owner/repo>            Repository slug
+  --pr <number>                  Pull request number
+  One of:
+    --reason "..."               Inline operator reason
+    --reason-file <path>         Read reason text from file
+    --reason-stdin               Read reason text from stdin
+
+Optional:
+  --bump-budget <N>              Increase follow-up maxRounds before requeueing (default: 1)
+  --idempotency-key <key>        Stable replay key for retry-safe operator calls
+  --root-dir <path>              Tool root containing data/follow-up-jobs/
+  --audit-root-dir <path>        Root that owns data/operator-mutations/
+  --quiet                        Suppress JSON success output
+  -h, --help                     Show this help text
 
 Exit codes:
   0 success (requeued and budget updated, or idempotent replay of a prior success)
@@ -154,12 +168,11 @@ function emit(stream, message, quiet) {
 }
 
 function resolveAuditRootDir(values, rootDir) {
-  const auditRootDir = values['audit-root-dir'] ? resolve(values['audit-root-dir']) : null;
-  const legacyAuditRootDir = values['hq-root'] ? resolve(values['hq-root']) : null;
-  if (auditRootDir && legacyAuditRootDir && auditRootDir !== legacyAuditRootDir) {
-    throw new UsageError('--audit-root-dir and --hq-root must point to the same path when both are provided');
+  if (values['hq-root']) {
+    throw new UsageError('--hq-root is no longer supported; use --audit-root-dir');
   }
-  return auditRootDir || legacyAuditRootDir || rootDir;
+  const auditRootDir = values['audit-root-dir'] ? resolve(values['audit-root-dir']) : null;
+  return auditRootDir || rootDir;
 }
 
 function main(argv, {

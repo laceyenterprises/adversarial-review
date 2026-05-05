@@ -28,10 +28,32 @@ const EXIT_RUNTIME = 4;
 const USAGE = `\
 Usage:
   node src/retrigger-review.mjs --repo <owner/repo> --pr <number> --reason "..."
-                                [--bump-budget <N> | --no-bump-budget]
-                                [--idempotency-key <key>]
-                                [--allow-failed-reset]
-                                [--root-dir <path>] [--audit-root-dir <path>]
+                                [options]
+
+Required:
+  --repo <owner/repo>            Repository slug
+  --pr <number>                  Pull request number
+  One of:
+    --reason "..."               Inline operator reason
+    --reason-file <path>         Read reason text from file
+    --reason-stdin               Read reason text from stdin
+
+Optional:
+  --bump-budget <N>              Increase follow-up maxRounds before retriggering (default: 1)
+  --no-bump-budget               Retrigger review without changing remediation budget
+  --idempotency-key <key>        Stable replay key for retry-safe operator calls
+  --allow-failed-reset           Permit manual reset of failed review rows
+  --root-dir <path>              Tool root containing data/reviews.db
+  --audit-root-dir <path>        Root that owns data/operator-mutations/
+  --quiet                        Suppress JSON success output
+  -h, --help                     Show this help text
+
+Exit codes:
+  0 success (review re-armed, already pending, or idempotent replay of a prior success)
+  1 blocked / refused (review row missing, PR closed, active review, failed row without override, or active job)
+  2 usage error
+  3 reason input error (--reason-file/--reason-stdin unreadable or empty reason)
+  4 runtime error
 `;
 
 class UsageError extends Error {}
@@ -122,24 +144,29 @@ function readReviewRowSafely({ rootDir, repo, prNumber }) {
 }
 
 function resolveAuditRootDir(values, rootDir) {
-  const auditRootDir = values['audit-root-dir'] ? resolve(values['audit-root-dir']) : null;
-  const legacyAuditRootDir = values['hq-root'] ? resolve(values['hq-root']) : null;
-  if (auditRootDir && legacyAuditRootDir && auditRootDir !== legacyAuditRootDir) {
-    throw new UsageError('--audit-root-dir and --hq-root must point to the same path when both are provided');
+  if (values['hq-root']) {
+    throw new UsageError('--hq-root is no longer supported; use --audit-root-dir');
   }
-  return auditRootDir || legacyAuditRootDir || rootDir;
+  const auditRootDir = values['audit-root-dir'] ? resolve(values['audit-root-dir']) : null;
+  return auditRootDir || rootDir;
 }
 
 function refuseReasonForReviewRow(reviewRow, { allowFailedReset = false } = {}) {
   if (!reviewRow) return 'review-row-missing';
   if (reviewRow.pr_state !== 'open') return 'pr-not-open';
-  if (reviewRow.review_status === 'failed' && !allowFailedReset) {
-    return 'failed';
+  switch (reviewRow.review_status) {
+    case 'pending':
+    case 'posted':
+      return null;
+    case 'failed':
+      return allowFailedReset ? null : 'failed';
+    case 'reviewing':
+    case 'malformed':
+    case 'failed-orphan':
+      return reviewRow.review_status;
+    default:
+      return `unknown-status:${reviewRow.review_status ?? 'missing'}`;
   }
-  if (['reviewing', 'malformed'].includes(reviewRow.review_status)) {
-    return reviewRow.review_status;
-  }
-  return null;
 }
 
 function makeAuditRow({

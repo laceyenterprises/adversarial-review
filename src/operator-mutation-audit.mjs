@@ -13,6 +13,7 @@ import { join } from 'node:path';
 
 const EX_USAGE = 64;
 const EX_DATAERR = 65;
+const MAX_AUDIT_ROW_BYTES = 4096;
 
 function buildRequestFingerprint({ verb, repo, pr, reason }) {
   return `${verb}:${repo}:${pr}:${reason}`;
@@ -59,6 +60,9 @@ function buildExistingFingerprint(row) {
 }
 
 function findOperatorMutationAuditRow(rootDir, idempotencyKey) {
+  let latestMatch = null;
+  let latestCommittedMatch = null;
+
   for (const filePath of listJsonlFiles(operatorMutationsDir(rootDir))) {
     const lines = readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
     for (let index = 0; index < lines.length; index += 1) {
@@ -73,11 +77,14 @@ function findOperatorMutationAuditRow(rootDir, idempotencyKey) {
         continue;
       }
       if (row.idempotencyKey === idempotencyKey) {
-        return row;
+        latestMatch = row;
+        if (isCommittedOperatorMutationOutcome(row.outcome)) {
+          latestCommittedMatch = row;
+        }
       }
     }
   }
-  return null;
+  return latestCommittedMatch || latestMatch || null;
 }
 
 function assertNoIdempotencyMismatch(existingRow, requestFingerprint) {
@@ -94,8 +101,14 @@ function appendOperatorMutationAuditRow(rootDir, row) {
   const filePath = monthFilePath(rootDir, row.ts);
   mkdirSync(operatorMutationsDir(rootDir), { recursive: true });
   const fd = openSync(filePath, 'a', 0o640);
+  const line = `${JSON.stringify(row)}\n`;
+  if (Buffer.byteLength(line, 'utf8') > MAX_AUDIT_ROW_BYTES) {
+    const err = new Error(`Operator mutation audit row exceeds ${MAX_AUDIT_ROW_BYTES} bytes`);
+    err.code = 'AUDIT_ROW_TOO_LARGE';
+    throw err;
+  }
   try {
-    writeSync(fd, `${JSON.stringify(row)}\n`, null, 'utf8');
+    writeSync(fd, line, null, 'utf8');
     fsyncSync(fd);
   } finally {
     closeSync(fd);

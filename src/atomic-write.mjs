@@ -24,6 +24,15 @@ function makeExistsError(filePath) {
   return err;
 }
 
+function fsyncParentDir(dirPath) {
+  const dirFd = openSync(dirPath, 'r');
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+}
+
 function writeFileAtomic(filePath, content, { overwrite = true } = {}) {
   const parentDir = dirname(filePath);
   mkdirSync(parentDir, { recursive: true });
@@ -40,11 +49,13 @@ function writeFileAtomic(filePath, content, { overwrite = true } = {}) {
 
     if (overwrite) {
       renameSync(tmpPath, filePath);
+      fsyncParentDir(parentDir);
       return;
     }
 
     try {
       linkSync(tmpPath, filePath);
+      fsyncParentDir(parentDir);
     } catch (err) {
       if (err?.code === 'EEXIST') {
         throw makeExistsError(filePath);

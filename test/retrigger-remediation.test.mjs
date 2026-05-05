@@ -47,7 +47,7 @@ test('retrigger-remediation refuses when no job exists', () => {
     '--pr', '238',
     '--reason', 'extra round',
     '--root-dir', rootDir,
-    '--hq-root', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
@@ -63,7 +63,7 @@ test('retrigger-remediation refuses active jobs', () => {
     '--pr', '238',
     '--reason', 'extra round',
     '--root-dir', rootDir,
-    '--hq-root', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
@@ -89,7 +89,7 @@ test('retrigger-remediation bumps and requeues eligible stopped jobs', () => {
     '--pr', '238',
     '--reason', 'grant one more round',
     '--root-dir', rootDir,
-    '--hq-root', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -176,7 +176,22 @@ test('retrigger-remediation help documents stable exit codes', () => {
   });
 
   assert.equal(rc, 0);
+  assert.match(out.text(), /Required:/);
+  assert.match(out.text(), /Optional:/);
   assert.match(out.text(), /Exit codes:/);
   assert.match(out.text(), /0 success/);
   assert.match(out.text(), /4 runtime error/);
+});
+
+test('retrigger-remediation rejects legacy --hq-root', () => {
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'extra round',
+    '--hq-root', '/tmp/hq-root',
+  ], { stdout: makeCaptureStream(), stderr: err });
+
+  assert.equal(rc, 2);
+  assert.match(err.text(), /--hq-root is no longer supported/);
 });

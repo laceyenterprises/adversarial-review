@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -11,7 +11,7 @@ import {
   requeueFollowUpJobForNextRound,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
-import { bumpRemediationBudget } from '../src/operator-retrigger-helpers.mjs';
+import { bumpRemediationBudget, findLatestFollowUpJob } from '../src/operator-retrigger-helpers.mjs';
 
 function makeJob(rootDir, overrides = {}) {
   const created = createFollowUpJob({
@@ -169,6 +169,21 @@ test('same idempotency key returns the same audit row on repeated bump', () => {
     auditEntry: makeAuditEntry('idem:shared'),
   });
   assert.equal(first.auditRow.idempotencyKey, second.auditRow.idempotencyKey);
+});
+
+test('findLatestFollowUpJob skips unreadable job files for unrelated PRs', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
+  makeJob(rootDir, {
+    status: 'failed',
+    failedAt: '2026-05-05T04:05:00.000Z',
+  });
+
+  const brokenDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(brokenDir, { recursive: true });
+  writeFileSync(path.join(brokenDir, 'broken.json'), '{"jobId":', 'utf8');
+
+  const latest = findLatestFollowUpJob(rootDir, { repo: 'laceyenterprises/agent-os', prNumber: 238 });
+  assert.equal(latest.job.prNumber, 238);
 });
 
 test('different fingerprint for the same idempotency key is rejected', () => {

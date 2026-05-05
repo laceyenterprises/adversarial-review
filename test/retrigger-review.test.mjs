@@ -83,6 +83,19 @@ test('parseArgs accepts audit-root-dir and allow-failed-reset', () => {
   assert.equal(values['allow-failed-reset'], true);
 });
 
+test('retrigger-review rejects legacy --hq-root', () => {
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--hq-root', '/tmp/hq-root',
+  ], { stdout: makeCaptureStream(), stderr: err });
+
+  assert.equal(rc, 2);
+  assert.match(err.text(), /--hq-root is no longer supported/);
+});
+
 test('parseArgs rejects mutually exclusive budget flags', () => {
   assert.throws(
     () => parseArgs([
@@ -156,7 +169,7 @@ test('retrigger-review bumps the terminal job budget and resets review status', 
     '--pr', '238',
     '--reason', 'substantially rewritten',
     '--root-dir', rootDir,
-    '--hq-root', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -185,7 +198,7 @@ test('retrigger-review refuses active follow-up jobs when bumping is enabled', (
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
-    '--hq-root', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
@@ -279,7 +292,7 @@ test('retrigger-review skips the budget bump when no follow-up job exists', () =
     '--pr', '238',
     '--reason', 'retry',
     '--root-dir', rootDir,
-    '--hq-root', rootDir,
+    '--audit-root-dir', rootDir,
   ], { stdout: out, stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
@@ -457,4 +470,39 @@ test('retrigger-review returns runtime exit code with broken root-dir', () => {
   assert.equal(rc, 4);
   assert.match(err.text(), /could not read review state:/);
   assert.doesNotMatch(err.text(), /\n\s+at\s/);
+});
+
+test('retrigger-review help documents structured usage and exit codes', () => {
+  const out = makeCaptureStream();
+  const rc = main(['--help'], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+  });
+
+  assert.equal(rc, 0);
+  assert.match(out.text(), /Required:/);
+  assert.match(out.text(), /Optional:/);
+  assert.match(out.text(), /Exit codes:/);
+  assert.match(out.text(), /--allow-failed-reset/);
+});
+
+test('retrigger-review refuses unknown review statuses by default', () => {
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    readReviewRow: () => ({
+      repo: 'laceyenterprises/agent-os',
+      pr_number: 238,
+      pr_state: 'open',
+      review_status: 'orphaned',
+    }),
+  });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /unknown-status:orphaned/);
 });

@@ -59,6 +59,15 @@ function buildExistingFingerprint(row) {
   });
 }
 
+function fsyncParentDir(dirPath) {
+  const dirFd = openSync(dirPath, 'r');
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+}
+
 function findOperatorMutationAuditRow(rootDir, idempotencyKey) {
   let latestMatch = null;
   let latestCommittedMatch = null;
@@ -113,6 +122,7 @@ function appendOperatorMutationAuditRow(rootDir, row) {
   } finally {
     closeSync(fd);
   }
+  fsyncParentDir(operatorMutationsDir(rootDir));
   return filePath;
 }
 

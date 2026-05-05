@@ -11,6 +11,7 @@ import {
 } from './review-state.mjs';
 import { bumpRemediationBudget, findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import {
+  EX_DATAERR,
   appendOperatorMutationAuditRow,
   assertNoIdempotencyMismatch,
   findOperatorMutationAuditRow,
@@ -295,6 +296,15 @@ function main(argv, {
   }
   const ts = new Date().toISOString();
   const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
+  const baseAudit = {
+    ts,
+    repo: values.repo,
+    pr: values.pr,
+    reason,
+    operator,
+    jobKey: null,
+    idempotencyKey: null,
+  };
   const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
     verb: 'hq.adversarial.retrigger-review',
     repo: values.repo,
@@ -302,6 +312,7 @@ function main(argv, {
     reason,
     idempotencyKey: values['idempotency-key'],
   });
+  baseAudit.idempotencyKey = idempotencyKey;
 
   try {
     const existingRow = findAuditRow(auditRootDir, idempotencyKey);
@@ -311,6 +322,19 @@ function main(argv, {
       return 0;
     }
   } catch (err) {
+    if (err?.exitCode === EX_DATAERR || err?.code === 'IDEMPOTENCY_KEY_MISMATCH') {
+      const row = makeAuditRow({
+        ...baseAudit,
+        priorMaxRounds: null,
+        newMaxRounds: null,
+        outcome: 'refused:idempotency-mismatch',
+      });
+      if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+        return EXIT_RUNTIME;
+      }
+      stderr.write(`refused:idempotency-mismatch: ${values.repo}#${values.pr}\n`);
+      return EXIT_USAGE;
+    }
     stderr.write(`error: ${err.message}\n`);
     return EXIT_RUNTIME;
   }
@@ -324,15 +348,7 @@ function main(argv, {
   }
 
   const latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
-  const baseAudit = {
-    ts,
-    repo: values.repo,
-    pr: values.pr,
-    reason,
-    operator,
-    jobKey: latestJob?.job?.jobId || null,
-    idempotencyKey,
-  };
+  baseAudit.jobKey = latestJob?.job?.jobId || null;
 
   const refusalReason = refuseReasonForReviewRow(reviewRow, {
     allowFailedReset: values['allow-failed-reset'],
@@ -344,7 +360,9 @@ function main(argv, {
       newMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
       outcome: 'refused:not-eligible',
     });
-    appendAuditRow(auditRootDir, row);
+    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      return EXIT_RUNTIME;
+    }
     writeReviewRefusal(stderr, { repo: values.repo, pr: values.pr, refusalReason });
     return EXIT_BLOCKED;
   }
@@ -378,7 +396,9 @@ function main(argv, {
         newMaxRounds: latestJob.job.remediationPlan?.maxRounds ?? null,
         outcome: 'refused:job-active',
       });
-      appendAuditRow(auditRootDir, row);
+      if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+        return EXIT_RUNTIME;
+      }
       stderr.write(`refused:job-active: ${values.repo}#${values.pr}\n`);
       return EXIT_BLOCKED;
     }
@@ -396,7 +416,9 @@ function main(argv, {
         latestJob,
       }),
     });
-    appendAuditRow(auditRootDir, row);
+    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      return EXIT_RUNTIME;
+    }
     emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
     return 0;
   }
@@ -421,7 +443,9 @@ function main(argv, {
       newMaxRounds: budgetResult?.newMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
       outcome: 'refused:not-eligible',
     });
-    appendAuditRow(auditRootDir, row);
+    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      return EXIT_RUNTIME;
+    }
     stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (${result.reason})\n`);
     return EXIT_BLOCKED;
   }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -183,6 +183,7 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   assert.equal(persisted.recommendedFollowUpAction.priority, 'high');
   assert.equal(persisted.riskClass, 'high');
   assert.equal(persisted.remediationPlan.maxRounds, 3);
+  assert.equal(statSync(jobPath).mode & 0o777, 0o644);
 });
 
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {

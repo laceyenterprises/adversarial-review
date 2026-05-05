@@ -70,6 +70,27 @@ test('retrigger-remediation refuses active jobs', () => {
   assert.match(err.text(), /refused:job-active/);
 });
 
+test('retrigger-remediation returns runtime exit code when refused-path audit append fails', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'extra round',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    appendAuditRow: () => {
+      throw new Error('disk full');
+    },
+  });
+
+  assert.equal(rc, 4);
+  assert.match(err.text(), /error: could not append operator mutation audit row: disk full/);
+  assert.doesNotMatch(err.text(), /\n\s+at\s/);
+});
+
 test('retrigger-remediation bumps and requeues eligible stopped jobs', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
   makeJob(rootDir, {
@@ -230,4 +251,76 @@ test('retrigger-remediation returns runtime exit code with concise stderr when t
   assert.match(err.text(), /error: could not append operator mutation audit row: disk full/);
   assert.doesNotMatch(err.text(), /Error: disk full/);
   assert.doesNotMatch(err.text(), /\n\s+at\s/);
+});
+
+test('retrigger-remediation treats same-key replay after a lost terminal audit row as success', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 1,
+      currentRound: 1,
+      stop: { code: 'max-rounds-reached', reason: 'cap' },
+      nextAction: null,
+    },
+  });
+  const args = [
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'grant one more round',
+    '--idempotency-key', 'shared-key',
+    '--root-dir', rootDir,
+  ];
+
+  assert.equal(main(args, {
+    stdout: makeCaptureStream(),
+    stderr: makeCaptureStream(),
+    appendAuditRow: () => {
+      throw new Error('disk full');
+    },
+  }), 4);
+
+  let requeueCalls = 0;
+  const out = makeCaptureStream();
+  const rc = main(args, {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    requeueImpl: () => {
+      requeueCalls += 1;
+      throw new Error('should not retry requeue');
+    },
+  });
+
+  assert.equal(rc, 0);
+  assert.equal(requeueCalls, 0);
+  assert.equal(JSON.parse(out.text()).outcome, 'bumped');
+});
+
+test('retrigger-remediation maps idempotency mismatches to usage and writes a refusal row', () => {
+  const rows = [];
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'grant one more round',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    findAuditRow: () => ({
+      idempotencyKey: 'shared-key',
+      verb: 'hq.adversarial.retrigger-remediation',
+      repo: 'laceyenterprises/agent-os',
+      pr: 238,
+      reason: 'different reason',
+      outcome: 'bumped',
+    }),
+    appendAuditRow: (_rootDir, row) => {
+      rows.push(row);
+    },
+  });
+
+  assert.equal(rc, 2);
+  assert.match(err.text(), /refused:idempotency-mismatch/);
+  assert.equal(rows.at(-1)?.outcome, 'refused:idempotency-mismatch');
 });

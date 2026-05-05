@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
 import { bumpRemediationBudget, findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import {
+  EX_DATAERR,
   appendOperatorMutationAuditRow,
   assertNoIdempotencyMismatch,
   findOperatorMutationAuditRow,
@@ -231,6 +232,14 @@ function main(argv, {
   }
   const ts = new Date().toISOString();
   const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
+  const baseAudit = {
+    ts,
+    repo: values.repo,
+    pr: values.pr,
+    reason,
+    operator,
+    idempotencyKey: null,
+  };
   const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
     verb: 'hq.adversarial.retrigger-remediation',
     repo: values.repo,
@@ -238,6 +247,7 @@ function main(argv, {
     reason,
     idempotencyKey: values['idempotency-key'],
   });
+  baseAudit.idempotencyKey = idempotencyKey;
 
   try {
     const existingRow = findAuditRow(auditRootDir, idempotencyKey);
@@ -247,26 +257,88 @@ function main(argv, {
       return 0;
     }
   } catch (err) {
+    if (err?.exitCode === EX_DATAERR || err?.code === 'IDEMPOTENCY_KEY_MISMATCH') {
+      const row = makeAuditRow({
+        ...baseAudit,
+        priorMaxRounds: null,
+        newMaxRounds: null,
+        jobKey: null,
+        outcome: 'refused:idempotency-mismatch',
+      });
+      if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+        return EXIT_RUNTIME;
+      }
+      stderr.write(`refused:idempotency-mismatch: ${values.repo}#${values.pr}\n`);
+      return EXIT_USAGE;
+    }
     stderr.write(`error: ${err.message}\n`);
     return EXIT_RUNTIME;
   }
 
   const latest = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
+  if (latest?.job && ['pending', 'inProgress'].includes(latest.job.status)) {
+    let activeReplay = null;
+    try {
+      activeReplay = bumpBudgetImpl({
+        rootDir,
+        repo: values.repo,
+        prNumber: values.pr,
+        bumpBudget: values.bumpBudget,
+        auditEntry: {
+          ts,
+          verb: 'hq.adversarial.retrigger-remediation',
+          reason,
+          requestFingerprint,
+          idempotencyKey,
+          auditRow: null,
+        },
+      });
+    } catch (err) {
+      stderr.write(`error: ${err.message}\n`);
+      return EXIT_RUNTIME;
+    }
+
+    if (activeReplay?.idempotent && activeReplay.job?.status === 'pending') {
+      const row = makeAuditRow({
+        ...baseAudit,
+        priorMaxRounds: activeReplay.priorMaxRounds,
+        newMaxRounds: activeReplay.newMaxRounds,
+        jobKey: activeReplay.job?.jobId || latest.job.jobId,
+        outcome: 'bumped',
+      });
+      if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+        return EXIT_RUNTIME;
+      }
+      emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
+      return 0;
+    }
+
+    const row = makeAuditRow({
+      ...baseAudit,
+      priorMaxRounds: latest.job.remediationPlan?.maxRounds ?? null,
+      newMaxRounds: latest.job.remediationPlan?.maxRounds ?? null,
+      jobKey: latest.job.jobId || null,
+      outcome: 'refused:job-active',
+    });
+    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      return EXIT_RUNTIME;
+    }
+    stderr.write(`refused:job-active: ${values.repo}#${values.pr} (${latest.job.status})\n`);
+    return EXIT_BLOCKED;
+  }
+
   const eligibility = remediationEligibility(latest?.job || null);
   if (!eligibility.ok) {
     const row = makeAuditRow({
-      ts,
-      repo: values.repo,
-      pr: values.pr,
-      reason,
-      operator,
+      ...baseAudit,
       priorMaxRounds: latest?.job?.remediationPlan?.maxRounds ?? null,
       newMaxRounds: latest?.job?.remediationPlan?.maxRounds ?? null,
       jobKey: latest?.job?.jobId || null,
-      idempotencyKey,
       outcome: eligibility.outcome,
     });
-    appendAuditRow(auditRootDir, row);
+    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      return EXIT_RUNTIME;
+    }
     stderr.write(`${eligibility.outcome}: ${values.repo}#${values.pr} (${eligibility.detail})\n`);
     return EXIT_BLOCKED;
   }
@@ -297,18 +369,15 @@ function main(argv, {
       ? 'refused:job-active'
       : 'refused:no-job';
     const row = makeAuditRow({
-      ts,
-      repo: values.repo,
-      pr: values.pr,
-      reason,
-      operator,
+      ...baseAudit,
       priorMaxRounds: latest?.job?.remediationPlan?.maxRounds ?? null,
       newMaxRounds: latest?.job?.remediationPlan?.maxRounds ?? null,
       jobKey: latest?.job?.jobId || null,
-      idempotencyKey,
       outcome,
     });
-    appendAuditRow(auditRootDir, row);
+    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      return EXIT_RUNTIME;
+    }
     stderr.write(`${outcome}: ${values.repo}#${values.pr}\n`);
     return EXIT_BLOCKED;
   }
@@ -324,50 +393,39 @@ function main(argv, {
     });
   } catch (err) {
     const row = makeAuditRow({
-      ts,
-      repo: values.repo,
-      pr: values.pr,
-      reason,
-      operator,
+      ...baseAudit,
       priorMaxRounds: budgetResult.priorMaxRounds,
       newMaxRounds: budgetResult.newMaxRounds,
       jobKey: budgetResult.job?.jobId || latest?.job?.jobId || null,
-      idempotencyKey,
       outcome: 'refused:not-eligible',
     });
-    appendAuditRow(auditRootDir, row);
+    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      return EXIT_RUNTIME;
+    }
     stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (${err.message})\n`);
     return EXIT_BLOCKED;
   }
 
   if (requeueResult.job.status !== 'pending') {
     const row = makeAuditRow({
-      ts,
-      repo: values.repo,
-      pr: values.pr,
-      reason,
-      operator,
+      ...baseAudit,
       priorMaxRounds: budgetResult.priorMaxRounds,
       newMaxRounds: budgetResult.newMaxRounds,
       jobKey: requeueResult.job.jobId,
-      idempotencyKey,
       outcome: 'refused:not-eligible',
     });
-    appendAuditRow(auditRootDir, row);
+    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+      return EXIT_RUNTIME;
+    }
     stderr.write(`refused:not-eligible: ${values.repo}#${values.pr} (requeue did not produce pending)\n`);
     return EXIT_BLOCKED;
   }
 
   const row = makeAuditRow({
-    ts,
-    repo: values.repo,
-    pr: values.pr,
-    reason,
-    operator,
+    ...baseAudit,
     priorMaxRounds: budgetResult.priorMaxRounds,
     newMaxRounds: budgetResult.newMaxRounds,
     jobKey: requeueResult.job.jobId,
-    idempotencyKey,
     outcome: 'bumped',
   });
   if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {

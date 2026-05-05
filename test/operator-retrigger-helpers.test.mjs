@@ -91,6 +91,51 @@ test('bumpRemediationBudget refuses inProgress jobs without mutating them', () =
   assert.equal(readFileSync(jobPath, 'utf8'), before);
 });
 
+test('bumpRemediationBudget rejects non-positive bump budgets without mutating the job', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
+  const { jobPath } = makeJob(rootDir, {
+    status: 'failed',
+    failedAt: '2026-05-05T04:05:00.000Z',
+  });
+  const before = readFileSync(jobPath, 'utf8');
+
+  const result = bumpRemediationBudget({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    bumpBudget: 0,
+    auditEntry: makeAuditEntry('idem:zero'),
+  });
+
+  assert.equal(result.bumped, false);
+  assert.equal(result.reason, 'invalid-bump-by');
+  assert.equal(readFileSync(jobPath, 'utf8'), before);
+});
+
+test('bumpRemediationBudget rejects empty audit reasons without mutating the job', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
+  const { jobPath } = makeJob(rootDir, {
+    status: 'failed',
+    failedAt: '2026-05-05T04:05:00.000Z',
+  });
+  const before = readFileSync(jobPath, 'utf8');
+
+  const result = bumpRemediationBudget({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    bumpBudget: 1,
+    auditEntry: {
+      ...makeAuditEntry('idem:no-reason'),
+      reason: '   ',
+    },
+  });
+
+  assert.equal(result.bumped, false);
+  assert.equal(result.reason, 'invalid-reason');
+  assert.equal(readFileSync(jobPath, 'utf8'), before);
+});
+
 test('bumpRemediationBudget bumps terminal job budgets atomically', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
   const { jobPath } = makeJob(rootDir, {
@@ -169,6 +214,41 @@ test('same idempotency key returns the same audit row on repeated bump', () => {
     auditEntry: makeAuditEntry('idem:shared'),
   });
   assert.equal(first.auditRow.idempotencyKey, second.auditRow.idempotencyKey);
+});
+
+test('same idempotency key replays successfully even after the job has already been requeued to pending', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
+  const { jobPath } = makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 2,
+      currentRound: 2,
+      stop: { code: 'max-rounds-reached', reason: 'cap' },
+      nextAction: null,
+    },
+  });
+
+  const first = bumpRemediationBudget({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    bumpBudget: 1,
+    auditEntry: makeAuditEntry('idem:pending-replay'),
+  });
+  requeueFollowUpJobForNextRound({ rootDir, jobPath: first.jobPath });
+
+  const second = bumpRemediationBudget({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    bumpBudget: 1,
+    auditEntry: makeAuditEntry('idem:pending-replay'),
+  });
+
+  assert.equal(second.bumped, true);
+  assert.equal(second.idempotent, true);
+  assert.equal(second.job.status, 'pending');
 });
 
 test('findLatestFollowUpJob skips unreadable job files for unrelated PRs', () => {

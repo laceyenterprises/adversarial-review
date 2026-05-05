@@ -10,6 +10,8 @@ import {
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
+const DEFAULT_FILE_MODE = 0o644;
+
 function uniqueTmpPath(filePath) {
   return join(
     dirname(filePath),
@@ -33,7 +35,7 @@ function fsyncParentDir(dirPath) {
   }
 }
 
-function writeFileAtomic(filePath, content, { overwrite = true } = {}) {
+function writeFileAtomic(filePath, content, { overwrite = true, mode = DEFAULT_FILE_MODE } = {}) {
   const parentDir = dirname(filePath);
   mkdirSync(parentDir, { recursive: true });
 
@@ -41,7 +43,7 @@ function writeFileAtomic(filePath, content, { overwrite = true } = {}) {
   let tmpFd = null;
 
   try {
-    tmpFd = openSync(tmpPath, 'wx', 0o600);
+    tmpFd = openSync(tmpPath, 'wx', mode);
     writeFileSync(tmpFd, content, 'utf8');
     fsyncSync(tmpFd);
     closeSync(tmpFd);

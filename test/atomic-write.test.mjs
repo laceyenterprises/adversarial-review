@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -27,4 +27,13 @@ test('writeFileAtomic never exposes partial JSON to concurrent readers', async (
 
   stop = true;
   await Promise.all(readers);
+});
+
+test('writeFileAtomic defaults to group-readable file permissions', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'atomic-write-'));
+  const targetPath = path.join(rootDir, 'job.json');
+
+  writeFileAtomic(targetPath, '{"ok":true}\n');
+
+  assert.equal(statSync(targetPath).mode & 0o777, 0o644);
 });

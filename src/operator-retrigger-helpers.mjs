@@ -86,6 +86,14 @@ function buildJobScopedIdempotentResult(existingEntry, jobPath) {
   };
 }
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
 function bumpRemediationBudget({
   rootDir,
   repo,
@@ -101,8 +109,11 @@ function bumpRemediationBudget({
   const { jobPath } = latest;
   const currentJob = readFollowUpJob(jobPath);
 
-  if (currentJob.status === 'pending' || currentJob.status === 'inProgress') {
-    return { bumped: false, reason: 'job-active', jobPath, job: currentJob };
+  if (!isPositiveInteger(bumpBudget)) {
+    return { bumped: false, reason: 'invalid-bump-by', jobPath, job: currentJob };
+  }
+  if (!isNonEmptyString(auditEntry?.reason)) {
+    return { bumped: false, reason: 'invalid-reason', jobPath, job: currentJob };
   }
 
   const existingEntry = findOperatorAuditEntry(currentJob, auditEntry.idempotencyKey);
@@ -115,10 +126,17 @@ function bumpRemediationBudget({
     return buildJobScopedIdempotentResult(existingEntry, jobPath);
   }
 
+  if (currentJob.status === 'pending' || currentJob.status === 'inProgress') {
+    return { bumped: false, reason: 'job-active', jobPath, job: currentJob };
+  }
+
   const fallbackRiskClass = normalizeRiskClass(currentJob?.riskClass);
   const defaultMaxRounds = ROUND_BUDGET_BY_RISK_CLASS[fallbackRiskClass] || ROUND_BUDGET_BY_RISK_CLASS.medium;
   const priorMaxRounds = Number(currentJob?.remediationPlan?.maxRounds ?? defaultMaxRounds);
   const newMaxRounds = priorMaxRounds + Number(bumpBudget);
+  if (!isPositiveInteger(newMaxRounds)) {
+    throw new Error(`Invalid remediation budget result: ${newMaxRounds}`);
+  }
   const nextAuditEntry = {
     ...auditEntry,
     priorMaxRounds,

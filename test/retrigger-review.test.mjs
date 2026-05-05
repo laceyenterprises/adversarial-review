@@ -264,6 +264,28 @@ test('retrigger-review explains reviewing recovery path', () => {
   assert.match(err.text(), /reconcileOrphanedReviewing/);
 });
 
+test('retrigger-review returns runtime exit code when a refusal-path audit append fails', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, { reviewStatus: 'reviewing' });
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    appendAuditRow: () => {
+      throw new Error('disk full');
+    },
+  });
+
+  assert.equal(rc, 4);
+  assert.match(err.text(), /error: could not append operator mutation audit row: disk full/);
+  assert.doesNotMatch(err.text(), /\n\s+at\s/);
+});
+
 test('retrigger-review keeps reviewing rows blocked even with --allow-failed-reset', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'reviewing' });
@@ -467,6 +489,34 @@ test('retrigger-review returns runtime exit code with concise stderr when termin
   assert.match(err.text(), /error: could not append operator mutation audit row: disk full/);
   assert.doesNotMatch(err.text(), /Error: disk full/);
   assert.doesNotMatch(err.text(), /\n\s+at\s/);
+});
+
+test('retrigger-review maps idempotency mismatches to usage and writes a refusal row', () => {
+  const rows = [];
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    findAuditRow: () => ({
+      idempotencyKey: 'shared-key',
+      verb: 'hq.adversarial.retrigger-review',
+      repo: 'laceyenterprises/agent-os',
+      pr: 238,
+      reason: 'different reason',
+      outcome: 'triggered',
+    }),
+    appendAuditRow: (_rootDir, row) => {
+      rows.push(row);
+    },
+  });
+
+  assert.equal(rc, 2);
+  assert.match(err.text(), /refused:idempotency-mismatch/);
+  assert.equal(rows.at(-1)?.outcome, 'refused:idempotency-mismatch');
 });
 
 test('retrigger-review returns runtime exit code when readReviewRow throws', () => {

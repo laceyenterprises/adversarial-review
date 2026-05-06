@@ -6,7 +6,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
-import { claimNextFollowUpJob, createFollowUpJob, markFollowUpJobCompleted } from '../src/follow-up-jobs.mjs';
+import {
+  claimNextFollowUpJob,
+  createFollowUpJob,
+  markFollowUpJobCompleted,
+  markFollowUpJobSpawned,
+} from '../src/follow-up-jobs.mjs';
 import { evaluateRoundBudgetForReview } from '../src/watcher.mjs';
 
 function setupDb() {
@@ -293,11 +298,27 @@ test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forwar
     rootDir,
     claimedAt: '2026-04-22T05:25:00.000Z',
   });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-22T05:26:00.000Z',
+    worker: {
+      processId: 8123,
+      state: 'spawned',
+      workspaceDir: 'workspace',
+      outputPath: 'workspace/.adversarial-follow-up/codex-last-message.md',
+      logPath: 'workspace/.adversarial-follow-up/codex-worker.log',
+      promptPath: 'workspace/.adversarial-follow-up/prompt.md',
+    },
+  });
   markFollowUpJobCompleted({
     rootDir,
-    jobPath: claimed.jobPath,
+    jobPath: spawned.jobPath,
     completedAt: '2026-04-22T05:30:00.000Z',
     completion: { source: 'test-fixture' },
+    remediationWorker: {
+      ...spawned.job.remediationWorker,
+      state: 'completed',
+    },
     reReview: {
       requested: true,
       status: 'pending',
@@ -354,11 +375,27 @@ test('evaluateRoundBudgetForReview skips rereview spawn when completed rounds ex
     rootDir,
     claimedAt: '2026-04-22T05:25:00.000Z',
   });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-22T05:26:00.000Z',
+    worker: {
+      processId: 8123,
+      state: 'spawned',
+      workspaceDir: 'workspace',
+      outputPath: 'workspace/.adversarial-follow-up/codex-last-message.md',
+      logPath: 'workspace/.adversarial-follow-up/codex-worker.log',
+      promptPath: 'workspace/.adversarial-follow-up/prompt.md',
+    },
+  });
   const completed = markFollowUpJobCompleted({
     rootDir,
-    jobPath: claimed.jobPath,
+    jobPath: spawned.jobPath,
     completedAt: '2026-04-22T05:30:00.000Z',
     completion: { source: 'test-fixture' },
+    remediationWorker: {
+      ...spawned.job.remediationWorker,
+      state: 'completed',
+    },
     reReview: {
       requested: true,
       status: 'pending',

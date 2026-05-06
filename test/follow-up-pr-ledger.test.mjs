@@ -24,6 +24,7 @@ import {
   getFollowUpJobDir,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
+  markFollowUpJobSpawned,
   markFollowUpJobStopped,
   readFollowUpJob,
   summarizePRRemediationLedger,
@@ -50,11 +51,27 @@ function makeJobInput(rootDir, overrides = {}) {
 
 function runOneRound(rootDir, claimedAt, completedAt) {
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: claimedAt,
+    worker: {
+      processId: 8123,
+      state: 'spawned',
+      workspaceDir: 'workspace',
+      outputPath: 'workspace/.adversarial-follow-up/codex-last-message.md',
+      logPath: 'workspace/.adversarial-follow-up/codex-worker.log',
+      promptPath: 'workspace/.adversarial-follow-up/prompt.md',
+    },
+  });
   return markFollowUpJobCompleted({
     rootDir,
-    jobPath: claimed.jobPath,
+    jobPath: spawned.jobPath,
     finishedAt: completedAt,
     completionPreview: 'one-round',
+    remediationWorker: {
+      ...spawned.job.remediationWorker,
+      state: 'completed',
+    },
     reReview: {
       requested: true,
       status: 'pending',
@@ -254,11 +271,27 @@ test('legacy maxRounds=6 PR runs all six actual remediation cycles, not three', 
       i,
       `round ${i} claim should set currentRound to ${i}`,
     );
+    const spawned = markFollowUpJobSpawned({
+      jobPath: claimed.jobPath,
+      spawnedAt: `2026-04-21T${String(i).padStart(2, '0')}:31:00.000Z`,
+      worker: {
+        processId: 8123 + i,
+        state: 'spawned',
+        workspaceDir: 'workspace',
+        outputPath: 'workspace/.adversarial-follow-up/codex-last-message.md',
+        logPath: 'workspace/.adversarial-follow-up/codex-worker.log',
+        promptPath: 'workspace/.adversarial-follow-up/prompt.md',
+      },
+    });
     markFollowUpJobCompleted({
       rootDir,
-      jobPath: claimed.jobPath,
+      jobPath: spawned.jobPath,
       finishedAt: `2026-04-21T${String(i).padStart(2, '0')}:35:00.000Z`,
       completionPreview: `legacy round ${i}`,
+      remediationWorker: {
+        ...spawned.job.remediationWorker,
+        state: 'completed',
+      },
       reReview: {
         requested: true,
         status: 'pending',
@@ -400,12 +433,28 @@ test('summarizePRRemediationLedger does not double-count failed and stopped inte
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T08:30:00.000Z' });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T08:31:00.000Z',
+    worker: {
+      processId: 8123,
+      state: 'spawned',
+      workspaceDir: 'workspace',
+      outputPath: 'workspace/.adversarial-follow-up/codex-last-message.md',
+      logPath: 'workspace/.adversarial-follow-up/codex-worker.log',
+      promptPath: 'workspace/.adversarial-follow-up/prompt.md',
+    },
+  });
   markFollowUpJobFailed({
     rootDir,
-    jobPath: claimed.jobPath,
+    jobPath: spawned.jobPath,
     error: new Error('invalid reply'),
     failedAt: '2026-04-21T08:40:00.000Z',
     failureCode: 'invalid-remediation-reply',
+    remediationWorker: {
+      ...spawned.job.remediationWorker,
+      state: 'failed',
+    },
   });
 
   const ledger = summarizePRRemediationLedger(rootDir, {

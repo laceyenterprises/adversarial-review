@@ -74,6 +74,18 @@ function readReviewRow(rootDir, repo = 'laceyenterprises/clio', prNumber = 7) {
   }
 }
 
+function hqReplyPathForJob(job) {
+  const replyPath = path.join(
+    process.env.HQ_ROOT,
+    'dispatch',
+    'remediation-replies',
+    job.jobId,
+    'remediation-reply.json',
+  );
+  mkdirSync(path.dirname(replyPath), { recursive: true });
+  return replyPath;
+}
+
 test('reconcileFollowUpJob stops a finished spawned round for no-progress when no re-review is requested', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({
@@ -128,7 +140,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
   writeFileSync(replyPath, `${JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -155,7 +167,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
@@ -195,7 +207,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
   writeFileSync(replyPath, `${JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -222,7 +234,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
@@ -298,7 +310,7 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
   mkdirSync(artifactDir, { recursive: true });
 
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
   writeFileSync(replyPath, '{"kind":"wrong"}\n', 'utf8');
 
@@ -311,7 +323,7 @@ test('reconcileFollowUpJob fails when the remediation reply artifact is invalid'
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
@@ -347,7 +359,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const replyPath = hqReplyPathForJob(claimed.job);
   // Empty stdout — exactly what claude-code --print produces on a
   // tool-only response.
   writeFileSync(outputPath, '', 'utf8');
@@ -377,7 +389,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
@@ -415,7 +427,7 @@ test('reconcileFollowUpJob honors a valid LEGACY-shape reply (no addressed[]) as
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, '', 'utf8');
   writeFileSync(replyPath, `${JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -443,7 +455,7 @@ test('reconcileFollowUpJob honors a valid LEGACY-shape reply (no addressed[]) as
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
@@ -481,7 +493,7 @@ test('reconcileFollowUpJob completes when stdout is empty and reply has reReview
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, '', 'utf8');
   writeFileSync(replyPath, `${JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -509,7 +521,7 @@ test('reconcileFollowUpJob completes when stdout is empty and reply has reReview
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
@@ -550,7 +562,7 @@ test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is emp
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, '', 'utf8');
   // Wrong `kind` -> validateRemediationReply throws.
   writeFileSync(replyPath, '{"kind":"wrong"}\n', 'utf8');
@@ -564,7 +576,7 @@ test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is emp
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 
@@ -790,7 +802,7 @@ test('reconcileFollowUpJob completes when codex-last-message.md is missing entir
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
-  const replyPath = path.join(artifactDir, 'remediation-reply.json');
+  const replyPath = hqReplyPathForJob(claimed.job);
   // Note: outputPath is configured on the worker record below, but the
   // file is intentionally NOT created — the worker's stdout capture is
   // missing entirely, not just empty.
@@ -820,7 +832,7 @@ test('reconcileFollowUpJob completes when codex-last-message.md is missing entir
       outputPath: path.relative(rootDir, outputPath),
       logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
       promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
-      replyPath: path.relative(rootDir, replyPath),
+      replyPath,
     },
   });
 

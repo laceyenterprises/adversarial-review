@@ -1,0 +1,93 @@
+import {
+  closeSync,
+  fsyncSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+
+const DEFAULT_FILE_MODE = 0o644;
+
+function uniqueTmpPath(filePath) {
+  return join(
+    dirname(filePath),
+    `.${basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+  );
+}
+
+function makeExistsError(filePath) {
+  const err = new Error(`EEXIST: file already exists, open '${filePath}'`);
+  err.code = 'EEXIST';
+  err.path = filePath;
+  return err;
+}
+
+function fsyncParentDir(dirPath) {
+  const dirFd = openSync(dirPath, 'r');
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+}
+
+function bestEffortFsyncParentDir(dirPath, fsyncParentDirImpl) {
+  try {
+    fsyncParentDirImpl(dirPath);
+  } catch {
+    // The file/link is already visible at its final path; treat parent-dir
+    // sync as best-effort rather than misreporting the write as failed.
+  }
+}
+
+function writeFileAtomic(
+  filePath,
+  content,
+  { overwrite = true, mode = DEFAULT_FILE_MODE, fsyncParentDirImpl = fsyncParentDir } = {}
+) {
+  const parentDir = dirname(filePath);
+  mkdirSync(parentDir, { recursive: true });
+
+  const tmpPath = uniqueTmpPath(filePath);
+  let tmpFd = null;
+
+  try {
+    tmpFd = openSync(tmpPath, 'wx', mode);
+    writeFileSync(tmpFd, content, 'utf8');
+    fsyncSync(tmpFd);
+    closeSync(tmpFd);
+    tmpFd = null;
+
+    if (overwrite) {
+      renameSync(tmpPath, filePath);
+      bestEffortFsyncParentDir(parentDir, fsyncParentDirImpl);
+      return;
+    }
+
+    try {
+      linkSync(tmpPath, filePath);
+      bestEffortFsyncParentDir(parentDir, fsyncParentDirImpl);
+    } catch (err) {
+      if (err?.code === 'EEXIST') {
+        throw makeExistsError(filePath);
+      }
+      throw err;
+    } finally {
+      rmSync(tmpPath, { force: true });
+    }
+  } catch (err) {
+    if (tmpFd !== null) {
+      try {
+        closeSync(tmpFd);
+      } catch {}
+    }
+    rmSync(tmpPath, { force: true });
+    throw err;
+  }
+}
+
+export { writeFileAtomic };

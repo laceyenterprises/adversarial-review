@@ -1,185 +1,170 @@
-// operator-retrigger-helpers.mjs — shared helpers for the operator-driven
-// off-cycle retrigger surfaces (`retrigger-review`, `retrigger-remediation`).
-//
-// Why this exists: the watcher's natural budget loop is the canonical path —
-// risk-tier round budgets, cascade-suppression, attempt counters all do the
-// right thing under normal operation. But there are real cases where an
-// operator (or a session that just substantially rewrote the PR) needs to
-// force a fresh cycle outside that loop. Without these helpers, "force a
-// fresh cycle" became "edit the SQLite file by hand" — the LAC-439 footgun
-// that produced silent no-ops because the watcher gates on review_status,
-// not on rereview_requested_at alone.
-//
-// The two operations:
-//
-//   bumpRemediationBudget(...) — find the latest terminal follow-up job for
-//     a PR and increase its `remediationPlan.maxRounds` by N. Watcher's
-//     `summarizePRRemediationLedger` reads `latestMaxRounds` from this same
-//     field, so the next pass sees a higher cap and re-arms the gate.
-//     Audit row appended to `operatorRetriggerAudit[]` on the same job
-//     record so the override is reconstructable.
-//
-//   (re-arming the review row itself stays in retrigger-review.mjs via the
-//    existing `requestReviewRereview` atomic transition.)
-
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  FOLLOW_UP_JOB_DIRS,
   ROUND_BUDGET_BY_RISK_CLASS,
   getFollowUpJobDir,
   readFollowUpJob,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
 
-const DEFAULT_RISK_CLASS = 'medium';
+const FOLLOW_UP_STATUS_KEYS = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
 
-/**
- * Find the latest follow-up job for (repo, prNumber) across every directory
- * the watcher reads. "Latest" = the row with the largest of
- * (completedAt | failedAt | stoppedAt | claimedAt | createdAt).
- *
- * Mirrors `summarizePRRemediationLedger`'s scan exactly so the bump targets
- * the same row the gate will read on its next pass. If no job exists, the
- * gate has no `latestMaxRounds` to read either, and a bump is a no-op
- * relative to the budget calculation — we surface that explicitly so the
- * operator knows the bump did not take effect.
- */
-function findLatestJobForPR(rootDir, { repo, prNumber }) {
-  const targetRepo = String(repo ?? '');
-  const targetPr = Number(prNumber);
-  if (!targetRepo || !Number.isFinite(targetPr)) {
-    return null;
-  }
+function latestJobTimestamp(job) {
+  return job?.completedAt
+    || job?.failedAt
+    || job?.stoppedAt
+    || job?.claimedAt
+    || job?.createdAt
+    || '';
+}
 
-  let latestJob = null;
-  let latestJobPath = null;
-  let latestJobKey = null;
-  let latestTimestamp = '';
+function appendOperatorRetriggerAudit(job, auditEntry) {
+  const entries = Array.isArray(job?.operatorRetriggerAudit)
+    ? job.operatorRetriggerAudit
+    : [];
 
-  for (const key of Object.keys(FOLLOW_UP_JOB_DIRS)) {
+  return {
+    ...job,
+    operatorRetriggerAudit: [...entries, auditEntry],
+  };
+}
+
+function findOperatorAuditEntry(job, idempotencyKey) {
+  const entries = Array.isArray(job?.operatorRetriggerAudit)
+    ? job.operatorRetriggerAudit
+    : [];
+  return entries.find((entry) => entry?.idempotencyKey === idempotencyKey) || null;
+}
+
+function findLatestFollowUpJob(rootDir, { repo, prNumber }) {
+  let latest = null;
+  for (const key of FOLLOW_UP_STATUS_KEYS) {
     const dir = getFollowUpJobDir(rootDir, key);
     if (!existsSync(dir)) continue;
 
-    let names;
-    try {
-      names = readdirSync(dir).filter((n) => n.endsWith('.json'));
-    } catch {
-      continue;
-    }
-
-    for (const name of names) {
+    for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.json')).sort()) {
       const jobPath = join(dir, name);
       let job;
       try {
         job = readFollowUpJob(jobPath);
-      } catch {
+      } catch (err) {
+        console.error(
+          `[operator-retrigger] Skipping unreadable follow-up job while scanning ${key} for ` +
+            `${repo}#${prNumber}: ${jobPath} (${err?.message || err})`
+        );
         continue;
       }
-      if (!job) continue;
-      if (job.repo !== targetRepo) continue;
-      if (Number(job.prNumber) !== targetPr) continue;
-
-      const ts = job.completedAt
-        || job.failedAt
-        || job.stoppedAt
-        || job.claimedAt
-        || job.createdAt
-        || '';
-      if (ts > latestTimestamp) {
-        latestTimestamp = ts;
-        latestJob = job;
-        latestJobPath = jobPath;
-        latestJobKey = key;
+      if (job.repo !== repo || Number(job.prNumber) !== Number(prNumber)) {
+        continue;
+      }
+      if (!latest || latestJobTimestamp(job) > latestJobTimestamp(latest.job)) {
+        latest = { job, jobPath };
       }
     }
   }
-
-  if (!latestJob) return null;
-  return { job: latestJob, jobPath: latestJobPath, jobKey: latestJobKey };
+  return latest;
 }
 
-/**
- * Bump the latest job's `remediationPlan.maxRounds` by `bumpBy` (default 1).
- * Atomic-write the updated job back. Append an entry to
- * `operatorRetriggerAudit[]` capturing prior/new values, reason, actor, and
- * timestamp.
- *
- * Returns:
- *   { bumped: true, jobPath, jobKey, priorMaxRounds, newMaxRounds, bumpBy }
- *     — the bump took effect.
- *   { bumped: false, reason: 'no-job-found' }
- *     — there is no follow-up job for this PR yet (no remediation has ever
- *       been planned). Operator should retrigger review first; the resulting
- *       remediation cycle will create the first job, and any subsequent
- *       budget bump can land on it.
- *   { bumped: false, reason: 'invalid-bump-by', bumpBy }
- *     — bumpBy is not a positive integer.
- */
+function normalizeRiskClass(riskClass) {
+  const normalized = String(riskClass ?? '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(ROUND_BUDGET_BY_RISK_CLASS, normalized)
+    ? normalized
+    : 'medium';
+}
+
+function buildJobScopedIdempotentResult(existingEntry, jobPath) {
+  return {
+    bumped: true,
+    idempotent: true,
+    reason: 'idempotent',
+    jobPath,
+    job: readFollowUpJob(jobPath),
+    auditRow: existingEntry.auditRow,
+    priorMaxRounds: existingEntry.priorMaxRounds,
+    newMaxRounds: existingEntry.newMaxRounds,
+  };
+}
+
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
 function bumpRemediationBudget({
   rootDir,
   repo,
   prNumber,
-  bumpBy = 1,
-  reason,
-  by = 'operator',
+  bumpBudget = 1,
+  auditEntry,
 }) {
-  if (!Number.isInteger(bumpBy) || bumpBy <= 0) {
-    return { bumped: false, reason: 'invalid-bump-by', bumpBy };
-  }
-  if (!reason || !String(reason).trim()) {
-    return { bumped: false, reason: 'reason-required' };
+  const latest = findLatestFollowUpJob(rootDir, { repo, prNumber });
+  if (!latest) {
+    return { bumped: false, reason: 'no-job' };
   }
 
-  const found = findLatestJobForPR(rootDir, { repo, prNumber });
-  if (!found) {
-    return { bumped: false, reason: 'no-job-found' };
+  const { jobPath } = latest;
+  const currentJob = readFollowUpJob(jobPath);
+
+  if (!isPositiveInteger(bumpBudget)) {
+    return { bumped: false, reason: 'invalid-bump-by', jobPath, job: currentJob };
+  }
+  if (!isNonEmptyString(auditEntry?.reason)) {
+    return { bumped: false, reason: 'invalid-reason', jobPath, job: currentJob };
   }
 
-  const { job, jobPath, jobKey } = found;
+  const existingEntry = findOperatorAuditEntry(currentJob, auditEntry.idempotencyKey);
+  if (existingEntry) {
+    if (existingEntry.requestFingerprint !== auditEntry.requestFingerprint) {
+      const err = new Error('IDEMPOTENCY_KEY_MISMATCH');
+      err.code = 'IDEMPOTENCY_KEY_MISMATCH';
+      throw err;
+    }
+    return buildJobScopedIdempotentResult(existingEntry, jobPath);
+  }
 
-  const persistedMax = Number(job?.remediationPlan?.maxRounds);
-  const priorMaxRounds = Number.isInteger(persistedMax) && persistedMax > 0
-    ? persistedMax
-    : (ROUND_BUDGET_BY_RISK_CLASS[String(job?.riskClass ?? '').trim().toLowerCase()]
-       || ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS]);
+  if (currentJob.status === 'pending' || currentJob.status === 'inProgress') {
+    return { bumped: false, reason: 'job-active', jobPath, job: currentJob };
+  }
 
-  const newMaxRounds = priorMaxRounds + bumpBy;
-
-  const updated = {
-    ...job,
-    remediationPlan: {
-      ...(job?.remediationPlan || {}),
-      maxRounds: newMaxRounds,
-    },
-    operatorRetriggerAudit: [
-      ...(Array.isArray(job?.operatorRetriggerAudit) ? job.operatorRetriggerAudit : []),
-      {
-        at: new Date().toISOString(),
-        by: String(by),
-        reason: String(reason).trim(),
-        priorMaxRounds,
-        newMaxRounds,
-        bumpBy,
-        operation: 'bump-remediation-budget',
-      },
-    ],
-  };
-
-  writeFollowUpJob(jobPath, updated);
-
-  return {
-    bumped: true,
-    jobPath,
-    jobKey,
+  const fallbackRiskClass = normalizeRiskClass(currentJob?.riskClass);
+  const defaultMaxRounds = ROUND_BUDGET_BY_RISK_CLASS[fallbackRiskClass] || ROUND_BUDGET_BY_RISK_CLASS.medium;
+  const priorMaxRounds = Number(currentJob?.remediationPlan?.maxRounds ?? defaultMaxRounds);
+  const newMaxRounds = priorMaxRounds + Number(bumpBudget);
+  if (!isPositiveInteger(newMaxRounds)) {
+    throw new Error(`Invalid remediation budget result: ${newMaxRounds}`);
+  }
+  const nextAuditEntry = {
+    ...auditEntry,
     priorMaxRounds,
     newMaxRounds,
-    bumpBy,
+  };
+  const nextJob = appendOperatorRetriggerAudit({
+    ...currentJob,
+    remediationPlan: {
+      ...currentJob.remediationPlan,
+      maxRounds: newMaxRounds,
+    },
+  }, nextAuditEntry);
+
+  writeFollowUpJob(jobPath, nextJob);
+  return {
+    bumped: true,
+    idempotent: false,
+    reason: 'bumped',
+    jobPath,
+    job: nextJob,
+    auditRow: auditEntry.auditRow,
+    priorMaxRounds,
+    newMaxRounds,
   };
 }
 
 export {
-  findLatestJobForPR,
+  appendOperatorRetriggerAudit,
   bumpRemediationBudget,
+  findLatestFollowUpJob,
 };

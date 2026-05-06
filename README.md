@@ -62,7 +62,7 @@ The pipeline is **automated end-to-end**:
 - on every terminal transition (completed / stopped / failed) the reconciler posts a public PR comment under the matching reviewer-bot identity so operators can read the loop status from the PR itself
 - bounded by a risk-tiered cap in `ROUND_BUDGET_BY_RISK_CLASS` (in `src/follow-up-jobs.mjs`): `low=1`, `medium=1` (default for spec-less PRs), `high=2`, `critical=3`. `requestReviewRereview` in `src/review-state.mjs` does not implement a per-PR cooldown — the round cap is the only re-arm bound, the cap is enforced PR-wide (each new follow-up job is seeded with the PR's prior round count so `claimNextFollowUpJob` stops past the budget), and each round must end with a fresh adversarial pass plus a worker-written `reReview.requested` decision before the next round can claim the job. **Migration note:** jobs persisted before this change (with `maxRounds=6` or `maxRounds=3` in their JSON) keep that cap — `resolveRoundBudgetForJob` treats the persisted `remediationPlan.maxRounds` as authoritative whenever it exists, so legacy PRs do not silently get downgraded to the new risk-tiered default mid-deploy.
 
-Operator-visible state is preserved in `data/follow-up-jobs/` (the durable JSON queue) and `data/reviews.db` (the review ledger). Operators retain explicit control: `npm run follow-up:requeue`, `npm run follow-up:stop`, `npm run retrigger-review` are still the canonical levers when manual intervention is required.
+Operator-visible state is preserved in `data/follow-up-jobs/` (the durable JSON queue) and `data/reviews.db` (the review ledger). Operators retain explicit control: `npm run follow-up:requeue`, `npm run follow-up:stop`, `npm run retrigger-review`, and `npm run retrigger-remediation` are the canonical levers when manual intervention is required.
 
 ### 3. Convergence and automerge
 
@@ -399,6 +399,17 @@ npm run retrigger-review -- \
 ```
 
 This wraps the same atomic transition the follow-up flow uses — `review_status='pending'`, clears `posted_at`/`failed_at`/`failure_message`, stamps `rereview_requested_at` and `rereview_reason`. Hand-written SQL that only sets `rereview_requested_at` is a silent no-op because the watcher polls on `review_status`, not on the rereview metadata. By default the CLI refuses rows whose `review_status` is `'failed'` (the watcher already retries those automatically and the reset would erase diagnostic evidence); pass `--allow-failed-reset` after reviewing the failure if you really want a clean rerun. See `npm run retrigger-review -- --help` for the full surface.
+
+Force one more remediation round for an existing follow-up job:
+
+```bash
+npm run retrigger-remediation -- \
+  --repo laceyenterprises/adversarial-review \
+  --pr 212 \
+  --reason "operator approved one more remediation pass"
+```
+
+This path is for the follow-up queue, not the watcher row: it optionally bumps `remediationPlan.maxRounds`, then requeues the latest terminal follow-up job when the stop reason is `max-rounds-reached` or `round-budget-exhausted` (or when the last terminal job failed, or completed with a durable rereview request). Both operator CLIs write durable mutation records under `data/operator-mutations/` by default; a replay of a previously successful idempotency key is a no-op, while previously refused attempts are treated as history and the CLI re-checks current eligibility on retry.
 
 **Emergency-only direct SQL** (use only if the npm script is unavailable, e.g. partial repo state during an incident):
 

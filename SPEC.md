@@ -200,6 +200,21 @@ Worker prompt env contract for the canonical reply path:
 | \`HQ_ROOT\` | absolute path to the HQ checkout | base directory for durable remediation-reply storage |
 | \`LRQ_ID\` | launch request id / reply storage key for the round | selects \`dispatch/remediation-replies/<LRQ_ID>/\` |
 
+\#\#\# 5\.1\.3 Operator retrigger workflow
+\- Manual recovery remains explicit and operator-visible; it must not require hand-editing SQLite rows or queue JSON
+\- \`retrigger-review\` is the canonical operator surface for re-arming the watcher row to \`review_status='pending'\`
+\- \`retrigger-remediation\` is the canonical operator surface for authorizing one more remediation round on the latest terminal follow-up job without directly mutating the watcher row
+\- \`retrigger-remediation\` may requeue only terminal jobs in:
+\- \`failed\`
+\- \`completed\` when the prior round left \`reReview.requested = true\`
+\- \`stopped:max-rounds-reached\`
+\- \`stopped:round-budget-exhausted\`
+\- Operator-triggered mutations must be durably audited on the job record (\`operatorRetriggerAudit[]\`) and in a repo-local operator-mutation ledger under \`data/operator-mutations/\` by default; alternate roots may be configured explicitly
+\- Operator-triggered mutations must be idempotent across calendar boundaries; the key space is global, not monthly
+\- A replay of a previously successful operator-mutation key is a no-op success
+\- Previously refused operator-mutation keys remain visible in the ledger for operator history but do not block a later retry after state changes
+\- Existing public CLI contracts remain stable: blocked operator outcomes must stay distinct from usage errors in exit codes and docs
+
 \#\#\# 5\.2 Remediation worker launch contract (new hardening requirements)
 \- A detached remediation launch must not treat \"process spawned\" as equivalent to \"durable worker established\"
 \- Required control-plane distinctions:

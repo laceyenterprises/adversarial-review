@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -18,6 +18,7 @@ import {
   getFollowUpJobDir,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
+  markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
   salvagePartialRemediationReply,
@@ -182,6 +183,7 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   assert.equal(persisted.recommendedFollowUpAction.priority, 'high');
   assert.equal(persisted.riskClass, 'high');
   assert.equal(persisted.remediationPlan.maxRounds, 3);
+  assert.equal(statSync(jobPath).mode & 0o777, 0o644);
 });
 
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {
@@ -2243,6 +2245,114 @@ test('requeueFollowUpJobForNextRound rejects non-terminal source statuses', () =
       jobPath: created.jobPath,
     }),
     /Cannot requeue follow-up job .* from status pending/
+  );
+});
+
+test('requeueFollowUpJobForNextRound accepts failed terminal jobs', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath: claimed.jobPath,
+    failedAt: '2026-04-21T10:05:00.000Z',
+    errorMessage: 'boom',
+  });
+
+  const requeued = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: failed.jobPath,
+    requestedAt: '2026-04-21T10:06:00.000Z',
+    requestedBy: 'operator',
+    reason: 'Retry after failure.',
+  });
+
+  assert.equal(requeued.job.status, 'pending');
+});
+
+test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs after a budget bump', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 1,
+  });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const stopped = markFollowUpJobStopped({
+    rootDir,
+    jobPath: claimed.jobPath,
+    stoppedAt: '2026-04-21T10:05:00.000Z',
+    stopCode: 'max-rounds-reached',
+    sourceStatus: 'in_progress',
+    stopReason: 'cap reached',
+  });
+  const job = readFollowUpJob(stopped.jobPath);
+  job.remediationPlan.maxRounds = 2;
+  writeFollowUpJob(stopped.jobPath, job);
+
+  const requeued = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: stopped.jobPath,
+    requestedAt: '2026-04-21T10:06:00.000Z',
+    requestedBy: 'operator',
+    reason: 'Budget bumped.',
+  });
+
+  assert.equal(requeued.job.status, 'pending');
+});
+
+test('requeueFollowUpJobForNextRound accepts stopped:round-budget-exhausted jobs after a budget bump', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 1,
+  });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const stopped = markFollowUpJobStopped({
+    rootDir,
+    jobPath: claimed.jobPath,
+    stoppedAt: '2026-04-21T10:05:00.000Z',
+    stopCode: 'round-budget-exhausted',
+    sourceStatus: 'in_progress',
+    stopReason: 'risk-budget reached',
+  });
+  const job = readFollowUpJob(stopped.jobPath);
+  job.remediationPlan.maxRounds = 2;
+  writeFollowUpJob(stopped.jobPath, job);
+
+  const requeued = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: stopped.jobPath,
+    requestedAt: '2026-04-21T10:06:00.000Z',
+    requestedBy: 'operator',
+    reason: 'Operator approved another pass.',
+  });
+
+  assert.equal(requeued.job.status, 'pending');
+});
+
+test('requeueFollowUpJobForNextRound rejects stopped:abandoned jobs', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const stopped = markFollowUpJobStopped({
+    rootDir,
+    jobPath: claimed.jobPath,
+    stoppedAt: '2026-04-21T10:05:00.000Z',
+    stopCode: 'abandoned',
+    sourceStatus: 'in_progress',
+    stopReason: 'manual abandonment',
+  });
+
+  assert.throws(
+    () => requeueFollowUpJobForNextRound({
+      rootDir,
+      jobPath: stopped.jobPath,
+      requestedAt: '2026-04-21T10:06:00.000Z',
+    }),
+    /stopped:abandoned/
   );
 });
 

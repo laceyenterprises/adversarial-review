@@ -99,6 +99,10 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
 // action does not crowd out the others.
 const ADDRESSED_FILES_MAX_CHARS = 600;
 const PER_ENTRY_FIELD_MAX_CHARS = 800;
+const PER_ENTRY_TITLE_MAX_CHARS = 120;
+const ANSI_ESCAPE_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+const TITLE_CONTROL_CHARS_PATTERN = /[\u0000-\u001F\u007F\u2028\u2029]/g;
+const TITLE_FORMAT_CHARS_PATTERN = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
 
 // Indent every line of `text` with `prefix`. Used to align fenced code
 // blocks under markdown list items so GFM renders them as part of the
@@ -118,6 +122,22 @@ function safeInlineCode(text) {
   const stripped = String(text ?? '').replace(/`/g, '').trim();
   if (!stripped) return null;
   return `\`${stripped}\``;
+}
+
+function normalizeEntryTitleText(text) {
+  return String(text ?? '')
+    .replace(ANSI_ESCAPE_PATTERN, '')
+    .replace(TITLE_FORMAT_CHARS_PATTERN, '')
+    .replace(TITLE_CONTROL_CHARS_PATTERN, ' ')
+    .replace(/[`*_#[\]<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function safeEntryTitle(entry, fallback = 'Finding') {
+  const title = normalizeEntryTitleText(entry?.title);
+  if (!title) return fallback;
+  return normalizeEntryTitleText(redactPublicSafeText(title, PER_ENTRY_TITLE_MAX_CHARS)) || fallback;
 }
 
 // Render a fenced text block at `indentLevel` spaces of indent so the
@@ -166,6 +186,7 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
             .filter(Boolean)
         : [];
       return {
+        title: safeEntryTitle(entry),
         finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
         action: redactPublicSafeText(action, PER_ENTRY_FIELD_MAX_CHARS),
         files,
@@ -179,7 +200,7 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
   return entries
     .map((entry, index) => {
       const lines = [
-        `${index + 1}. **Finding**`,
+        `${index + 1}. **${entry.title}**`,
         '',
         indentedFencedText(entry.finding),
         '',
@@ -214,6 +235,7 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
       const reasoning = String(entry.reasoning ?? '').trim();
       if (!finding || !reasoning) return null;
       return {
+        title: safeEntryTitle(entry),
         finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
         reasoning: redactPublicSafeText(reasoning, PER_ENTRY_FIELD_MAX_CHARS),
       };
@@ -226,7 +248,7 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
   return entries
     .map((entry, index) => {
       return [
-        `${index + 1}. **Finding**`,
+        `${index + 1}. **${entry.title}**`,
         '',
         indentedFencedText(entry.finding),
         '',
@@ -258,6 +280,7 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
         const trimmed = entry.trim();
         if (!trimmed) return null;
         return {
+          title: 'Finding',
           finding: redactPublicSafeText(trimmed, PER_ENTRY_FIELD_MAX_CHARS),
           reasoning: '',
           needsHumanInput: '',
@@ -267,6 +290,7 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
       const finding = String(entry.finding ?? '').trim();
       if (!finding) return null;
       return {
+        title: safeEntryTitle(entry),
         finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
         reasoning: redactPublicSafeText(
           String(entry.reasoning ?? '').trim(),
@@ -286,7 +310,7 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
   return entries
     .map((entry, index) => {
       const lines = [
-        `${index + 1}. **Finding**`,
+        `${index + 1}. **${entry.title}**`,
         '',
         indentedFencedText(entry.finding),
       ];

@@ -34,6 +34,9 @@ lists in the reply JSON — they are not redundant, they encode
 **different decisions**:
 
 - `addressed[]` → you fixed it. One entry per finding, with:
+  - `title` (optional but preferred): copy the review finding's
+    `Title:` value exactly when the reviewer supplied one. This becomes
+    the public PR comment heading for that entry.
   - `finding`: a short quote / paraphrase identifying which review
     finding this entry corresponds to (so a human reading the PR
     comment can match it back to the review without guessing).
@@ -44,7 +47,8 @@ lists in the reply JSON — they are not redundant, they encode
   Shape (write your own values; do not copy this verbatim):
 
   ```
-  { "finding": "Race in retry path can double-submit.",
+  { "title":   "Retry double-submit race",
+    "finding": "Race in retry path can double-submit.",
     "action":  "Added an idempotency token + dedupe check.",
     "files":   ["src/worker.mjs"] }
   ```
@@ -53,13 +57,15 @@ lists in the reply JSON — they are not redundant, they encode
   change the code, and want to record the reasoning. Use this when the
   reviewer is wrong, the finding is out of scope for this PR, or the
   fix would cost more than the bug. Each entry needs:
+  - `title` (optional but preferred): copy the review finding's `Title:`.
   - `finding`: the finding you are pushing back on.
   - `reasoning`: why you disagreed (one sentence, sharp).
 
   Shape:
 
   ```
-  { "finding":  "Reviewer asked to refactor the entire dispatch module.",
+  { "title":    "Over-broad dispatch refactor",
+    "finding":  "Reviewer asked to refactor the entire dispatch module.",
     "reasoning": "Out of scope for this PR; tracked as separate ticket LAC-99." }
   ```
 
@@ -70,6 +76,7 @@ lists in the reply JSON — they are not redundant, they encode
   (missing secrets, design decision required, architectural
   disagreement large enough that you should not unilaterally resolve
   it). Each entry needs:
+  - `title` (optional but preferred): copy the review finding's `Title:`.
   - `finding`: the review finding you are blocking on (so the next
     human can identify which item is unresolved).
   - `reasoning` and/or `needsHumanInput`: why this is a hard exit and
@@ -79,7 +86,8 @@ lists in the reply JSON — they are not redundant, they encode
   Shape:
 
   ```
-  { "finding":         "Reviewer asks for a schema migration on a 50M-row table.",
+  { "title":           "Destructive large-table migration",
+    "finding":         "Reviewer asks for a schema migration on a 50M-row table.",
     "reasoning":       "Migration is destructive and needs a DBA window I do not have authority to schedule.",
     "needsHumanInput": "DBA approval + maintenance window" }
   ```

@@ -975,6 +975,7 @@ test('buildRemediationReply carries addressed[] and pushback[] entries through t
     validation: ['npm test'],
     addressed: [
       {
+        title: 'Retry double-submit race',
         finding: 'Race in retry path can double-submit.',
         action: 'Added an idempotency token + dedupe check.',
         files: ['src/worker.mjs'],
@@ -996,11 +997,46 @@ test('buildRemediationReply carries addressed[] and pushback[] entries through t
   });
 
   assert.equal(reply.addressed.length, 2);
+  assert.equal(reply.addressed[0].title, 'Retry double-submit race');
   assert.equal(reply.addressed[0].finding, 'Race in retry path can double-submit.');
   assert.deepEqual(reply.addressed[0].files, ['src/worker.mjs']);
   assert.equal(reply.pushback.length, 1);
   assert.equal(reply.pushback[0].reasoning, 'Out of scope for this PR; tracked as separate ticket LAC-99.');
   assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply validates optional per-finding titles', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 82,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T17:02:00.000Z',
+    critical: false,
+  });
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed it.',
+    validation: ['npm test'],
+    addressed: [{ title: 'Good title', finding: 'Issue.', action: 'Fixed.' }],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  assert.deepEqual(validateRemediationReply(baseReply, { expectedJob: job }), baseReply);
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, addressed: [{ title: '', finding: 'Issue.', action: 'Fixed.' }] },
+      { expectedJob: job },
+    ),
+    /addressed\[0\]\.title must be a non-empty string/,
+  );
 });
 
 test('validateRemediationReply tolerates a reply that omits addressed/pushback entirely (legacy compat)', () => {
@@ -1582,6 +1618,91 @@ test('validateRemediationReply rejects a reply that fails to account for every b
     }, { expectedJob: job }),
     /does not account for every blocking finding.*review has 3 blocking issue\(s\), reply records 2/
   );
+});
+
+test('validateRemediationReply rejects skipped coverage for Title-led blocking findings', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two problems.',
+    '',
+    '## Blocking Issues',
+    '- Title: Retry path can double-submit',
+    '  File: src/a.mjs',
+    '  Lines: 1-5',
+    '  Problem: First problem.',
+    '- Title: Missing auth guard',
+    '  File: src/b.mjs',
+    '  Lines: 10-20',
+    '  Problem: Second problem.',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 97,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:07:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'completed',
+      summary: 'Fixed one of two.',
+      validation: ['npm test'],
+      addressed: [{ finding: 'First problem.', action: 'Fixed.' }],
+      pushback: [],
+      blockers: [],
+      reReview: { requested: true, reason: 'One addressed.' },
+    }, { expectedJob: job }),
+    /does not account for every blocking finding.*review has 2 blocking issue\(s\), reply records 1/
+  );
+});
+
+test('validateRemediationReply does not split Title-led findings on prose File mentions', () => {
+  const reviewBody = [
+    '## Summary',
+    'One parser problem.',
+    '',
+    '## Blocking Issues',
+    '- Title: Parser ghost finding boundary',
+    '  File: src/a.mjs',
+    '  Lines: 1-5',
+    '  Problem: Continuation prose can mention another path.',
+    '  File: src/b.mjs is also affected by the same recommendation text.',
+    '  Recommended fix: Keep prose mentions inside the active finding.',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 98,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:08:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed the parser boundary bug.',
+    validation: ['npm test'],
+    addressed: [{ finding: 'Parser ghost finding boundary', action: 'Dashless File prose no longer starts a new finding.' }],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Ready.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
 });
 
 test('validateRemediationReply accepts a reply that accounts for every blocking finding (one per list permitted)', () => {

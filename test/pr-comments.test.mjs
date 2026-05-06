@@ -939,6 +939,7 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
       validation: ['npm test'],
       addressed: [
         {
+          title: 'Retry double-submit race',
           finding: 'Race in retry path can double-submit.',
           action: 'Added an idempotency token + dedupe check.',
           files: ['src/worker.mjs', 'test/worker.test.mjs'],
@@ -959,7 +960,7 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   // Untrusted finding/action text stays inside fences, files render
   // as inline-coded paths so a worker-supplied path can't break out
   // of the inline-code wrapper.
-  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /1\. \*\*Retry double-submit race\*\*/);
   assert.match(body, /Race in retry path can double-submit\./);
   assert.match(body, /\*\*Action\*\*/);
   assert.match(body, /Added an idempotency token \+ dedupe check\./);
@@ -971,6 +972,65 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   assert.equal(filesLines.length, 1, 'Files: line only on entries that supply it');
   // Both entries should be numbered.
   assert.match(body, /2\. \*\*Finding\*\*/);
+});
+
+test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed one finding.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: 'Foo\n\n## Injected heading\n\nbody',
+          finding: 'Title rendering can break out of its list item.',
+          action: 'Collapsed title whitespace before rendering.',
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'title sanitized' },
+  });
+
+  assert.match(body, /1\. \*\*Foo Injected heading body\*\*/);
+  assert.doesNotMatch(body, /\n## Injected heading/);
+  assert.doesNotMatch(body, /1\. \*\*Foo\n/);
+});
+
+test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls back when empty', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed two findings.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: '\u202ERetry \u001B[31mdouble-submit\u001B[0m',
+          finding: 'Bidi and ANSI controls should not render in headings.',
+          action: 'Stripped unsafe title characters.',
+        },
+        {
+          title: '\u202E\u200D\u2028\u2029',
+          finding: 'Invisible-only titles should use the fallback heading.',
+          action: 'Fell back to Finding after sanitization.',
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'title controls sanitized' },
+  });
+
+  assert.match(body, /1\. \*\*Retry double-submit\*\*/);
+  assert.match(body, /2\. \*\*Finding\*\*/);
+  assert.doesNotMatch(body, /[\u001B\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u);
 });
 
 test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding/reasoning', () => {
@@ -985,6 +1045,7 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
       addressed: [],
       pushback: [
         {
+          title: 'Over-broad dispatch refactor',
           finding: 'Reviewer asked to refactor the entire dispatch module.',
           reasoning: 'Out of scope for this PR; tracked as separate ticket LAC-99.',
         },
@@ -995,7 +1056,7 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
   });
 
   assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
-  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /1\. \*\*Over-broad dispatch refactor\*\*/);
   assert.match(body, /Reviewer asked to refactor the entire dispatch module\./);
   assert.match(body, /\*\*Reasoning\*\*/);
   assert.match(body, /Out of scope for this PR; tracked as separate ticket LAC-99\./);

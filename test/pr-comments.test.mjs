@@ -1001,6 +1001,38 @@ test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', 
   assert.doesNotMatch(body, /1\. \*\*Foo\n/);
 });
 
+test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls back when empty', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed two findings.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: '\u202ERetry \u001B[31mdouble-submit\u001B[0m',
+          finding: 'Bidi and ANSI controls should not render in headings.',
+          action: 'Stripped unsafe title characters.',
+        },
+        {
+          title: '\u202E\u200D\u2028\u2029',
+          finding: 'Invisible-only titles should use the fallback heading.',
+          action: 'Fell back to Finding after sanitization.',
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'title controls sanitized' },
+  });
+
+  assert.match(body, /1\. \*\*Retry double-submit\*\*/);
+  assert.match(body, /2\. \*\*Finding\*\*/);
+  assert.doesNotMatch(body, /[\u001B\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u);
+});
+
 test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding/reasoning', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',

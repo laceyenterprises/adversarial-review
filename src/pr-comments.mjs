@@ -100,6 +100,9 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
 const ADDRESSED_FILES_MAX_CHARS = 600;
 const PER_ENTRY_FIELD_MAX_CHARS = 800;
 const PER_ENTRY_TITLE_MAX_CHARS = 120;
+const ANSI_ESCAPE_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+const TITLE_CONTROL_CHARS_PATTERN = /[\u0000-\u001F\u007F\u2028\u2029]/g;
+const TITLE_FORMAT_CHARS_PATTERN = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
 
 // Indent every line of `text` with `prefix`. Used to align fenced code
 // blocks under markdown list items so GFM renders them as part of the
@@ -121,13 +124,20 @@ function safeInlineCode(text) {
   return `\`${stripped}\``;
 }
 
-function safeEntryTitle(entry, fallback = 'Finding') {
-  const title = String(entry?.title ?? '')
+function normalizeEntryTitleText(text) {
+  return String(text ?? '')
+    .replace(ANSI_ESCAPE_PATTERN, '')
+    .replace(TITLE_FORMAT_CHARS_PATTERN, '')
+    .replace(TITLE_CONTROL_CHARS_PATTERN, ' ')
     .replace(/[`*_#[\]<>]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function safeEntryTitle(entry, fallback = 'Finding') {
+  const title = normalizeEntryTitleText(entry?.title);
   if (!title) return fallback;
-  return redactPublicSafeText(title, PER_ENTRY_TITLE_MAX_CHARS) || fallback;
+  return normalizeEntryTitleText(redactPublicSafeText(title, PER_ENTRY_TITLE_MAX_CHARS)) || fallback;
 }
 
 // Render a fenced text block at `indentLevel` spaces of indent so the

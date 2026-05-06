@@ -1664,6 +1664,47 @@ test('validateRemediationReply rejects skipped coverage for Title-led blocking f
   );
 });
 
+test('validateRemediationReply does not split Title-led findings on prose File mentions', () => {
+  const reviewBody = [
+    '## Summary',
+    'One parser problem.',
+    '',
+    '## Blocking Issues',
+    '- Title: Parser ghost finding boundary',
+    '  File: src/a.mjs',
+    '  Lines: 1-5',
+    '  Problem: Continuation prose can mention another path.',
+    '  File: src/b.mjs is also affected by the same recommendation text.',
+    '  Recommended fix: Keep prose mentions inside the active finding.',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 98,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:08:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed the parser boundary bug.',
+    validation: ['npm test'],
+    addressed: [{ finding: 'Parser ghost finding boundary', action: 'Dashless File prose no longer starts a new finding.' }],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Ready.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
 test('validateRemediationReply accepts a reply that accounts for every blocking finding (one per list permitted)', () => {
   const reviewBody = [
     '## Summary',

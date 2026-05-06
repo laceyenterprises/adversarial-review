@@ -21,13 +21,13 @@ Output requirements:
   5. ## Verdict
 - Under issue sections, use bullets
 - For each real issue, include:
-  - Title:
+  - Title: (preferred during transition; omit only when the reviewer path cannot supply one)
   - File:
   - Lines:
   - Problem:
   - Why it matters:
   - Recommended fix:
-- `Title:` must be a short, stable noun phrase (roughly 3-8 words) that uniquely names the issue. Do not use generic titles like "Finding", "Issue", or "Problem".
+- When present, `Title:` must be a short, stable noun phrase (roughly 3-8 words) that uniquely names the issue. Do not use generic titles like "Finding", "Issue", or "Problem".
 - If a section has no items, write exactly: - None.
 - In ## Verdict, end with exactly one of:
   - Request changes

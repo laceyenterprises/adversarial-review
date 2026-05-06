@@ -31,29 +31,32 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 const LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
 const DEFAULT_RISK_CLASS = 'medium';
 // Convergence loop budgets, post-2026-05-06:
-// All risk classes get TWO remediation rounds. Round 1 is the initial
-// auto-remediation triggered by the first `Request changes` review.
-// Round 2 is the auto-queued follow-up if the rereview after round 1
-// is still `Request changes`. After round 2, the watcher always fires
-// a final rereview but `claimNextFollowUpJob` refuses to start round
-// 3 — the PR halts and waits for operator review (or the
-// `operator-approved` label).
+// Higher-risk PRs get more bot rounds before operator escalation,
+// because that's where you most want the bot to converge before
+// pulling the operator in. Default (medium) = 2: the initial
+// remediation triggered by the first `Request changes`, plus one
+// auto-queued follow-up if the rereview is still `Request changes`.
+// Below that, low = 1 (simpler PRs aren't worth multiple rounds).
+// Above that, high/critical = 3 (more iterations to absorb tougher
+// reviewer feedback before halting).
 //
-// Why uniform across risk classes: the previous medium=1 / high=3 /
-// critical=3 split predated the always-rereview-after-remediation
-// rule and the operator-override label. Once both of those land, the
-// "more rounds for higher risk" framing inverts: the more critical
-// the change, the more important it is that an operator's eyes hit
-// it sooner rather than letting the bot churn unchecked. Two rounds
-// is a deliberate compromise between giving the remediator one shot
-// at fixing reviewer findings and one shot at addressing review-of-
-// remediation findings.
-const CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS = 2;
+// Each round is one remediation + one rereview. After the cap is
+// consumed, `claimNextFollowUpJob` refuses to start another round —
+// the PR halts and waits for operator review (or the
+// `operator-approved` label). The watcher ALWAYS fires the rereview
+// after each remediation regardless of how close to the cap we are;
+// the cap lives entirely on the remediation-enqueue side.
+//
+// Operator override (`operator-approved` label) is the escape valve
+// when the operator has decided substance is fine despite a
+// `Request changes` verdict — it sidesteps the round budget too, so
+// the operator doesn't have to wait out remaining bot rounds when
+// they're ready to merge as-is.
 const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
-  low: CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS,
-  medium: CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS,
-  high: CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS,
-  critical: CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
 });
 const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;

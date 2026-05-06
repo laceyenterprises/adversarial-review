@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
-import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
+import { requestReviewRereview } from './review-state.mjs';
 import {
   bumpRemediationBudget,
   findLatestFollowUpJob,
@@ -268,19 +268,36 @@ export async function tryRetriggerRemediationFromLabel({
     };
   }
 
-  const requeueResult = requeueFollowUpJobForNextRound({
-    rootDir,
-    jobPath: bumpResult.jobPath,
-    requestedAt: ts,
-    requestedBy: `pr-label:${labelEventActor}`,
-    reason,
-  });
+  // Re-arm the watcher row to `review_status='pending'` instead of
+  // force-requeueing the follow-up job. Rationale (post-2026-05-06):
+  // force-requeueing causes the daemon to spawn a remediation worker
+  // IMMEDIATELY in parallel with the rereview the budget bump just
+  // unlocked — observed live during PR #48 verification, where round
+  // 2's worker pushed commits BEFORE the review #2 verdict was
+  // posted. Letting the natural cycle drive (review fires → if
+  // request-changes, reviewer creates new follow-up job → daemon
+  // claims and spawns) preserves the convergence loop's expected
+  // sequencing. The CLI keeps its old "force requeue" semantic for
+  // operators who explicitly want to skip the review step.
+  let rereviewResult;
+  try {
+    rereviewResult = requestReviewRereview({
+      rootDir,
+      repo,
+      prNumber,
+      requestedAt: ts,
+      reason: `pr-label retrigger-remediation: ${reason}`,
+    });
+  } catch (err) {
+    rereviewResult = { ok: false, error: err?.message || String(err) };
+  }
 
   const terminalAuditRow = {
     ...auditRow,
     priorMaxRounds: bumpResult.priorMaxRounds,
     newMaxRounds: bumpResult.newMaxRounds,
-    outcome: 'requeued',
+    rereviewOutcome: rereviewResult?.outcome || (rereviewResult?.ok ? 'rearmed' : 'rearm-failed'),
+    outcome: 'bumped-and-rearmed',
   };
   writeLabelConsumption(rootDir, labelEventKey, {
     schemaVersion: 1,
@@ -312,35 +329,35 @@ export async function tryRetriggerRemediationFromLabel({
     });
   } catch (err) {
     return {
-      outcome: 'requeued-audit-failed',
-      detail: `requeued OK but operator mutation audit append failed: ${err?.message || err}`,
+      outcome: 'bumped-audit-failed',
+      detail: `bumped + re-armed OK but operator mutation audit append failed: ${err?.message || err}`,
       jobPath: bumpResult.jobPath,
       newMaxRounds: bumpResult.newMaxRounds,
     };
   }
 
-  // Remove the label only AFTER the bump+requeue succeeds. If we
-  // fail to remove the label, the next tick will see the same GitHub
-  // labeled event and retry removal without bumping another round.
+  // Remove the label only AFTER the bump succeeds. If we fail to
+  // remove the label, the next tick will see the same GitHub labeled
+  // event and the consumption check above will short-circuit it.
   let labelRemoved = false;
   try {
     await removeLabelFromPR({ repo, prNumber, execFileImpl });
     labelRemoved = true;
   } catch (err) {
     return {
-      outcome: 'requeued-label-removal-failed',
-      detail: `requeued OK but label removal failed: ${err?.message || err}`,
+      outcome: 'bumped-label-removal-failed',
+      detail: `bumped + re-armed OK but label removal failed: ${err?.message || err}`,
       jobPath: bumpResult.jobPath,
       newMaxRounds: bumpResult.newMaxRounds,
     };
   }
 
   return {
-    outcome: 'requeued',
-    detail: `bumped maxRounds ${bumpResult.priorMaxRounds} → ${bumpResult.newMaxRounds}, requeued for next round`,
+    outcome: 'bumped-and-rearmed',
+    detail: `bumped maxRounds ${bumpResult.priorMaxRounds} → ${bumpResult.newMaxRounds}, re-armed watcher row for fresh review`,
     jobPath: bumpResult.jobPath,
     newMaxRounds: bumpResult.newMaxRounds,
     labelRemoved,
-    requeueOutcome: requeueResult?.outcome || 'requeued',
+    rereviewOutcome: rereviewResult?.outcome,
   };
 }

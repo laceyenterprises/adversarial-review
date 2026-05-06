@@ -97,7 +97,7 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
     now: () => '2026-05-06T18:00:00.000Z',
   });
 
-  assert.equal(result.outcome, 'requeued');
+  assert.equal(result.outcome, 'bumped-and-rearmed');
   assert.equal(result.labelRemoved, true);
   assert.equal(result.newMaxRounds, 3);
 
@@ -118,7 +118,7 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   assert.equal(auditRows.length, 1);
   assert.equal(auditRows[0].row.source, 'pr-label');
   assert.equal(auditRows[0].row.operator, 'pr-label:VirtualPaul');
-  assert.equal(auditRows[0].row.outcome, 'requeued');
+  assert.equal(auditRows[0].row.outcome, 'bumped-and-rearmed');
 
   // Job's persisted maxRounds was bumped.
   const updated = readFollowUpJob(jobPath);
@@ -142,7 +142,7 @@ test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted',
     appendAuditRow: () => {},
   });
 
-  assert.equal(result.outcome, 'requeued');
+  assert.equal(result.outcome, 'bumped-and-rearmed');
   assert.equal(ghCalls.length, 1);
 });
 
@@ -167,7 +167,7 @@ test('tryRetriggerRemediationFromLabel works on completed jobs that requested re
     appendAuditRow: () => {},
   });
 
-  assert.equal(result.outcome, 'requeued');
+  assert.equal(result.outcome, 'bumped-and-rearmed');
   assert.equal(ghCalls.length, 1);
 });
 
@@ -188,7 +188,7 @@ test('tryRetriggerRemediationFromLabel works on failed jobs', async () => {
     appendAuditRow: () => {},
   });
 
-  assert.equal(result.outcome, 'requeued');
+  assert.equal(result.outcome, 'bumped-and-rearmed');
   assert.equal(ghCalls.length, 1);
 });
 
@@ -265,7 +265,7 @@ test('tryRetriggerRemediationFromLabel surfaces label-removal failure but report
   });
 
   // The bump+requeue landed; only label removal failed.
-  assert.equal(result.outcome, 'requeued-label-removal-failed');
+  assert.equal(result.outcome, 'bumped-label-removal-failed');
   assert.match(result.detail, /label removal failed/);
 
   const afterFirst = readFollowUpJob(jobPath);
@@ -313,7 +313,7 @@ test('tryRetriggerRemediationFromLabel keeps consumed label state retryable when
     },
   });
 
-  assert.equal(first.outcome, 'requeued-audit-failed');
+  assert.equal(first.outcome, 'bumped-audit-failed');
   assert.equal(ghCalls.length, 0, 'label stays until the terminal audit row is durable');
   assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
 
@@ -353,11 +353,11 @@ test('tryRetriggerRemediationFromLabel is idempotent across re-applications', as
   };
 
   const first = await tryRetriggerRemediationFromLabel(args);
-  assert.equal(first.outcome, 'requeued');
+  assert.equal(first.outcome, 'bumped-and-rearmed');
 
   // Second call with the same `now` produces the same idempotency key.
   // bumpRemediationBudget detects the existing audit entry and returns
   // an idempotent result; we should not double-bump.
   const second = await tryRetriggerRemediationFromLabel(args);
-  assert.notEqual(second.outcome, 'requeued', 'second call must not double-bump');
+  assert.notEqual(second.outcome, 'bumped-and-rearmed', 'second call must not double-bump');
 });

@@ -974,6 +974,33 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   assert.match(body, /2\. \*\*Finding\*\*/);
 });
 
+test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed one finding.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: 'Foo\n\n## Injected heading\n\nbody',
+          finding: 'Title rendering can break out of its list item.',
+          action: 'Collapsed title whitespace before rendering.',
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'title sanitized' },
+  });
+
+  assert.match(body, /1\. \*\*Foo Injected heading body\*\*/);
+  assert.doesNotMatch(body, /\n## Injected heading/);
+  assert.doesNotMatch(body, /1\. \*\*Foo\n/);
+});
+
 test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding/reasoning', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',

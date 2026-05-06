@@ -122,7 +122,10 @@ function safeInlineCode(text) {
 }
 
 function safeEntryTitle(entry, fallback = 'Finding') {
-  const title = String(entry?.title ?? '').replace(/[`*_#[\]<>]/g, '').trim();
+  const title = String(entry?.title ?? '')
+    .replace(/[`*_#[\]<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!title) return fallback;
   return redactPublicSafeText(title, PER_ENTRY_TITLE_MAX_CHARS) || fallback;
 }

@@ -1620,6 +1620,50 @@ test('validateRemediationReply rejects a reply that fails to account for every b
   );
 });
 
+test('validateRemediationReply rejects skipped coverage for Title-led blocking findings', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two problems.',
+    '',
+    '## Blocking Issues',
+    '- Title: Retry path can double-submit',
+    '  File: src/a.mjs',
+    '  Lines: 1-5',
+    '  Problem: First problem.',
+    '- Title: Missing auth guard',
+    '  File: src/b.mjs',
+    '  Lines: 10-20',
+    '  Problem: Second problem.',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 97,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:07:00.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'completed',
+      summary: 'Fixed one of two.',
+      validation: ['npm test'],
+      addressed: [{ finding: 'First problem.', action: 'Fixed.' }],
+      pushback: [],
+      blockers: [],
+      reReview: { requested: true, reason: 'One addressed.' },
+    }, { expectedJob: job }),
+    /does not account for every blocking finding.*review has 2 blocking issue\(s\), reply records 1/
+  );
+});
+
 test('validateRemediationReply accepts a reply that accounts for every blocking finding (one per list permitted)', () => {
   const reviewBody = [
     '## Summary',

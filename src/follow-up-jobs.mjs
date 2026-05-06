@@ -509,14 +509,16 @@ function validateBlockersField(items) {
 //     `Lines:` / `Problem:` / `Why it matters:` / `Recommended fix:`
 //     fields
 //   - the literal sentinel `- None.` when the section is empty
-// Two render shapes are both compliant with that prompt:
-//   1. one top-level `- File:` bullet per finding, with the rest of
+// Three render shapes are compliant with that prompt:
+//   1. one top-level `- Title:` bullet per finding, with the rest of
 //      the fields as 2-space-indented continuation lines (no marker)
-//   2. five top-level bullets per finding (`- File:`, `- Lines:`,
+//   2. one top-level `- File:` bullet per finding, with the rest of
+//      the fields as 2-space-indented continuation lines (back-compat)
+//   3. top-level bullets per field (`- Title:`, `- File:`, `- Lines:`,
 //      `- Problem:`, `- Why it matters:`, `- Recommended fix:`)
-// Both shapes contain exactly one `- File:` field bullet per finding,
-// so the finding-boundary marker is `- File:` (with optional leading
-// whitespace), not "any column-0 dash."
+// The finding boundary is a top-level `- Title:` field when present,
+// otherwise a top-level `- File:` field for legacy reviews. A `File:`
+// continuation after `- Title:` attaches to the current finding.
 //
 // Returns `null` when the section is absent (caller opts out of
 // coverage enforcement). Returns `[]` when the section exists but is
@@ -543,10 +545,21 @@ function parseBlockingFindingsSection(reviewBody) {
   const findings = [];
   let current = null;
   for (const raw of lines) {
-    const fileMatch = raw.match(/^[ \t]*-[ \t]+File[ \t]*:[ \t]*(.*)$/i);
-    if (fileMatch) {
+    const titleMatch = raw.match(/^[ \t]*-[ \t]+Title[ \t]*:[ \t]*(.*)$/i);
+    if (titleMatch) {
       if (current) findings.push(current);
-      current = { file: fileMatch[1].trim() };
+      current = { title: titleMatch[1].trim() };
+      continue;
+    }
+    const fileMatch = raw.match(/^[ \t]*(?:-[ \t]+)?File[ \t]*:[ \t]*(.*)$/i);
+    if (fileMatch) {
+      if (current && current.file !== undefined) {
+        findings.push(current);
+        current = {};
+      } else if (!current) {
+        current = {};
+      }
+      current.file = fileMatch[1].trim();
       continue;
     }
     if (!current) continue;

@@ -206,6 +206,29 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /Handle token refresh before retrying/);
 });
 
+test('buildRemediationPrompt authorizes spec / governance doc updates when reviewer findings ask for them (post-2026-05-06)', () => {
+  // The 2026-05-06 PR #267 review surfaced a feedback pattern: when
+  // the reviewer asks for a SPEC.md / RUNBOOK update, the remediator
+  // had been treating it as out-of-scope and pushing back. The
+  // updated prompt must explicitly authorize doc edits in that case
+  // — closing the spec drift IS the remediation when the reviewer
+  // flags it.
+  const prompt = buildRemediationPrompt(makeJob(), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+  assert.match(
+    prompt,
+    /If a reviewer finding explicitly asks for a spec \/ governance \/ runbook update/,
+    'remediator prompt must explicitly authorize spec/runbook edits when the reviewer flags drift',
+  );
+  assert.match(
+    prompt,
+    /closing the drift IS the remediation/,
+    'prompt must frame doc updates as in-scope, not as a separate task',
+  );
+});
+
 test('buildRemediationPrompt includes the durable remediation reply artifact path when provided', () => {
   const hqRoot = '/tmp/hq-root';
   const { replyPath } = resolveHqReplyPath({
@@ -1526,6 +1549,10 @@ test('consumeNextFollowUpJob honors persisted maxRounds=2 on a medium-risk legac
 });
 
 test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 within budget', async () => {
+  // High-risk PRs get 3 rounds (vs medium=2, low=1). This test pins
+  // the "more rounds for higher risk" semantics: a high-risk job at
+  // currentRound=2 (i.e. about to enter round 3) MUST be allowed to
+  // claim because round 3 is within budget for high.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -1588,6 +1615,76 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 wi
   assert.equal(result.job.remediationWorker.processId, 8127);
   assert.equal(result.job.riskClass, 'high');
   assert.equal(spawnCalls.length, 1);
+});
+
+test('consumeNextFollowUpJob persists max-rounds-reached when a critical-risk job exhausts round 4', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json'),
+    `${JSON.stringify({
+      planSchemaVersion: 1,
+      tickets: [{ id: 'PMO-A2', riskClass: 'critical' }],
+    }, null, 2)}\n`,
+    'utf8'
+  );
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json.linear-mapping.json'),
+    `${JSON.stringify({ 'PMO-A2': 'LAC-208' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 8,
+    reviewerModel: 'claude',
+    linearTicketId: 'LAC-208',
+    reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:01:00.000Z',
+    critical: true,
+  });
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    remediationPlan: {
+      ...created.job.remediationPlan,
+      currentRound: 4,
+      rounds: [
+        { round: 1, state: 'completed' },
+        { round: 2, state: 'completed' },
+        { round: 3, state: 'completed' },
+        { round: 4, state: 'completed' },
+      ],
+    },
+  });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob({
+    rootDir,
+    now: () => '2026-04-21T10:31:00.000Z',
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    spawnImpl: (command, args, options) => {
+      spawnCalls.push({ command, args, options });
+      return {
+        pid: 8127,
+        unref() {},
+      };
+    },
+    promptTemplate: 'You are a remediation worker.',
+  }));
+
+  assert.equal(result.consumed, false);
+  assert.equal(result.job.status, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'max-rounds-reached');
+  const stoppedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+  const stoppedNames = readdirSync(stoppedDir).filter((name) => name.endsWith('.json'));
+  assert.equal(stoppedNames.length, 1);
+  assert.equal(result.jobPath, path.join(stoppedDir, stoppedNames[0]));
+  const stoppedJob = JSON.parse(readFileSync(path.join(stoppedDir, stoppedNames[0]), 'utf8'));
+  assert.equal(stoppedJob.status, 'stopped');
+  assert.equal(stoppedJob.remediationPlan.stop.code, 'max-rounds-reached');
+  assert.equal(spawnCalls.length, 0);
 });
 
 test('reconcileFollowUpJob stops exited workers for no-progress when the final artifact exists without re-review', async () => {

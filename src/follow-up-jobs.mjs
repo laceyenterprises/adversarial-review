@@ -12,15 +12,12 @@ import { writeFileAtomic } from './atomic-write.mjs';
 const MAX_CREATE_ATTEMPTS = 100;
 
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
-// Bounded remediation cap, risk-tiered per the pr-merge-orchestration
-// spec (`projects/pr-merge-orchestration/SPEC.md` §3.1). Was uniformly
-// 6 in PR #18's era, dropped to a uniform 3 after observing
-// diminishing returns past round 3, then dropped to a default of 1
-// (`medium` risk) under the spec. Security/high-severity work is
-// intentionally promoted to the 3-round budget when correctly marked
-// as `high` or `critical`; those changes are where extra adversarial
-// remediation has the best risk/reward. Pairs with a lenient final-round verdict threshold in
-// the reviewer prompt (the final-round review only blocks on data
+// Bounded remediation cap. This was uniformly 6 in PR #18's era,
+// dropped to a uniform 3 after observing diminishing returns past
+// round 3, then became risk-tiered. Post-2026-05-06 defaults are
+// low=1, medium=2, high=3, critical=4. Pairs with a lenient final-round
+// verdict threshold in the
+// reviewer prompt (the final-round review only blocks on data
 // corruption / secret leakage / security regression / broken
 // external contract; everything else becomes a non-blocking note for
 // human review). See prompts/reviewer-prompt-final-round-addendum.md.
@@ -30,11 +27,32 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 // only NEW jobs derive their budget from this table.
 const LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
 const DEFAULT_RISK_CLASS = 'medium';
+// Convergence loop budgets, post-2026-05-06:
+// Higher-risk PRs get more bot rounds before operator escalation,
+// because that's where you most want the bot to converge before
+// pulling the operator in. Default (medium) = 2: the initial
+// remediation triggered by the first `Request changes`, plus one
+// auto-queued follow-up if the rereview is still `Request changes`.
+// Below that, low = 1 (simpler PRs aren't worth multiple rounds).
+// Above that, high = 3 and critical = 4 (more iterations to absorb
+// tougher reviewer feedback before halting).
+//
+// Each round is one remediation + one rereview. After the cap is
+// consumed, `claimNextFollowUpJob` refuses to start another round —
+// the PR halts and waits for operator review (or the
+// `operator-approved` label). The watcher ALWAYS fires the rereview
+// after each remediation regardless of how close to the cap we are;
+// the cap lives entirely on the remediation-enqueue side.
+//
+// Operator override (`operator-approved` label) is the escape valve
+// when the operator has decided substance is fine despite a
+// `Request changes` verdict, after the durable remediation ledger is
+// otherwise merge-ready.
 const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
   low: 1,
-  medium: 1,
+  medium: 2,
   high: 3,
-  critical: 3,
+  critical: 4,
 });
 const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
@@ -1053,8 +1071,8 @@ function listFollowUpJobsInDir(rootDir, key) {
 // is therefore `max(currentRound)` across terminal jobs, NOT the sum.
 // Summing would double-count: 3 sequential remediation cycles produce
 // terminal `currentRound` stamps of 1, 2, 3 — a sum of 6 would
-// prematurely trip `max-rounds-reached` at round 2 on the new 3-round
-// default cap, and at round 3 on the legacy 6-round cap.
+// prematurely trip `max-rounds-reached` at round 2 on a 3-round cap,
+// and at round 3 on the legacy 6-round cap.
 //
 // `latestMaxRounds` is read from the most-recent job (by terminal /
 // claim / create timestamp). Jobs created with the legacy 6-round cap
@@ -1422,6 +1440,7 @@ function claimNextFollowUpJob({
   claimedAt = new Date().toISOString(),
   launcherPid = process.pid,
   markStoppedImpl = markFollowUpJobStopped,
+  returnStopped = false,
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
 
@@ -1439,8 +1458,9 @@ function claimNextFollowUpJob({
     const currentRound = Number(job?.remediationPlan?.currentRound || 0);
     const maxRounds = Number(job?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
     if (currentRound >= maxRounds) {
+      let stopped = null;
       try {
-        markStoppedImpl({
+        stopped = markStoppedImpl({
           rootDir,
           jobPath: inProgressPath,
           stoppedAt: claimedAt,
@@ -1449,6 +1469,14 @@ function claimNextFollowUpJob({
           stopReason: `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
         });
       } catch {}
+      if (returnStopped && stopped) {
+        return {
+          job: stopped.job,
+          jobPath: stopped.jobPath,
+          stopped: true,
+          reason: 'max-rounds-reached',
+        };
+      }
       continue;
     }
 

@@ -38,6 +38,11 @@ import {
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
+import {
+  RETRIGGER_REMEDIATION_LABEL,
+  tryRetriggerRemediationFromLabel,
+} from './follow-up-retrigger-label.mjs';
+import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -495,6 +500,20 @@ function evaluateRoundBudgetForReview({
   reviewAttempts = 0,
   log = console.log,
 }) {
+  // Convergence loop, post-2026-05-06:
+  // The rereview is ALWAYS allowed to fire after a remediation round —
+  // the cap on the convergence loop lives on the *remediation* side
+  // (`claimNextFollowUpJob` refuses when `currentRound >= maxRounds`),
+  // not on the *rereview* side. Rationale: the reviewer's verdict is
+  // the only signal that can replace a stale `Request changes`, so
+  // skipping the rereview after remediation strands the PR even when
+  // the remediator addressed the findings. The previous gate
+  // (round-budget-exhausted) hid converged remediations behind a
+  // halt-without-rereview state — exactly what the 2026-05-06 PR #267
+  // verification surfaced.
+  //
+  // This function is retained (and still returns the round-counters
+  // for caller observability) so the callsite shape is unchanged.
   if (reviewStatus !== 'pending' || Number(reviewAttempts) <= 0) {
     return { skip: false };
   }
@@ -508,22 +527,8 @@ function evaluateRoundBudgetForReview({
     },
   }, { rootDir });
 
-  if (ledger.completedRoundsForPR < resolution.roundBudget) {
-    return {
-      skip: false,
-      completedRoundsForPR: ledger.completedRoundsForPR,
-      roundBudget: resolution.roundBudget,
-      riskClass: resolution.riskClass,
-    };
-  }
-
-  log(
-    `[watcher] Skipping rereview for ${repo}#${prNumber}: completed remediation rounds ${ledger.completedRoundsForPR}/${resolution.roundBudget} exhaust the ${resolution.riskClass} risk-class budget. Merge-agent handoff is future Track B work.`
-  );
-
   return {
-    skip: true,
-    reason: 'round-budget-exhausted',
+    skip: false,
     completedRoundsForPR: ledger.completedRoundsForPR,
     roundBudget: resolution.roundBudget,
     riskClass: resolution.riskClass,
@@ -746,6 +751,43 @@ async function pollOnce(octokit) {
         continue;
       }
 
+      // PR-side `retrigger-remediation` label (post-2026-05-06):
+      // mobile-friendly operator surface that mirrors
+      // `npm run retrigger-remediation`. Operator applies the label
+      // on a halted PR; watcher detects it here, bumps maxRounds,
+      // requeues the latest follow-up job, and removes the label.
+      // Active jobs leave the label in place for the next tick.
+      const prLabelNames = (Array.isArray(pr.labels) ? pr.labels : [])
+        .map((l) => (typeof l === 'string' ? l : l?.name || ''))
+        .filter(Boolean);
+      if (prLabelNames.includes(RETRIGGER_REMEDIATION_LABEL)) {
+        try {
+          const labelEvent = await fetchLatestLabelEvent(
+            repoPath,
+            prNumber,
+            RETRIGGER_REMEDIATION_LABEL,
+            { execFileImpl: execFileAsync }
+          );
+          const result = await tryRetriggerRemediationFromLabel({
+            rootDir: ROOT,
+            repo: repoPath,
+            prNumber,
+            labelActor: labelEvent?.actor || 'unknown',
+            labelEvent,
+            execFileImpl: execFileAsync,
+          });
+          console.log(
+            `[watcher] retrigger-remediation label on ${repoPath}#${prNumber}: ${result.outcome}` +
+              (result.detail ? ` (${result.detail})` : '')
+          );
+        } catch (err) {
+          console.error(
+            `[watcher] retrigger-remediation label processing failed for ${repoPath}#${prNumber}:`,
+            err?.message || err
+          );
+        }
+      }
+
       if (existing?.review_status === 'posted') {
         try {
           const candidate = await fetchMergeAgentCandidate(repoPath, prNumber, {
@@ -883,7 +925,7 @@ async function pollOnce(octokit) {
       //   2. `maxRemediationRounds` must come from the job's persisted
       //      cap, not the global default. A legacy job created with the
       //      old 6-round cap must be allowed to use all 6 rounds, even
-      //      though new jobs default to 3.
+      //      after new jobs moved to risk-class-derived caps.
       //
       // `summarizePRRemediationLedger` reads currentRound from terminal
       // follow-up jobs (the only place a remediation cycle is actually

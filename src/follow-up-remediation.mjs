@@ -903,6 +903,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Before making code changes, rebase the PR branch onto the upstream \`main\` branch (\`git fetch origin && git rebase origin/main\`) so the remediation lands on top of current trunk. If the rebase produces conflicts, resolve them as part of this round — it is remediation work, not a blocker, unless resolving the conflict requires a design decision you cannot make on your own (in which case record it under \`blockers[]\`). After resolving conflicts, re-run the relevant tests so the rebase outcome is validated alongside the original fix.
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
+- If a reviewer finding explicitly asks for a spec / governance / runbook update (e.g. "update SPEC.md to match the new behavior", "the runbook should document the new failure mode"), make that update as part of THIS remediation round. Do not refuse the doc edit on the grounds that it is "out of scope" — when the reviewer flags spec drift, closing the drift IS the remediation. Treat the governing doc as a load-bearing artifact equal in weight to the code change. If the reviewer's finding is ambiguous about whether a doc update is required, prefer to update the doc; an over-conservative read leaves the spec stale and the next reviewer round will repeat the finding.
 - Run the smallest relevant validation before finishing.
 - Commit the remediation changes and push the PR branch.
 - Do not open a new PR; this job is for an existing PR follow-up.
@@ -2300,10 +2301,19 @@ async function consumeNextFollowUpJob({
   const claimed = claimNextFollowUpJob({
     rootDir,
     claimedAt: now(),
+    returnStopped: true,
   });
 
   if (!claimed) {
     return { consumed: false, reason: 'no-pending-jobs' };
+  }
+  if (claimed.stopped) {
+    return {
+      consumed: false,
+      reason: claimed.reason || 'max-rounds-reached',
+      job: claimed.job,
+      jobPath: claimed.jobPath,
+    };
   }
 
   // Lifecycle gate: stop the bounded loop on any non-open PR state. If

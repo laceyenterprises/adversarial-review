@@ -146,9 +146,9 @@ test('summarizePRRemediationLedger takes max(currentRound) across terminal jobs 
   // currentRound stamps are 1, 2, 3 — already cumulative. The PR-wide
   // ledger must take the MAX (3), not the SUM (6). Summing would
   // double-count and trip max-rounds-reached after only 2 cycles.
-  // PMO-A1 dropped the default budget from 3 to 1 (for medium
-  // riskClass); pass maxRemediationRounds=3 explicitly so this test
-  // still exercises the cumulative-round-counting invariant.
+    // Use an explicit 3-round cap so this test exercises the
+    // cumulative-round-counting invariant independently of current
+    // risk-class defaults.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   for (let i = 1; i <= 3; i += 1) {
@@ -175,13 +175,13 @@ test('summarizePRRemediationLedger takes max(currentRound) across terminal jobs 
   );
 });
 
-test('after 2 completed rounds on the 3-round default cap, the next attempt is 3 and a third worker can still claim', () => {
+test('after 2 completed rounds on a 3-round cap, the next attempt is 3 and a third worker can still claim', () => {
   // Reviewer requested regression: with the buggy sum-of-currentRound
   // accounting, after 2 cycles completedRoundsForPR was 1+2=3. The
   // next adversarial review pass would compute attempt=4, the new
   // job would be seeded with currentRound=3, and claim would
   // immediately stop it as max-rounds-reached — the third remediation
-  // worker would never run on the new 3-round default cap.
+  // worker would never run on a 3-round cap.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   // Round 1
@@ -586,7 +586,7 @@ test('claimNextFollowUpJob stops a freshly created job whose seeded currentRound
   );
 });
 
-test('legacy maxRounds=6 PRs run all six rounds even after the default drops to 3', () => {
+test('legacy maxRounds=6 PRs run all six rounds after default-cap changes', () => {
   // Migration safety: a PR whose first follow-up job was created
   // before the default-cap change must keep its persisted 6-round
   // cap. The watcher carries latestMaxRounds forward into both the

@@ -120,17 +120,17 @@ test('pickMergeAgentDispatch dispatches a Request-changes PR when the operator-a
   assert.equal(decision, 'dispatch');
 });
 
-test('pickMergeAgentDispatch dispatches when verdict is missing/unknown but operator-approved is set', () => {
-  // Same override path covers no-verdict and unknown-verdict — those
-  // skips exist for "we're not sure what the reviewer said", and an
-  // explicit operator approval is the answer.
+test('operator-approved does NOT bypass missing or unknown verdicts', () => {
+  // The override only applies to a parseable Request changes verdict.
+  // Missing or unrecognized verdicts mean the merge gate cannot tell
+  // what the reviewer said, so the system fails closed.
   assert.equal(
     pickMergeAgentDispatch(makeJob({ lastVerdict: null, labels: [{ name: 'operator-approved' }] })),
-    'dispatch'
+    'skip-no-verdict'
   );
   assert.equal(
     pickMergeAgentDispatch(makeJob({ lastVerdict: 'Needs follow-up from author', labels: [{ name: 'operator-approved' }] })),
-    'dispatch'
+    'skip-unknown-verdict'
   );
 });
 
@@ -204,17 +204,27 @@ test('operator-approved is overridden by an explicit do-not-merge / merge-agent-
   );
 });
 
-test('operator-approved bypasses skip-remediation-claimable so the operator does not have to wait out the round budget', () => {
+test('operator-approved does NOT bypass claimable remediation rounds', () => {
   // currentRound < maxRounds normally means "more remediation
-  // possible — do not merge yet". Operator override says "I'm happy
-  // as-is, don't burn another round."
+  // possible — do not merge yet". The override only applies after
+  // the durable ledger says no remediation rounds remain.
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
     remediationCurrentRound: 0,
     remediationMaxRounds: 2,
   }));
-  assert.equal(decision, 'dispatch');
+  assert.equal(decision, 'skip-remediation-claimable');
+});
+
+test('operator-approved does NOT bypass unknown remediation ledger state', () => {
+  const decision = pickMergeAgentDispatch(makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    remediationCurrentRound: 0,
+    remediationMaxRounds: 0,
+  }));
+  assert.equal(decision, 'skip-remediation-state-unknown');
 });
 
 test('operator-approved does NOT bypass active in-flight remediation (let the worker finish first)', () => {
@@ -275,7 +285,7 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.lastVerdict, 'Comment only');
   assert.equal(dispatchJob.latestFollowUpJobStatus, 'pending');
   assert.equal(dispatchJob.remediationCurrentRound, 0);
-  // Convergence-loop fixed cap (2026-05-06): all risk classes uniformly 2.
+  // Spec-less jobs fall back to medium risk, which has a 2-round cap.
   assert.equal(dispatchJob.remediationMaxRounds, 2);
 });
 

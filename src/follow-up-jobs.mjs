@@ -12,15 +12,12 @@ import { writeFileAtomic } from './atomic-write.mjs';
 const MAX_CREATE_ATTEMPTS = 100;
 
 const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
-// Bounded remediation cap, risk-tiered per the pr-merge-orchestration
-// spec (`projects/pr-merge-orchestration/SPEC.md` §3.1). Was uniformly
-// 6 in PR #18's era, dropped to a uniform 3 after observing
-// diminishing returns past round 3, then dropped to a default of 1
-// (`medium` risk) under the spec. Security/high-severity work is
-// intentionally promoted to the 3-round budget when correctly marked
-// as `high` or `critical`; those changes are where extra adversarial
-// remediation has the best risk/reward. Pairs with a lenient final-round verdict threshold in
-// the reviewer prompt (the final-round review only blocks on data
+// Bounded remediation cap. This was uniformly 6 in PR #18's era,
+// dropped to a uniform 3 after observing diminishing returns past
+// round 3, then became risk-tiered. Post-2026-05-06 defaults are
+// low=1, medium=2, high=3, critical=4. Pairs with a lenient final-round
+// verdict threshold in the
+// reviewer prompt (the final-round review only blocks on data
 // corruption / secret leakage / security regression / broken
 // external contract; everything else becomes a non-blocking note for
 // human review). See prompts/reviewer-prompt-final-round-addendum.md.
@@ -37,8 +34,8 @@ const DEFAULT_RISK_CLASS = 'medium';
 // remediation triggered by the first `Request changes`, plus one
 // auto-queued follow-up if the rereview is still `Request changes`.
 // Below that, low = 1 (simpler PRs aren't worth multiple rounds).
-// Above that, high/critical = 3 (more iterations to absorb tougher
-// reviewer feedback before halting).
+// Above that, high = 3 and critical = 4 (more iterations to absorb
+// tougher reviewer feedback before halting).
 //
 // Each round is one remediation + one rereview. After the cap is
 // consumed, `claimNextFollowUpJob` refuses to start another round —
@@ -49,9 +46,8 @@ const DEFAULT_RISK_CLASS = 'medium';
 //
 // Operator override (`operator-approved` label) is the escape valve
 // when the operator has decided substance is fine despite a
-// `Request changes` verdict — it sidesteps the round budget too, so
-// the operator doesn't have to wait out remaining bot rounds when
-// they're ready to merge as-is.
+// `Request changes` verdict, after the durable remediation ledger is
+// otherwise merge-ready.
 const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
   low: 1,
   medium: 2,

@@ -1617,6 +1617,73 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 wi
   assert.equal(spawnCalls.length, 1);
 });
 
+test('consumeNextFollowUpJob persists max-rounds-reached when a critical-risk job exhausts round 4', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json'),
+    `${JSON.stringify({
+      planSchemaVersion: 1,
+      tickets: [{ id: 'PMO-A2', riskClass: 'critical' }],
+    }, null, 2)}\n`,
+    'utf8'
+  );
+  writeFileSync(
+    path.join(projectsDir, 'PLAN-track-a.json.linear-mapping.json'),
+    `${JSON.stringify({ 'PMO-A2': 'LAC-208' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 8,
+    reviewerModel: 'claude',
+    linearTicketId: 'LAC-208',
+    reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:01:00.000Z',
+    critical: true,
+  });
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    remediationPlan: {
+      ...created.job.remediationPlan,
+      currentRound: 4,
+      rounds: [
+        { round: 1, state: 'completed' },
+        { round: 2, state: 'completed' },
+        { round: 3, state: 'completed' },
+        { round: 4, state: 'completed' },
+      ],
+    },
+  });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob({
+    rootDir,
+    now: () => '2026-04-21T10:31:00.000Z',
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    spawnImpl: (command, args, options) => {
+      spawnCalls.push({ command, args, options });
+      return {
+        pid: 8127,
+        unref() {},
+      };
+    },
+    promptTemplate: 'You are a remediation worker.',
+  }));
+
+  assert.equal(result.consumed, false);
+  const stoppedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+  const stoppedNames = readdirSync(stoppedDir).filter((name) => name.endsWith('.json'));
+  assert.equal(stoppedNames.length, 1);
+  const stoppedJob = JSON.parse(readFileSync(path.join(stoppedDir, stoppedNames[0]), 'utf8'));
+  assert.equal(stoppedJob.status, 'stopped');
+  assert.equal(stoppedJob.remediationPlan.stop.code, 'max-rounds-reached');
+  assert.equal(spawnCalls.length, 0);
+});
+
 test('reconcileFollowUpJob stops exited workers for no-progress when the final artifact exists without re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, {

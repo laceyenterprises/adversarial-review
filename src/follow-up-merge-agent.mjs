@@ -197,17 +197,18 @@ function pickMergeAgentDispatch(job, {
   const labels = new Set(normalizeLabelNames(job?.labels));
   const operatorApproved = labels.has(OPERATOR_APPROVED_LABEL);
 
-  // Hard skips that even an operator override does NOT bypass:
-  // closed/merged PRs, conflicting trees, failed/pending CI, or an
-  // explicit do-not-merge label. The operator-approved label only
-  // says "I'm OK with the review verdict", not "ignore CI/conflicts".
-  if (normalizedVerdict === null && !operatorApproved) {
+  // Hard skips that even an operator override does NOT bypass include
+  // unknown/missing verdicts, closed/merged PRs, conflicting trees,
+  // failed/pending CI, active/unclear remediation state, and explicit
+  // do-not-merge labels. The operator-approved label only says "I'm
+  // OK with the latest Request changes verdict."
+  if (normalizedVerdict === null) {
     return 'skip-no-verdict';
   }
   if (normalizedVerdict === 'request-changes' && !operatorApproved) {
     return 'skip-request-changes';
   }
-  if (normalizedVerdict === 'unknown' && !operatorApproved) {
+  if (normalizedVerdict === 'unknown') {
     return 'skip-unknown-verdict';
   }
 
@@ -245,18 +246,9 @@ function pickMergeAgentDispatch(job, {
   const remediationCurrentRound = Number(job?.remediationCurrentRound);
   const remediationMaxRounds = Number(job?.remediationMaxRounds);
   if (!Number.isFinite(remediationCurrentRound) || !Number.isFinite(remediationMaxRounds) || remediationMaxRounds <= 0) {
-    if (operatorApproved) {
-      // Operator-approved bypasses the unknown-state guard — they've
-      // told us to merge regardless of where the remediation ledger
-      // thinks we are.
-    } else {
-      return 'skip-remediation-state-unknown';
-    }
-  } else if (remediationCurrentRound < remediationMaxRounds && !operatorApproved) {
+    return 'skip-remediation-state-unknown';
+  } else if (remediationCurrentRound < remediationMaxRounds) {
     // More remediation rounds available — let the loop continue.
-    // operator-approved bypasses this check: when the operator says
-    // "merge as-is", we don't burn another round just because the
-    // budget allows it.
     return 'skip-remediation-claimable';
   }
 

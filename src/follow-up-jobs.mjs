@@ -1071,8 +1071,8 @@ function listFollowUpJobsInDir(rootDir, key) {
 // is therefore `max(currentRound)` across terminal jobs, NOT the sum.
 // Summing would double-count: 3 sequential remediation cycles produce
 // terminal `currentRound` stamps of 1, 2, 3 — a sum of 6 would
-// prematurely trip `max-rounds-reached` at round 2 on the new 3-round
-// default cap, and at round 3 on the legacy 6-round cap.
+// prematurely trip `max-rounds-reached` at round 2 on a 3-round cap,
+// and at round 3 on the legacy 6-round cap.
 //
 // `latestMaxRounds` is read from the most-recent job (by terminal /
 // claim / create timestamp). Jobs created with the legacy 6-round cap
@@ -1440,6 +1440,7 @@ function claimNextFollowUpJob({
   claimedAt = new Date().toISOString(),
   launcherPid = process.pid,
   markStoppedImpl = markFollowUpJobStopped,
+  returnStopped = false,
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
 
@@ -1457,8 +1458,9 @@ function claimNextFollowUpJob({
     const currentRound = Number(job?.remediationPlan?.currentRound || 0);
     const maxRounds = Number(job?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
     if (currentRound >= maxRounds) {
+      let stopped = null;
       try {
-        markStoppedImpl({
+        stopped = markStoppedImpl({
           rootDir,
           jobPath: inProgressPath,
           stoppedAt: claimedAt,
@@ -1467,6 +1469,14 @@ function claimNextFollowUpJob({
           stopReason: `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
         });
       } catch {}
+      if (returnStopped && stopped) {
+        return {
+          job: stopped.job,
+          jobPath: stopped.jobPath,
+          stopped: true,
+          reason: 'max-rounds-reached',
+        };
+      }
       continue;
     }
 

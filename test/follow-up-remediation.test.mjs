@@ -1675,9 +1675,12 @@ test('consumeNextFollowUpJob persists max-rounds-reached when a critical-risk jo
   }));
 
   assert.equal(result.consumed, false);
+  assert.equal(result.job.status, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'max-rounds-reached');
   const stoppedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
   const stoppedNames = readdirSync(stoppedDir).filter((name) => name.endsWith('.json'));
   assert.equal(stoppedNames.length, 1);
+  assert.equal(result.jobPath, path.join(stoppedDir, stoppedNames[0]));
   const stoppedJob = JSON.parse(readFileSync(path.join(stoppedDir, stoppedNames[0]), 'utf8'));
   assert.equal(stoppedJob.status, 'stopped');
   assert.equal(stoppedJob.remediationPlan.stop.code, 'max-rounds-reached');

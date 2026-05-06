@@ -917,7 +917,7 @@ async function pollOnce(octokit) {
       //   2. `maxRemediationRounds` must come from the job's persisted
       //      cap, not the global default. A legacy job created with the
       //      old 6-round cap must be allowed to use all 6 rounds, even
-      //      though new jobs default to 3.
+      //      after new jobs moved to risk-class-derived caps.
       //
       // `summarizePRRemediationLedger` reads currentRound from terminal
       // follow-up jobs (the only place a remediation cycle is actually

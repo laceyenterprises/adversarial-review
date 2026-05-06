@@ -2301,10 +2301,19 @@ async function consumeNextFollowUpJob({
   const claimed = claimNextFollowUpJob({
     rootDir,
     claimedAt: now(),
+    returnStopped: true,
   });
 
   if (!claimed) {
     return { consumed: false, reason: 'no-pending-jobs' };
+  }
+  if (claimed.stopped) {
+    return {
+      consumed: false,
+      reason: claimed.reason || 'max-rounds-reached',
+      job: claimed.job,
+      jobPath: claimed.jobPath,
+    };
   }
 
   // Lifecycle gate: stop the bounded loop on any non-open PR state. If

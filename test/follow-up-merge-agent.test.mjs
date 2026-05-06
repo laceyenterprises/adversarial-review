@@ -289,6 +289,31 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.remediationMaxRounds, 2);
 });
 
+test('operator-approved cannot dispatch when no follow-up job ledger exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'abc123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [{ name: 'operator-approved' }],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.lastVerdict, null);
+  assert.equal(dispatchJob.remediationMaxRounds, 0);
+  assert.equal(
+    pickMergeAgentDispatch(dispatchJob),
+    'skip-no-verdict',
+    'operator-approved must not widen the gate when there is no parseable verdict ledger'
+  );
+});
+
 test('dispatchMergeAgentForPR records only successful launches and parses trailing JSON output', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const result = await dispatchMergeAgentForPR({

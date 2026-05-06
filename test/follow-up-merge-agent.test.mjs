@@ -106,6 +106,131 @@ test('pickMergeAgentDispatch refuses dispatch while remediation is still active 
   );
 });
 
+// ── operator-approved override (post-2026-05-06) ────────────────────────
+
+test('pickMergeAgentDispatch dispatches a Request-changes PR when the operator-approved label is present', () => {
+  // Mobile-friendly operator override: the operator reviewed the
+  // request-changes findings on their phone, decided the substance is
+  // fine, and added the `operator-approved` label. The merge-agent
+  // should now fire even though the verdict is unchanged.
+  const decision = pickMergeAgentDispatch(makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+  }));
+  assert.equal(decision, 'dispatch');
+});
+
+test('pickMergeAgentDispatch dispatches when verdict is missing/unknown but operator-approved is set', () => {
+  // Same override path covers no-verdict and unknown-verdict — those
+  // skips exist for "we're not sure what the reviewer said", and an
+  // explicit operator approval is the answer.
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({ lastVerdict: null, labels: [{ name: 'operator-approved' }] })),
+    'dispatch'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({ lastVerdict: 'Needs follow-up from author', labels: [{ name: 'operator-approved' }] })),
+    'dispatch'
+  );
+});
+
+test('operator-approved does NOT bypass not-mergeable', () => {
+  // Force-merging a conflicting tree is ~always wrong. The override
+  // says "I'm fine with the verdict", not "ignore git state."
+  const decision = pickMergeAgentDispatch(makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    mergeable: 'CONFLICTING',
+  }));
+  assert.equal(decision, 'skip-not-mergeable');
+});
+
+test('operator-approved does NOT bypass failed CI checks', () => {
+  // CI is a hard gate. An operator override of the reviewer verdict
+  // does not authorize merging on top of failing tests.
+  const decision = pickMergeAgentDispatch(makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    checksConclusion: 'FAILURE',
+  }));
+  assert.equal(decision, 'skip-checks-failed');
+});
+
+test('operator-approved does NOT bypass pending CI checks', () => {
+  const decision = pickMergeAgentDispatch(makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    checksConclusion: 'PENDING',
+  }));
+  assert.equal(decision, 'skip-checks-pending');
+});
+
+test('operator-approved does NOT bypass closed/merged PRs', () => {
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      prState: 'closed',
+    })),
+    'skip-pr-not-open'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      merged: true,
+    })),
+    'skip-pr-not-open'
+  );
+});
+
+test('operator-approved is overridden by an explicit do-not-merge / merge-agent-skip label (skip wins)', () => {
+  // If both signals are present, the more conservative one wins.
+  // Could happen if operator approved, then changed their mind and
+  // added a stop signal but forgot to remove the approval.
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }, { name: 'do-not-merge' }],
+    })),
+    'skip-operator-skip'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }, { name: 'merge-agent-skip' }],
+    })),
+    'skip-operator-skip'
+  );
+});
+
+test('operator-approved bypasses skip-remediation-claimable so the operator does not have to wait out the round budget', () => {
+  // currentRound < maxRounds normally means "more remediation
+  // possible — do not merge yet". Operator override says "I'm happy
+  // as-is, don't burn another round."
+  const decision = pickMergeAgentDispatch(makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    remediationCurrentRound: 0,
+    remediationMaxRounds: 2,
+  }));
+  assert.equal(decision, 'dispatch');
+});
+
+test('operator-approved does NOT bypass active in-flight remediation (let the worker finish first)', () => {
+  // Dispatching merge-agent while a remediation worker is actively
+  // pushing would race. Make the operator wait one tick — the next
+  // watcher pass after remediation completes will fire merge-agent.
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      latestFollowUpJobStatus: 'in-progress',
+    })),
+    'skip-remediation-active'
+  );
+});
+
 test('pickMergeAgentDispatch uses durable repo/pr/sha idempotency instead of a time window', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   recordMergeAgentDispatch(rootDir, makeJob(), {
@@ -150,7 +275,8 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.lastVerdict, 'Comment only');
   assert.equal(dispatchJob.latestFollowUpJobStatus, 'pending');
   assert.equal(dispatchJob.remediationCurrentRound, 0);
-  assert.equal(dispatchJob.remediationMaxRounds, 1);
+  // Convergence-loop fixed cap (2026-05-06): all risk classes uniformly 2.
+  assert.equal(dispatchJob.remediationMaxRounds, 2);
 });
 
 test('dispatchMergeAgentForPR records only successful launches and parses trailing JSON output', async () => {

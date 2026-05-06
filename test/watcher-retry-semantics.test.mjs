@@ -343,7 +343,7 @@ test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forwar
   assert.equal(decision.roundBudget, 6, 'persisted maxRounds=6 must win over the medium-tier downgrade');
 });
 
-test('evaluateRoundBudgetForReview skips rereview spawn when completed rounds exhaust the budget', () => {
+test('evaluateRoundBudgetForReview always allows rereview after a completed remediation (post-2026-05-06 convergence loop)', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -416,11 +416,17 @@ test('evaluateRoundBudgetForReview skips rereview spawn when completed rounds ex
     log: (line) => logLines.push(line),
   });
 
-  assert.equal(decision.skip, true);
-  assert.equal(decision.reason, 'round-budget-exhausted');
-  assert.equal(decision.roundBudget, 1);
+  // Post-2026-05-06 convergence loop: rereview is ALWAYS allowed
+  // after a remediation round, regardless of how many rounds have
+  // completed. The cap on the loop now lives entirely on the
+  // remediation-enqueue side (`claimNextFollowUpJob` refuses
+  // `currentRound >= maxRounds`) — skipping the rereview after
+  // remediation strands converged work behind a stale verdict.
+  assert.equal(decision.skip, false);
+  assert.equal(decision.reason, undefined);
+  // medium risk class now uniformly caps at 2 rounds (was 1).
+  assert.equal(decision.roundBudget, 2);
   assert.equal(decision.riskClass, 'medium');
-  assert.equal(logLines.length, 1);
-  assert.match(logLines[0], /completed remediation rounds 1\/1/);
-  assert.match(logLines[0], /medium risk-class budget/);
+  // No "skipping rereview" log line should fire — the gate is gone.
+  assert.equal(logLines.length, 0);
 });

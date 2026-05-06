@@ -495,6 +495,20 @@ function evaluateRoundBudgetForReview({
   reviewAttempts = 0,
   log = console.log,
 }) {
+  // Convergence loop, post-2026-05-06:
+  // The rereview is ALWAYS allowed to fire after a remediation round —
+  // the cap on the convergence loop lives on the *remediation* side
+  // (`claimNextFollowUpJob` refuses when `currentRound >= maxRounds`),
+  // not on the *rereview* side. Rationale: the reviewer's verdict is
+  // the only signal that can replace a stale `Request changes`, so
+  // skipping the rereview after remediation strands the PR even when
+  // the remediator addressed the findings. The previous gate
+  // (round-budget-exhausted) hid converged remediations behind a
+  // halt-without-rereview state — exactly what the 2026-05-06 PR #267
+  // verification surfaced.
+  //
+  // This function is retained (and still returns the round-counters
+  // for caller observability) so the callsite shape is unchanged.
   if (reviewStatus !== 'pending' || Number(reviewAttempts) <= 0) {
     return { skip: false };
   }
@@ -508,22 +522,8 @@ function evaluateRoundBudgetForReview({
     },
   }, { rootDir });
 
-  if (ledger.completedRoundsForPR < resolution.roundBudget) {
-    return {
-      skip: false,
-      completedRoundsForPR: ledger.completedRoundsForPR,
-      roundBudget: resolution.roundBudget,
-      riskClass: resolution.riskClass,
-    };
-  }
-
-  log(
-    `[watcher] Skipping rereview for ${repo}#${prNumber}: completed remediation rounds ${ledger.completedRoundsForPR}/${resolution.roundBudget} exhaust the ${resolution.riskClass} risk-class budget. Merge-agent handoff is future Track B work.`
-  );
-
   return {
-    skip: true,
-    reason: 'round-budget-exhausted',
+    skip: false,
     completedRoundsForPR: ledger.completedRoundsForPR,
     roundBudget: resolution.roundBudget,
     riskClass: resolution.riskClass,

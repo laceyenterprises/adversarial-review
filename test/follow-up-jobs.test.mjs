@@ -182,7 +182,11 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   assert.deepEqual(persisted, job);
   assert.equal(persisted.recommendedFollowUpAction.priority, 'high');
   assert.equal(persisted.riskClass, 'high');
-  assert.equal(persisted.remediationPlan.maxRounds, 3);
+  // Convergence-loop fixed cap (2026-05-06): high/critical no longer
+  // get more rounds than medium/low. All risk classes uniformly cap
+  // at 2 — the operator-approved label is the higher-criticality
+  // escape valve.
+  assert.equal(persisted.remediationPlan.maxRounds, 2);
   assert.equal(statSync(jobPath).mode & 0o777, 0o644);
 });
 
@@ -272,7 +276,8 @@ test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
-  assert.equal(resolution.roundBudget, 1);
+  // Convergence-loop fixed cap (2026-05-06): all risk classes get 2.
+  assert.equal(resolution.roundBudget, 2);
 });
 
 test('resolveRoundBudgetForJob resolves risk class from plan mapping sidecars', () => {
@@ -290,7 +295,12 @@ test('resolveRoundBudgetForJob resolves risk class from plan mapping sidecars', 
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'critical');
-  assert.equal(resolution.roundBudget, 3);
+  // Convergence-loop fixed cap (2026-05-06): even critical now gets 2.
+  // Higher counts were previously allowed for high/critical; the fixed
+  // cap reflects the post-2026-05-06 design that operator override
+  // (`operator-approved` label) is the right escape valve, not more
+  // bot retries.
+  assert.equal(resolution.roundBudget, 2);
 });
 
 test('resolveRoundBudgetForJob falls back to medium when the linked plan file is corrupt', () => {
@@ -309,7 +319,7 @@ test('resolveRoundBudgetForJob falls back to medium when the linked plan file is
   }, { rootDir, preferPersisted: false });
 
   assert.equal(resolution.riskClass, 'medium');
-  assert.equal(resolution.roundBudget, 1);
+  assert.equal(resolution.roundBudget, 2);
 });
 
 test('summarizePRRemediationLedger excludes terminal jobs without a spawned remediation worker', () => {

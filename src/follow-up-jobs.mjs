@@ -30,11 +30,30 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 // only NEW jobs derive their budget from this table.
 const LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
 const DEFAULT_RISK_CLASS = 'medium';
+// Convergence loop budgets, post-2026-05-06:
+// All risk classes get TWO remediation rounds. Round 1 is the initial
+// auto-remediation triggered by the first `Request changes` review.
+// Round 2 is the auto-queued follow-up if the rereview after round 1
+// is still `Request changes`. After round 2, the watcher always fires
+// a final rereview but `claimNextFollowUpJob` refuses to start round
+// 3 — the PR halts and waits for operator review (or the
+// `operator-approved` label).
+//
+// Why uniform across risk classes: the previous medium=1 / high=3 /
+// critical=3 split predated the always-rereview-after-remediation
+// rule and the operator-override label. Once both of those land, the
+// "more rounds for higher risk" framing inverts: the more critical
+// the change, the more important it is that an operator's eyes hit
+// it sooner rather than letting the bot churn unchecked. Two rounds
+// is a deliberate compromise between giving the remediator one shot
+// at fixing reviewer findings and one shot at addressing review-of-
+// remediation findings.
+const CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS = 2;
 const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
-  low: 1,
-  medium: 1,
-  high: 3,
-  critical: 3,
+  low: CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS,
+  medium: CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS,
+  high: CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS,
+  critical: CONVERGENCE_LOOP_MAX_REMEDIATION_ROUNDS,
 });
 const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;

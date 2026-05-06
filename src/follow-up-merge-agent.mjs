@@ -9,6 +9,22 @@ const execFileAsync = promisify(execFile);
 
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'do-not-merge']);
+// `operator-approved` is a mobile-friendly override the operator can
+// apply from the GitHub iOS/Android app (or the web UI) to say
+// "I've read the review, the substance is fine, please dispatch the
+// merge-agent and merge this PR even though the verdict is
+// `Request changes`." This is the escape valve when the codex/claude
+// reviewer's verdict is overcautious but the review-of-review loop
+// has converged or the operator has decided manually.
+//
+// The label ONLY overrides the `request-changes` verdict skip. It
+// does NOT override:
+//   - `not-mergeable` (force-merging a conflicted PR is ~always wrong)
+//   - `checks-failed` / `checks-pending` (CI is a hard gate)
+//   - `merge-agent-skip` / `do-not-merge` (those signal "absolutely
+//     do not merge"; if both are present, skip wins)
+//   - `pr-not-open` / `merged` (trivially N/A)
+const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED', 'WAITING', 'REQUESTED']);
 
@@ -178,13 +194,20 @@ function pickMergeAgentDispatch(job, {
   recentDispatches = [],
 } = {}) {
   const normalizedVerdict = normalizeReviewVerdict(job?.lastVerdict);
-  if (normalizedVerdict === null) {
+  const labels = new Set(normalizeLabelNames(job?.labels));
+  const operatorApproved = labels.has(OPERATOR_APPROVED_LABEL);
+
+  // Hard skips that even an operator override does NOT bypass:
+  // closed/merged PRs, conflicting trees, failed/pending CI, or an
+  // explicit do-not-merge label. The operator-approved label only
+  // says "I'm OK with the review verdict", not "ignore CI/conflicts".
+  if (normalizedVerdict === null && !operatorApproved) {
     return 'skip-no-verdict';
   }
-  if (normalizedVerdict === 'request-changes') {
+  if (normalizedVerdict === 'request-changes' && !operatorApproved) {
     return 'skip-request-changes';
   }
-  if (normalizedVerdict === 'unknown') {
+  if (normalizedVerdict === 'unknown' && !operatorApproved) {
     return 'skip-unknown-verdict';
   }
 
@@ -196,8 +219,11 @@ function pickMergeAgentDispatch(job, {
     return 'skip-not-mergeable';
   }
 
-  const labels = new Set(normalizeLabelNames(job?.labels));
   if ([...OPERATOR_SKIP_LABELS].some((label) => labels.has(label))) {
+    // Skip-labels win even when operator-approved is also present.
+    // If both are applied (e.g. operator added approved earlier and
+    // then changed their mind), refuse to dispatch — the more
+    // conservative signal wins.
     return 'skip-operator-skip';
   }
 
@@ -219,9 +245,18 @@ function pickMergeAgentDispatch(job, {
   const remediationCurrentRound = Number(job?.remediationCurrentRound);
   const remediationMaxRounds = Number(job?.remediationMaxRounds);
   if (!Number.isFinite(remediationCurrentRound) || !Number.isFinite(remediationMaxRounds) || remediationMaxRounds <= 0) {
-    return 'skip-remediation-state-unknown';
-  }
-  if (remediationCurrentRound < remediationMaxRounds) {
+    if (operatorApproved) {
+      // Operator-approved bypasses the unknown-state guard — they've
+      // told us to merge regardless of where the remediation ledger
+      // thinks we are.
+    } else {
+      return 'skip-remediation-state-unknown';
+    }
+  } else if (remediationCurrentRound < remediationMaxRounds && !operatorApproved) {
+    // More remediation rounds available — let the loop continue.
+    // operator-approved bypasses this check: when the operator says
+    // "merge as-is", we don't burn another round just because the
+    // budget allows it.
     return 'skip-remediation-claimable';
   }
 

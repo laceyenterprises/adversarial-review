@@ -206,6 +206,29 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /Handle token refresh before retrying/);
 });
 
+test('buildRemediationPrompt authorizes spec / governance doc updates when reviewer findings ask for them (post-2026-05-06)', () => {
+  // The 2026-05-06 PR #267 review surfaced a feedback pattern: when
+  // the reviewer asks for a SPEC.md / RUNBOOK update, the remediator
+  // had been treating it as out-of-scope and pushing back. The
+  // updated prompt must explicitly authorize doc edits in that case
+  // — closing the spec drift IS the remediation when the reviewer
+  // flags it.
+  const prompt = buildRemediationPrompt(makeJob(), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+  assert.match(
+    prompt,
+    /If a reviewer finding explicitly asks for a spec \/ governance \/ runbook update/,
+    'remediator prompt must explicitly authorize spec/runbook edits when the reviewer flags drift',
+  );
+  assert.match(
+    prompt,
+    /closing the drift IS the remediation/,
+    'prompt must frame doc updates as in-scope, not as a separate task',
+  );
+});
+
 test('buildRemediationPrompt includes the durable remediation reply artifact path when provided', () => {
   const hqRoot = '/tmp/hq-root';
   const { replyPath } = resolveHqReplyPath({
@@ -1525,7 +1548,13 @@ test('consumeNextFollowUpJob honors persisted maxRounds=2 on a medium-risk legac
   assert.equal(spawnCalls.length, 1);
 });
 
-test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 within budget', async () => {
+test('consumeNextFollowUpJob refuses to spawn when a job has exhausted the convergence-loop round cap (post-2026-05-06)', async () => {
+  // Pre-2026-05-06: high/critical risk jobs got 3 remediation rounds.
+  // Post-2026-05-06: all risk classes uniformly cap at 2 rounds — the
+  // operator-approved label is the higher-criticality escape valve,
+  // not more bot retries. This test pins the new contract: a job
+  // with currentRound=2 MUST refuse the next spawn even on a
+  // high-risk plan.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const projectsDir = path.join(rootDir, 'projects', 'fixture-project');
   mkdirSync(projectsDir, { recursive: true });
@@ -1553,6 +1582,8 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 wi
     reviewPostedAt: '2026-04-21T08:01:00.000Z',
     critical: true,
   });
+  // Force the job into "two rounds completed" state to exhaust the
+  // post-2026-05-06 uniform cap of 2.
   writeFollowUpJob(created.jobPath, {
     ...created.job,
     remediationPlan: {
@@ -1582,12 +1613,10 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 wi
     promptTemplate: 'You are a remediation worker.',
   }));
 
-  assert.equal(result.consumed, true);
-  assert.equal(result.job.status, 'in_progress');
-  assert.equal(result.job.remediationPlan.currentRound, 3);
-  assert.equal(result.job.remediationWorker.processId, 8127);
-  assert.equal(result.job.riskClass, 'high');
-  assert.equal(spawnCalls.length, 1);
+  // The job should be marked stopped (max-rounds-reached), not consumed,
+  // and no remediation worker should have been spawned.
+  assert.equal(result.consumed, false);
+  assert.equal(spawnCalls.length, 0);
 });
 
 test('reconcileFollowUpJob stops exited workers for no-progress when the final artifact exists without re-review', async () => {

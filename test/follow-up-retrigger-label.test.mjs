@@ -63,6 +63,17 @@ function makeActiveJob(rootDir) {
   return { jobPath: created.jobPath, job: created.job };
 }
 
+function makeLabelEvent(overrides = {}) {
+  return {
+    id: 'evt-retrigger-1',
+    nodeId: 'LE_retrigger_1',
+    actor: 'VirtualPaul',
+    createdAt: '2026-05-06T17:59:00.000Z',
+    label: RETRIGGER_REMEDIATION_LABEL,
+    ...overrides,
+  };
+}
+
 test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halted-stopped:max-rounds-reached job', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { jobPath } = makeHaltedJob(rootDir, { stopCode: 'max-rounds-reached' });
@@ -75,6 +86,7 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
     labelActor: 'VirtualPaul',
+    labelEvent: makeLabelEvent(),
     execFileImpl: async (cmd, args) => {
       ghCalls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -122,6 +134,7 @@ test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
+    labelEvent: makeLabelEvent(),
     execFileImpl: async (cmd, args) => {
       ghCalls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -146,6 +159,7 @@ test('tryRetriggerRemediationFromLabel works on completed jobs that requested re
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
+    labelEvent: makeLabelEvent(),
     execFileImpl: async (cmd, args) => {
       ghCalls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -166,6 +180,7 @@ test('tryRetriggerRemediationFromLabel works on failed jobs', async () => {
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
+    labelEvent: makeLabelEvent(),
     execFileImpl: async (cmd, args) => {
       ghCalls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -186,6 +201,7 @@ test('tryRetriggerRemediationFromLabel leaves label in place when job is still a
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
+    labelEvent: makeLabelEvent(),
     execFileImpl: async (cmd, args) => {
       ghCalls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -206,6 +222,7 @@ test('tryRetriggerRemediationFromLabel returns no-job when there is no follow-up
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 999,
+    labelEvent: makeLabelEvent(),
     execFileImpl: async (cmd, args) => {
       ghCalls.push({ cmd, args });
       return { stdout: '', stderr: '' };
@@ -217,7 +234,7 @@ test('tryRetriggerRemediationFromLabel returns no-job when there is no follow-up
   assert.equal(ghCalls.length, 0);
 });
 
-test('tryRetriggerRemediationFromLabel surfaces label-removal failure but reports the requeue succeeded', async () => {
+test('tryRetriggerRemediationFromLabel refuses unattributed labels', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   makeHaltedJob(rootDir);
 
@@ -225,6 +242,22 @@ test('tryRetriggerRemediationFromLabel surfaces label-removal failure but report
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+  });
+
+  assert.equal(result.outcome, 'label-event-missing');
+});
+
+test('tryRetriggerRemediationFromLabel surfaces label-removal failure but reports the requeue succeeded', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { jobPath } = makeHaltedJob(rootDir);
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent(),
     execFileImpl: async () => {
       throw new Error('gh: simulated network failure');
     },
@@ -234,6 +267,71 @@ test('tryRetriggerRemediationFromLabel surfaces label-removal failure but report
   // The bump+requeue landed; only label removal failed.
   assert.equal(result.outcome, 'requeued-label-removal-failed');
   assert.match(result.detail, /label removal failed/);
+
+  const afterFirst = readFollowUpJob(jobPath);
+  assert.equal(afterFirst.remediationPlan.maxRounds, 3);
+
+  const haltedAgain = {
+    ...afterFirst,
+    status: 'stopped',
+    remediationPlan: {
+      ...afterFirst.remediationPlan,
+      stop: { code: 'max-rounds-reached' },
+    },
+  };
+  writeFollowUpJob(jobPath, haltedAgain);
+
+  const retry = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent(),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+  });
+
+  assert.equal(retry.outcome, 'label-already-consumed');
+  assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
+});
+
+test('tryRetriggerRemediationFromLabel keeps consumed label state retryable when terminal audit append fails', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { jobPath } = makeHaltedJob(rootDir);
+
+  const ghCalls = [];
+  const first = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-audit-failure' }),
+    execFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: () => {
+      throw new Error('disk full');
+    },
+  });
+
+  assert.equal(first.outcome, 'requeued-audit-failed');
+  assert.equal(ghCalls.length, 0, 'label stays until the terminal audit row is durable');
+  assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
+
+  const retry = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-audit-failure' }),
+    execFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: () => {},
+  });
+
+  assert.equal(retry.outcome, 'label-already-consumed');
+  assert.equal(ghCalls.length, 1);
+  assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
 });
 
 test('tryRetriggerRemediationFromLabel is idempotent across re-applications', async () => {
@@ -245,6 +343,7 @@ test('tryRetriggerRemediationFromLabel is idempotent across re-applications', as
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
+    labelEvent: makeLabelEvent(),
     execFileImpl: async (cmd, callArgs) => {
       ghCalls.push({ cmd, callArgs });
       return { stdout: '', stderr: '' };

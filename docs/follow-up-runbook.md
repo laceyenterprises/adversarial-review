@@ -64,7 +64,7 @@ New follow-up jobs derive their default remediation budget from the linked spec 
 | `high` | 3 |
 | `critical` | 4 |
 
-The old table (`low/medium=1`, `high/critical=3`) no longer applies to new jobs: medium now gets the auto-queued retry round, and critical gets one extra iteration before operator handoff. After the stored cap is consumed, the next adversarial review still runs. If a human accepts the remaining `Request changes` findings, the `operator-approved` label can dispatch merge-agent, but it bypasses only the `Request changes` merge-agent skip; missing or unknown verdicts, not-mergeable state, failed or pending CI, active or unknown remediation state, and `do-not-merge` / `merge-agent-skip` remain hard gates. PRs without a discoverable spec linkage fall back to `medium` -> `2` rounds.
+The old table (`low/medium=1`, `high/critical=3`) no longer applies to new jobs: medium now gets the auto-queued retry round, and critical gets one extra iteration before operator handoff. After the stored cap is consumed, the next adversarial review still runs. If a human accepts the remaining `Request changes` findings, the `operator-approved` label can dispatch merge-agent, but only when the latest matching GitHub `labeled` event is attributable and scoped to the current head SHA plus latest adversarial review record. It bypasses only the `Request changes` merge-agent skip; missing or unknown verdicts, not-mergeable state, failed or pending CI, active or unknown remediation state, and `do-not-merge` / `merge-agent-skip` remain hard gates. PRs without a discoverable spec linkage fall back to `medium` -> `2` rounds.
 
 Legacy in-flight jobs keep their persisted `maxRounds` cap. Do not retroactively rewrite those queue records.
 
@@ -285,7 +285,7 @@ Current worker authority and expectations:
 - do not open a new PR
 - do not merge the PR
 
-Operator-triggered retriggers use a separate durable ledger under `data/operator-mutations/` by default. The storage is repo-local so the CLIs stay writable under the normal `placey` runtime account; `--audit-root-dir` can relocate that ledger when an operator intentionally wants it elsewhere. Successful mutations are idempotent by key; previously refused attempts stay in the ledger for operator history but do not block a later retry after conditions change.
+Operator-triggered retriggers use a separate durable ledger under `data/operator-mutations/` by default. The storage is repo-local so the CLIs stay writable under the normal `placey` runtime account; `--audit-root-dir` can relocate that ledger when an operator intentionally wants it elsewhere. Successful mutations are idempotent by key; previously refused attempts stay in the ledger for operator history but do not block a later retry after conditions change. PR-label retriggers are keyed to the GitHub `labeled` event id, not just the current job, so a stale `retrigger-remediation` label can retry audit/label cleanup without authorizing another budget bump after a later halt.
 
 If launch preparation fails, the claimed job moves to:
 

@@ -30,6 +30,20 @@ function makeJob(overrides = {}) {
     latestFollowUpJobStatus: 'completed',
     remediationCurrentRound: 1,
     remediationMaxRounds: 1,
+    latestReviewKey: 'job-401:2026-05-06T18:00:00.000Z',
+    operatorApproval: null,
+    ...overrides,
+  };
+}
+
+function makeOperatorApproval(overrides = {}) {
+  return {
+    actor: 'VirtualPaul',
+    createdAt: '2026-05-06T18:05:00.000Z',
+    labelEventId: 'evt-operator-approved',
+    labelEventNodeId: 'LE_operator_approved',
+    headSha: 'abc123',
+    reviewKey: 'job-401:2026-05-06T18:00:00.000Z',
     ...overrides,
   };
 }
@@ -116,8 +130,46 @@ test('pickMergeAgentDispatch dispatches a Request-changes PR when the operator-a
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
   }));
   assert.equal(decision, 'dispatch');
+});
+
+test('operator-approved must be scoped to the current head SHA and review', () => {
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval({ headSha: 'old-sha' }),
+    })),
+    'skip-operator-approval-stale'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval({ reviewKey: 'old-review' }),
+    })),
+    'skip-operator-approval-stale'
+  );
+});
+
+test('operator-approved fails closed when no attributed labeled event was fetched', () => {
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+    })),
+    'skip-operator-approval-stale'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval({ actor: 'unknown' }),
+    })),
+    'skip-operator-approval-stale'
+  );
 });
 
 test('operator-approved does NOT bypass missing or unknown verdicts', () => {
@@ -280,6 +332,13 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
     operatorNotes: null,
     prState: 'open',
     merged: false,
+    prUpdatedAt: '2026-05-02T10:05:00.000Z',
+    operatorApprovalEvent: {
+      id: 'evt-build-approval',
+      nodeId: 'LE_build_approval',
+      actor: 'VirtualPaul',
+      createdAt: '2026-05-02T10:05:00.000Z',
+    },
   });
 
   assert.equal(dispatchJob.lastVerdict, 'Comment only');
@@ -287,6 +346,9 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.remediationCurrentRound, 0);
   // Spec-less jobs fall back to medium risk, which has a 2-round cap.
   assert.equal(dispatchJob.remediationMaxRounds, 2);
+  assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
+  assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
+  assert.equal(dispatchJob.operatorApproval.reviewKey, dispatchJob.latestReviewKey);
 });
 
 test('operator-approved cannot dispatch when no follow-up job ledger exists', () => {
@@ -329,6 +391,43 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
   assert.equal(result.dispatchId, 'disp_123');
   assert.equal(result.launchRequestId, 'lrq_456');
   assert.equal(listMergeAgentDispatches(rootDir).length, 1);
+});
+
+test('dispatchMergeAgentForPR removes operator-approved after successful dispatch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const ghCalls = [];
+  const result = await dispatchMergeAgentForPR({
+    rootDir,
+    ...makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval(),
+    }),
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"disp_approved","lrq":"lrq_approved"}\n',
+    }),
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    now: '2026-05-03T12:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.operatorApprovalLabelRemoved, true);
+  assert.deepEqual(ghCalls[0], {
+    cmd: 'gh',
+    args: [
+      'pr',
+      'edit',
+      '401',
+      '--repo',
+      'laceyenterprises/agent-os',
+      '--remove-label',
+      'operator-approved',
+    ],
+  });
+  assert.equal(listMergeAgentDispatches(rootDir)[0].operatorApproval.actor, 'VirtualPaul');
 });
 
 test('dispatchMergeAgentForPR leaves no durable dispatch record when hq launch fails', async () => {

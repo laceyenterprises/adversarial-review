@@ -42,6 +42,7 @@ import {
   RETRIGGER_REMEDIATION_LABEL,
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
+import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -761,11 +762,18 @@ async function pollOnce(octokit) {
         .filter(Boolean);
       if (prLabelNames.includes(RETRIGGER_REMEDIATION_LABEL)) {
         try {
+          const labelEvent = await fetchLatestLabelEvent(
+            repoPath,
+            prNumber,
+            RETRIGGER_REMEDIATION_LABEL,
+            { execFileImpl: execFileAsync }
+          );
           const result = await tryRetriggerRemediationFromLabel({
             rootDir: ROOT,
             repo: repoPath,
             prNumber,
-            labelActor: pr.author?.login || 'unknown',
+            labelActor: labelEvent?.actor || 'unknown',
+            labelEvent,
             execFileImpl: execFileAsync,
           });
           console.log(

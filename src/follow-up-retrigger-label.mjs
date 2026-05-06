@@ -15,6 +15,10 @@
 //
 // SPEC §5.1.3 documents this as the PR-side counterpart to the CLI.
 
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { writeFileAtomic } from './atomic-write.mjs';
 import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
 import {
   bumpRemediationBudget,
@@ -22,6 +26,9 @@ import {
 } from './operator-retrigger-helpers.mjs';
 import {
   appendOperatorMutationAuditRow,
+  digestSha256,
+  findOperatorMutationAuditRow,
+  isCommittedOperatorMutationOutcome,
   resolveIdempotencyKey,
 } from './operator-mutation-audit.mjs';
 
@@ -31,6 +38,45 @@ export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation';
 
 const DEFAULT_REASON = 'Operator applied retrigger-remediation label.';
 const DEFAULT_BUMP_BUDGET = 1;
+
+function safePathSegment(value) {
+  return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
+function labelConsumptionPath(rootDir, labelEventKey) {
+  const digest = digestSha256(labelEventKey).replace(/^sha256:/, '');
+  return join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    'label-consumptions',
+    `${safePathSegment(RETRIGGER_REMEDIATION_LABEL)}-${digest}.json`
+  );
+}
+
+function readLabelConsumption(rootDir, labelEventKey) {
+  const filePath = labelConsumptionPath(rootDir, labelEventKey);
+  if (!existsSync(filePath)) return null;
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}
+
+function writeLabelConsumption(rootDir, labelEventKey, doc) {
+  writeFileAtomic(
+    labelConsumptionPath(rootDir, labelEventKey),
+    `${JSON.stringify(doc, null, 2)}\n`,
+    { mode: 0o640 }
+  );
+}
+
+function normalizeLabelEventKey({ repo, prNumber, labelEvent }) {
+  const eventId = labelEvent?.id || labelEvent?.nodeId || null;
+  if (eventId) return `github-label-event:${eventId}`;
+  const createdAt = labelEvent?.createdAt || null;
+  if (createdAt) {
+    return `github-label:${repo}#${prNumber}:${RETRIGGER_REMEDIATION_LABEL}:${createdAt}`;
+  }
+  return null;
+}
 
 function isHaltedTerminal(job) {
   if (!job) return false;
@@ -48,10 +94,6 @@ async function removeLabelFromPR({
   prNumber,
   execFileImpl,
 }) {
-  // Best-effort removal. If gh fails (network, permissions), the
-  // label stays — the next watcher tick re-fires the
-  // bumpRemediationBudget call, which is idempotency-keyed so a
-  // duplicate trigger is a safe no-op.
   await execFileImpl('gh', [
     'pr',
     'edit',
@@ -61,6 +103,52 @@ async function removeLabelFromPR({
     '--remove-label',
     RETRIGGER_REMEDIATION_LABEL,
   ], { maxBuffer: 5 * 1024 * 1024 });
+}
+
+async function retryConsumedLabelRemoval({
+  repo,
+  prNumber,
+  execFileImpl,
+  consumption,
+  auditRootDir,
+  appendAuditRow,
+  rootDir,
+  labelEventKey,
+}) {
+  let nextConsumption = consumption;
+  if (nextConsumption?.auditStatus === 'pending') {
+    try {
+      appendAuditRow(auditRootDir, nextConsumption.auditRow);
+    } catch (err) {
+      return {
+        outcome: 'label-already-consumed-audit-failed',
+        detail: `label event was already consumed; operator mutation audit append failed: ${err?.message || err}`,
+        jobPath: nextConsumption?.jobPath || null,
+      };
+    }
+    nextConsumption = {
+      ...nextConsumption,
+      auditStatus: 'written',
+      auditedAt: nextConsumption.auditedAt || new Date().toISOString(),
+    };
+    writeLabelConsumption(rootDir, labelEventKey, nextConsumption);
+  }
+
+  try {
+    await removeLabelFromPR({ repo, prNumber, execFileImpl });
+  } catch (err) {
+    return {
+      outcome: 'label-already-consumed-removal-failed',
+      detail: `label event was already consumed; label removal failed: ${err?.message || err}`,
+      jobPath: nextConsumption?.jobPath || null,
+    };
+  }
+
+  return {
+    outcome: 'label-already-consumed',
+    detail: 'label event was already consumed; retried label removal without bumping budget',
+    jobPath: nextConsumption?.jobPath || null,
+  };
 }
 
 export async function tryRetriggerRemediationFromLabel({
@@ -74,7 +162,57 @@ export async function tryRetriggerRemediationFromLabel({
   execFileImpl,
   now = () => new Date().toISOString(),
   appendAuditRow = appendOperatorMutationAuditRow,
+  findAuditRow = findOperatorMutationAuditRow,
+  labelEvent = null,
 }) {
+  const labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
+  if (!labelEventKey) {
+    return {
+      outcome: 'label-event-missing',
+      detail: 'cannot attribute retrigger-remediation to a GitHub labeled event',
+    };
+  }
+  const labelEventActor = labelEvent?.actor || labelActor || 'unknown';
+  const fingerprintReason = `${reason}|labelEvent=${labelEventKey}`;
+  const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
+    verb: VERB,
+    repo,
+    pr: prNumber,
+    reason: fingerprintReason,
+  });
+
+  const existingConsumption = readLabelConsumption(rootDir, labelEventKey);
+  if (existingConsumption) {
+    return retryConsumedLabelRemoval({
+      repo,
+      prNumber,
+      execFileImpl,
+      consumption: existingConsumption,
+      auditRootDir,
+      appendAuditRow,
+      rootDir,
+      labelEventKey,
+    });
+  }
+
+  const existingAuditRow = findAuditRow(auditRootDir, idempotencyKey);
+  if (existingAuditRow && isCommittedOperatorMutationOutcome(existingAuditRow.outcome)) {
+    return retryConsumedLabelRemoval({
+      repo,
+      prNumber,
+      execFileImpl,
+      consumption: {
+        auditStatus: 'written',
+        auditRow: existingAuditRow,
+        jobPath: null,
+      },
+      auditRootDir,
+      appendAuditRow,
+      rootDir,
+      labelEventKey,
+    });
+  }
+
   const latest = findLatestFollowUpJob(rootDir, { repo, prNumber });
   if (!latest) {
     return { outcome: 'no-job', detail: 'no follow-up job exists for this PR yet' };
@@ -87,19 +225,6 @@ export async function tryRetriggerRemediationFromLabel({
   }
 
   const jobKey = `${latest.job.repo}#${latest.job.prNumber}@${latest.job.jobId}`;
-  // resolveIdempotencyKey takes the canonical request shape and
-  // returns a deterministic fingerprint + key. Using the latest
-  // jobId in the reason makes each halted-state generation produce
-  // a distinct fingerprint, so a second label tap on the SAME
-  // halted state is a no-op while a fresh halt (after a follow-up
-  // remediation) gets a new key and re-triggers cleanly.
-  const fingerprintReason = `${reason}|jobId=${latest.job.jobId}`;
-  const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
-    verb: VERB,
-    repo,
-    pr: prNumber,
-    reason: fingerprintReason,
-  });
   const ts = now();
   const auditRow = {
     ts,
@@ -107,10 +232,17 @@ export async function tryRetriggerRemediationFromLabel({
     repo,
     pr: prNumber,
     reason,
-    operator: `pr-label:${labelActor}`,
+    operator: `pr-label:${labelEventActor}`,
     jobKey,
     idempotencyKey,
     source: 'pr-label',
+    labelEvent: {
+      id: labelEvent?.id || null,
+      nodeId: labelEvent?.nodeId || null,
+      actor: labelEventActor,
+      createdAt: labelEvent?.createdAt || null,
+      label: RETRIGGER_REMEDIATION_LABEL,
+    },
   };
 
   const bumpResult = bumpRemediationBudget({
@@ -122,7 +254,7 @@ export async function tryRetriggerRemediationFromLabel({
       idempotencyKey,
       requestFingerprint,
       reason,
-      operator: `pr-label:${labelActor}`,
+      operator: `pr-label:${labelEventActor}`,
       ts,
       auditRow,
     },
@@ -139,26 +271,57 @@ export async function tryRetriggerRemediationFromLabel({
   const requeueResult = requeueFollowUpJobForNextRound({
     rootDir,
     jobPath: bumpResult.jobPath,
-    requeuedAt: ts,
+    requestedAt: ts,
+    requestedBy: `pr-label:${labelEventActor}`,
     reason,
   });
 
+  const terminalAuditRow = {
+    ...auditRow,
+    priorMaxRounds: bumpResult.priorMaxRounds,
+    newMaxRounds: bumpResult.newMaxRounds,
+    outcome: 'requeued',
+  };
+  writeLabelConsumption(rootDir, labelEventKey, {
+    schemaVersion: 1,
+    label: RETRIGGER_REMEDIATION_LABEL,
+    labelEventKey,
+    idempotencyKey,
+    repo,
+    prNumber: Number(prNumber),
+    jobPath: bumpResult.jobPath,
+    auditStatus: 'pending',
+    auditRow: terminalAuditRow,
+    consumedAt: ts,
+  });
+
   try {
-    appendAuditRow(auditRootDir, {
-      ...auditRow,
-      priorMaxRounds: bumpResult.priorMaxRounds,
-      newMaxRounds: bumpResult.newMaxRounds,
-      outcome: 'requeued',
+    appendAuditRow(auditRootDir, terminalAuditRow);
+    writeLabelConsumption(rootDir, labelEventKey, {
+      schemaVersion: 1,
+      label: RETRIGGER_REMEDIATION_LABEL,
+      labelEventKey,
+      idempotencyKey,
+      repo,
+      prNumber: Number(prNumber),
+      jobPath: bumpResult.jobPath,
+      auditStatus: 'written',
+      auditRow: terminalAuditRow,
+      consumedAt: ts,
+      auditedAt: ts,
     });
-  } catch {
-    // Audit failure is non-blocking; the bump+requeue already
-    // landed, the operator-mutation ledger may need manual repair.
+  } catch (err) {
+    return {
+      outcome: 'requeued-audit-failed',
+      detail: `requeued OK but operator mutation audit append failed: ${err?.message || err}`,
+      jobPath: bumpResult.jobPath,
+      newMaxRounds: bumpResult.newMaxRounds,
+    };
   }
 
   // Remove the label only AFTER the bump+requeue succeeds. If we
-  // fail to remove the label, the next tick will see the label
-  // again, hit the bumpRemediationBudget idempotency check, and
-  // safely no-op.
+  // fail to remove the label, the next tick will see the same GitHub
+  // labeled event and retry removal without bumping another round.
   let labelRemoved = false;
   try {
     await removeLabelFromPR({ repo, prNumber, execFileImpl });

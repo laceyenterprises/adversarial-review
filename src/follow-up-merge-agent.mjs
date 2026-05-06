@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
+import { fetchLatestLabelEvent } from './github-label-events.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -195,7 +196,8 @@ function pickMergeAgentDispatch(job, {
 } = {}) {
   const normalizedVerdict = normalizeReviewVerdict(job?.lastVerdict);
   const labels = new Set(normalizeLabelNames(job?.labels));
-  const operatorApproved = labels.has(OPERATOR_APPROVED_LABEL);
+  const hasOperatorApprovedLabel = labels.has(OPERATOR_APPROVED_LABEL);
+  const operatorApproved = hasOperatorApprovedLabel && isScopedOperatorApproval(job);
 
   // Hard skips that even an operator override does NOT bypass include
   // unknown/missing verdicts, closed/merged PRs, conflicting trees,
@@ -204,9 +206,6 @@ function pickMergeAgentDispatch(job, {
   // OK with the latest Request changes verdict."
   if (normalizedVerdict === null) {
     return 'skip-no-verdict';
-  }
-  if (normalizedVerdict === 'request-changes' && !operatorApproved) {
-    return 'skip-request-changes';
   }
   if (normalizedVerdict === 'unknown') {
     return 'skip-unknown-verdict';
@@ -252,6 +251,10 @@ function pickMergeAgentDispatch(job, {
     return 'skip-remediation-claimable';
   }
 
+  if (normalizedVerdict === 'request-changes' && !operatorApproved) {
+    return hasOperatorApprovedLabel ? 'skip-operator-approval-stale' : 'skip-request-changes';
+  }
+
   const alreadyDispatched = recentDispatches.some((entry) => (
     String(entry?.repo ?? '') === String(job?.repo ?? '')
     && Number(entry?.prNumber) === Number(job?.prNumber)
@@ -262,6 +265,40 @@ function pickMergeAgentDispatch(job, {
   }
 
   return 'dispatch';
+}
+
+function isScopedOperatorApproval(job) {
+  const approval = job?.operatorApproval;
+  if (!approval) return false;
+  if (!approval.actor || String(approval.actor).trim().toLowerCase() === 'unknown') return false;
+  if (!approval.labelEventId && !approval.labelEventNodeId) return false;
+  if (!approval.createdAt) return false;
+  if (String(approval.headSha || '') !== String(job?.headSha || '')) return false;
+  if (!approval.reviewKey || String(approval.reviewKey) !== String(job?.latestReviewKey || '')) return false;
+  return true;
+}
+
+function isoAtOrAfter(candidate, floor) {
+  if (!candidate || !floor) return false;
+  return String(candidate) >= String(floor);
+}
+
+function buildScopedOperatorApproval(candidate, latestJob) {
+  const event = candidate?.operatorApprovalEvent;
+  if (!event) return null;
+  const latestReviewAt = latestJob?.reviewPostedAt || latestJob?.createdAt || null;
+  const latestReviewKey = latestJob ? `${latestJob.jobId}:${latestReviewAt || 'unknown-review-time'}` : null;
+  if (!latestReviewKey || !candidate?.headSha) return null;
+  if (!isoAtOrAfter(event.createdAt, latestReviewAt)) return null;
+  if (candidate?.prUpdatedAt && !isoAtOrAfter(event.createdAt, candidate.prUpdatedAt)) return null;
+  return {
+    actor: event.actor || null,
+    createdAt: event.createdAt || null,
+    labelEventId: event.id || null,
+    labelEventNodeId: event.nodeId || null,
+    headSha: candidate.headSha,
+    reviewKey: latestReviewKey,
+  };
 }
 
 function recordMergeAgentDispatch(rootDir, job, {
@@ -280,6 +317,7 @@ function recordMergeAgentDispatch(rootDir, job, {
     branch: job.branch,
     baseBranch: job.baseBranch,
     headSha: job.headSha || null,
+    operatorApproval: job.operatorApproval || null,
     dispatchedAt,
     dispatchId,
     launchRequestId,
@@ -339,7 +377,10 @@ async function dispatchMergeAgentForPR({
   latestFollowUpJobStatus = null,
   remediationCurrentRound = null,
   remediationMaxRounds = null,
+  latestReviewKey = null,
+  operatorApproval = null,
   execFileImpl = execFileAsync,
+  ghExecFileImpl = execFileAsync,
   now = isoNow(),
   hqPath = 'hq',
 } = {}) {
@@ -359,6 +400,8 @@ async function dispatchMergeAgentForPR({
     latestFollowUpJobStatus,
     remediationCurrentRound,
     remediationMaxRounds,
+    latestReviewKey,
+    operatorApproval,
   };
   const recordedDispatch = getRecordedMergeAgentDispatch(rootDir, job);
   const decision = pickMergeAgentDispatch(job, {
@@ -390,11 +433,28 @@ async function dispatchMergeAgentForPR({
     launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
   });
 
+  let operatorApprovalLabelRemoved = false;
+  if (normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL)) {
+    try {
+      await ghExecFileImpl('gh', [
+        'pr',
+        'edit',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--remove-label',
+        OPERATOR_APPROVED_LABEL,
+      ], { maxBuffer: 5 * 1024 * 1024 });
+      operatorApprovalLabelRemoved = true;
+    } catch {}
+  }
+
   return {
     decision,
     prompt,
     dispatchId: parsed?.dispatchId || null,
     launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
+    operatorApprovalLabelRemoved,
   };
 }
 
@@ -410,11 +470,16 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       '--repo',
       repo,
       '--json',
-      'mergeable,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt',
+      'mergeable,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt',
     ],
     { maxBuffer: 5 * 1024 * 1024 }
   );
   const parsed = JSON.parse(String(stdout || '{}'));
+  const labels = parsed.labels || [];
+  const hasOperatorApproved = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
+  const operatorApprovalEvent = hasOperatorApproved
+    ? await fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
+    : null;
   return {
     repo,
     prNumber,
@@ -423,12 +488,14 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     headSha: parsed.headRefOid || null,
     mergeable: parsed.mergeable || 'UNKNOWN',
     checksConclusion: summarizeChecksConclusion(parsed.statusCheckRollup),
-    labels: parsed.labels || [],
+    labels,
     operatorNotes: extractOperatorNotes(parsed.body),
     prState: parsed.mergedAt ? 'merged' : String(parsed.state || 'unknown').trim().toLowerCase(),
     merged: Boolean(parsed.mergedAt),
     closedAt: parsed.closedAt || null,
     mergedAt: parsed.mergedAt || null,
+    prUpdatedAt: parsed.updatedAt || null,
+    operatorApprovalEvent,
   };
 }
 
@@ -437,12 +504,16 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
   });
+  const latestReviewAt = latestJob?.reviewPostedAt || latestJob?.createdAt || null;
+  const latestReviewKey = latestJob ? `${latestJob.jobId}:${latestReviewAt || 'unknown-review-time'}` : null;
   return {
     ...candidate,
     lastVerdict: extractReviewVerdict(latestJob?.reviewBody),
     latestFollowUpJobStatus: latestJob?.status || null,
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
+    latestReviewKey,
+    operatorApproval: buildScopedOperatorApproval(candidate, latestJob),
   };
 }
 
@@ -454,6 +525,7 @@ export {
   extractReviewVerdict,
   fetchMergeAgentCandidate,
   findLatestFollowUpJobForPR,
+  isScopedOperatorApproval,
   listMergeAgentDispatches,
   pickMergeAgentDispatch,
   recordMergeAgentDispatch,

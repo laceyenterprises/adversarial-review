@@ -206,7 +206,9 @@ Worker prompt env contract for the canonical reply path:
 \#\#\# 5\.1\.3 Operator retrigger workflow
 \- Manual recovery remains explicit and operator-visible; it must not require hand-editing SQLite rows or queue JSON
 \- \`retrigger-review\` is the canonical operator surface for re-arming the watcher row to \`review_status='pending'\`
-\- \`retrigger-remediation\` is the canonical operator surface for authorizing one more remediation round on the latest terminal follow-up job without directly mutating the watcher row
+\- \`retrigger-remediation\` is the canonical operator surface for authorizing one more remediation round on the latest terminal follow-up job without directly mutating the watcher row. **It has two equivalent invocations**:
+\- **CLI**: \`npm run retrigger-remediation -- --repo <slug> --pr <n> --reason "..."\` — the canonical shell-side surface, audit-rich, suitable for scripted operator workflows.
+\- **PR-side label** (post-2026-05-06): the operator applies the \`retrigger-remediation\` label to the PR (mobile-friendly via the GitHub iOS / Android app or web UI). The watcher detects the label on its next tick, calls the same \`bumpRemediationBudget\` + \`requeueFollowUpJobForNextRound\` machinery the CLI uses, appends an operator-mutation audit row with \`source: pr-label\`, and removes the label after success. If the latest follow-up job is still active (pending/in-progress), the label is left in place for the next tick. If label removal fails (gh transient), the bump's \`idempotencyKey\` ensures a re-fire on the next tick is a safe no-op.
 \- \`retrigger-remediation\` may requeue only terminal jobs in:
 \- \`failed\`
 \- \`completed\` when the prior round left \`reReview.requested = true\`

@@ -38,6 +38,10 @@ import {
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
+import {
+  RETRIGGER_REMEDIATION_LABEL,
+  tryRetriggerRemediationFromLabel,
+} from './follow-up-retrigger-label.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -744,6 +748,36 @@ async function pollOnce(octokit) {
 
       if (prState && prState !== 'open') {
         continue;
+      }
+
+      // PR-side `retrigger-remediation` label (post-2026-05-06):
+      // mobile-friendly operator surface that mirrors
+      // `npm run retrigger-remediation`. Operator applies the label
+      // on a halted PR; watcher detects it here, bumps maxRounds,
+      // requeues the latest follow-up job, and removes the label.
+      // Active jobs leave the label in place for the next tick.
+      const prLabelNames = (Array.isArray(pr.labels) ? pr.labels : [])
+        .map((l) => (typeof l === 'string' ? l : l?.name || ''))
+        .filter(Boolean);
+      if (prLabelNames.includes(RETRIGGER_REMEDIATION_LABEL)) {
+        try {
+          const result = await tryRetriggerRemediationFromLabel({
+            rootDir: ROOT,
+            repo: repoPath,
+            prNumber,
+            labelActor: pr.author?.login || 'unknown',
+            execFileImpl: execFileAsync,
+          });
+          console.log(
+            `[watcher] retrigger-remediation label on ${repoPath}#${prNumber}: ${result.outcome}` +
+              (result.detail ? ` (${result.detail})` : '')
+          );
+        } catch (err) {
+          console.error(
+            `[watcher] retrigger-remediation label processing failed for ${repoPath}#${prNumber}:`,
+            err?.message || err
+          );
+        }
       }
 
       if (existing?.review_status === 'posted') {

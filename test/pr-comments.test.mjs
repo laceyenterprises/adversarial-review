@@ -939,6 +939,7 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
       validation: ['npm test'],
       addressed: [
         {
+          title: 'Retry double-submit race',
           finding: 'Race in retry path can double-submit.',
           action: 'Added an idempotency token + dedupe check.',
           files: ['src/worker.mjs', 'test/worker.test.mjs'],
@@ -959,7 +960,7 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   // Untrusted finding/action text stays inside fences, files render
   // as inline-coded paths so a worker-supplied path can't break out
   // of the inline-code wrapper.
-  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /1\. \*\*Retry double-submit race\*\*/);
   assert.match(body, /Race in retry path can double-submit\./);
   assert.match(body, /\*\*Action\*\*/);
   assert.match(body, /Added an idempotency token \+ dedupe check\./);
@@ -985,6 +986,7 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
       addressed: [],
       pushback: [
         {
+          title: 'Over-broad dispatch refactor',
           finding: 'Reviewer asked to refactor the entire dispatch module.',
           reasoning: 'Out of scope for this PR; tracked as separate ticket LAC-99.',
         },
@@ -995,7 +997,7 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
   });
 
   assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
-  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /1\. \*\*Over-broad dispatch refactor\*\*/);
   assert.match(body, /Reviewer asked to refactor the entire dispatch module\./);
   assert.match(body, /\*\*Reasoning\*\*/);
   assert.match(body, /Out of scope for this PR; tracked as separate ticket LAC-99\./);

@@ -377,7 +377,15 @@ function validateStringArrayField(items, fieldName) {
   });
 }
 
-// addressed[] entries are { finding, action, files? } where files is
+function validateOptionalTitle(entry, fieldName) {
+  if (entry.title === undefined) return;
+  if (typeof entry.title !== 'string' || !entry.title.trim()) {
+    throw new Error(`Remediation reply ${fieldName}.title must be a non-empty string when provided`);
+  }
+  assertNoPlaceholderText(entry.title, `${fieldName}.title`);
+}
+
+// addressed[] entries are { title?, finding, action, files? } where files is
 // an optional array of strings (the worker can list paths it touched
 // while addressing the finding). Per-entry validation rejects a
 // missing or empty finding/action so the public PR comment never
@@ -396,6 +404,7 @@ function validateAddressedField(items) {
     if (typeof entry.action !== 'string' || !entry.action.trim()) {
       throw new Error(`Remediation reply addressed[${index}].action must be a non-empty string`);
     }
+    validateOptionalTitle(entry, `addressed[${index}]`);
     assertNoPlaceholderText(entry.finding, `addressed[${index}].finding`);
     assertNoPlaceholderText(entry.action, `addressed[${index}].action`);
     if (entry.files !== undefined) {
@@ -412,10 +421,10 @@ function validateAddressedField(items) {
   });
 }
 
-// pushback[] entries are { finding, reasoning } — both required and
-// non-empty. This is the slot for "I read the finding, decided not to
-// change the code, here's why." Distinct from blockers (hard exit) and
-// addressed (fix applied).
+// pushback[] entries are { title?, finding, reasoning }. Finding and
+// reasoning are required and non-empty. This is the slot for "I read
+// the finding, decided not to change the code, here's why." Distinct
+// from blockers (hard exit) and addressed (fix applied).
 function validatePushbackField(items) {
   if (!Array.isArray(items)) {
     throw new Error('Remediation reply pushback must be an array');
@@ -430,13 +439,14 @@ function validatePushbackField(items) {
     if (typeof entry.reasoning !== 'string' || !entry.reasoning.trim()) {
       throw new Error(`Remediation reply pushback[${index}].reasoning must be a non-empty string`);
     }
+    validateOptionalTitle(entry, `pushback[${index}]`);
     assertNoPlaceholderText(entry.finding, `pushback[${index}].finding`);
     assertNoPlaceholderText(entry.reasoning, `pushback[${index}].reasoning`);
   });
 }
 
 // blockers[] entries are EITHER:
-//   - structured object: { finding, reasoning?, needsHumanInput? }
+//   - structured object: { title?, finding, reasoning?, needsHumanInput? }
 //     `finding` always required, plus at least one of `reasoning` or
 //     `needsHumanInput` (both can be present). The structured form
 //     ties each blocker back to the originating review finding so the
@@ -469,6 +479,7 @@ function validateBlockersField(items) {
     if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
       throw new Error(`Remediation reply blockers[${index}].finding must be a non-empty string`);
     }
+    validateOptionalTitle(entry, `blockers[${index}]`);
     const hasReasoning = typeof entry.reasoning === 'string' && entry.reasoning.trim();
     const hasNeedsHumanInput = typeof entry.needsHumanInput === 'string' && entry.needsHumanInput.trim();
     if (!hasReasoning && !hasNeedsHumanInput) {
@@ -494,8 +505,9 @@ function validateBlockersField(items) {
 
 // Parse the `## Blocking Issues` section into structured findings. The
 // reviewer prompt (`prompts/reviewer-prompt.md`) requires:
-//   - one bullet item per finding, each with `File:` / `Lines:` /
-//     `Problem:` / `Why it matters:` / `Recommended fix:` fields
+//   - one bullet item per finding, each with `Title:` / `File:` /
+//     `Lines:` / `Problem:` / `Why it matters:` / `Recommended fix:`
+//     fields
 //   - the literal sentinel `- None.` when the section is empty
 // Two render shapes are both compliant with that prompt:
 //   1. one top-level `- File:` bullet per finding, with the rest of

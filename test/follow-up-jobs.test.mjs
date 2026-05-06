@@ -975,6 +975,7 @@ test('buildRemediationReply carries addressed[] and pushback[] entries through t
     validation: ['npm test'],
     addressed: [
       {
+        title: 'Retry double-submit race',
         finding: 'Race in retry path can double-submit.',
         action: 'Added an idempotency token + dedupe check.',
         files: ['src/worker.mjs'],
@@ -996,11 +997,46 @@ test('buildRemediationReply carries addressed[] and pushback[] entries through t
   });
 
   assert.equal(reply.addressed.length, 2);
+  assert.equal(reply.addressed[0].title, 'Retry double-submit race');
   assert.equal(reply.addressed[0].finding, 'Race in retry path can double-submit.');
   assert.deepEqual(reply.addressed[0].files, ['src/worker.mjs']);
   assert.equal(reply.pushback.length, 1);
   assert.equal(reply.pushback[0].reasoning, 'Out of scope for this PR; tracked as separate ticket LAC-99.');
   assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply validates optional per-finding titles', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 82,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T17:02:00.000Z',
+    critical: false,
+  });
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed it.',
+    validation: ['npm test'],
+    addressed: [{ title: 'Good title', finding: 'Issue.', action: 'Fixed.' }],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  assert.deepEqual(validateRemediationReply(baseReply, { expectedJob: job }), baseReply);
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, addressed: [{ title: '', finding: 'Issue.', action: 'Fixed.' }] },
+      { expectedJob: job },
+    ),
+    /addressed\[0\]\.title must be a non-empty string/,
+  );
 });
 
 test('validateRemediationReply tolerates a reply that omits addressed/pushback entirely (legacy compat)', () => {

@@ -1107,6 +1107,99 @@ test('validateRemediationReply requires matching titles for Title-led blocking f
   );
 });
 
+test('validateRemediationReply enforces title coverage for mixed-title blocking findings', () => {
+  const reviewBody = [
+    '## Summary',
+    'One titled blocker and one legacy untitled blocker.',
+    '',
+    '## Blocking Issues',
+    '- Title: Retry path can double-submit',
+    '  File: src/a.mjs',
+    '  Problem: First problem.',
+    '- File: src/b.mjs',
+    '  Problem: Second problem.',
+  ].join('\n');
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 84,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T17:04:00.000Z',
+    critical: false,
+  });
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed it.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'Retry path can double-submit', finding: 'First problem.', action: 'Fixed.' },
+      { finding: 'Second problem.', action: 'Fixed.' },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  assert.deepEqual(validateRemediationReply(baseReply, { expectedJob: job }), baseReply);
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [
+          { finding: 'First problem.', action: 'Fixed.' },
+          { finding: 'Second problem.', action: 'Fixed.' },
+        ],
+      },
+      { expectedJob: job },
+    ),
+    /titles must match.*Missing: Retry path can double-submit/,
+  );
+});
+
+test('validateRemediationReply explains string blockers when titled reviews require structured titles', () => {
+  const reviewBody = [
+    '## Summary',
+    'One titled blocker.',
+    '',
+    '## Blocking Issues',
+    '- Title: Destructive migration',
+    '  File: src/a.mjs',
+    '  Problem: Needs DBA input.',
+  ].join('\n');
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 85,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T17:05:00.000Z',
+    critical: false,
+  });
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'blocked',
+    summary: 'Blocked on DBA input.',
+    validation: ['npm test'],
+    addressed: [],
+    pushback: [],
+    blockers: ['DBA input required.'],
+    reReview: { requested: false, reason: null },
+  };
+
+  assert.throws(
+    () => validateRemediationReply(reply, { expectedJob: job }),
+    /blockers\[0\] is a string.*must be objects with a non-empty title/,
+  );
+});
+
 test('validateRemediationReply rejects noisy public per-finding fields', () => {
   const job = buildFollowUpJob({
     repo: 'laceyenterprises/clio',

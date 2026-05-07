@@ -20,6 +20,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from './follow-up-jobs.mjs';
 import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -98,12 +99,11 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
 // caps apply independently to finding/action/reasoning so one long
 // action does not crowd out the others.
 const ADDRESSED_FILES_MAX_CHARS = 600;
-const PER_ENTRY_RENDER_MAX_CHARS = 500;
+const PER_ENTRY_RENDER_MAX_CHARS = PUBLIC_REPLY_MAX_CHARS;
 const PER_ENTRY_TITLE_MAX_CHARS = 120;
 const ANSI_ESCAPE_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const TITLE_CONTROL_CHARS_PATTERN = /[\u0000-\u001F\u007F\u2028\u2029]/g;
 const TITLE_FORMAT_CHARS_PATTERN = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
-const MACHINE_DUMP_PATTERN = /(^\s*(?:\{|\[)\s*["{\[]|```|<tool_(?:call|result)\b|^\s*(?:stdout|stderr)\s*:|^diff --git\b|^@@\s|Original token count:|Traceback \(most recent call last\))/im;
 
 // Indent every line of `text` with `prefix`. Used to align fenced code
 // blocks under markdown list items so GFM renders them as part of the
@@ -144,9 +144,15 @@ function safeEntryTitle(entry, fallback = 'Finding') {
 function sanitizePerFindingText(text) {
   const raw = String(text ?? '').trim();
   if (!raw) return '';
-  if (MACHINE_DUMP_PATTERN.test(raw)) return '';
-  const collapsed = raw.replace(/\s+/g, ' ');
-  return redactPublicSafeText(collapsed, PER_ENTRY_RENDER_MAX_CHARS).trim();
+  if (detectPublicReplyNoiseSignal(raw)) return '';
+  const normalized = raw
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t\f\v]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return redactPublicSafeText(normalized, PER_ENTRY_RENDER_MAX_CHARS).trim();
 }
 
 // Render a fenced text block at `indentLevel` spaces of indent so the
@@ -185,10 +191,10 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
   const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
-      const title = safeEntryTitle(entry, '');
+      const title = safeEntryTitle(entry);
       const finding = sanitizePerFindingText(entry.finding);
       const action = sanitizePerFindingText(entry.action);
-      if (!title || !finding || !action) return null;
+      if (!finding || !action) return null;
       const files = Array.isArray(entry.files)
         ? entry.files
             .filter((f) => typeof f === 'string' && f.trim())
@@ -241,10 +247,10 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
   const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
-      const title = safeEntryTitle(entry, '');
+      const title = safeEntryTitle(entry);
       const finding = sanitizePerFindingText(entry.finding);
       const reasoning = sanitizePerFindingText(entry.reasoning);
-      if (!title || !finding || !reasoning) return null;
+      if (!finding || !reasoning) return null;
       return {
         title,
         finding,

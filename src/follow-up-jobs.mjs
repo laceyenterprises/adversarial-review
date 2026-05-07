@@ -57,6 +57,7 @@ const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
 const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
 const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
+const PUBLIC_REPLY_MAX_CHARS = 1200;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],
@@ -385,9 +386,32 @@ function validateOptionalTitle(entry, fieldName) {
   assertNoPlaceholderText(entry.title, `${fieldName}.title`);
 }
 
-const PUBLIC_REPLY_NOISE_PATTERN = /(^\s*(?:\{|\[)\s*["{\[]|```|<tool_(?:call|result)\b|^\s*(?:stdout|stderr)\s*:|^diff --git\b|^@@\s|Original token count:|Traceback \(most recent call last\))/im;
+const PUBLIC_REPLY_NOISE_SIGNALS = Object.freeze([
+  { label: 'JSON-like dump at start of field', pattern: /^\s*(?:\{|\[)\s*["{\[]/ },
+  { label: 'fenced code block', pattern: /```/ },
+  { label: 'tool call/result markup', pattern: /<tool_(?:call|result)\b/i },
+  { label: 'git diff header', pattern: /^diff --git\b/m },
+  { label: 'diff hunk header', pattern: /^@@\s/m },
+  { label: 'token-count transcript header', pattern: /Original token count:/ },
+  { label: 'python traceback header', pattern: /^Traceback \(most recent call last\):/m },
+]);
 const PUBLIC_REPLY_MAX_LINES = 8;
-const PUBLIC_REPLY_MAX_CHARS = 1200;
+
+function detectPublicReplyNoiseSignal(value) {
+  const text = String(value ?? '');
+  for (const signal of PUBLIC_REPLY_NOISE_SIGNALS) {
+    if (signal.pattern.test(text)) return signal.label;
+  }
+
+  // A single prose line that begins with "stdout:" or "stderr:" is
+  // ambiguous enough to allow; paired prefixes are a much stronger
+  // signal that the worker pasted command output.
+  if (/^\s*stdout\s*:/im.test(text) && /^\s*stderr\s*:/im.test(text)) {
+    return 'paired stdout/stderr log prefixes';
+  }
+
+  return null;
+}
 
 function assertPublicReplyTextQuality(value, locationLabel) {
   if (typeof value !== 'string') return;
@@ -406,9 +430,11 @@ function assertPublicReplyTextQuality(value, locationLabel) {
         `summarize it instead of dumping raw output`
     );
   }
-  if (PUBLIC_REPLY_NOISE_PATTERN.test(text)) {
+  const noiseSignal = detectPublicReplyNoiseSignal(text);
+  if (noiseSignal) {
     throw new Error(
-      `Remediation reply ${locationLabel} looks like raw logs, JSON, diff, or tool output; ` +
+      `Remediation reply ${locationLabel} looks like raw logs, JSON, diff, or tool output ` +
+        `(${noiseSignal}); ` +
         `write a human summary instead`
     );
   }
@@ -687,42 +713,57 @@ function validateBlockingCoverage(reply, expectedJob) {
     );
   }
 
-  const expectedTitles = findings.map((finding) => normalizeCoverageTitle(finding.title));
-  if (!expectedTitles.every(Boolean)) return;
-
   const actualEntries = [
     ...addressed.map((entry, index) => ({ field: 'addressed', index, entry })),
     ...pushback.map((entry, index) => ({ field: 'pushback', index, entry })),
     ...blockers.map((entry, index) => ({ field: 'blockers', index, entry })),
   ];
-  const untitled = actualEntries.find(({ entry }) => (
-    !entry || typeof entry !== 'object' || Array.isArray(entry) || !normalizeCoverageTitle(entry.title)
-  ));
-  if (untitled) {
-    throw new Error(
-      `Remediation reply ${untitled.field}[${untitled.index}].title is required because ` +
-        `the adversarial review supplied Title fields for its blocking findings`
-    );
-  }
+
+  const expectedTitles = findings.map((finding) => normalizeCoverageTitle(finding.title));
+  const titledExpected = expectedTitles.filter(Boolean);
+  if (!titledExpected.length) return;
 
   const expectedCounts = new Map();
-  for (const title of expectedTitles) {
+  for (const title of titledExpected) {
     expectedCounts.set(title, (expectedCounts.get(title) || 0) + 1);
   }
   const actualCounts = new Map();
   for (const { entry } of actualEntries) {
     const title = normalizeCoverageTitle(entry.title);
+    if (!title) continue;
     actualCounts.set(title, (actualCounts.get(title) || 0) + 1);
   }
+
+  if (titledExpected.length === findings.length) {
+    const untitled = actualEntries.find(({ entry }) => (
+      !entry || typeof entry !== 'object' || Array.isArray(entry) || !normalizeCoverageTitle(entry.title)
+    ));
+    if (untitled) {
+      if (typeof untitled.entry === 'string') {
+        throw new Error(
+          `Remediation reply blockers[${untitled.index}] is a string; when the adversarial review ` +
+            `supplies Title fields for every blocking finding, blockers entries must be objects ` +
+            `with a non-empty title`
+        );
+      }
+      throw new Error(
+        `Remediation reply ${untitled.field}[${untitled.index}].title is required because ` +
+          `the adversarial review supplied Title fields for its blocking findings`
+      );
+    }
+  }
+
   const missing = [];
   const extra = [];
   for (const [title, count] of expectedCounts.entries()) {
     const actual = actualCounts.get(title) || 0;
     if (actual < count) missing.push(title);
   }
-  for (const [title, count] of actualCounts.entries()) {
-    const expectedCount = expectedCounts.get(title) || 0;
-    if (count > expectedCount) extra.push(title);
+  if (titledExpected.length === findings.length) {
+    for (const [title, count] of actualCounts.entries()) {
+      const expectedCount = expectedCounts.get(title) || 0;
+      if (count > expectedCount) extra.push(title);
+    }
   }
   if (missing.length || extra.length) {
     throw new Error(
@@ -2004,6 +2045,7 @@ export {
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS,
+  PUBLIC_REPLY_MAX_CHARS,
   ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
@@ -2013,6 +2055,7 @@ export {
   buildRemediationReplyArtifact,
   claimNextFollowUpJob,
   createFollowUpJob,
+  detectPublicReplyNoiseSignal,
   ensureFollowUpJobDirs,
   extractReviewSummary,
   getCurrentRound,

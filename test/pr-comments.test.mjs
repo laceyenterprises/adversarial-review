@@ -1002,7 +1002,7 @@ test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', 
   assert.doesNotMatch(body, /1\. \*\*Foo\n/);
 });
 
-test('buildRemediationOutcomeCommentBody strips unsafe title controls and omits empty-title entries', () => {
+test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls back for empty titles', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'completed',
@@ -1030,9 +1030,59 @@ test('buildRemediationOutcomeCommentBody strips unsafe title controls and omits 
   });
 
   assert.match(body, /1\. \*\*Retry double-submit\*\*/);
-  assert.doesNotMatch(body, /Invisible-only titles/);
-  assert.doesNotMatch(body, /2\. \*\*/);
+  assert.match(body, /2\. \*\*Finding\*\*/);
+  assert.match(body, /Invisible-only titles should use the fallback heading\./);
   assert.doesNotMatch(body, /[\u001B\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u);
+});
+
+test('buildRemediationOutcomeCommentBody renders validator-accepted untitled per-finding entries', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Handled an untitled review.',
+      validation: ['npm test'],
+      addressed: [{ finding: 'Untitled addressed finding.', action: 'Applied the fix.' }],
+      pushback: [{ finding: 'Untitled pushback finding.', reasoning: 'Outside this PR.' }],
+      blockers: [{ finding: 'Untitled blocker finding.', reasoning: 'Needs operator input.' }],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'untitled entries render' },
+  });
+
+  assert.match(body, /\*\*Addressed findings\*\*/);
+  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
+  assert.match(body, /\*\*Blockers\*\*/);
+  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /Untitled addressed finding\./);
+  assert.match(body, /Untitled pushback finding\./);
+  assert.match(body, /Untitled blocker finding\./);
+});
+
+test('buildRemediationOutcomeCommentBody renders the full validator-accepted per-entry text cap', () => {
+  const longAction = `Expanded reasoning ${'x'.repeat(850)} still visible at the end.`;
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed one verbose finding.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          finding: 'The renderer used a smaller cap than validation.',
+          action: longAction,
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'caps aligned' },
+  });
+
+  assert.ok(body.includes(longAction), 'renderer should not truncate text that validation accepts');
 });
 
 test('buildRemediationOutcomeCommentBody omits malformed per-finding sections instead of posting empty buckets', () => {

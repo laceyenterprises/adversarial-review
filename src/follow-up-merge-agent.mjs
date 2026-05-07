@@ -347,6 +347,8 @@ function isScopedMergeAgentRequest(job) {
   if (!request.labelEventId && !request.labelEventNodeId) return false;
   if (!request.createdAt) return false;
   if (String(request.headSha || '') !== String(job?.headSha || '')) return false;
+  const prUpdatedAt = request.prUpdatedAt || job?.prUpdatedAt || null;
+  if (prUpdatedAt && !isoAtOrAfter(request.createdAt, prUpdatedAt)) return false;
   return true;
 }
 
@@ -384,6 +386,7 @@ function buildScopedMergeAgentRequest(candidate) {
     labelEventId: event.id || null,
     labelEventNodeId: event.nodeId || null,
     headSha: candidate.headSha,
+    prUpdatedAt: candidate.prUpdatedAt || null,
   };
 }
 
@@ -392,6 +395,8 @@ function recordMergeAgentDispatch(rootDir, job, {
   prompt,
   dispatchId = null,
   launchRequestId = null,
+  trigger = null,
+  labelRemoval = null,
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -405,7 +410,8 @@ function recordMergeAgentDispatch(rootDir, job, {
     headSha: job.headSha || null,
     operatorApproval: job.operatorApproval || null,
     mergeAgentRequest: job.mergeAgentRequest || null,
-    trigger: job.mergeAgentTrigger || null,
+    trigger,
+    labelRemoval,
     dispatchedAt,
     dispatchId,
     launchRequestId,
@@ -413,6 +419,99 @@ function recordMergeAgentDispatch(rootDir, job, {
   };
   writeFileSync(filePath, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
   return filePath;
+}
+
+function updateMergeAgentDispatchLabelRemoval(rootDir, job, {
+  recordedDispatch = null,
+  trigger,
+  attemptedAt,
+  removed,
+  error = null,
+} = {}) {
+  const filePath = mergeAgentDispatchFilePath(rootDir, job);
+  const existing = recordedDispatch || getRecordedMergeAgentDispatch(rootDir, job);
+  if (!existing) return null;
+
+  const previousAttempts = Array.isArray(existing.labelRemoval?.attempts)
+    ? existing.labelRemoval.attempts
+    : [];
+  const labelRemoval = {
+    label: trigger,
+    removed: Boolean(removed),
+    lastAttemptAt: attemptedAt,
+    lastError: removed ? null : error,
+    attempts: [
+      ...previousAttempts,
+      {
+        attemptedAt,
+        label: trigger,
+        removed: Boolean(removed),
+        error: removed ? null : error,
+      },
+    ],
+  };
+
+  const next = {
+    ...existing,
+    trigger: existing.trigger || trigger || null,
+    labelRemoval,
+  };
+  writeFileSync(filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  return filePath;
+}
+
+async function removeConsumedTriggerLabel({
+  repo,
+  prNumber,
+  labels,
+  trigger,
+  ghExecFileImpl,
+  now,
+} = {}) {
+  const normalizedLabels = normalizeLabelNames(labels);
+  const result = {
+    attempted: false,
+    operatorApprovalLabelRemoved: false,
+    mergeAgentRequestedLabelRemoved: false,
+    labelRemovalErrors: [],
+  };
+
+  if (!trigger || !normalizedLabels.includes(trigger)) {
+    return result;
+  }
+
+  result.attempted = true;
+  try {
+    await ghExecFileImpl('gh', [
+      'pr',
+      'edit',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--remove-label',
+      trigger,
+    ], { maxBuffer: 5 * 1024 * 1024 });
+    if (trigger === OPERATOR_APPROVED_LABEL) {
+      result.operatorApprovalLabelRemoved = true;
+    }
+    if (trigger === MERGE_AGENT_REQUESTED_LABEL) {
+      result.mergeAgentRequestedLabelRemoved = true;
+    }
+  } catch (err) {
+    const detail = err?.message || String(err);
+    result.labelRemovalErrors.push({ label: trigger, error: detail });
+    console.warn(
+      `[follow-up-merge-agent] failed to remove consumed label '${trigger}' from ${repo}#${prNumber}: ${detail}`
+    );
+  }
+
+  result.labelRemovalAttempt = {
+    trigger,
+    attemptedAt: now,
+    removed: result.labelRemovalErrors.length === 0,
+    error: result.labelRemovalErrors[0]?.error || null,
+  };
+  return result;
 }
 
 function writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt = isoNow() } = {}) {
@@ -466,6 +565,7 @@ async function dispatchMergeAgentForPR({
   remediationCurrentRound = null,
   remediationMaxRounds = null,
   latestReviewKey = null,
+  prUpdatedAt = null,
   operatorApproval = null,
   mergeAgentRequest = null,
   execFileImpl = execFileAsync,
@@ -492,6 +592,7 @@ async function dispatchMergeAgentForPR({
     remediationCurrentRound,
     remediationMaxRounds,
     latestReviewKey,
+    prUpdatedAt,
     operatorApproval,
     mergeAgentRequest,
   };
@@ -501,9 +602,35 @@ async function dispatchMergeAgentForPR({
   });
   const { decision, trigger } = dispatchDecision;
   if (decision !== 'dispatch') {
+    if (decision === 'skip-already-dispatched' && recordedDispatch?.trigger) {
+      const labelRemoval = await removeConsumedTriggerLabel({
+        repo,
+        prNumber,
+        labels,
+        trigger: recordedDispatch.trigger,
+        ghExecFileImpl,
+        now,
+      });
+      if (labelRemoval.attempted) {
+        updateMergeAgentDispatchLabelRemoval(rootDir, job, {
+          recordedDispatch,
+          trigger: recordedDispatch.trigger,
+          attemptedAt: labelRemoval.labelRemovalAttempt.attemptedAt,
+          removed: labelRemoval.labelRemovalAttempt.removed,
+          error: labelRemoval.labelRemovalAttempt.error,
+        });
+      }
+      return {
+        decision,
+        trigger: recordedDispatch.trigger,
+        labelRemovalRetried: labelRemoval.attempted,
+        operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
+        mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
+        labelRemovalErrors: labelRemoval.labelRemovalErrors,
+      };
+    }
     return { decision };
   }
-  job.mergeAgentTrigger = trigger;
 
   const prompt = buildMergeAgentPrompt(job);
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
@@ -527,39 +654,24 @@ async function dispatchMergeAgentForPR({
     prompt,
     dispatchId: parsed?.dispatchId || null,
     launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
+    trigger,
   });
 
-  const normalizedLabels = normalizeLabelNames(labels);
-  let operatorApprovalLabelRemoved = false;
-  let mergeAgentRequestedLabelRemoved = false;
-  const labelRemovalErrors = [];
-  for (const label of [trigger].filter(Boolean)) {
-    if (!normalizedLabels.includes(label)) {
-      continue;
-    }
-    try {
-      await ghExecFileImpl('gh', [
-        'pr',
-        'edit',
-        String(prNumber),
-        '--repo',
-        repo,
-        '--remove-label',
-        label,
-      ], { maxBuffer: 5 * 1024 * 1024 });
-      if (label === OPERATOR_APPROVED_LABEL) {
-        operatorApprovalLabelRemoved = true;
-      }
-      if (label === MERGE_AGENT_REQUESTED_LABEL) {
-        mergeAgentRequestedLabelRemoved = true;
-      }
-    } catch (err) {
-      const detail = err?.message || String(err);
-      labelRemovalErrors.push({ label, error: detail });
-      console.warn(
-        `[follow-up-merge-agent] failed to remove consumed label '${label}' from ${repo}#${prNumber}: ${detail}`
-      );
-    }
+  const labelRemoval = await removeConsumedTriggerLabel({
+    repo,
+    prNumber,
+    labels,
+    trigger,
+    ghExecFileImpl,
+    now,
+  });
+  if (labelRemoval.attempted) {
+    updateMergeAgentDispatchLabelRemoval(rootDir, job, {
+      trigger,
+      attemptedAt: labelRemoval.labelRemovalAttempt.attemptedAt,
+      removed: labelRemoval.labelRemovalAttempt.removed,
+      error: labelRemoval.labelRemovalAttempt.error,
+    });
   }
 
   return {
@@ -568,9 +680,9 @@ async function dispatchMergeAgentForPR({
     prompt,
     dispatchId: parsed?.dispatchId || null,
     launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
-    operatorApprovalLabelRemoved,
-    mergeAgentRequestedLabelRemoved,
-    labelRemovalErrors,
+    operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
+    mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
+    labelRemovalErrors: labelRemoval.labelRemovalErrors,
   };
 }
 

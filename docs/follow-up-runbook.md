@@ -72,9 +72,9 @@ The old table (`low/medium=1`, `high/critical=3`) no longer applies to new jobs:
 
 `merge-agent-requested` is the stronger stuck-branch request. It is accepted only from an attributable GitHub `labeled` event scoped to the current head SHA. When scoped, it can bypass missing or unknown verdicts, mergeability, failed or pending checks, and remediation-round gates so merge-agent can clean the branch. It still does not bypass closed/merged PRs, active remediation, explicit skip labels, or duplicate-dispatch protection. Stale or unattributed requests return `skip-merge-agent-requested-stale`.
 
-`merge-agent-skip`, `merge-agent-stuck`, and `do-not-merge` are explicit skip labels. They win over both override labels and surface as `skip-operator-skip`.
+`merge-agent-skip`, `merge-agent-stuck`, and `do-not-merge` are explicit skip labels. They win over both override labels and surface as `skip-operator-skip`. To recover a PR carrying `merge-agent-stuck`, remove `merge-agent-stuck` first and then apply `merge-agent-requested`; the request label does not clear stuck-state semantics by itself.
 
-Dispatch precedence is intentionally diagnostic-first: closed/merged PRs, explicit skip labels, active remediation, normal verdict/mergeable/check/remediation diagnostics, scoped `merge-agent-requested` override, duplicate-dispatch protection, then dispatch. After a successful dispatch, the watcher removes only the label that actually authorized that dispatch; unused labels stay in place as operator audit trail.
+Dispatch precedence is intentionally diagnostic-first: closed/merged PRs, explicit skip labels, active remediation, normal verdict/mergeable/check/remediation diagnostics, scoped `merge-agent-requested` override, duplicate-dispatch protection, then dispatch. Closed, skip-labeled, and active-remediation PRs therefore surface `skip-pr-not-open`, `skip-operator-skip`, or `skip-remediation-active` instead of lower-level verdict/check/mergeability diagnostics. After a successful dispatch, the watcher removes only the label that actually authorized that dispatch; unused labels stay in place as operator audit trail.
 
 Legacy in-flight jobs keep their persisted `maxRounds` cap. Do not retroactively rewrite those queue records.
 

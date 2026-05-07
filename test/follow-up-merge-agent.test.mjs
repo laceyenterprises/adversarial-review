@@ -416,6 +416,29 @@ test('merge-agent-requested must be scoped to the current head SHA', () => {
   );
 });
 
+test('merge-agent-requested must not predate the latest PR update', () => {
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest({ createdAt: '2026-05-07T12:04:00.000Z' }),
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+      mergeable: 'CONFLICTING',
+    })),
+    'skip-merge-agent-requested-stale'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest({
+        createdAt: '2026-05-07T12:04:00.000Z',
+        prUpdatedAt: '2026-05-07T12:05:00.000Z',
+      }),
+      mergeable: 'CONFLICTING',
+    })),
+    'skip-merge-agent-requested-stale'
+  );
+});
+
 test('merge-agent-requested uses durable repo/pr/sha idempotency', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   recordMergeAgentDispatch(rootDir, makeJob({ labels: [{ name: 'merge-agent-requested' }] }), {
@@ -664,6 +687,7 @@ test('dispatchMergeAgentForPR removes operator-approved after successful dispatc
     ],
   });
   assert.equal(listMergeAgentDispatches(rootDir)[0].operatorApproval.actor, 'VirtualPaul');
+  assert.equal(listMergeAgentDispatches(rootDir)[0].trigger, 'operator-approved');
 });
 
 test('dispatchMergeAgentForPR removes merge-agent-requested after successful dispatch', async () => {
@@ -766,10 +790,90 @@ test('dispatchMergeAgentForPR logs consumed-label removal failures', async () =>
     assert.deepEqual(result.labelRemovalErrors, [
       { label: 'merge-agent-requested', error: 'rate limited' },
     ]);
+    const [recorded] = listMergeAgentDispatches(rootDir);
+    assert.equal(recorded.labelRemoval.label, 'merge-agent-requested');
+    assert.equal(recorded.labelRemoval.removed, false);
+    assert.equal(recorded.labelRemoval.lastError, 'rate limited');
     assert.match(warnings[0], /failed to remove consumed label 'merge-agent-requested'/);
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test('dispatchMergeAgentForPR retries consumed-label removal for an already-dispatched SHA', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const first = await dispatchMergeAgentForPR({
+    rootDir,
+    ...makeJob({
+      lastVerdict: null,
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'CONFLICTING',
+      checksConclusion: 'PENDING',
+      remediationCurrentRound: 0,
+      remediationMaxRounds: 0,
+    }),
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"disp_requested","lrq":"lrq_requested"}\n',
+    }),
+    ghExecFileImpl: async () => {
+      throw new Error('rate limited');
+    },
+    now: '2026-05-07T12:00:00.000Z',
+  });
+  assert.equal(first.decision, 'dispatch');
+
+  const ghCalls = [];
+  const second = await dispatchMergeAgentForPR({
+    rootDir,
+    ...makeJob({
+      lastVerdict: null,
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'CONFLICTING',
+      checksConclusion: 'PENDING',
+      remediationCurrentRound: 0,
+      remediationMaxRounds: 0,
+    }),
+    execFileImpl: async () => {
+      throw new Error('hq should not be called after idempotency hit');
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    now: '2026-05-07T12:02:00.000Z',
+  });
+
+  assert.equal(second.decision, 'skip-already-dispatched');
+  assert.equal(second.labelRemovalRetried, true);
+  assert.equal(second.mergeAgentRequestedLabelRemoved, true);
+  assert.equal(ghCalls.length, 1);
+  assert.equal(ghCalls[0].args.at(-1), 'merge-agent-requested');
+  const [recorded] = listMergeAgentDispatches(rootDir);
+  assert.equal(recorded.labelRemoval.removed, true);
+  assert.equal(recorded.labelRemoval.attempts.length, 2);
+});
+
+test('dispatchMergeAgentForPR does not mutate the caller job fields while recording trigger', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const input = makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
+  });
+  await dispatchMergeAgentForPR({
+    rootDir,
+    ...input,
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"disp_approved","lrq":"lrq_approved"}\n',
+    }),
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    now: '2026-05-07T12:00:00.000Z',
+  });
+
+  assert.equal(input.mergeAgentTrigger, undefined);
+  assert.equal(listMergeAgentDispatches(rootDir)[0].trigger, 'operator-approved');
 });
 
 test('dispatchMergeAgentForPR leaves no durable dispatch record when hq launch fails', async () => {

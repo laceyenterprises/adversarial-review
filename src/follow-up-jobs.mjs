@@ -388,14 +388,14 @@ function validateOptionalTitle(entry, fieldName) {
 
 const PUBLIC_REPLY_NOISE_SIGNALS = Object.freeze([
   { label: 'JSON-like dump at start of field', pattern: /^\s*(?:\{|\[)\s*["{\[]/ },
-  { label: 'fenced code block', pattern: /```/ },
+  { label: 'fenced code block', pattern: /^\s*```/m },
   { label: 'tool call/result markup', pattern: /<tool_(?:call|result)\b/i },
   { label: 'git diff header', pattern: /^diff --git\b/m },
   { label: 'diff hunk header', pattern: /^@@\s/m },
   { label: 'token-count transcript header', pattern: /Original token count:/ },
   { label: 'python traceback header', pattern: /^Traceback \(most recent call last\):/m },
 ]);
-const PUBLIC_REPLY_MAX_LINES = 8;
+const PUBLIC_REPLY_MAX_LINES = 20;
 
 function detectPublicReplyNoiseSignal(value) {
   const text = String(value ?? '');
@@ -650,7 +650,14 @@ function parseBlockingFindingsSection(reviewBody) {
 }
 
 function normalizeCoverageTitle(title) {
-  return String(title ?? '').replace(/\s+/g, ' ').trim();
+  return String(title ?? '')
+    .normalize('NFKC')
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLocaleLowerCase('en-US');
 }
 
 function usesPerFindingReplyContract(reply) {
@@ -719,19 +726,29 @@ function validateBlockingCoverage(reply, expectedJob) {
     ...blockers.map((entry, index) => ({ field: 'blockers', index, entry })),
   ];
 
-  const expectedTitles = findings.map((finding) => normalizeCoverageTitle(finding.title));
-  const titledExpected = expectedTitles.filter(Boolean);
+  const expectedTitleEntries = findings
+    .map((finding) => ({
+      raw: typeof finding.title === 'string' ? finding.title.trim() : '',
+      key: normalizeCoverageTitle(finding.title),
+    }))
+    .filter((entry) => entry.key);
+  const titledExpected = expectedTitleEntries.map((entry) => entry.key);
   if (!titledExpected.length) return;
 
   const expectedCounts = new Map();
-  for (const title of titledExpected) {
-    expectedCounts.set(title, (expectedCounts.get(title) || 0) + 1);
+  const expectedDisplay = new Map();
+  for (const { key, raw } of expectedTitleEntries) {
+    expectedCounts.set(key, (expectedCounts.get(key) || 0) + 1);
+    if (!expectedDisplay.has(key)) expectedDisplay.set(key, raw);
   }
   const actualCounts = new Map();
+  const actualDisplay = new Map();
   for (const { entry } of actualEntries) {
-    const title = normalizeCoverageTitle(entry.title);
-    if (!title) continue;
-    actualCounts.set(title, (actualCounts.get(title) || 0) + 1);
+    const raw = typeof entry?.title === 'string' ? entry.title.trim() : '';
+    const key = normalizeCoverageTitle(raw);
+    if (!key) continue;
+    actualCounts.set(key, (actualCounts.get(key) || 0) + 1);
+    if (!actualDisplay.has(key)) actualDisplay.set(key, raw);
   }
 
   if (titledExpected.length === findings.length) {
@@ -755,14 +772,15 @@ function validateBlockingCoverage(reply, expectedJob) {
 
   const missing = [];
   const extra = [];
-  for (const [title, count] of expectedCounts.entries()) {
-    const actual = actualCounts.get(title) || 0;
-    if (actual < count) missing.push(title);
+  const allExpectedFindingsTitled = titledExpected.length === findings.length;
+  for (const [key, count] of expectedCounts.entries()) {
+    const actual = actualCounts.get(key) || 0;
+    if (actual < count) missing.push(expectedDisplay.get(key) || key);
   }
-  if (titledExpected.length === findings.length) {
-    for (const [title, count] of actualCounts.entries()) {
-      const expectedCount = expectedCounts.get(title) || 0;
-      if (count > expectedCount) extra.push(title);
+  for (const [key, count] of actualCounts.entries()) {
+    const expectedCount = expectedCounts.get(key) || 0;
+    if (expectedCount === 0 || (allExpectedFindingsTitled && count > expectedCount)) {
+      extra.push(actualDisplay.get(key) || key);
     }
   }
   if (missing.length || extra.length) {

@@ -99,7 +99,10 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
 // caps apply independently to finding/action/reasoning so one long
 // action does not crowd out the others.
 const ADDRESSED_FILES_MAX_CHARS = 600;
-const PER_ENTRY_RENDER_MAX_CHARS = PUBLIC_REPLY_MAX_CHARS;
+// Validator caps raw worker text at PUBLIC_REPLY_MAX_CHARS. Rendering
+// gets a little headroom because redaction can expand short secrets or
+// paths into placeholders before the final public-comment cap applies.
+const PER_ENTRY_RENDER_MAX_CHARS = 1400;
 const PER_ENTRY_TITLE_MAX_CHARS = 120;
 const ANSI_ESCAPE_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const TITLE_CONTROL_CHARS_PATTERN = /[\u0000-\u001F\u007F\u2028\u2029]/g;

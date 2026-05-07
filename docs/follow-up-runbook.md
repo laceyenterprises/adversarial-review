@@ -313,6 +313,24 @@ adversarial-review-remediation-reply
 
 and it is where re-review intent is expressed:
 
+Per-finding accountability fields (`addressed[]`, `pushback[]`, and
+structured `blockers[]`) are public PR-comment input, not a scratchpad.
+When the review gives blocking findings `Title:` fields, new replies
+must copy those titles into the matching entries. The validator compares
+titles with normalization for case, dash variants, quote variants, and
+whitespace so humans are not punished for harmless typography, while
+errors still show the original expected and supplied text.
+
+Keep per-finding `finding`, `action`, `reasoning`, and
+`needsHumanInput` fields short: 1200 characters and 20 non-empty lines
+per field. The validator rejects raw JSON/log/tool-output/traceback/diff
+shapes and markdown code blocks that start a line with a fence opener.
+Inline prose that merely mentions triple backticks is allowed.
+
+String `blockers[]` entries are legacy/salvage-only compatibility for
+old or hand-edited artifacts that bypass strict validation. New worker
+replies should always use structured blocker objects.
+
 - `reReview.requested = true` means the worker is asking for another adversarial review pass
 - if `reReview.requested = true`, `reReview.reason` is required
 

@@ -1085,6 +1085,31 @@ test('buildRemediationOutcomeCommentBody renders the full validator-accepted per
   assert.ok(body.includes(longAction), 'renderer should not truncate text that validation accepts');
 });
 
+test('buildRemediationOutcomeCommentBody leaves redaction expansion room for per-entry text', () => {
+  const validatorSizedAction = `${'x'.repeat(1183)} sk-12345678 tail`;
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed one edge case.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          finding: 'The renderer truncated redaction placeholders.',
+          action: validatorSizedAction,
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'redaction margin' },
+  });
+
+  assert.match(body, /\[REDACTED_OPENAI_TOKEN\] tail/);
+});
+
 test('buildRemediationOutcomeCommentBody omits malformed per-finding sections instead of posting empty buckets', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',

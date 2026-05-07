@@ -117,10 +117,12 @@ try to fight the contract; the constraints exist so the public PR
 comment never claims contradictory things about the same round.
 
 Keep `finding`, `action`, `reasoning`, and `needsHumanInput` concise:
-one short human-readable paragraph each. Do not paste raw JSON, logs,
-tool output, stack traces, diffs, or fenced markdown into those fields.
-Put detailed diagnostics in the worker log; the reply JSON is the
-public PR-comment substrate.
+one short human-readable paragraph each, capped at 1200 characters and
+20 non-empty lines per field. Do not paste raw JSON, logs, tool output,
+stack traces, diffs, or fenced markdown blocks into those fields. Inline
+prose that mentions backtick fences is fine; starting a line with a
+fence is treated as a raw block and rejected. Put detailed diagnostics
+in the worker log; the reply JSON is the public PR-comment substrate.
 
 The contract example below uses **empty arrays** for `addressed`,
 `pushback`, and `blockers`. That is intentional — replace the empty

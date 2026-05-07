@@ -1105,6 +1105,15 @@ test('validateRemediationReply requires matching titles for Title-led blocking f
     ),
     /titles must match.*Missing: Retry path can double-submit.*Unexpected: Retry double-submit/,
   );
+
+  const normalizedTitleReply = {
+    ...baseReply,
+    addressed: [
+      { title: 'RETRY PATH CAN DOUBLE\u2011SUBMIT', finding: 'First problem.', action: 'Fixed.' },
+      { title: 'missing auth guard', finding: 'Second problem.', action: 'Fixed.' },
+    ],
+  };
+  assert.deepEqual(validateRemediationReply(normalizedTitleReply, { expectedJob: job }), normalizedTitleReply);
 });
 
 test('validateRemediationReply enforces title coverage for mixed-title blocking findings', () => {
@@ -1158,6 +1167,19 @@ test('validateRemediationReply enforces title coverage for mixed-title blocking 
       { expectedJob: job },
     ),
     /titles must match.*Missing: Retry path can double-submit/,
+  );
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [
+          { title: 'Retry typo title', finding: 'First problem.', action: 'Fixed.' },
+          { finding: 'Second problem.', action: 'Fixed.' },
+        ],
+      },
+      { expectedJob: job },
+    ),
+    /titles must match.*Missing: Retry path can double-submit.*Unexpected: Retry typo title/,
   );
 });
 
@@ -1257,6 +1279,18 @@ test('validateRemediationReply rejects noisy public per-finding fields', () => {
     ),
     /pushback\[0\]\.reasoning looks like raw logs, JSON, diff, or tool output/,
   );
+
+  const inlineBacktickReply = {
+    ...baseReply,
+    addressed: [
+      {
+        title: 'Good title',
+        finding: 'The docs mentioned the literal ```js marker inline.',
+        action: 'Removed the inline ``` marker from the explanation.',
+      },
+    ],
+  };
+  assert.deepEqual(validateRemediationReply(inlineBacktickReply, { expectedJob: job }), inlineBacktickReply);
 });
 
 test('validateRemediationReply tolerates a reply that omits addressed/pushback entirely (legacy compat)', () => {

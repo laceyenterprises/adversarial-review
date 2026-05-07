@@ -7,7 +7,7 @@
 import { Octokit } from '@octokit/rest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -43,6 +43,7 @@ import {
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -56,49 +57,59 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 
 const db = openReviewStateDb(ROOT);
 ensureReviewStateSchema(db);
-const DEFAULT_REVIEWER_TIMEOUT_MS = 10 * 60 * 1000;
 const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
-
-function resolveReviewerTimeoutMs(env = process.env) {
-  const raw = env.ADVERSARIAL_REVIEWER_TIMEOUT_MS;
-  if (raw === undefined || raw === null || raw === '') {
-    return DEFAULT_REVIEWER_TIMEOUT_MS;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_REVIEWER_TIMEOUT_MS;
-  }
-  return Math.floor(parsed);
-}
+const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 
 function readWatcherDrainState({
   drainFile = WATCHER_DRAIN_FILE,
   now = new Date(),
 } = {}) {
-  if (!existsSync(drainFile)) {
-    return { active: false };
+  let raw;
+  let markerMtimeMs;
+  try {
+    raw = readFileSync(drainFile, 'utf8');
+    markerMtimeMs = statSync(drainFile).mtimeMs;
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { active: false };
+    }
+    return {
+      active: true,
+      reason: `unreadable drain marker at ${drainFile}: ${err?.message || err}`,
+    };
   }
 
+  const nowMs = now.getTime();
+  const maxExpiresAt = markerMtimeMs + WATCHER_DRAIN_MAX_MS;
   let payload;
   try {
-    payload = JSON.parse(readFileSync(drainFile, 'utf8'));
+    payload = JSON.parse(raw);
   } catch (err) {
+    if (nowMs >= maxExpiresAt) {
+      return { active: false, expired: true };
+    }
     return {
       active: true,
       reason: `invalid drain marker at ${drainFile}: ${err?.message || err}`,
     };
   }
 
-  const expiresAt = payload?.expiresAt ? Date.parse(payload.expiresAt) : null;
-  if (Number.isFinite(expiresAt) && expiresAt <= now.getTime()) {
+  const parsedExpiresAt = payload?.expiresAt ? Date.parse(payload.expiresAt) : NaN;
+  const hasValidExpiresAt = Number.isFinite(parsedExpiresAt);
+  const effectiveExpiresAt = hasValidExpiresAt
+    ? Math.min(parsedExpiresAt, maxExpiresAt)
+    : maxExpiresAt;
+  if (nowMs >= effectiveExpiresAt) {
     return { active: false, expired: true };
   }
 
   return {
     active: true,
-    reason: String(payload?.reason || 'watcher drain active'),
+    reason: hasValidExpiresAt
+      ? String(payload?.reason || 'watcher drain active')
+      : `drain marker missing/invalid expiresAt at ${drainFile}`,
     requestedBy: payload?.requestedBy ? String(payload.requestedBy) : null,
-    expiresAt: payload?.expiresAt ? String(payload.expiresAt) : null,
+    expiresAt: hasValidExpiresAt ? String(payload.expiresAt) : null,
   };
 }
 
@@ -1132,5 +1143,6 @@ export {
   pollOnce,
   readWatcherDrainState,
   WATCHER_DRAIN_FILE,
+  WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,
 };

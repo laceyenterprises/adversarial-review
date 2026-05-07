@@ -401,7 +401,7 @@ jq -n \
   > data/watcher-drain.json
 ```
 
-While `data/watcher-drain.json` exists and has not expired, `src/watcher.mjs` keeps lifecycle and merge-agent checks running but skips new review spawns. This is the handoff main-catchup should use before `launchctl kickstart -k`: write the marker, wait until `data/reviews.db` has no `review_status='reviewing'` rows, bounce the watcher, then remove the marker. Invalid drain JSON fails closed and also blocks new review spawns; an expired marker is ignored.
+While `data/watcher-drain.json` exists and has not expired, `src/watcher.mjs` keeps lifecycle and merge-agent checks running but skips new review spawns. This is the watcher-only handoff main-catchup should use before `launchctl kickstart -k`: write the marker, wait until `data/reviews.db` has no `review_status='reviewing'` rows, bounce the watcher, then remove the marker. Invalid drain JSON or a missing/invalid `expiresAt` fails closed, but the watcher caps any marker at one hour from the marker file's mtime so a bad marker cannot silence reviews forever. The reviewer subprocess timeout defaults to 10 minutes, so a normal drain may wait that long for a slow in-flight review. This marker does not quiesce the follow-up daemon; follow-up remediation workers are governed by the follow-up job ledger and dispatch/HQ controls.
 
 Re-trigger a review for a previously-reviewed PR (canonical path):
 

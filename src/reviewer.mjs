@@ -35,21 +35,9 @@ import {
   fetchLinkedSpecContents,
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const execFileAsync = promisify(execFile);
-const DEFAULT_REVIEWER_TIMEOUT_MS = 10 * 60 * 1000;
-
-function resolveReviewerTimeoutMs(env = process.env) {
-  const raw = env.ADVERSARIAL_REVIEWER_TIMEOUT_MS;
-  if (raw === undefined || raw === null || raw === '') {
-    return DEFAULT_REVIEWER_TIMEOUT_MS;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_REVIEWER_TIMEOUT_MS;
-  }
-  return Math.floor(parsed);
-}
 
 function spawnWithInput(command, args, { env, cwd, input = '', timeout = 0, maxBuffer = 10 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {

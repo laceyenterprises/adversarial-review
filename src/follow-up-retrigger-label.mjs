@@ -38,6 +38,8 @@ export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation';
 
 const DEFAULT_REASON = 'Operator applied retrigger-remediation label.';
 const DEFAULT_BUMP_BUDGET = 1;
+const ACK_COMMENT_TIMEOUT_MS = 30_000;
+const ACK_COMMENT_MARKER_PREFIX = 'adversarial-review-retrigger-remediation-ack';
 
 function safePathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
@@ -103,6 +105,83 @@ async function removeLabelFromPR({
     '--remove-label',
     RETRIGGER_REMEDIATION_LABEL,
   ], { maxBuffer: 5 * 1024 * 1024 });
+}
+
+function rereviewOutcomeFromResult(rereviewResult) {
+  if (rereviewResult?.outcome) return rereviewResult.outcome;
+  if (rereviewResult?.status) return rereviewResult.status;
+  if (rereviewResult?.ok) return 'rearmed';
+  return 'rearm-failed';
+}
+
+function buildAckCommentBody({
+  labelEventKey,
+  labelEventActor,
+  reason,
+  bumpResult,
+  rereviewResult,
+}) {
+  const markerDigest = digestSha256(labelEventKey).replace(/^sha256:/, '');
+  const marker = `${ACK_COMMENT_MARKER_PREFIX}:${markerDigest}`;
+  const rereviewOutcome = rereviewOutcomeFromResult(rereviewResult);
+  const rereviewReason = rereviewResult?.reason || rereviewResult?.error || null;
+  const lines = [
+    `<!-- ${marker} -->`,
+    '### Remediation retrigger accepted',
+    '',
+    `The \`${RETRIGGER_REMEDIATION_LABEL}\` label was accepted by the adversarial-review watcher.`,
+    '',
+    `- Requested by: \`${labelEventActor || 'unknown'}\``,
+    `- Remediation budget: \`${bumpResult.priorMaxRounds} -> ${bumpResult.newMaxRounds}\` rounds`,
+    `- Fresh review queue: \`${rereviewOutcome}\`${rereviewReason ? ` (${rereviewReason})` : ''}`,
+    '',
+    'Next: the watcher will post a fresh adversarial review when it reaches this PR. If that review requests changes, the remediation worker will claim the new follow-up job.',
+  ];
+  if (reason) {
+    lines.push('', `Reason: ${reason}`);
+  }
+  return lines.join('\n');
+}
+
+async function postRetriggerAckComment({
+  repo,
+  prNumber,
+  execFileImpl,
+  labelEventKey,
+  labelEventActor,
+  reason,
+  bumpResult,
+  rereviewResult,
+}) {
+  const body = buildAckCommentBody({
+    labelEventKey,
+    labelEventActor,
+    reason,
+    bumpResult,
+    rereviewResult,
+  });
+  try {
+    const result = await execFileImpl('gh', [
+      'pr',
+      'comment',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--body',
+      body,
+    ], {
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: ACK_COMMENT_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
+    });
+    return { posted: true, stdout: result?.stdout || '' };
+  } catch (err) {
+    return {
+      posted: false,
+      reason: err?.killed === true ? 'gh-cli-timeout' : 'gh-cli-failure',
+      error: err?.message || String(err),
+    };
+  }
 }
 
 async function retryConsumedLabelRemoval({
@@ -296,7 +375,7 @@ export async function tryRetriggerRemediationFromLabel({
     ...auditRow,
     priorMaxRounds: bumpResult.priorMaxRounds,
     newMaxRounds: bumpResult.newMaxRounds,
-    rereviewOutcome: rereviewResult?.outcome || (rereviewResult?.ok ? 'rearmed' : 'rearm-failed'),
+    rereviewOutcome: rereviewOutcomeFromResult(rereviewResult),
     outcome: 'bumped-and-rearmed',
   };
   writeLabelConsumption(rootDir, labelEventKey, {
@@ -336,6 +415,31 @@ export async function tryRetriggerRemediationFromLabel({
     };
   }
 
+  const ackComment = await postRetriggerAckComment({
+    repo,
+    prNumber,
+    execFileImpl,
+    labelEventKey,
+    labelEventActor,
+    reason,
+    bumpResult,
+    rereviewResult,
+  });
+  writeLabelConsumption(rootDir, labelEventKey, {
+    schemaVersion: 1,
+    label: RETRIGGER_REMEDIATION_LABEL,
+    labelEventKey,
+    idempotencyKey,
+    repo,
+    prNumber: Number(prNumber),
+    jobPath: bumpResult.jobPath,
+    auditStatus: 'written',
+    auditRow: terminalAuditRow,
+    ackComment,
+    consumedAt: ts,
+    auditedAt: ts,
+  });
+
   // Remove the label only AFTER the bump succeeds. If we fail to
   // remove the label, the next tick will see the same GitHub labeled
   // event and the consumption check above will short-circuit it.
@@ -358,6 +462,7 @@ export async function tryRetriggerRemediationFromLabel({
     jobPath: bumpResult.jobPath,
     newMaxRounds: bumpResult.newMaxRounds,
     labelRemoved,
-    rereviewOutcome: rereviewResult?.outcome,
+    ackComment,
+    rereviewOutcome: rereviewOutcomeFromResult(rereviewResult),
   };
 }

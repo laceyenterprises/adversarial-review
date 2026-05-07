@@ -101,10 +101,21 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   assert.equal(result.labelRemoved, true);
   assert.equal(result.newMaxRounds, 3);
 
-  // gh was called to remove the label.
-  assert.equal(ghCalls.length, 1);
+  // gh was called to post an ack comment, then remove the label.
+  assert.equal(ghCalls.length, 2);
   assert.equal(ghCalls[0].cmd, 'gh');
-  assert.deepEqual(ghCalls[0].args, [
+  assert.deepEqual(ghCalls[0].args.slice(0, 6), [
+    'pr',
+    'comment',
+    '238',
+    '--repo',
+    'laceyenterprises/agent-os',
+    '--body',
+  ]);
+  assert.match(ghCalls[0].args[6], /Remediation retrigger accepted/);
+  assert.match(ghCalls[0].args[6], /Remediation budget: `2 -> 3` rounds/);
+  assert.equal(ghCalls[1].cmd, 'gh');
+  assert.deepEqual(ghCalls[1].args, [
     'pr',
     'edit',
     '238',
@@ -119,6 +130,9 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   assert.equal(auditRows[0].row.source, 'pr-label');
   assert.equal(auditRows[0].row.operator, 'pr-label:VirtualPaul');
   assert.equal(auditRows[0].row.outcome, 'bumped-and-rearmed');
+  assert.equal(auditRows[0].row.rereviewOutcome, 'blocked');
+  assert.equal(result.ackComment.posted, true);
+  assert.equal(result.rereviewOutcome, 'blocked');
 
   // Job's persisted maxRounds was bumped.
   const updated = readFollowUpJob(jobPath);
@@ -143,7 +157,8 @@ test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted',
   });
 
   assert.equal(result.outcome, 'bumped-and-rearmed');
-  assert.equal(ghCalls.length, 1);
+  assert.equal(ghCalls.length, 2);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['comment', 'edit']);
 });
 
 test('tryRetriggerRemediationFromLabel works on completed jobs that requested re-review', async () => {
@@ -168,7 +183,8 @@ test('tryRetriggerRemediationFromLabel works on completed jobs that requested re
   });
 
   assert.equal(result.outcome, 'bumped-and-rearmed');
-  assert.equal(ghCalls.length, 1);
+  assert.equal(ghCalls.length, 2);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['comment', 'edit']);
 });
 
 test('tryRetriggerRemediationFromLabel works on failed jobs', async () => {
@@ -189,7 +205,8 @@ test('tryRetriggerRemediationFromLabel works on failed jobs', async () => {
   });
 
   assert.equal(result.outcome, 'bumped-and-rearmed');
-  assert.equal(ghCalls.length, 1);
+  assert.equal(ghCalls.length, 2);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['comment', 'edit']);
 });
 
 test('tryRetriggerRemediationFromLabel leaves label in place when job is still active', async () => {

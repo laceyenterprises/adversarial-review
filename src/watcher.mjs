@@ -49,6 +49,7 @@ const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+const WATCHER_DRAIN_RELATIVE_PATH = join('data', 'watcher-drain.json');
 
 const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 
@@ -106,6 +107,62 @@ function handlePollError(err, source = 'pollOnce') {
     return;
   }
   console.error(`[watcher] Poll error (source=${source}):`, err);
+}
+
+function readActiveWatcherDrain(rootDir = ROOT, { nowMs = Date.now(), logger = console } = {}) {
+  const drainPath = join(rootDir, WATCHER_DRAIN_RELATIVE_PATH);
+  let payload;
+  try {
+    payload = JSON.parse(readFileSync(drainPath, 'utf8'));
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      logger.warn?.(`[watcher] Ignoring unreadable watcher drain marker at ${drainPath}: ${err?.message || err}`);
+    }
+    return null;
+  }
+
+  const expiresAtMs = Date.parse(payload?.expiresAt || '');
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+    return null;
+  }
+
+  return {
+    path: drainPath,
+    payload,
+    expiresAtMs,
+  };
+}
+
+function claimReviewUnlessDraining({
+  rootDir = ROOT,
+  stmtMarkAttemptStarted,
+  attemptAt,
+  repoPath,
+  prNumber,
+  nowMs = Date.now(),
+  logger = console,
+}) {
+  const drain = readActiveWatcherDrain(rootDir, { nowMs, logger });
+  if (drain) {
+    logger.log?.(
+      `[watcher] Watcher drain marker active until ${drain.payload.expiresAt}; ` +
+      `skipping review claim for ${repoPath}#${prNumber}`
+    );
+    return {
+      changes: 0,
+      claimed: false,
+      skippedForDrain: true,
+      drain,
+    };
+  }
+
+  const result = stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
+  return {
+    changes: result.changes,
+    claimed: result.changes === 1,
+    skippedForDrain: false,
+    drain: null,
+  };
 }
 
 // Set of AbortControllers for in-flight reviewer subprocesses. The
@@ -899,8 +956,16 @@ async function pollOnce(octokit) {
       }
 
       const attemptAt = new Date().toISOString();
-      const claim = stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
-      if (claim.changes === 0) {
+      const claim = claimReviewUnlessDraining({
+        stmtMarkAttemptStarted,
+        attemptAt,
+        repoPath,
+        prNumber,
+      });
+      if (claim.skippedForDrain) {
+        continue;
+      }
+      if (!claim.claimed) {
         // Lost the cross-process compare-and-swap. Either another
         // watcher just claimed this row, or the row's status moved to
         // a non-claimable state (`reviewing`, `failed-orphan`, terminal)
@@ -1067,8 +1132,10 @@ if (isMain) {
 }
 
 export {
+  claimReviewUnlessDraining,
   classifyReviewerFailure,
   evaluateRoundBudgetForReview,
   pollOnce,
+  readActiveWatcherDrain,
   settleReviewerAttempt,
 };

@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { claimReviewUnlessDraining } from '../src/watcher.mjs';
 
 // The atomic-claim SQL lives inline in src/watcher.mjs (it's bound to
 // the module's prepared-statement set there). The watcher module has
@@ -193,4 +197,41 @@ test('atomic claim refuses pending row from a different PR — repo/pr scoping i
   assert.equal(claim.changes, 0);
   const row = readRow(db);
   assert.equal(row.review_status, 'pending', 'unrelated row not touched');
+});
+
+test('fresh watcher drain marker prevents pending row from being claimed', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-drain-'));
+  const db = setupDb();
+  try {
+    mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    writeFileSync(
+      path.join(rootDir, 'data', 'watcher-drain.json'),
+      JSON.stringify({
+        requestedBy: 'main-catchup',
+        reason: 'test drain',
+        expiresAt: '2026-05-07T06:00:00Z',
+      }),
+      'utf8'
+    );
+    seedReviewRow(db, { reviewStatus: 'pending' });
+
+    const claim = claimReviewUnlessDraining({
+      rootDir,
+      stmtMarkAttemptStarted: db.prepare(CLAIM_SQL),
+      attemptAt: '2026-05-07T05:30:00.000Z',
+      repoPath: REPO,
+      prNumber: PR,
+      nowMs: Date.parse('2026-05-07T05:30:00Z'),
+      logger: { log() {}, warn() {} },
+    });
+
+    assert.equal(claim.skippedForDrain, true);
+    assert.equal(claim.claimed, false);
+    const row = readRow(db);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.last_attempted_at, null);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

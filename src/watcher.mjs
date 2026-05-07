@@ -25,6 +25,7 @@ import {
   CASCADE_FAILURE_CAP,
   classifyReviewerFailure,
   clearCascadeState,
+  isReviewerSubprocessTimeout,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
@@ -463,6 +464,7 @@ async function spawnReviewer({
     if (stderr) console.error(`[reviewer:${prNumber}] stderr: ${stderr.trim()}`);
     return { ok: true };
   } catch (err) {
+    const timedOut = isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' });
     const detail = [err.message, err.stdout, err.stderr]
       .filter(Boolean)
       .join('\n')
@@ -475,11 +477,20 @@ async function spawnReviewer({
         ? err.exitCode
         : (Number.isInteger(err?.code) ? err.code : null),
       errorCode: typeof err?.code === 'string' ? err.code : null,
+      killed: err?.killed === true,
+      signal: typeof err?.signal === 'string' ? err.signal : null,
+      timedOut,
       stderr: String(err?.stderr || detail || ''),
       failureClass: classifyReviewerFailure(
         err?.stderr || detail || '',
         Number.isInteger(err?.exitCode) ? err.exitCode : err?.code,
-        err?.code
+        err?.code,
+        {
+          killed: err?.killed === true,
+          signal: err?.signal,
+          code: err?.code,
+          timeoutKilled: timedOut,
+        }
       ),
     };
   } finally {

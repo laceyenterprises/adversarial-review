@@ -6,12 +6,23 @@ const CASCADE_FAILURE_CAP = 5;
 const CASCADE_STATE_DIR = ['data', 'cascade-state'];
 
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
-const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT', 'ABORT_ERR']);
+const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
 
-function classifyReviewerFailure(stderr, exitCode, errorCode = null) {
+function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
+  const actualSignal = String(error?.signal || '').toUpperCase();
+  const expectedSignal = String(killSignal || 'SIGTERM').toUpperCase();
+  return (
+    error?.killed === true &&
+    actualSignal === expectedSignal &&
+    String(error?.code || '').toUpperCase() !== 'ABORT_ERR'
+  );
+}
+
+function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {
   const text = String(stderr || '');
   const lower = text.toLowerCase();
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
+  const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
   const mentionsReal429 =
     /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
   const mentionsRateLimit = /rate.?limit/.test(lower);
@@ -22,7 +33,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null) {
     /command timed out after \d+ms/.test(lower) ||
     /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
 
-  if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
+  if (timeoutKilled || CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
   }
 
@@ -130,6 +141,7 @@ export {
   classifyReviewerFailure,
   clearCascadeState,
   getCascadeStatePath,
+  isReviewerSubprocessTimeout,
   readCascadeState,
   recordCascadeFailure,
   resolveCascadeBackoffMinutes,

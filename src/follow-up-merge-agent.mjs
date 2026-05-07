@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { writeFileAtomic } from './atomic-write.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 
@@ -261,9 +262,16 @@ function pickMergeAgentDispatchDetail(job, {
     hasOperatorApprovedLabel,
   });
   if (normalDecision.decision === 'dispatch') {
+    const dispatchDecision = !normalDecision.trigger && mergeAgentRequested
+      ? { decision: 'dispatch', trigger: MERGE_AGENT_REQUESTED_LABEL }
+      : normalDecision;
     return alreadyDispatched
       ? { decision: 'skip-already-dispatched', trigger: null }
-      : normalDecision;
+      : dispatchDecision;
+  }
+
+  if (normalDecision.decision === 'skip-operator-approval-stale') {
+    return normalDecision;
   }
 
   if (hasMergeAgentRequestedLabel) {
@@ -354,7 +362,10 @@ function isScopedMergeAgentRequest(job) {
 
 function isoAtOrAfter(candidate, floor) {
   if (!candidate || !floor) return false;
-  return String(candidate) >= String(floor);
+  const candidateEpoch = Date.parse(candidate);
+  const floorEpoch = Date.parse(floor);
+  if (Number.isNaN(candidateEpoch) || Number.isNaN(floorEpoch)) return false;
+  return candidateEpoch >= floorEpoch;
 }
 
 function buildScopedOperatorApproval(candidate, latestJob) {
@@ -417,7 +428,7 @@ function recordMergeAgentDispatch(rootDir, job, {
     launchRequestId,
     prompt,
   };
-  writeFileSync(filePath, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   return filePath;
 }
 
@@ -427,6 +438,7 @@ function updateMergeAgentDispatchLabelRemoval(rootDir, job, {
   attemptedAt,
   removed,
   error = null,
+  observedExternally = false,
 } = {}) {
   const filePath = mergeAgentDispatchFilePath(rootDir, job);
   const existing = recordedDispatch || getRecordedMergeAgentDispatch(rootDir, job);
@@ -440,6 +452,7 @@ function updateMergeAgentDispatchLabelRemoval(rootDir, job, {
     removed: Boolean(removed),
     lastAttemptAt: attemptedAt,
     lastError: removed ? null : error,
+    observedExternally: Boolean(observedExternally),
     attempts: [
       ...previousAttempts,
       {
@@ -447,6 +460,7 @@ function updateMergeAgentDispatchLabelRemoval(rootDir, job, {
         label: trigger,
         removed: Boolean(removed),
         error: removed ? null : error,
+        observedExternally: Boolean(observedExternally),
       },
     ],
   };
@@ -456,7 +470,7 @@ function updateMergeAgentDispatchLabelRemoval(rootDir, job, {
     trigger: existing.trigger || trigger || null,
     labelRemoval,
   };
-  writeFileSync(filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  writeFileAtomic(filePath, `${JSON.stringify(next, null, 2)}\n`);
   return filePath;
 }
 
@@ -619,6 +633,17 @@ async function dispatchMergeAgentForPR({
           removed: labelRemoval.labelRemovalAttempt.removed,
           error: labelRemoval.labelRemovalAttempt.error,
         });
+      } else if (
+        recordedDispatch.labelRemoval?.removed !== true
+        && !normalizeLabelNames(labels).includes(recordedDispatch.trigger)
+      ) {
+        updateMergeAgentDispatchLabelRemoval(rootDir, job, {
+          recordedDispatch,
+          trigger: recordedDispatch.trigger,
+          attemptedAt: now,
+          removed: true,
+          observedExternally: true,
+        });
       }
       return {
         decision,
@@ -707,12 +732,14 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   const normalizedLabels = normalizeLabelNames(labels);
   const hasOperatorApproved = normalizedLabels.includes(OPERATOR_APPROVED_LABEL);
   const hasMergeAgentRequested = normalizedLabels.includes(MERGE_AGENT_REQUESTED_LABEL);
-  const operatorApprovalEvent = hasOperatorApproved
-    ? await fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
-    : null;
-  const mergeAgentRequestEvent = hasMergeAgentRequested
-    ? await fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
-    : null;
+  const [operatorApprovalEvent, mergeAgentRequestEvent] = await Promise.all([
+    hasOperatorApproved
+      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
+      : null,
+    hasMergeAgentRequested
+      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
+      : null,
+  ]);
   return {
     repo,
     prNumber,

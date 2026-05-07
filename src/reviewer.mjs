@@ -35,6 +35,7 @@ import {
   fetchLinkedSpecContents,
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -627,7 +628,7 @@ async function reviewWithClaude(diff, extraContext = '', { isFinalRound = false 
       ['--print', '--permission-mode', 'bypassPermissions', prompt],
       {
         env,
-        timeout: 5 * 60 * 1000,
+        timeout: resolveReviewerTimeoutMs(env),
         maxBuffer: 10 * 1024 * 1024,
       }
     ));
@@ -700,7 +701,7 @@ async function reviewWithCodex(diff, extraContext = '', { isFinalRound = false }
       {
         env,
         cwd: process.cwd(),
-        timeout: 5 * 60 * 1000,
+        timeout: resolveReviewerTimeoutMs(env),
         maxBuffer: 10 * 1024 * 1024,
       }
     );
@@ -1029,6 +1030,7 @@ const __test__ = {
   CLAUDE_STRIPPED_ENV_VARS,
   spawnClaude,
   isLaunchctlSessionFailure,
+  resolveReviewerTimeoutMs,
 };
 
 export {
@@ -1036,6 +1038,7 @@ export {
   CODEX_CLI,
   sanitizeCodexReviewPayload,
   buildReviewerPromptPrefix,
+  resolveReviewerTimeoutMs,
   isFinalReviewRound,
   detectSpecTouchViolations,
   ADVERSARIAL_PROMPT,

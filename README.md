@@ -389,6 +389,20 @@ Inspect review DB:
 sqlite3 data/reviews.db "select repo,pr_number,review_status,pr_state,review_attempts,posted_at,failed_at,rereview_requested_at from reviewed_prs order by id desc limit 20;"
 ```
 
+Quiesce the watcher before a managed service bounce:
+
+```bash
+mkdir -p data
+jq -n \
+  --arg reason "main-catchup bouncing adversarial-review" \
+  --arg requestedBy "main-catchup" \
+  --arg expiresAt "$(date -u -v+20M '+%Y-%m-%dT%H:%M:%SZ')" \
+  '{reason:$reason, requestedBy:$requestedBy, expiresAt:$expiresAt}' \
+  > data/watcher-drain.json
+```
+
+While `data/watcher-drain.json` exists and has not expired, `src/watcher.mjs` keeps lifecycle and merge-agent checks running but skips new review spawns. This is the watcher-only handoff main-catchup should use before `launchctl kickstart -k`: write the marker, wait until `data/reviews.db` has no `review_status='reviewing'` rows, bounce the watcher, then remove the marker. Invalid drain JSON or a missing/invalid `expiresAt` fails closed, but the watcher caps any marker at one hour from the marker file's mtime so a bad marker cannot silence reviews forever. The reviewer subprocess timeout defaults to 10 minutes, so a normal drain may wait that long for a slow in-flight review. This marker does not quiesce the follow-up daemon; follow-up remediation workers are governed by the follow-up job ledger and dispatch/HQ controls.
+
 Re-trigger a review for a previously-reviewed PR (canonical path):
 
 ```bash
@@ -398,7 +412,7 @@ npm run retrigger-review -- \
   --reason "operator triggered: <why you're rerunning>"
 ```
 
-This wraps the same atomic transition the follow-up flow uses — `review_status='pending'`, clears `posted_at`/`failed_at`/`failure_message`, stamps `rereview_requested_at` and `rereview_reason`. Hand-written SQL that only sets `rereview_requested_at` is a silent no-op because the watcher polls on `review_status`, not on the rereview metadata. By default the CLI refuses rows whose `review_status` is `'failed'` (the watcher already retries those automatically and the reset would erase diagnostic evidence); pass `--allow-failed-reset` after reviewing the failure if you really want a clean rerun. See `npm run retrigger-review -- --help` for the full surface.
+This wraps the same atomic transition the follow-up flow uses — `review_status='pending'`, clears `posted_at`/`failed_at`/`failure_message`, stamps `rereview_requested_at` and `rereview_reason`. Hand-written SQL that only sets `rereview_requested_at` is a silent no-op because the watcher polls on `review_status`, not on the rereview metadata. By default the CLI refuses rows whose `review_status` is `'failed'` (the watcher already retries those automatically and the reset would erase diagnostic evidence) or `'failed-orphan'` (operator must first verify no orphan review posted on GitHub); pass `--allow-failed-reset` after reviewing the failure/orphan evidence if you really want a clean rerun. See `npm run retrigger-review -- --help` for the full surface.
 
 Force one more remediation round for an existing follow-up job:
 

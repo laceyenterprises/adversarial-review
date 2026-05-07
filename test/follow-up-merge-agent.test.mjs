@@ -11,6 +11,8 @@ import {
   listMergeAgentDispatches,
   pickMergeAgentDispatch,
   recordMergeAgentDispatch,
+  resolveMergeAgentParentSession,
+  resolveMergeAgentProject,
 } from '../src/follow-up-merge-agent.mjs';
 
 function makeJob(overrides = {}) {
@@ -378,12 +380,18 @@ test('operator-approved cannot dispatch when no follow-up job ledger exists', ()
 
 test('dispatchMergeAgentForPR records only successful launches and parses trailing JSON output', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
   const result = await dispatchMergeAgentForPR({
     rootDir,
     ...makeJob(),
-    execFileImpl: async () => ({
-      stdout: 'warning: dispatch queued\n{"dispatchId":"disp_123","lrq":"lrq_456"}\n',
-    }),
+    parentSession: 'session:test:merge-watcher',
+    hqProject: 'merge-project',
+    execFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args });
+      return {
+        stdout: 'warning: dispatch queued\n{"dispatchId":"disp_123","lrq":"lrq_456"}\n',
+      };
+    },
     now: '2026-05-03T12:00:00.000Z',
   });
 
@@ -391,6 +399,38 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
   assert.equal(result.dispatchId, 'disp_123');
   assert.equal(result.launchRequestId, 'lrq_456');
   assert.equal(listMergeAgentDispatches(rootDir).length, 1);
+  assert.deepEqual(hqCalls[0].args.slice(0, 15), [
+    'dispatch',
+    '--worker-class', 'merge-agent',
+    '--task-kind', 'merge',
+    '--repo', 'agent-os',
+    '--pr', '401',
+    '--ticket', 'PR-401',
+    '--parent-session', 'session:test:merge-watcher',
+    '--project', 'merge-project',
+  ]);
+});
+
+test('merge-agent dispatch attribution defaults are stable for launchd', () => {
+  assert.equal(resolveMergeAgentParentSession({}), 'session:adversarial-review:watcher');
+  assert.equal(
+    resolveMergeAgentParentSession({ AGENT_SESSION_REF: 'session:test:agent' }),
+    'session:test:agent'
+  );
+  assert.equal(
+    resolveMergeAgentParentSession({ HQ_PARENT_SESSION: 'session:test:hq' }),
+    'session:test:hq'
+  );
+  assert.equal(
+    resolveMergeAgentParentSession({ MERGE_AGENT_PARENT_SESSION: 'session:test:merge' }),
+    'session:test:merge'
+  );
+  assert.equal(resolveMergeAgentProject({}), 'pr-merge-orchestration');
+  assert.equal(resolveMergeAgentProject({ HQ_PROJECT: 'from-env' }), 'from-env');
+  assert.equal(
+    resolveMergeAgentProject({ MERGE_AGENT_HQ_PROJECT: 'from-merge-env' }),
+    'from-merge-env'
+  );
 });
 
 test('dispatchMergeAgentForPR removes operator-approved after successful dispatch', async () => {

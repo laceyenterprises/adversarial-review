@@ -7,7 +7,7 @@
 import { Octokit } from '@octokit/rest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -25,6 +25,7 @@ import {
   CASCADE_FAILURE_CAP,
   classifyReviewerFailure,
   clearCascadeState,
+  isReviewerSubprocessTimeout,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
@@ -43,6 +44,7 @@ import {
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -56,6 +58,61 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 
 const db = openReviewStateDb(ROOT);
 ensureReviewStateSchema(db);
+const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
+const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
+
+function readWatcherDrainState({
+  drainFile = WATCHER_DRAIN_FILE,
+  now = new Date(),
+} = {}) {
+  let raw;
+  let markerMtimeMs;
+  try {
+    raw = readFileSync(drainFile, 'utf8');
+    markerMtimeMs = statSync(drainFile).mtimeMs;
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { active: false };
+    }
+    return {
+      active: true,
+      reason: `unreadable drain marker at ${drainFile}: ${err?.message || err}`,
+    };
+  }
+
+  const nowMs = now.getTime();
+  const maxExpiresAt = markerMtimeMs + WATCHER_DRAIN_MAX_MS;
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (err) {
+    if (nowMs >= maxExpiresAt) {
+      return { active: false, expired: true };
+    }
+    return {
+      active: true,
+      reason: `invalid drain marker at ${drainFile}: ${err?.message || err}`,
+    };
+  }
+
+  const parsedExpiresAt = payload?.expiresAt ? Date.parse(payload.expiresAt) : NaN;
+  const hasValidExpiresAt = Number.isFinite(parsedExpiresAt);
+  const effectiveExpiresAt = hasValidExpiresAt
+    ? Math.min(parsedExpiresAt, maxExpiresAt)
+    : maxExpiresAt;
+  if (nowMs >= effectiveExpiresAt) {
+    return { active: false, expired: true };
+  }
+
+  return {
+    active: true,
+    reason: hasValidExpiresAt
+      ? String(payload?.reason || 'watcher drain active')
+      : `drain marker missing/invalid expiresAt at ${drainFile}`,
+    requestedBy: payload?.requestedBy ? String(payload.requestedBy) : null,
+    expiresAt: hasValidExpiresAt ? String(payload.expiresAt) : null,
+  };
+}
 
 // ── Inode-orphan recovery ───────────────────────────────────────────────────
 //
@@ -398,7 +455,7 @@ async function spawnReviewer({
       [reviewerPath, args],
       {
         env: reviewerEnv,
-        timeout: 5 * 60 * 1000,
+        timeout: resolveReviewerTimeoutMs(reviewerEnv),
         signal: controller.signal,
         killSignal: 'SIGTERM',
       }
@@ -407,6 +464,7 @@ async function spawnReviewer({
     if (stderr) console.error(`[reviewer:${prNumber}] stderr: ${stderr.trim()}`);
     return { ok: true };
   } catch (err) {
+    const timedOut = isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' });
     const detail = [err.message, err.stdout, err.stderr]
       .filter(Boolean)
       .join('\n')
@@ -419,11 +477,20 @@ async function spawnReviewer({
         ? err.exitCode
         : (Number.isInteger(err?.code) ? err.code : null),
       errorCode: typeof err?.code === 'string' ? err.code : null,
+      killed: err?.killed === true,
+      signal: typeof err?.signal === 'string' ? err.signal : null,
+      timedOut,
       stderr: String(err?.stderr || detail || ''),
       failureClass: classifyReviewerFailure(
         err?.stderr || detail || '',
         Number.isInteger(err?.exitCode) ? err.exitCode : err?.code,
-        err?.code
+        err?.code,
+        {
+          killed: err?.killed === true,
+          signal: err?.signal,
+          code: err?.code,
+          timeoutKilled: timedOut,
+        }
       ),
     };
   } finally {
@@ -703,6 +770,16 @@ async function pollOnce(octokit) {
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit);
 
+  const watcherDrain = readWatcherDrainState();
+  if (watcherDrain.active) {
+    console.log(
+      `[watcher] Review drain active — skipping new review spawns` +
+        (watcherDrain.requestedBy ? ` requested_by=${watcherDrain.requestedBy}` : '') +
+        (watcherDrain.expiresAt ? ` expires_at=${watcherDrain.expiresAt}` : '') +
+        ` reason="${watcherDrain.reason}"`
+    );
+  }
+
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
 
@@ -807,6 +884,10 @@ async function pollOnce(octokit) {
             err?.message || err
           );
         }
+        continue;
+      }
+
+      if (watcherDrain.active) {
         continue;
       }
 
@@ -1003,6 +1084,7 @@ function main() {
     }
     return computeWorkloadAwarePollDeadlineMs({
       activeRepoCount: activeRepos.length,
+      reviewerTimeoutMs: resolveReviewerTimeoutMs(),
     });
   }
 
@@ -1070,5 +1152,8 @@ export {
   classifyReviewerFailure,
   evaluateRoundBudgetForReview,
   pollOnce,
+  readWatcherDrainState,
+  WATCHER_DRAIN_FILE,
+  WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,
 };

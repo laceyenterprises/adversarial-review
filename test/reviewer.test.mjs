@@ -7,6 +7,7 @@ const {
   CLAUDE_STRIPPED_ENV_VARS,
   ENV_BIN,
   LAUNCHCTL,
+  resolveReviewerTimeoutMs,
   spawnClaude,
 } = __test__;
 
@@ -76,6 +77,13 @@ test('buildObviousDocsGuidance tells workers to inspect obvious repo docs before
   assert.match(guidance, /README\.md/);
   assert.match(guidance, /SPEC\.md/);
   assert.match(guidance, /go read it directly rather than guessing from the diff alone/i);
+});
+
+test('reviewer timeout defaults to 10m and honors explicit positive env override', () => {
+  assert.equal(resolveReviewerTimeoutMs({}), 10 * 60 * 1000);
+  assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '12345' }), 12345);
+  assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '0' }), 10 * 60 * 1000);
+  assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: 'not-a-number' }), 10 * 60 * 1000);
 });
 
 test('spawnClaude wraps claude in launchctl asuser on darwin', async () => {

@@ -26,11 +26,30 @@ const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'do-not-merge']);
 //     do not merge"; if both are present, skip wins)
 //   - `pr-not-open` / `merged` (trivially N/A)
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
+const DEFAULT_MERGE_AGENT_PARENT_SESSION = 'session:adversarial-review:watcher';
+const DEFAULT_MERGE_AGENT_PROJECT = 'pr-merge-orchestration';
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED', 'WAITING', 'REQUESTED']);
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+function resolveMergeAgentParentSession(env = process.env) {
+  return (
+    env.MERGE_AGENT_PARENT_SESSION ||
+    env.HQ_PARENT_SESSION ||
+    env.AGENT_SESSION_REF ||
+    DEFAULT_MERGE_AGENT_PARENT_SESSION
+  );
+}
+
+function resolveMergeAgentProject(env = process.env) {
+  return (
+    env.MERGE_AGENT_HQ_PROJECT ||
+    env.HQ_PROJECT ||
+    DEFAULT_MERGE_AGENT_PROJECT
+  );
 }
 
 function normalizeLabelNames(labels) {
@@ -383,6 +402,8 @@ async function dispatchMergeAgentForPR({
   ghExecFileImpl = execFileAsync,
   now = isoNow(),
   hqPath = 'hq',
+  parentSession = resolveMergeAgentParentSession(),
+  hqProject = resolveMergeAgentProject(),
 } = {}) {
   const job = {
     repo,
@@ -421,6 +442,8 @@ async function dispatchMergeAgentForPR({
     '--repo', repo.split('/')[1] || repo,
     '--pr', String(prNumber),
     '--ticket', `PR-${prNumber}`,
+    '--parent-session', parentSession,
+    '--project', hqProject,
     '--prompt', promptPath,
   ];
   const { stdout } = await execFileImpl(hqPath, args, { maxBuffer: 5 * 1024 * 1024 });
@@ -529,6 +552,8 @@ export {
   listMergeAgentDispatches,
   pickMergeAgentDispatch,
   recordMergeAgentDispatch,
+  resolveMergeAgentParentSession,
+  resolveMergeAgentProject,
   summarizeChecksConclusion,
   writeMergeAgentPrompt,
 };

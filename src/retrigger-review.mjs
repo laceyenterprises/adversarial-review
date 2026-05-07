@@ -43,7 +43,7 @@ Optional:
   --bump-budget <N>              Increase follow-up maxRounds before retriggering (default: 1)
   --no-bump-budget               Retrigger review without changing remediation budget
   --idempotency-key <key>        Stable replay key for retry-safe operator calls
-  --allow-failed-reset           Permit manual reset of failed review rows
+  --allow-failed-reset           Permit manual reset of failed / failed-orphan review rows
   --root-dir <path>              Tool root containing data/reviews.db
   --audit-root-dir <path>        Root that owns data/operator-mutations/
   --quiet                        Suppress JSON success output
@@ -161,9 +161,10 @@ function refuseReasonForReviewRow(reviewRow, { allowFailedReset = false } = {}) 
       return null;
     case 'failed':
       return allowFailedReset ? null : 'failed';
+    case 'failed-orphan':
+      return allowFailedReset ? null : 'failed-orphan';
     case 'reviewing':
     case 'malformed':
-    case 'failed-orphan':
       return reviewRow.review_status;
     default:
       return `unknown-status:${reviewRow.review_status ?? 'missing'}`;

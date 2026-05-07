@@ -1,20 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   CASCADE_FAILURE_CAP,
   classifyReviewerFailure,
   clearCascadeState,
   getCascadeStatePath,
+  isReviewerSubprocessTimeout,
   readCascadeState,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from '../src/reviewer-cascade.mjs';
 import { settleReviewerAttempt } from '../src/watcher.mjs';
+
+const execFileAsync = promisify(execFile);
 
 function setupFixture() {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-cascade-'));
@@ -125,6 +130,46 @@ test('rate-limit and 5xx heuristics distinguish real 429s from cascades', () => 
   assert.equal(
     classifyReviewerFailure('upstream retry exhausted after HTTP/1.1 503 from LiteLLM', 1),
     'cascade'
+  );
+});
+
+test('reviewer subprocess timeouts use actual execFile timeout fields for cascade backoff', async () => {
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 10_000)'],
+      { timeout: 50, killSignal: 'SIGTERM' }
+    ),
+    (err) => {
+      assert.equal(err.killed, true);
+      assert.equal(err.signal, 'SIGTERM');
+      assert.equal(err.code, null);
+      assert.equal(isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' }), true);
+      assert.equal(
+        classifyReviewerFailure(
+          err.stderr || err.message,
+          err.exitCode ?? err.code,
+          err.code,
+          err
+        ),
+        'cascade'
+      );
+      return true;
+    }
+  );
+});
+
+test('reviewer controller aborts do not engage cascade backoff', () => {
+  const abortErr = Object.assign(new Error('The operation was aborted'), {
+    code: 'ABORT_ERR',
+    killed: true,
+    signal: 'SIGTERM',
+  });
+
+  assert.equal(isReviewerSubprocessTimeout(abortErr, { killSignal: 'SIGTERM' }), false);
+  assert.equal(
+    classifyReviewerFailure(abortErr.message, null, abortErr.code, abortErr),
+    'unknown'
   );
 });
 

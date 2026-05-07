@@ -98,11 +98,12 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
 // caps apply independently to finding/action/reasoning so one long
 // action does not crowd out the others.
 const ADDRESSED_FILES_MAX_CHARS = 600;
-const PER_ENTRY_FIELD_MAX_CHARS = 800;
+const PER_ENTRY_RENDER_MAX_CHARS = 500;
 const PER_ENTRY_TITLE_MAX_CHARS = 120;
 const ANSI_ESCAPE_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const TITLE_CONTROL_CHARS_PATTERN = /[\u0000-\u001F\u007F\u2028\u2029]/g;
 const TITLE_FORMAT_CHARS_PATTERN = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
+const MACHINE_DUMP_PATTERN = /(^\s*(?:\{|\[)\s*["{\[]|```|<tool_(?:call|result)\b|^\s*(?:stdout|stderr)\s*:|^diff --git\b|^@@\s|Original token count:|Traceback \(most recent call last\))/im;
 
 // Indent every line of `text` with `prefix`. Used to align fenced code
 // blocks under markdown list items so GFM renders them as part of the
@@ -138,6 +139,14 @@ function safeEntryTitle(entry, fallback = 'Finding') {
   const title = normalizeEntryTitleText(entry?.title);
   if (!title) return fallback;
   return normalizeEntryTitleText(redactPublicSafeText(title, PER_ENTRY_TITLE_MAX_CHARS)) || fallback;
+}
+
+function sanitizePerFindingText(text) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return '';
+  if (MACHINE_DUMP_PATTERN.test(raw)) return '';
+  const collapsed = raw.replace(/\s+/g, ' ');
+  return redactPublicSafeText(collapsed, PER_ENTRY_RENDER_MAX_CHARS).trim();
 }
 
 // Render a fenced text block at `indentLevel` spaces of indent so the
@@ -176,9 +185,10 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
   const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
-      const finding = String(entry.finding ?? '').trim();
-      const action = String(entry.action ?? '').trim();
-      if (!finding || !action) return null;
+      const title = safeEntryTitle(entry, '');
+      const finding = sanitizePerFindingText(entry.finding);
+      const action = sanitizePerFindingText(entry.action);
+      if (!title || !finding || !action) return null;
       const files = Array.isArray(entry.files)
         ? entry.files
             .filter((f) => typeof f === 'string' && f.trim())
@@ -186,9 +196,9 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
             .filter(Boolean)
         : [];
       return {
-        title: safeEntryTitle(entry),
-        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
-        action: redactPublicSafeText(action, PER_ENTRY_FIELD_MAX_CHARS),
+        title,
+        finding,
+        action,
         files,
       };
     })
@@ -231,13 +241,14 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
   const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
-      const finding = String(entry.finding ?? '').trim();
-      const reasoning = String(entry.reasoning ?? '').trim();
-      if (!finding || !reasoning) return null;
+      const title = safeEntryTitle(entry, '');
+      const finding = sanitizePerFindingText(entry.finding);
+      const reasoning = sanitizePerFindingText(entry.reasoning);
+      if (!title || !finding || !reasoning) return null;
       return {
-        title: safeEntryTitle(entry),
-        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
-        reasoning: redactPublicSafeText(reasoning, PER_ENTRY_FIELD_MAX_CHARS),
+        title,
+        finding,
+        reasoning,
       };
     })
     .filter(Boolean)
@@ -277,29 +288,24 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
   const entries = items
     .map((entry) => {
       if (typeof entry === 'string') {
-        const trimmed = entry.trim();
+        const trimmed = sanitizePerFindingText(entry);
         if (!trimmed) return null;
         return {
           title: 'Finding',
-          finding: redactPublicSafeText(trimmed, PER_ENTRY_FIELD_MAX_CHARS),
+          finding: trimmed,
           reasoning: '',
           needsHumanInput: '',
         };
       }
       if (!entry || typeof entry !== 'object') return null;
-      const finding = String(entry.finding ?? '').trim();
+      const title = safeEntryTitle(entry);
+      const finding = sanitizePerFindingText(entry.finding);
       if (!finding) return null;
       return {
-        title: safeEntryTitle(entry),
-        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
-        reasoning: redactPublicSafeText(
-          String(entry.reasoning ?? '').trim(),
-          PER_ENTRY_FIELD_MAX_CHARS,
-        ),
-        needsHumanInput: redactPublicSafeText(
-          String(entry.needsHumanInput ?? '').trim(),
-          PER_ENTRY_FIELD_MAX_CHARS,
-        ),
+        title,
+        finding,
+        reasoning: sanitizePerFindingText(entry.reasoning),
+        needsHumanInput: sanitizePerFindingText(entry.needsHumanInput),
       };
     })
     .filter(Boolean)
@@ -581,24 +587,33 @@ function buildRemediationOutcomeCommentBody({
   // never emits an empty header to avoid a comment full of
   // "(none reported)" placeholders for non-applicable cases.
   if (reply?.addressed?.length) {
-    lines.push('');
-    lines.push('**Addressed findings**');
-    lines.push('');
-    lines.push(formatAddressedList(reply.addressed));
+    const addressed = formatAddressedList(reply.addressed, '');
+    if (addressed) {
+      lines.push('');
+      lines.push('**Addressed findings**');
+      lines.push('');
+      lines.push(addressed);
+    }
   }
 
   if (reply?.pushback?.length) {
-    lines.push('');
-    lines.push('**Pushback (deliberately not changed)**');
-    lines.push('');
-    lines.push(formatPushbackList(reply.pushback));
+    const pushback = formatPushbackList(reply.pushback, '');
+    if (pushback) {
+      lines.push('');
+      lines.push('**Pushback (deliberately not changed)**');
+      lines.push('');
+      lines.push(pushback);
+    }
   }
 
   if (reply?.blockers?.length) {
-    lines.push('');
-    lines.push('**Blockers**');
-    lines.push('');
-    lines.push(formatBlockersList(reply.blockers));
+    const blockers = formatBlockersList(reply.blockers, '');
+    if (blockers) {
+      lines.push('');
+      lines.push('**Blockers**');
+      lines.push('');
+      lines.push(blockers);
+    }
   }
 
   // Surface the actual rereview outcome (not just the worker's request bit)

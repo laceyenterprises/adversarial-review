@@ -1039,6 +1039,133 @@ test('validateRemediationReply validates optional per-finding titles', () => {
   );
 });
 
+test('validateRemediationReply requires matching titles for Title-led blocking findings', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two titled blockers.',
+    '',
+    '## Blocking Issues',
+    '- Title: Retry path can double-submit',
+    '  File: src/a.mjs',
+    '  Problem: First problem.',
+    '- Title: Missing auth guard',
+    '  File: src/b.mjs',
+    '  Problem: Second problem.',
+  ].join('\n');
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 83,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T17:03:00.000Z',
+    critical: false,
+  });
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed it.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'Retry path can double-submit', finding: 'First problem.', action: 'Fixed.' },
+      { title: 'Missing auth guard', finding: 'Second problem.', action: 'Fixed.' },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  assert.deepEqual(validateRemediationReply(baseReply, { expectedJob: job }), baseReply);
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [
+          { finding: 'First problem.', action: 'Fixed.' },
+          { title: 'Missing auth guard', finding: 'Second problem.', action: 'Fixed.' },
+        ],
+      },
+      { expectedJob: job },
+    ),
+    /addressed\[0\]\.title is required/,
+  );
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [
+          { title: 'Retry double-submit', finding: 'First problem.', action: 'Fixed.' },
+          { title: 'Missing auth guard', finding: 'Second problem.', action: 'Fixed.' },
+        ],
+      },
+      { expectedJob: job },
+    ),
+    /titles must match.*Missing: Retry path can double-submit.*Unexpected: Retry double-submit/,
+  );
+});
+
+test('validateRemediationReply rejects noisy public per-finding fields', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 84,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T17:04:00.000Z',
+    critical: false,
+  });
+  const baseReply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed it.',
+    validation: ['npm test'],
+    addressed: [{ title: 'Good title', finding: 'Issue.', action: 'Fixed.' }],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        addressed: [
+          {
+            title: 'Good title',
+            finding: '{"stdout":"raw dump","stderr":"more noise"}',
+            action: 'Fixed.',
+          },
+        ],
+      },
+      { expectedJob: job },
+    ),
+    /addressed\[0\]\.finding looks like raw logs, JSON, diff, or tool output/,
+  );
+  assert.throws(
+    () => validateRemediationReply(
+      {
+        ...baseReply,
+        pushback: [
+          {
+            title: 'Pushback title',
+            finding: 'Issue.',
+            reasoning: '```text\nraw log\n```',
+          },
+        ],
+        addressed: [],
+      },
+      { expectedJob: job },
+    ),
+    /pushback\[0\]\.reasoning looks like raw logs, JSON, diff, or tool output/,
+  );
+});
+
 test('validateRemediationReply tolerates a reply that omits addressed/pushback entirely (legacy compat)', () => {
   const job = buildFollowUpJob({
     repo: 'laceyenterprises/clio',
@@ -1696,7 +1823,13 @@ test('validateRemediationReply does not split Title-led findings on prose File m
     outcome: 'completed',
     summary: 'Fixed the parser boundary bug.',
     validation: ['npm test'],
-    addressed: [{ finding: 'Parser ghost finding boundary', action: 'Dashless File prose no longer starts a new finding.' }],
+    addressed: [
+      {
+        title: 'Parser ghost finding boundary',
+        finding: 'Parser ghost finding boundary',
+        action: 'Dashless File prose no longer starts a new finding.',
+      },
+    ],
     pushback: [],
     blockers: [],
     reReview: { requested: true, reason: 'Ready.' },

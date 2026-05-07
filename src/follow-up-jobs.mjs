@@ -385,6 +385,35 @@ function validateOptionalTitle(entry, fieldName) {
   assertNoPlaceholderText(entry.title, `${fieldName}.title`);
 }
 
+const PUBLIC_REPLY_NOISE_PATTERN = /(^\s*(?:\{|\[)\s*["{\[]|```|<tool_(?:call|result)\b|^\s*(?:stdout|stderr)\s*:|^diff --git\b|^@@\s|Original token count:|Traceback \(most recent call last\))/im;
+const PUBLIC_REPLY_MAX_LINES = 8;
+const PUBLIC_REPLY_MAX_CHARS = 1200;
+
+function assertPublicReplyTextQuality(value, locationLabel) {
+  if (typeof value !== 'string') return;
+  const text = value.trim();
+  if (!text) return;
+  if (text.length > PUBLIC_REPLY_MAX_CHARS) {
+    throw new Error(
+      `Remediation reply ${locationLabel} is too long for the public PR comment; ` +
+        `summarize it instead of dumping raw output`
+    );
+  }
+  const nonEmptyLineCount = text.split(/\r?\n/).filter((line) => line.trim()).length;
+  if (nonEmptyLineCount > PUBLIC_REPLY_MAX_LINES) {
+    throw new Error(
+      `Remediation reply ${locationLabel} has too many lines for the public PR comment; ` +
+        `summarize it instead of dumping raw output`
+    );
+  }
+  if (PUBLIC_REPLY_NOISE_PATTERN.test(text)) {
+    throw new Error(
+      `Remediation reply ${locationLabel} looks like raw logs, JSON, diff, or tool output; ` +
+        `write a human summary instead`
+    );
+  }
+}
+
 // addressed[] entries are { title?, finding, action, files? } where files is
 // an optional array of strings (the worker can list paths it touched
 // while addressing the finding). Per-entry validation rejects a
@@ -407,6 +436,8 @@ function validateAddressedField(items) {
     validateOptionalTitle(entry, `addressed[${index}]`);
     assertNoPlaceholderText(entry.finding, `addressed[${index}].finding`);
     assertNoPlaceholderText(entry.action, `addressed[${index}].action`);
+    assertPublicReplyTextQuality(entry.finding, `addressed[${index}].finding`);
+    assertPublicReplyTextQuality(entry.action, `addressed[${index}].action`);
     if (entry.files !== undefined) {
       if (!Array.isArray(entry.files)) {
         throw new Error(`Remediation reply addressed[${index}].files must be an array if provided`);
@@ -442,6 +473,8 @@ function validatePushbackField(items) {
     validateOptionalTitle(entry, `pushback[${index}]`);
     assertNoPlaceholderText(entry.finding, `pushback[${index}].finding`);
     assertNoPlaceholderText(entry.reasoning, `pushback[${index}].reasoning`);
+    assertPublicReplyTextQuality(entry.finding, `pushback[${index}].finding`);
+    assertPublicReplyTextQuality(entry.reasoning, `pushback[${index}].reasoning`);
   });
 }
 
@@ -471,6 +504,7 @@ function validateBlockersField(items) {
         throw new Error(`Remediation reply blockers[${index}] must be a non-empty string`);
       }
       assertNoPlaceholderText(entry, `blockers[${index}]`);
+      assertPublicReplyTextQuality(entry, `blockers[${index}]`);
       return;
     }
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -494,11 +528,14 @@ function validateBlockersField(items) {
       throw new Error(`Remediation reply blockers[${index}].needsHumanInput must be a non-empty string when provided`);
     }
     assertNoPlaceholderText(entry.finding, `blockers[${index}].finding`);
+    assertPublicReplyTextQuality(entry.finding, `blockers[${index}].finding`);
     if (hasReasoning) {
       assertNoPlaceholderText(entry.reasoning, `blockers[${index}].reasoning`);
+      assertPublicReplyTextQuality(entry.reasoning, `blockers[${index}].reasoning`);
     }
     if (hasNeedsHumanInput) {
       assertNoPlaceholderText(entry.needsHumanInput, `blockers[${index}].needsHumanInput`);
+      assertPublicReplyTextQuality(entry.needsHumanInput, `blockers[${index}].needsHumanInput`);
     }
   });
 }
@@ -586,9 +623,8 @@ function parseBlockingFindingsSection(reviewBody) {
   return findings;
 }
 
-function countBlockingFindingsInReview(reviewBody) {
-  const findings = parseBlockingFindingsSection(reviewBody);
-  return findings === null ? null : findings.length;
+function normalizeCoverageTitle(title) {
+  return String(title ?? '').replace(/\s+/g, ' ').trim();
 }
 
 function usesPerFindingReplyContract(reply) {
@@ -633,8 +669,9 @@ function validateBlockingCoverage(reply, expectedJob) {
   const usesNewSchema = usesPerFindingReplyContract(reply);
   if (!usesNewSchema) return;
 
-  const expected = countBlockingFindingsInReview(expectedJob.reviewBody);
-  if (expected === null || expected === 0) return;
+  const findings = parseBlockingFindingsSection(expectedJob.reviewBody);
+  if (findings === null || findings.length === 0) return;
+  const expected = findings.length;
 
   const addressed = Array.isArray(reply.addressed) ? reply.addressed : [];
   const pushback = Array.isArray(reply.pushback) ? reply.pushback : [];
@@ -647,6 +684,51 @@ function validateBlockingCoverage(reply, expectedJob) {
         `review has ${expected} blocking issue(s), reply records ${total} ` +
         `(addressed=${addressed.length}, pushback=${pushback.length}, blockers=${blockers.length}). ` +
         `Each blocking issue must appear exactly once across addressed[], pushback[], or blockers[].`
+    );
+  }
+
+  const expectedTitles = findings.map((finding) => normalizeCoverageTitle(finding.title));
+  if (!expectedTitles.every(Boolean)) return;
+
+  const actualEntries = [
+    ...addressed.map((entry, index) => ({ field: 'addressed', index, entry })),
+    ...pushback.map((entry, index) => ({ field: 'pushback', index, entry })),
+    ...blockers.map((entry, index) => ({ field: 'blockers', index, entry })),
+  ];
+  const untitled = actualEntries.find(({ entry }) => (
+    !entry || typeof entry !== 'object' || Array.isArray(entry) || !normalizeCoverageTitle(entry.title)
+  ));
+  if (untitled) {
+    throw new Error(
+      `Remediation reply ${untitled.field}[${untitled.index}].title is required because ` +
+        `the adversarial review supplied Title fields for its blocking findings`
+    );
+  }
+
+  const expectedCounts = new Map();
+  for (const title of expectedTitles) {
+    expectedCounts.set(title, (expectedCounts.get(title) || 0) + 1);
+  }
+  const actualCounts = new Map();
+  for (const { entry } of actualEntries) {
+    const title = normalizeCoverageTitle(entry.title);
+    actualCounts.set(title, (actualCounts.get(title) || 0) + 1);
+  }
+  const missing = [];
+  const extra = [];
+  for (const [title, count] of expectedCounts.entries()) {
+    const actual = actualCounts.get(title) || 0;
+    if (actual < count) missing.push(title);
+  }
+  for (const [title, count] of actualCounts.entries()) {
+    const expectedCount = expectedCounts.get(title) || 0;
+    if (count > expectedCount) extra.push(title);
+  }
+  if (missing.length || extra.length) {
+    throw new Error(
+      `Remediation reply titles must match the blocking review Title fields exactly. ` +
+        `Missing: ${missing.length ? missing.join('; ') : 'none'}. ` +
+        `Unexpected: ${extra.length ? extra.join('; ') : 'none'}.`
     );
   }
 }

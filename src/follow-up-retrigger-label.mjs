@@ -15,7 +15,7 @@
 //
 // SPEC §5.1.3 documents this as the PR-side counterpart to the CLI.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -38,7 +38,10 @@ export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation';
 
 const DEFAULT_REASON = 'Operator applied retrigger-remediation label.';
 const DEFAULT_BUMP_BUDGET = 1;
-const ACK_COMMENT_TIMEOUT_MS = 30_000;
+const ACK_COMMENT_TIMEOUT_MS = 10_000;
+const ACK_COMMENT_LOOKUP_TIMEOUT_MS = 15_000;
+const ACK_COMMENT_RETRY_BUDGET_PER_TICK = 5;
+const ACK_COMMENT_MAX_ATTEMPTS = 5;
 const ACK_COMMENT_MARKER_PREFIX = 'adversarial-review-retrigger-remediation-ack';
 
 function safePathSegment(value) {
@@ -109,9 +112,25 @@ async function removeLabelFromPR({
 
 function rereviewOutcomeFromResult(rereviewResult) {
   if (rereviewResult?.outcome) return rereviewResult.outcome;
-  if (rereviewResult?.status) return rereviewResult.status;
   if (rereviewResult?.ok) return 'rearmed';
   return 'rearm-failed';
+}
+
+function buildAckCommentMarker(labelEventKey) {
+  const markerDigest = digestSha256(labelEventKey).replace(/^sha256:/, '');
+  return `${ACK_COMMENT_MARKER_PREFIX}:${markerDigest}`;
+}
+
+function sanitizeAckCommentText(value, maxChars = 500) {
+  const normalized = String(value ?? '')
+    .replace(/<\/?[^>\n]+>/g, '')
+    .replace(/`/g, "'")
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const escapedHeadings = normalized.replace(/^#+\s*/g, '# ');
+  if (escapedHeadings.length <= maxChars) return escapedHeadings;
+  return `${escapedHeadings.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
 
 function buildAckCommentBody({
@@ -121,26 +140,70 @@ function buildAckCommentBody({
   bumpResult,
   rereviewResult,
 }) {
-  const markerDigest = digestSha256(labelEventKey).replace(/^sha256:/, '');
-  const marker = `${ACK_COMMENT_MARKER_PREFIX}:${markerDigest}`;
+  const marker = buildAckCommentMarker(labelEventKey);
   const rereviewOutcome = rereviewOutcomeFromResult(rereviewResult);
   const rereviewReason = rereviewResult?.reason || rereviewResult?.error || null;
+  const safeActor = sanitizeAckCommentText(labelEventActor || 'unknown', 120) || 'unknown';
+  const safeRereviewReason = rereviewReason ? sanitizeAckCommentText(rereviewReason, 500) : null;
+  const safeReason = reason ? sanitizeAckCommentText(reason, 500) : null;
   const lines = [
     `<!-- ${marker} -->`,
     '### Remediation retrigger accepted',
     '',
     `The \`${RETRIGGER_REMEDIATION_LABEL}\` label was accepted by the adversarial-review watcher.`,
     '',
-    `- Requested by: \`${labelEventActor || 'unknown'}\``,
+    `- Requested by: \`${safeActor}\``,
     `- Remediation budget: \`${bumpResult.priorMaxRounds} -> ${bumpResult.newMaxRounds}\` rounds`,
-    `- Fresh review queue: \`${rereviewOutcome}\`${rereviewReason ? ` (${rereviewReason})` : ''}`,
+    `- Fresh review queue: \`${rereviewOutcome}\`${safeRereviewReason ? ` (${safeRereviewReason})` : ''}`,
     '',
     'Next: the watcher will post a fresh adversarial review when it reaches this PR. If that review requests changes, the remediation worker will claim the new follow-up job.',
   ];
-  if (reason) {
-    lines.push('', `Reason: ${reason}`);
+  if (safeReason) {
+    lines.push('', `Reason: ${safeReason}`);
   }
   return lines.join('\n');
+}
+
+async function findExistingAckComment({
+  repo,
+  prNumber,
+  marker,
+  execFileImpl,
+  timeoutMs = ACK_COMMENT_LOOKUP_TIMEOUT_MS,
+}) {
+  if (!marker) return { found: false };
+  try {
+    const { stdout } = await execFileImpl('gh', [
+      'api',
+      '--paginate',
+      `repos/${repo}/issues/${encodeURIComponent(prNumber)}/comments`,
+      '-q',
+      '.[] | {id: .id, body: .body}',
+    ], {
+      maxBuffer: 25 * 1024 * 1024,
+      timeout: timeoutMs,
+      killSignal: 'SIGTERM',
+    });
+    for (const line of String(stdout).split('\n').filter(Boolean)) {
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (String(entry?.body || '').includes(marker)) {
+        return { found: true, marker, commentId: entry?.id ?? null };
+      }
+    }
+    return { found: false };
+  } catch (err) {
+    return {
+      found: false,
+      lookupFailed: true,
+      reason: err?.killed === true ? 'lookup-timeout' : 'lookup-failure',
+      error: err?.message || String(err),
+    };
+  }
 }
 
 async function postRetriggerAckComment({
@@ -160,6 +223,21 @@ async function postRetriggerAckComment({
     bumpResult,
     rereviewResult,
   });
+  const marker = buildAckCommentMarker(labelEventKey);
+  const existing = await findExistingAckComment({
+    repo,
+    prNumber,
+    marker,
+    execFileImpl,
+  });
+  if (existing.found) {
+    return {
+      posted: true,
+      deduped: true,
+      marker: existing.marker,
+      commentId: existing.commentId ?? null,
+    };
+  }
   try {
     const result = await execFileImpl('gh', [
       'pr',
@@ -174,7 +252,7 @@ async function postRetriggerAckComment({
       timeout: ACK_COMMENT_TIMEOUT_MS,
       killSignal: 'SIGTERM',
     });
-    return { posted: true, stdout: result?.stdout || '' };
+    return { posted: true, stdout: result?.stdout || '', marker };
   } catch (err) {
     return {
       posted: false,
@@ -182,6 +260,68 @@ async function postRetriggerAckComment({
       error: err?.message || String(err),
     };
   }
+}
+
+function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpResult, rereviewResult }) {
+  return {
+    posted: false,
+    reason: 'pending',
+    attempts: 0,
+    maxAttempts: ACK_COMMENT_MAX_ATTEMPTS,
+    marker: buildAckCommentMarker(labelEventKey),
+    context: {
+      labelEventActor: labelEventActor || 'unknown',
+      reason: reason || null,
+      bumpResult: {
+        priorMaxRounds: bumpResult?.priorMaxRounds ?? null,
+        newMaxRounds: bumpResult?.newMaxRounds ?? null,
+      },
+      rereviewResult: {
+        ok: rereviewResult?.ok ?? null,
+        outcome: rereviewResult?.outcome || null,
+        status: rereviewResult?.status || null,
+        reason: rereviewResult?.reason || null,
+        error: rereviewResult?.error || null,
+      },
+    },
+  };
+}
+
+async function retryAckCommentForConsumption({
+  repo,
+  prNumber,
+  execFileImpl,
+  consumption,
+  rootDir,
+  labelEventKey,
+}) {
+  if (consumption?.ackComment?.posted === true) return consumption;
+  const context = consumption?.ackComment?.context;
+  if (!context) return consumption;
+  const previousAttempts = Number(consumption?.ackComment?.attempts || 0);
+  if (previousAttempts >= ACK_COMMENT_MAX_ATTEMPTS) return consumption;
+  const ackComment = await postRetriggerAckComment({
+    repo,
+    prNumber,
+    execFileImpl,
+    labelEventKey,
+    labelEventActor: context.labelEventActor,
+    reason: context.reason,
+    bumpResult: context.bumpResult,
+    rereviewResult: context.rereviewResult,
+  });
+  const nextConsumption = {
+    ...consumption,
+    ackComment: {
+      ...ackComment,
+      context,
+      attempts: previousAttempts + 1,
+      maxAttempts: ACK_COMMENT_MAX_ATTEMPTS,
+      attemptedAt: new Date().toISOString(),
+    },
+  };
+  writeLabelConsumption(rootDir, labelEventKey, nextConsumption);
+  return nextConsumption;
 }
 
 async function retryConsumedLabelRemoval({
@@ -223,11 +363,68 @@ async function retryConsumedLabelRemoval({
     };
   }
 
+  nextConsumption = await retryAckCommentForConsumption({
+    repo,
+    prNumber,
+    execFileImpl,
+    consumption: nextConsumption,
+    rootDir,
+    labelEventKey,
+  });
+
   return {
     outcome: 'label-already-consumed',
     detail: 'label event was already consumed; retried label removal without bumping budget',
     jobPath: nextConsumption?.jobPath || null,
+    ackComment: nextConsumption?.ackComment || null,
   };
+}
+
+export async function retryPendingRetriggerAckComments({
+  rootDir,
+  execFileImpl,
+  budget = ACK_COMMENT_RETRY_BUDGET_PER_TICK,
+} = {}) {
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'label-consumptions');
+  let names;
+  try {
+    names = readdirSync(dir).filter((name) => name.endsWith('.json')).sort();
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { attempted: 0, posted: 0 };
+    throw err;
+  }
+  let attempted = 0;
+  let posted = 0;
+  for (const name of names) {
+    if (attempted >= budget) break;
+    const filePath = join(dir, name);
+    let consumption;
+    try {
+      consumption = JSON.parse(readFileSync(filePath, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (
+      consumption?.label !== RETRIGGER_REMEDIATION_LABEL ||
+      consumption?.auditStatus !== 'written' ||
+      consumption?.ackComment?.posted === true ||
+      Number(consumption?.ackComment?.attempts || 0) >= ACK_COMMENT_MAX_ATTEMPTS ||
+      !consumption?.ackComment?.context
+    ) {
+      continue;
+    }
+    attempted += 1;
+    const next = await retryAckCommentForConsumption({
+      repo: consumption.repo,
+      prNumber: consumption.prNumber,
+      execFileImpl,
+      consumption,
+      rootDir,
+      labelEventKey: consumption.labelEventKey,
+    });
+    if (next?.ackComment?.posted === true) posted += 1;
+  }
+  return { attempted, posted };
 }
 
 export async function tryRetriggerRemediationFromLabel({
@@ -378,6 +575,13 @@ export async function tryRetriggerRemediationFromLabel({
     rereviewOutcome: rereviewOutcomeFromResult(rereviewResult),
     outcome: 'bumped-and-rearmed',
   };
+  const pendingAckComment = buildPendingAckComment({
+    labelEventKey,
+    labelEventActor,
+    reason,
+    bumpResult,
+    rereviewResult,
+  });
   writeLabelConsumption(rootDir, labelEventKey, {
     schemaVersion: 1,
     label: RETRIGGER_REMEDIATION_LABEL,
@@ -388,6 +592,7 @@ export async function tryRetriggerRemediationFromLabel({
     jobPath: bumpResult.jobPath,
     auditStatus: 'pending',
     auditRow: terminalAuditRow,
+    ackComment: pendingAckComment,
     consumedAt: ts,
   });
 
@@ -403,6 +608,7 @@ export async function tryRetriggerRemediationFromLabel({
       jobPath: bumpResult.jobPath,
       auditStatus: 'written',
       auditRow: terminalAuditRow,
+      ackComment: pendingAckComment,
       consumedAt: ts,
       auditedAt: ts,
     });
@@ -410,6 +616,23 @@ export async function tryRetriggerRemediationFromLabel({
     return {
       outcome: 'bumped-audit-failed',
       detail: `bumped + re-armed OK but operator mutation audit append failed: ${err?.message || err}`,
+      jobPath: bumpResult.jobPath,
+      newMaxRounds: bumpResult.newMaxRounds,
+    };
+  }
+
+  // Remove the label before posting the human-visible ack so a slow
+  // GitHub comment path does not leave operators staring at a stale
+  // retrigger-remediation label. The pending ack record above keeps the
+  // comment recoverable if the daemon dies before or during the post.
+  let labelRemoved = false;
+  try {
+    await removeLabelFromPR({ repo, prNumber, execFileImpl });
+    labelRemoved = true;
+  } catch (err) {
+    return {
+      outcome: 'bumped-label-removal-failed',
+      detail: `bumped + re-armed OK but label removal failed: ${err?.message || err}`,
       jobPath: bumpResult.jobPath,
       newMaxRounds: bumpResult.newMaxRounds,
     };
@@ -435,26 +658,17 @@ export async function tryRetriggerRemediationFromLabel({
     jobPath: bumpResult.jobPath,
     auditStatus: 'written',
     auditRow: terminalAuditRow,
-    ackComment,
+    ackComment: {
+      ...ackComment,
+      context: pendingAckComment.context,
+      attempts: 1,
+      maxAttempts: ACK_COMMENT_MAX_ATTEMPTS,
+      attemptedAt: new Date().toISOString(),
+    },
+    labelRemoved,
     consumedAt: ts,
     auditedAt: ts,
   });
-
-  // Remove the label only AFTER the bump succeeds. If we fail to
-  // remove the label, the next tick will see the same GitHub labeled
-  // event and the consumption check above will short-circuit it.
-  let labelRemoved = false;
-  try {
-    await removeLabelFromPR({ repo, prNumber, execFileImpl });
-    labelRemoved = true;
-  } catch (err) {
-    return {
-      outcome: 'bumped-label-removal-failed',
-      detail: `bumped + re-armed OK but label removal failed: ${err?.message || err}`,
-      jobPath: bumpResult.jobPath,
-      newMaxRounds: bumpResult.newMaxRounds,
-    };
-  }
 
   return {
     outcome: 'bumped-and-rearmed',

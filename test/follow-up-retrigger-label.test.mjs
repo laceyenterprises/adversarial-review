@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -11,6 +11,7 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
+  retryPendingRetriggerAckComments,
   tryRetriggerRemediationFromLabel,
 } from '../src/follow-up-retrigger-label.mjs';
 
@@ -74,6 +75,13 @@ function makeLabelEvent(overrides = {}) {
   };
 }
 
+function readOnlyLabelConsumption(rootDir) {
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'label-consumptions');
+  const names = readdirSync(dir).filter((name) => name.endsWith('.json'));
+  assert.equal(names.length, 1);
+  return JSON.parse(readFileSync(path.join(dir, names[0]), 'utf8'));
+}
+
 test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halted-stopped:max-rounds-reached job', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { jobPath } = makeHaltedJob(rootDir, { stopCode: 'max-rounds-reached' });
@@ -101,21 +109,10 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   assert.equal(result.labelRemoved, true);
   assert.equal(result.newMaxRounds, 3);
 
-  // gh was called to post an ack comment, then remove the label.
-  assert.equal(ghCalls.length, 2);
+  // gh removes the label first, then checks for and posts the ack comment.
+  assert.equal(ghCalls.length, 3);
   assert.equal(ghCalls[0].cmd, 'gh');
-  assert.deepEqual(ghCalls[0].args.slice(0, 6), [
-    'pr',
-    'comment',
-    '238',
-    '--repo',
-    'laceyenterprises/agent-os',
-    '--body',
-  ]);
-  assert.match(ghCalls[0].args[6], /Remediation retrigger accepted/);
-  assert.match(ghCalls[0].args[6], /Remediation budget: `2 -> 3` rounds/);
-  assert.equal(ghCalls[1].cmd, 'gh');
-  assert.deepEqual(ghCalls[1].args, [
+  assert.deepEqual(ghCalls[0].args, [
     'pr',
     'edit',
     '238',
@@ -124,15 +121,32 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
     '--remove-label',
     RETRIGGER_REMEDIATION_LABEL,
   ]);
+  assert.equal(ghCalls[1].cmd, 'gh');
+  assert.deepEqual(ghCalls[1].args.slice(0, 3), [
+    'api',
+    '--paginate',
+    'repos/laceyenterprises/agent-os/issues/238/comments',
+  ]);
+  assert.equal(ghCalls[2].cmd, 'gh');
+  assert.deepEqual(ghCalls[2].args.slice(0, 6), [
+    'pr',
+    'comment',
+    '238',
+    '--repo',
+    'laceyenterprises/agent-os',
+    '--body',
+  ]);
+  assert.match(ghCalls[2].args[6], /Remediation retrigger accepted/);
+  assert.match(ghCalls[2].args[6], /Remediation budget: `2 -> 3` rounds/);
 
   // Audit row recorded.
   assert.equal(auditRows.length, 1);
   assert.equal(auditRows[0].row.source, 'pr-label');
   assert.equal(auditRows[0].row.operator, 'pr-label:VirtualPaul');
   assert.equal(auditRows[0].row.outcome, 'bumped-and-rearmed');
-  assert.equal(auditRows[0].row.rereviewOutcome, 'blocked');
+  assert.equal(auditRows[0].row.rereviewOutcome, 'rearm-failed');
   assert.equal(result.ackComment.posted, true);
-  assert.equal(result.rereviewOutcome, 'blocked');
+  assert.equal(result.rereviewOutcome, 'rearm-failed');
 
   // Job's persisted maxRounds was bumped.
   const updated = readFollowUpJob(jobPath);
@@ -157,8 +171,8 @@ test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted',
   });
 
   assert.equal(result.outcome, 'bumped-and-rearmed');
-  assert.equal(ghCalls.length, 2);
-  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['comment', 'edit']);
+  assert.equal(ghCalls.length, 3);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
 });
 
 test('tryRetriggerRemediationFromLabel works on completed jobs that requested re-review', async () => {
@@ -183,8 +197,8 @@ test('tryRetriggerRemediationFromLabel works on completed jobs that requested re
   });
 
   assert.equal(result.outcome, 'bumped-and-rearmed');
-  assert.equal(ghCalls.length, 2);
-  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['comment', 'edit']);
+  assert.equal(ghCalls.length, 3);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
 });
 
 test('tryRetriggerRemediationFromLabel works on failed jobs', async () => {
@@ -205,8 +219,8 @@ test('tryRetriggerRemediationFromLabel works on failed jobs', async () => {
   });
 
   assert.equal(result.outcome, 'bumped-and-rearmed');
-  assert.equal(ghCalls.length, 2);
-  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['comment', 'edit']);
+  assert.equal(ghCalls.length, 3);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
 });
 
 test('tryRetriggerRemediationFromLabel leaves label in place when job is still active', async () => {
@@ -347,7 +361,8 @@ test('tryRetriggerRemediationFromLabel keeps consumed label state retryable when
   });
 
   assert.equal(retry.outcome, 'label-already-consumed');
-  assert.equal(ghCalls.length, 1);
+  assert.equal(ghCalls.length, 3);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
   assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
 });
 
@@ -377,4 +392,84 @@ test('tryRetriggerRemediationFromLabel is idempotent across re-applications', as
   // an idempotent result; we should not double-bump.
   const second = await tryRetriggerRemediationFromLabel(args);
   assert.notEqual(second.outcome, 'bumped-and-rearmed', 'second call must not double-bump');
+});
+
+test('tryRetriggerRemediationFromLabel dedupes ack comments by marker before posting', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir);
+
+  const ghCalls = [];
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-deduped-ack' }),
+    execFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      if (args[0] === 'gh') throw new Error('bad test seam');
+      if (args[0] === 'api') {
+        const consumption = readOnlyLabelConsumption(rootDir);
+        return {
+          stdout: `${JSON.stringify({
+            id: 12345,
+            body: `<!-- ${consumption.ackComment.marker} -->\nprevious ack`,
+          })}\n`,
+          stderr: '',
+        };
+      }
+      assert.notEqual(args[1], 'comment', 'existing marker must skip gh pr comment');
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: () => {},
+  });
+
+  assert.equal(result.outcome, 'bumped-and-rearmed');
+  assert.equal(result.ackComment.posted, true);
+  assert.equal(result.ackComment.deduped, true);
+  assert.equal(result.ackComment.commentId, 12345);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate']);
+});
+
+test('retryPendingRetriggerAckComments retries pending ack records after label removal', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir);
+
+  await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({
+      id: 'evt-pending-ack',
+      actor: 'Bad`Actor',
+    }),
+    reason: 'operator note\n# hidden\n</details>',
+    execFileImpl: async (_cmd, args) => {
+      if (args[1] === 'comment') throw new Error('simulated comment outage');
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: () => {},
+  });
+
+  const pending = readOnlyLabelConsumption(rootDir);
+  assert.equal(pending.labelRemoved, true);
+  assert.equal(pending.ackComment.posted, false);
+
+  const bodies = [];
+  const retry = await retryPendingRetriggerAckComments({
+    rootDir,
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'api') return { stdout: '', stderr: '' };
+      if (args[1] === 'comment') bodies.push(args[6]);
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.deepEqual(retry, { attempted: 1, posted: 1 });
+  assert.equal(bodies.length, 1);
+  assert.doesNotMatch(bodies[0], /<\/details>/);
+  assert.doesNotMatch(bodies[0], /\n# hidden/);
+  assert.match(bodies[0], /Requested by: `Bad'Actor`/);
+
+  const afterRetry = readOnlyLabelConsumption(rootDir);
+  assert.equal(afterRetry.ackComment.posted, true);
 });

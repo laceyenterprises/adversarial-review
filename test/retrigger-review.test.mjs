@@ -247,6 +247,49 @@ test('retrigger-review allows failed reset when explicitly requested', () => {
   assert.equal(JSON.parse(out.text()).outcome, 'triggered:no-job');
 });
 
+test('retrigger-review allows failed-orphan reset when explicitly requested', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'failed-orphan',
+    failedAt: '2026-05-05T04:06:00.000Z',
+    failureMessage: 'watcher restarted while reviewing',
+  });
+
+  const err = makeCaptureStream();
+  const blocked = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'verified no orphan review posted',
+    '--root-dir', rootDir,
+  ], { stdout: makeCaptureStream(), stderr: err });
+
+  assert.equal(blocked, 1);
+  assert.match(err.text(), /failed-orphan/);
+
+  const out = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'verified no orphan review posted',
+    '--allow-failed-reset',
+    '--root-dir', rootDir,
+  ], { stdout: out, stderr: makeCaptureStream() });
+
+  assert.equal(rc, 0);
+  assert.equal(JSON.parse(out.text()).outcome, 'triggered:no-job');
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare('SELECT review_status, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+      .get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.failed_at, null);
+    assert.equal(row.failure_message, null);
+  } finally {
+    db.close();
+  }
+});
+
 test('retrigger-review explains reviewing recovery path', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'reviewing' });

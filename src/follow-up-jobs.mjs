@@ -57,6 +57,7 @@ const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
 const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
 const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
+const PUBLIC_REPLY_MAX_CHARS = 1200;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],
@@ -385,6 +386,60 @@ function validateOptionalTitle(entry, fieldName) {
   assertNoPlaceholderText(entry.title, `${fieldName}.title`);
 }
 
+const PUBLIC_REPLY_NOISE_SIGNALS = Object.freeze([
+  { label: 'JSON-like dump at start of field', pattern: /^\s*(?:\{|\[)\s*["{\[]/ },
+  { label: 'fenced code block', pattern: /^\s*```/m },
+  { label: 'tool call/result markup', pattern: /<tool_(?:call|result)\b/i },
+  { label: 'git diff header', pattern: /^diff --git\b/m },
+  { label: 'diff hunk header', pattern: /^@@\s/m },
+  { label: 'token-count transcript header', pattern: /Original token count:/ },
+  { label: 'python traceback header', pattern: /^Traceback \(most recent call last\):/m },
+]);
+const PUBLIC_REPLY_MAX_LINES = 20;
+
+function detectPublicReplyNoiseSignal(value) {
+  const text = String(value ?? '');
+  for (const signal of PUBLIC_REPLY_NOISE_SIGNALS) {
+    if (signal.pattern.test(text)) return signal.label;
+  }
+
+  // A single prose line that begins with "stdout:" or "stderr:" is
+  // ambiguous enough to allow; paired prefixes are a much stronger
+  // signal that the worker pasted command output.
+  if (/^\s*stdout\s*:/im.test(text) && /^\s*stderr\s*:/im.test(text)) {
+    return 'paired stdout/stderr log prefixes';
+  }
+
+  return null;
+}
+
+function assertPublicReplyTextQuality(value, locationLabel) {
+  if (typeof value !== 'string') return;
+  const text = value.trim();
+  if (!text) return;
+  if (text.length > PUBLIC_REPLY_MAX_CHARS) {
+    throw new Error(
+      `Remediation reply ${locationLabel} is too long for the public PR comment; ` +
+        `summarize it instead of dumping raw output`
+    );
+  }
+  const nonEmptyLineCount = text.split(/\r?\n/).filter((line) => line.trim()).length;
+  if (nonEmptyLineCount > PUBLIC_REPLY_MAX_LINES) {
+    throw new Error(
+      `Remediation reply ${locationLabel} has too many lines for the public PR comment; ` +
+        `summarize it instead of dumping raw output`
+    );
+  }
+  const noiseSignal = detectPublicReplyNoiseSignal(text);
+  if (noiseSignal) {
+    throw new Error(
+      `Remediation reply ${locationLabel} looks like raw logs, JSON, diff, or tool output ` +
+        `(${noiseSignal}); ` +
+        `write a human summary instead`
+    );
+  }
+}
+
 // addressed[] entries are { title?, finding, action, files? } where files is
 // an optional array of strings (the worker can list paths it touched
 // while addressing the finding). Per-entry validation rejects a
@@ -407,6 +462,8 @@ function validateAddressedField(items) {
     validateOptionalTitle(entry, `addressed[${index}]`);
     assertNoPlaceholderText(entry.finding, `addressed[${index}].finding`);
     assertNoPlaceholderText(entry.action, `addressed[${index}].action`);
+    assertPublicReplyTextQuality(entry.finding, `addressed[${index}].finding`);
+    assertPublicReplyTextQuality(entry.action, `addressed[${index}].action`);
     if (entry.files !== undefined) {
       if (!Array.isArray(entry.files)) {
         throw new Error(`Remediation reply addressed[${index}].files must be an array if provided`);
@@ -442,6 +499,8 @@ function validatePushbackField(items) {
     validateOptionalTitle(entry, `pushback[${index}]`);
     assertNoPlaceholderText(entry.finding, `pushback[${index}].finding`);
     assertNoPlaceholderText(entry.reasoning, `pushback[${index}].reasoning`);
+    assertPublicReplyTextQuality(entry.finding, `pushback[${index}].finding`);
+    assertPublicReplyTextQuality(entry.reasoning, `pushback[${index}].reasoning`);
   });
 }
 
@@ -471,6 +530,7 @@ function validateBlockersField(items) {
         throw new Error(`Remediation reply blockers[${index}] must be a non-empty string`);
       }
       assertNoPlaceholderText(entry, `blockers[${index}]`);
+      assertPublicReplyTextQuality(entry, `blockers[${index}]`);
       return;
     }
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -494,11 +554,14 @@ function validateBlockersField(items) {
       throw new Error(`Remediation reply blockers[${index}].needsHumanInput must be a non-empty string when provided`);
     }
     assertNoPlaceholderText(entry.finding, `blockers[${index}].finding`);
+    assertPublicReplyTextQuality(entry.finding, `blockers[${index}].finding`);
     if (hasReasoning) {
       assertNoPlaceholderText(entry.reasoning, `blockers[${index}].reasoning`);
+      assertPublicReplyTextQuality(entry.reasoning, `blockers[${index}].reasoning`);
     }
     if (hasNeedsHumanInput) {
       assertNoPlaceholderText(entry.needsHumanInput, `blockers[${index}].needsHumanInput`);
+      assertPublicReplyTextQuality(entry.needsHumanInput, `blockers[${index}].needsHumanInput`);
     }
   });
 }
@@ -586,9 +649,15 @@ function parseBlockingFindingsSection(reviewBody) {
   return findings;
 }
 
-function countBlockingFindingsInReview(reviewBody) {
-  const findings = parseBlockingFindingsSection(reviewBody);
-  return findings === null ? null : findings.length;
+function normalizeCoverageTitle(title) {
+  return String(title ?? '')
+    .normalize('NFKC')
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLocaleLowerCase('en-US');
 }
 
 function usesPerFindingReplyContract(reply) {
@@ -633,8 +702,9 @@ function validateBlockingCoverage(reply, expectedJob) {
   const usesNewSchema = usesPerFindingReplyContract(reply);
   if (!usesNewSchema) return;
 
-  const expected = countBlockingFindingsInReview(expectedJob.reviewBody);
-  if (expected === null || expected === 0) return;
+  const findings = parseBlockingFindingsSection(expectedJob.reviewBody);
+  if (findings === null || findings.length === 0) return;
+  const expected = findings.length;
 
   const addressed = Array.isArray(reply.addressed) ? reply.addressed : [];
   const pushback = Array.isArray(reply.pushback) ? reply.pushback : [];
@@ -647,6 +717,77 @@ function validateBlockingCoverage(reply, expectedJob) {
         `review has ${expected} blocking issue(s), reply records ${total} ` +
         `(addressed=${addressed.length}, pushback=${pushback.length}, blockers=${blockers.length}). ` +
         `Each blocking issue must appear exactly once across addressed[], pushback[], or blockers[].`
+    );
+  }
+
+  const actualEntries = [
+    ...addressed.map((entry, index) => ({ field: 'addressed', index, entry })),
+    ...pushback.map((entry, index) => ({ field: 'pushback', index, entry })),
+    ...blockers.map((entry, index) => ({ field: 'blockers', index, entry })),
+  ];
+
+  const expectedTitleEntries = findings
+    .map((finding) => ({
+      raw: typeof finding.title === 'string' ? finding.title.trim() : '',
+      key: normalizeCoverageTitle(finding.title),
+    }))
+    .filter((entry) => entry.key);
+  const titledExpected = expectedTitleEntries.map((entry) => entry.key);
+  if (!titledExpected.length) return;
+
+  const expectedCounts = new Map();
+  const expectedDisplay = new Map();
+  for (const { key, raw } of expectedTitleEntries) {
+    expectedCounts.set(key, (expectedCounts.get(key) || 0) + 1);
+    if (!expectedDisplay.has(key)) expectedDisplay.set(key, raw);
+  }
+  const actualCounts = new Map();
+  const actualDisplay = new Map();
+  for (const { entry } of actualEntries) {
+    const raw = typeof entry?.title === 'string' ? entry.title.trim() : '';
+    const key = normalizeCoverageTitle(raw);
+    if (!key) continue;
+    actualCounts.set(key, (actualCounts.get(key) || 0) + 1);
+    if (!actualDisplay.has(key)) actualDisplay.set(key, raw);
+  }
+
+  if (titledExpected.length === findings.length) {
+    const untitled = actualEntries.find(({ entry }) => (
+      !entry || typeof entry !== 'object' || Array.isArray(entry) || !normalizeCoverageTitle(entry.title)
+    ));
+    if (untitled) {
+      if (typeof untitled.entry === 'string') {
+        throw new Error(
+          `Remediation reply blockers[${untitled.index}] is a string; when the adversarial review ` +
+            `supplies Title fields for every blocking finding, blockers entries must be objects ` +
+            `with a non-empty title`
+        );
+      }
+      throw new Error(
+        `Remediation reply ${untitled.field}[${untitled.index}].title is required because ` +
+          `the adversarial review supplied Title fields for its blocking findings`
+      );
+    }
+  }
+
+  const missing = [];
+  const extra = [];
+  const allExpectedFindingsTitled = titledExpected.length === findings.length;
+  for (const [key, count] of expectedCounts.entries()) {
+    const actual = actualCounts.get(key) || 0;
+    if (actual < count) missing.push(expectedDisplay.get(key) || key);
+  }
+  for (const [key, count] of actualCounts.entries()) {
+    const expectedCount = expectedCounts.get(key) || 0;
+    if (expectedCount === 0 || (allExpectedFindingsTitled && count > expectedCount)) {
+      extra.push(actualDisplay.get(key) || key);
+    }
+  }
+  if (missing.length || extra.length) {
+    throw new Error(
+      `Remediation reply titles must match the blocking review Title fields exactly. ` +
+        `Missing: ${missing.length ? missing.join('; ') : 'none'}. ` +
+        `Unexpected: ${extra.length ? extra.join('; ') : 'none'}.`
     );
   }
 }
@@ -1922,6 +2063,7 @@ export {
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS,
+  PUBLIC_REPLY_MAX_CHARS,
   ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
@@ -1931,6 +2073,7 @@ export {
   buildRemediationReplyArtifact,
   claimNextFollowUpJob,
   createFollowUpJob,
+  detectPublicReplyNoiseSignal,
   ensureFollowUpJobDirs,
   extractReviewSummary,
   getCurrentRound,

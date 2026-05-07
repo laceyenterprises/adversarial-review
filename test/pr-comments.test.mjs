@@ -945,6 +945,7 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
           files: ['src/worker.mjs', 'test/worker.test.mjs'],
         },
         {
+          title: 'Auth header null guard',
           finding: 'Missing null check on auth header.',
           action: 'Added explicit guard + regression test.',
         },
@@ -971,7 +972,7 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   const filesLines = body.match(/\*\*Files:\*\*/g) || [];
   assert.equal(filesLines.length, 1, 'Files: line only on entries that supply it');
   // Both entries should be numbered.
-  assert.match(body, /2\. \*\*Finding\*\*/);
+  assert.match(body, /2\. \*\*Auth header null guard\*\*/);
 });
 
 test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', () => {
@@ -1001,7 +1002,7 @@ test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', 
   assert.doesNotMatch(body, /1\. \*\*Foo\n/);
 });
 
-test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls back when empty', () => {
+test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls back for empty titles', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'completed',
@@ -1030,7 +1031,117 @@ test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls 
 
   assert.match(body, /1\. \*\*Retry double-submit\*\*/);
   assert.match(body, /2\. \*\*Finding\*\*/);
+  assert.match(body, /Invisible-only titles should use the fallback heading\./);
   assert.doesNotMatch(body, /[\u001B\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u);
+});
+
+test('buildRemediationOutcomeCommentBody renders validator-accepted untitled per-finding entries', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Handled an untitled review.',
+      validation: ['npm test'],
+      addressed: [{ finding: 'Untitled addressed finding.', action: 'Applied the fix.' }],
+      pushback: [{ finding: 'Untitled pushback finding.', reasoning: 'Outside this PR.' }],
+      blockers: [{ finding: 'Untitled blocker finding.', reasoning: 'Needs operator input.' }],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'untitled entries render' },
+  });
+
+  assert.match(body, /\*\*Addressed findings\*\*/);
+  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
+  assert.match(body, /\*\*Blockers\*\*/);
+  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /Untitled addressed finding\./);
+  assert.match(body, /Untitled pushback finding\./);
+  assert.match(body, /Untitled blocker finding\./);
+});
+
+test('buildRemediationOutcomeCommentBody renders the full validator-accepted per-entry text cap', () => {
+  const longAction = `Expanded reasoning ${'x'.repeat(850)} still visible at the end.`;
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed one verbose finding.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          finding: 'The renderer used a smaller cap than validation.',
+          action: longAction,
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'caps aligned' },
+  });
+
+  assert.ok(body.includes(longAction), 'renderer should not truncate text that validation accepts');
+});
+
+test('buildRemediationOutcomeCommentBody leaves redaction expansion room for per-entry text', () => {
+  const validatorSizedAction = `${'x'.repeat(1183)} sk-12345678 tail`;
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed one edge case.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          finding: 'The renderer truncated redaction placeholders.',
+          action: validatorSizedAction,
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'redaction margin' },
+  });
+
+  assert.match(body, /\[REDACTED_OPENAI_TOKEN\] tail/);
+});
+
+test('buildRemediationOutcomeCommentBody omits malformed per-finding sections instead of posting empty buckets', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Malformed reply fields should not leak into the comment.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: '',
+          finding: '{"stdout":"raw worker dump","stderr":"noise"}',
+          action: '```diff\n- old\n+ new\n```',
+        },
+      ],
+      pushback: [
+        {
+          title: 'Noisy pushback',
+          finding: '<tool_call name="exec">...</tool_call>',
+          reasoning: 'Traceback (most recent call last): boom',
+        },
+      ],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'ready' },
+  });
+
+  assert.doesNotMatch(body, /\*\*Addressed findings\*\*/);
+  assert.doesNotMatch(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
+  assert.doesNotMatch(body, /raw worker dump/);
+  assert.doesNotMatch(body, /tool_call/);
 });
 
 test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding/reasoning', () => {
@@ -1109,12 +1220,14 @@ test('buildRemediationOutcomeCommentBody redacts host-local paths smuggled into 
       validation: ['npm test'],
       addressed: [
         {
+          title: 'Host-local addressed path',
           finding: 'Bug at /Users/airlock/secret-project/src/worker.mjs',
           action: 'Patched the function in /Users/airlock/secret-project/src/worker.mjs',
         },
       ],
       pushback: [
         {
+          title: 'Host-local pushback path',
           finding: 'Reviewer at /Users/airlock/private/notes.md asked for X',
           reasoning: 'Discussed in /private/var/folders/zz/T/scratchpad.md',
         },
@@ -1153,13 +1266,14 @@ test('buildRemediationOutcomeCommentBody renders all four sections (summary, add
       summary: 'Hit a hard exit on the schema migration.',
       validation: ['npm test'],
       addressed: [
-        { finding: 'Null-handling bug', action: 'Added a guard.' },
+        { title: 'Null-handling bug', finding: 'Null-handling bug', action: 'Added a guard.' },
       ],
       pushback: [
-        { finding: 'Reviewer wants a full refactor', reasoning: 'Out of scope.' },
+        { title: 'Full refactor request', finding: 'Reviewer wants a full refactor', reasoning: 'Out of scope.' },
       ],
       blockers: [
         {
+          title: 'Schema migration',
           finding: 'Reviewer asks for the schema migration.',
           reasoning: 'Schema migration requires DBA review.',
           needsHumanInput: 'DBA approval + maintenance window',
@@ -1204,6 +1318,7 @@ test('buildRemediationOutcomeCommentBody truncates an absurdly long Files: line 
       validation: [],
       addressed: [
         {
+          title: 'Sweeping refactor',
           finding: 'Sweeping refactor.',
           action: 'Touched many files.',
           files: manyFiles,
@@ -1277,6 +1392,7 @@ test('buildRemediationOutcomeCommentBody salvages worker response on invalid-rem
       validation: ['python3 platform/session-ledger/tests/test_turn_observability.py'],
       addressed: [
         {
+          title: 'Turn attempts opened_at preservation',
           finding: 'turn_attempts upsert overwrites opened_at on partial updates.',
           action: 'Changed conflict update to preserve opened_at and other nullable fields.',
           files: ['platform/session-ledger/src/session_ledger/db.py'],
@@ -1300,7 +1416,7 @@ test('buildRemediationOutcomeCommentBody salvages worker response on invalid-rem
   assert.match(body, /\*\*Summary\*\*/);
   assert.match(body, /Preserved opened_at, made events idempotent/);
   assert.match(body, /\*\*Addressed findings\*\*/);
-  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /1\. \*\*Turn attempts openedat preservation\*\*/);
   assert.match(body, /turn_attempts upsert overwrites opened_at on partial updates\./);
   assert.match(body, /\*\*Files:\*\* `platform\/session-ledger\/src\/session_ledger\/db\.py`/);
 });

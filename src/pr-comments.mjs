@@ -20,6 +20,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from './follow-up-jobs.mjs';
 import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -98,7 +99,10 @@ function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
 // caps apply independently to finding/action/reasoning so one long
 // action does not crowd out the others.
 const ADDRESSED_FILES_MAX_CHARS = 600;
-const PER_ENTRY_FIELD_MAX_CHARS = 800;
+// Validator caps raw worker text at PUBLIC_REPLY_MAX_CHARS. Rendering
+// gets a little headroom because redaction can expand short secrets or
+// paths into placeholders before the final public-comment cap applies.
+const PER_ENTRY_RENDER_MAX_CHARS = 1400;
 const PER_ENTRY_TITLE_MAX_CHARS = 120;
 const ANSI_ESCAPE_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const TITLE_CONTROL_CHARS_PATTERN = /[\u0000-\u001F\u007F\u2028\u2029]/g;
@@ -140,6 +144,20 @@ function safeEntryTitle(entry, fallback = 'Finding') {
   return normalizeEntryTitleText(redactPublicSafeText(title, PER_ENTRY_TITLE_MAX_CHARS)) || fallback;
 }
 
+function sanitizePerFindingText(text) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return '';
+  if (detectPublicReplyNoiseSignal(raw)) return '';
+  const normalized = raw
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t\f\v]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return redactPublicSafeText(normalized, PER_ENTRY_RENDER_MAX_CHARS).trim();
+}
+
 // Render a fenced text block at `indentLevel` spaces of indent so the
 // fenced content nests under a markdown list item. The fence width
 // auto-grows to outrun any backtick run inside the content (same
@@ -176,8 +194,9 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
   const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
-      const finding = String(entry.finding ?? '').trim();
-      const action = String(entry.action ?? '').trim();
+      const title = safeEntryTitle(entry);
+      const finding = sanitizePerFindingText(entry.finding);
+      const action = sanitizePerFindingText(entry.action);
       if (!finding || !action) return null;
       const files = Array.isArray(entry.files)
         ? entry.files
@@ -186,9 +205,9 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
             .filter(Boolean)
         : [];
       return {
-        title: safeEntryTitle(entry),
-        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
-        action: redactPublicSafeText(action, PER_ENTRY_FIELD_MAX_CHARS),
+        title,
+        finding,
+        action,
         files,
       };
     })
@@ -231,13 +250,14 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
   const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
-      const finding = String(entry.finding ?? '').trim();
-      const reasoning = String(entry.reasoning ?? '').trim();
+      const title = safeEntryTitle(entry);
+      const finding = sanitizePerFindingText(entry.finding);
+      const reasoning = sanitizePerFindingText(entry.reasoning);
       if (!finding || !reasoning) return null;
       return {
-        title: safeEntryTitle(entry),
-        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
-        reasoning: redactPublicSafeText(reasoning, PER_ENTRY_FIELD_MAX_CHARS),
+        title,
+        finding,
+        reasoning,
       };
     })
     .filter(Boolean)
@@ -277,29 +297,24 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
   const entries = items
     .map((entry) => {
       if (typeof entry === 'string') {
-        const trimmed = entry.trim();
+        const trimmed = sanitizePerFindingText(entry);
         if (!trimmed) return null;
         return {
           title: 'Finding',
-          finding: redactPublicSafeText(trimmed, PER_ENTRY_FIELD_MAX_CHARS),
+          finding: trimmed,
           reasoning: '',
           needsHumanInput: '',
         };
       }
       if (!entry || typeof entry !== 'object') return null;
-      const finding = String(entry.finding ?? '').trim();
+      const title = safeEntryTitle(entry);
+      const finding = sanitizePerFindingText(entry.finding);
       if (!finding) return null;
       return {
-        title: safeEntryTitle(entry),
-        finding: redactPublicSafeText(finding, PER_ENTRY_FIELD_MAX_CHARS),
-        reasoning: redactPublicSafeText(
-          String(entry.reasoning ?? '').trim(),
-          PER_ENTRY_FIELD_MAX_CHARS,
-        ),
-        needsHumanInput: redactPublicSafeText(
-          String(entry.needsHumanInput ?? '').trim(),
-          PER_ENTRY_FIELD_MAX_CHARS,
-        ),
+        title,
+        finding,
+        reasoning: sanitizePerFindingText(entry.reasoning),
+        needsHumanInput: sanitizePerFindingText(entry.needsHumanInput),
       };
     })
     .filter(Boolean)
@@ -581,24 +596,33 @@ function buildRemediationOutcomeCommentBody({
   // never emits an empty header to avoid a comment full of
   // "(none reported)" placeholders for non-applicable cases.
   if (reply?.addressed?.length) {
-    lines.push('');
-    lines.push('**Addressed findings**');
-    lines.push('');
-    lines.push(formatAddressedList(reply.addressed));
+    const addressed = formatAddressedList(reply.addressed, '');
+    if (addressed) {
+      lines.push('');
+      lines.push('**Addressed findings**');
+      lines.push('');
+      lines.push(addressed);
+    }
   }
 
   if (reply?.pushback?.length) {
-    lines.push('');
-    lines.push('**Pushback (deliberately not changed)**');
-    lines.push('');
-    lines.push(formatPushbackList(reply.pushback));
+    const pushback = formatPushbackList(reply.pushback, '');
+    if (pushback) {
+      lines.push('');
+      lines.push('**Pushback (deliberately not changed)**');
+      lines.push('');
+      lines.push(pushback);
+    }
   }
 
   if (reply?.blockers?.length) {
-    lines.push('');
-    lines.push('**Blockers**');
-    lines.push('');
-    lines.push(formatBlockersList(reply.blockers));
+    const blockers = formatBlockersList(reply.blockers, '');
+    if (blockers) {
+      lines.push('');
+      lines.push('**Blockers**');
+      lines.push('');
+      lines.push(blockers);
+    }
   }
 
   // Surface the actual rereview outcome (not just the worker's request bit)

@@ -389,6 +389,20 @@ Inspect review DB:
 sqlite3 data/reviews.db "select repo,pr_number,review_status,pr_state,review_attempts,posted_at,failed_at,rereview_requested_at from reviewed_prs order by id desc limit 20;"
 ```
 
+Quiesce the watcher before a managed service bounce:
+
+```bash
+mkdir -p data
+jq -n \
+  --arg reason "main-catchup bouncing adversarial-review" \
+  --arg requestedBy "main-catchup" \
+  --arg expiresAt "$(date -u -v+20M '+%Y-%m-%dT%H:%M:%SZ')" \
+  '{reason:$reason, requestedBy:$requestedBy, expiresAt:$expiresAt}' \
+  > data/watcher-drain.json
+```
+
+While `data/watcher-drain.json` exists and has not expired, `src/watcher.mjs` keeps lifecycle and merge-agent checks running but skips new review spawns. This is the handoff main-catchup should use before `launchctl kickstart -k`: write the marker, wait until `data/reviews.db` has no `review_status='reviewing'` rows, bounce the watcher, then remove the marker. Invalid drain JSON fails closed and also blocks new review spawns; an expired marker is ignored.
+
 Re-trigger a review for a previously-reviewed PR (canonical path):
 
 ```bash

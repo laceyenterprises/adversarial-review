@@ -41,6 +41,7 @@ import {
 } from './follow-up-merge-agent.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
+  retryPendingRetriggerAckComments,
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
@@ -769,6 +770,20 @@ async function pollOnce(octokit) {
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit);
+
+  try {
+    const ackRetry = await retryPendingRetriggerAckComments({
+      rootDir: ROOT,
+      execFileImpl: execFileAsync,
+    });
+    if (ackRetry.attempted > 0) {
+      console.log(
+        `[watcher] retrigger-remediation ack retry: attempted=${ackRetry.attempted} posted=${ackRetry.posted}`
+      );
+    }
+  } catch (err) {
+    console.error('[watcher] retrigger-remediation ack retry failed:', err?.message || err);
+  }
 
   const watcherDrain = readWatcherDrainState();
   if (watcherDrain.active) {

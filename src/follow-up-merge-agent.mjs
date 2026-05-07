@@ -3,13 +3,15 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { writeFileAtomic } from './atomic-write.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 
 const execFileAsync = promisify(execFile);
 
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
-const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'do-not-merge']);
+const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
+const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
 // "I've read the review, the substance is fine, please dispatch the
@@ -22,8 +24,9 @@ const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'do-not-merge']);
 // does NOT override:
 //   - `not-mergeable` (force-merging a conflicted PR is ~always wrong)
 //   - `checks-failed` / `checks-pending` (CI is a hard gate)
-//   - `merge-agent-skip` / `do-not-merge` (those signal "absolutely
-//     do not merge"; if both are present, skip wins)
+//   - `merge-agent-skip` / `merge-agent-stuck` / `do-not-merge`
+//     (those signal "do not dispatch merge-agent now"; if both are
+//     present, skip wins)
 //   - `pr-not-open` / `merged` (trivially N/A)
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const DEFAULT_MERGE_AGENT_PARENT_SESSION = 'session:adversarial-review:watcher';
@@ -213,77 +216,125 @@ function buildMergeAgentPrompt(job) {
 function pickMergeAgentDispatch(job, {
   recentDispatches = [],
 } = {}) {
+  return pickMergeAgentDispatchDetail(job, { recentDispatches }).decision;
+}
+
+function pickMergeAgentDispatchDetail(job, {
+  recentDispatches = [],
+} = {}) {
   const normalizedVerdict = normalizeReviewVerdict(job?.lastVerdict);
   const labels = new Set(normalizeLabelNames(job?.labels));
+  const hasMergeAgentRequestedLabel = labels.has(MERGE_AGENT_REQUESTED_LABEL);
+  const mergeAgentRequested = hasMergeAgentRequestedLabel && isScopedMergeAgentRequest(job);
   const hasOperatorApprovedLabel = labels.has(OPERATOR_APPROVED_LABEL);
   const operatorApproved = hasOperatorApprovedLabel && isScopedOperatorApproval(job);
+  const alreadyDispatched = recentDispatches.some((entry) => (
+    String(entry?.repo ?? '') === String(job?.repo ?? '')
+    && Number(entry?.prNumber) === Number(job?.prNumber)
+    && String(entry?.headSha ?? '') === String(job?.headSha ?? '')
+  ));
 
   // Hard skips that even an operator override does NOT bypass include
-  // unknown/missing verdicts, closed/merged PRs, conflicting trees,
-  // failed/pending CI, active/unclear remediation state, and explicit
-  // do-not-merge labels. The operator-approved label only says "I'm
-  // OK with the latest Request changes verdict."
-  if (normalizedVerdict === null) {
-    return 'skip-no-verdict';
-  }
-  if (normalizedVerdict === 'unknown') {
-    return 'skip-unknown-verdict';
-  }
-
+  // closed/merged PRs, active remediation state, and explicit
+  // do-not-merge labels. `operator-approved` only says "I'm OK with
+  // the latest Request changes verdict." `merge-agent-requested` is
+  // stronger: it asks the merge-agent to clean/rebase the branch, so it
+  // can bypass current mergeability/check/verdict gates, but not hard
+  // stop labels, active remediation, or duplicate-dispatch protection.
   if (String(job?.prState ?? '').trim().toLowerCase() !== 'open' || Boolean(job?.merged)) {
-    return 'skip-pr-not-open';
-  }
-
-  if (String(job?.mergeable ?? '').trim().toUpperCase() !== 'MERGEABLE') {
-    return 'skip-not-mergeable';
+    return { decision: 'skip-pr-not-open', trigger: null };
   }
 
   if ([...OPERATOR_SKIP_LABELS].some((label) => labels.has(label))) {
-    // Skip-labels win even when operator-approved is also present.
-    // If both are applied (e.g. operator added approved earlier and
-    // then changed their mind), refuse to dispatch — the more
-    // conservative signal wins.
-    return 'skip-operator-skip';
+    // Skip-labels win even when approval/request labels are also present.
+    return { decision: 'skip-operator-skip', trigger: null };
+  }
+
+  const latestFollowUpJobStatus = String(job?.latestFollowUpJobStatus ?? '').trim().toLowerCase();
+  if (latestFollowUpJobStatus === 'pending' || latestFollowUpJobStatus === 'in-progress') {
+    return { decision: 'skip-remediation-active', trigger: null };
+  }
+
+  const normalDecision = pickNormalMergeAgentDispatchDetail({
+    job,
+    normalizedVerdict,
+    operatorApproved,
+    hasOperatorApprovedLabel,
+  });
+  if (normalDecision.decision === 'dispatch') {
+    const dispatchDecision = !normalDecision.trigger && mergeAgentRequested
+      ? { decision: 'dispatch', trigger: MERGE_AGENT_REQUESTED_LABEL }
+      : normalDecision;
+    return alreadyDispatched
+      ? { decision: 'skip-already-dispatched', trigger: null }
+      : dispatchDecision;
+  }
+
+  if (normalDecision.decision === 'skip-operator-approval-stale') {
+    return normalDecision;
+  }
+
+  if (hasMergeAgentRequestedLabel) {
+    if (!mergeAgentRequested) {
+      return { decision: 'skip-merge-agent-requested-stale', trigger: null };
+    }
+    return alreadyDispatched
+      ? { decision: 'skip-already-dispatched', trigger: null }
+      : { decision: 'dispatch', trigger: MERGE_AGENT_REQUESTED_LABEL };
+  }
+
+  return normalDecision;
+}
+
+function pickNormalMergeAgentDispatchDetail({
+  job,
+  normalizedVerdict,
+  operatorApproved,
+  hasOperatorApprovedLabel,
+}) {
+  if (normalizedVerdict === null) {
+    return { decision: 'skip-no-verdict', trigger: null };
+  }
+  if (normalizedVerdict === 'unknown') {
+    return { decision: 'skip-unknown-verdict', trigger: null };
+  }
+
+  if (String(job?.mergeable ?? '').trim().toUpperCase() !== 'MERGEABLE') {
+    return { decision: 'skip-not-mergeable', trigger: null };
   }
 
   const checksConclusion = job?.checksConclusion == null
     ? null
     : String(job.checksConclusion).trim().toUpperCase();
   if (checksConclusion === 'PENDING') {
-    return 'skip-checks-pending';
+    return { decision: 'skip-checks-pending', trigger: null };
   }
   if (checksConclusion !== null && checksConclusion !== 'SUCCESS') {
-    return 'skip-checks-failed';
-  }
-
-  const latestFollowUpJobStatus = String(job?.latestFollowUpJobStatus ?? '').trim().toLowerCase();
-  if (latestFollowUpJobStatus === 'pending' || latestFollowUpJobStatus === 'in-progress') {
-    return 'skip-remediation-active';
+    return { decision: 'skip-checks-failed', trigger: null };
   }
 
   const remediationCurrentRound = Number(job?.remediationCurrentRound);
   const remediationMaxRounds = Number(job?.remediationMaxRounds);
   if (!Number.isFinite(remediationCurrentRound) || !Number.isFinite(remediationMaxRounds) || remediationMaxRounds <= 0) {
-    return 'skip-remediation-state-unknown';
+    return { decision: 'skip-remediation-state-unknown', trigger: null };
   } else if (remediationCurrentRound < remediationMaxRounds) {
     // More remediation rounds available — let the loop continue.
-    return 'skip-remediation-claimable';
+    return { decision: 'skip-remediation-claimable', trigger: null };
   }
 
   if (normalizedVerdict === 'request-changes' && !operatorApproved) {
-    return hasOperatorApprovedLabel ? 'skip-operator-approval-stale' : 'skip-request-changes';
+    return {
+      decision: hasOperatorApprovedLabel ? 'skip-operator-approval-stale' : 'skip-request-changes',
+      trigger: null,
+    };
   }
 
-  const alreadyDispatched = recentDispatches.some((entry) => (
-    String(entry?.repo ?? '') === String(job?.repo ?? '')
-    && Number(entry?.prNumber) === Number(job?.prNumber)
-    && String(entry?.headSha ?? '') === String(job?.headSha ?? '')
-  ));
-  if (alreadyDispatched) {
-    return 'skip-already-dispatched';
-  }
-
-  return 'dispatch';
+  return {
+    decision: 'dispatch',
+    trigger: normalizedVerdict === 'request-changes' && operatorApproved
+      ? OPERATOR_APPROVED_LABEL
+      : null,
+  };
 }
 
 function isScopedOperatorApproval(job) {
@@ -297,9 +348,24 @@ function isScopedOperatorApproval(job) {
   return true;
 }
 
+function isScopedMergeAgentRequest(job) {
+  const request = job?.mergeAgentRequest;
+  if (!request) return false;
+  if (!request.actor || String(request.actor).trim().toLowerCase() === 'unknown') return false;
+  if (!request.labelEventId && !request.labelEventNodeId) return false;
+  if (!request.createdAt) return false;
+  if (String(request.headSha || '') !== String(job?.headSha || '')) return false;
+  const prUpdatedAt = request.prUpdatedAt || job?.prUpdatedAt || null;
+  if (prUpdatedAt && !isoAtOrAfter(request.createdAt, prUpdatedAt)) return false;
+  return true;
+}
+
 function isoAtOrAfter(candidate, floor) {
   if (!candidate || !floor) return false;
-  return String(candidate) >= String(floor);
+  const candidateEpoch = Date.parse(candidate);
+  const floorEpoch = Date.parse(floor);
+  if (Number.isNaN(candidateEpoch) || Number.isNaN(floorEpoch)) return false;
+  return candidateEpoch >= floorEpoch;
 }
 
 function buildScopedOperatorApproval(candidate, latestJob) {
@@ -320,11 +386,28 @@ function buildScopedOperatorApproval(candidate, latestJob) {
   };
 }
 
+function buildScopedMergeAgentRequest(candidate) {
+  const event = candidate?.mergeAgentRequestEvent;
+  if (!event) return null;
+  if (!candidate?.headSha) return null;
+  if (candidate?.prUpdatedAt && !isoAtOrAfter(event.createdAt, candidate.prUpdatedAt)) return null;
+  return {
+    actor: event.actor || null,
+    createdAt: event.createdAt || null,
+    labelEventId: event.id || null,
+    labelEventNodeId: event.nodeId || null,
+    headSha: candidate.headSha,
+    prUpdatedAt: candidate.prUpdatedAt || null,
+  };
+}
+
 function recordMergeAgentDispatch(rootDir, job, {
   dispatchedAt = isoNow(),
   prompt,
   dispatchId = null,
   launchRequestId = null,
+  trigger = null,
+  labelRemoval = null,
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -337,13 +420,112 @@ function recordMergeAgentDispatch(rootDir, job, {
     baseBranch: job.baseBranch,
     headSha: job.headSha || null,
     operatorApproval: job.operatorApproval || null,
+    mergeAgentRequest: job.mergeAgentRequest || null,
+    trigger,
+    labelRemoval,
     dispatchedAt,
     dispatchId,
     launchRequestId,
     prompt,
   };
-  writeFileSync(filePath, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   return filePath;
+}
+
+function updateMergeAgentDispatchLabelRemoval(rootDir, job, {
+  recordedDispatch = null,
+  trigger,
+  attemptedAt,
+  removed,
+  error = null,
+  observedExternally = false,
+} = {}) {
+  const filePath = mergeAgentDispatchFilePath(rootDir, job);
+  const existing = recordedDispatch || getRecordedMergeAgentDispatch(rootDir, job);
+  if (!existing) return null;
+
+  const previousAttempts = Array.isArray(existing.labelRemoval?.attempts)
+    ? existing.labelRemoval.attempts
+    : [];
+  const labelRemoval = {
+    label: trigger,
+    removed: Boolean(removed),
+    lastAttemptAt: attemptedAt,
+    lastError: removed ? null : error,
+    observedExternally: Boolean(observedExternally),
+    attempts: [
+      ...previousAttempts,
+      {
+        attemptedAt,
+        label: trigger,
+        removed: Boolean(removed),
+        error: removed ? null : error,
+        observedExternally: Boolean(observedExternally),
+      },
+    ],
+  };
+
+  const next = {
+    ...existing,
+    trigger: existing.trigger || trigger || null,
+    labelRemoval,
+  };
+  writeFileAtomic(filePath, `${JSON.stringify(next, null, 2)}\n`);
+  return filePath;
+}
+
+async function removeConsumedTriggerLabel({
+  repo,
+  prNumber,
+  labels,
+  trigger,
+  ghExecFileImpl,
+  now,
+} = {}) {
+  const normalizedLabels = normalizeLabelNames(labels);
+  const result = {
+    attempted: false,
+    operatorApprovalLabelRemoved: false,
+    mergeAgentRequestedLabelRemoved: false,
+    labelRemovalErrors: [],
+  };
+
+  if (!trigger || !normalizedLabels.includes(trigger)) {
+    return result;
+  }
+
+  result.attempted = true;
+  try {
+    await ghExecFileImpl('gh', [
+      'pr',
+      'edit',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--remove-label',
+      trigger,
+    ], { maxBuffer: 5 * 1024 * 1024 });
+    if (trigger === OPERATOR_APPROVED_LABEL) {
+      result.operatorApprovalLabelRemoved = true;
+    }
+    if (trigger === MERGE_AGENT_REQUESTED_LABEL) {
+      result.mergeAgentRequestedLabelRemoved = true;
+    }
+  } catch (err) {
+    const detail = err?.message || String(err);
+    result.labelRemovalErrors.push({ label: trigger, error: detail });
+    console.warn(
+      `[follow-up-merge-agent] failed to remove consumed label '${trigger}' from ${repo}#${prNumber}: ${detail}`
+    );
+  }
+
+  result.labelRemovalAttempt = {
+    trigger,
+    attemptedAt: now,
+    removed: result.labelRemovalErrors.length === 0,
+    error: result.labelRemovalErrors[0]?.error || null,
+  };
+  return result;
 }
 
 function writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt = isoNow() } = {}) {
@@ -397,7 +579,9 @@ async function dispatchMergeAgentForPR({
   remediationCurrentRound = null,
   remediationMaxRounds = null,
   latestReviewKey = null,
+  prUpdatedAt = null,
   operatorApproval = null,
+  mergeAgentRequest = null,
   execFileImpl = execFileAsync,
   ghExecFileImpl = execFileAsync,
   now = isoNow(),
@@ -422,13 +606,54 @@ async function dispatchMergeAgentForPR({
     remediationCurrentRound,
     remediationMaxRounds,
     latestReviewKey,
+    prUpdatedAt,
     operatorApproval,
+    mergeAgentRequest,
   };
   const recordedDispatch = getRecordedMergeAgentDispatch(rootDir, job);
-  const decision = pickMergeAgentDispatch(job, {
+  const dispatchDecision = pickMergeAgentDispatchDetail(job, {
     recentDispatches: recordedDispatch ? [recordedDispatch] : [],
   });
+  const { decision, trigger } = dispatchDecision;
   if (decision !== 'dispatch') {
+    if (decision === 'skip-already-dispatched' && recordedDispatch?.trigger) {
+      const labelRemoval = await removeConsumedTriggerLabel({
+        repo,
+        prNumber,
+        labels,
+        trigger: recordedDispatch.trigger,
+        ghExecFileImpl,
+        now,
+      });
+      if (labelRemoval.attempted) {
+        updateMergeAgentDispatchLabelRemoval(rootDir, job, {
+          recordedDispatch,
+          trigger: recordedDispatch.trigger,
+          attemptedAt: labelRemoval.labelRemovalAttempt.attemptedAt,
+          removed: labelRemoval.labelRemovalAttempt.removed,
+          error: labelRemoval.labelRemovalAttempt.error,
+        });
+      } else if (
+        recordedDispatch.labelRemoval?.removed !== true
+        && !normalizeLabelNames(labels).includes(recordedDispatch.trigger)
+      ) {
+        updateMergeAgentDispatchLabelRemoval(rootDir, job, {
+          recordedDispatch,
+          trigger: recordedDispatch.trigger,
+          attemptedAt: now,
+          removed: true,
+          observedExternally: true,
+        });
+      }
+      return {
+        decision,
+        trigger: recordedDispatch.trigger,
+        labelRemovalRetried: labelRemoval.attempted,
+        operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
+        mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
+        labelRemovalErrors: labelRemoval.labelRemovalErrors,
+      };
+    }
     return { decision };
   }
 
@@ -454,30 +679,35 @@ async function dispatchMergeAgentForPR({
     prompt,
     dispatchId: parsed?.dispatchId || null,
     launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
+    trigger,
   });
 
-  let operatorApprovalLabelRemoved = false;
-  if (normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL)) {
-    try {
-      await ghExecFileImpl('gh', [
-        'pr',
-        'edit',
-        String(prNumber),
-        '--repo',
-        repo,
-        '--remove-label',
-        OPERATOR_APPROVED_LABEL,
-      ], { maxBuffer: 5 * 1024 * 1024 });
-      operatorApprovalLabelRemoved = true;
-    } catch {}
+  const labelRemoval = await removeConsumedTriggerLabel({
+    repo,
+    prNumber,
+    labels,
+    trigger,
+    ghExecFileImpl,
+    now,
+  });
+  if (labelRemoval.attempted) {
+    updateMergeAgentDispatchLabelRemoval(rootDir, job, {
+      trigger,
+      attemptedAt: labelRemoval.labelRemovalAttempt.attemptedAt,
+      removed: labelRemoval.labelRemovalAttempt.removed,
+      error: labelRemoval.labelRemovalAttempt.error,
+    });
   }
 
   return {
     decision,
+    trigger,
     prompt,
     dispatchId: parsed?.dispatchId || null,
     launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
-    operatorApprovalLabelRemoved,
+    operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
+    mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
+    labelRemovalErrors: labelRemoval.labelRemovalErrors,
   };
 }
 
@@ -499,10 +729,17 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   );
   const parsed = JSON.parse(String(stdout || '{}'));
   const labels = parsed.labels || [];
-  const hasOperatorApproved = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
-  const operatorApprovalEvent = hasOperatorApproved
-    ? await fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
-    : null;
+  const normalizedLabels = normalizeLabelNames(labels);
+  const hasOperatorApproved = normalizedLabels.includes(OPERATOR_APPROVED_LABEL);
+  const hasMergeAgentRequested = normalizedLabels.includes(MERGE_AGENT_REQUESTED_LABEL);
+  const [operatorApprovalEvent, mergeAgentRequestEvent] = await Promise.all([
+    hasOperatorApproved
+      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
+      : null,
+    hasMergeAgentRequested
+      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
+      : null,
+  ]);
   return {
     repo,
     prNumber,
@@ -519,6 +756,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     mergedAt: parsed.mergedAt || null,
     prUpdatedAt: parsed.updatedAt || null,
     operatorApprovalEvent,
+    mergeAgentRequestEvent,
   };
 }
 
@@ -537,20 +775,24 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
     latestReviewKey,
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),
+    mergeAgentRequest: buildScopedMergeAgentRequest(candidate),
   };
 }
 
 export {
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
+  buildScopedMergeAgentRequest,
   dispatchMergeAgentForPR,
   extractOperatorNotes,
   extractReviewVerdict,
   fetchMergeAgentCandidate,
   findLatestFollowUpJobForPR,
   isScopedOperatorApproval,
+  isScopedMergeAgentRequest,
   listMergeAgentDispatches,
   pickMergeAgentDispatch,
+  pickMergeAgentDispatchDetail,
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,

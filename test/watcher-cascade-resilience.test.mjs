@@ -128,6 +128,17 @@ test('rate-limit and 5xx heuristics distinguish real 429s from cascades', () => 
   );
 });
 
+test('reviewer subprocess timeouts use cascade backoff instead of burning attempt budget', () => {
+  assert.equal(
+    classifyReviewerFailure('Command timed out after 300000ms', null, 'ETIMEDOUT'),
+    'cascade'
+  );
+  assert.equal(
+    classifyReviewerFailure('The operation was aborted', null, 'ABORT_ERR'),
+    'cascade'
+  );
+});
+
 test('recovery clears cascade state after a successful review', () => {
   const { rootDir, db } = setupFixture();
   try {

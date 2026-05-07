@@ -56,6 +56,19 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 
 const db = openReviewStateDb(ROOT);
 ensureReviewStateSchema(db);
+const DEFAULT_REVIEWER_TIMEOUT_MS = 10 * 60 * 1000;
+
+function resolveReviewerTimeoutMs(env = process.env) {
+  const raw = env.ADVERSARIAL_REVIEWER_TIMEOUT_MS;
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_REVIEWER_TIMEOUT_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_REVIEWER_TIMEOUT_MS;
+  }
+  return Math.floor(parsed);
+}
 
 // ── Inode-orphan recovery ───────────────────────────────────────────────────
 //
@@ -398,7 +411,7 @@ async function spawnReviewer({
       [reviewerPath, args],
       {
         env: reviewerEnv,
-        timeout: 5 * 60 * 1000,
+        timeout: resolveReviewerTimeoutMs(reviewerEnv),
         signal: controller.signal,
         killSignal: 'SIGTERM',
       }
@@ -1003,6 +1016,7 @@ function main() {
     }
     return computeWorkloadAwarePollDeadlineMs({
       activeRepoCount: activeRepos.length,
+      reviewerTimeoutMs: resolveReviewerTimeoutMs(),
     });
   }
 

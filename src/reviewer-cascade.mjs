@@ -6,6 +6,7 @@ const CASCADE_FAILURE_CAP = 5;
 const CASCADE_STATE_DIR = ['data', 'cascade-state'];
 
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
+const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT', 'ABORT_ERR']);
 
 function classifyReviewerFailure(stderr, exitCode, errorCode = null) {
   const text = String(stderr || '');
@@ -18,9 +19,10 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null) {
     /all upstream attempts failed|upstream[._ -]?failed|cascade/.test(lower) ||
     (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
     /timeout.*retries|retries.*timeout/.test(lower) ||
+    /command timed out after \d+ms/.test(lower) ||
     /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
 
-  if ((mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
+  if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
   }
 

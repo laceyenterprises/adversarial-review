@@ -213,17 +213,25 @@ test('operator-approved fails closed when no attributed labeled event was fetche
   );
 });
 
-test('operator-approved does NOT bypass missing or unknown verdicts', () => {
-  // The override only applies to a parseable Request changes verdict.
-  // Missing or unrecognized verdicts mean the merge gate cannot tell
-  // what the reviewer said, so the system fails closed.
+test('operator-approved bypasses missing or unknown review verdicts for the current head', () => {
+  // The operator override is the manual escape valve when review is
+  // pending, missing, or otherwise not parseable yet. Git/CI safety
+  // gates still run separately.
   assert.equal(
-    pickMergeAgentDispatch(makeJob({ lastVerdict: null, labels: [{ name: 'operator-approved' }] })),
-    'skip-no-verdict'
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: null,
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval(),
+    })),
+    'dispatch'
   );
   assert.equal(
-    pickMergeAgentDispatch(makeJob({ lastVerdict: 'Needs follow-up from author', labels: [{ name: 'operator-approved' }] })),
-    'skip-unknown-verdict'
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Needs follow-up from author',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval(),
+    })),
+    'dispatch'
   );
 });
 
@@ -233,6 +241,7 @@ test('operator-approved does NOT bypass not-mergeable', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     mergeable: 'CONFLICTING',
   }));
   assert.equal(decision, 'skip-not-mergeable');
@@ -244,6 +253,7 @@ test('operator-approved does NOT bypass failed CI checks', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     checksConclusion: 'FAILURE',
   }));
   assert.equal(decision, 'skip-checks-failed');
@@ -253,6 +263,7 @@ test('operator-approved does NOT bypass pending CI checks', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     checksConclusion: 'PENDING',
   }));
   assert.equal(decision, 'skip-checks-pending');
@@ -304,40 +315,42 @@ test('operator-approved is overridden by explicit skip labels (skip wins)', () =
   );
 });
 
-test('operator-approved does NOT bypass claimable remediation rounds', () => {
-  // currentRound < maxRounds normally means "more remediation
-  // possible — do not merge yet". The override only applies after
-  // the durable ledger says no remediation rounds remain.
+test('operator-approved bypasses claimable remediation rounds', () => {
+  // The operator can explicitly decide to merge now rather than wait
+  // for the bounded remediation loop to consume more rounds.
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     remediationCurrentRound: 0,
     remediationMaxRounds: 2,
   }));
-  assert.equal(decision, 'skip-remediation-claimable');
+  assert.equal(decision, 'dispatch');
 });
 
-test('operator-approved does NOT bypass unknown remediation ledger state', () => {
+test('operator-approved bypasses unknown remediation ledger state', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     remediationCurrentRound: 0,
     remediationMaxRounds: 0,
   }));
-  assert.equal(decision, 'skip-remediation-state-unknown');
+  assert.equal(decision, 'dispatch');
 });
 
-test('operator-approved does NOT bypass active in-flight remediation (let the worker finish first)', () => {
-  // Dispatching merge-agent while a remediation worker is actively
-  // pushing would race. Make the operator wait one tick — the next
-  // watcher pass after remediation completes will fire merge-agent.
+test('operator-approved bypasses active in-flight remediation', () => {
+  // This is the explicit operator override for "merge this current
+  // head now"; merge-agent/D5 still guard against head drift before
+  // actually landing the PR.
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
       labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval(),
       latestFollowUpJobStatus: 'in-progress',
     })),
-    'skip-remediation-active'
+    'dispatch'
   );
 });
 
@@ -597,7 +610,37 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.operatorApproval.reviewKey, dispatchJob.latestReviewKey);
 });
 
-test('operator-approved cannot dispatch when no follow-up job ledger exists', () => {
+test('operator-approved can dispatch when no follow-up job ledger exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'abc123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [{ name: 'operator-approved' }],
+    operatorApprovalEvent: {
+      id: 'evt-build-approval',
+      nodeId: 'LE_build_approval',
+      actor: 'VirtualPaul',
+      createdAt: '2026-05-02T10:05:00.000Z',
+    },
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+    prUpdatedAt: '2026-05-02T10:04:00.000Z',
+  });
+
+  assert.equal(dispatchJob.lastVerdict, null);
+  assert.equal(dispatchJob.remediationMaxRounds, 0);
+  assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
+  assert.equal(dispatchJob.operatorApproval.reviewKey, null);
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+});
+
+test('operator-approved without a valid label event stays fail-closed without a follow-up ledger', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
     repo: 'laceyenterprises/agent-os',
@@ -614,12 +657,8 @@ test('operator-approved cannot dispatch when no follow-up job ledger exists', ()
   });
 
   assert.equal(dispatchJob.lastVerdict, null);
-  assert.equal(dispatchJob.remediationMaxRounds, 0);
-  assert.equal(
-    pickMergeAgentDispatch(dispatchJob),
-    'skip-no-verdict',
-    'operator-approved must not widen the gate when there is no parseable verdict ledger'
-  );
+  assert.equal(dispatchJob.operatorApproval, null);
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'skip-operator-approval-stale');
 });
 
 test('merge-agent-requested can dispatch when no follow-up job ledger exists', () => {

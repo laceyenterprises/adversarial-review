@@ -14,14 +14,13 @@ const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', '
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
-// "I've read the review, the substance is fine, please dispatch the
-// merge-agent and merge this PR even though the verdict is
-// `Request changes`." This is the escape valve when the codex/claude
-// reviewer's verdict is overcautious but the review-of-review loop
-// has converged or the operator has decided manually.
+// "I approve merging this current PR head now; do not wait for the
+// adversarial-review/remediation loop to converge." This is the
+// escape valve when automation is still reviewing, pending, or
+// overcautious but the operator has decided manually.
 //
-// The label ONLY overrides the `request-changes` verdict skip. It
-// does NOT override:
+// The label overrides review/remediation-state gates. It does NOT
+// override:
 //   - `not-mergeable` (force-merging a conflicted PR is ~always wrong)
 //   - `checks-failed` / `checks-pending` (CI is a hard gate)
 //   - `merge-agent-skip` / `merge-agent-stuck` / `do-not-merge`
@@ -235,12 +234,13 @@ function pickMergeAgentDispatchDetail(job, {
   ));
 
   // Hard skips that even an operator override does NOT bypass include
-  // closed/merged PRs, active remediation state, and explicit
-  // do-not-merge labels. `operator-approved` only says "I'm OK with
-  // the latest Request changes verdict." `merge-agent-requested` is
-  // stronger: it asks the merge-agent to clean/rebase the branch, so it
-  // can bypass current mergeability/check/verdict gates, but not hard
-  // stop labels, active remediation, or duplicate-dispatch protection.
+  // closed/merged PRs and explicit do-not-merge labels.
+  // `operator-approved` also keeps mergeability/checks as hard gates,
+  // but bypasses review/remediation-state gates for the current head.
+  // `merge-agent-requested` is different: it asks the merge-agent to
+  // clean/rebase the branch, so it can bypass current
+  // mergeability/check/verdict gates, but not hard stop labels, active
+  // remediation, or duplicate-dispatch protection.
   if (String(job?.prState ?? '').trim().toLowerCase() !== 'open' || Boolean(job?.merged)) {
     return { decision: 'skip-pr-not-open', trigger: null };
   }
@@ -248,6 +248,19 @@ function pickMergeAgentDispatchDetail(job, {
   if ([...OPERATOR_SKIP_LABELS].some((label) => labels.has(label))) {
     // Skip-labels win even when approval/request labels are also present.
     return { decision: 'skip-operator-skip', trigger: null };
+  }
+
+  if (hasOperatorApprovedLabel) {
+    if (!operatorApproved) {
+      return { decision: 'skip-operator-approval-stale', trigger: null };
+    }
+    const hardGateDecision = pickOperatorApprovedMergeGate(job);
+    if (hardGateDecision.decision !== 'dispatch') {
+      return hardGateDecision;
+    }
+    return alreadyDispatched
+      ? { decision: 'skip-already-dispatched', trigger: null }
+      : { decision: 'dispatch', trigger: OPERATOR_APPROVED_LABEL };
   }
 
   const latestFollowUpJobStatus = String(job?.latestFollowUpJobStatus ?? '').trim().toLowerCase();
@@ -284,6 +297,24 @@ function pickMergeAgentDispatchDetail(job, {
   }
 
   return normalDecision;
+}
+
+function pickOperatorApprovedMergeGate(job) {
+  if (String(job?.mergeable ?? '').trim().toUpperCase() !== 'MERGEABLE') {
+    return { decision: 'skip-not-mergeable', trigger: null };
+  }
+
+  const checksConclusion = job?.checksConclusion == null
+    ? null
+    : String(job.checksConclusion).trim().toUpperCase();
+  if (checksConclusion === 'PENDING') {
+    return { decision: 'skip-checks-pending', trigger: null };
+  }
+  if (checksConclusion !== null && checksConclusion !== 'SUCCESS') {
+    return { decision: 'skip-checks-failed', trigger: null };
+  }
+
+  return { decision: 'dispatch', trigger: OPERATOR_APPROVED_LABEL };
 }
 
 function pickNormalMergeAgentDispatchDetail({
@@ -344,7 +375,9 @@ function isScopedOperatorApproval(job) {
   if (!approval.labelEventId && !approval.labelEventNodeId) return false;
   if (!approval.createdAt) return false;
   if (String(approval.headSha || '') !== String(job?.headSha || '')) return false;
-  if (!approval.reviewKey || String(approval.reviewKey) !== String(job?.latestReviewKey || '')) return false;
+  if (job?.latestReviewKey && String(approval.reviewKey || '') !== String(job.latestReviewKey)) return false;
+  const prUpdatedAt = approval.prUpdatedAt || job?.prUpdatedAt || null;
+  if (prUpdatedAt && !isoAtOrAfter(approval.createdAt, prUpdatedAt)) return false;
   return true;
 }
 
@@ -373,8 +406,8 @@ function buildScopedOperatorApproval(candidate, latestJob) {
   if (!event) return null;
   const latestReviewAt = latestJob?.reviewPostedAt || latestJob?.createdAt || null;
   const latestReviewKey = latestJob ? `${latestJob.jobId}:${latestReviewAt || 'unknown-review-time'}` : null;
-  if (!latestReviewKey || !candidate?.headSha) return null;
-  if (!isoAtOrAfter(event.createdAt, latestReviewAt)) return null;
+  if (!candidate?.headSha) return null;
+  if (latestReviewAt && !isoAtOrAfter(event.createdAt, latestReviewAt)) return null;
   if (candidate?.prUpdatedAt && !isoAtOrAfter(event.createdAt, candidate.prUpdatedAt)) return null;
   return {
     actor: event.actor || null,
@@ -382,6 +415,7 @@ function buildScopedOperatorApproval(candidate, latestJob) {
     labelEventId: event.id || null,
     labelEventNodeId: event.nodeId || null,
     headSha: candidate.headSha,
+    prUpdatedAt: candidate.prUpdatedAt || null,
     reviewKey: latestReviewKey,
   };
 }

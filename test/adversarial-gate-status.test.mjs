@@ -236,7 +236,7 @@ test('pickAdversarialGateStatus returns success for a scoped operator-approved o
   assert.equal(decision.reason, 'operator-approved');
 });
 
-test('pickAdversarialGateStatus fails closed when operator-approved is present but remediation rounds remain claimable', () => {
+test('pickAdversarialGateStatus lets scoped operator-approved override claimable remediation rounds', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
     latestJob: makeJob({
@@ -249,8 +249,30 @@ test('pickAdversarialGateStatus fails closed when operator-approved is present b
     operatorApproval: makeOperatorApproval(),
   });
 
-  assert.equal(decision.state, 'failure');
-  assert.equal(decision.reason, 'override-remediation-claimable');
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'operator-approved');
+});
+
+test('pickAdversarialGateStatus lets scoped operator-approved override pending review state', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({ review_status: 'reviewing' }),
+    latestJob: makeJob({ status: 'in_progress' }),
+    operatorApproval: makeOperatorApproval(),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'operator-approved');
+});
+
+test('pickAdversarialGateStatus lets scoped operator-approved override missing review state', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: null,
+    latestJob: null,
+    operatorApproval: makeOperatorApproval({ reviewKey: null }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'operator-approved');
 });
 
 test('publishAdversarialGateStatus skips duplicate decisions already recorded for the same head SHA', async () => {

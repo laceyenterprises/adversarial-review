@@ -136,15 +136,6 @@ function truncateDescription(description) {
   return `${text.slice(0, DESCRIPTION_MAX_CHARS - 1).trimEnd()}…`;
 }
 
-function remediationRoundsRemainClaimable(latestJob) {
-  const currentRound = Number(latestJob?.remediationPlan?.currentRound);
-  const maxRounds = Number(latestJob?.remediationPlan?.maxRounds);
-  if (!Number.isFinite(currentRound) || !Number.isFinite(maxRounds) || maxRounds <= 0) {
-    return false;
-  }
-  return currentRound < maxRounds;
-}
-
 function makeDecision(state, description, reason) {
   return {
     context: ADVERSARIAL_GATE_CONTEXT,
@@ -178,6 +169,14 @@ function pickAdversarialGateStatus({
   latestJob = null,
   operatorApproval = null,
 } = {}) {
+  if (operatorApproval) {
+    return makeDecision(
+      'success',
+      'Scoped operator override approves the current head.',
+      'operator-approved'
+    );
+  }
+
   if (!reviewRow) {
     return makeDecision('pending', 'Adversarial review has not posted yet.', 'review-not-posted');
   }
@@ -269,20 +268,6 @@ function pickAdversarialGateStatus({
     return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
   }
   if (normalizedVerdict === 'request-changes') {
-    if (operatorApproval) {
-      if (remediationRoundsRemainClaimable(latestJob)) {
-        return makeDecision(
-          'failure',
-          'Operator override is present, but remediation rounds remain.',
-          'override-remediation-claimable'
-        );
-      }
-      return makeDecision(
-        'success',
-        'Scoped operator override accepts the current blocking review.',
-        'operator-approved'
-      );
-    }
     return makeDecision('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
   }
   if (normalizedVerdict === null) {
@@ -318,7 +303,6 @@ async function buildAdversarialGateSnapshot(rootDir, {
   const hasOperatorApprovedLabel = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
   if (
     hasOperatorApprovedLabel
-    && latestJob
     && headSha
     && typeof fetchLatestLabelEventImpl === 'function'
   ) {

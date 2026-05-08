@@ -16,7 +16,7 @@ State mapping:
 | State | Meaning |
 |---|---|
 | `pending` | Review has not posted, review is queued/in progress, a posted review is waiting for the follow-up ledger to appear, remediation is queued/in progress, or a requested re-review has not posted yet. |
-| `success` | The latest posted review settled as `Comment only` or `Approved`, or a current scoped `operator-approved` label accepts a final-round `Request changes` verdict after remediation rounds are exhausted. |
+| `success` | The latest posted review settled as `Comment only` or `Approved`, or a current scoped `operator-approved` label accepts the PR head regardless of review/remediation state. |
 | `failure` | Review/remediation is malformed, failed, orphaned, stopped, missing a verdict, still blocked by `Request changes`, or in an unknown state. |
 
 Reason mapping:

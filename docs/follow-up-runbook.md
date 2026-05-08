@@ -30,6 +30,7 @@ npm run follow-up:consume                         # claim + spawn one job (manua
 npm run follow-up:reconcile                       # reconcile in-progress jobs (manual tick)
 npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
 npm run follow-up:stop -- <job-path> [reason]     # stop an in-progress job
+npm run check-branch-protection                   # verify agent-os/adversarial-gate is required
 npm run retrigger-review -- --repo <slug> --pr <n> --reason "<why>"  # force a re-review pass
 npm run retrigger-remediation -- --repo <slug> --pr <n> --reason "<why>"  # bump/requeue one remediation round
 ```
@@ -71,6 +72,8 @@ The old table (`low/medium=1`, `high/critical=3`) no longer applies to new jobs:
 ## Operator merge-agent labels
 
 Before enabling GitHub-native merge or auto-merge for this repo, require `agent-os/adversarial-gate` in branch protection. That status is the GitHub-facing projection of the adversarial-review ledger; without making it required, GitHub can merge a PR even when the durable review/remediation loop is still pending or blocked.
+
+The watcher now checks that protection on a cached interval and logs `branch-protection-warning` for any watched repo/base branch where the required context is absent or unreadable. Run `npm run check-branch-protection` for an operator-side audit; pass `-- --repo <owner/repo>` or `-- --base <branch>` to narrow the probe.
 
 `operator-approved` is the narrow final-round approval override. It is accepted only from an attributable GitHub `labeled` event scoped to the current head SHA and latest review record, and it only bypasses a `Request changes` verdict after the normal mergeable/check/remediation gates pass.
 

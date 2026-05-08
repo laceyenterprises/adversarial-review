@@ -13,6 +13,7 @@
     "follow-up:reconcile": "node src/follow-up-reconcile.mjs",
     "follow-up:requeue": "node src/follow-up-requeue.mjs",
     "follow-up:stop": "node src/follow-up-stop.mjs",
+    "check-branch-protection": "node src/check-branch-protection.mjs",
     "retrigger-review": "node src/retrigger-review.mjs",
     "retrigger-remediation": "node src/retrigger-remediation.mjs"
   },

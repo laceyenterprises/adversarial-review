@@ -793,6 +793,7 @@ export {
   isScopedOperatorApproval,
   isScopedMergeAgentRequest,
   listMergeAgentDispatches,
+  normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
   recordMergeAgentDispatch,

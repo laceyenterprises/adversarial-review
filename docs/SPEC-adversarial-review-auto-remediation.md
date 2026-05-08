@@ -9,6 +9,8 @@ The watcher projects the durable adversarial-review ledger onto the PR head SHA 
 
 Operators must require `agent-os/adversarial-gate` in branch protection before relying on GitHub-native merge or auto-merge for adversarial-review-gated branches. Without the required context, GitHub can merge while review, remediation, or operator handling is still pending.
 
+The watcher verifies that policy in process: on a cached interval it checks watched repositories' branch protection and logs `branch-protection-warning` when `agent-os/adversarial-gate` is missing or the protection endpoint cannot be read. Operators can run the same probe with `npm run check-branch-protection`.
+
 State mapping:
 
 | State | Meaning |

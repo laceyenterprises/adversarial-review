@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -8,8 +8,14 @@ import {
   buildScopedOperatorApproval,
   extractReviewVerdict,
   findLatestFollowUpJobForPR,
+  normalizeReviewVerdict,
   OPERATOR_APPROVED_LABEL,
 } from './follow-up-merge-agent.mjs';
+import {
+  ensureReviewStateSchema,
+  getReviewRow,
+  openReviewStateDb,
+} from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -25,10 +31,58 @@ function gateRecordDir(rootDir) {
   return join(rootDir, ...ADVERSARIAL_GATE_RECORD_DIR);
 }
 
+function normalizePrNumber(prNumber) {
+  const value = Number(prNumber);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Invalid PR number for adversarial gate status: ${prNumber}`);
+  }
+  return value;
+}
+
 function gateRecordPath(rootDir, { repo, prNumber, headSha }) {
-  const safeRepo = sanitizePathSegment(String(repo ?? '').replace(/\//g, '__'));
   const safeSha = sanitizePathSegment(headSha || 'no-sha');
-  return join(gateRecordDir(rootDir), `${safeRepo}-pr-${Number(prNumber)}-${safeSha}.json`);
+  return join(gateRecordDir(rootDir), `${gateRecordPrefix({ repo, prNumber })}${safeSha}.json`);
+}
+
+function gateRecordPrefix({ repo, prNumber }) {
+  const safeRepo = sanitizePathSegment(String(repo ?? '').replace(/\//g, '__'));
+  return `${safeRepo}-pr-${normalizePrNumber(prNumber)}-`;
+}
+
+function pruneGateRecordsForPR(rootDir, {
+  repo,
+  prNumber,
+  keepHeadSha = null,
+  readdirImpl = readdirSync,
+  rmImpl = rmSync,
+} = {}) {
+  const dir = gateRecordDir(rootDir);
+  const prefix = gateRecordPrefix({ repo, prNumber });
+  const keepName = keepHeadSha
+    ? `${prefix}${sanitizePathSegment(keepHeadSha)}.json`
+    : null;
+  let removed = 0;
+  let scanned = [];
+  try {
+    scanned = readdirImpl(dir);
+  } catch {
+    return { removed };
+  }
+  for (const name of scanned) {
+    if (!name.startsWith(prefix) || !name.endsWith('.json') || name === keepName) {
+      continue;
+    }
+    rmImpl(join(dir, name), { force: true });
+    removed += 1;
+  }
+  return { removed };
+}
+
+function deleteGateRecordsForPR(rootDir, coordinates) {
+  return pruneGateRecordsForPR(rootDir, {
+    ...coordinates,
+    keepHeadSha: null,
+  });
 }
 
 function normalizeLabelNames(labels) {
@@ -40,19 +94,6 @@ function normalizeLabelNames(labels) {
       return '';
     })
     .filter(Boolean);
-}
-
-function normalizeReviewVerdict(verdict) {
-  const text = String(verdict ?? '')
-    .replace(/[*_`~]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-  if (!text) return null;
-  if (text.startsWith('request changes')) return 'request-changes';
-  if (text.startsWith('comment only')) return 'comment-only';
-  if (text.startsWith('approved')) return 'approved';
-  return 'unknown';
 }
 
 function normalizeReviewStatus(status) {
@@ -71,14 +112,6 @@ function truncateDescription(description) {
   return `${text.slice(0, DESCRIPTION_MAX_CHARS - 1).trimEnd()}…`;
 }
 
-function readGateRecord(rootDir, coordinates) {
-  try {
-    return JSON.parse(readFileSync(gateRecordPath(rootDir, coordinates), 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
 function remediationRoundsRemainClaimable(latestJob) {
   const currentRound = Number(latestJob?.remediationPlan?.currentRound);
   const maxRounds = Number(latestJob?.remediationPlan?.maxRounds);
@@ -88,13 +121,12 @@ function remediationRoundsRemainClaimable(latestJob) {
   return currentRound < maxRounds;
 }
 
-function makeDecision(state, description, reason, extra = {}) {
+function makeDecision(state, description, reason) {
   return {
     context: ADVERSARIAL_GATE_CONTEXT,
     state,
     description: truncateDescription(description),
     reason,
-    ...extra,
   };
 }
 
@@ -187,11 +219,6 @@ function pickAdversarialGateStatus({
 }
 
 async function readReviewRowForGate(rootDir, { repo, prNumber }) {
-  const {
-    getReviewRow,
-    openReviewStateDb,
-    ensureReviewStateSchema,
-  } = await import('./review-state.mjs');
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
@@ -249,22 +276,13 @@ async function publishAdversarialGateStatus(rootDir, {
   decision,
   execFileImpl = execFileAsync,
   env = process.env,
-  readRecordImpl = readGateRecord,
   mkdirImpl = mkdirSync,
   writeRecordImpl = writeFileAtomic,
 } = {}) {
   if (!repo || !headSha || !decision?.state) {
     return { posted: false, reason: 'missing-input' };
   }
-
-  const existing = readRecordImpl(rootDir, { repo, prNumber, headSha });
-  if (
-    existing?.context === ADVERSARIAL_GATE_CONTEXT
-    && existing?.state === decision.state
-    && existing?.description === decision.description
-  ) {
-    return { posted: false, reason: 'already-current', record: existing };
-  }
+  const normalizedPrNumber = normalizePrNumber(prNumber);
 
   const token = env.GITHUB_TOKEN;
   if (!token) {
@@ -306,7 +324,7 @@ async function publishAdversarialGateStatus(rootDir, {
   const record = {
     context: ADVERSARIAL_GATE_CONTEXT,
     repo,
-    prNumber: Number(prNumber),
+    prNumber: normalizedPrNumber,
     headSha,
     state: decision.state,
     description: decision.description,
@@ -315,8 +333,10 @@ async function publishAdversarialGateStatus(rootDir, {
   };
   writeRecordImpl(
     gateRecordPath(rootDir, { repo, prNumber, headSha }),
-    `${JSON.stringify(record, null, 2)}\n`
+    `${JSON.stringify(record, null, 2)}\n`,
+    { mode: 0o640 }
   );
+  pruneGateRecordsForPR(rootDir, { repo, prNumber, keepHeadSha: headSha });
   return { posted: true, record };
 }
 
@@ -356,7 +376,9 @@ async function projectAdversarialGateStatus(rootDir, {
 export {
   ADVERSARIAL_GATE_CONTEXT,
   buildAdversarialGateSnapshot,
+  deleteGateRecordsForPR,
   pickAdversarialGateStatus,
   projectAdversarialGateStatus,
+  pruneGateRecordsForPR,
   publishAdversarialGateStatus,
 };

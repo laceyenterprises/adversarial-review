@@ -35,11 +35,18 @@ import {
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 import {
+  createBranchProtectionChecker,
+  warnForMissingAdversarialGateBranchProtection,
+} from './branch-protection.mjs';
+import {
   buildMergeAgentDispatchJob,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
-import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
+import {
+  deleteGateRecordsForPR,
+  projectAdversarialGateStatus,
+} from './adversarial-gate-status.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
   retryPendingRetriggerAckComments,
@@ -692,6 +699,9 @@ async function runPrltSync() {
 
 let activeRepos = config.repos ?? [];
 let lastRepoRefresh = 0;
+const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
+  execFileImpl: execFileAsync,
+});
 
 async function refreshOrgRepos(octokit) {
   if (!config.org) return;
@@ -747,11 +757,13 @@ async function syncPRLifecycle(octokit) {
     if (pr.merged_at) {
       console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
       stmtMarkMerged.run(pr.merged_at, repo, prNumber);
+      deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await setLinearDone(linearTicketId);
       anyChanged = true;
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
       stmtMarkClosed.run(pr.closed_at ?? new Date().toISOString(), repo, prNumber);
+      deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await setLinearCancelled(linearTicketId);
       anyChanged = true;
     }
@@ -802,6 +814,13 @@ async function handlePostedReviewRow({
 
 async function pollOnce(octokit) {
   await refreshOrgRepos(octokit);
+
+  await warnForMissingAdversarialGateBranchProtection(activeRepos, {
+    checker: adversarialGateBranchProtectionChecker,
+    baseBranches: config.adversarialGateBaseBranches || {},
+    defaultBaseBranch: config.adversarialGateBaseBranch || 'main',
+    logger: console,
+  });
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit);
@@ -901,9 +920,6 @@ async function pollOnce(octokit) {
       }
 
       if (prState && prState !== 'open') {
-        if (existing) {
-          await projectGateStatusSafe(existing);
-        }
         continue;
       }
 

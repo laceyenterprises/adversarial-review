@@ -7,13 +7,37 @@ const {
   CLAUDE_STRIPPED_ENV_VARS,
   ENV_BIN,
   LAUNCHCTL,
+  queueFollowUpForPostedReview,
   resolveReviewerTimeoutMs,
-  shouldQueueFollowUpForReview,
   spawnClaude,
 } = __test__;
 
-test('clean comment-only reviews still queue a durable follow-up verdict carrier', () => {
-  const reviewBody = [
+function queueWithFakes(reviewText) {
+  const created = [];
+  const result = queueFollowUpForPostedReview({
+    rootDir: '/tmp/adversarial-review-test',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 57,
+    reviewerModel: 'claude',
+    builderTag: '[codex]',
+    linearTicketId: null,
+    reviewText,
+    reviewPostedAt: '2026-05-08T14:00:00.000Z',
+    critical: false,
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      latestMaxRounds: 2,
+    }),
+    createFollowUpJobImpl: (jobInput) => {
+      created.push(jobInput);
+      return { jobPath: '/tmp/adversarial-review-test/data/follow-up-jobs/pending/job.json' };
+    },
+  });
+  return { result, created };
+}
+
+test('clean comment-only reviews still queue a durable follow-up verdict carrier through the production queue helper', () => {
+  const { result, created } = queueWithFakes([
     '## Summary',
     'Everything is settled.',
     '',
@@ -25,20 +49,23 @@ test('clean comment-only reviews still queue a durable follow-up verdict carrier
     '',
     '## Verdict',
     'Comment only',
-  ].join('\n');
+  ].join('\n'));
 
-  assert.equal(shouldQueueFollowUpForReview(reviewBody), true);
+  assert.equal(result.queued, true);
+  assert.equal(created.length, 1);
+  assert.equal(created[0].reviewBody.includes('Comment only'), true);
+  assert.equal(created[0].maxRemediationRounds, 2);
+  assert.equal(created[0].priorCompletedRounds, 1);
 });
 
 test('request-changes and malformed verdicts still queue durable follow-up handoffs', () => {
-  assert.equal(
-    shouldQueueFollowUpForReview('## Summary\nFix it.\n\n## Verdict\nRequest changes'),
-    true
-  );
-  assert.equal(
-    shouldQueueFollowUpForReview('## Summary\nVerdict missing.'),
-    true
-  );
+  const dirty = queueWithFakes('## Summary\nFix it.\n\n## Verdict\nRequest changes');
+  const malformed = queueWithFakes('## Summary\nVerdict missing.');
+
+  assert.equal(dirty.result.queued, true);
+  assert.equal(dirty.created.length, 1);
+  assert.equal(malformed.result.queued, true);
+  assert.equal(malformed.created.length, 1);
 });
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {

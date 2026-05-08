@@ -527,6 +527,50 @@ function shouldQueueFollowUpForReview(reviewText) {
   return Boolean(reviewText);
 }
 
+function queueFollowUpForPostedReview({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  reviewerModel,
+  builderTag = null,
+  linearTicketId = null,
+  reviewText,
+  reviewPostedAt = new Date().toISOString(),
+  critical = false,
+  summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
+  createFollowUpJobImpl = createFollowUpJob,
+}) {
+  if (!shouldQueueFollowUpForReview(reviewText)) {
+    return { queued: false, reason: 'empty-review-body' };
+  }
+
+  // Carry the PR's prior remediation-round count and the per-job
+  // maxRounds forward into the new follow-up job. Two effects:
+  //   - `claimNextFollowUpJob`'s `currentRound >= maxRounds` guard
+  //     enforces the cap PR-wide, not per-job, so a PR that has
+  //     already exhausted its remediation budget cannot accidentally
+  //     get another worker spawn from a freshly created job.
+  //   - Legacy jobs created with maxRounds=6 keep that cap; we do not
+  //     overwrite it with the current default.
+  const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
+  const carriedMaxRounds = priorLedger.latestMaxRounds;
+
+  const { jobPath } = createFollowUpJobImpl({
+    rootDir,
+    repo,
+    prNumber,
+    reviewerModel,
+    builderTag: builderTag || null,
+    linearTicketId,
+    reviewBody: reviewText,
+    reviewPostedAt,
+    critical,
+    priorCompletedRounds: priorLedger.completedRoundsForPR,
+    ...(carriedMaxRounds ? { maxRemediationRounds: carriedMaxRounds } : {}),
+  });
+  return { queued: true, jobPath };
+}
+
 function normalizeWhitespace(text) {
   return String(text ?? '')
     .replace(/\r\n/g, '\n')
@@ -979,31 +1023,22 @@ async function main() {
   const critical = isCritical(reviewText);
   const reviewPostedAt = new Date().toISOString();
   try {
-    // Carry the PR's prior remediation-round count and the per-job
-    // maxRounds forward into the new follow-up job. Two effects:
-    //   - `claimNextFollowUpJob`'s `currentRound >= maxRounds` guard
-    //     enforces the cap PR-wide, not per-job, so a PR that has
-    //     already exhausted its remediation budget cannot accidentally
-    //     get another worker spawn from a freshly created job.
-    //   - Legacy jobs created with maxRounds=6 keep that cap; we do not
-    //     overwrite it with the current default.
-    const priorLedger = summarizePRRemediationLedger(ROOT, { repo, prNumber });
-    const carriedMaxRounds = priorLedger.latestMaxRounds;
-
-    const { jobPath } = createFollowUpJob({
+    const queued = queueFollowUpForPostedReview({
       rootDir: ROOT,
       repo,
       prNumber,
       reviewerModel: effectiveModel,
-      builderTag: builderTag || null,
+      builderTag,
       linearTicketId,
-      reviewBody: reviewText,
+      reviewText,
       reviewPostedAt,
       critical,
-      priorCompletedRounds: priorLedger.completedRoundsForPR,
-      ...(carriedMaxRounds ? { maxRemediationRounds: carriedMaxRounds } : {}),
     });
-    console.log(`[reviewer] Follow-up handoff queued at ${jobPath}`);
+    if (queued.queued) {
+      console.log(`[reviewer] Follow-up handoff queued at ${queued.jobPath}`);
+    } else {
+      console.error(`[reviewer] Follow-up handoff skipped for ${repo}#${prNumber}: ${queued.reason}`);
+    }
   } catch (err) {
     console.error(`[reviewer] Failed to queue follow-up handoff for ${repo}#${prNumber}:`, err.message);
   }
@@ -1034,6 +1069,7 @@ const __test__ = {
   CLAUDE_STRIPPED_ENV_VARS,
   spawnClaude,
   shouldQueueFollowUpForReview,
+  queueFollowUpForPostedReview,
   isLaunchctlSessionFailure,
   resolveReviewerTimeoutMs,
 };

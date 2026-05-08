@@ -599,7 +599,7 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
     prNumber: 401,
     reviewerModel: 'codex',
     linearTicketId: null,
-    reviewBody: '## Summary\nx\n## Verdict\nComment only',
+    reviewBody: '## Summary\nx\n## Verdict\n\nComment only',
     reviewPostedAt: '2026-05-02T10:00:00.000Z',
     critical: false,
   });

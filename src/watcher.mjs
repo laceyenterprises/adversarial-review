@@ -25,6 +25,7 @@ import {
   CASCADE_FAILURE_CAP,
   classifyReviewerFailure,
   clearCascadeState,
+  formatTransientFailureBreakdown,
   isReviewerSubprocessTimeout,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
@@ -530,31 +531,44 @@ function settleReviewerAttempt({
   }
 
   const failureClass = result.failureClass || 'unknown';
-  if (failureClass === 'cascade') {
+  const transientFailureClasses = new Set([
+    'cascade',
+    'reviewer-timeout',
+    'launchctl-bootstrap',
+  ]);
+  const defaultFailureMessages = {
+    cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
+    'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
+    'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
+    bug: 'Reviewer failed due to an invocation or implementation bug.',
+    unknown: 'Unknown reviewer failure',
+  };
+  const failureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
+  const classifiedMessage = `[${failureClass}] ${failureMessage}`;
+  if (transientFailureClasses.has(failureClass)) {
     const cascadeState = recordCascadeFailure(rootDir, {
       repo: repoPath,
       prNumber,
       failedAt: failureAt,
+      failureClass,
     });
-    const cascadeMessage =
-      result.error ||
-      'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.';
-    if (cascadeState.consecutiveCascadeFailures >= CASCADE_FAILURE_CAP) {
-      statements.markPendingUpstream.run(failureAt, cascadeMessage, repoPath, prNumber);
+    if (cascadeState.consecutiveTransientFailures >= CASCADE_FAILURE_CAP) {
+      statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber);
+      const breakdown = formatTransientFailureBreakdown(cascadeState.transientFailureBreakdown);
       log.warn(
-        `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveCascadeFailures} cascade failures; will resume when upstream recovers`
+        `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); will resume when the reviewer lane recovers`
       );
     } else {
-      statements.markCascadeFailed.run(failureAt, cascadeMessage, repoPath, prNumber);
+      statements.markCascadeFailed.run(failureAt, classifiedMessage, repoPath, prNumber);
     }
     log.warn(
-      `[watcher] Reviewer cascade-class failure on #${prNumber} (consecutive=${cascadeState.consecutiveCascadeFailures}); backing off ${cascadeState.backoffMinutes}m`
+      `[watcher] Reviewer ${failureClass} failure on #${prNumber} (consecutiveTransient=${cascadeState.consecutiveTransientFailures}); backing off ${cascadeState.backoffMinutes}m`
     );
     return;
   }
 
   clearCascadeState(rootDir, { repo: repoPath, prNumber });
-  statements.markFailed.run(failureAt, result.error || 'Unknown reviewer failure', repoPath, prNumber);
+  statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber);
   const updatedRow = statements.getReviewRow.get(repoPath, prNumber);
   if (failureClass === 'bug') {
     log.warn(

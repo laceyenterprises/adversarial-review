@@ -74,7 +74,7 @@ test('cascade simulator backs off and does not increment attempt counter', () =>
     assert.equal(row.review_status, 'failed');
     assert.equal(row.review_attempts, 0, 'cascade retries must not burn the normal attempt counter');
     assert.equal(row.failed_at, failedAt);
-    assert.equal(cascadeState.consecutiveCascadeFailures, 1);
+    assert.equal(cascadeState.consecutiveTransientFailures, 1);
     assert.equal(cascadeState.backoffMinutes, 1);
     assert.equal(cascadeState.nextRetryAfter, '2026-05-04T07:11:00.000Z');
     assert.equal(
@@ -133,7 +133,7 @@ test('rate-limit and 5xx heuristics distinguish real 429s from cascades', () => 
   );
 });
 
-test('reviewer subprocess timeouts use actual execFile timeout fields for cascade backoff', async () => {
+test('reviewer subprocess timeouts get a distinct failure class', async () => {
   await assert.rejects(
     execFileAsync(
       process.execPath,
@@ -152,10 +152,64 @@ test('reviewer subprocess timeouts use actual execFile timeout fields for cascad
           err.code,
           err
         ),
-        'cascade'
+        'reviewer-timeout'
       );
       return true;
     }
+  );
+});
+
+test('reviewer timeout stderr is not folded into cascade failures', () => {
+  assert.equal(
+    classifyReviewerFailure('Anthropic CLI error: command timed out after 600000ms', 1),
+    'reviewer-timeout'
+  );
+});
+
+test('cascade markers win over wrapped reviewer timeout stderr', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      'LiteLLM retry pool: all upstream attempts failed after command timed out after 600000ms',
+      1
+    ),
+    'cascade'
+  );
+});
+
+test('launchctl bootstrap errors get a distinct failure class', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      'LaunchctlSessionError: Claude launchctl session bootstrap failed: Command failed: /bin/launchctl asuser 501 /usr/bin/env -u ANTHROPIC_API_KEY /opt/homebrew/bin/claude auth status',
+      1
+    ),
+    'launchctl-bootstrap'
+  );
+});
+
+test('launchctl bootstrap classification requires launchctl and error on the same stderr line', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      'debug: checked launchctl auth wrapper\nreviewer stderr: input/output error from model stream',
+      1
+    ),
+    'unknown'
+  );
+  assert.equal(
+    classifyReviewerFailure(
+      'Command failed: /bin/launchctl asuser 501 /opt/homebrew/bin/claude auth status: input/output error',
+      1
+    ),
+    'launchctl-bootstrap'
+  );
+});
+
+test('launchctl bootstrap classification ignores benign gui domain references', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      'doctor: launchctl print gui/501/com.lacey.reviewer completed successfully',
+      0
+    ),
+    'unknown'
   );
 });
 
@@ -257,6 +311,40 @@ test('invalid cascade timestamps fail closed until state is cleared or rewritten
   }
 });
 
+test('recordCascadeFailure reads legacy cascade counters and writes transient counters', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-cascade-legacy-'));
+  try {
+    const statePath = getCascadeStatePath(rootDir, {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 195,
+    });
+    mkdirSync(path.dirname(statePath), { recursive: true });
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        consecutiveCascadeFailures: 2,
+        lastFailureAt: '2026-05-04T07:10:00.000Z',
+        nextRetryAfter: '2026-05-04T07:12:00.000Z',
+        backoffMinutes: 2,
+      })}\n`,
+      'utf8'
+    );
+
+    const state = recordCascadeFailure(rootDir, {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 195,
+      failedAt: '2026-05-04T07:14:00.000Z',
+      failureClass: 'reviewer-timeout',
+    });
+
+    assert.equal(state.consecutiveTransientFailures, 3);
+    assert.equal(state.consecutiveCascadeFailures, undefined);
+    assert.deepEqual(state.transientFailureBreakdown, { cascade: 2, 'reviewer-timeout': 1 });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('pending-upstream engages after five consecutive cascades and further retries stay capped', () => {
   const { rootDir, db } = setupFixture();
   try {
@@ -280,7 +368,7 @@ test('pending-upstream engages after five consecutive cascades and further retri
       'SELECT review_status, review_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
     ).get('laceyenterprises/adversarial-review', 195);
 
-    assert.equal(state.consecutiveCascadeFailures, 5);
+    assert.equal(state.consecutiveTransientFailures, 5);
     assert.equal(state.backoffMinutes, 15);
     assert.equal(row.review_status, 'pending-upstream');
     assert.equal(row.review_attempts, 0);
@@ -298,7 +386,7 @@ test('pending-upstream engages after five consecutive cascades and further retri
       prNumber: 195,
       failedAt: '2026-05-04T07:30:00.000Z',
     });
-    assert.equal(capped.consecutiveCascadeFailures, CASCADE_FAILURE_CAP, 'pending-upstream retries stay capped');
+    assert.equal(capped.consecutiveTransientFailures, CASCADE_FAILURE_CAP, 'pending-upstream retries stay capped');
     assert.equal(capped.backoffMinutes, 15);
   } finally {
     db.close();
@@ -322,7 +410,7 @@ test('recordCascadeFailure writes atomically via temp-file rename', () => {
     });
 
     const state = JSON.parse(readFileSync(targetPath, 'utf8'));
-    assert.equal(state.consecutiveCascadeFailures, 1);
+    assert.equal(state.consecutiveTransientFailures, 1);
     assert.throws(() => readFileSync(tmpPath, 'utf8'), /ENOENT/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -404,6 +492,7 @@ test('settleReviewerAttempt records cascade failures and marks pending-upstream 
   try {
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
+    const warnings = [];
     const statements = {
       markPosted: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
@@ -427,7 +516,7 @@ test('settleReviewerAttempt records cascade failures and marks pending-upstream 
         failureAt: `2026-05-04T07:1${i}:00.000Z`,
         maxRemediationRounds: 1,
         statements,
-        log: { warn() {} },
+        log: { warn: (line) => warnings.push(line) },
       });
     }
 
@@ -438,9 +527,103 @@ test('settleReviewerAttempt records cascade failures and marks pending-upstream 
 
     assert.equal(row.review_status, 'pending-upstream');
     assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, /^\[cascade\]/);
     assert.match(row.failure_message, /All upstream attempts failed/);
-    assert.equal(state.consecutiveCascadeFailures, CASCADE_FAILURE_CAP);
+    assert.equal(state.consecutiveTransientFailures, CASCADE_FAILURE_CAP);
     assert.equal(state.backoffMinutes, 15);
+    assert.match(warnings.join('\n'), /marked pending-upstream after 5 transient reviewer failures \(cascade=5\)/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt keeps contextual defaults for empty transient errors', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: '',
+        failureClass: 'cascade',
+      },
+      failureAt: '2026-05-04T07:10:00.000Z',
+      maxRemediationRounds: 1,
+      statements,
+      log: { warn() {} },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+
+    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(
+      row.failure_message,
+      '[cascade] Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.'
+    );
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt records reviewer timeout class without burning attempts', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const warnings = [];
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'Command failed after reviewer timeout',
+        failureClass: 'reviewer-timeout',
+      },
+      failureAt: '2026-05-04T07:10:00.000Z',
+      maxRemediationRounds: 1,
+      statements,
+      log: { warn: (line) => warnings.push(line) },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+
+    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, /^\[reviewer-timeout\]/);
+    assert.match(warnings.join('\n'), /Reviewer reviewer-timeout failure/);
+    assert.equal(readCascadeState(rootDir, { repo, prNumber }).consecutiveTransientFailures, 1);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

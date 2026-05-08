@@ -16,6 +16,7 @@ import {
   getReviewRow,
   openReviewStateDb,
 } from './review-state.mjs';
+import { classifyReviewerFailure } from './reviewer-cascade.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -153,6 +154,25 @@ function makeDecision(state, description, reason) {
   };
 }
 
+function reviewerFailureClass(reviewRow) {
+  const rawMessage = String(reviewRow?.failure_message || '');
+  const message = rawMessage.toLowerCase();
+  const tagMatch = message.match(/^\[(reviewer-timeout|launchctl-bootstrap|cascade)\]/);
+  if (tagMatch) return tagMatch[1];
+  const legacyClass = classifyReviewerFailure(rawMessage, null);
+  if (legacyClass === 'cascade' || legacyClass === 'reviewer-timeout' || legacyClass === 'launchctl-bootstrap') {
+    return legacyClass;
+  }
+  if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
+    return 'launchctl-bootstrap';
+  }
+  if (message.includes('command timed out after')) {
+    return 'reviewer-timeout';
+  }
+  if (/litellm\/upstream cascade|watcher backoff engaged/.test(message)) return 'cascade';
+  return null;
+}
+
 function pickAdversarialGateStatus({
   reviewRow = null,
   latestJob = null,
@@ -175,12 +195,32 @@ function pickAdversarialGateStatus({
     return makeDecision('pending', 'Adversarial review is in progress.', 'review-in-progress');
   }
   if (reviewStatus === 'pending-upstream') {
+    const failureClass = reviewerFailureClass(reviewRow);
+    if (failureClass === 'reviewer-timeout') {
+      return makeDecision('pending', 'Adversarial reviewer timed out; retry is pending.', 'reviewer-timeout-retry-pending');
+    }
+    if (failureClass === 'launchctl-bootstrap') {
+      return makeDecision('pending', 'Claude reviewer bootstrap failed; retry is pending.', 'reviewer-bootstrap-retry-pending');
+    }
+    if (failureClass === 'cascade') {
+      return makeDecision('pending', 'Adversarial reviewer hit an upstream cascade; retry is pending.', 'reviewer-cascade-retry-pending');
+    }
     return makeDecision('pending', 'Adversarial review retry is pending.', 'review-retry-pending');
   }
   if (reviewStatus === 'malformed') {
     return makeDecision('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }
   if (reviewStatus === 'failed') {
+    const failureClass = reviewerFailureClass(reviewRow);
+    if (failureClass === 'reviewer-timeout') {
+      return makeDecision('failure', 'Adversarial reviewer timed out before posting.', 'reviewer-timeout');
+    }
+    if (failureClass === 'launchctl-bootstrap') {
+      return makeDecision('failure', 'Claude reviewer bootstrap failed before posting.', 'reviewer-launchctl-bootstrap');
+    }
+    if (failureClass === 'cascade') {
+      return makeDecision('failure', 'Adversarial reviewer hit an upstream cascade before posting.', 'reviewer-cascade');
+    }
     return makeDecision('failure', 'Adversarial review failed before posting.', 'review-failed');
   }
   if (reviewStatus === 'failed-orphan') {

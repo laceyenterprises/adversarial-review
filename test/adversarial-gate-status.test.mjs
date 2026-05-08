@@ -1,11 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   ADVERSARIAL_GATE_CONTEXT,
   pickAdversarialGateStatus,
+  projectAdversarialGateStatus,
   publishAdversarialGateStatus,
 } from '../src/adversarial-gate-status.mjs';
+import { handlePostedReviewRow } from '../src/watcher.mjs';
 
 function makeReviewRow(overrides = {}) {
   return {
@@ -202,4 +207,83 @@ test('publishAdversarialGateStatus skips duplicate posts for the same sha/state/
   }));
   assert.equal(record.state, 'pending');
   assert.equal(record.description, decision.description);
+});
+
+test('posted watcher rows project the adversarial gate before merge-agent dispatch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-posted-'));
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 54;
+  const headSha = 'abc123posted';
+  const reviewRow = makeReviewRow({ pr_number: prNumber });
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(
+    path.join(completedDir, 'job-54.json'),
+    `${JSON.stringify({
+      jobId: 'job-54',
+      repo,
+      prNumber,
+      status: 'completed',
+      createdAt: '2026-05-08T00:00:00.000Z',
+      completedAt: '2026-05-08T00:01:00.000Z',
+      reviewBody: '## Summary\nClean.\n## Verdict\nComment only',
+      remediationPlan: {
+        currentRound: 2,
+        maxRounds: 2,
+      },
+      reReview: {
+        requested: false,
+      },
+    }, null, 2)}\n`
+  );
+
+  const events = [];
+  const ghCalls = [];
+  const execFileImpl = async (command, args, options) => {
+    events.push('status-post');
+    ghCalls.push({ command, args, options });
+    return { stdout: '{}', stderr: '' };
+  };
+
+  await handlePostedReviewRow({
+    rootDir,
+    repoPath: repo,
+    prNumber,
+    existing: reviewRow,
+    projectGateStatusSafe: async (row) => {
+      assert.equal(row, reviewRow);
+      return projectAdversarialGateStatus(rootDir, {
+        repo,
+        prNumber,
+        headSha,
+        reviewRow: row,
+        execFileImpl,
+        env: {
+          PATH: '/usr/bin:/bin',
+          HOME: '/tmp/test-home',
+          GITHUB_TOKEN: 'token-123',
+        },
+      });
+    },
+    fetchMergeAgentCandidateImpl: async () => {
+      events.push('merge-fetch');
+      return { repo, prNumber };
+    },
+    buildMergeAgentDispatchJobImpl: (_rootDir, candidate) => candidate,
+    dispatchMergeAgentForPRImpl: async () => {
+      events.push('merge-dispatch');
+      return { decision: 'skip-test' };
+    },
+    logger: {
+      log() {},
+      error() {},
+    },
+  });
+
+  assert.deepEqual(events, ['status-post', 'merge-fetch', 'merge-dispatch']);
+  assert.equal(ghCalls.length, 1);
+  assert.equal(ghCalls[0].command, 'gh');
+  assert.ok(ghCalls[0].args.includes(`repos/laceyenterprises/adversarial-review/statuses/${headSha}`));
+  assert.ok(ghCalls[0].args.includes('state=success'));
+  assert.ok(ghCalls[0].args.includes(`context=${ADVERSARIAL_GATE_CONTEXT}`));
 });

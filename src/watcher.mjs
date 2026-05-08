@@ -766,6 +766,40 @@ async function syncPRLifecycle(octokit) {
 
 // ── Poll loop (new PRs) ──────────────────────────────────────────────────────
 
+async function handlePostedReviewRow({
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  existing,
+  projectGateStatusSafe,
+  execFileImpl = execFileAsync,
+  fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
+  buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
+  dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
+  logger = console,
+} = {}) {
+  await projectGateStatusSafe(existing);
+
+  try {
+    const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+      execFileImpl,
+    });
+    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate);
+    const dispatched = await dispatchMergeAgentForPRImpl({
+      rootDir,
+      ...dispatchJob,
+    });
+    logger.log(
+      `[watcher] merge-agent decision for ${repoPath}#${prNumber}: ${dispatched.decision}`
+    );
+  } catch (err) {
+    logger.error(
+      `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:`,
+      err?.message || err
+    );
+  }
+}
+
 async function pollOnce(octokit) {
   await refreshOrgRepos(octokit);
 
@@ -867,6 +901,9 @@ async function pollOnce(octokit) {
       }
 
       if (prState && prState !== 'open') {
+        if (existing) {
+          await projectGateStatusSafe(existing);
+        }
         continue;
       }
 
@@ -908,28 +945,21 @@ async function pollOnce(octokit) {
       }
 
       if (existing?.review_status === 'posted') {
-        try {
-          const candidate = await fetchMergeAgentCandidate(repoPath, prNumber, {
-            execFileImpl: execFileAsync,
-          });
-          const dispatchJob = buildMergeAgentDispatchJob(ROOT, candidate);
-          const dispatched = await dispatchMergeAgentForPR({
-            rootDir: ROOT,
-            ...dispatchJob,
-          });
-          console.log(
-            `[watcher] merge-agent decision for ${repoPath}#${prNumber}: ${dispatched.decision}`
-          );
-        } catch (err) {
-          console.error(
-            `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:`,
-            err?.message || err
-          );
-        }
+        await handlePostedReviewRow({
+          rootDir: ROOT,
+          repoPath,
+          prNumber,
+          existing,
+          projectGateStatusSafe,
+          execFileImpl: execFileAsync,
+        });
         continue;
       }
 
       if (watcherDrain.active) {
+        if (existing) {
+          await projectGateStatusSafe(existing);
+        }
         continue;
       }
 
@@ -1195,6 +1225,7 @@ if (isMain) {
 export {
   classifyReviewerFailure,
   evaluateRoundBudgetForReview,
+  handlePostedReviewRow,
   pollOnce,
   readWatcherDrainState,
   WATCHER_DRAIN_FILE,

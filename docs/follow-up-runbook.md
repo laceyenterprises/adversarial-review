@@ -395,6 +395,8 @@ Operator action:
 - Both commands default their durable mutation ledger to `data/operator-mutations/` under the tool root, not `HQ_ROOT/dispatch/`, so they remain writable from the documented `placey` LaunchAgent topology.
 - Both commands derive a default idempotency key from `(verb, repo, pr, reason)`. A previously successful key replays as a no-op success; a previously refused key is re-evaluated so operators can retry after state changes without minting a new key.
 
+For `review_status='failed-orphan'`, inspect the GitHub PR first. If no orphaned reviewer post landed, run `npm run retrigger-review -- --repo <slug> --pr <n> --reason "<verified reason>"`; that is the supported clear path for the sticky row and lets the next watcher tick publish the next non-failure `agent-os/adversarial-gate` state. Do not hand-edit `data/reviews.db` or the local gate-record file to clear it.
+
 ### 4. Reconcile detached completion
 
 Reconciliation is explicit and one-shot:

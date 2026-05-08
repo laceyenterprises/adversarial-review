@@ -36,7 +36,7 @@ Reason mapping:
 | `remediation-in-progress` | `pending` | Follow-up remediation is currently in progress. |
 | `review-settled` | `success` | The latest review verdict is non-blocking. |
 | `operator-approved` | `success` | A scoped operator approval accepts a final-round `Request changes` verdict after remediation rounds are exhausted. |
-| `review-malformed` | `failure` | The review ledger is in a malformed-title terminal state. |
+| `review-malformed` | `failure` | The durable review row is in a malformed terminal state, including but not limited to malformed-title. |
 | `reviewer-timeout` | `failure` | The reviewer timed out before posting. |
 | `reviewer-launchctl-bootstrap` | `failure` | The Claude launchctl/bootstrap path failed before posting. |
 | `reviewer-cascade` | `failure` | The reviewer hit a LiteLLM/upstream cascade before posting. |

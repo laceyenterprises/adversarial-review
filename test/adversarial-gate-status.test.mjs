@@ -153,6 +153,19 @@ test('pickAdversarialGateStatus reports launchctl bootstrap failures precisely',
   assert.match(decision.description, /bootstrap failed/i);
 });
 
+test('pickAdversarialGateStatus only trusts bracket tags at the message prefix', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      failure_message: '[launchctl-bootstrap] stderr quoted stale row: [reviewer-timeout] Command timed out',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'reviewer-launchctl-bootstrap');
+});
+
 test('pickAdversarialGateStatus reports transient pending-upstream class precisely', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({
@@ -165,6 +178,19 @@ test('pickAdversarialGateStatus reports transient pending-upstream class precise
   assert.equal(decision.state, 'pending');
   assert.equal(decision.reason, 'reviewer-timeout-retry-pending');
   assert.match(decision.description, /retry is pending/i);
+});
+
+test('pickAdversarialGateStatus retro-classifies legacy raw cascade stderr', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'pending-upstream',
+      failure_message: 'All upstream attempts failed in retry pool after command timed out after 600000ms',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'reviewer-cascade-retry-pending');
 });
 
 test('pickAdversarialGateStatus recognizes legacy cascade failure messages', () => {

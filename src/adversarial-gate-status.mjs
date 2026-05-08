@@ -16,6 +16,7 @@ import {
   getReviewRow,
   openReviewStateDb,
 } from './review-state.mjs';
+import { classifyReviewerFailure } from './reviewer-cascade.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -154,10 +155,14 @@ function makeDecision(state, description, reason) {
 }
 
 function reviewerFailureClass(reviewRow) {
-  const message = String(reviewRow?.failure_message || '').toLowerCase();
-  if (message.includes('[reviewer-timeout]')) return 'reviewer-timeout';
-  if (message.includes('[launchctl-bootstrap]')) return 'launchctl-bootstrap';
-  if (message.includes('[cascade]')) return 'cascade';
+  const rawMessage = String(reviewRow?.failure_message || '');
+  const message = rawMessage.toLowerCase();
+  const tagMatch = message.match(/^\[(reviewer-timeout|launchctl-bootstrap|cascade)\]/);
+  if (tagMatch) return tagMatch[1];
+  const legacyClass = classifyReviewerFailure(rawMessage, null);
+  if (legacyClass === 'cascade' || legacyClass === 'reviewer-timeout' || legacyClass === 'launchctl-bootstrap') {
+    return legacyClass;
+  }
   if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
     return 'launchctl-bootstrap';
   }

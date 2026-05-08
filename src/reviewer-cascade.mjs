@@ -9,7 +9,7 @@ const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
-  /bootstrap failed|could not find domain|input\/output error|not privileged to set domain|gui\/\d+/;
+  /bootstrap failed|could not find domain|input\/output error|not privileged to set domain/;
 
 function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
   const actualSignal = String(error?.signal || '').toUpperCase();
@@ -40,16 +40,16 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     /timeout.*retries|retries.*timeout/.test(lower) ||
     /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
 
-  if (timeoutKilled || mentionsReviewerTimeout) {
-    return 'reviewer-timeout';
-  }
-
   if (launchctlBootstrap) {
     return 'launchctl-bootstrap';
   }
 
   if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
+  }
+
+  if (timeoutKilled || mentionsReviewerTimeout) {
+    return 'reviewer-timeout';
   }
 
   if (exitCode === 127 || BUG_ERROR_CODES.has(normalizedErrorCode) || /typeerror|syntaxerror|cannot find/.test(lower)) {
@@ -117,15 +117,50 @@ function resolveCascadeBackoffMinutes(consecutiveCascadeFailures) {
   return CASCADE_BACKOFF_MINUTES[index];
 }
 
-function recordCascadeFailure(rootDir, { repo, prNumber, failedAt = new Date().toISOString() }) {
+function normalizeTransientFailureClass(failureClass) {
+  const value = String(failureClass || '').trim();
+  if (value === 'cascade' || value === 'reviewer-timeout' || value === 'launchctl-bootstrap') {
+    return value;
+  }
+  return 'cascade';
+}
+
+function formatTransientFailureBreakdown(breakdown = {}) {
+  return Object.entries(breakdown)
+    .filter(([, count]) => Number(count) > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([failureClass, count]) => `${failureClass}=${Number(count)}`)
+    .join(', ');
+}
+
+function recordCascadeFailure(rootDir, {
+  repo,
+  prNumber,
+  failedAt = new Date().toISOString(),
+  failureClass = 'cascade',
+} = {}) {
   const previous = readCascadeState(rootDir, { repo, prNumber });
-  const previousCount = Number(previous?.consecutiveCascadeFailures || 0);
-  const consecutiveCascadeFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
-  const backoffMinutes = resolveCascadeBackoffMinutes(consecutiveCascadeFailures);
+  const previousCount = Number(
+    previous?.consecutiveTransientFailures ?? previous?.consecutiveCascadeFailures ?? 0
+  );
+  const consecutiveTransientFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
+  const backoffMinutes = resolveCascadeBackoffMinutes(consecutiveTransientFailures);
   const failedAtMs = Date.parse(failedAt);
   const nextRetryAfter = new Date(failedAtMs + (backoffMinutes * 60_000)).toISOString();
+  const normalizedFailureClass = normalizeTransientFailureClass(failureClass);
+  const transientFailureBreakdown = previous?.transientFailureBreakdown
+    ? { ...previous.transientFailureBreakdown }
+    : {};
+  if (!previous?.transientFailureBreakdown && Number(previous?.consecutiveCascadeFailures) > 0) {
+    transientFailureBreakdown.cascade = Number(previous.consecutiveCascadeFailures);
+  }
+  transientFailureBreakdown[normalizedFailureClass] = Number(
+    transientFailureBreakdown[normalizedFailureClass] || 0
+  ) + 1;
   return writeCascadeState(rootDir, { repo, prNumber }, {
-    consecutiveCascadeFailures,
+    consecutiveTransientFailures,
+    transientFailureBreakdown,
+    lastFailureClass: normalizedFailureClass,
     lastFailureAt: failedAt,
     nextRetryAfter,
     backoffMinutes,
@@ -155,6 +190,7 @@ export {
   CASCADE_FAILURE_CAP,
   classifyReviewerFailure,
   clearCascadeState,
+  formatTransientFailureBreakdown,
   getCascadeStatePath,
   isReviewerSubprocessTimeout,
   readCascadeState,

@@ -25,6 +25,7 @@ import {
   CASCADE_FAILURE_CAP,
   classifyReviewerFailure,
   clearCascadeState,
+  formatTransientFailureBreakdown,
   isReviewerSubprocessTimeout,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
@@ -549,17 +550,19 @@ function settleReviewerAttempt({
       repo: repoPath,
       prNumber,
       failedAt: failureAt,
+      failureClass,
     });
-    if (cascadeState.consecutiveCascadeFailures >= CASCADE_FAILURE_CAP) {
+    if (cascadeState.consecutiveTransientFailures >= CASCADE_FAILURE_CAP) {
       statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber);
+      const breakdown = formatTransientFailureBreakdown(cascadeState.transientFailureBreakdown);
       log.warn(
-        `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveCascadeFailures} ${failureClass} failures; will resume when the reviewer lane recovers`
+        `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); will resume when the reviewer lane recovers`
       );
     } else {
       statements.markCascadeFailed.run(failureAt, classifiedMessage, repoPath, prNumber);
     }
     log.warn(
-      `[watcher] Reviewer ${failureClass} failure on #${prNumber} (consecutive=${cascadeState.consecutiveCascadeFailures}); backing off ${cascadeState.backoffMinutes}m`
+      `[watcher] Reviewer ${failureClass} failure on #${prNumber} (consecutiveTransient=${cascadeState.consecutiveTransientFailures}); backing off ${cascadeState.backoffMinutes}m`
     );
     return;
   }

@@ -35,10 +35,18 @@ import {
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 import {
+  createBranchProtectionChecker,
+  warnForMissingAdversarialGateBranchProtection,
+} from './branch-protection.mjs';
+import {
   buildMergeAgentDispatchJob,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
+import {
+  deleteGateRecordsForPR,
+  projectAdversarialGateStatus,
+} from './adversarial-gate-status.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
   retryPendingRetriggerAckComments,
@@ -691,6 +699,9 @@ async function runPrltSync() {
 
 let activeRepos = config.repos ?? [];
 let lastRepoRefresh = 0;
+const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
+  execFileImpl: execFileAsync,
+});
 
 async function refreshOrgRepos(octokit) {
   if (!config.org) return;
@@ -746,11 +757,13 @@ async function syncPRLifecycle(octokit) {
     if (pr.merged_at) {
       console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
       stmtMarkMerged.run(pr.merged_at, repo, prNumber);
+      deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await setLinearDone(linearTicketId);
       anyChanged = true;
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
       stmtMarkClosed.run(pr.closed_at ?? new Date().toISOString(), repo, prNumber);
+      deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await setLinearCancelled(linearTicketId);
       anyChanged = true;
     }
@@ -765,8 +778,49 @@ async function syncPRLifecycle(octokit) {
 
 // ── Poll loop (new PRs) ──────────────────────────────────────────────────────
 
+async function handlePostedReviewRow({
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  existing,
+  projectGateStatusSafe,
+  execFileImpl = execFileAsync,
+  fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
+  buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
+  dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
+  logger = console,
+} = {}) {
+  await projectGateStatusSafe(existing);
+
+  try {
+    const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+      execFileImpl,
+    });
+    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate);
+    const dispatched = await dispatchMergeAgentForPRImpl({
+      rootDir,
+      ...dispatchJob,
+    });
+    logger.log(
+      `[watcher] merge-agent decision for ${repoPath}#${prNumber}: ${dispatched.decision}`
+    );
+  } catch (err) {
+    logger.error(
+      `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:`,
+      err?.message || err
+    );
+  }
+}
+
 async function pollOnce(octokit) {
   await refreshOrgRepos(octokit);
+
+  await warnForMissingAdversarialGateBranchProtection(activeRepos, {
+    checker: adversarialGateBranchProtectionChecker,
+    baseBranches: config.adversarialGateBaseBranches || {},
+    defaultBaseBranch: config.adversarialGateBaseBranch || 'main',
+    logger: console,
+  });
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit);
@@ -825,6 +879,31 @@ async function pollOnce(octokit) {
       }
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
+      async function projectGateStatusSafe(reviewRow) {
+        if (!pr?.head?.sha) return;
+        try {
+          const projected = await projectAdversarialGateStatus(ROOT, {
+            repo: repoPath,
+            prNumber,
+            headSha: pr.head.sha,
+            labels: pr.labels,
+            prUpdatedAt: pr.updated_at || null,
+            reviewRow,
+            execFileImpl: execFileAsync,
+            fetchLatestLabelEventImpl: fetchLatestLabelEvent,
+          });
+          console.log(
+            `[watcher] adversarial gate for ${repoPath}#${prNumber}: ${projected.decision.state}` +
+              ` (${projected.decision.reason})`
+          );
+        } catch (err) {
+          console.error(
+            `[watcher] adversarial gate projection failed for ${repoPath}#${prNumber}:`,
+            err?.message || err
+          );
+        }
+      }
+
       // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()
       // when the watcher restarted with a row stuck in 'reviewing' — i.e.
       // a reviewer subprocess was in flight when the watcher died and may
@@ -836,6 +915,7 @@ async function pollOnce(octokit) {
         existing?.review_status === 'malformed' ||
         existing?.review_status === 'failed-orphan'
       ) {
+        await projectGateStatusSafe(existing);
         continue;
       }
 
@@ -881,28 +961,21 @@ async function pollOnce(octokit) {
       }
 
       if (existing?.review_status === 'posted') {
-        try {
-          const candidate = await fetchMergeAgentCandidate(repoPath, prNumber, {
-            execFileImpl: execFileAsync,
-          });
-          const dispatchJob = buildMergeAgentDispatchJob(ROOT, candidate);
-          const dispatched = await dispatchMergeAgentForPR({
-            rootDir: ROOT,
-            ...dispatchJob,
-          });
-          console.log(
-            `[watcher] merge-agent decision for ${repoPath}#${prNumber}: ${dispatched.decision}`
-          );
-        } catch (err) {
-          console.error(
-            `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:`,
-            err?.message || err
-          );
-        }
+        await handlePostedReviewRow({
+          rootDir: ROOT,
+          repoPath,
+          prNumber,
+          existing,
+          projectGateStatusSafe,
+          execFileImpl: execFileAsync,
+        });
         continue;
       }
 
       if (watcherDrain.active) {
+        if (existing) {
+          await projectGateStatusSafe(existing);
+        }
         continue;
       }
 
@@ -938,6 +1011,7 @@ async function pollOnce(octokit) {
           prNumber
         );
         stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(pr.labels) ? pr.labels : []), repoPath, prNumber);
+        await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
       }
 
@@ -960,6 +1034,7 @@ async function pollOnce(octokit) {
       }
 
       const current = stmtGetReviewRow.get(repoPath, prNumber);
+      await projectGateStatusSafe(current);
       const cascadeGate = shouldBackoffReviewerSpawn(ROOT, {
         repo: repoPath,
         prNumber,
@@ -1166,6 +1241,7 @@ if (isMain) {
 export {
   classifyReviewerFailure,
   evaluateRoundBudgetForReview,
+  handlePostedReviewRow,
   pollOnce,
   readWatcherDrainState,
   WATCHER_DRAIN_FILE,

@@ -10,6 +10,7 @@ Use this when a review has already been posted to GitHub and you need to inspect
 
 - This is a **bounded loop** with operator override. It is not an unbounded autonomous retry daemon.
 - The **watcher owns review posting**. Follow-up remediation does not post GitHub reviews directly.
+- The watcher also projects the durable adversarial-review state onto the PR head SHA as the commit status context `agent-os/adversarial-gate`. Do not rely on GitHub-native merge or auto-merge until that context is required in branch protection for the target branch.
 - The remediation worker works on the **existing PR branch**, commits changes, and pushes that branch.
 - The remediation worker does **not** open a new PR and does **not** merge the PR.
 - Until `LAC-358` is explicitly reverted, **all auto-remediation routes through the codex worker class regardless of the original PR's `builderTag`**. The durable `builderTag` is still preserved on the job ledger for downstream queue/audit purposes, but worker-class selection is intentionally hard-switched to codex per `feedback_prefer_codex_for_heavy_work.md` while claude-code remains unsuitable for unattended heavy remediation. Commit trailers on remediation commits therefore stamp `Worker-Class: codex`, and reconcile-time public PR comments also post under the codex bot identity when the worker model falls back to the hard-switched class (including `never-spawned` reconcile paths).
@@ -29,6 +30,7 @@ npm run follow-up:consume                         # claim + spawn one job (manua
 npm run follow-up:reconcile                       # reconcile in-progress jobs (manual tick)
 npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
 npm run follow-up:stop -- <job-path> [reason]     # stop an in-progress job
+npm run check-branch-protection                   # verify agent-os/adversarial-gate is required
 npm run retrigger-review -- --repo <slug> --pr <n> --reason "<why>"  # force a re-review pass
 npm run retrigger-remediation -- --repo <slug> --pr <n> --reason "<why>"  # bump/requeue one remediation round
 ```
@@ -68,6 +70,10 @@ New follow-up jobs derive their default remediation budget from the linked spec 
 The old table (`low/medium=1`, `high/critical=3`) no longer applies to new jobs: medium now gets the auto-queued retry round, and critical gets one extra iteration before operator handoff. After the stored cap is consumed, the next adversarial review still runs. If a human accepts the remaining `Request changes` findings, the `operator-approved` label can dispatch merge-agent, but only when the latest matching GitHub `labeled` event is attributable and scoped to the current head SHA plus latest adversarial review record. It bypasses only the `Request changes` merge-agent skip; missing or unknown verdicts, not-mergeable state, failed or pending CI, active or unknown remediation state, and explicit skip labels remain hard gates. PRs without a discoverable spec linkage fall back to `medium` -> `2` rounds.
 
 ## Operator merge-agent labels
+
+Before enabling GitHub-native merge or auto-merge for this repo, require `agent-os/adversarial-gate` in branch protection. That status is the GitHub-facing projection of the adversarial-review ledger; without making it required, GitHub can merge a PR even when the durable review/remediation loop is still pending or blocked.
+
+The watcher now checks that protection on a cached interval and logs `branch-protection-warning` for any watched repo/base branch where the required context is absent or unreadable. Run `npm run check-branch-protection` for an operator-side audit; pass `-- --repo <owner/repo>` or `-- --base <branch>` to narrow the probe.
 
 `operator-approved` is the narrow final-round approval override. It is accepted only from an attributable GitHub `labeled` event scoped to the current head SHA and latest review record, and it only bypasses a `Request changes` verdict after the normal mergeable/check/remediation gates pass.
 
@@ -391,6 +397,8 @@ Operator action:
 - `retrigger-remediation` requeues the latest terminal follow-up job and optionally bumps `remediationPlan.maxRounds`. It only accepts terminal jobs in `failed`, `completed` with `reReview.requested=true`, or `stopped:{max-rounds-reached,round-budget-exhausted}`. Its exit-code contract is also stable: `0=success`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
 - Both commands default their durable mutation ledger to `data/operator-mutations/` under the tool root, not `HQ_ROOT/dispatch/`, so they remain writable from the documented `placey` LaunchAgent topology.
 - Both commands derive a default idempotency key from `(verb, repo, pr, reason)`. A previously successful key replays as a no-op success; a previously refused key is re-evaluated so operators can retry after state changes without minting a new key.
+
+For `review_status='failed-orphan'`, inspect the GitHub PR first. If no orphaned reviewer post landed, run `npm run retrigger-review -- --repo <slug> --pr <n> --reason "<verified reason>"`; that is the supported clear path for the sticky row and lets the next watcher tick publish the next non-failure `agent-os/adversarial-gate` state. Do not hand-edit `data/reviews.db` or the local gate-record file to clear it.
 
 ### 4. Reconcile detached completion
 

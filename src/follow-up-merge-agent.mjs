@@ -780,8 +780,10 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
 }
 
 export {
+  OPERATOR_APPROVED_LABEL,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
+  buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
   dispatchMergeAgentForPR,
   extractOperatorNotes,
@@ -791,6 +793,7 @@ export {
   isScopedOperatorApproval,
   isScopedMergeAgentRequest,
   listMergeAgentDispatches,
+  normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
   recordMergeAgentDispatch,

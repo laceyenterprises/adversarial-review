@@ -902,6 +902,7 @@ async function pollOnce(octokit) {
             headSha: pr.head.sha,
             labels: pr.labels,
             prUpdatedAt: pr.updated_at || null,
+            prAuthor: pr.user?.login || null,
             reviewRow,
             execFileImpl: execFileAsync,
             fetchLatestLabelEventImpl: fetchLatestLabelEvent,

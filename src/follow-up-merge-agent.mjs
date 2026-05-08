@@ -65,6 +65,10 @@ function normalizeLabelNames(labels) {
     .filter(Boolean);
 }
 
+function normalizeLogin(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
 function extractOperatorNotes(prBody) {
   const text = String(prBody ?? '').trim();
   if (!text) return null;
@@ -371,13 +375,11 @@ function pickNormalMergeAgentDispatchDetail({
 function isScopedOperatorApproval(job) {
   const approval = job?.operatorApproval;
   if (!approval) return false;
-  // SECURITY: This override assumes a single trusted repo operator; if write
-  // access expands, re-evaluate self-approval before accepting label events.
   if (!approval.actor || String(approval.actor).trim().toLowerCase() === 'unknown') return false;
+  if (job?.prAuthor && normalizeLogin(approval.actor) === normalizeLogin(job.prAuthor)) return false;
   if (!approval.labelEventId && !approval.labelEventNodeId) return false;
   if (!approval.createdAt) return false;
   if (String(approval.headSha || '') !== String(job?.headSha || '')) return false;
-  if (job?.latestReviewKey && String(approval.reviewKey || '') !== String(job.latestReviewKey)) return false;
   return true;
 }
 
@@ -404,17 +406,19 @@ function isoAtOrAfter(candidate, floor) {
 function buildScopedOperatorApproval(candidate, latestJob) {
   const event = candidate?.operatorApprovalEvent;
   if (!event) return null;
-  const latestReviewAt = latestJob?.reviewPostedAt || latestJob?.createdAt || null;
-  const latestReviewKey = latestJob ? `${latestJob.jobId}:${latestReviewAt || 'unknown-review-time'}` : null;
   if (!candidate?.headSha) return null;
+  if (candidate?.prAuthor && normalizeLogin(event.actor) === normalizeLogin(candidate.prAuthor)) return null;
+  if (String(event.headSha || '') !== String(candidate.headSha || '')) return null;
+  if (!event.codeScopedAt || !isoAtOrAfter(event.createdAt, event.codeScopedAt)) return null;
   return {
     actor: event.actor || null,
     createdAt: event.createdAt || null,
     labelEventId: event.id || null,
     labelEventNodeId: event.nodeId || null,
-    headSha: candidate.headSha,
-    prUpdatedAt: candidate.prUpdatedAt || null,
-    reviewKey: latestReviewKey,
+    headSha: event.headSha || null,
+    codeScopedAt: event.codeScopedAt || null,
+    codeScopeEventId: event.codeScopeEventId || null,
+    codeScopeEventKind: event.codeScopeEventKind || null,
   };
 }
 
@@ -607,10 +611,10 @@ async function dispatchMergeAgentForPR({
   lastVerdict,
   prState = 'open',
   merged = false,
+  prAuthor = null,
   latestFollowUpJobStatus = null,
   remediationCurrentRound = null,
   remediationMaxRounds = null,
-  latestReviewKey = null,
   prUpdatedAt = null,
   operatorApproval = null,
   mergeAgentRequest = null,
@@ -634,10 +638,10 @@ async function dispatchMergeAgentForPR({
     lastVerdict,
     prState,
     merged,
+    prAuthor,
     latestFollowUpJobStatus,
     remediationCurrentRound,
     remediationMaxRounds,
-    latestReviewKey,
     prUpdatedAt,
     operatorApproval,
     mergeAgentRequest,
@@ -755,7 +759,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       '--repo',
       repo,
       '--json',
-      'mergeable,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt',
+      'mergeable,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
     ],
     { maxBuffer: 5 * 1024 * 1024 }
   );
@@ -784,6 +788,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     operatorNotes: extractOperatorNotes(parsed.body),
     prState: parsed.mergedAt ? 'merged' : String(parsed.state || 'unknown').trim().toLowerCase(),
     merged: Boolean(parsed.mergedAt),
+    prAuthor: parsed.author?.login || null,
     closedAt: parsed.closedAt || null,
     mergedAt: parsed.mergedAt || null,
     prUpdatedAt: parsed.updatedAt || null,
@@ -797,15 +802,12 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
   });
-  const latestReviewAt = latestJob?.reviewPostedAt || latestJob?.createdAt || null;
-  const latestReviewKey = latestJob ? `${latestJob.jobId}:${latestReviewAt || 'unknown-review-time'}` : null;
   return {
     ...candidate,
     lastVerdict: extractReviewVerdict(latestJob?.reviewBody),
     latestFollowUpJobStatus: latestJob?.status || null,
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
-    latestReviewKey,
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),
     mergeAgentRequest: buildScopedMergeAgentRequest(candidate),
   };
@@ -813,6 +815,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
 
 export {
   OPERATOR_APPROVED_LABEL,
+  OPERATOR_SKIP_LABELS,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
   buildScopedOperatorApproval,

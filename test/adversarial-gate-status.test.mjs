@@ -48,7 +48,7 @@ function makeOperatorApproval(overrides = {}) {
     labelEventId: 'evt-operator-approved',
     labelEventNodeId: 'LE_operator_approved',
     headSha: 'abc123',
-    reviewKey: 'job-53:2026-05-07T18:00:00.000Z',
+    codeScopedAt: '2026-05-07T18:00:00.000Z',
     ...overrides,
   };
 }
@@ -230,6 +230,7 @@ test('pickAdversarialGateStatus returns success for a scoped operator-approved o
       },
     }),
     operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
   });
 
   assert.equal(decision.state, 'success');
@@ -247,6 +248,7 @@ test('pickAdversarialGateStatus lets scoped operator-approved override claimable
       },
     }),
     operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
   });
 
   assert.equal(decision.state, 'success');
@@ -258,6 +260,7 @@ test('pickAdversarialGateStatus lets scoped operator-approved override pending r
     reviewRow: makeReviewRow({ review_status: 'reviewing' }),
     latestJob: makeJob({ status: 'in_progress' }),
     operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
   });
 
   assert.equal(decision.state, 'success');
@@ -268,7 +271,8 @@ test('pickAdversarialGateStatus lets scoped operator-approved override missing r
   const decision = pickAdversarialGateStatus({
     reviewRow: null,
     latestJob: null,
-    operatorApproval: makeOperatorApproval({ reviewKey: null }),
+    operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
   });
 
   assert.equal(decision.state, 'success');
@@ -298,6 +302,7 @@ test('pickAdversarialGateStatus ignores unvalidated operator approvals', () => {
     operatorApproval: {
       actor: 'VirtualPaul',
     },
+    headSha: 'abc123',
   });
 
   assert.equal(decision.state, 'failure');

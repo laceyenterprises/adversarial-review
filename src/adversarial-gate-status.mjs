@@ -10,6 +10,7 @@ import {
   findLatestFollowUpJobForPR,
   normalizeReviewVerdict,
   OPERATOR_APPROVED_LABEL,
+  OPERATOR_SKIP_LABELS,
 } from './follow-up-merge-agent.mjs';
 import {
   ensureReviewStateSchema,
@@ -23,7 +24,6 @@ const execFileAsync = promisify(execFile);
 const ADVERSARIAL_GATE_CONTEXT = 'agent-os/adversarial-gate';
 const ADVERSARIAL_GATE_RECORD_DIR = ['data', 'adversarial-gate-status'];
 const DESCRIPTION_MAX_CHARS = 140;
-const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 
 function sanitizePathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
@@ -165,10 +165,11 @@ function reviewerFailureClass(reviewRow) {
   return null;
 }
 
-function hasMinimumOperatorApprovalFields(operatorApproval) {
+function hasMinimumOperatorApprovalFields(operatorApproval, currentHeadSha = null) {
   if (!operatorApproval) return false;
   if (!operatorApproval.actor || String(operatorApproval.actor).trim().toLowerCase() === 'unknown') return false;
   if (!operatorApproval.headSha) return false;
+  if (!currentHeadSha || String(operatorApproval.headSha) !== String(currentHeadSha)) return false;
   if (!operatorApproval.labelEventId && !operatorApproval.labelEventNodeId) return false;
   if (!operatorApproval.createdAt) return false;
   return true;
@@ -179,6 +180,7 @@ function pickAdversarialGateStatus({
   latestJob = null,
   operatorApproval = null,
   labels = [],
+  headSha = null,
 } = {}) {
   if (normalizeLabelNames(labels).some((label) => OPERATOR_SKIP_LABELS.has(label))) {
     return makeDecision(
@@ -188,7 +190,7 @@ function pickAdversarialGateStatus({
     );
   }
 
-  if (hasMinimumOperatorApprovalFields(operatorApproval)) {
+  if (hasMinimumOperatorApprovalFields(operatorApproval, headSha)) {
     return makeDecision(
       'success',
       'Scoped operator override approves the current head.',
@@ -311,6 +313,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   headSha,
   labels = [],
   prUpdatedAt = null,
+  prAuthor = null,
   reviewRow = null,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
@@ -332,6 +335,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
       {
         headSha,
         prUpdatedAt,
+        prAuthor,
         operatorApprovalEvent: event,
       },
       latestJob
@@ -343,6 +347,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     latestJob,
     operatorApproval,
     labels,
+    headSha,
   };
 }
 
@@ -433,6 +438,7 @@ async function projectAdversarialGateStatus(rootDir, {
   headSha,
   labels = [],
   prUpdatedAt = null,
+  prAuthor = null,
   reviewRow = null,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
@@ -444,6 +450,7 @@ async function projectAdversarialGateStatus(rootDir, {
     headSha,
     labels,
     prUpdatedAt,
+    prAuthor,
     reviewRow,
     execFileImpl,
     fetchLatestLabelEventImpl,

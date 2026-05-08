@@ -141,12 +141,16 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   assert.match(ghCalls[2].args[6], /Remediation queue: `requeued`/);
   assert.match(ghCalls[2].args[6], /remediation worker will respond to the latest adversarial review/i);
 
-  // Audit row recorded.
-  assert.equal(auditRows.length, 1);
+  // Audit rows record the durable bump first, then the terminal requeue outcome.
+  assert.equal(auditRows.length, 2);
   assert.equal(auditRows[0].row.source, 'pr-label');
   assert.equal(auditRows[0].row.operator, 'pr-label:VirtualPaul');
-  assert.equal(auditRows[0].row.outcome, 'bumped-and-requeued');
-  assert.equal(auditRows[0].row.requeueOutcome, 'requeued');
+  assert.equal(auditRows[0].row.outcome, 'bumped-requeue-pending');
+  assert.equal(auditRows[0].row.requeueOutcome, 'not-attempted');
+  assert.equal(auditRows[1].row.source, 'pr-label');
+  assert.equal(auditRows[1].row.operator, 'pr-label:VirtualPaul');
+  assert.equal(auditRows[1].row.outcome, 'bumped-and-requeued');
+  assert.equal(auditRows[1].row.requeueOutcome, 'requeued');
   assert.equal(result.ackComment.posted, true);
   assert.equal(result.requeueOutcome, 'requeued');
 
@@ -281,6 +285,63 @@ test('tryRetriggerRemediationFromLabel refuses unattributed labels', async () =>
   });
 
   assert.equal(result.outcome, 'label-event-missing');
+});
+
+test('tryRetriggerRemediationFromLabel consumes label and audits bump when requeue fails', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { jobPath } = makeHaltedJob(rootDir);
+
+  const ghCalls = [];
+  const auditRows = [];
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-requeue-failure' }),
+    execFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: (auditRoot, row) => {
+      auditRows.push({ auditRoot, row });
+    },
+    requeueImpl: () => {
+      throw new Error('simulated queue write failure');
+    },
+    now: () => '2026-05-06T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-requeue-failed');
+  assert.equal(result.labelRemoved, true);
+  assert.equal(result.requeueOutcome, 'requeue-failed');
+  assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
+
+  assert.equal(auditRows.length, 2);
+  assert.equal(auditRows[0].row.outcome, 'bumped-requeue-pending');
+  assert.equal(auditRows[1].row.outcome, 'bumped-requeue-failed');
+  assert.match(auditRows[1].row.requeueError, /simulated queue write failure/);
+
+  assert.equal(ghCalls.length, 3);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
+  assert.match(ghCalls[2].args[6], /Remediation retrigger needs operator attention/);
+  assert.match(ghCalls[2].args[6], /could not requeue the follow-up worker/);
+
+  const consumption = readOnlyLabelConsumption(rootDir);
+  assert.equal(consumption.labelRemoved, true);
+  assert.equal(consumption.auditRow.outcome, 'bumped-requeue-failed');
+  assert.equal(consumption.ackComment.context.requeueResult.outcome, 'requeue-failed');
+
+  const retry = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-requeue-failure' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+  });
+
+  assert.equal(retry.outcome, 'label-already-consumed');
+  assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
 });
 
 test('tryRetriggerRemediationFromLabel surfaces label-removal failure but reports the requeue succeeded', async () => {

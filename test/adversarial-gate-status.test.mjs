@@ -63,6 +63,28 @@ test('pickAdversarialGateStatus returns success for a settled non-blocking revie
   assert.equal(decision.reason, 'review-settled');
 });
 
+test('pickAdversarialGateStatus keeps posted rows without a follow-up ledger entry pending', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'awaiting-ledger');
+});
+
+test('pickAdversarialGateStatus settles comment-only posted rows even without a follow-up job', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      reviewBody: '## Summary\nClean.\n## Verdict\nComment only',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+});
+
 test('pickAdversarialGateStatus returns pending while remediation is active', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
@@ -137,7 +159,7 @@ test('pickAdversarialGateStatus fails closed when operator-approved is present b
   assert.equal(decision.reason, 'override-remediation-claimable');
 });
 
-test('publishAdversarialGateStatus reposts duplicate decisions so GitHub remains authoritative', async () => {
+test('publishAdversarialGateStatus skips duplicate decisions already recorded for the same head SHA', async () => {
   const rootDir = '/virtual/root';
   const ghCalls = [];
   const records = new Map();
@@ -163,8 +185,21 @@ test('publishAdversarialGateStatus reposts duplicate decisions so GitHub remains
     }), parsed);
     return filePath;
   };
+  const readRecordImpl = () => {
+    const record = records.get(JSON.stringify({
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 53,
+      headSha: 'abc123',
+    }));
+    if (!record) {
+      const err = new Error('ENOENT');
+      err.code = 'ENOENT';
+      throw err;
+    }
+    return `${JSON.stringify(record)}\n`;
+  };
 
-  await publishAdversarialGateStatus(rootDir, {
+  const first = await publishAdversarialGateStatus(rootDir, {
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 53,
     headSha: 'abc123',
@@ -177,10 +212,11 @@ test('publishAdversarialGateStatus reposts duplicate decisions so GitHub remains
       SHOULD_NOT_LEAK: 'nope',
     },
     writeRecordImpl,
+    readRecordImpl,
     mkdirImpl: () => {},
   });
 
-  await publishAdversarialGateStatus(rootDir, {
+  const second = await publishAdversarialGateStatus(rootDir, {
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 53,
     headSha: 'abc123',
@@ -193,11 +229,15 @@ test('publishAdversarialGateStatus reposts duplicate decisions so GitHub remains
       SHOULD_NOT_LEAK: 'nope',
     },
     writeRecordImpl,
+    readRecordImpl,
     mkdirImpl: () => {},
   });
 
-  assert.equal(ghCalls.length, 2);
-  assert.deepEqual(writeOptions, [{ mode: 0o640 }, { mode: 0o640 }]);
+  assert.equal(first.posted, true);
+  assert.equal(second.posted, false);
+  assert.equal(second.reason, 'unchanged');
+  assert.equal(ghCalls.length, 1);
+  assert.deepEqual(writeOptions, [{ mode: 0o640 }]);
   assert.deepEqual(Object.keys(ghCalls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH']);
 
   const record = records.get(JSON.stringify({

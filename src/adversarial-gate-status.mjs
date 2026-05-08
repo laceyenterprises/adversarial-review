@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -42,6 +42,25 @@ function normalizePrNumber(prNumber) {
 function gateRecordPath(rootDir, { repo, prNumber, headSha }) {
   const safeSha = sanitizePathSegment(headSha || 'no-sha');
   return join(gateRecordDir(rootDir), `${gateRecordPrefix({ repo, prNumber })}${safeSha}.json`);
+}
+
+function readGateRecord(rootDir, { repo, prNumber, headSha }, readRecordImpl = readFileSync) {
+  try {
+    return JSON.parse(String(readRecordImpl(gateRecordPath(rootDir, { repo, prNumber, headSha }), 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+function matchesPublishedDecision(record, decision) {
+  if (!record || !decision) return false;
+  return (
+    record.context === ADVERSARIAL_GATE_CONTEXT &&
+    record.state === decision.state &&
+    record.description === decision.description &&
+    record.reason === decision.reason &&
+    Boolean(record.postedAt)
+  );
 }
 
 function gateRecordPrefix({ repo, prNumber }) {
@@ -98,6 +117,10 @@ function normalizeLabelNames(labels) {
 
 function normalizeReviewStatus(status) {
   return String(status ?? '').trim().toLowerCase();
+}
+
+function extractReviewBodyFromRow(reviewRow) {
+  return reviewRow?.reviewBody ?? reviewRow?.review_body ?? reviewRow?.review_text ?? null;
 }
 
 function normalizeJobStatus(status) {
@@ -172,7 +195,17 @@ function pickAdversarialGateStatus({
   }
 
   if (!latestJob) {
-    return makeDecision('failure', 'Posted review is missing from the follow-up ledger.', 'missing-ledger');
+    const reviewBody = extractReviewBodyFromRow(reviewRow);
+    if (typeof reviewBody === 'string' && reviewBody.trim()) {
+      const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(reviewBody));
+      if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
+        return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
+      }
+      if (normalizedVerdict === 'request-changes') {
+        return makeDecision('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
+      }
+    }
+    return makeDecision('pending', 'Posted review is waiting for follow-up ledger reconciliation.', 'awaiting-ledger');
   }
 
   if (latestJobStatus === 'pending') {
@@ -277,12 +310,22 @@ async function publishAdversarialGateStatus(rootDir, {
   execFileImpl = execFileAsync,
   env = process.env,
   mkdirImpl = mkdirSync,
+  readRecordImpl = readFileSync,
   writeRecordImpl = writeFileAtomic,
 } = {}) {
   if (!repo || !headSha || !decision?.state) {
     return { posted: false, reason: 'missing-input' };
   }
   const normalizedPrNumber = normalizePrNumber(prNumber);
+
+  const existingRecord = readGateRecord(
+    rootDir,
+    { repo, prNumber: normalizedPrNumber, headSha },
+    readRecordImpl
+  );
+  if (matchesPublishedDecision(existingRecord, decision)) {
+    return { posted: false, reason: 'unchanged', record: existingRecord };
+  }
 
   const token = env.GITHUB_TOKEN;
   if (!token) {

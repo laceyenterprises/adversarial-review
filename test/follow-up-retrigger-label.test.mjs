@@ -457,6 +457,7 @@ test('retryPendingRetriggerAckComments retries pending ack records after label r
   const pending = readOnlyLabelConsumption(rootDir);
   assert.equal(pending.labelRemoved, true);
   assert.equal(pending.ackComment.posted, false);
+  assert.equal(pending.ackComment.context.requeueResult.outcome, 'requeued');
 
   const bodies = [];
   const retry = await retryPendingRetriggerAckComments({
@@ -473,6 +474,7 @@ test('retryPendingRetriggerAckComments retries pending ack records after label r
   assert.doesNotMatch(bodies[0], /<\/details>/);
   assert.doesNotMatch(bodies[0], /\n# hidden/);
   assert.match(bodies[0], /Requested by: `Bad'Actor`/);
+  assert.match(bodies[0], /Remediation queue: `requeued`/);
 
   const afterRetry = readOnlyLabelConsumption(rootDir);
   assert.equal(afterRetry.ackComment.posted, true);

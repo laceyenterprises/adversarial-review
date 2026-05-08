@@ -277,7 +277,7 @@ function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpRe
         newMaxRounds: bumpResult?.newMaxRounds ?? null,
       },
       requeueResult: {
-        outcome: requeueResult?.outcome || null,
+        outcome: requeueOutcomeFromResult(requeueResult),
         status: requeueResult?.job?.status || requeueResult?.status || null,
         jobPath: requeueResult?.jobPath || null,
         reason: requeueResult?.reason || null,
@@ -546,9 +546,14 @@ export async function tryRetriggerRemediationFromLabel({
   }
 
   // `retrigger-remediation` means "run another remediation worker
-  // against the latest posted review." The normal worker completion
-  // path is responsible for requesting the follow-up review after it
-  // has actually responded to that review.
+  // against the latest posted review." Rationale (post-2026-05-08,
+  // PR #48 regression): force-requeue is safe only because the watcher
+  // defers reviewer dispatch while the latest follow-up job is
+  // pending/inProgress for the same PR. `requeueFollowUpJobForNextRound`
+  // writes the pending job before this function returns, so even if the
+  // watcher row was already `review_status='pending'`, the same tick
+  // will skip the fresh review until the worker terminates and the
+  // normal worker completion path requests re-review.
   let requeueResult;
   try {
     requeueResult = requeueImpl({

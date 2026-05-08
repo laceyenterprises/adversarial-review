@@ -48,7 +48,7 @@ function makeOperatorApproval(overrides = {}) {
     labelEventId: 'evt-operator-approved',
     labelEventNodeId: 'LE_operator_approved',
     headSha: 'abc123',
-    reviewKey: 'job-53:2026-05-07T18:00:00.000Z',
+    codeScopedAt: '2026-05-07T18:00:00.000Z',
     ...overrides,
   };
 }
@@ -230,13 +230,14 @@ test('pickAdversarialGateStatus returns success for a scoped operator-approved o
       },
     }),
     operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
   });
 
   assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'operator-approved');
 });
 
-test('pickAdversarialGateStatus fails closed when operator-approved is present but remediation rounds remain claimable', () => {
+test('pickAdversarialGateStatus lets scoped operator-approved override claimable remediation rounds', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
     latestJob: makeJob({
@@ -247,10 +248,65 @@ test('pickAdversarialGateStatus fails closed when operator-approved is present b
       },
     }),
     operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'operator-approved');
+});
+
+test('pickAdversarialGateStatus lets scoped operator-approved override pending review state', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({ review_status: 'reviewing' }),
+    latestJob: makeJob({ status: 'in_progress' }),
+    operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'operator-approved');
+});
+
+test('pickAdversarialGateStatus lets scoped operator-approved override missing review state', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: null,
+    latestJob: null,
+    operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'operator-approved');
+});
+
+test('pickAdversarialGateStatus lets explicit skip labels override operator-approved', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      reviewBody: '## Summary\nOperator accepted.\n## Verdict\nRequest changes',
+    }),
+    operatorApproval: makeOperatorApproval(),
+    labels: [{ name: 'operator-approved' }, { name: 'do-not-merge' }],
   });
 
   assert.equal(decision.state, 'failure');
-  assert.equal(decision.reason, 'override-remediation-claimable');
+  assert.equal(decision.reason, 'operator-skip-label');
+});
+
+test('pickAdversarialGateStatus ignores unvalidated operator approvals', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      reviewBody: '## Summary\nStill blocked.\n## Verdict\nRequest changes',
+    }),
+    operatorApproval: {
+      actor: 'VirtualPaul',
+    },
+    headSha: 'abc123',
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'blocking-review');
 });
 
 test('publishAdversarialGateStatus skips duplicate decisions already recorded for the same head SHA', async () => {

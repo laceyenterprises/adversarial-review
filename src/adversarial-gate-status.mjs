@@ -10,6 +10,7 @@ import {
   findLatestFollowUpJobForPR,
   normalizeReviewVerdict,
   OPERATOR_APPROVED_LABEL,
+  OPERATOR_SKIP_LABELS,
 } from './follow-up-merge-agent.mjs';
 import {
   ensureReviewStateSchema,
@@ -136,15 +137,6 @@ function truncateDescription(description) {
   return `${text.slice(0, DESCRIPTION_MAX_CHARS - 1).trimEnd()}…`;
 }
 
-function remediationRoundsRemainClaimable(latestJob) {
-  const currentRound = Number(latestJob?.remediationPlan?.currentRound);
-  const maxRounds = Number(latestJob?.remediationPlan?.maxRounds);
-  if (!Number.isFinite(currentRound) || !Number.isFinite(maxRounds) || maxRounds <= 0) {
-    return false;
-  }
-  return currentRound < maxRounds;
-}
-
 function makeDecision(state, description, reason) {
   return {
     context: ADVERSARIAL_GATE_CONTEXT,
@@ -173,11 +165,39 @@ function reviewerFailureClass(reviewRow) {
   return null;
 }
 
+function hasMinimumOperatorApprovalFields(operatorApproval, currentHeadSha = null) {
+  if (!operatorApproval) return false;
+  if (!operatorApproval.actor || String(operatorApproval.actor).trim().toLowerCase() === 'unknown') return false;
+  if (!operatorApproval.headSha) return false;
+  if (!currentHeadSha || String(operatorApproval.headSha) !== String(currentHeadSha)) return false;
+  if (!operatorApproval.labelEventId && !operatorApproval.labelEventNodeId) return false;
+  if (!operatorApproval.createdAt) return false;
+  return true;
+}
+
 function pickAdversarialGateStatus({
   reviewRow = null,
   latestJob = null,
   operatorApproval = null,
+  labels = [],
+  headSha = null,
 } = {}) {
+  if (normalizeLabelNames(labels).some((label) => OPERATOR_SKIP_LABELS.has(label))) {
+    return makeDecision(
+      'failure',
+      'Explicit operator skip label blocks adversarial gate.',
+      'operator-skip-label'
+    );
+  }
+
+  if (hasMinimumOperatorApprovalFields(operatorApproval, headSha)) {
+    return makeDecision(
+      'success',
+      'Scoped operator override approves the current head.',
+      'operator-approved'
+    );
+  }
+
   if (!reviewRow) {
     return makeDecision('pending', 'Adversarial review has not posted yet.', 'review-not-posted');
   }
@@ -269,20 +289,6 @@ function pickAdversarialGateStatus({
     return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
   }
   if (normalizedVerdict === 'request-changes') {
-    if (operatorApproval) {
-      if (remediationRoundsRemainClaimable(latestJob)) {
-        return makeDecision(
-          'failure',
-          'Operator override is present, but remediation rounds remain.',
-          'override-remediation-claimable'
-        );
-      }
-      return makeDecision(
-        'success',
-        'Scoped operator override accepts the current blocking review.',
-        'operator-approved'
-      );
-    }
     return makeDecision('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
   }
   if (normalizedVerdict === null) {
@@ -307,6 +313,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   headSha,
   labels = [],
   prUpdatedAt = null,
+  prAuthor = null,
   reviewRow = null,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
@@ -318,7 +325,6 @@ async function buildAdversarialGateSnapshot(rootDir, {
   const hasOperatorApprovedLabel = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
   if (
     hasOperatorApprovedLabel
-    && latestJob
     && headSha
     && typeof fetchLatestLabelEventImpl === 'function'
   ) {
@@ -329,6 +335,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
       {
         headSha,
         prUpdatedAt,
+        prAuthor,
         operatorApprovalEvent: event,
       },
       latestJob
@@ -339,6 +346,8 @@ async function buildAdversarialGateSnapshot(rootDir, {
     reviewRow: resolvedRow,
     latestJob,
     operatorApproval,
+    labels,
+    headSha,
   };
 }
 
@@ -429,6 +438,7 @@ async function projectAdversarialGateStatus(rootDir, {
   headSha,
   labels = [],
   prUpdatedAt = null,
+  prAuthor = null,
   reviewRow = null,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
@@ -440,6 +450,7 @@ async function projectAdversarialGateStatus(rootDir, {
     headSha,
     labels,
     prUpdatedAt,
+    prAuthor,
     reviewRow,
     execFileImpl,
     fetchLatestLabelEventImpl,

@@ -16,8 +16,8 @@ State mapping:
 | State | Meaning |
 |---|---|
 | `pending` | Review has not posted, review is queued/in progress, a posted review is waiting for the follow-up ledger to appear, remediation is queued/in progress, or a requested re-review has not posted yet. |
-| `success` | The latest posted review settled as `Comment only` or `Approved`, or a current scoped `operator-approved` label accepts a final-round `Request changes` verdict after remediation rounds are exhausted. |
-| `failure` | Review/remediation is malformed, failed, orphaned, stopped, missing a verdict, still blocked by `Request changes`, or in an unknown state. |
+| `success` | The latest posted review settled as `Comment only` or `Approved`, or a current scoped `operator-approved` label accepts the PR head regardless of review/remediation state and no explicit skip label is present. |
+| `failure` | Review/remediation is malformed, failed, orphaned, stopped, missing a verdict, still blocked by `Request changes`, explicitly skip-labeled, or in an unknown state. |
 
 Reason mapping:
 
@@ -35,7 +35,7 @@ Reason mapping:
 | `remediation-queued` | `pending` | Follow-up remediation is queued. |
 | `remediation-in-progress` | `pending` | Follow-up remediation is currently in progress. |
 | `review-settled` | `success` | The latest review verdict is non-blocking. |
-| `operator-approved` | `success` | A scoped operator approval accepts a final-round `Request changes` verdict after remediation rounds are exhausted. |
+| `operator-approved` | `success` | A scoped operator approval accepts the current PR head regardless of review/remediation state. |
 | `review-malformed` | `failure` | The durable review row is in a malformed terminal state, including but not limited to malformed-title. |
 | `reviewer-timeout` | `failure` | The reviewer timed out before posting. |
 | `reviewer-launchctl-bootstrap` | `failure` | The Claude launchctl/bootstrap path failed before posting. |
@@ -44,7 +44,6 @@ Reason mapping:
 | `review-failed-orphan` | `failure` | The watcher needs operator verification for a possible orphan review post. |
 | `review-state-unknown` | `failure` | The durable review row contains an unexpected state. |
 | `blocking-review` | `failure` | The latest review verdict still requests changes. |
-| `override-remediation-claimable` | `failure` | A scoped operator override is present, but remediation rounds remain claimable. |
 | `missing-verdict` | `failure` | The latest review body does not contain a usable verdict. |
 | `unknown-verdict` | `failure` | The latest review body contains a malformed or unsupported verdict. |
 | `remediation-failed` | `failure` | Follow-up remediation failed and needs operator action. |

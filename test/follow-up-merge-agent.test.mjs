@@ -33,7 +33,6 @@ function makeJob(overrides = {}) {
     latestFollowUpJobStatus: 'completed',
     remediationCurrentRound: 1,
     remediationMaxRounds: 1,
-    latestReviewKey: 'job-401:2026-05-06T18:00:00.000Z',
     operatorApproval: null,
     ...overrides,
   };
@@ -46,7 +45,7 @@ function makeOperatorApproval(overrides = {}) {
     labelEventId: 'evt-operator-approved',
     labelEventNodeId: 'LE_operator_approved',
     headSha: 'abc123',
-    reviewKey: 'job-401:2026-05-06T18:00:00.000Z',
+    codeScopedAt: '2026-05-06T18:00:00.000Z',
     ...overrides,
   };
 }
@@ -176,7 +175,7 @@ test('pickMergeAgentDispatch dispatches a Request-changes PR when the operator-a
   assert.equal(decision, 'dispatch');
 });
 
-test('operator-approved must be scoped to the current head SHA and review', () => {
+test('operator-approved must be scoped to the current head SHA and non-author actor', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
@@ -189,9 +188,25 @@ test('operator-approved must be scoped to the current head SHA and review', () =
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
       labels: [{ name: 'operator-approved' }],
-      operatorApproval: makeOperatorApproval({ reviewKey: 'old-review' }),
+      prAuthor: 'VirtualPaul',
+      operatorApproval: makeOperatorApproval(),
     })),
     'skip-operator-approval-stale'
+  );
+});
+
+test('stale operator-approved label does not block a green normal dispatch', () => {
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Comment only',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval({ headSha: 'old-sha' }),
+      mergeable: 'MERGEABLE',
+      checksConclusion: 'SUCCESS',
+      remediationCurrentRound: 1,
+      remediationMaxRounds: 1,
+    })),
+    'dispatch'
   );
 });
 
@@ -213,17 +228,25 @@ test('operator-approved fails closed when no attributed labeled event was fetche
   );
 });
 
-test('operator-approved does NOT bypass missing or unknown verdicts', () => {
-  // The override only applies to a parseable Request changes verdict.
-  // Missing or unrecognized verdicts mean the merge gate cannot tell
-  // what the reviewer said, so the system fails closed.
+test('operator-approved bypasses missing or unknown review verdicts for the current head', () => {
+  // The operator override is the manual escape valve when review is
+  // pending, missing, or otherwise not parseable yet. Git/CI safety
+  // gates still run separately.
   assert.equal(
-    pickMergeAgentDispatch(makeJob({ lastVerdict: null, labels: [{ name: 'operator-approved' }] })),
-    'skip-no-verdict'
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: null,
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval(),
+    })),
+    'dispatch'
   );
   assert.equal(
-    pickMergeAgentDispatch(makeJob({ lastVerdict: 'Needs follow-up from author', labels: [{ name: 'operator-approved' }] })),
-    'skip-unknown-verdict'
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Needs follow-up from author',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval(),
+    })),
+    'dispatch'
   );
 });
 
@@ -233,6 +256,7 @@ test('operator-approved does NOT bypass not-mergeable', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     mergeable: 'CONFLICTING',
   }));
   assert.equal(decision, 'skip-not-mergeable');
@@ -244,6 +268,7 @@ test('operator-approved does NOT bypass failed CI checks', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     checksConclusion: 'FAILURE',
   }));
   assert.equal(decision, 'skip-checks-failed');
@@ -253,9 +278,20 @@ test('operator-approved does NOT bypass pending CI checks', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     checksConclusion: 'PENDING',
   }));
   assert.equal(decision, 'skip-checks-pending');
+});
+
+test('operator-approved does NOT bypass unknown CI checks', () => {
+  const decision = pickMergeAgentDispatch(makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
+    checksConclusion: null,
+  }));
+  assert.equal(decision, 'skip-checks-unknown');
 });
 
 test('operator-approved does NOT bypass closed/merged PRs', () => {
@@ -304,40 +340,42 @@ test('operator-approved is overridden by explicit skip labels (skip wins)', () =
   );
 });
 
-test('operator-approved does NOT bypass claimable remediation rounds', () => {
-  // currentRound < maxRounds normally means "more remediation
-  // possible — do not merge yet". The override only applies after
-  // the durable ledger says no remediation rounds remain.
+test('operator-approved bypasses claimable remediation rounds', () => {
+  // The operator can explicitly decide to merge now rather than wait
+  // for the bounded remediation loop to consume more rounds.
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     remediationCurrentRound: 0,
     remediationMaxRounds: 2,
   }));
-  assert.equal(decision, 'skip-remediation-claimable');
+  assert.equal(decision, 'dispatch');
 });
 
-test('operator-approved does NOT bypass unknown remediation ledger state', () => {
+test('operator-approved bypasses unknown remediation ledger state', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
     remediationCurrentRound: 0,
     remediationMaxRounds: 0,
   }));
-  assert.equal(decision, 'skip-remediation-state-unknown');
+  assert.equal(decision, 'dispatch');
 });
 
-test('operator-approved does NOT bypass active in-flight remediation (let the worker finish first)', () => {
-  // Dispatching merge-agent while a remediation worker is actively
-  // pushing would race. Make the operator wait one tick — the next
-  // watcher pass after remediation completes will fire merge-agent.
+test('operator-approved bypasses active in-flight remediation', () => {
+  // This is the explicit operator override for "merge this current
+  // head now"; merge-agent/D5 still guard against head drift before
+  // actually landing the PR.
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
       labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval(),
       latestFollowUpJobStatus: 'in-progress',
     })),
-    'skip-remediation-active'
+    'dispatch'
   );
 });
 
@@ -375,7 +413,7 @@ test('merge-agent-requested bypasses current verdict and check gates so merge-ag
   );
 });
 
-test('merge-agent-requested does not bypass stale operator-approved diagnostics', () => {
+test('merge-agent-requested dispatches even when operator-approved is stale', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
@@ -385,7 +423,7 @@ test('merge-agent-requested does not bypass stale operator-approved diagnostics'
       mergeable: 'MERGEABLE',
       checksConclusion: 'SUCCESS',
     })),
-    'skip-operator-approval-stale'
+    'dispatch'
   );
 });
 
@@ -584,6 +622,8 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
       nodeId: 'LE_build_approval',
       actor: 'VirtualPaul',
       createdAt: '2026-05-02T10:05:00.000Z',
+      headSha: 'abc123',
+      codeScopedAt: '2026-05-02T10:04:00.000Z',
     },
   });
 
@@ -594,10 +634,83 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.remediationMaxRounds, 2);
   assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
   assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
-  assert.equal(dispatchJob.operatorApproval.reviewKey, dispatchJob.latestReviewKey);
+  assert.equal(dispatchJob.operatorApproval.codeScopedAt, '2026-05-02T10:04:00.000Z');
 });
 
-test('operator-approved cannot dispatch when no follow-up job ledger exists', () => {
+test('operator-approved remains scoped when review posts update the PR after labeling', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    reviewBody: '## Summary\nStill blocked.\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-05-02T10:10:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'abc123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [{ name: 'operator-approved' }],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+    prUpdatedAt: '2026-05-02T10:15:00.000Z',
+    operatorApprovalEvent: {
+      id: 'evt-pre-review-approval',
+      nodeId: 'LE_pre_review_approval',
+      actor: 'VirtualPaul',
+      createdAt: '2026-05-02T10:05:00.000Z',
+      headSha: 'abc123',
+      codeScopedAt: '2026-05-02T10:04:00.000Z',
+    },
+  });
+
+  assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
+  assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+});
+
+test('operator-approved can dispatch when no follow-up job ledger exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'abc123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [{ name: 'operator-approved' }],
+    operatorApprovalEvent: {
+      id: 'evt-build-approval',
+      nodeId: 'LE_build_approval',
+      actor: 'VirtualPaul',
+      createdAt: '2026-05-02T10:05:00.000Z',
+      headSha: 'abc123',
+      codeScopedAt: '2026-05-02T10:04:00.000Z',
+    },
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+    prUpdatedAt: '2026-05-02T10:04:00.000Z',
+  });
+
+  assert.equal(dispatchJob.lastVerdict, null);
+  assert.equal(dispatchJob.remediationMaxRounds, 0);
+  assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
+  assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+});
+
+test('operator-approved without a valid label event stays fail-closed without a follow-up ledger', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
     repo: 'laceyenterprises/agent-os',
@@ -614,12 +727,8 @@ test('operator-approved cannot dispatch when no follow-up job ledger exists', ()
   });
 
   assert.equal(dispatchJob.lastVerdict, null);
-  assert.equal(dispatchJob.remediationMaxRounds, 0);
-  assert.equal(
-    pickMergeAgentDispatch(dispatchJob),
-    'skip-no-verdict',
-    'operator-approved must not widen the gate when there is no parseable verdict ledger'
-  );
+  assert.equal(dispatchJob.operatorApproval, null);
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'skip-operator-approval-stale');
 });
 
 test('merge-agent-requested can dispatch when no follow-up job ledger exists', () => {
@@ -1026,6 +1135,7 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
             statusCheckRollup: [],
             state: 'OPEN',
             updatedAt: '2026-05-07T12:00:00.000Z',
+            author: { login: 'builder-bot' },
           }),
         };
       }
@@ -1040,24 +1150,41 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
   assert.equal(eventFetchesStarted, 2);
   for (const resolve of eventResolvers) {
     resolve({
-      stdout: JSON.stringify([
-        {
-          id: 1,
-          node_id: 'LE_operator_approved',
-          event: 'labeled',
-          label: { name: 'operator-approved' },
-          actor: { login: 'VirtualPaul' },
-          created_at: '2026-05-07T12:01:00.000Z',
+      stdout: JSON.stringify({
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: 'abc123',
+              timelineItems: {
+                nodes: [
+                  {
+                    __typename: 'PullRequestCommit',
+                    id: 'commit-event',
+                    commit: {
+                      oid: 'abc123',
+                      committedDate: '2026-05-07T12:00:30.000Z',
+                    },
+                  },
+                  {
+                    __typename: 'LabeledEvent',
+                    id: 'LE_operator_approved',
+                    label: { name: 'operator-approved' },
+                    actor: { login: 'VirtualPaul' },
+                    createdAt: '2026-05-07T12:01:00.000Z',
+                  },
+                  {
+                    __typename: 'LabeledEvent',
+                    id: 'LE_merge_agent_requested',
+                    label: { name: 'merge-agent-requested' },
+                    actor: { login: 'VirtualPaul' },
+                    createdAt: '2026-05-07T12:02:00.000Z',
+                  },
+                ],
+              },
+            },
+          },
         },
-        {
-          id: 2,
-          node_id: 'LE_merge_agent_requested',
-          event: 'labeled',
-          label: { name: 'merge-agent-requested' },
-          actor: { login: 'VirtualPaul' },
-          created_at: '2026-05-07T12:02:00.000Z',
-        },
-      ]),
+      }),
     });
   }
 

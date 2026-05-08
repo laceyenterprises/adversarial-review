@@ -45,9 +45,8 @@ const DEFAULT_RISK_CLASS = 'medium';
 // the cap lives entirely on the remediation-enqueue side.
 //
 // Operator override (`operator-approved` label) is the escape valve
-// when the operator has decided substance is fine despite a
-// `Request changes` verdict, after the durable remediation ledger is
-// otherwise merge-ready.
+// when the operator has decided the current PR head is mergeable now,
+// even if review/remediation state is still pending or noisy.
 const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
   low: 1,
   medium: 2,

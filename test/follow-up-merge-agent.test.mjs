@@ -195,6 +195,21 @@ test('operator-approved must be scoped to the current head SHA and review', () =
   );
 });
 
+test('stale operator-approved label does not block a green normal dispatch', () => {
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Comment only',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval({ headSha: 'old-sha' }),
+      mergeable: 'MERGEABLE',
+      checksConclusion: 'SUCCESS',
+      remediationCurrentRound: 1,
+      remediationMaxRounds: 1,
+    })),
+    'dispatch'
+  );
+});
+
 test('operator-approved fails closed when no attributed labeled event was fetched', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
@@ -267,6 +282,16 @@ test('operator-approved does NOT bypass pending CI checks', () => {
     checksConclusion: 'PENDING',
   }));
   assert.equal(decision, 'skip-checks-pending');
+});
+
+test('operator-approved does NOT bypass unknown CI checks', () => {
+  const decision = pickMergeAgentDispatch(makeJob({
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
+    checksConclusion: null,
+  }));
+  assert.equal(decision, 'skip-checks-unknown');
 });
 
 test('operator-approved does NOT bypass closed/merged PRs', () => {
@@ -388,7 +413,7 @@ test('merge-agent-requested bypasses current verdict and check gates so merge-ag
   );
 });
 
-test('merge-agent-requested does not bypass stale operator-approved diagnostics', () => {
+test('merge-agent-requested dispatches even when operator-approved is stale', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
@@ -398,7 +423,7 @@ test('merge-agent-requested does not bypass stale operator-approved diagnostics'
       mergeable: 'MERGEABLE',
       checksConclusion: 'SUCCESS',
     })),
-    'skip-operator-approval-stale'
+    'dispatch'
   );
 });
 

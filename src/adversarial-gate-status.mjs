@@ -164,12 +164,21 @@ function reviewerFailureClass(reviewRow) {
   return null;
 }
 
+function hasMinimumOperatorApprovalFields(operatorApproval) {
+  if (!operatorApproval) return false;
+  if (!operatorApproval.actor || String(operatorApproval.actor).trim().toLowerCase() === 'unknown') return false;
+  if (!operatorApproval.headSha) return false;
+  if (!operatorApproval.labelEventId && !operatorApproval.labelEventNodeId) return false;
+  if (!operatorApproval.createdAt) return false;
+  return true;
+}
+
 function pickAdversarialGateStatus({
   reviewRow = null,
   latestJob = null,
   operatorApproval = null,
 } = {}) {
-  if (operatorApproval) {
+  if (hasMinimumOperatorApprovalFields(operatorApproval)) {
     return makeDecision(
       'success',
       'Scoped operator override approves the current head.',

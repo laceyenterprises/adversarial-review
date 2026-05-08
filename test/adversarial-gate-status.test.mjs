@@ -275,6 +275,21 @@ test('pickAdversarialGateStatus lets scoped operator-approved override missing r
   assert.equal(decision.reason, 'operator-approved');
 });
 
+test('pickAdversarialGateStatus ignores unvalidated operator approvals', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      reviewBody: '## Summary\nStill blocked.\n## Verdict\nRequest changes',
+    }),
+    operatorApproval: {
+      actor: 'VirtualPaul',
+    },
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'blocking-review');
+});
+
 test('publishAdversarialGateStatus skips duplicate decisions already recorded for the same head SHA', async () => {
   const rootDir = '/virtual/root';
   const ghCalls = [];

@@ -250,10 +250,7 @@ function pickMergeAgentDispatchDetail(job, {
     return { decision: 'skip-operator-skip', trigger: null };
   }
 
-  if (hasOperatorApprovedLabel) {
-    if (!operatorApproved) {
-      return { decision: 'skip-operator-approval-stale', trigger: null };
-    }
+  if (operatorApproved) {
     const hardGateDecision = pickOperatorApprovedMergeGate(job);
     if (hardGateDecision.decision !== 'dispatch') {
       return hardGateDecision;
@@ -283,10 +280,6 @@ function pickMergeAgentDispatchDetail(job, {
       : dispatchDecision;
   }
 
-  if (normalDecision.decision === 'skip-operator-approval-stale') {
-    return normalDecision;
-  }
-
   if (hasMergeAgentRequestedLabel) {
     if (!mergeAgentRequested) {
       return { decision: 'skip-merge-agent-requested-stale', trigger: null };
@@ -294,6 +287,10 @@ function pickMergeAgentDispatchDetail(job, {
     return alreadyDispatched
       ? { decision: 'skip-already-dispatched', trigger: null }
       : { decision: 'dispatch', trigger: MERGE_AGENT_REQUESTED_LABEL };
+  }
+
+  if (hasOperatorApprovedLabel && !operatorApproved) {
+    return { decision: 'skip-operator-approval-stale', trigger: null };
   }
 
   return normalDecision;
@@ -307,6 +304,9 @@ function pickOperatorApprovedMergeGate(job) {
   const checksConclusion = job?.checksConclusion == null
     ? null
     : String(job.checksConclusion).trim().toUpperCase();
+  if (checksConclusion === null) {
+    return { decision: 'skip-checks-unknown', trigger: null };
+  }
   if (checksConclusion === 'PENDING') {
     return { decision: 'skip-checks-pending', trigger: null };
   }
@@ -371,6 +371,8 @@ function pickNormalMergeAgentDispatchDetail({
 function isScopedOperatorApproval(job) {
   const approval = job?.operatorApproval;
   if (!approval) return false;
+  // SECURITY: This override assumes a single trusted repo operator; if write
+  // access expands, re-evaluate self-approval before accepting label events.
   if (!approval.actor || String(approval.actor).trim().toLowerCase() === 'unknown') return false;
   if (!approval.labelEventId && !approval.labelEventNodeId) return false;
   if (!approval.createdAt) return false;

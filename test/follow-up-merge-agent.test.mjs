@@ -635,6 +635,45 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.operatorApproval.reviewKey, dispatchJob.latestReviewKey);
 });
 
+test('operator-approved remains scoped when review posts update the PR after labeling', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    reviewBody: '## Summary\nStill blocked.\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-05-02T10:10:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'abc123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [{ name: 'operator-approved' }],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+    prUpdatedAt: '2026-05-02T10:15:00.000Z',
+    operatorApprovalEvent: {
+      id: 'evt-pre-review-approval',
+      nodeId: 'LE_pre_review_approval',
+      actor: 'VirtualPaul',
+      createdAt: '2026-05-02T10:05:00.000Z',
+    },
+  });
+
+  assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
+  assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+});
+
 test('operator-approved can dispatch when no follow-up job ledger exists', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const dispatchJob = buildMergeAgentDispatchJob(rootDir, {

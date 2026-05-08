@@ -23,6 +23,7 @@ const execFileAsync = promisify(execFile);
 const ADVERSARIAL_GATE_CONTEXT = 'agent-os/adversarial-gate';
 const ADVERSARIAL_GATE_RECORD_DIR = ['data', 'adversarial-gate-status'];
 const DESCRIPTION_MAX_CHARS = 140;
+const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 
 function sanitizePathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
@@ -177,7 +178,16 @@ function pickAdversarialGateStatus({
   reviewRow = null,
   latestJob = null,
   operatorApproval = null,
+  labels = [],
 } = {}) {
+  if (normalizeLabelNames(labels).some((label) => OPERATOR_SKIP_LABELS.has(label))) {
+    return makeDecision(
+      'failure',
+      'Explicit operator skip label blocks adversarial gate.',
+      'operator-skip-label'
+    );
+  }
+
   if (hasMinimumOperatorApprovalFields(operatorApproval)) {
     return makeDecision(
       'success',
@@ -332,6 +342,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     reviewRow: resolvedRow,
     latestJob,
     operatorApproval,
+    labels,
   };
 }
 

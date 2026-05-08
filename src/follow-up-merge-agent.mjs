@@ -310,7 +310,7 @@ function pickOperatorApprovedMergeGate(job) {
   if (checksConclusion === 'PENDING') {
     return { decision: 'skip-checks-pending', trigger: null };
   }
-  if (checksConclusion !== null && checksConclusion !== 'SUCCESS') {
+  if (checksConclusion !== 'SUCCESS') {
     return { decision: 'skip-checks-failed', trigger: null };
   }
 
@@ -378,8 +378,6 @@ function isScopedOperatorApproval(job) {
   if (!approval.createdAt) return false;
   if (String(approval.headSha || '') !== String(job?.headSha || '')) return false;
   if (job?.latestReviewKey && String(approval.reviewKey || '') !== String(job.latestReviewKey)) return false;
-  const prUpdatedAt = approval.prUpdatedAt || job?.prUpdatedAt || null;
-  if (prUpdatedAt && !isoAtOrAfter(approval.createdAt, prUpdatedAt)) return false;
   return true;
 }
 
@@ -409,8 +407,6 @@ function buildScopedOperatorApproval(candidate, latestJob) {
   const latestReviewAt = latestJob?.reviewPostedAt || latestJob?.createdAt || null;
   const latestReviewKey = latestJob ? `${latestJob.jobId}:${latestReviewAt || 'unknown-review-time'}` : null;
   if (!candidate?.headSha) return null;
-  if (latestReviewAt && !isoAtOrAfter(event.createdAt, latestReviewAt)) return null;
-  if (candidate?.prUpdatedAt && !isoAtOrAfter(event.createdAt, candidate.prUpdatedAt)) return null;
   return {
     actor: event.actor || null,
     createdAt: event.createdAt || null,

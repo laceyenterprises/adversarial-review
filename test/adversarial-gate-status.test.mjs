@@ -275,6 +275,20 @@ test('pickAdversarialGateStatus lets scoped operator-approved override missing r
   assert.equal(decision.reason, 'operator-approved');
 });
 
+test('pickAdversarialGateStatus lets explicit skip labels override operator-approved', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      reviewBody: '## Summary\nOperator accepted.\n## Verdict\nRequest changes',
+    }),
+    operatorApproval: makeOperatorApproval(),
+    labels: [{ name: 'operator-approved' }, { name: 'do-not-merge' }],
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'operator-skip-label');
+});
+
 test('pickAdversarialGateStatus ignores unvalidated operator approvals', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),

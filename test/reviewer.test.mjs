@@ -12,7 +12,7 @@ const {
   spawnClaude,
 } = __test__;
 
-test('clean comment-only reviews do not queue follow-up remediation', () => {
+test('clean comment-only reviews still queue a durable follow-up verdict carrier', () => {
   const reviewBody = [
     '## Summary',
     'Everything is settled.',
@@ -27,10 +27,10 @@ test('clean comment-only reviews do not queue follow-up remediation', () => {
     'Comment only',
   ].join('\n');
 
-  assert.equal(shouldQueueFollowUpForReview(reviewBody), false);
+  assert.equal(shouldQueueFollowUpForReview(reviewBody), true);
 });
 
-test('request-changes and malformed verdicts still queue follow-up remediation', () => {
+test('request-changes and malformed verdicts still queue durable follow-up handoffs', () => {
   assert.equal(
     shouldQueueFollowUpForReview('## Summary\nFix it.\n\n## Verdict\nRequest changes'),
     true

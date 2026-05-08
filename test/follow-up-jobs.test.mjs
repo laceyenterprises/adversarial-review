@@ -459,6 +459,44 @@ test('claimNextFollowUpJob moves the oldest pending file into in-progress metada
   assert.equal(existsSync(path.join(getFollowUpJobDir(rootDir, 'pending'), `${claimed.job.jobId}.json`)), false);
 });
 
+test('claimNextFollowUpJob records clean review jobs without spawning remediation', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    critical: false,
+    reviewBody: [
+      '## Summary',
+      'Everything is settled.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+  });
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    launcherPid: 4242,
+    returnStopped: true,
+  });
+
+  assert.ok(claimed);
+  assert.equal(claimed.stopped, true);
+  assert.equal(claimed.reason, 'review-settled');
+  assert.equal(claimed.job.status, 'stopped');
+  assert.equal(claimed.job.remediationPlan.stop.code, 'review-settled');
+  assert.equal(claimed.job.remediationPlan.currentRound, 0);
+  assert.equal(claimed.job.remediationWorker, null);
+  assert.match(claimed.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(existsSync(created.jobPath), false);
+});
+
 test('claimNextFollowUpJob skips exhausted pending jobs after moving them to stopped', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const exhausted = createFollowUpJob({

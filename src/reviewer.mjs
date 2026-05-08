@@ -30,10 +30,6 @@ import {
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 import {
-  extractReviewVerdict,
-  normalizeReviewVerdict,
-} from './follow-up-merge-agent.mjs';
-import {
   buildObviousDocsGuidance,
   extractLinkedRepoDocs,
   fetchLinkedSpecContents,
@@ -528,8 +524,7 @@ function isCritical(reviewText) {
 }
 
 function shouldQueueFollowUpForReview(reviewText) {
-  const verdict = normalizeReviewVerdict(extractReviewVerdict(reviewText));
-  return verdict !== 'comment-only' && verdict !== 'approved';
+  return Boolean(reviewText);
 }
 
 function normalizeWhitespace(text) {
@@ -983,38 +978,34 @@ async function main() {
 
   const critical = isCritical(reviewText);
   const reviewPostedAt = new Date().toISOString();
-  if (shouldQueueFollowUpForReview(reviewText)) {
-    try {
-      // Carry the PR's prior remediation-round count and the per-job
-      // maxRounds forward into the new follow-up job. Two effects:
-      //   - `claimNextFollowUpJob`'s `currentRound >= maxRounds` guard
-      //     enforces the cap PR-wide, not per-job, so a PR that has
-      //     already exhausted its remediation budget cannot accidentally
-      //     get another worker spawn from a freshly created job.
-      //   - Legacy jobs created with maxRounds=6 keep that cap; we do not
-      //     overwrite it with the current default.
-      const priorLedger = summarizePRRemediationLedger(ROOT, { repo, prNumber });
-      const carriedMaxRounds = priorLedger.latestMaxRounds;
+  try {
+    // Carry the PR's prior remediation-round count and the per-job
+    // maxRounds forward into the new follow-up job. Two effects:
+    //   - `claimNextFollowUpJob`'s `currentRound >= maxRounds` guard
+    //     enforces the cap PR-wide, not per-job, so a PR that has
+    //     already exhausted its remediation budget cannot accidentally
+    //     get another worker spawn from a freshly created job.
+    //   - Legacy jobs created with maxRounds=6 keep that cap; we do not
+    //     overwrite it with the current default.
+    const priorLedger = summarizePRRemediationLedger(ROOT, { repo, prNumber });
+    const carriedMaxRounds = priorLedger.latestMaxRounds;
 
-      const { jobPath } = createFollowUpJob({
-        rootDir: ROOT,
-        repo,
-        prNumber,
-        reviewerModel: effectiveModel,
-        builderTag: builderTag || null,
-        linearTicketId,
-        reviewBody: reviewText,
-        reviewPostedAt,
-        critical,
-        priorCompletedRounds: priorLedger.completedRoundsForPR,
-        ...(carriedMaxRounds ? { maxRemediationRounds: carriedMaxRounds } : {}),
-      });
-      console.log(`[reviewer] Follow-up handoff queued at ${jobPath}`);
-    } catch (err) {
-      console.error(`[reviewer] Failed to queue follow-up handoff for ${repo}#${prNumber}:`, err.message);
-    }
-  } else {
-    console.log(`[reviewer] Clean review verdict for ${repo}#${prNumber}; no follow-up handoff queued`);
+    const { jobPath } = createFollowUpJob({
+      rootDir: ROOT,
+      repo,
+      prNumber,
+      reviewerModel: effectiveModel,
+      builderTag: builderTag || null,
+      linearTicketId,
+      reviewBody: reviewText,
+      reviewPostedAt,
+      critical,
+      priorCompletedRounds: priorLedger.completedRoundsForPR,
+      ...(carriedMaxRounds ? { maxRemediationRounds: carriedMaxRounds } : {}),
+    });
+    console.log(`[reviewer] Follow-up handoff queued at ${jobPath}`);
+  } catch (err) {
+    console.error(`[reviewer] Failed to queue follow-up handoff for ${repo}#${prNumber}:`, err.message);
   }
 
   // 4. Update Linear (LAC-13)

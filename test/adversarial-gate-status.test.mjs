@@ -11,6 +11,10 @@ import {
   pruneGateRecordsForPR,
   publishAdversarialGateStatus,
 } from '../src/adversarial-gate-status.mjs';
+import {
+  claimNextFollowUpJob,
+  createFollowUpJob,
+} from '../src/follow-up-jobs.mjs';
 import { handlePostedReviewRow } from '../src/watcher.mjs';
 
 function makeReviewRow(overrides = {}) {
@@ -85,10 +89,23 @@ test('pickAdversarialGateStatus settles comment-only posted rows even without a 
   assert.equal(decision.reason, 'review-settled');
 });
 
+test('pickAdversarialGateStatus settles pending clean verdict-carrier jobs', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({ status: 'pending' }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+});
+
 test('pickAdversarialGateStatus returns pending while remediation is active', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
-    latestJob: makeJob({ status: 'in_progress' }),
+    latestJob: makeJob({
+      status: 'in_progress',
+      reviewBody: '## Summary\nStill blocked.\n## Verdict\nRequest changes',
+    }),
   });
 
   assert.equal(decision.state, 'pending');
@@ -108,34 +125,46 @@ test('pickAdversarialGateStatus returns failure when remediation stopped', () =>
   assert.equal(decision.reason, 'remediation-stopped');
 });
 
-test('pickAdversarialGateStatus settles clean stopped follow-up jobs', () => {
-  const decision = pickAdversarialGateStatus({
-    reviewRow: makeReviewRow(),
-    latestJob: makeJob({
-      status: 'stopped',
-      reviewBody: [
-        '## Summary',
-        'Clean final review.',
-        '',
-        '## Blocking issues',
-        '- None.',
-        '',
-        '## Non-blocking issues',
-        '- None.',
-        '',
-        '## Verdict',
-        'Comment only',
-      ].join('\n'),
-      remediationPlan: {
-        currentRound: 2,
-        maxRounds: 2,
-        stop: {
-          code: 'max-rounds-reached',
-        },
-      },
-    }),
+test('pickAdversarialGateStatus settles clean re-review jobs after remediation is suppressed', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-gate-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 53,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewPostedAt: '2026-05-07T18:30:00.000Z',
+    critical: false,
+    priorCompletedRounds: 2,
+    maxRemediationRounds: 2,
+    reviewBody: [
+      '## Summary',
+      'Clean final review.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
   });
 
+  const cleanJob = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-05-07T18:31:00.000Z',
+    returnStopped: true,
+  });
+
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: cleanJob.job,
+  });
+
+  assert.equal(cleanJob.stopped, true);
+  assert.equal(cleanJob.reason, 'review-settled');
   assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'review-settled');
 });

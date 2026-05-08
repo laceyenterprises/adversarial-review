@@ -269,14 +269,14 @@ function pickAdversarialGateStatus({
   }
 
   const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(latestJob.reviewBody));
+  if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
+    return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
+  }
   if (latestJobStatus === 'pending') {
     return makeDecision('pending', 'Remediation is queued.', 'remediation-queued');
   }
   if (latestJobStatus === 'in-progress') {
     return makeDecision('pending', 'Remediation is in progress.', 'remediation-in-progress');
-  }
-  if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
-    return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
   }
   if (latestJobStatus === 'failed') {
     return makeDecision('failure', 'Remediation failed and needs operator action.', 'remediation-failed');

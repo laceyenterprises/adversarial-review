@@ -262,6 +262,29 @@ function buildRecommendedFollowUpAction({ critical }) {
   };
 }
 
+function extractFollowUpReviewVerdict(reviewBody) {
+  const match = String(reviewBody ?? '').match(/##\s+Verdict\s*\n([^\n]+)/i);
+  return match ? match[1].trim() : null;
+}
+
+function normalizeFollowUpReviewVerdict(verdict) {
+  const text = String(verdict ?? '')
+    .replace(/[*_`~]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!text) return null;
+  if (text.startsWith('request changes')) return 'request-changes';
+  if (text.startsWith('comment only')) return 'comment-only';
+  if (text.startsWith('approved')) return 'approved';
+  return 'unknown';
+}
+
+function isSettledReviewJob(job) {
+  const verdict = normalizeFollowUpReviewVerdict(extractFollowUpReviewVerdict(job?.reviewBody));
+  return verdict === 'comment-only' || verdict === 'approved';
+}
+
 function buildRemediationReplyArtifact(outputPath) {
   return {
     kind: REMEDIATION_REPLY_KIND,
@@ -1629,6 +1652,32 @@ function claimNextFollowUpJob({
     }
 
     const job = readFollowUpJob(inProgressPath);
+    if (isSettledReviewJob(job)) {
+      let stopped = null;
+      try {
+        stopped = markStoppedImpl({
+          rootDir,
+          jobPath: inProgressPath,
+          stoppedAt: claimedAt,
+          stopCode: 'review-settled',
+          sourceStatus: job.status,
+          stopReason: 'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+          completion: {
+            preview: 'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+          },
+        });
+      } catch {}
+      if (returnStopped && stopped) {
+        return {
+          job: stopped.job,
+          jobPath: stopped.jobPath,
+          stopped: true,
+          reason: 'review-settled',
+        };
+      }
+      continue;
+    }
+
     const currentRound = Number(job?.remediationPlan?.currentRound || 0);
     const maxRounds = Number(job?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
     if (currentRound >= maxRounds) {

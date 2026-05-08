@@ -535,7 +535,15 @@ function settleReviewerAttempt({
     'reviewer-timeout',
     'launchctl-bootstrap',
   ]);
-  const classifiedMessage = `[${failureClass}] ${result.error || 'Unknown reviewer failure'}`;
+  const defaultFailureMessages = {
+    cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
+    'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
+    'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
+    bug: 'Reviewer failed due to an invocation or implementation bug.',
+    unknown: 'Unknown reviewer failure',
+  };
+  const failureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
+  const classifiedMessage = `[${failureClass}] ${failureMessage}`;
   if (transientFailureClasses.has(failureClass)) {
     const cascadeState = recordCascadeFailure(rootDir, {
       repo: repoPath,

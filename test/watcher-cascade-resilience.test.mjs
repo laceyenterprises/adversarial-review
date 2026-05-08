@@ -159,10 +159,34 @@ test('reviewer subprocess timeouts get a distinct failure class', async () => {
   );
 });
 
+test('reviewer timeout stderr is not folded into cascade failures', () => {
+  assert.equal(
+    classifyReviewerFailure('Anthropic CLI error: command timed out after 600000ms', 1),
+    'reviewer-timeout'
+  );
+});
+
 test('launchctl bootstrap errors get a distinct failure class', () => {
   assert.equal(
     classifyReviewerFailure(
       'LaunchctlSessionError: Claude launchctl session bootstrap failed: Command failed: /bin/launchctl asuser 501 /usr/bin/env -u ANTHROPIC_API_KEY /opt/homebrew/bin/claude auth status',
+      1
+    ),
+    'launchctl-bootstrap'
+  );
+});
+
+test('launchctl bootstrap classification requires launchctl and error on the same stderr line', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      'debug: checked launchctl auth wrapper\nreviewer stderr: input/output error from model stream',
+      1
+    ),
+    'unknown'
+  );
+  assert.equal(
+    classifyReviewerFailure(
+      'Command failed: /bin/launchctl asuser 501 /opt/homebrew/bin/claude auth status: input/output error',
       1
     ),
     'launchctl-bootstrap'
@@ -452,6 +476,52 @@ test('settleReviewerAttempt records cascade failures and marks pending-upstream 
     assert.match(row.failure_message, /All upstream attempts failed/);
     assert.equal(state.consecutiveCascadeFailures, CASCADE_FAILURE_CAP);
     assert.equal(state.backoffMinutes, 15);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt keeps contextual defaults for empty transient errors', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: '',
+        failureClass: 'cascade',
+      },
+      failureAt: '2026-05-04T07:10:00.000Z',
+      maxRemediationRounds: 1,
+      statements,
+      log: { warn() {} },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+
+    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(
+      row.failure_message,
+      '[cascade] Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.'
+    );
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

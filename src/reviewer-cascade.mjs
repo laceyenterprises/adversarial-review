@@ -7,6 +7,9 @@ const CASCADE_STATE_DIR = ['data', 'cascade-state'];
 
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
+const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
+const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
+  /bootstrap failed|could not find domain|input\/output error|not privileged to set domain|gui\/\d+/;
 
 function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
   const actualSignal = String(error?.signal || '').toUpperCase();
@@ -23,9 +26,11 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const lower = text.toLowerCase();
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
-  const launchctlBootstrap =
-    /launchctlsessionerror|claude launchctl session bootstrap failed/.test(lower) ||
-    (/launchctl/.test(lower) && /bootstrap failed|could not find domain|input\/output error|not privileged to set domain|gui\/\d+/.test(lower));
+  const mentionsReviewerTimeout = REVIEWER_TIMEOUT_MESSAGE_RE.test(lower);
+  const launchctlBootstrap = lower.split(/\r?\n/).some((line) => (
+    /launchctlsessionerror|claude launchctl session bootstrap failed/.test(line) ||
+    (/launchctl/.test(line) && LAUNCHCTL_BOOTSTRAP_ERROR_RE.test(line))
+  ));
   const mentionsReal429 =
     /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
   const mentionsRateLimit = /rate.?limit/.test(lower);
@@ -33,10 +38,9 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     /all upstream attempts failed|upstream[._ -]?failed|cascade/.test(lower) ||
     (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
     /timeout.*retries|retries.*timeout/.test(lower) ||
-    /command timed out after \d+ms/.test(lower) ||
     /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
 
-  if (timeoutKilled) {
+  if (timeoutKilled || mentionsReviewerTimeout) {
     return 'reviewer-timeout';
   }
 

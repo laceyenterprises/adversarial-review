@@ -167,6 +167,32 @@ test('pickAdversarialGateStatus reports transient pending-upstream class precise
   assert.match(decision.description, /retry is pending/i);
 });
 
+test('pickAdversarialGateStatus recognizes legacy cascade failure messages', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'pending-upstream',
+      failure_message: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'reviewer-cascade-retry-pending');
+});
+
+test('pickAdversarialGateStatus does not infer timeout from debug-log fragments', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      failure_message: 'debug: starting claude review\nreviewer process exited without completion marker',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'review-failed');
+});
+
 test('pickAdversarialGateStatus returns success for a scoped operator-approved override after rounds are exhausted', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),

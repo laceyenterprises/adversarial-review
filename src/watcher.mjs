@@ -530,31 +530,34 @@ function settleReviewerAttempt({
   }
 
   const failureClass = result.failureClass || 'unknown';
-  if (failureClass === 'cascade') {
+  const transientFailureClasses = new Set([
+    'cascade',
+    'reviewer-timeout',
+    'launchctl-bootstrap',
+  ]);
+  const classifiedMessage = `[${failureClass}] ${result.error || 'Unknown reviewer failure'}`;
+  if (transientFailureClasses.has(failureClass)) {
     const cascadeState = recordCascadeFailure(rootDir, {
       repo: repoPath,
       prNumber,
       failedAt: failureAt,
     });
-    const cascadeMessage =
-      result.error ||
-      'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.';
     if (cascadeState.consecutiveCascadeFailures >= CASCADE_FAILURE_CAP) {
-      statements.markPendingUpstream.run(failureAt, cascadeMessage, repoPath, prNumber);
+      statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber);
       log.warn(
-        `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveCascadeFailures} cascade failures; will resume when upstream recovers`
+        `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveCascadeFailures} ${failureClass} failures; will resume when the reviewer lane recovers`
       );
     } else {
-      statements.markCascadeFailed.run(failureAt, cascadeMessage, repoPath, prNumber);
+      statements.markCascadeFailed.run(failureAt, classifiedMessage, repoPath, prNumber);
     }
     log.warn(
-      `[watcher] Reviewer cascade-class failure on #${prNumber} (consecutive=${cascadeState.consecutiveCascadeFailures}); backing off ${cascadeState.backoffMinutes}m`
+      `[watcher] Reviewer ${failureClass} failure on #${prNumber} (consecutive=${cascadeState.consecutiveCascadeFailures}); backing off ${cascadeState.backoffMinutes}m`
     );
     return;
   }
 
   clearCascadeState(rootDir, { repo: repoPath, prNumber });
-  statements.markFailed.run(failureAt, result.error || 'Unknown reviewer failure', repoPath, prNumber);
+  statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber);
   const updatedRow = statements.getReviewRow.get(repoPath, prNumber);
   if (failureClass === 'bug') {
     log.warn(

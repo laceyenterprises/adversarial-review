@@ -23,6 +23,9 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const lower = text.toLowerCase();
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
+  const launchctlBootstrap =
+    /launchctlsessionerror|claude launchctl session bootstrap failed/.test(lower) ||
+    (/launchctl/.test(lower) && /bootstrap failed|could not find domain|input\/output error|not privileged to set domain|gui\/\d+/.test(lower));
   const mentionsReal429 =
     /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
   const mentionsRateLimit = /rate.?limit/.test(lower);
@@ -33,7 +36,15 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     /command timed out after \d+ms/.test(lower) ||
     /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
 
-  if (timeoutKilled || CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
+  if (timeoutKilled) {
+    return 'reviewer-timeout';
+  }
+
+  if (launchctlBootstrap) {
+    return 'launchctl-bootstrap';
+  }
+
+  if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
   }
 

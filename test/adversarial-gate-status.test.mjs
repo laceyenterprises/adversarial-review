@@ -125,6 +125,48 @@ test('pickAdversarialGateStatus keeps PR #53 queued-rereview shape pending until
   assert.match(decision.description, /queued re-review/i);
 });
 
+test('pickAdversarialGateStatus reports reviewer timeout failures precisely', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      failure_message: '[reviewer-timeout] Command failed after reviewer timeout',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'reviewer-timeout');
+  assert.match(decision.description, /timed out/i);
+});
+
+test('pickAdversarialGateStatus reports launchctl bootstrap failures precisely', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      failure_message: '[launchctl-bootstrap] Claude launchctl session bootstrap failed',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'reviewer-launchctl-bootstrap');
+  assert.match(decision.description, /bootstrap failed/i);
+});
+
+test('pickAdversarialGateStatus reports transient pending-upstream class precisely', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'pending-upstream',
+      failure_message: '[reviewer-timeout] Command failed after reviewer timeout',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'reviewer-timeout-retry-pending');
+  assert.match(decision.description, /retry is pending/i);
+});
+
 test('pickAdversarialGateStatus returns success for a scoped operator-approved override after rounds are exhausted', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),

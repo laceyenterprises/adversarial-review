@@ -8,6 +8,7 @@ import {
 } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
@@ -260,6 +261,22 @@ function buildRecommendedFollowUpAction({ critical }) {
     maxRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
     futureArchitectureNote: 'Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff.',
   };
+}
+
+function isSettledReviewJob(job) {
+  const verdict = normalizeReviewVerdict(extractReviewVerdict(job?.reviewBody));
+  return verdict === 'comment-only' || verdict === 'approved';
+}
+
+function handleClaimedStopFailure({ pendingPath, inProgressPath, stopCode, err }) {
+  console.error(`[follow-up] failed to mark ${stopCode} job stopped`, err);
+  if (!existsSync(inProgressPath) || existsSync(pendingPath)) return;
+
+  try {
+    renameSync(inProgressPath, pendingPath);
+  } catch (restoreErr) {
+    console.error(`[follow-up] failed to restore ${stopCode} job to pending`, restoreErr);
+  }
 }
 
 function buildRemediationReplyArtifact(outputPath) {
@@ -1629,6 +1646,39 @@ function claimNextFollowUpJob({
     }
 
     const job = readFollowUpJob(inProgressPath);
+    if (isSettledReviewJob(job)) {
+      let stopped = null;
+      try {
+        stopped = markStoppedImpl({
+          rootDir,
+          jobPath: inProgressPath,
+          stoppedAt: claimedAt,
+          stopCode: 'review-settled',
+          sourceStatus: job.status,
+          stopReason: 'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+          completion: {
+            preview: 'Latest adversarial review verdict is non-blocking; no remediation worker required.',
+          },
+        });
+      } catch (err) {
+        handleClaimedStopFailure({
+          pendingPath,
+          inProgressPath,
+          stopCode: 'review-settled',
+          err,
+        });
+      }
+      if (returnStopped && stopped) {
+        return {
+          job: stopped.job,
+          jobPath: stopped.jobPath,
+          stopped: true,
+          reason: 'review-settled',
+        };
+      }
+      continue;
+    }
+
     const currentRound = Number(job?.remediationPlan?.currentRound || 0);
     const maxRounds = Number(job?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
     if (currentRound >= maxRounds) {
@@ -1642,7 +1692,14 @@ function claimNextFollowUpJob({
           sourceStatus: job.status,
           stopReason: `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
         });
-      } catch {}
+      } catch (err) {
+        handleClaimedStopFailure({
+          pendingPath,
+          inProgressPath,
+          stopCode: 'max-rounds-reached',
+          err,
+        });
+      }
       if (returnStopped && stopped) {
         return {
           job: stopped.job,

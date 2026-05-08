@@ -459,6 +459,84 @@ test('claimNextFollowUpJob moves the oldest pending file into in-progress metada
   assert.equal(existsSync(path.join(getFollowUpJobDir(rootDir, 'pending'), `${claimed.job.jobId}.json`)), false);
 });
 
+test('claimNextFollowUpJob records clean review jobs without spawning remediation', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    critical: false,
+    reviewBody: [
+      '## Summary',
+      'Everything is settled.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      '',
+      'Comment only',
+    ].join('\n'),
+  });
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    launcherPid: 4242,
+    returnStopped: true,
+  });
+
+  assert.ok(claimed);
+  assert.equal(claimed.stopped, true);
+  assert.equal(claimed.reason, 'review-settled');
+  assert.equal(claimed.job.status, 'stopped');
+  assert.equal(claimed.job.remediationPlan.stop.code, 'review-settled');
+  assert.equal(claimed.job.remediationPlan.currentRound, 0);
+  assert.equal(claimed.job.remediationWorker, null);
+  assert.match(claimed.jobPath, /data\/follow-up-jobs\/stopped\/.+\.json$/);
+  assert.equal(existsSync(created.jobPath), false);
+});
+
+test('claimNextFollowUpJob logs and retries settled jobs when stopped-marking fails', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const settled = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    critical: false,
+    reviewBody: '## Summary\nClean.\n\n## Verdict\nComment only',
+  });
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    prNumber: 8,
+    reviewPostedAt: '2026-04-21T09:00:00.000Z',
+  });
+
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => {
+    errors.push(args);
+  };
+
+  try {
+    const claimed = claimNextFollowUpJob({
+      rootDir,
+      claimedAt: '2026-04-21T10:00:00.000Z',
+      markStoppedImpl: () => {
+        throw new Error('broken settled stop move');
+      },
+    });
+
+    assert.ok(claimed);
+    assert.equal(claimed.job.prNumber, 8);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(existsSync(settled.jobPath), true);
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0][0]), /failed to mark review-settled job stopped/);
+});
+
 test('claimNextFollowUpJob skips exhausted pending jobs after moving them to stopped', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const exhausted = createFollowUpJob({
@@ -524,16 +602,30 @@ test('claimNextFollowUpJob continues past an exhausted job when stopped-marking 
     },
   });
 
-  const claimed = claimNextFollowUpJob({
-    rootDir,
-    claimedAt: '2026-04-21T10:00:00.000Z',
-    markStoppedImpl: () => {
-      throw new Error('broken stop move');
-    },
-  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => {
+    errors.push(args);
+  };
+
+  let claimed;
+  try {
+    claimed = claimNextFollowUpJob({
+      rootDir,
+      claimedAt: '2026-04-21T10:00:00.000Z',
+      markStoppedImpl: () => {
+        throw new Error('broken stop move');
+      },
+    });
+  } finally {
+    console.error = originalError;
+  }
 
   assert.ok(claimed);
   assert.equal(claimed.job.prNumber, 8);
+  assert.equal(existsSync(exhaustedPath), true);
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0][0]), /failed to mark max-rounds-reached job stopped/);
 });
 
 test('markFollowUpJobFailed moves an in-progress job into failed with error context', () => {

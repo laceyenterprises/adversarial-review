@@ -148,6 +148,7 @@ GitHub PR opened
 \#\#\# 5\. Follow-up Handoff Queue (first slice)
 \- After a GitHub review post succeeds, write a durable JSON job under \`data/follow-up-jobs/pending/\`
 \- Record repo, PR number, reviewer model, review summary/body, criticality, and recommended follow-up action
+\- Clean verdicts (\`Comment only\` / \`Approved\`) still get a durable job as the verdict carrier; the follow-up consumer records them as settled without spawning a remediation worker
 \- Keep the handoff explicit and append-only; do not hide it behind undocumented local hooks
 \- This queue is the minimal bridge until session-aware continuation exists natively
 
@@ -194,7 +195,7 @@ GitHub PR opened
 \- The watcher checks watched repositories' branch protection for the required \`agent-os/adversarial-gate\` context on a cached interval and emits \`branch-protection-warning\` when the context is absent or the protection endpoint cannot be read. Operators can run \`npm run check-branch-protection\` for the same check outside the watcher.
 \- Gate state mapping:
 \- \`pending\`: no review has posted, a review is queued/in progress, remediation is queued/in progress, or a requested re-review has not posted yet
-\- \`success\`: the latest posted review settled as \`Comment only\` or \`Approved\`, or a current scoped \`operator-approved\` label accepts the PR head regardless of review/remediation state
+\- \`success\`: the latest posted review settled as \`Comment only\` or \`Approved\` in its durable follow-up verdict carrier, or a current scoped \`operator-approved\` label accepts the PR head regardless of review/remediation state
 \- \`failure\`: malformed/failed/failed-orphan review state, missing follow-up ledger or verdict, failed/stopped remediation, unresolved \`Request changes\` verdict, stale/ineligible operator approval, or any unknown ledger/verdict state
 \- The gate is projected on terminal watcher branches, including already-posted rows, so a PR does not remain stuck at a previous \`pending\` projection after the review verdict settles.
 

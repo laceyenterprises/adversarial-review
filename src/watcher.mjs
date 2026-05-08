@@ -39,6 +39,7 @@ import {
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
+import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
   retryPendingRetriggerAckComments,
@@ -825,6 +826,31 @@ async function pollOnce(octokit) {
       }
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
+      async function projectGateStatusSafe(reviewRow) {
+        if (!pr?.head?.sha) return;
+        try {
+          const projected = await projectAdversarialGateStatus(ROOT, {
+            repo: repoPath,
+            prNumber,
+            headSha: pr.head.sha,
+            labels: pr.labels,
+            prUpdatedAt: pr.updated_at || null,
+            reviewRow,
+            execFileImpl: execFileAsync,
+            fetchLatestLabelEventImpl: fetchLatestLabelEvent,
+          });
+          console.log(
+            `[watcher] adversarial gate for ${repoPath}#${prNumber}: ${projected.decision.state}` +
+              ` (${projected.decision.reason})`
+          );
+        } catch (err) {
+          console.error(
+            `[watcher] adversarial gate projection failed for ${repoPath}#${prNumber}:`,
+            err?.message || err
+          );
+        }
+      }
+
       // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()
       // when the watcher restarted with a row stuck in 'reviewing' — i.e.
       // a reviewer subprocess was in flight when the watcher died and may
@@ -836,6 +862,7 @@ async function pollOnce(octokit) {
         existing?.review_status === 'malformed' ||
         existing?.review_status === 'failed-orphan'
       ) {
+        await projectGateStatusSafe(existing);
         continue;
       }
 
@@ -938,6 +965,7 @@ async function pollOnce(octokit) {
           prNumber
         );
         stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(pr.labels) ? pr.labels : []), repoPath, prNumber);
+        await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
       }
 
@@ -960,6 +988,7 @@ async function pollOnce(octokit) {
       }
 
       const current = stmtGetReviewRow.get(repoPath, prNumber);
+      await projectGateStatusSafe(current);
       const cascadeGate = shouldBackoffReviewerSpawn(ROOT, {
         repo: repoPath,
         prNumber,

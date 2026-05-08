@@ -108,6 +108,38 @@ test('pickAdversarialGateStatus returns failure when remediation stopped', () =>
   assert.equal(decision.reason, 'remediation-stopped');
 });
 
+test('pickAdversarialGateStatus settles clean stopped follow-up jobs', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      status: 'stopped',
+      reviewBody: [
+        '## Summary',
+        'Clean final review.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Non-blocking issues',
+        '- None.',
+        '',
+        '## Verdict',
+        'Comment only',
+      ].join('\n'),
+      remediationPlan: {
+        currentRound: 2,
+        maxRounds: 2,
+        stop: {
+          code: 'max-rounds-reached',
+        },
+      },
+    }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+});
+
 test('pickAdversarialGateStatus keeps PR #53 queued-rereview shape pending until the second review posts', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({ review_status: 'pending' }),

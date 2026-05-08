@@ -8,8 +8,38 @@ const {
   ENV_BIN,
   LAUNCHCTL,
   resolveReviewerTimeoutMs,
+  shouldQueueFollowUpForReview,
   spawnClaude,
 } = __test__;
+
+test('clean comment-only reviews do not queue follow-up remediation', () => {
+  const reviewBody = [
+    '## Summary',
+    'Everything is settled.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(shouldQueueFollowUpForReview(reviewBody), false);
+});
+
+test('request-changes and malformed verdicts still queue follow-up remediation', () => {
+  assert.equal(
+    shouldQueueFollowUpForReview('## Summary\nFix it.\n\n## Verdict\nRequest changes'),
+    true
+  );
+  assert.equal(
+    shouldQueueFollowUpForReview('## Summary\nVerdict missing.'),
+    true
+  );
+});
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {
   assert.equal(

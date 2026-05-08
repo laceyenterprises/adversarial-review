@@ -105,7 +105,7 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
     now: () => '2026-05-06T18:00:00.000Z',
   });
 
-  assert.equal(result.outcome, 'bumped-and-rearmed');
+  assert.equal(result.outcome, 'bumped-and-requeued');
   assert.equal(result.labelRemoved, true);
   assert.equal(result.newMaxRounds, 3);
 
@@ -138,19 +138,26 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   ]);
   assert.match(ghCalls[2].args[6], /Remediation retrigger accepted/);
   assert.match(ghCalls[2].args[6], /Remediation budget: `2 -> 3` rounds/);
+  assert.match(ghCalls[2].args[6], /Remediation queue: `requeued`/);
+  assert.match(ghCalls[2].args[6], /remediation worker will respond to the latest adversarial review/i);
 
-  // Audit row recorded.
-  assert.equal(auditRows.length, 1);
+  // Audit rows record the durable bump first, then the terminal requeue outcome.
+  assert.equal(auditRows.length, 2);
   assert.equal(auditRows[0].row.source, 'pr-label');
   assert.equal(auditRows[0].row.operator, 'pr-label:VirtualPaul');
-  assert.equal(auditRows[0].row.outcome, 'bumped-and-rearmed');
-  assert.equal(auditRows[0].row.rereviewOutcome, 'rearm-failed');
+  assert.equal(auditRows[0].row.outcome, 'bumped-requeue-pending');
+  assert.equal(auditRows[0].row.requeueOutcome, 'not-attempted');
+  assert.equal(auditRows[1].row.source, 'pr-label');
+  assert.equal(auditRows[1].row.operator, 'pr-label:VirtualPaul');
+  assert.equal(auditRows[1].row.outcome, 'bumped-and-requeued');
+  assert.equal(auditRows[1].row.requeueOutcome, 'requeued');
   assert.equal(result.ackComment.posted, true);
-  assert.equal(result.rereviewOutcome, 'rearm-failed');
+  assert.equal(result.requeueOutcome, 'requeued');
 
   // Job's persisted maxRounds was bumped.
-  const updated = readFollowUpJob(jobPath);
+  const updated = readFollowUpJob(result.jobPath);
   assert.equal(updated.remediationPlan.maxRounds, 3);
+  assert.equal(updated.status, 'pending');
 });
 
 test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted', async () => {
@@ -170,7 +177,7 @@ test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted',
     appendAuditRow: () => {},
   });
 
-  assert.equal(result.outcome, 'bumped-and-rearmed');
+  assert.equal(result.outcome, 'bumped-and-requeued');
   assert.equal(ghCalls.length, 3);
   assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
 });
@@ -196,7 +203,7 @@ test('tryRetriggerRemediationFromLabel works on completed jobs that requested re
     appendAuditRow: () => {},
   });
 
-  assert.equal(result.outcome, 'bumped-and-rearmed');
+  assert.equal(result.outcome, 'bumped-and-requeued');
   assert.equal(ghCalls.length, 3);
   assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
 });
@@ -218,7 +225,7 @@ test('tryRetriggerRemediationFromLabel works on failed jobs', async () => {
     appendAuditRow: () => {},
   });
 
-  assert.equal(result.outcome, 'bumped-and-rearmed');
+  assert.equal(result.outcome, 'bumped-and-requeued');
   assert.equal(ghCalls.length, 3);
   assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
 });
@@ -280,6 +287,63 @@ test('tryRetriggerRemediationFromLabel refuses unattributed labels', async () =>
   assert.equal(result.outcome, 'label-event-missing');
 });
 
+test('tryRetriggerRemediationFromLabel consumes label and audits bump when requeue fails', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { jobPath } = makeHaltedJob(rootDir);
+
+  const ghCalls = [];
+  const auditRows = [];
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-requeue-failure' }),
+    execFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: (auditRoot, row) => {
+      auditRows.push({ auditRoot, row });
+    },
+    requeueImpl: () => {
+      throw new Error('simulated queue write failure');
+    },
+    now: () => '2026-05-06T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-requeue-failed');
+  assert.equal(result.labelRemoved, true);
+  assert.equal(result.requeueOutcome, 'requeue-failed');
+  assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
+
+  assert.equal(auditRows.length, 2);
+  assert.equal(auditRows[0].row.outcome, 'bumped-requeue-pending');
+  assert.equal(auditRows[1].row.outcome, 'bumped-requeue-failed');
+  assert.match(auditRows[1].row.requeueError, /simulated queue write failure/);
+
+  assert.equal(ghCalls.length, 3);
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
+  assert.match(ghCalls[2].args[6], /Remediation retrigger needs operator attention/);
+  assert.match(ghCalls[2].args[6], /could not requeue the follow-up worker/);
+
+  const consumption = readOnlyLabelConsumption(rootDir);
+  assert.equal(consumption.labelRemoved, true);
+  assert.equal(consumption.auditRow.outcome, 'bumped-requeue-failed');
+  assert.equal(consumption.ackComment.context.requeueResult.outcome, 'requeue-failed');
+
+  const retry = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-requeue-failure' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+  });
+
+  assert.equal(retry.outcome, 'label-already-consumed');
+  assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
+});
+
 test('tryRetriggerRemediationFromLabel surfaces label-removal failure but reports the requeue succeeded', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { jobPath } = makeHaltedJob(rootDir);
@@ -299,8 +363,9 @@ test('tryRetriggerRemediationFromLabel surfaces label-removal failure but report
   assert.equal(result.outcome, 'bumped-label-removal-failed');
   assert.match(result.detail, /label removal failed/);
 
-  const afterFirst = readFollowUpJob(jobPath);
+  const afterFirst = readFollowUpJob(result.jobPath);
   assert.equal(afterFirst.remediationPlan.maxRounds, 3);
+  assert.equal(afterFirst.status, 'pending');
 
   const haltedAgain = {
     ...afterFirst,
@@ -310,7 +375,7 @@ test('tryRetriggerRemediationFromLabel surfaces label-removal failure but report
       stop: { code: 'max-rounds-reached' },
     },
   };
-  writeFollowUpJob(jobPath, haltedAgain);
+  writeFollowUpJob(result.jobPath, haltedAgain);
 
   const retry = await tryRetriggerRemediationFromLabel({
     rootDir,
@@ -322,7 +387,7 @@ test('tryRetriggerRemediationFromLabel surfaces label-removal failure but report
   });
 
   assert.equal(retry.outcome, 'label-already-consumed');
-  assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
+  assert.equal(readFollowUpJob(result.jobPath).remediationPlan.maxRounds, 3);
 });
 
 test('tryRetriggerRemediationFromLabel keeps consumed label state retryable when terminal audit append fails', async () => {
@@ -385,13 +450,13 @@ test('tryRetriggerRemediationFromLabel is idempotent across re-applications', as
   };
 
   const first = await tryRetriggerRemediationFromLabel(args);
-  assert.equal(first.outcome, 'bumped-and-rearmed');
+  assert.equal(first.outcome, 'bumped-and-requeued');
 
   // Second call with the same `now` produces the same idempotency key.
   // bumpRemediationBudget detects the existing audit entry and returns
   // an idempotent result; we should not double-bump.
   const second = await tryRetriggerRemediationFromLabel(args);
-  assert.notEqual(second.outcome, 'bumped-and-rearmed', 'second call must not double-bump');
+  assert.notEqual(second.outcome, 'bumped-and-requeued', 'second call must not double-bump');
 });
 
 test('tryRetriggerRemediationFromLabel dedupes ack comments by marker before posting', async () => {
@@ -423,7 +488,7 @@ test('tryRetriggerRemediationFromLabel dedupes ack comments by marker before pos
     appendAuditRow: () => {},
   });
 
-  assert.equal(result.outcome, 'bumped-and-rearmed');
+  assert.equal(result.outcome, 'bumped-and-requeued');
   assert.equal(result.ackComment.posted, true);
   assert.equal(result.ackComment.deduped, true);
   assert.equal(result.ackComment.commentId, 12345);
@@ -453,6 +518,7 @@ test('retryPendingRetriggerAckComments retries pending ack records after label r
   const pending = readOnlyLabelConsumption(rootDir);
   assert.equal(pending.labelRemoved, true);
   assert.equal(pending.ackComment.posted, false);
+  assert.equal(pending.ackComment.context.requeueResult.outcome, 'requeued');
 
   const bodies = [];
   const retry = await retryPendingRetriggerAckComments({
@@ -469,6 +535,7 @@ test('retryPendingRetriggerAckComments retries pending ack records after label r
   assert.doesNotMatch(bodies[0], /<\/details>/);
   assert.doesNotMatch(bodies[0], /\n# hidden/);
   assert.match(bodies[0], /Requested by: `Bad'Actor`/);
+  assert.match(bodies[0], /Remediation queue: `requeued`/);
 
   const afterRetry = readOnlyLabelConsumption(rootDir);
   assert.equal(afterRetry.ackComment.posted, true);

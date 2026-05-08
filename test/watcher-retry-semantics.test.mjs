@@ -12,7 +12,10 @@ import {
   markFollowUpJobCompleted,
   markFollowUpJobSpawned,
 } from '../src/follow-up-jobs.mjs';
-import { evaluateRoundBudgetForReview } from '../src/watcher.mjs';
+import {
+  evaluateRoundBudgetForReview,
+  shouldDeferReviewForActiveFollowUp,
+} from '../src/watcher.mjs';
 
 function setupDb() {
   const db = new Database(':memory:');
@@ -267,6 +270,58 @@ test("requestReviewRereview accepts 'failed-orphan' rows so retrigger-review can
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('watcher defers a pending review while a requeued follow-up job is active (PR #48 race guard)', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const db = setupDb();
+  db.prepare(
+    'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(
+    'laceyenterprises/adversarial-review',
+    48,
+    '2026-05-06T17:00:00.000Z',
+    'claude',
+    'open',
+    'pending',
+    2,
+  );
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 48,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewBody: '## Summary\nPR #48 race fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-05-06T16:59:00.000Z',
+    critical: false,
+    maxRemediationRounds: 3,
+  });
+
+  const row = db.prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+    .get('laceyenterprises/adversarial-review', 48);
+  assert.equal(row.review_status, 'pending');
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 48,
+  });
+
+  assert.equal(created.job.status, 'pending');
+  assert.equal(decision.defer, true);
+  assert.equal(decision.latestJobStatus, 'pending');
+
+  // This mirrors the watcher's dispatch gate: when the active-job
+  // guard fires, the pending review row is not claimed as `reviewing`.
+  if (!decision.defer) {
+    db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'reviewing' WHERE repo = ? AND pr_number = ? AND review_status = 'pending'"
+    ).run('laceyenterprises/adversarial-review', 48);
+  }
+  const after = db.prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+    .get('laceyenterprises/adversarial-review', 48);
+  assert.equal(after.review_status, 'pending');
 });
 
 test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forward (does not downgrade via riskClass)', () => {

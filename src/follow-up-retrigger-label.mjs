@@ -19,7 +19,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
-import { requestReviewRereview } from './review-state.mjs';
+import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
 import {
   bumpRemediationBudget,
   findLatestFollowUpJob,
@@ -110,10 +110,10 @@ async function removeLabelFromPR({
   ], { maxBuffer: 5 * 1024 * 1024 });
 }
 
-function rereviewOutcomeFromResult(rereviewResult) {
-  if (rereviewResult?.outcome) return rereviewResult.outcome;
-  if (rereviewResult?.ok) return 'rearmed';
-  return 'rearm-failed';
+function requeueOutcomeFromResult(requeueResult) {
+  if (requeueResult?.job?.status === 'pending') return 'requeued';
+  if (requeueResult?.outcome) return requeueResult.outcome;
+  return 'requeue-failed';
 }
 
 function buildAckCommentMarker(labelEventKey) {
@@ -138,25 +138,30 @@ function buildAckCommentBody({
   labelEventActor,
   reason,
   bumpResult,
-  rereviewResult,
+  requeueResult,
 }) {
   const marker = buildAckCommentMarker(labelEventKey);
-  const rereviewOutcome = rereviewOutcomeFromResult(rereviewResult);
-  const rereviewReason = rereviewResult?.reason || rereviewResult?.error || null;
+  const requeueOutcome = requeueOutcomeFromResult(requeueResult);
+  const requeueReason = requeueResult?.reason || requeueResult?.error || null;
+  const requeueFailed = requeueOutcome !== 'requeued';
   const safeActor = sanitizeAckCommentText(labelEventActor || 'unknown', 120) || 'unknown';
-  const safeRereviewReason = rereviewReason ? sanitizeAckCommentText(rereviewReason, 500) : null;
+  const safeRequeueReason = requeueReason ? sanitizeAckCommentText(requeueReason, 500) : null;
   const safeReason = reason ? sanitizeAckCommentText(reason, 500) : null;
   const lines = [
     `<!-- ${marker} -->`,
-    '### Remediation retrigger accepted',
+    requeueFailed ? '### Remediation retrigger needs operator attention' : '### Remediation retrigger accepted',
     '',
-    `The \`${RETRIGGER_REMEDIATION_LABEL}\` label was accepted by the adversarial-review watcher.`,
+    requeueFailed
+      ? `The \`${RETRIGGER_REMEDIATION_LABEL}\` label was consumed after the remediation budget bump, but the watcher could not requeue the follow-up worker.`
+      : `The \`${RETRIGGER_REMEDIATION_LABEL}\` label was accepted by the adversarial-review watcher.`,
     '',
     `- Requested by: \`${safeActor}\``,
     `- Remediation budget: \`${bumpResult.priorMaxRounds} -> ${bumpResult.newMaxRounds}\` rounds`,
-    `- Fresh review queue: \`${rereviewOutcome}\`${safeRereviewReason ? ` (${safeRereviewReason})` : ''}`,
+    `- Remediation queue: \`${requeueOutcome}\`${safeRequeueReason ? ` (${safeRequeueReason})` : ''}`,
     '',
-    'Next: the watcher will post a fresh adversarial review when it reaches this PR. If that review requests changes, the remediation worker will claim the new follow-up job.',
+    requeueFailed
+      ? 'Next: inspect the follow-up job and re-run the operator retrigger after the queue failure is fixed. The label has been removed so this accepted budget bump is not applied again.'
+      : 'Next: the remediation worker will respond to the latest adversarial review. If it requests re-review, the watcher will post the follow-up review afterward. If the worker fails or is stopped before requesting re-review, apply `retrigger-review` separately to force a fresh adversarial pass.',
   ];
   if (safeReason) {
     lines.push('', `Reason: ${safeReason}`);
@@ -214,14 +219,14 @@ async function postRetriggerAckComment({
   labelEventActor,
   reason,
   bumpResult,
-  rereviewResult,
+  requeueResult,
 }) {
   const body = buildAckCommentBody({
     labelEventKey,
     labelEventActor,
     reason,
     bumpResult,
-    rereviewResult,
+    requeueResult,
   });
   const marker = buildAckCommentMarker(labelEventKey);
   const existing = await findExistingAckComment({
@@ -262,7 +267,7 @@ async function postRetriggerAckComment({
   }
 }
 
-function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpResult, rereviewResult }) {
+function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpResult, requeueResult }) {
   return {
     posted: false,
     reason: 'pending',
@@ -276,14 +281,44 @@ function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpRe
         priorMaxRounds: bumpResult?.priorMaxRounds ?? null,
         newMaxRounds: bumpResult?.newMaxRounds ?? null,
       },
-      rereviewResult: {
-        ok: rereviewResult?.ok ?? null,
-        outcome: rereviewResult?.outcome || null,
-        status: rereviewResult?.status || null,
-        reason: rereviewResult?.reason || null,
-        error: rereviewResult?.error || null,
+      requeueResult: {
+        outcome: requeueOutcomeFromResult(requeueResult),
+        status: requeueResult?.job?.status || requeueResult?.status || null,
+        jobPath: requeueResult?.jobPath || null,
+        reason: requeueResult?.reason || null,
+        error: requeueResult?.error || null,
       },
     },
+  };
+}
+
+function buildLabelConsumptionDoc({
+  labelEventKey,
+  idempotencyKey,
+  repo,
+  prNumber,
+  jobPath,
+  auditStatus,
+  auditRow,
+  ackComment,
+  consumedAt,
+  auditedAt = null,
+  labelRemoved = false,
+}) {
+  return {
+    schemaVersion: 1,
+    label: RETRIGGER_REMEDIATION_LABEL,
+    labelEventKey,
+    idempotencyKey,
+    repo,
+    prNumber: Number(prNumber),
+    jobPath,
+    auditStatus,
+    auditRow,
+    ackComment,
+    labelRemoved,
+    consumedAt,
+    ...(auditedAt ? { auditedAt } : {}),
   };
 }
 
@@ -308,7 +343,7 @@ async function retryAckCommentForConsumption({
     labelEventActor: context.labelEventActor,
     reason: context.reason,
     bumpResult: context.bumpResult,
-    rereviewResult: context.rereviewResult,
+    requeueResult: context.requeueResult,
   });
   const nextConsumption = {
     ...consumption,
@@ -439,6 +474,7 @@ export async function tryRetriggerRemediationFromLabel({
   now = () => new Date().toISOString(),
   appendAuditRow = appendOperatorMutationAuditRow,
   findAuditRow = findOperatorMutationAuditRow,
+  requeueImpl = requeueFollowUpJobForNextRound,
   labelEvent = null,
 }) {
   const labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
@@ -544,139 +580,204 @@ export async function tryRetriggerRemediationFromLabel({
     };
   }
 
-  // Re-arm the watcher row to `review_status='pending'` instead of
-  // force-requeueing the follow-up job. Rationale (post-2026-05-06):
-  // force-requeueing causes the daemon to spawn a remediation worker
-  // IMMEDIATELY in parallel with the rereview the budget bump just
-  // unlocked — observed live during PR #48 verification, where round
-  // 2's worker pushed commits BEFORE the review #2 verdict was
-  // posted. Letting the natural cycle drive (review fires → if
-  // request-changes, reviewer creates new follow-up job → daemon
-  // claims and spawns) preserves the convergence loop's expected
-  // sequencing. The CLI keeps its old "force requeue" semantic for
-  // operators who explicitly want to skip the review step.
-  let rereviewResult;
-  try {
-    rereviewResult = requestReviewRereview({
-      rootDir,
-      repo,
-      prNumber,
-      requestedAt: ts,
-      reason: `pr-label retrigger-remediation: ${reason}`,
-    });
-  } catch (err) {
-    rereviewResult = { ok: false, error: err?.message || String(err) };
-  }
-
-  const terminalAuditRow = {
+  const bumpedAuditRow = {
     ...auditRow,
     priorMaxRounds: bumpResult.priorMaxRounds,
     newMaxRounds: bumpResult.newMaxRounds,
-    rereviewOutcome: rereviewOutcomeFromResult(rereviewResult),
-    outcome: 'bumped-and-rearmed',
+    requeueOutcome: 'not-attempted',
+    outcome: 'bumped-requeue-pending',
   };
-  const pendingAckComment = buildPendingAckComment({
+  const initialAckComment = buildPendingAckComment({
     labelEventKey,
     labelEventActor,
     reason,
     bumpResult,
-    rereviewResult,
+    requeueResult: {
+      outcome: 'not-attempted',
+      reason: 'requeue step pending',
+      jobPath: bumpResult.jobPath,
+    },
   });
-  writeLabelConsumption(rootDir, labelEventKey, {
-    schemaVersion: 1,
-    label: RETRIGGER_REMEDIATION_LABEL,
+  const baseConsumption = buildLabelConsumptionDoc({
     labelEventKey,
     idempotencyKey,
     repo,
-    prNumber: Number(prNumber),
+    prNumber,
     jobPath: bumpResult.jobPath,
     auditStatus: 'pending',
-    auditRow: terminalAuditRow,
-    ackComment: pendingAckComment,
+    auditRow: bumpedAuditRow,
+    ackComment: initialAckComment,
     consumedAt: ts,
   });
+  writeLabelConsumption(rootDir, labelEventKey, baseConsumption);
 
   try {
-    appendAuditRow(auditRootDir, terminalAuditRow);
+    appendAuditRow(auditRootDir, bumpedAuditRow);
     writeLabelConsumption(rootDir, labelEventKey, {
-      schemaVersion: 1,
-      label: RETRIGGER_REMEDIATION_LABEL,
-      labelEventKey,
-      idempotencyKey,
-      repo,
-      prNumber: Number(prNumber),
-      jobPath: bumpResult.jobPath,
+      ...baseConsumption,
       auditStatus: 'written',
-      auditRow: terminalAuditRow,
-      ackComment: pendingAckComment,
-      consumedAt: ts,
       auditedAt: ts,
     });
   } catch (err) {
     return {
       outcome: 'bumped-audit-failed',
-      detail: `bumped + re-armed OK but operator mutation audit append failed: ${err?.message || err}`,
+      detail: `bumped OK but operator mutation audit append failed: ${err?.message || err}`,
       jobPath: bumpResult.jobPath,
       newMaxRounds: bumpResult.newMaxRounds,
     };
   }
 
-  // Remove the label before posting the human-visible ack so a slow
-  // GitHub comment path does not leave operators staring at a stale
-  // retrigger-remediation label. The pending ack record above keeps the
-  // comment recoverable if the daemon dies before or during the post.
-  let labelRemoved = false;
-  try {
-    await removeLabelFromPR({ repo, prNumber, execFileImpl });
-    labelRemoved = true;
-  } catch (err) {
+  async function finishAfterRequeueAttempt({ requeueResult, terminalAuditRow, detail, outcome }) {
+    const pendingAckComment = buildPendingAckComment({
+      labelEventKey,
+      labelEventActor,
+      reason,
+      bumpResult,
+      requeueResult,
+    });
+
+    try {
+      appendAuditRow(auditRootDir, terminalAuditRow);
+    } catch (err) {
+      console.error(
+        `[retrigger-remediation-label] terminal audit append failed for ${repo}#${prNumber}:`,
+        err?.message || err
+      );
+    }
+
+    const nextJobPath = requeueResult?.jobPath || bumpResult.jobPath;
+    writeLabelConsumption(rootDir, labelEventKey, buildLabelConsumptionDoc({
+      labelEventKey,
+      idempotencyKey,
+      repo,
+      prNumber,
+      jobPath: nextJobPath,
+      auditStatus: 'written',
+      auditRow: terminalAuditRow,
+      ackComment: pendingAckComment,
+      consumedAt: ts,
+      auditedAt: ts,
+    }));
+
+    let labelRemoved = false;
+    try {
+      await removeLabelFromPR({ repo, prNumber, execFileImpl });
+      labelRemoved = true;
+    } catch (err) {
+      return {
+        outcome: outcome === 'bumped-and-requeued'
+          ? 'bumped-label-removal-failed'
+          : 'bumped-requeue-failed-label-removal-failed',
+        detail: `${detail}; label removal failed: ${err?.message || err}`,
+        jobPath: nextJobPath,
+        newMaxRounds: bumpResult.newMaxRounds,
+      };
+    }
+
+    const ackComment = await postRetriggerAckComment({
+      repo,
+      prNumber,
+      execFileImpl,
+      labelEventKey,
+      labelEventActor,
+      reason,
+      bumpResult,
+      requeueResult,
+    });
+    writeLabelConsumption(rootDir, labelEventKey, buildLabelConsumptionDoc({
+      labelEventKey,
+      idempotencyKey,
+      repo,
+      prNumber,
+      jobPath: nextJobPath,
+      auditStatus: 'written',
+      auditRow: terminalAuditRow,
+      ackComment: {
+        ...ackComment,
+        context: pendingAckComment.context,
+        attempts: 1,
+        maxAttempts: ACK_COMMENT_MAX_ATTEMPTS,
+        attemptedAt: new Date().toISOString(),
+      },
+      labelRemoved,
+      consumedAt: ts,
+      auditedAt: ts,
+    }));
+
     return {
-      outcome: 'bumped-label-removal-failed',
-      detail: `bumped + re-armed OK but label removal failed: ${err?.message || err}`,
-      jobPath: bumpResult.jobPath,
+      outcome,
+      detail,
+      jobPath: nextJobPath,
       newMaxRounds: bumpResult.newMaxRounds,
+      labelRemoved,
+      ackComment,
+      requeueOutcome: requeueOutcomeFromResult(requeueResult),
     };
   }
 
-  const ackComment = await postRetriggerAckComment({
-    repo,
-    prNumber,
-    execFileImpl,
-    labelEventKey,
-    labelEventActor,
-    reason,
-    bumpResult,
-    rereviewResult,
-  });
-  writeLabelConsumption(rootDir, labelEventKey, {
-    schemaVersion: 1,
-    label: RETRIGGER_REMEDIATION_LABEL,
-    labelEventKey,
-    idempotencyKey,
-    repo,
-    prNumber: Number(prNumber),
-    jobPath: bumpResult.jobPath,
-    auditStatus: 'written',
-    auditRow: terminalAuditRow,
-    ackComment: {
-      ...ackComment,
-      context: pendingAckComment.context,
-      attempts: 1,
-      maxAttempts: ACK_COMMENT_MAX_ATTEMPTS,
-      attemptedAt: new Date().toISOString(),
-    },
-    labelRemoved,
-    consumedAt: ts,
-    auditedAt: ts,
-  });
+  // `retrigger-remediation` means "run another remediation worker
+  // against the latest posted review." Rationale (post-2026-05-08,
+  // PR #48 regression): force-requeue is safe only because the watcher
+  // defers reviewer dispatch while the latest follow-up job is
+  // pending/inProgress for the same PR. `requeueFollowUpJobForNextRound`
+  // writes the pending job before this function returns, so even if the
+  // watcher row was already `review_status='pending'`, the same tick
+  // will skip the fresh review until the worker terminates and the
+  // normal worker completion path requests re-review.
+  let requeueResult;
+  try {
+    requeueResult = requeueImpl({
+      rootDir,
+      jobPath: bumpResult.jobPath,
+      requestedAt: ts,
+      requestedBy: `pr-label:${labelEventActor}`,
+      reason,
+    });
+  } catch (err) {
+    const failedRequeue = {
+      outcome: 'requeue-failed',
+      status: 'failed',
+      jobPath: bumpResult.jobPath,
+      error: err?.message || String(err),
+    };
+    return finishAfterRequeueAttempt({
+      requeueResult: failedRequeue,
+      terminalAuditRow: {
+        ...bumpedAuditRow,
+        requeueOutcome: requeueOutcomeFromResult(failedRequeue),
+        requeueError: failedRequeue.error,
+        outcome: 'bumped-requeue-failed',
+      },
+      outcome: 'bumped-requeue-failed',
+      detail: `bumped OK but follow-up requeue failed: ${failedRequeue.error}`,
+    });
+  }
 
-  return {
-    outcome: 'bumped-and-rearmed',
-    detail: `bumped maxRounds ${bumpResult.priorMaxRounds} → ${bumpResult.newMaxRounds}, re-armed watcher row for fresh review`,
-    jobPath: bumpResult.jobPath,
+  if (requeueResult?.job?.status !== 'pending') {
+    return finishAfterRequeueAttempt({
+      requeueResult,
+      terminalAuditRow: {
+        ...bumpedAuditRow,
+        requeueOutcome: requeueOutcomeFromResult(requeueResult),
+        requeueStatus: requeueResult?.job?.status || requeueResult?.status || null,
+        outcome: 'bumped-requeue-failed',
+      },
+      outcome: 'bumped-requeue-failed',
+      detail: 'bumped OK but follow-up requeue did not produce a pending job',
+    });
+  }
+
+  const terminalAuditRow = {
+    ...bumpedAuditRow,
+    priorMaxRounds: bumpResult.priorMaxRounds,
     newMaxRounds: bumpResult.newMaxRounds,
-    labelRemoved,
-    ackComment,
-    rereviewOutcome: rereviewOutcomeFromResult(rereviewResult),
+    requeueOutcome: requeueOutcomeFromResult(requeueResult),
+    outcome: 'bumped-and-requeued',
   };
+  return finishAfterRequeueAttempt({
+    requeueResult,
+    terminalAuditRow,
+    outcome: 'bumped-and-requeued',
+    detail: `bumped maxRounds ${bumpResult.priorMaxRounds} → ${bumpResult.newMaxRounds}, requeued remediation worker`,
+  });
 }

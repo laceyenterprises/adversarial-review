@@ -56,6 +56,7 @@ import {
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
+import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -625,6 +626,32 @@ function evaluateRoundBudgetForReview({
   };
 }
 
+function isActiveFollowUpJob(job) {
+  return ['pending', 'inProgress', 'in-progress'].includes(job?.status);
+}
+
+function shouldDeferReviewForActiveFollowUp({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  latestJobFinder = findLatestFollowUpJob,
+}) {
+  const latest = latestJobFinder(rootDir, { repo, prNumber });
+  if (!isActiveFollowUpJob(latest?.job)) {
+    return {
+      defer: false,
+      latestJobStatus: latest?.job?.status || null,
+      jobPath: latest?.jobPath || null,
+    };
+  }
+  return {
+    defer: true,
+    latestJobStatus: latest.job.status,
+    jobPath: latest.jobPath || null,
+    jobId: latest.job.jobId || null,
+  };
+}
+
 // ── Linear state helpers ─────────────────────────────────────────────────────
 
 let linearClient = null;
@@ -1049,6 +1076,19 @@ async function pollOnce(octokit) {
 
       const current = stmtGetReviewRow.get(repoPath, prNumber);
       await projectGateStatusSafe(current);
+      const activeFollowUp = shouldDeferReviewForActiveFollowUp({
+        rootDir: ROOT,
+        repo: repoPath,
+        prNumber,
+      });
+      if (activeFollowUp.defer) {
+        console.log(
+          `[watcher] Deferring reviewer for ${repoPath}#${prNumber}: active follow-up job` +
+            (activeFollowUp.jobId ? ` ${activeFollowUp.jobId}` : '') +
+            ` is ${activeFollowUp.latestJobStatus}`
+        );
+        continue;
+      }
       const cascadeGate = shouldBackoffReviewerSpawn(ROOT, {
         repo: repoPath,
         prNumber,
@@ -1258,6 +1298,7 @@ export {
   handlePostedReviewRow,
   pollOnce,
   readWatcherDrainState,
+  shouldDeferReviewForActiveFollowUp,
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,

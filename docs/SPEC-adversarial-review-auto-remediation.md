@@ -51,3 +51,14 @@ Reason mapping:
 | `remediation-stopped` | `failure` | Follow-up remediation stopped and needs operator action. |
 
 The watcher must project the gate on terminal early-exit paths, including already-posted review rows. A settled PR must not stay frozen at an earlier `pending` projection after the durable review verdict is available.
+
+## Operator Retrigger Contracts
+
+`retrigger-review` and `retrigger-remediation` are separate operator surfaces:
+
+- `retrigger-review` resets the watcher delivery row to `review_status='pending'` so the watcher can post another adversarial review.
+- `retrigger-remediation` bumps the remediation budget and requeues the latest eligible terminal follow-up job. It does not reset `reviews.db` first; the next fresh adversarial review must come from the requeued worker's durable `reReview.requested=true` reply during normal reconciliation.
+
+For PR-side `retrigger-remediation` labels, a successful budget bump is the durable consumption boundary. Once the bump lands, the watcher must write the label-consumption record and operator-mutation audit before attempting the queue rearm. If requeue then fails, the watcher still removes the label and posts a failure-flavored acknowledgement that names the partial-success state; the same GitHub label event must not authorize another budget bump on retry.
+
+The watcher must not run a fresh adversarial review while the latest follow-up job for the same PR is `pending` or `inProgress`. This guard is load-bearing for the PR #48 race: if an operator requeues remediation while the watcher row is already `pending`, the pending follow-up job wins and reviewer dispatch is deferred until the worker reaches a terminal state.

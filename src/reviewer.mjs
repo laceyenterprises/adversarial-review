@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   createFollowUpJob,
+  resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 import {
@@ -544,12 +545,15 @@ function queueFollowUpForPostedReview({
     return { queued: false, reason: 'empty-review-body' };
   }
 
-  // Carry only the PR's prior remediation-round count into the next
-  // follow-up job. The cap itself must be re-derived from the current
-  // PR's riskClass for each fresh dispatch decision; forwarding
-  // `latestMaxRounds` implicitly lifts future jobs to whatever prior
-  // budget happened to be persisted.
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
+  const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, {
+    rootDir,
+    preferPersisted: false,
+  });
+  const latestMaxRounds = Number(priorLedger.latestMaxRounds);
+  const elevatedPriorCap = Number.isInteger(latestMaxRounds) && latestMaxRounds > tierResolution.roundBudget
+    ? latestMaxRounds
+    : null;
 
   const { jobPath } = createFollowUpJobImpl({
     rootDir,
@@ -561,7 +565,9 @@ function queueFollowUpForPostedReview({
     reviewBody: reviewText,
     reviewPostedAt,
     critical,
+    riskClass: tierResolution.riskClass,
     priorCompletedRounds: priorLedger.completedRoundsForPR,
+    ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
   });
   return { queued: true, jobPath };
 }

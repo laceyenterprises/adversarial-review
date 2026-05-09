@@ -324,11 +324,11 @@ test('watcher defers a pending review while a requeued follow-up job is active (
   assert.equal(after.review_status, 'pending');
 });
 
-test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forward (does not downgrade via riskClass)', () => {
-  // Dispatch-time decisions must re-derive the cap from the current
-  // PR's riskClass instead of forwarding a prior persisted
-  // `latestMaxRounds`. This prevents a legacy or operator-raised cap
-  // from implicitly lifting future rereview/remediation decisions.
+test('evaluateRoundBudgetForReview preserves elevated legacy caps above the current riskClass tier', () => {
+  // Dispatch-time decisions normally re-derive the cap from the
+  // current PR riskClass, but an already elevated legacy/operator cap
+  // remains authoritative for the active PR cycle so an in-flight PR is
+  // not silently truncated after consuming more rounds than the new tier.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   const created = createFollowUpJob({
@@ -343,8 +343,8 @@ test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forwar
     maxRemediationRounds: 6,
   });
   // Force the legacy persisted shape on disk: riskClass='medium' next
-  // to maxRounds=6. With the bug, the watcher's resolution would
-  // collapse to medium-tier 1 round.
+  // to maxRounds=6. The watcher should use the elevated cap when it is
+  // higher than the current medium tier.
   const claimed = claimNextFollowUpJob({
     rootDir,
     claimedAt: '2026-04-22T05:25:00.000Z',
@@ -391,7 +391,7 @@ test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forwar
 
   assert.equal(decision.skip, false, 'a legacy 6-round PR must NOT be skipped after a single completed round');
   assert.equal(decision.completedRoundsForPR, 1);
-  assert.equal(decision.roundBudget, 2, 'dispatch-time cap should come from the current medium risk tier');
+  assert.equal(decision.roundBudget, 6, 'elevated prior cap should prevent mid-flight truncation');
 });
 
 test('evaluateRoundBudgetForReview always allows rereview after a completed remediation (post-2026-05-06 convergence loop)', () => {

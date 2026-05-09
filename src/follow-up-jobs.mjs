@@ -204,15 +204,10 @@ function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {})
       || job?.recommendedFollowUpAction?.maxRounds
   );
 
-  // Persisted state is authoritative once it exists. Migration guarantee:
-  // a legacy job persisted with `maxRounds=6` (created under the older
-  // uniform-cap regime) must not be silently downgraded by recomputing
-  // the budget from the current ROUND_BUDGET_BY_RISK_CLASS table. Spec
-  // risk-tier changes for an already-created job require an explicit
-  // migration, not an implicit override of the JSON record. Without
-  // this precedence the legacy `maxRounds=6` job would collapse to the
-  // `medium=1` budget and lose five rounds of remediation budget mid-
-  // deploy.
+  // Persisted state is authoritative within a single follow-up job.
+  // Fresh jobs normally re-derive the cap from the PR's current
+  // riskClass; callers may intentionally pass an elevated prior cap
+  // when preserving an in-flight legacy/operator budget is required.
   if (preferPersisted && Number.isInteger(persistedRoundBudget) && persistedRoundBudget > 0) {
     return buildRoundBudgetResolution({
       riskClass: persistedRiskClass || DEFAULT_RISK_CLASS,

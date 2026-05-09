@@ -2329,12 +2329,13 @@ async function consumeNextFollowUpJob({
   }
   if (claimed.stopped) {
     if (claimed.reason === 'max-rounds-reached') {
+      const persistedCap = Number(claimed.job?.remediationPlan?.maxRounds);
       logRoundBudgetDecision(log, {
         repo: claimed.job?.repo || null,
         prNumber: Number.isFinite(Number(claimed.job?.prNumber)) ? Number(claimed.job.prNumber) : null,
         riskClass: claimed.job?.riskClass || null,
         runsCompleted: Number(claimed.job?.remediationPlan?.currentRound || 0),
-        cap: Number(claimed.job?.remediationPlan?.maxRounds || 0),
+        cap: Number.isFinite(persistedCap) ? persistedCap : null,
         decision: 'deny',
       });
     }

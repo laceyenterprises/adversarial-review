@@ -54,7 +54,7 @@ test('clean comment-only reviews still queue a durable follow-up verdict carrier
   assert.equal(result.queued, true);
   assert.equal(created.length, 1);
   assert.equal(created[0].reviewBody.includes('Comment only'), true);
-  assert.equal(created[0].maxRemediationRounds, 2);
+  assert.equal(Object.hasOwn(created[0], 'maxRemediationRounds'), false);
   assert.equal(created[0].priorCompletedRounds, 1);
 });
 
@@ -66,6 +66,64 @@ test('request-changes and malformed verdicts still queue durable follow-up hando
   assert.equal(dirty.created.length, 1);
   assert.equal(malformed.result.queued, true);
   assert.equal(malformed.created.length, 1);
+});
+
+test('new follow-up jobs preserve an elevated prior cap to avoid truncating an active PR cycle', () => {
+  const created = [];
+  queueFollowUpForPostedReview({
+    rootDir: '/tmp/adversarial-review-test',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 58,
+    reviewerModel: 'claude',
+    builderTag: '[codex]',
+    linearTicketId: 'LAC-466',
+    reviewText: '## Summary\nNeeds fixes.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-05-08T14:00:00.000Z',
+    critical: false,
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 7,
+      latestMaxRounds: 7,
+    }),
+    createFollowUpJobImpl: (jobInput) => {
+      created.push(jobInput);
+      return { jobPath: '/tmp/adversarial-review-test/data/follow-up-jobs/pending/job.json' };
+    },
+  });
+
+  assert.equal(created.length, 1);
+  assert.equal(created[0].priorCompletedRounds, 7);
+  assert.equal(created[0].maxRemediationRounds, 7);
+});
+
+test('new follow-up jobs re-derive cap when the prior cap is not above the current risk tier', () => {
+  const created = [];
+  queueFollowUpForPostedReview({
+    rootDir: '/tmp/adversarial-review-test',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 58,
+    reviewerModel: 'claude',
+    builderTag: '[codex]',
+    linearTicketId: 'LAC-466',
+    reviewText: '## Summary\nNeeds fixes.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-05-08T14:00:00.000Z',
+    critical: false,
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      latestMaxRounds: 2,
+    }),
+    createFollowUpJobImpl: (jobInput) => {
+      created.push(jobInput);
+      return { jobPath: '/tmp/adversarial-review-test/data/follow-up-jobs/pending/job.json' };
+    },
+  });
+
+  assert.equal(created.length, 1);
+  assert.equal(created[0].priorCompletedRounds, 1);
+  assert.equal(
+    Object.hasOwn(created[0], 'maxRemediationRounds'),
+    false,
+    'fresh dispatch should let createFollowUpJob derive the current tier cap',
+  );
 });
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {

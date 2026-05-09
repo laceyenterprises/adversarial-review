@@ -31,7 +31,6 @@ import {
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
 import {
-  DEFAULT_MAX_REMEDIATION_ROUNDS,
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
@@ -613,15 +612,16 @@ function evaluateRoundBudgetForReview({
   const resolution = resolveRoundBudgetForJob({
     linearTicketId,
     riskClass: ledger.latestRiskClass,
-    remediationPlan: {
-      maxRounds: ledger.latestMaxRounds,
-    },
   }, { rootDir });
+  const latestMaxRounds = Number(ledger.latestMaxRounds);
+  const roundBudget = Number.isInteger(latestMaxRounds) && latestMaxRounds > resolution.roundBudget
+    ? latestMaxRounds
+    : resolution.roundBudget;
 
   return {
     skip: false,
     completedRoundsForPR: ledger.completedRoundsForPR,
-    roundBudget: resolution.roundBudget,
+    roundBudget,
     riskClass: resolution.riskClass,
   };
 }
@@ -1111,10 +1111,10 @@ async function pollOnce(octokit) {
       //      transient post failure should not count as a remediation
       //      cycle and must not silently trip the lenient threshold.
       //
-      //   2. `maxRemediationRounds` must come from the job's persisted
-      //      cap, not the global default. A legacy job created with the
-      //      old 6-round cap must be allowed to use all 6 rounds, even
-      //      after new jobs moved to risk-class-derived caps.
+      //   2. An elevated legacy/operator cap must continue to describe
+      //      the active PR cycle when it is higher than the current
+      //      risk-class tier. Otherwise a PR that already consumed more
+      //      rounds than the new tier allows would be silently cut off.
       //
       // `summarizePRRemediationLedger` reads currentRound from terminal
       // follow-up jobs (the only place a remediation cycle is actually
@@ -1123,8 +1123,15 @@ async function pollOnce(octokit) {
         repo: repoPath,
         prNumber,
       });
+      const roundBudget = resolveRoundBudgetForJob({
+        linearTicketId,
+        riskClass: ledger.latestRiskClass,
+      }, { rootDir: ROOT });
+      const latestMaxRounds = Number(ledger.latestMaxRounds);
       const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
-      const maxRemediationRounds = ledger.latestMaxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS;
+      const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
+        ? latestMaxRounds
+        : roundBudget.roundBudget;
 
       const result = await spawnReviewer({
         repo: repoPath,

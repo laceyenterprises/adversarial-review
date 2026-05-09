@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   createFollowUpJob,
+  resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 import {
@@ -544,16 +545,15 @@ function queueFollowUpForPostedReview({
     return { queued: false, reason: 'empty-review-body' };
   }
 
-  // Carry the PR's prior remediation-round count and the per-job
-  // maxRounds forward into the new follow-up job. Two effects:
-  //   - `claimNextFollowUpJob`'s `currentRound >= maxRounds` guard
-  //     enforces the cap PR-wide, not per-job, so a PR that has
-  //     already exhausted its remediation budget cannot accidentally
-  //     get another worker spawn from a freshly created job.
-  //   - Legacy jobs created with maxRounds=6 keep that cap; we do not
-  //     overwrite it with the current default.
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
-  const carriedMaxRounds = priorLedger.latestMaxRounds;
+  const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, {
+    rootDir,
+    preferPersisted: false,
+  });
+  const latestMaxRounds = Number(priorLedger.latestMaxRounds);
+  const elevatedPriorCap = Number.isInteger(latestMaxRounds) && latestMaxRounds > tierResolution.roundBudget
+    ? latestMaxRounds
+    : null;
 
   const { jobPath } = createFollowUpJobImpl({
     rootDir,
@@ -565,8 +565,9 @@ function queueFollowUpForPostedReview({
     reviewBody: reviewText,
     reviewPostedAt,
     critical,
+    riskClass: tierResolution.riskClass,
     priorCompletedRounds: priorLedger.completedRoundsForPR,
-    ...(carriedMaxRounds ? { maxRemediationRounds: carriedMaxRounds } : {}),
+    ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
   });
   return { queued: true, jobPath };
 }

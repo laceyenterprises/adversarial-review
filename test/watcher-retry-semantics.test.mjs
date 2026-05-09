@@ -324,15 +324,11 @@ test('watcher defers a pending review while a requeued follow-up job is active (
   assert.equal(after.review_status, 'pending');
 });
 
-test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forward (does not downgrade via riskClass)', () => {
-  // Reviewer blocking finding: `resolveRoundBudgetForJob` previously
-  // gave persisted `riskClass` precedence over persisted `maxRounds`.
-  // For a legacy job written with `riskClass='medium'` AND
-  // `maxRounds=6`, the watcher's rereview gate would resolve the
-  // budget to the medium-tier 1 round and immediately skip the
-  // rereview after a single completed remediation cycle — losing five
-  // rounds of legacy budget mid-deploy. The migration guarantee is
-  // that persisted maxRounds wins; a legacy 6-round PR keeps all six.
+test('evaluateRoundBudgetForReview preserves elevated legacy caps above the current riskClass tier', () => {
+  // Dispatch-time decisions normally re-derive the cap from the
+  // current PR riskClass, but an already elevated legacy/operator cap
+  // remains authoritative for the active PR cycle so an in-flight PR is
+  // not silently truncated after consuming more rounds than the new tier.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   const created = createFollowUpJob({
@@ -347,8 +343,8 @@ test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forwar
     maxRemediationRounds: 6,
   });
   // Force the legacy persisted shape on disk: riskClass='medium' next
-  // to maxRounds=6. With the bug, the watcher's resolution would
-  // collapse to medium-tier 1 round.
+  // to maxRounds=6. The watcher should use the elevated cap when it is
+  // higher than the current medium tier.
   const claimed = claimNextFollowUpJob({
     rootDir,
     claimedAt: '2026-04-22T05:25:00.000Z',
@@ -395,7 +391,7 @@ test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forwar
 
   assert.equal(decision.skip, false, 'a legacy 6-round PR must NOT be skipped after a single completed round');
   assert.equal(decision.completedRoundsForPR, 1);
-  assert.equal(decision.roundBudget, 6, 'persisted maxRounds=6 must win over the medium-tier downgrade');
+  assert.equal(decision.roundBudget, 6, 'elevated prior cap should prevent mid-flight truncation');
 });
 
 test('evaluateRoundBudgetForReview always allows rereview after a completed remediation (post-2026-05-06 convergence loop)', () => {

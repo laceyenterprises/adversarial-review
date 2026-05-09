@@ -1,0 +1,74 @@
+{
+  "kind": "adversarial-review-remediation-reply",
+  "schemaVersion": 1,
+  "jobId": "laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z",
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 307,
+  "outcome": "completed",
+  "summary": "Rebased cleanly onto origin/main, moved the adapter-refactor project spec into the canonical discoverable project path, tightened revision-scoped override and delivery contracts, and reordered the migration plan so schema lands before delivery dedupe depends on it.",
+  "validation": [
+    "git fetch origin && git rebase origin/main",
+    "python3 -m json.tool projects/adversarial-review-adapter-refactor/SPEC.meta.json",
+    "python3 -m json.tool projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json",
+    "python3 -m json.tool projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json.linear-mapping.json",
+    "ssh -o BatchMode=yes airlock@localhost '... hq spec lock projects/adversarial-review-adapter-refactor/SPEC.md'",
+    "modules/worker-pool/bin/hq plan validate projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json",
+    "git diff --check"
+  ],
+  "addressed": [
+    {
+      "title": "Revisionless operator override",
+      "finding": "getOverrides returned bare override values without binding them to the subject revision being acted on.",
+      "action": "Changed the operator adapter contract to accept expectedRevisionRef, return observedRevisionRef plus actor, eventId, and observedAt, and require the kernel to ignore or fail closed on revision mismatch.",
+      "files": [
+        "projects/adversarial-review-adapter-refactor/SPEC.md",
+        "projects/adversarial-review-adapter-refactor/SPEC.meta.json",
+        "projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json"
+      ]
+    },
+    {
+      "title": "Incomplete delivery key contract",
+      "finding": "Public delivery methods did not carry the full revision, round, and kind key needed for safe dedupe and retry.",
+      "action": "Introduced DeliveryKey and DeliveryContext and made review, remediation reply, operator notice, retry, and dedupe methods use the same revision-scoped context.",
+      "files": [
+        "projects/adversarial-review-adapter-refactor/SPEC.md"
+      ]
+    },
+    {
+      "title": "Dedupe migration order inversion",
+      "finding": "The comms dedupe carve depended on domain_id, subject_external_id, and revision_ref fields that were scheduled for a later migration.",
+      "action": "Inserted an additive ARA-04B schema ticket before ARA-05, made ARA-05 depend on it, and split 30-day replay/new-key preference into the later ARA-07 step.",
+      "files": [
+        "projects/adversarial-review-adapter-refactor/SPEC.md",
+        "projects/adversarial-review-adapter-refactor/SPEC.meta.json",
+        "projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json"
+      ]
+    },
+    {
+      "title": "Unimplementable kernel acceptance rule",
+      "finding": "The acceptance criterion banned the raw substring pr, which would also ban unrelated words like prompt and approved.",
+      "action": "Replaced the substring ban with an explicit forbidden adapter vocabulary and regex-style concept list while allowing unrelated ordinary words.",
+      "files": [
+        "projects/adversarial-review-adapter-refactor/SPEC.md",
+        "projects/adversarial-review-adapter-refactor/SPEC.meta.json"
+      ]
+    },
+    {
+      "title": "Noncanonical dispatch spec path",
+      "finding": "The project-shaped spec lived under a noncanonical SPEC-adapter-refactor.md path that project scanners do not discover by default.",
+      "action": "Moved the spec, sidecar metadata, plan, and mapping sidecar into projects/adversarial-review-adapter-refactor/ as SPEC.md, SPEC.meta.json, and adjacent plan artifacts; relocked the spec and updated the plan specRef.",
+      "files": [
+        "projects/adversarial-review-adapter-refactor/SPEC.md",
+        "projects/adversarial-review-adapter-refactor/SPEC.meta.json",
+        "projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json",
+        "projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json.linear-mapping.json"
+      ]
+    }
+  ],
+  "pushback": [],
+  "blockers": [],
+  "reReview": {
+    "requested": true,
+    "reason": "All blocking review findings have direct spec or plan changes and the moved project spec validates through hq."
+  }
+}

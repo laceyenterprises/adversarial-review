@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import {
   extractReviewVerdict,
   normalizeReviewVerdict,
@@ -11,27 +13,22 @@ import {
   validateRemediationReply,
 } from '../src/kernel/remediation-reply.mjs';
 
-const productionFixtureRoot = '/Users/airlock/agent-os/tools/adversarial-review/data/follow-up-jobs/completed';
-const productionReplyRoot = '/Users/airlock/agent-os-hq/dispatch/remediation-replies';
+// Fixtures are committed under test/fixtures/kernel/ so the suite runs the
+// same on every host (CI, fresh clones, agent worktrees). Snapshots of real
+// production review/remediation artifacts; do not edit by hand — regenerate
+// by copying a fresh production blob and trimming if needed.
+const fixtureRoot = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'kernel');
 
-function readProductionJob(name) {
-  const path = `${productionFixtureRoot}/${name}`;
-  if (!existsSync(path)) return null;
-  return JSON.parse(readFileSync(path, 'utf8'));
+function readFixture(name) {
+  return JSON.parse(readFileSync(join(fixtureRoot, name), 'utf8'));
 }
 
-function readProductionReply(jobId) {
-  const path = `${productionReplyRoot}/${jobId}/remediation-reply.json`;
-  if (!existsSync(path)) return null;
-  return JSON.parse(readFileSync(path, 'utf8'));
-}
-
-const passingVerdictJob = readProductionJob('laceyenterprises__adversarial-review-pr-35-2026-05-04T05-24-51-401Z.json');
-const failingVerdictJob = readProductionJob('laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z.json');
+const passingVerdictJob = readFixture('passing-verdict-job.json');
+const failingVerdictJob = readFixture('failing-verdict-job.json');
 const remediationJob = failingVerdictJob;
-const remediationReply = remediationJob ? readProductionReply(remediationJob.jobId) : null;
+const remediationReply = readFixture('remediation-reply.json');
 
-test('kernel verdict parser accepts a production passing verdict and renders it stably', { skip: !passingVerdictJob && 'production fixture missing' }, () => {
+test('kernel verdict parser accepts a production passing verdict and renders it stably', () => {
   const sanitized = sanitizeCodexReviewPayload(passingVerdictJob.reviewBody);
 
   assert.equal(sanitizeCodexReviewPayload(sanitized), sanitized);
@@ -39,7 +36,7 @@ test('kernel verdict parser accepts a production passing verdict and renders it 
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(sanitized)), 'comment-only');
 });
 
-test('kernel verdict parser preserves a production failing verdict byte-for-byte', { skip: !failingVerdictJob && 'production fixture missing' }, () => {
+test('kernel verdict parser preserves a production failing verdict byte-for-byte', () => {
   const sanitized = sanitizeCodexReviewPayload(failingVerdictJob.reviewBody);
 
   assert.equal(sanitized, failingVerdictJob.reviewBody);
@@ -47,7 +44,7 @@ test('kernel verdict parser preserves a production failing verdict byte-for-byte
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(sanitized)), 'request-changes');
 });
 
-test('kernel remediation-reply parser accepts a production reply without changing bytes', { skip: (!remediationJob || !remediationReply) && 'production fixture missing' }, () => {
+test('kernel remediation-reply parser accepts a production reply without changing bytes', () => {
   const raw = JSON.stringify(remediationReply, null, 2);
   const parsed = parseRemediationReply(raw, { expectedJob: remediationJob });
   const validated = validateRemediationReply(remediationReply, { expectedJob: remediationJob });
@@ -57,7 +54,7 @@ test('kernel remediation-reply parser accepts a production reply without changin
   assert.equal(JSON.stringify(validated, null, 2), raw);
 });
 
-test('kernel remediation-reply validator rejects blocked outcome with empty blockers', { skip: (!remediationJob || !remediationReply) && 'production fixture missing' }, () => {
+test('kernel remediation-reply validator rejects blocked outcome with empty blockers', () => {
   const invalid = {
     ...remediationReply,
     outcome: 'blocked',

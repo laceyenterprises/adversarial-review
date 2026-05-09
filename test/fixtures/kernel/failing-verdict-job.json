@@ -1,0 +1,272 @@
+{
+  "schemaVersion": 2,
+  "kind": "adversarial-review-follow-up",
+  "status": "completed",
+  "jobId": "laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z",
+  "createdAt": "2026-05-09T20:33:22.761Z",
+  "trigger": {
+    "type": "github-review-posted",
+    "postedAt": "2026-05-09T20:33:22.761Z"
+  },
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 307,
+  "linearTicketId": null,
+  "riskClass": "medium",
+  "reviewerModel": "codex",
+  "builderTag": "claude-code",
+  "critical": false,
+  "reviewSummary": "The plan has contract gaps that would let stale PR-head state leak through the new adapter seam, and the migration ordering asks a ticket to use schema fields that do not exist until a later ticket. These are not documentation nits; they are production failure paths for the review gate.",
+  "reviewBody": "## Summary\nThe plan has contract gaps that would let stale PR-head state leak through the new adapter seam, and the migration ordering asks a ticket to use schema fields that do not exist until a later ticket. These are not documentation nits; they are production failure paths for the review gate.\n\n## Blocking Issues\n- Title: Revisionless operator override\n  - File: `projects/adversarial-review/SPEC-adapter-refactor.md`\n  - Lines: 145-150\n  - Problem: `getOverrides(ref)` returns `operatorApproved`, `forceRereview`, and `raisedRoundCap` as bare booleans/values with no expected `revisionRef`, observed revision, label event id, actor, or timestamp.\n  - Why it matters: The existing `operator-approved` contract is current-head scoped. With this interface, the kernel can fetch subject head A, observe an approval that was valid for A, then apply it after the subject advances to head B because the override result is not bound to the revision being acted on. That is exactly the stale approval class this gate is supposed to prevent.\n  - Recommended fix: Make override reads revision-scoped: pass the expected `revisionRef` into `getOverrides`, and return the observed/applied revision plus audit fields such as actor and event id. The kernel must reject overrides whose revision does not match the latest subject revision.\n- Title: Incomplete delivery key contract\n  - File: `projects/adversarial-review/SPEC-adapter-refactor.md`\n  - Lines: 122-133\n  - Problem: The spec says public delivery attempts must be keyed by `(domainId, subjectId, revisionRef, round, kind)`, but `postOperatorNotice(ref, event, body)` has no `revisionRef`, `round`, or `kind`, and `retryUndelivered(ref)` has no revision boundary at all.\n  - Why it matters: The comms adapter cannot prove current-head delivery or safely dedupe/retry every public message with the interface as written. During a PR head change, stale notices or stale retry rows can be reposted, or fresh delivery for the new head can be suppressed by old state.\n  - Recommended fix: Introduce a single `DeliveryKey`/`DeliveryContext` object used by all post, retry, and dedupe methods, or explicitly exclude operator notices from revision-scoped delivery and give them their own idempotency/currentness contract.\n- Title: Dedupe migration order inversion\n  - File: `projects/adversarial-review/adapter-refactor-plan.json`\n  - Lines: 58-66, 84-92\n  - Problem: ARA-05 requires comment dedupe to use `(domainId, subjectExternalId, revisionRef, round, kind)`, but ARA-07, which depends on ARA-05 and ARA-06, is the step that adds `domain_id`, `subject_external_id`, and `revision_ref` to the ledger.\n  - Why it matters: ARA-05 is not independently shippable as claimed. It either cannot persist the new dedupe key, must overload legacy PR-number fields, or must quietly perform part of ARA-07 early. All three break the plan’s review and rollback boundaries.\n  - Recommended fix: Move the minimal identity/delivery schema migration before ARA-05, or split ARA-07 into an early additive migration/backfill step and a later replay/cleanup step. ARA-05 should only ship after the fields and indexes it depends on exist.\n- Title: Unimplementable kernel acceptance rule\n  - File: `projects/adversarial-review/SPEC-adapter-refactor.md`\n  - Lines: 296-297\n  - Problem: The acceptance criterion bans any kernel references to `pr` in identifiers or strings. As written, this also bans ordinary non-PR words such as `prompt`, `prepareRemediationWorkspace`, `representation`, and `approved`.\n  - Why it matters: A literal check is impossible to satisfy without contorting unrelated names. A non-literal check is underspecified, so different workers can pass/fail the same implementation differently.\n  - Recommended fix: Replace the substring ban with an explicit forbidden vocabulary or regex set for PR-shaped concepts, such as `prNumber`, `pullRequest`, `github`, `gh`, `Linear`, `merge-agent`, and GitHub-specific API strings.\n- Title: Noncanonical dispatch spec path\n  - File: `projects/adversarial-review/SPEC-adapter-refactor.md`\n  - Lines: 1\n  - Problem: The project-shaped spec is added as `projects/adversarial-review/SPEC-adapter-refactor.md` with `SPEC-adapter-refactor.meta.json`, while the repo’s project/ticket-shape contract says dispatchable project specs are discovered as `projects/<name>/SPEC.md` with `SPEC.meta.json`.\n  - Why it matters: `hq spec lock` can be pointed at an arbitrary path manually, but project scanners and operator workflows are specified to discover `SPEC.md` only. This makes the project easy to miss in automated spec discovery and review-due flows.\n  - Recommended fix: Put this in its own project directory as `projects/adversarial-review-adapter-refactor/SPEC.md` plus `SPEC.meta.json`, or update the governing project-shape spec and scanners to explicitly support multiple dispatchable specs under one project directory.\n\n## Non-blocking Issues\n- Title: Premature final acceptance replay\n  - File: `projects/adversarial-review/SPEC-adapter-refactor.md`\n  - Lines: 300-303\n  - Problem: The 30-day replay is listed as a final acceptance criterion, but the plan ships high-risk prompt and adapter changes before the replay ticket.\n  - Why it matters: Prompt-stage regressions or adapter behavior changes can hit the live review gate before the production replay catches them.\n  - Recommended fix: Require per-step replay or golden-fixture equivalence before each behavior-sensitive migration step, especially ARA-02 and ARA-05.\n\n## Suggested Fixes\n- Make every operator override and delivery operation explicitly revision-scoped.\n- Move additive subject-identity schema work before the comms dedupe carve.\n- Replace vague substring-based acceptance criteria with precise forbidden PR/GitHub/Linear contract terms.\n- Align the project spec filenames with the documented `projects/<name>/SPEC.md` discovery contract, or update that governing contract in the same PR.\n- Add per-step validation gates so prompt/comms changes are replay-tested before they can ship.\n\n## Verdict\nRequest changes",
+  "recommendedFollowUpAction": {
+    "type": "address-adversarial-review",
+    "priority": "normal",
+    "summary": "Start a follow-up coding session for this PR and address the adversarial review findings.",
+    "executionModel": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "futureArchitectureNote": "Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff."
+  },
+  "remediationReply": {
+    "kind": "adversarial-review-remediation-reply",
+    "schemaVersion": 1,
+    "state": "worker-wrote-reply",
+    "path": "/Users/airlock/agent-os-hq/dispatch/remediation-replies/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/remediation-reply.json"
+  },
+  "remediationPlan": {
+    "mode": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "currentRound": 2,
+    "rounds": [
+      {
+        "round": 2,
+        "state": "completed",
+        "claimedAt": "2026-05-09T20:34:05.950Z",
+        "claimedBy": {
+          "workerType": "codex-remediation",
+          "launcherPid": 78347
+        },
+        "spawnedAt": "2026-05-09T20:34:18.821Z",
+        "worker": {
+          "model": "codex",
+          "state": "completed",
+          "spawnedAt": "2026-05-09T20:34:18.821Z",
+          "workerClass": "codex",
+          "processId": 54223,
+          "workspaceDir": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z",
+          "promptPath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/prompt.md",
+          "outputPath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-last-message.md",
+          "logPath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-worker.log",
+          "gitIdentity": {
+            "name": "Codex Remediation Worker",
+            "email": "codex-remediation-worker@laceyenterprises.com"
+          },
+          "startupEvidence": {
+            "stage": "pre-side-effect-gate",
+            "requestedContract": {
+              "authMode": "local-oauth",
+              "authOwnerUser": "placey",
+              "authHome": "/Users/placey",
+              "authPath": "/Users/placey/.codex/auth.json",
+              "forbiddenFallbacks": [
+                "api-key",
+                "openai-api-key"
+              ],
+              "forbiddenCalls": [
+                "authenticate"
+              ]
+            },
+            "resolvedStartup": {
+              "resolvedAuthMode": "local-oauth",
+              "resolvedAuthOwner": "placey",
+              "authHome": "/Users/placey",
+              "authPath": "/Users/placey/.codex/auth.json",
+              "codexHome": "/Users/placey/.codex"
+            },
+            "sanitizedEnv": {
+              "stripped": [],
+              "gitIdentityOverrides": []
+            },
+            "gitIdentity": {
+              "name": "Codex Remediation Worker",
+              "email": "codex-remediation-worker@laceyenterprises.com"
+            },
+            "policy_violations": []
+          },
+          "command": [
+            "codex",
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--ephemeral",
+            "--output-last-message",
+            "/Users/airlock/agent-os/tools/adversarial-review/data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-last-message.md",
+            "-"
+          ],
+          "workspaceState": {
+            "action": "reused",
+            "reason": "missing"
+          },
+          "replyPath": "/Users/airlock/agent-os-hq/dispatch/remediation-replies/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/remediation-reply.json",
+          "reconciledAt": "2026-05-09T20:46:48.737Z"
+        },
+        "finishedAt": "2026-05-09T20:46:48.737Z",
+        "completion": {
+          "source": "codex-output-last-message",
+          "workerModel": "codex",
+          "note": "Reconciled from detached worker exit plus non-empty final message artifact.",
+          "finalMessagePath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-last-message.md",
+          "finalMessageBytes": 1778,
+          "finalMessageDigest": "9accbfdfabb72f4030aa932c1fe45c3099324e5adea09dc580737cb6f302e3a9",
+          "preview": "Completed and pushed remediation for PR 307. Changed: - Moved the project spec into canonical discovery shape: [SPEC.md](/Users/airlock/agent-os/tools/adversarial-review/data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026…",
+          "finalMessageSummary": "Completed and pushed remediation for PR 307. Changed: - Moved the project spec into canonical discovery shape: [SPEC.md…",
+          "logPath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-worker.log"
+        },
+        "remediationReply": {
+          "kind": "adversarial-review-remediation-reply",
+          "schemaVersion": 1,
+          "state": "worker-wrote-reply",
+          "path": "/Users/airlock/agent-os-hq/dispatch/remediation-replies/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/remediation-reply.json"
+        },
+        "reReview": {
+          "requested": true,
+          "requestedAt": "2026-05-09T20:46:48.737Z",
+          "reason": "All blocking review findings have direct spec or plan changes and the moved project spec validates through hq.",
+          "triggered": true,
+          "status": "pending",
+          "outcomeReason": "review-status-reset",
+          "reviewRow": {
+            "repo": "laceyenterprises/agent-os",
+            "prNumber": 307,
+            "reviewer": "codex",
+            "prState": "open",
+            "reviewStatus": "pending",
+            "reviewAttempts": 2,
+            "lastAttemptedAt": "2026-05-09T20:30:16.248Z",
+            "postedAt": null,
+            "failedAt": null
+          }
+        }
+      }
+    ],
+    "stopReason": null,
+    "stop": null,
+    "nextAction": null
+  },
+  "sessionHandoff": {
+    "originalBuildSessionId": null,
+    "resumePreferred": true,
+    "resumeAvailable": false
+  },
+  "claimedAt": "2026-05-09T20:34:05.950Z",
+  "claimedBy": {
+    "workerType": "codex-remediation",
+    "launcherPid": 78347
+  },
+  "replyStorageKey": "laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z",
+  "remediationWorker": {
+    "model": "codex",
+    "state": "completed",
+    "spawnedAt": "2026-05-09T20:34:18.821Z",
+    "workerClass": "codex",
+    "processId": 54223,
+    "workspaceDir": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z",
+    "promptPath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/prompt.md",
+    "outputPath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-last-message.md",
+    "logPath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-worker.log",
+    "gitIdentity": {
+      "name": "Codex Remediation Worker",
+      "email": "codex-remediation-worker@laceyenterprises.com"
+    },
+    "startupEvidence": {
+      "stage": "pre-side-effect-gate",
+      "requestedContract": {
+        "authMode": "local-oauth",
+        "authOwnerUser": "placey",
+        "authHome": "/Users/placey",
+        "authPath": "/Users/placey/.codex/auth.json",
+        "forbiddenFallbacks": [
+          "api-key",
+          "openai-api-key"
+        ],
+        "forbiddenCalls": [
+          "authenticate"
+        ]
+      },
+      "resolvedStartup": {
+        "resolvedAuthMode": "local-oauth",
+        "resolvedAuthOwner": "placey",
+        "authHome": "/Users/placey",
+        "authPath": "/Users/placey/.codex/auth.json",
+        "codexHome": "/Users/placey/.codex"
+      },
+      "sanitizedEnv": {
+        "stripped": [],
+        "gitIdentityOverrides": []
+      },
+      "gitIdentity": {
+        "name": "Codex Remediation Worker",
+        "email": "codex-remediation-worker@laceyenterprises.com"
+      },
+      "policy_violations": []
+    },
+    "command": [
+      "codex",
+      "exec",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--ephemeral",
+      "--output-last-message",
+      "/Users/airlock/agent-os/tools/adversarial-review/data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-last-message.md",
+      "-"
+    ],
+    "workspaceState": {
+      "action": "reused",
+      "reason": "missing"
+    },
+    "replyPath": "/Users/airlock/agent-os-hq/dispatch/remediation-replies/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/remediation-reply.json",
+    "reconciledAt": "2026-05-09T20:46:48.737Z"
+  },
+  "workspaceDir": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z",
+  "completedAt": "2026-05-09T20:46:48.737Z",
+  "completion": {
+    "source": "codex-output-last-message",
+    "workerModel": "codex",
+    "note": "Reconciled from detached worker exit plus non-empty final message artifact.",
+    "finalMessagePath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-last-message.md",
+    "finalMessageBytes": 1778,
+    "finalMessageDigest": "9accbfdfabb72f4030aa932c1fe45c3099324e5adea09dc580737cb6f302e3a9",
+    "preview": "Completed and pushed remediation for PR 307. Changed: - Moved the project spec into canonical discovery shape: [SPEC.md](/Users/airlock/agent-os/tools/adversarial-review/data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026…",
+    "finalMessageSummary": "Completed and pushed remediation for PR 307. Changed: - Moved the project spec into canonical discovery shape: [SPEC.md…",
+    "logPath": "data/follow-up-jobs/workspaces/laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z/.adversarial-follow-up/codex-worker.log"
+  },
+  "reReview": {
+    "requested": true,
+    "requestedAt": "2026-05-09T20:46:48.737Z",
+    "reason": "All blocking review findings have direct spec or plan changes and the moved project spec validates through hq.",
+    "triggered": true,
+    "status": "pending",
+    "outcomeReason": "review-status-reset",
+    "reviewRow": {
+      "repo": "laceyenterprises/agent-os",
+      "prNumber": 307,
+      "reviewer": "codex",
+      "prState": "open",
+      "reviewStatus": "pending",
+      "reviewAttempts": 2,
+      "lastAttemptedAt": "2026-05-09T20:30:16.248Z",
+      "postedAt": null,
+      "failedAt": null
+    }
+  },
+  "commentDelivery": {
+    "posted": true,
+    "attempting": false,
+    "reason": null,
+    "error": null,
+    "timeoutMs": null,
+    "attempts": 1,
+    "firstAttemptAt": "2026-05-09T20:46:48.784Z",
+    "lastAttemptAt": "2026-05-09T20:46:50.757Z",
+    "body": "<!-- adversarial-review-remediation-marker:laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z:r2:completed -->\n### Remediation Worker (codex) — round 2 of 2\n\n**Outcome:** `completed` — re-review queued.\n\n**Summary**\n\n```text\nRebased cleanly onto origin/main, moved the adapter-refactor project spec into the canonical discoverable project path, tightened revision-scoped override and delivery contracts, and reordered the migration plan so schema lands before delivery dedupe depends on it.\n```\n\n**Validation run**\n\n- ```text\ngit fetch origin && git rebase origin/main\n```\n\n- ```text\npython3 -m json.tool projects/adversarial-review-adapter-refactor/SPEC.meta.json\n```\n\n- ```text\npython3 -m json.tool projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json\n```\n\n- ```text\npython3 -m json.tool projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json.linear-mapping.json\n```\n\n- ```text\nssh -o BatchMode=yes airlock@localhost '... hq spec lock projects/adversarial-review-adapter-refactor/SPEC.md'\n```\n\n- ```text\nmodules/worker-pool/bin/hq plan validate projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json\n```\n\n- ```text\ngit diff --check\n```\n\n**Addressed findings**\n\n1. **Revisionless operator override**\n\n   ```text\n   getOverrides returned bare override values without binding them to the subject revision being acted on.\n   ```\n\n   **Action**\n\n   ```text\n   Changed the operator adapter contract to accept expectedRevisionRef, return observedRevisionRef plus actor, eventId, and observedAt, and require the kernel to ignore or fail closed on revision mismatch.\n   ```\n\n   **Files:** `projects/adversarial-review-adapter-refactor/SPEC.md`, `projects/adversarial-review-adapter-refactor/SPEC.meta.json`, `projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json`\n\n2. **Incomplete delivery key contract**\n\n   ```text\n   Public delivery methods did not carry the full revision, round, and kind key needed for safe dedupe and retry.\n   ```\n\n   **Action**\n\n   ```text\n   Introduced DeliveryKey and DeliveryContext and made review, remediation reply, operator notice, retry, and dedupe methods use the same revision-scoped context.\n   ```\n\n   **Files:** `projects/adversarial-review-adapter-refactor/SPEC.md`\n\n3. **Dedupe migration order inversion**\n\n   ```text\n   The comms dedupe carve depended on domain_id, subject_external_id, and revision_ref fields that were scheduled for a later migration.\n   ```\n\n   **Action**\n\n   ```text\n   Inserted an additive ARA-04B schema ticket before ARA-05, made ARA-05 depend on it, and split 30-day replay/new-key preference into the later ARA-07 step.\n   ```\n\n   **Files:** `projects/adversarial-review-adapter-refactor/SPEC.md`, `projects/adversarial-review-adapter-refactor/SPEC.meta.json`, `projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json`\n\n4. **Unimplementable kernel acceptance rule**\n\n   ```text\n   The acceptance criterion banned the raw substring pr, which would also ban unrelated words like prompt and approved.\n   ```\n\n   **Action**\n\n   ```text\n   Replaced the substring ban with an explicit forbidden adapter vocabulary and regex-style concept list while allowing unrelated ordinary words.\n   ```\n\n   **Files:** `projects/adversarial-review-adapter-refactor/SPEC.md`, `projects/adversarial-review-adapter-refactor/SPEC.meta.json`\n\n5. **Noncanonical dispatch spec path**\n\n   ```text\n   The project-shaped spec lived under a noncanonical SPEC-adapter-refactor.md path that project scanners do not discover by default.\n   ```\n\n   **Action**\n\n   ```text\n   Moved the spec, sidecar metadata, plan, and mapping sidecar into projects/adversarial-review-adapter-refactor/ as SPEC.md, SPEC.meta.json, and adjacent plan artifacts; relocked the spec and updated the plan specRef.\n   ```\n\n   **Files:** `projects/adversarial-review-adapter-refactor/SPEC.md`, `projects/adversarial-review-adapter-refactor/SPEC.meta.json`, `projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json`, `projects/adversarial-review-adapter-refactor/adapter-refactor-plan.json.linear-mapping.json`\n\n**Re-review status:** queued — `All blocking review findings have direct spec or plan changes and the moved project spec validates through hq.`\n\n_Posted automatically by the adversarial-review remediation pipeline. Job: `laceyenterprises__agent-os-pr-307-2026-05-09T20-33-22-761Z`._",
+    "repo": "laceyenterprises/agent-os",
+    "prNumber": 307,
+    "workerClass": "codex"
+  }
+}

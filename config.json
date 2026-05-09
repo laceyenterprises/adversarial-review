@@ -10,7 +10,5 @@
     "inReview": "In Review",
     "done": "Done",
     "cancelled": "Cancelled"
-  },
-  "prltHq": "/Users/placey/prlt-hq/Laceyenterprises-hq",
-  "prltBin": "/opt/homebrew/bin/prlt"
+  }
 }

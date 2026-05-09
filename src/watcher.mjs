@@ -708,34 +708,6 @@ const setLinearInReview  = (id) => setLinearState(id, linearStates.inReview);
 const setLinearDone      = (id) => setLinearState(id, linearStates.done);
 const setLinearCancelled = (id) => setLinearState(id, linearStates.cancelled);
 
-// ── prlt linear sync ─────────────────────────────────────────────────────────
-
-const PRLT_HQ = config.prltHq ?? '/Users/placey/prlt-hq/Laceyenterprises-hq';
-const PRLT_BIN = config.prltBin ?? '/opt/homebrew/bin/prlt';
-
-async function runPrltSync() {
-  if (!process.env.LINEAR_API_KEY) return;
-
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      PRLT_BIN,
-      ['linear', 'sync', '--machine'],
-      {
-        cwd: PRLT_HQ,
-        env: { ...process.env },
-        timeout: 60_000,
-      }
-    );
-    const result = JSON.parse(stdout || '{}');
-    const synced = result?.result?.synced ?? result?.result?.tickets?.length ?? '?';
-    console.log(`[watcher] prlt linear sync complete — ${synced} ticket(s) synced`);
-    if (stderr) console.warn(`[watcher] prlt sync stderr: ${stderr.trim()}`);
-  } catch (err) {
-    // Non-fatal — log and continue
-    console.error(`[watcher] prlt linear sync failed:`, err.message);
-  }
-}
-
 // ── Org repo discovery ───────────────────────────────────────────────────────
 
 let activeRepos = config.repos ?? [];
@@ -780,8 +752,6 @@ async function syncPRLifecycle(octokit) {
   const openRows = stmtGetOpenPRs.all();
   if (openRows.length === 0) return;
 
-  let anyChanged = false;
-
   for (const row of openRows) {
     const { repo, pr_number: prNumber, linear_ticket: linearTicketId } = row;
     const [owner, repoName] = repo.split('/');
@@ -800,20 +770,13 @@ async function syncPRLifecycle(octokit) {
       stmtMarkMerged.run(pr.merged_at, repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await setLinearDone(linearTicketId);
-      anyChanged = true;
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
       stmtMarkClosed.run(pr.closed_at ?? new Date().toISOString(), repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await setLinearCancelled(linearTicketId);
-      anyChanged = true;
     }
     // Still open → nothing to do
-  }
-
-  // If anything changed, run prlt sync to keep prlt's DB in step
-  if (anyChanged) {
-    await runPrltSync();
   }
 }
 
@@ -1181,9 +1144,6 @@ async function pollOnce(octokit) {
         result,
         maxRemediationRounds,
       });
-
-      // Sync prlt after each new PR picked up
-      await runPrltSync();
     }
   }
 }

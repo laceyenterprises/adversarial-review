@@ -544,16 +544,12 @@ function queueFollowUpForPostedReview({
     return { queued: false, reason: 'empty-review-body' };
   }
 
-  // Carry the PR's prior remediation-round count and the per-job
-  // maxRounds forward into the new follow-up job. Two effects:
-  //   - `claimNextFollowUpJob`'s `currentRound >= maxRounds` guard
-  //     enforces the cap PR-wide, not per-job, so a PR that has
-  //     already exhausted its remediation budget cannot accidentally
-  //     get another worker spawn from a freshly created job.
-  //   - Legacy jobs created with maxRounds=6 keep that cap; we do not
-  //     overwrite it with the current default.
+  // Carry only the PR's prior remediation-round count into the next
+  // follow-up job. The cap itself must be re-derived from the current
+  // PR's riskClass for each fresh dispatch decision; forwarding
+  // `latestMaxRounds` implicitly lifts future jobs to whatever prior
+  // budget happened to be persisted.
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
-  const carriedMaxRounds = priorLedger.latestMaxRounds;
 
   const { jobPath } = createFollowUpJobImpl({
     rootDir,
@@ -566,7 +562,6 @@ function queueFollowUpForPostedReview({
     reviewPostedAt,
     critical,
     priorCompletedRounds: priorLedger.completedRoundsForPR,
-    ...(carriedMaxRounds ? { maxRemediationRounds: carriedMaxRounds } : {}),
   });
   return { queued: true, jobPath };
 }

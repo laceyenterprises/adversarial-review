@@ -613,9 +613,6 @@ function evaluateRoundBudgetForReview({
   const resolution = resolveRoundBudgetForJob({
     linearTicketId,
     riskClass: ledger.latestRiskClass,
-    remediationPlan: {
-      maxRounds: ledger.latestMaxRounds,
-    },
   }, { rootDir });
 
   return {
@@ -1160,8 +1157,12 @@ async function pollOnce(octokit) {
         repo: repoPath,
         prNumber,
       });
+      const roundBudget = resolveRoundBudgetForJob({
+        linearTicketId,
+        riskClass: ledger.latestRiskClass,
+      }, { rootDir: ROOT });
       const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
-      const maxRemediationRounds = ledger.latestMaxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS;
+      const maxRemediationRounds = roundBudget.roundBudget || DEFAULT_MAX_REMEDIATION_ROUNDS;
 
       const result = await spawnReviewer({
         repo: repoPath,

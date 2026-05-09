@@ -124,6 +124,26 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
 const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
 
+function logRoundBudgetDecision(log, {
+  riskClass,
+  runsCompleted,
+  cap,
+  decision,
+  repo = null,
+  prNumber = null,
+}) {
+  const payload = {
+    event: 'remediation-round-budget',
+    repo,
+    prNumber,
+    riskClass,
+    runsCompleted,
+    cap,
+    decision,
+  };
+  log?.log?.(`[follow-up] ${JSON.stringify(payload)}`);
+}
+
 class OAuthError extends Error {
   constructor(model, reason) {
     super(`[OAuth] ${model} credentials unavailable: ${reason}`);
@@ -2308,6 +2328,16 @@ async function consumeNextFollowUpJob({
     return { consumed: false, reason: 'no-pending-jobs' };
   }
   if (claimed.stopped) {
+    if (claimed.reason === 'max-rounds-reached') {
+      logRoundBudgetDecision(log, {
+        repo: claimed.job?.repo || null,
+        prNumber: Number.isFinite(Number(claimed.job?.prNumber)) ? Number(claimed.job.prNumber) : null,
+        riskClass: claimed.job?.riskClass || null,
+        runsCompleted: Number(claimed.job?.remediationPlan?.currentRound || 0),
+        cap: Number(claimed.job?.remediationPlan?.maxRounds || 0),
+        decision: 'deny',
+      });
+    }
     return {
       consumed: false,
       reason: claimed.reason || 'max-rounds-reached',
@@ -2415,6 +2445,14 @@ async function consumeNextFollowUpJob({
 
     const currentRound = Number(claimed.job?.remediationPlan?.currentRound || 0);
     if (currentRound > roundBudgetResolution.roundBudget) {
+      logRoundBudgetDecision(log, {
+        repo: claimed.job?.repo || null,
+        prNumber: Number.isFinite(Number(claimed.job?.prNumber)) ? Number(claimed.job.prNumber) : null,
+        riskClass: roundBudgetResolution.riskClass,
+        runsCompleted: currentRound,
+        cap: roundBudgetResolution.roundBudget,
+        decision: 'deny',
+      });
       const stoppedAt = now();
       const stopped = await stopConsumedJobWithComment({
         rootDir,

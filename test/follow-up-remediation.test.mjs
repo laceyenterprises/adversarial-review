@@ -1687,6 +1687,42 @@ test('consumeNextFollowUpJob persists max-rounds-reached when a critical-risk jo
   assert.equal(spawnCalls.length, 0);
 });
 
+test('consumeNextFollowUpJob logs a structured deny decision when a remediation round is denied by the round cap', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const logs = [];
+
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 88,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    riskClass: 'medium',
+    reviewBody: '## Summary\nBudget test.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-05-09T01:00:00.000Z',
+    critical: false,
+    priorCompletedRounds: 2,
+  });
+
+  const result = await consumeNextFollowUpJob({
+    rootDir,
+    now: () => '2026-05-09T01:05:00.000Z',
+    promptTemplate: 'You are a remediation worker.',
+    log: {
+      log: (line) => logs.push(line),
+      warn: () => {},
+      error: () => {},
+    },
+  });
+
+  assert.equal(result.consumed, false);
+  assert.equal(result.reason, 'max-rounds-reached');
+  assert.match(
+    logs.find((line) => line.includes('"event":"remediation-round-budget"')) || '',
+    /"riskClass":"medium".*"runsCompleted":2.*"cap":2.*"decision":"deny"/,
+  );
+});
+
 test('reconcileFollowUpJob stops exited workers for no-progress when the final artifact exists without re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, {

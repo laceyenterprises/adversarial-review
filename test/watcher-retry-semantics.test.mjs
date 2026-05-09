@@ -325,14 +325,10 @@ test('watcher defers a pending review while a requeued follow-up job is active (
 });
 
 test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forward (does not downgrade via riskClass)', () => {
-  // Reviewer blocking finding: `resolveRoundBudgetForJob` previously
-  // gave persisted `riskClass` precedence over persisted `maxRounds`.
-  // For a legacy job written with `riskClass='medium'` AND
-  // `maxRounds=6`, the watcher's rereview gate would resolve the
-  // budget to the medium-tier 1 round and immediately skip the
-  // rereview after a single completed remediation cycle — losing five
-  // rounds of legacy budget mid-deploy. The migration guarantee is
-  // that persisted maxRounds wins; a legacy 6-round PR keeps all six.
+  // Dispatch-time decisions must re-derive the cap from the current
+  // PR's riskClass instead of forwarding a prior persisted
+  // `latestMaxRounds`. This prevents a legacy or operator-raised cap
+  // from implicitly lifting future rereview/remediation decisions.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   const created = createFollowUpJob({
@@ -395,7 +391,7 @@ test('evaluateRoundBudgetForReview honors a legacy maxRounds=6 PR carried forwar
 
   assert.equal(decision.skip, false, 'a legacy 6-round PR must NOT be skipped after a single completed round');
   assert.equal(decision.completedRoundsForPR, 1);
-  assert.equal(decision.roundBudget, 6, 'persisted maxRounds=6 must win over the medium-tier downgrade');
+  assert.equal(decision.roundBudget, 2, 'dispatch-time cap should come from the current medium risk tier');
 });
 
 test('evaluateRoundBudgetForReview always allows rereview after a completed remediation (post-2026-05-06 convergence loop)', () => {

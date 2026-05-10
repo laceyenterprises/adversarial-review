@@ -12,6 +12,9 @@ set -euo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export HOME="/Users/placey"
+export USER="placey"
+export LOGNAME="placey"
+export SHELL="/bin/zsh"
 export CODEX_AUTH_PATH="/Users/placey/.codex/auth.json"
 
 # Sanity gate: better-sqlite3 is a native module and breaks across Node ABI

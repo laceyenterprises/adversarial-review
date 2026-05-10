@@ -58,10 +58,16 @@ TICK_INTERVAL_SECONDS="${TICK_INTERVAL_SECONDS:-120}"
 # anyway, sleep instead of crash-looping — same lesson as the watcher's
 # popup-storm incident on 2026-04-26. Keep this BEFORE 1Password resolution
 # so a broken native module produces zero `op read` popups.
-if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >/tmp/adversarial-follow-up-native-check.err 2>&1; then
+# Per-user err-file path. The original `/tmp/adversarial-follow-up-native-check.err`
+# was a single shared path across users, which silently broke the airlock-side
+# launch when an old placey-owned file existed (cross-user redirect denied,
+# masking a healthy ABI as a false mismatch). UID-suffixed paths give every
+# user their own scratch file with no cleanup coupling.
+FOLLOW_UP_NATIVE_CHECK_ERR="/tmp/adversarial-follow-up-native-check.${UID}.err"
+if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$FOLLOW_UP_NATIVE_CHECK_ERR" 2>&1; then
   echo "[follow-up-tick] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
   echo "[follow-up-tick] details:" >&2
-  sed 's/^/  /' /tmp/adversarial-follow-up-native-check.err >&2
+  sed 's/^/  /' "$FOLLOW_UP_NATIVE_CHECK_ERR" >&2
   echo "[follow-up-tick] fix: cd $WATCHER_DIR && npm rebuild better-sqlite3" >&2
   echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; bootout the agent and rebuild to recover sooner." >&2
   sleep 3600

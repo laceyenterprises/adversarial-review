@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-user LaunchAgent for the adversarial-review follow-up daemon running
+  as airlock. Sibling of ai.laceyenterprises.adversarial-follow-up.placey.plist;
+  see that file for the long-lived process model + 1Password / TCC popup
+  rationale (the design notes apply equally here).
+
+  Filename convention + auto-install: see the watcher's `.airlock.plist`
+  for the full migration rationale. The os-restart path copies this
+  file to /Users/airlock/Library/LaunchAgents/ and bootstraps it into
+  airlock's gui domain.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.laceyenterprises.adversarial-follow-up.airlock</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/airlock/agent-os/tools/adversarial-review/scripts/adversarial-follow-up-tick.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/airlock/agent-os/tools/adversarial-review</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/airlock</string>
+        <key>USER</key>
+        <string>airlock</string>
+        <key>LOGNAME</key>
+        <string>airlock</string>
+        <key>SHELL</key>
+        <string>/bin/zsh</string>
+        <key>HQ_ROOT</key>
+        <string>/Users/airlock/agent-os-hq</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/airlock/Library/Logs/adversarial-follow-up.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/airlock/Library/Logs/adversarial-follow-up.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

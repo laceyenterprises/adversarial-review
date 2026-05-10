@@ -53,7 +53,8 @@ import {
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
-import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 
@@ -440,15 +441,9 @@ async function spawnReviewer({
     : '';
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
-  // AbortController ties the reviewer subprocess lifetime to the
-  // watcher process. On normal completion it's a no-op. On a
-  // watchdog-timeout exit (exitForPollDeadline) we abort every
-  // controller in inFlightReviewerControllers BEFORE the parent
-  // exits, which sends SIGTERM to the child via execFile's signal
-  // option. That kill closes the duplicate-review race: without it
-  // the child can keep running after the parent dies, post a review
-  // the parent never recorded, and the next watcher run would spawn
-  // a second reviewer for the same PR.
+  // AbortController ties the reviewer subprocess lifetime to the watcher
+  // process. The child is spawned as its own process group so timeout/abort
+  // cleanup can terminate the reviewer and any CLI subprocesses it created.
   const controller = new AbortController();
   inFlightReviewerControllers.add(controller);
 
@@ -460,14 +455,14 @@ async function spawnReviewer({
       console.log(`[watcher] Using Codex auth for reviewer at ${authPath} with HOME=${home}`);
     }
 
-    const { stdout, stderr } = await execFileAsync(
+    const { stdout, stderr } = await spawnCapturedProcessGroup(
       process.execPath,
       [reviewerPath, args],
       {
         env: reviewerEnv,
         timeout: resolveReviewerTimeoutMs(reviewerEnv),
+        progressTimeout: resolveProgressTimeoutMs(reviewerEnv),
         signal: controller.signal,
-        killSignal: 'SIGTERM',
       }
     );
     if (stdout) console.log(`[reviewer:${prNumber}] ${stdout.trim()}`);

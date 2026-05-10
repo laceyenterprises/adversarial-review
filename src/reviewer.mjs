@@ -19,7 +19,7 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -36,96 +36,53 @@ import {
   fetchLinkedSpecContents,
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
-import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { looksLikeRuntimeJunk, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 
 const execFileAsync = promisify(execFile);
 
-function spawnWithInput(command, args, { env, cwd, input = '', timeout = 0, maxBuffer = 10 * 1024 * 1024 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      env,
-      cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    let timedOut = false;
-
-    const finishReject = (err) => {
-      if (settled) return;
-      settled = true;
-      if (killTimer) clearTimeout(killTimer);
-      reject(err);
-    };
-
-    const killTimer = timeout > 0
-      ? setTimeout(() => {
-          timedOut = true;
-          child.kill('SIGTERM');
-        }, timeout)
-      : null;
-
-    const appendChecked = (target, chunk) => {
-      const next = target + chunk;
-      if (next.length > maxBuffer) {
-        child.kill('SIGTERM');
-        const err = new Error(`spawnWithInput maxBuffer exceeded (${maxBuffer} bytes)`);
-        err.stdout = stdout;
-        err.stderr = stderr;
-        finishReject(err);
-        return null;
-      }
-      return next;
-    };
-
-    child.stdout.on('data', (data) => {
-      if (settled) return;
-      const next = appendChecked(stdout, data.toString());
-      if (next !== null) stdout = next;
-    });
-
-    child.stderr.on('data', (data) => {
-      if (settled) return;
-      const next = appendChecked(stderr, data.toString());
-      if (next !== null) stderr = next;
-    });
-
-    child.on('error', (err) => {
-      if (settled) return;
-      err.stdout = stdout;
-      err.stderr = stderr;
-      finishReject(err);
-    });
-
-    child.on('close', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      if (killTimer) clearTimeout(killTimer);
-      if (code === 0) {
-        resolve({ stdout, stderr, code, signal });
-        return;
-      }
-      const err = new Error(
-        timedOut
-          ? `Command timed out after ${timeout}ms`
-          : `Command failed with code ${code}${signal ? ` signal ${signal}` : ''}`
-      );
-      err.code = code;
-      err.signal = signal;
-      err.stdout = stdout;
-      err.stderr = stderr;
-      reject(err);
-    });
-
-    child.stdin.end(input);
+async function spawnWithInput(command, args, {
+  env,
+  cwd,
+  input = '',
+  timeout = 0,
+  progressTimeout = resolveProgressTimeoutMs(env),
+  killGraceMs,
+  maxBuffer = 10 * 1024 * 1024,
+  signal,
+} = {}) {
+  return spawnCapturedProcessGroup(command, args, {
+    env,
+    cwd,
+    input,
+    timeout,
+    progressTimeout,
+    killGraceMs,
+    maxBuffer,
+    signal,
   });
 }
 
-async function spawnCaptured(command, args, { env, cwd, timeout = 0, maxBuffer = 10 * 1024 * 1024 } = {}) {
-  return spawnWithInput(command, args, { env, cwd, input: '', timeout, maxBuffer });
+async function spawnCaptured(command, args, {
+  env,
+  cwd,
+  timeout = 0,
+  progressTimeout = resolveProgressTimeoutMs(env),
+  killGraceMs,
+  maxBuffer = 10 * 1024 * 1024,
+  signal,
+} = {}) {
+  return spawnWithInput(command, args, {
+    env,
+    cwd,
+    input: '',
+    timeout,
+    progressTimeout,
+    killGraceMs,
+    maxBuffer,
+    signal,
+  });
 }
 
 // ── CLI paths ────────────────────────────────────────────────────────────────
@@ -210,18 +167,19 @@ async function spawnClaude(args, options = {}) {
     }
 
     try {
-      return await execFileImpl(
-        LAUNCHCTL,
-        [
-          'asuser',
-          String(uid),
-          ENV_BIN,
-          ...CLAUDE_STRIPPED_ENV_VARS.flatMap((name) => ['-u', name]),
-          CLAUDE_CLI,
-          ...args,
-        ],
-        execOptions
-      );
+      const command = LAUNCHCTL;
+      const commandArgs = [
+        'asuser',
+        String(uid),
+        ENV_BIN,
+        ...CLAUDE_STRIPPED_ENV_VARS.flatMap((name) => ['-u', name]),
+        CLAUDE_CLI,
+        ...args,
+      ];
+      if (execFileImpl === execFileAsync) {
+        return await spawnCapturedProcessGroup(command, commandArgs, execOptions);
+      }
+      return await execFileImpl(command, commandArgs, execOptions);
     } catch (err) {
       const details = formatChildProcessFailureDetails(err);
       if (!isClaudeLoggedOutStatus(details) && isLaunchctlSessionFailure(details)) {
@@ -231,6 +189,9 @@ async function spawnClaude(args, options = {}) {
     }
   }
 
+  if (execFileImpl === execFileAsync) {
+    return spawnCapturedProcessGroup(CLAUDE_CLI, args, execOptions);
+  }
   return execFileImpl(CLAUDE_CLI, args, execOptions);
 }
 
@@ -1027,7 +988,9 @@ const __test__ = {
   isLaunchctlSessionFailure,
   isClaudeLoggedOutStatus,
   resolveClaudeAuthProbeTimeoutMs,
+  resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
+  spawnCaptured,
 };
 
 export {
@@ -1035,6 +998,7 @@ export {
   CODEX_CLI,
   sanitizeCodexReviewPayload,
   buildReviewerPromptPrefix,
+  spawnCaptured,
   resolveReviewerTimeoutMs,
   isFinalReviewRound,
   detectSpecTouchViolations,

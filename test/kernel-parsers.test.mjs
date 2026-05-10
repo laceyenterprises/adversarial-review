@@ -29,8 +29,14 @@ const remediationJob = failingVerdictJob;
 const remediationReply = readFixture('remediation-reply.json');
 
 test('kernel verdict parser accepts a production passing verdict and renders it stably', () => {
+  // The passing fixture was pre-normalized to sanitizer-canonical form
+  // when committed (see test/fixtures/kernel/passing-verdict-job.json),
+  // so byte-equality must hold against the input as well as on re-run.
+  // A regression that quietly re-cases headings or collapses whitespace
+  // would break the first assert and not silently slip past idempotency.
   const sanitized = sanitizeCodexReviewPayload(passingVerdictJob.reviewBody);
 
+  assert.equal(sanitized, passingVerdictJob.reviewBody);
   assert.equal(sanitizeCodexReviewPayload(sanitized), sanitized);
   assert.equal(extractReviewVerdict(sanitized), 'Comment only');
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(sanitized)), 'comment-only');

@@ -243,7 +243,7 @@ function validateBlockersField(items, options = {}) {
 }
 
 // Parse the `## Blocking Issues` section into structured findings. The
-// review contract (`templates/reviewer-template.md`) requires:
+// review contract (`prompts/reviewer-prompt.md`) requires:
 //   - one bullet item per finding, each with `Title:` / `File:` /
 //     `Lines:` / `Problem:` / `Why it matters:` / `Recommended fix:`
 //     fields
@@ -350,7 +350,7 @@ function usesPerFindingReplyContract(reply) {
 // Enforce that the reply records the same number of accountability
 // entries as there are blocking findings in the review body, summed
 // across `addressed[]`, `pushback[]`, and `blockers[]`. Without this
-// the template's per-finding contract is documentation-only — a worker
+// the reviewer prompt's per-finding contract is documentation-only — a worker
 // can omit findings entirely, claim rereview readiness on a subset of
 // the review, and the public reply becomes a misleading durable
 // record.

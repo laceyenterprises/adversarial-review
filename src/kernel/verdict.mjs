@@ -64,15 +64,6 @@ function sanitizeCodexReviewPayload(reviewText) {
   return sanitized;
 }
 
-export {
-  extractReviewVerdict,
-  looksLikeRuntimeJunk,
-  normalizeReviewVerdict,
-  normalizeWhitespace,
-  sanitizeCodexReviewPayload,
-  titleCaseWords,
-};
-
 function extractReviewVerdict(reviewBody) {
   const match = String(reviewBody ?? '').match(/^##\s+Verdict\s*$\s*([^\n]+)/im);
   return match ? match[1].trim() : null;
@@ -90,4 +81,14 @@ function normalizeReviewVerdict(verdict) {
   if (text.startsWith('approved')) return 'approved';
   return 'unknown';
 }
+
+// normalizeWhitespace and titleCaseWords are intentionally not exported —
+// they are private helpers of sanitizeCodexReviewPayload. Re-introduce
+// exports only when a real second caller appears.
+export {
+  extractReviewVerdict,
+  looksLikeRuntimeJunk,
+  normalizeReviewVerdict,
+  sanitizeCodexReviewPayload,
+};
 

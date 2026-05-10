@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
   ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
+  archiveStoppedFollowUpJobs,
   buildFollowUpJob,
   buildRemediationReply,
   buildStopMetadata,
@@ -185,6 +186,53 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   // High risk = 3 rounds (more iterations before halting for operator).
   assert.equal(persisted.remediationPlan.maxRounds, 3);
   assert.equal(statSync(jobPath).mode & 0o777, 0o644);
+});
+
+test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old into month archive', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  const nowMs = Date.parse('2026-05-10T12:00:00.000Z');
+
+  function writeStoppedJob(id, ageHours) {
+    const jobPath = path.join(stoppedDir, `${id}.json`);
+    writeFollowUpJob(jobPath, {
+      ...buildFollowUpJob({
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 480,
+        reviewerModel: 'codex',
+        reviewBody: '## Summary\nStopped job',
+        reviewPostedAt: '2026-05-09T08:00:00.000Z',
+        critical: false,
+      }),
+      jobId: id,
+      status: 'stopped',
+      stoppedAt: '2026-05-09T12:00:00.000Z',
+    });
+    const mtime = new Date(nowMs - (ageHours * 60 * 60 * 1000));
+    utimesSync(jobPath, mtime, mtime);
+    return jobPath;
+  }
+
+  const fresh = writeStoppedJob('stopped-12h', 12);
+  const boundary = writeStoppedJob('stopped-24h', 24);
+  const old = writeStoppedJob('stopped-48h', 48);
+  writeFileSync(`${old}.posted`, 'sidecar\n', 'utf8');
+  utimesSync(`${old}.posted`, new Date(nowMs - 48 * 60 * 60 * 1000), new Date(nowMs - 48 * 60 * 60 * 1000));
+
+  const result = archiveStoppedFollowUpJobs({ rootDir, nowMs });
+
+  assert.equal(result.scanned, 3);
+  assert.equal(result.archived, 2);
+  assert.equal(existsSync(fresh), true);
+  assert.equal(existsSync(boundary), false);
+  assert.equal(existsSync(old), false);
+
+  const archiveDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped-archived', '2026-05');
+  assert.deepEqual(
+    readdirSync(archiveDir).sort(),
+    ['stopped-24h.json', 'stopped-48h.json', 'stopped-48h.json.posted']
+  );
 });
 
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {
@@ -2812,7 +2860,7 @@ test('requeueFollowUpJobForNextRound accepts stopped:round-budget-exhausted jobs
   assert.equal(requeued.job.status, 'pending');
 });
 
-test('requeueFollowUpJobForNextRound rejects stopped:abandoned jobs', () => {
+test('requeueFollowUpJobForNextRound accepts stopped:abandoned jobs as terminal after a budget bump', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
@@ -2825,14 +2873,17 @@ test('requeueFollowUpJobForNextRound rejects stopped:abandoned jobs', () => {
     stopReason: 'manual abandonment',
   });
 
-  assert.throws(
-    () => requeueFollowUpJobForNextRound({
-      rootDir,
-      jobPath: stopped.jobPath,
-      requestedAt: '2026-04-21T10:06:00.000Z',
-    }),
-    /stopped:abandoned/
-  );
+  const job = readFollowUpJob(stopped.jobPath);
+  job.remediationPlan.maxRounds = 2;
+  writeFollowUpJob(stopped.jobPath, job);
+
+  const requeued = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: stopped.jobPath,
+    requestedAt: '2026-04-21T10:06:00.000Z',
+  });
+
+  assert.equal(requeued.job.status, 'pending');
 });
 
 test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible metadata', () => {

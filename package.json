@@ -4,6 +4,9 @@
   "description": "Adversarial cross-model code review service for agent-built PRs",
   "type": "module",
   "main": "src/watcher.mjs",
+  "bin": {
+    "adversarial-review": "src/cli.mjs"
+  },
   "scripts": {
     "start": "node src/watcher.mjs",
     "review": "node src/reviewer.mjs",
@@ -15,7 +18,8 @@
     "follow-up:stop": "node src/follow-up-stop.mjs",
     "check-branch-protection": "node src/check-branch-protection.mjs",
     "retrigger-review": "node src/retrigger-review.mjs",
-    "retrigger-remediation": "node src/retrigger-remediation.mjs"
+    "retrigger-remediation": "node src/retrigger-remediation.mjs",
+    "reset-pr": "node src/reset-pr.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

@@ -5,6 +5,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -64,6 +65,7 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
   completed: ['data', 'follow-up-jobs', 'completed'],
   failed: ['data', 'follow-up-jobs', 'failed'],
   stopped: ['data', 'follow-up-jobs', 'stopped'],
+  stoppedArchived: ['data', 'follow-up-jobs', 'stopped-archived'],
   workspaces: ['data', 'follow-up-jobs', 'workspaces'],
 });
 
@@ -1243,6 +1245,71 @@ function listFollowUpJobsInDir(rootDir, key) {
     }));
 }
 
+function archiveStoppedFollowUpJobs({
+  rootDir,
+  nowMs = Date.now(),
+  ttlMs = 24 * 60 * 60 * 1000,
+} = {}) {
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  if (!existsSync(stoppedDir)) {
+    return { scanned: 0, archived: 0, skipped: 0, archivedPaths: [] };
+  }
+
+  let scanned = 0;
+  let archived = 0;
+  let skipped = 0;
+  const archivedPaths = [];
+
+  for (const name of readdirSync(stoppedDir).filter((entry) => entry.endsWith('.json')).sort()) {
+    scanned += 1;
+    const sourcePath = join(stoppedDir, name);
+    if (!existsSync(sourcePath)) {
+      skipped += 1;
+      continue;
+    }
+    const st = statSync(sourcePath);
+    if ((nowMs - st.mtimeMs) < ttlMs) {
+      skipped += 1;
+      continue;
+    }
+
+    let job = null;
+    try {
+      job = readFollowUpJob(sourcePath);
+    } catch {}
+
+    const archiveTimestamp = job?.stoppedAt || new Date(st.mtimeMs).toISOString();
+    const archiveMonth = /^\d{4}-(0[1-9]|1[0-2])/.test(archiveTimestamp)
+      ? archiveTimestamp.slice(0, 7)
+      : new Date(nowMs).toISOString().slice(0, 7);
+    const archiveDir = join(getFollowUpJobDir(rootDir, 'stoppedArchived'), archiveMonth);
+    mkdirSync(archiveDir, { recursive: true });
+
+    const targetPath = join(archiveDir, name);
+    if (existsSync(targetPath)) {
+      rmSync(sourcePath, { force: true });
+      skipped += 1;
+      continue;
+    }
+
+    const stem = name.replace(/\.json$/u, '');
+    const relatedNames = readdirSync(stoppedDir)
+      .filter((entry) => (
+        entry === name
+          || entry.startsWith(`${stem}.`)
+          || entry.startsWith(`${stem}-`)
+      ))
+      .sort();
+    for (const entryName of relatedNames) {
+      renameSync(join(stoppedDir, entryName), join(archiveDir, entryName));
+    }
+    archived += 1;
+    archivedPaths.push(targetPath);
+  }
+
+  return { scanned, archived, skipped, archivedPaths };
+}
+
 // Per-PR remediation ledger summary. The bounded loop's "round number"
 // must be derived from the durable follow-up-jobs ledger (the only
 // counter that actually advances when remediation work completes), not
@@ -1995,11 +2062,6 @@ function requeueFollowUpJobForNextRound({
   const currentJob = readFollowUpJob(jobPath);
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
   const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
-  const stoppedCode = currentJob?.remediationPlan?.stop?.code || null;
-  const requeueableStoppedCodes = new Set([
-    'max-rounds-reached',
-    'round-budget-exhausted',
-  ]);
   const stopCode = selectStopCode({
     currentRound,
     maxRounds,
@@ -2010,11 +2072,6 @@ function requeueFollowUpJobForNextRound({
 
   if (currentJob.status === 'pending' || currentJob.status === 'inProgress') {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
-  }
-  if (currentJob.status === 'stopped' && !requeueableStoppedCodes.has(stoppedCode)) {
-    throw new Error(
-      `Cannot requeue follow-up job ${currentJob.jobId} from stopped:${stoppedCode || 'unknown'}`
-    );
   }
   if (!['completed', 'failed', 'stopped'].includes(currentJob.status)) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
@@ -2122,6 +2179,7 @@ export {
   buildStopMetadata,
   buildRemediationReply,
   buildRemediationReplyArtifact,
+  archiveStoppedFollowUpJobs,
   claimNextFollowUpJob,
   createFollowUpJob,
   detectPublicReplyNoiseSignal,

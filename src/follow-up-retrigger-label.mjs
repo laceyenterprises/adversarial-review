@@ -8,10 +8,10 @@
 // re-fire.
 //
 // Eligibility: the latest follow-up job must be in a halted-terminal
-// state (`stopped:max-rounds-reached`, `stopped:round-budget-exhausted`,
-// `failed`, or `completed` with `reReview.requested = true`). Active
-// jobs leave the label in place; the operator can wait out the
-// in-flight round and the next tick will re-evaluate.
+// state (`stopped`, `failed`, or `completed` with
+// `reReview.requested = true`). Active jobs leave the label in place;
+// the operator can wait out the in-flight round and the next tick will
+// re-evaluate.
 //
 // SPEC §5.1.3 documents this as the PR-side counterpart to the CLI.
 
@@ -87,10 +87,7 @@ function isHaltedTerminal(job) {
   if (!job) return false;
   if (job.status === 'failed') return true;
   if (job.status === 'completed' && job?.reReview?.requested === true) return true;
-  if (job.status === 'stopped') {
-    const stopCode = job?.remediationPlan?.stop?.code || null;
-    return ['max-rounds-reached', 'round-budget-exhausted'].includes(stopCode);
-  }
+  if (job.status === 'stopped') return true;
   return false;
 }
 

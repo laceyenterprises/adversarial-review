@@ -328,7 +328,7 @@ test('requeueFollowUpJobForNextRound accepts terminal stopped:round-budget-exhau
   assert.equal(requeued.job.status, 'pending');
 });
 
-test('requeueFollowUpJobForNextRound rejects stopped:abandoned', () => {
+test('requeueFollowUpJobForNextRound accepts terminal stopped:abandoned', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
   const { jobPath } = makeJob(rootDir, {
     status: 'stopped',
@@ -340,7 +340,8 @@ test('requeueFollowUpJobForNextRound rejects stopped:abandoned', () => {
       nextAction: null,
     },
   });
-  assert.throws(() => requeueFollowUpJobForNextRound({ rootDir, jobPath }), /stopped:abandoned/);
+  const requeued = requeueFollowUpJobForNextRound({ rootDir, jobPath });
+  assert.equal(requeued.job.status, 'pending');
 });
 
 test('requeueFollowUpJobForNextRound rejects pending source jobs', () => {

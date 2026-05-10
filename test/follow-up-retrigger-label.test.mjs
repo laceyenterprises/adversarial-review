@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  claimNextFollowUpJob,
   createFollowUpJob,
   readFollowUpJob,
   writeFollowUpJob,
@@ -180,6 +181,37 @@ test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted',
   assert.equal(result.outcome, 'bumped-and-requeued');
   assert.equal(ghCalls.length, 3);
   assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
+});
+
+test('tryRetriggerRemediationFromLabel requeues stopped jobs with non-budget stop codes for the next claim', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'daemon-bounce-safety',
+    currentRound: 1,
+    maxRounds: 2,
+  });
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-stopped-terminal' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+    now: () => '2026-05-09T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  const requeued = readFollowUpJob(result.jobPath);
+  assert.equal(requeued.status, 'pending');
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    workerType: 'codex-remediation',
+    claimedAt: '2026-05-09T18:00:01.000Z',
+  });
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.match(claimed.jobPath, /data\/follow-up-jobs\/in-progress\/.+\.json$/);
 });
 
 test('tryRetriggerRemediationFromLabel works on completed jobs that requested re-review', async () => {

@@ -125,12 +125,6 @@ function remediationEligibility(job) {
   if (job.status === 'completed' && job?.reReview?.requested !== true) {
     return { ok: false, outcome: 'refused:not-eligible', detail: 'completed-without-rereview-request' };
   }
-  if (job.status === 'stopped') {
-    const stopCode = job?.remediationPlan?.stop?.code || null;
-    if (!['max-rounds-reached', 'round-budget-exhausted'].includes(stopCode)) {
-      return { ok: false, outcome: 'refused:not-eligible', detail: `stopped:${stopCode || 'unknown'}` };
-    }
-  }
   if (!['completed', 'failed', 'stopped'].includes(job.status)) {
     return { ok: false, outcome: 'refused:not-eligible', detail: job.status };
   }

@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEFAULT_PROGRESS_TIMEOUT_MS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
+  resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
 
@@ -33,4 +35,16 @@ test('resolveReviewerTimeoutMs rejects non-positive / non-numeric overrides and 
 
 test('resolveReviewerTimeoutMs floors fractional millisecond values', () => {
   assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '120000.7' }), 120000);
+});
+
+test('default reviewer progress timeout is 5 minutes', () => {
+  assert.equal(DEFAULT_PROGRESS_TIMEOUT_MS, 5 * 60 * 1000);
+});
+
+test('resolveProgressTimeoutMs follows the reviewer env override parser shape', () => {
+  assert.equal(resolveProgressTimeoutMs({}), DEFAULT_PROGRESS_TIMEOUT_MS);
+  assert.equal(resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '' }), DEFAULT_PROGRESS_TIMEOUT_MS);
+  assert.equal(resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500.9' }), 2500);
+  assert.equal(resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '0' }), DEFAULT_PROGRESS_TIMEOUT_MS);
+  assert.equal(resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: 'nope' }), DEFAULT_PROGRESS_TIMEOUT_MS);
 });

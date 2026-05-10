@@ -15,9 +15,13 @@ function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
   const actualSignal = String(error?.signal || '').toUpperCase();
   const expectedSignal = String(killSignal || 'SIGTERM').toUpperCase();
   return (
-    error?.killed === true &&
-    actualSignal === expectedSignal &&
-    String(error?.code || '').toUpperCase() !== 'ABORT_ERR'
+    error?.timedOut === true ||
+    error?.progressTimedOut === true ||
+    (
+      error?.killed === true &&
+      (actualSignal === expectedSignal || actualSignal === 'SIGKILL') &&
+      String(error?.code || '').toUpperCase() !== 'ABORT_ERR'
+    )
   );
 }
 

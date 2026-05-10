@@ -9,6 +9,7 @@
 // more headroom by default; operators can tune further via the existing
 // ADVERSARIAL_REVIEWER_TIMEOUT_MS env override."
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
+const DEFAULT_PROGRESS_TIMEOUT_MS = 5 * 60 * 1000;
 
 function resolveReviewerTimeoutMs(env = process.env) {
   const raw = env.ADVERSARIAL_REVIEWER_TIMEOUT_MS;
@@ -22,7 +23,21 @@ function resolveReviewerTimeoutMs(env = process.env) {
   return Math.floor(parsed);
 }
 
+function resolveProgressTimeoutMs(env = process.env) {
+  const raw = env.ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS;
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_PROGRESS_TIMEOUT_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_PROGRESS_TIMEOUT_MS;
+  }
+  return Math.floor(parsed);
+}
+
 export {
+  DEFAULT_PROGRESS_TIMEOUT_MS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
+  resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
 };

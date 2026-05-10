@@ -20,7 +20,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -200,6 +200,39 @@ function resolveCodexAuthPath() {
   // not necessarily under the current process HOME. CODEX_AUTH_PATH env var
   // allows explicit override; otherwise default to placey's home.
   return process.env.CODEX_AUTH_PATH || '/Users/placey/.codex/auth.json';
+}
+
+function resolveCodexHome(env = process.env) {
+  return env.CODEX_HOME || '/Users/airlock/.codex-acp-placey';
+}
+
+function resolveCodexSourceConfigPath(authPath = resolveCodexAuthPath(), env = process.env) {
+  return join(env.CODEX_SOURCE_HOME || dirname(authPath), 'config.toml');
+}
+
+function shouldRefreshCodexConfig(sourcePath, targetPath) {
+  if (!existsSync(sourcePath)) return false;
+  if (!existsSync(targetPath)) return true;
+
+  const sourceStat = statSync(sourcePath);
+  const targetStat = statSync(targetPath);
+  return sourceStat.mtimeMs > targetStat.mtimeMs;
+}
+
+function syncCodexRuntimeConfig({
+  authPath = resolveCodexAuthPath(),
+  codexHome = resolveCodexHome(),
+  sourceConfigPath = resolveCodexSourceConfigPath(authPath),
+} = {}) {
+  mkdirSync(codexHome, { recursive: true });
+  const targetConfigPath = join(codexHome, 'config.toml');
+
+  if (shouldRefreshCodexConfig(sourceConfigPath, targetConfigPath)) {
+    copyFileSync(sourceConfigPath, targetConfigPath);
+    chmodSync(targetConfigPath, 0o600);
+  }
+
+  return { codexHome, sourceConfigPath, targetConfigPath };
 }
 
 /**
@@ -636,12 +669,14 @@ async function reviewWithCodex(diff, extraContext = '', { isFinalRound = false }
   const promptPrefix = buildReviewerPromptPrefix({ isFinalRound });
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const authPath = resolveCodexAuthPath();
+  const { codexHome, sourceConfigPath, targetConfigPath } = syncCodexRuntimeConfig({ authPath });
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
 
   const env = {
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     CODEX_AUTH_PATH: authPath,
+    CODEX_HOME: codexHome,
     HOME: process.env.HOME || '/Users/placey',
   };
   delete env.OPENAI_API_KEY;
@@ -649,7 +684,7 @@ async function reviewWithCodex(diff, extraContext = '', { isFinalRound = false }
   let stdout = '';
   let stderr = '';
   try {
-    console.error('[reviewWithCodex] invoking native Codex CLI');
+    console.error(`[reviewWithCodex] invoking native Codex CLI with CODEX_HOME=${codexHome}; config=${targetConfigPath}; sourceConfig=${sourceConfigPath}`);
     const result = await spawnCaptured(
       CODEX_CLI,
       [
@@ -991,6 +1026,10 @@ const __test__ = {
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
   spawnCaptured,
+  resolveCodexHome,
+  resolveCodexSourceConfigPath,
+  shouldRefreshCodexConfig,
+  syncCodexRuntimeConfig,
 };
 
 export {

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 
@@ -9,7 +12,9 @@ const {
   LAUNCHCTL,
   queueFollowUpForPostedReview,
   resolveReviewerTimeoutMs,
+  shouldRefreshCodexConfig,
   spawnClaude,
+  syncCodexRuntimeConfig,
 } = __test__;
 
 function queueWithFakes(reviewText) {
@@ -199,6 +204,39 @@ test('reviewer timeout defaults to 20m and honors explicit positive env override
   assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '12345' }), 12345);
   assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '0' }), 20 * 60 * 1000);
   assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: 'not-a-number' }), 20 * 60 * 1000);
+});
+
+test('Codex runtime config is copied into CODEX_HOME and refreshed only when source is newer', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-codex-home-'));
+  try {
+    const sourceDir = join(root, 'placey-codex');
+    const targetDir = join(root, 'airlock-codex');
+    const sourceConfigPath = join(sourceDir, 'config.toml');
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(sourceConfigPath, 'model = "gpt-5.5"\n');
+
+    const first = syncCodexRuntimeConfig({
+      authPath: join(sourceDir, 'auth.json'),
+      codexHome: targetDir,
+      sourceConfigPath,
+    });
+    assert.equal(first.targetConfigPath, join(targetDir, 'config.toml'));
+    assert.equal(readFileSync(first.targetConfigPath, 'utf8'), 'model = "gpt-5.5"\n');
+    assert.equal(statSync(first.targetConfigPath).mode & 0o777, 0o600);
+
+    writeFileSync(first.targetConfigPath, 'model = "local-copy"\n');
+    assert.equal(shouldRefreshCodexConfig(sourceConfigPath, first.targetConfigPath), false);
+    syncCodexRuntimeConfig({ codexHome: targetDir, sourceConfigPath });
+    assert.equal(readFileSync(first.targetConfigPath, 'utf8'), 'model = "local-copy"\n');
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(sourceConfigPath, 'model = "gpt-5.4"\n');
+    assert.equal(shouldRefreshCodexConfig(sourceConfigPath, first.targetConfigPath), true);
+    syncCodexRuntimeConfig({ codexHome: targetDir, sourceConfigPath });
+    assert.equal(readFileSync(first.targetConfigPath, 'utf8'), 'model = "gpt-5.4"\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('spawnClaude wraps claude in launchctl asuser on darwin', async () => {

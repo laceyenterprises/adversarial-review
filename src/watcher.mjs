@@ -398,13 +398,15 @@ function extractLinearTicketId(prTitle) {
 function resolveCodexReviewerEnv(reviewerEnv) {
   const sourceDir = process.env.CODEX_SOURCE_HOME || '/Users/placey/.codex';
   const sourceAuthPath = join(sourceDir, 'auth.json');
+  const codexHome = process.env.CODEX_REVIEWER_CODEX_HOME || '/Users/airlock/.codex-acp-placey';
 
   reviewerEnv.HOME = reviewerEnv.HOME || '/Users/airlock';
   reviewerEnv.CODEX_AUTH_PATH = sourceAuthPath;
+  reviewerEnv.CODEX_HOME = codexHome;
   reviewerEnv.CODEX_SOURCE_HOME = sourceDir;
   delete reviewerEnv.OPENAI_API_KEY;
 
-  return { authPath: sourceAuthPath, home: reviewerEnv.HOME };
+  return { authPath: sourceAuthPath, codexHome, home: reviewerEnv.HOME };
 }
 
 // ── Reviewer spawning ────────────────────────────────────────────────────────

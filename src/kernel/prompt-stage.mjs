@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const STAGES = new Set(['first', 'middle', 'last']);
+const PROMPT_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/;
 
 function toPositiveNumber(value) {
   const number = Number(value);
@@ -20,6 +21,13 @@ function assertStage(stage) {
   return stage;
 }
 
+function assertPromptPathSegment(name, value) {
+  if (!PROMPT_PATH_SEGMENT.test(value)) {
+    throw new Error(`${name} must match ${PROMPT_PATH_SEGMENT}`);
+  }
+  return value;
+}
+
 function pickReviewerStage({
   reviewAttemptNumber,
   completedRemediationRounds,
@@ -29,6 +37,9 @@ function pickReviewerStage({
   const completed = toNonNegativeNumber(completedRemediationRounds);
   const cap = toPositiveNumber(maxRemediationRounds);
 
+  if (attempt === null && completed === null && cap === null) {
+    throw new Error('pickReviewerStage requires review attempt context');
+  }
   if (attempt === 1 && completed === 0) return 'first';
   if (completed !== null && cap !== null && completed >= cap) return 'last';
   return 'middle';
@@ -41,8 +52,8 @@ function pickRemediatorStage({
   const round = toPositiveNumber(remediationRound);
   const cap = toPositiveNumber(maxRemediationRounds);
 
-  if (round === 1) return 'first';
   if (round !== null && cap !== null && round >= cap) return 'last';
+  if (round === 1) return 'first';
   return 'middle';
 }
 
@@ -58,7 +69,12 @@ function loadStagePrompt({
 
   const selectedStage = assertStage(stage);
   return readFileSync(
-    join(rootDir, 'prompts', promptSet, `${actor}.${selectedStage}.md`),
+    join(
+      rootDir,
+      'prompts',
+      assertPromptPathSegment('promptSet', promptSet),
+      `${assertPromptPathSegment('actor', actor)}.${selectedStage}.md`,
+    ),
     'utf8',
   ).trim();
 }

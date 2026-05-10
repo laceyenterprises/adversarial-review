@@ -132,10 +132,9 @@ in the worker log; the reply JSON is the public PR-comment substrate.
 The contract example below uses **empty arrays** for `addressed`,
 `pushback`, and `blockers`. That is intentional — replace the empty
 arrays with the entries you actually want to record. Do **not** copy
-the example shapes from this section verbatim; the validator
-recognizes the prompt's exact placeholder strings (the
-`Replace this with…` / `Replace with…` / `Optional list of files…`
-sentinels) and will reject the reply. Legitimate review language
+the example shapes from this section verbatim; the validator rejects
+the literal placeholder strings `Replace this with…`, `Replace with…`,
+and `Optional list of files…` if they appear in your reply. Legitimate review language
 that happens to start with similar wording — e.g.
 `"Replace with parameterized queries"` as a real action, or
 `"Replace this regex; it can backtrack exponentially"` as a real

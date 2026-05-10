@@ -336,10 +336,20 @@ const ADVERSARIAL_PROMPT = loadStagePrompt({
   stage: 'first',
 });
 
-// Kept as a named export for tests that pin the final-round threshold text.
-// Rendering now reads prompts/code-pr/reviewer.last.md through prompt-stage.
-const REVIEWER_FINAL_ROUND_ADDENDUM_PATH = join(__dirname, '..', 'prompts', 'reviewer-prompt-final-round-addendum.md');
-const ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM = readFileSync(REVIEWER_FINAL_ROUND_ADDENDUM_PATH, 'utf8').trim();
+const ADVERSARIAL_PROMPT_FINAL_ROUND = loadStagePrompt({
+  rootDir: ROOT,
+  promptSet: REVIEWER_PROMPT_SET,
+  actor: 'reviewer',
+  stage: 'last',
+});
+const FINAL_ROUND_PROMPT_SEPARATOR = '\n\n---\n\n';
+const ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM = ADVERSARIAL_PROMPT_FINAL_ROUND.startsWith(
+  `${ADVERSARIAL_PROMPT}${FINAL_ROUND_PROMPT_SEPARATOR}`,
+)
+  ? ADVERSARIAL_PROMPT_FINAL_ROUND.slice(
+      `${ADVERSARIAL_PROMPT}${FINAL_ROUND_PROMPT_SEPARATOR}`.length,
+    )
+  : ADVERSARIAL_PROMPT_FINAL_ROUND;
 
 function buildReviewerPromptPrefix({
   isFinalRound = false,

@@ -29,7 +29,7 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 // reviewer prompt (the final-round review only blocks on data
 // corruption / secret leakage / security regression / broken
 // external contract; everything else becomes a non-blocking note for
-// human review). See prompts/reviewer-prompt-final-round-addendum.md.
+// human review). See prompts/code-pr/reviewer.last.md.
 //
 // Legacy jobs persisted with the old 3- or 6-round caps keep their
 // persisted value via the per-job `remediationPlan.maxRounds` field;

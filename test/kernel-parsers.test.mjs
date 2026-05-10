@@ -73,3 +73,117 @@ test('kernel remediation-reply validator rejects blocked outcome with empty bloc
     /outcome is "blocked" but blockers is empty/
   );
 });
+
+// Sanitizer "actual cleaning paths" coverage. The pre-normalized fixture
+// tests above only prove idempotency on already-clean input. This test
+// drives messy input through the transforms the sanitizer actually
+// performs (heading-level collapse, recognized-section title-casing,
+// trailing-colon strip) and pins the canonical output, so a regression
+// in any of those transforms fails loudly here even when the production
+// fixture happens not to exercise the broken path.
+test('kernel sanitizer collapses heading levels and title-cases recognized sections', () => {
+  const messy = [
+    '# summary',
+    'Real summary body.',
+    '',
+    '### blocking issues:',
+    '- None.',
+    '',
+    '#### NON-BLOCKING ISSUES',
+    '- Lint smell.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  // Per the sanitizer:
+  //   - `# `, `### `, `#### ` all collapse to `## `
+  //   - recognized headings (`summary`/`blocking issues`/`non-blocking
+  //     issues`/`suggested fixes`/`verdict`) get title-cased per word
+  //     (so "non-blocking" stays as one hyphenated token; only the first
+  //     letter uppercases)
+  //   - trailing colons on the heading line are stripped
+  //   - extractReviewVerdict reads the line after `## Verdict`
+  const expected = [
+    '## Summary',
+    'Real summary body.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    '',
+    '## Non-blocking Issues',
+    '- Lint smell.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  const sanitized = sanitizeCodexReviewPayload(messy);
+
+  assert.equal(sanitized, expected);
+  assert.equal(extractReviewVerdict(sanitized), 'Comment only');
+  assert.equal(normalizeReviewVerdict('Comment only'), 'comment-only');
+  // Idempotency on already-clean output must still hold.
+  assert.equal(sanitizeCodexReviewPayload(sanitized), sanitized);
+});
+
+test('kernel sanitizer stops processing further sections after a duplicate is seen', () => {
+  // The sanitizer's `firstSeen` dedup BREAKS the section walk on the
+  // first duplicate heading. Sections AFTER the duplicate are not
+  // processed (so a malicious second `## Verdict` cannot override the
+  // first one's text via further section trims). Content of the first
+  // Verdict section's slice still extends to end-of-file — the dedup is
+  // a "stop processing more headings" signal, not a content-trimmer.
+  const dupVerdict = [
+    '## Summary',
+    'First.',
+    '',
+    '## Blocking Issues',
+    '- F1',
+    '',
+    '## Verdict',
+    'Comment only',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const sanitized = sanitizeCodexReviewPayload(dupVerdict);
+
+  // First Verdict must be the one extractReviewVerdict returns, even
+  // though the duplicate's "Request changes" text is still present in
+  // the trailing slice.
+  assert.equal(extractReviewVerdict(sanitized), 'Comment only');
+});
+
+test('kernel sanitizer rejects payloads missing required Summary/Verdict sections', () => {
+  // Verdict present, Summary missing.
+  assert.throws(
+    () => sanitizeCodexReviewPayload([
+      '## Blocking Issues',
+      '- Real finding.',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n')),
+    /missing required Summary\/Verdict sections/
+  );
+
+  // Summary present, Verdict missing.
+  assert.throws(
+    () => sanitizeCodexReviewPayload([
+      '## Summary',
+      'Some review body.',
+      '',
+      '## Blocking Issues',
+      '- One finding.',
+    ].join('\n')),
+    /missing required Summary\/Verdict sections/
+  );
+
+  // No recognizable sections at all (empty markdown body) — distinct error path.
+  assert.throws(
+    () => sanitizeCodexReviewPayload('not a review at all'),
+    /did not contain recognizable review sections/
+  );
+});

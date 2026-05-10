@@ -342,14 +342,10 @@ const ADVERSARIAL_PROMPT_FINAL_ROUND = loadStagePrompt({
   actor: 'reviewer',
   stage: 'last',
 });
-const FINAL_ROUND_PROMPT_SEPARATOR = '\n\n---\n\n';
-const ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM = ADVERSARIAL_PROMPT_FINAL_ROUND.startsWith(
-  `${ADVERSARIAL_PROMPT}${FINAL_ROUND_PROMPT_SEPARATOR}`,
-)
-  ? ADVERSARIAL_PROMPT_FINAL_ROUND.slice(
-      `${ADVERSARIAL_PROMPT}${FINAL_ROUND_PROMPT_SEPARATOR}`.length,
-    )
-  : ADVERSARIAL_PROMPT_FINAL_ROUND;
+const ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM = readFileSync(
+  join(ROOT, 'prompts', REVIEWER_PROMPT_SET, 'reviewer.last.addendum.md'),
+  'utf8',
+).trim();
 
 function buildReviewerPromptPrefix({
   isFinalRound = false,

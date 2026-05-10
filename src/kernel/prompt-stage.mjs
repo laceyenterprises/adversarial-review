@@ -40,7 +40,7 @@ function pickReviewerStage({
   if (attempt === null && completed === null && cap === null) {
     throw new Error('pickReviewerStage requires review attempt context');
   }
-  if (attempt === 1 && completed === 0) return 'first';
+  if (attempt === 1 || completed === 0 || completed === null) return 'first';
   if (completed !== null && cap !== null && completed >= cap) return 'last';
   return 'middle';
 }
@@ -52,6 +52,7 @@ function pickRemediatorStage({
   const round = toPositiveNumber(remediationRound);
   const cap = toPositiveNumber(maxRemediationRounds);
 
+  if (round === null) return 'first';
   if (round !== null && cap !== null && round >= cap) return 'last';
   if (round === 1) return 'first';
   return 'middle';

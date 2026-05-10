@@ -68,6 +68,13 @@ test('reviewer middle rereview uses the focused middle prompt', () => {
   assert.match(rendered.prompt, /This is a re-review after a remediation round/);
 });
 
+test('reviewer partial or invalid context defaults to first unless mid-cycle is proven', () => {
+  assert.equal(pickReviewerStage({ maxRemediationRounds: 2 }), 'first');
+  assert.equal(pickReviewerStage({ reviewAttemptNumber: 3, maxRemediationRounds: 2 }), 'first');
+  assert.equal(pickReviewerStage({ reviewAttemptNumber: 2, completedRemediationRounds: 1 }), 'middle');
+  assert.equal(pickReviewerStage({ completedRemediationRounds: 1, maxRemediationRounds: 3 }), 'middle');
+});
+
 test('reviewer final review uses the staged final prompt', () => {
   for (const fixture of [
     { reviewAttemptNumber: 2, completedRemediationRounds: 1, maxRemediationRounds: 1 },
@@ -123,6 +130,12 @@ test('remediator stages select first, middle, and last by remediation round', ()
   assert.notEqual(last.prompt, readPrompt('code-pr', 'remediator.first.md'));
   assert.match(last.prompt, /This is the last remediation round available/);
   assert.equal(singleRound.prompt, readPrompt('code-pr', 'remediator.last.md'));
+});
+
+test('remediator invalid or partial context falls back to first instead of silently selecting middle', () => {
+  assert.equal(pickRemediatorStage({}), 'first');
+  assert.equal(pickRemediatorStage({ remediationRound: 0, maxRemediationRounds: 3 }), 'first');
+  assert.equal(pickRemediatorStage({ maxRemediationRounds: 3 }), 'first');
 });
 
 test('loadStagePrompt rejects unsafe prompt path segments', () => {

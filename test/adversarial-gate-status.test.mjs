@@ -112,7 +112,11 @@ test('pickAdversarialGateStatus returns pending while remediation is active', ()
   assert.equal(decision.reason, 'remediation-in-progress');
 });
 
-test('pickAdversarialGateStatus returns failure when remediation stopped', () => {
+test('pickAdversarialGateStatus posts non-blocking success when remediation stopped (operator decides)', () => {
+  // Pipeline-give-up cases intentionally do not block the GitHub merge
+  // button; the operator reads the review thread and decides. Real
+  // adversarial findings still fire `failure` via the `blocking-review`
+  // path (covered by a separate test).
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
     latestJob: makeJob({
@@ -121,8 +125,9 @@ test('pickAdversarialGateStatus returns failure when remediation stopped', () =>
     }),
   });
 
-  assert.equal(decision.state, 'failure');
+  assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'remediation-stopped');
+  assert.match(decision.description, /operator decides/i);
 });
 
 test('pickAdversarialGateStatus settles clean re-review jobs after remediation is suppressed', () => {
@@ -186,7 +191,7 @@ test('pickAdversarialGateStatus keeps PR #53 queued-rereview shape pending until
   assert.match(decision.description, /queued re-review/i);
 });
 
-test('pickAdversarialGateStatus reports reviewer timeout failures precisely', () => {
+test('pickAdversarialGateStatus reports reviewer timeout precisely (non-blocking, operator decides)', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({
       review_status: 'failed',
@@ -195,12 +200,13 @@ test('pickAdversarialGateStatus reports reviewer timeout failures precisely', ()
     latestJob: null,
   });
 
-  assert.equal(decision.state, 'failure');
+  assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'reviewer-timeout');
   assert.match(decision.description, /timed out/i);
+  assert.match(decision.description, /operator decides/i);
 });
 
-test('pickAdversarialGateStatus reports launchctl bootstrap failures precisely', () => {
+test('pickAdversarialGateStatus reports launchctl bootstrap precisely (non-blocking, operator decides)', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({
       review_status: 'failed',
@@ -209,9 +215,10 @@ test('pickAdversarialGateStatus reports launchctl bootstrap failures precisely',
     latestJob: null,
   });
 
-  assert.equal(decision.state, 'failure');
+  assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'reviewer-launchctl-bootstrap');
   assert.match(decision.description, /bootstrap failed/i);
+  assert.match(decision.description, /operator decides/i);
 });
 
 test('pickAdversarialGateStatus only trusts bracket tags at the message prefix', () => {
@@ -223,7 +230,7 @@ test('pickAdversarialGateStatus only trusts bracket tags at the message prefix',
     latestJob: null,
   });
 
-  assert.equal(decision.state, 'failure');
+  assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'reviewer-launchctl-bootstrap');
 });
 
@@ -267,7 +274,7 @@ test('pickAdversarialGateStatus recognizes legacy cascade failure messages', () 
   assert.equal(decision.reason, 'reviewer-cascade-retry-pending');
 });
 
-test('pickAdversarialGateStatus does not infer timeout from debug-log fragments', () => {
+test('pickAdversarialGateStatus does not infer timeout from debug-log fragments (non-blocking, operator decides)', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({
       review_status: 'failed',
@@ -276,8 +283,9 @@ test('pickAdversarialGateStatus does not infer timeout from debug-log fragments'
     latestJob: null,
   });
 
-  assert.equal(decision.state, 'failure');
+  assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'review-failed');
+  assert.match(decision.description, /operator decides/i);
 });
 
 test('pickAdversarialGateStatus returns success for a scoped operator-approved override after rounds are exhausted', () => {

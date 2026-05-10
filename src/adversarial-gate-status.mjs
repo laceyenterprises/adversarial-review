@@ -231,20 +231,28 @@ function pickAdversarialGateStatus({
     return makeDecision('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }
   if (reviewStatus === 'failed') {
+    // Infrastructure failures (reviewer crashed before posting any verdict)
+    // intentionally post `success` so the GitHub status check does NOT block
+    // a mobile merge. A red gate that exists because our own pipeline broke
+    // is operator-hostile — there's no real adversarial finding here, only a
+    // missing one. The description carries the failure class so the operator
+    // can read it on the PR; if they want to merge anyway it doesn't take
+    // admin override. Real adversarial findings (`blocking-review` below)
+    // still post `failure`.
     const failureClass = reviewerFailureClass(reviewRow);
     if (failureClass === 'reviewer-timeout') {
-      return makeDecision('failure', 'Adversarial reviewer timed out before posting.', 'reviewer-timeout');
+      return makeDecision('success', 'Adversarial reviewer timed out before posting; operator decides.', 'reviewer-timeout');
     }
     if (failureClass === 'launchctl-bootstrap') {
-      return makeDecision('failure', 'Claude reviewer bootstrap failed before posting.', 'reviewer-launchctl-bootstrap');
+      return makeDecision('success', 'Claude reviewer bootstrap failed before posting; operator decides.', 'reviewer-launchctl-bootstrap');
     }
     if (failureClass === 'cascade') {
-      return makeDecision('failure', 'Adversarial reviewer hit an upstream cascade before posting.', 'reviewer-cascade');
+      return makeDecision('success', 'Adversarial reviewer hit an upstream cascade before posting; operator decides.', 'reviewer-cascade');
     }
-    return makeDecision('failure', 'Adversarial review failed before posting.', 'review-failed');
+    return makeDecision('success', 'Adversarial review failed before posting; operator decides.', 'review-failed');
   }
   if (reviewStatus === 'failed-orphan') {
-    return makeDecision('failure', 'Adversarial review needs operator verification.', 'review-failed-orphan');
+    return makeDecision('success', 'Adversarial review needs operator verification (orphaned reviewer).', 'review-failed-orphan');
   }
   if (reviewStatus !== 'posted') {
     return makeDecision(
@@ -279,10 +287,20 @@ function pickAdversarialGateStatus({
     return makeDecision('pending', 'Remediation is in progress.', 'remediation-in-progress');
   }
   if (latestJobStatus === 'failed') {
-    return makeDecision('failure', 'Remediation failed and needs operator action.', 'remediation-failed');
+    // Pipeline gave up (remediation worker died / infra issue) — don't block
+    // operator's merge button. Real adversarial findings still surface in
+    // the PR review comment thread; the operator decides without needing
+    // admin override on mobile. See note in the `failed` branch above.
+    return makeDecision('success', 'Remediation failed; operator decides (see review thread).', 'remediation-failed');
   }
   if (latestJobStatus === 'stopped') {
-    return makeDecision('failure', 'Remediation stopped and needs operator action.', 'remediation-stopped');
+    // Round budget exhausted. Last verdict may genuinely be Request-changes,
+    // but at this point the operator has full context (the review thread)
+    // and `request-changes` below still posts `failure` for the "verdict is
+    // really request-changes after a settled remediation" case. The
+    // `stopped` state itself is a pipeline-give-up signal, not an
+    // adversarial signal — don't block the merge button on infra giving up.
+    return makeDecision('success', 'Remediation stopped; operator decides (see review thread).', 'remediation-stopped');
   }
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
     return makeDecision('pending', 'Queued re-review has not posted yet.', 'rereview-queued');

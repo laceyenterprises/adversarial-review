@@ -243,7 +243,7 @@ function validateBlockersField(items, options = {}) {
 }
 
 // Parse the `## Blocking Issues` section into structured findings. The
-// review contract (`prompts/reviewer-prompt.md`) requires:
+// review contract (`prompts/code-pr/reviewer.*.md`) requires:
 //   - one bullet item per finding, each with `Title:` / `File:` /
 //     `Lines:` / `Problem:` / `Why it matters:` / `Recommended fix:`
 //     fields

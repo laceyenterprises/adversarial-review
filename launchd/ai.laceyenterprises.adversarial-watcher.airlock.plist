@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-user LaunchAgent for the adversarial-review watcher running as airlock.
+
+  Filename convention: `.airlock.plist` is the airlock-side variant of
+  `.placey.plist`. The os-restart auto-install path (see scripts/os-restart.sh
+  INSTALLABLE_USER_AGENT_PLISTS) copies this file to
+  `/Users/airlock/Library/LaunchAgents/ai.laceyenterprises.adversarial-watcher.airlock.plist`
+  and bootstraps it into airlock's gui domain.
+
+  Why airlock instead of placey: the watcher invokes `hq dispatch` for
+  merge-agent jobs, which must run as the HQ ownerUser (`airlock` on
+  this host). When the watcher ran as placey, every merge-agent
+  dispatch hit `[hq] error: OWNER_MISMATCH running as 'placey' but
+  HQ ownerUser is 'airlock'`, swallowed as `Command failed: ...` by
+  the watcher's then-opaque execFile error handling. Migrating the
+  watcher to airlock makes the dispatch a same-user call. See the
+  PR #324 / #329 chain for the full diagnosis.
+
+  Prereqs that must be in place on airlock BEFORE this plist boots:
+    - `claude` CLI logged in (`sudo -u airlock claude login` produces
+       a usable `claude auth status`)
+    - `gh` CLI logged in to an account with repo access
+    - the 1Password service account env at
+      `/Users/airlock/agent-os/agents/clio/credentials/local/op-service-account.env`
+      is readable by airlock (it already is for the dispatch-daemon)
+
+  Label suffix: `.airlock` distinguishes from any concurrent
+  `.placey.plist`. Cross-user labels must not collide; even after the
+  placey LaunchAgent is bootout'd, leaving a distinct label gives
+  per-user audit logs and parallel troubleshooting.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.laceyenterprises.adversarial-watcher.airlock</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/airlock/agent-os/tools/adversarial-review/scripts/adversarial-watcher-start.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/airlock/agent-os/tools/adversarial-review</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/airlock</string>
+        <key>USER</key>
+        <string>airlock</string>
+        <key>LOGNAME</key>
+        <string>airlock</string>
+        <key>SHELL</key>
+        <string>/bin/zsh</string>
+        <key>HQ_ROOT</key>
+        <string>/Users/airlock/agent-os-hq</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/airlock/Library/Logs/adversarial-watcher.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/airlock/Library/Logs/adversarial-watcher.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

@@ -18,10 +18,16 @@ set -euo pipefail
 # gate BEFORE any 1Password resolution so a broken native module produces
 # zero popups.
 WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
-if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >/tmp/adversarial-watcher-native-check.err 2>&1; then
+# Per-user err-file path. The original `/tmp/adversarial-watcher-native-check.err`
+# was a single shared path across users, which silently broke the airlock-side
+# launch when an old placey-owned file existed (cross-user redirect denied,
+# masking a healthy ABI as a false "ABI mismatch" failure). UID-suffixed paths
+# give every user their own scratch file with no cleanup coupling.
+WATCHER_NATIVE_CHECK_ERR="/tmp/adversarial-watcher-native-check.${UID}.err"
+if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$WATCHER_NATIVE_CHECK_ERR" 2>&1; then
   echo "[adversarial-watcher] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
   echo "[adversarial-watcher] details:" >&2
-  sed 's/^/  /' /tmp/adversarial-watcher-native-check.err >&2
+  sed 's/^/  /' "$WATCHER_NATIVE_CHECK_ERR" >&2
   echo "[adversarial-watcher] fix: cd $WATCHER_DIR && npm rebuild better-sqlite3" >&2
   echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; bootout the agent and rebuild to recover sooner." >&2
   sleep 3600

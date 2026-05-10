@@ -39,6 +39,7 @@ import {
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { looksLikeRuntimeJunk, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
+import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -327,31 +328,47 @@ function isClaudeLoggedOutStatus(text) {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
-const REVIEWER_PROMPT_PATH = join(__dirname, '..', 'prompts', 'reviewer-prompt.md');
-const ADVERSARIAL_PROMPT = readFileSync(REVIEWER_PROMPT_PATH, 'utf8').trim();
+const REVIEWER_PROMPT_SET = 'code-pr';
+const ADVERSARIAL_PROMPT = loadStagePrompt({
+  rootDir: ROOT,
+  promptSet: REVIEWER_PROMPT_SET,
+  actor: 'reviewer',
+  stage: 'first',
+});
 
-// Lenient verdict threshold appended on the FINAL review of a PR (the
-// last allowed review pass before the bounded remediation loop's cap
-// hits). Without this, the reviewer keeps surfacing fresh non-blocking
-// findings on every round and the PR never converges. With this,
-// round-N (final) review only blocks on data corruption / secret
-// leakage / security regression / broken external contract;
-// everything else becomes a non-blocking note for human review. See
-// the addendum file for the full threshold definition.
+// Kept as a named export for tests that pin the final-round threshold text.
+// Rendering now reads prompts/code-pr/reviewer.last.md through prompt-stage.
 const REVIEWER_FINAL_ROUND_ADDENDUM_PATH = join(__dirname, '..', 'prompts', 'reviewer-prompt-final-round-addendum.md');
 const ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM = readFileSync(REVIEWER_FINAL_ROUND_ADDENDUM_PATH, 'utf8').trim();
 
-// Build the prompt prefix used by the model. On a normal review pass
-// this is just the base adversarial prompt. On the final review pass
-// (when this round is the last allowed under the remediation cap), the
-// lenient verdict-threshold addendum is appended. Splitting the
-// addendum into its own file keeps the prompts/ directory
-// self-documenting — operators tracing convergence behavior can read
-// both prompts side-by-side instead of decoding conditional logic in
-// code.
-function buildReviewerPromptPrefix({ isFinalRound = false } = {}) {
-  if (!isFinalRound) return ADVERSARIAL_PROMPT;
-  return `${ADVERSARIAL_PROMPT}\n\n---\n\n${ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM}`;
+function buildReviewerPromptPrefix({
+  isFinalRound = false,
+  stage,
+  reviewAttemptNumber,
+  completedRemediationRounds,
+  maxRemediationRounds,
+} = {}) {
+  const inferredCompletedRemediationRounds = completedRemediationRounds ?? (
+    Number.isFinite(Number(reviewAttemptNumber)) ? Number(reviewAttemptNumber) - 1 : undefined
+  );
+  const selectedStage = stage || (
+    isFinalRound
+      ? 'last'
+      : (reviewAttemptNumber !== undefined || completedRemediationRounds !== undefined || maxRemediationRounds !== undefined)
+        ? pickReviewerStage({
+            reviewAttemptNumber,
+            completedRemediationRounds: inferredCompletedRemediationRounds,
+            maxRemediationRounds,
+          })
+        : 'first'
+  );
+
+  return loadStagePrompt({
+    rootDir: ROOT,
+    promptSet: REVIEWER_PROMPT_SET,
+    actor: 'reviewer',
+    stage: selectedStage,
+  });
 }
 
 // Compute whether the current review attempt is the final one allowed
@@ -575,10 +592,10 @@ async function fetchPRContext(repo, prNumber) {
  * uses its native OAuth path only. Preflight auth validation is aligned with
  * the broker/Keychain path used by the live stack.
  */
-async function reviewWithClaude(diff, extraContext = '', { isFinalRound = false } = {}) {
+async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first' } = {}) {
   await assertClaudeOAuth();
 
-  const promptPrefix = buildReviewerPromptPrefix({ isFinalRound });
+  const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
@@ -624,7 +641,7 @@ async function reviewWithClaude(diff, extraContext = '', { isFinalRound = false 
  * (see runbooks/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md).
  * Using native Codex CLI instead, which is stable and produces quality reviews.
  */
-async function reviewWithCodex(diff, extraContext = '', { isFinalRound = false } = {}) {
+async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' } = {}) {
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
   console.error('[reviewWithCodex] OAuth OK');
@@ -633,7 +650,7 @@ async function reviewWithCodex(diff, extraContext = '', { isFinalRound = false }
     throw new Error(`Codex CLI not found at ${CODEX_CLI}`);
   }
 
-  const promptPrefix = buildReviewerPromptPrefix({ isFinalRound });
+  const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const authPath = resolveCodexAuthPath();
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
@@ -825,6 +842,7 @@ async function main() {
     linearTicketId,
     builderTag,
     reviewAttemptNumber,
+    completedRemediationRounds,
     maxRemediationRounds,
   } = args;
 
@@ -840,14 +858,25 @@ async function main() {
   // the watcher. Backward-compat: if either is missing (old watcher
   // calling new reviewer), default to non-final-round behavior so we
   // don't accidentally downgrade reviews on older deployments.
-  const isFinalRound = isFinalReviewRound({
-    reviewAttemptNumber,
-    maxRemediationRounds,
-  });
+  const reviewerCompletedRemediationRounds = completedRemediationRounds ?? (
+    Number.isFinite(Number(reviewAttemptNumber)) ? Number(reviewAttemptNumber) - 1 : undefined
+  );
+  const reviewerPromptStage = (
+    reviewAttemptNumber === undefined &&
+    completedRemediationRounds === undefined &&
+    maxRemediationRounds === undefined
+  )
+    ? 'first'
+    : pickReviewerStage({
+        reviewAttemptNumber,
+        completedRemediationRounds: reviewerCompletedRemediationRounds,
+        maxRemediationRounds,
+      });
+  const isFinalRound = reviewerPromptStage === 'last';
 
   console.log(
     `[reviewer] Starting review: ${repo}#${prNumber} model=${reviewerModel}` +
-    ` (OAuth-only mode${isFinalRound ? `; FINAL round attempt ${reviewAttemptNumber} of ${1 + Number(maxRemediationRounds || 0)} — lenient verdict threshold active` : ''})`
+    ` (OAuth-only mode; prompt stage=${reviewerPromptStage}${isFinalRound ? `; FINAL round attempt ${reviewAttemptNumber} of ${1 + Number(maxRemediationRounds || 0)} — lenient verdict threshold active` : ''})`
   );
   console.error(`[reviewer] DEBUG: args=${JSON.stringify(args)}`);
 
@@ -891,10 +920,10 @@ async function main() {
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
     if (effectiveModel === 'claude') {
-      rawReviewText = await reviewWithClaude(diff, extraContext, { isFinalRound });
+      rawReviewText = await reviewWithClaude(diff, extraContext, { promptStage: reviewerPromptStage });
       reviewText = rawReviewText;
     } else {
-      rawReviewText = await reviewWithCodex(diff, extraContext, { isFinalRound });
+      rawReviewText = await reviewWithCodex(diff, extraContext, { promptStage: reviewerPromptStage });
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
       try {
         reviewText = sanitizeCodexReviewPayload(rawReviewText);

@@ -33,13 +33,15 @@ import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-deliv
 import { redactSensitiveText } from './redaction.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
+import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
 
 const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const DEFAULT_HQ_ROOT = join(homedir(), 'agent-os-hq');
-const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', 'follow-up-remediation.md');
+const REMEDIATOR_PROMPT_SET = 'code-pr';
+const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', REMEDIATOR_PROMPT_SET, 'remediator.first.md');
 const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
@@ -623,8 +625,13 @@ function spawnRemediationWorker(workerClass, opts) {
   }
 }
 
-function loadFollowUpPromptTemplate(rootDir = ROOT) {
-  return readFileSync(rootDir === ROOT ? FOLLOW_UP_PROMPT_PATH : join(rootDir, 'prompts', 'follow-up-remediation.md'), 'utf8').trim();
+function loadFollowUpPromptTemplate(rootDir = ROOT, { stage = 'first' } = {}) {
+  return loadStagePrompt({
+    rootDir,
+    promptSet: REMEDIATOR_PROMPT_SET,
+    actor: 'remediator',
+    stage,
+  });
 }
 
 function buildMarkdownFence(text) {
@@ -851,13 +858,20 @@ function resetWorkspaceDir(workspaceDir) {
 }
 
 function buildRemediationPrompt(job, {
-  template = loadFollowUpPromptTemplate(ROOT),
+  template,
   remediationReplyPath = job?.remediationReply?.path || null,
   hqRoot,
   launchRequestId,
   governingDocContext = '',
 } = {}) {
   const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
+  const remediationRound = Number(job?.remediationPlan?.currentRound || 0) + 1;
+  const maxRemediationRounds = Number(job?.remediationPlan?.maxRounds || 1);
+  const remediatorPromptStage = pickRemediatorStage({
+    remediationRound,
+    maxRemediationRounds,
+  });
+  const promptTemplate = template ?? loadFollowUpPromptTemplate(ROOT, { stage: remediatorPromptStage });
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
   // The contract example uses empty arrays for the per-finding lists
@@ -895,11 +909,11 @@ function buildRemediationPrompt(job, {
     reviewCriticality: criticality,
     queueTriggeredAt: job.createdAt,
     remediationMode: job?.remediationPlan?.mode || 'bounded-manual-rounds',
-    remediationRound: Number(job?.remediationPlan?.currentRound || 0) + 1,
-    maxRemediationRounds: Number(job?.remediationPlan?.maxRounds || 1),
+    remediationRound,
+    maxRemediationRounds,
     remediationReplyArtifact: remediationReplyPath,
   };
-  const interpolatedTemplate = interpolatePromptTemplate(template, {
+  const interpolatedTemplate = interpolatePromptTemplate(promptTemplate, {
     HQ_ROOT: replyContext.hqRoot,
     LRQ_ID: replyContext.launchRequestId,
   }, { strict: true });

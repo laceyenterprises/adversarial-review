@@ -2026,7 +2026,7 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
     await withHqRootEnv(hqRoot, async () => {
       const result = await consumeNextFollowUpJob({
         rootDir,
-        // The default promptTemplate loader reads <rootDir>/prompts/follow-up-remediation.md;
+        // The default promptTemplate loader reads <rootDir>/prompts/code-pr/remediator.<stage>.md;
         // we don't provision a prompts dir under the temp rootDir, so pass a literal
         // template string instead.
         promptTemplate: 'You are a remediation worker.',

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   buildReviewerPromptPrefix,
@@ -7,6 +10,8 @@ import {
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
 } from '../src/reviewer.mjs';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 test('buildReviewerPromptPrefix returns the base prompt when not the final round', () => {
   const prompt = buildReviewerPromptPrefix({ isFinalRound: false });
@@ -21,6 +26,14 @@ test('buildReviewerPromptPrefix appends the lenient addendum on the final round'
   // The addendum file must remain non-trivial — empty addendum would
   // silently neutralize the convergence behavior.
   assert.ok(ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM.length > 200);
+});
+
+test('final-round addendum export comes from the dedicated addendum file', () => {
+  const addendumPath = join(ROOT, 'prompts', 'code-pr', 'reviewer.last.addendum.md');
+  assert.equal(
+    ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
+    readFileSync(addendumPath, 'utf8').trim(),
+  );
 });
 
 test('buildReviewerPromptPrefix defaults to non-final-round when called with no args', () => {

@@ -71,7 +71,7 @@ A PR's review verdict is what the worker-pool automerge gate watches (it reads t
 - `true` (the default success path) — fresh adversarial pass runs; new verdict replaces the stale `Request changes`; if it lands as `Comment only`, the gate fires automerge
 - `false` — deliberate human-intervention exit; the PR keeps its current verdict; a public PR comment flags that human review is needed (use the `blockers` array to explain)
 
-After the PR has consumed its remediation budget (`low=1`, `medium=2`, `high=3`, `critical=4` for default jobs, or a preserved higher legacy/operator cap), the next adversarial review pass still runs and uses the **lenient final-round threshold** (`prompts/reviewer-prompt-final-round-addendum.md`). That threshold relaxes the *categorization* bar — it stops marginal nits from generating new blocking findings every round and stacking complexity faster than they remove risk. It does **not** relax the automated merge gate: on the final round, the verdict is only `Comment only` when both `## Blocking issues` and `## Non-blocking issues` are empty. Any remaining finding (blocking or non-blocking) keeps the verdict at `Request changes`, the bounded loop hits `max-rounds-reached` on the next consume attempt, and the system posts a public PR comment saying human intervention is required. If an operator decides the current head is acceptable, the `operator-approved` label can dispatch merge-agent even while review/remediation state is missing, pending, active, or still carrying `Request changes`, but only when the latest matching GitHub `labeled` event is attributable, was applied after the current head's PR timeline code event, and was not applied by the PR author. It still does not bypass not-mergeable state, failed, pending, or unknown CI, closed PRs, or explicit skip labels (`do-not-merge`, `merge-agent-skip`, `merge-agent-stuck`). Operators can use `merge-agent-requested` as a scoped one-shot request to dispatch merge-agent for a stuck branch; it must be attributable and current-head scoped, can bypass verdict/mergeable/check/remediation-round gates, and still respects closed PRs, active remediation, explicit skip labels, and duplicate-dispatch protection.
+After the PR has consumed its remediation budget (`low=1`, `medium=2`, `high=3`, `critical=4` for default jobs, or a preserved higher legacy/operator cap), the next adversarial review pass still runs and uses the **lenient final-round threshold** (`prompts/code-pr/reviewer.last.md`). That threshold relaxes the *categorization* bar — it stops marginal nits from generating new blocking findings every round and stacking complexity faster than they remove risk. It does **not** relax the automated merge gate: on the final round, the verdict is only `Comment only` when both `## Blocking issues` and `## Non-blocking issues` are empty. Any remaining finding (blocking or non-blocking) keeps the verdict at `Request changes`, the bounded loop hits `max-rounds-reached` on the next consume attempt, and the system posts a public PR comment saying human intervention is required. If an operator decides the current head is acceptable, the `operator-approved` label can dispatch merge-agent even while review/remediation state is missing, pending, active, or still carrying `Request changes`, but only when the latest matching GitHub `labeled` event is attributable, was applied after the current head's PR timeline code event, and was not applied by the PR author. It still does not bypass not-mergeable state, failed, pending, or unknown CI, closed PRs, or explicit skip labels (`do-not-merge`, `merge-agent-skip`, `merge-agent-stuck`). Operators can use `merge-agent-requested` as a scoped one-shot request to dispatch merge-agent for a stuck branch; it must be attributable and current-head scoped, can bypass verdict/mergeable/check/remediation-round gates, and still respects closed PRs, active remediation, explicit skip labels, and duplicate-dispatch protection.
 
 If the loop reaches the stored round cap without converging, the job stops with code `max-rounds-reached` (or `round-budget-exhausted` when the consume site refuses a spawn over budget) and the PR comment explicitly says human intervention is required.
 
@@ -370,7 +370,7 @@ Not enough:
 
 The JSON artifact is the contract.
 
-**Convergence rule (see `prompts/follow-up-remediation.md`):** `reReview.requested = true` is the default success path — without it, the PR's stale `Request changes` verdict is never replaced and the worker-pool automerge gate never fires unless the operator explicitly overrides that head. `false` is reserved for deliberate human-intervention exits (cite the reason in `blockers`). The bounded risk-class loop is the safety net against thrashing; after the last remediation round the fresh adversarial pass still runs, and only the next remediation consume attempt is stopped by the cap. The final-round lenient threshold (see `prompts/reviewer-prompt-final-round-addendum.md`) relaxes the categorization bar but never relaxes the automated merge gate.
+**Convergence rule (see `prompts/code-pr/remediator.*.md`):** `reReview.requested = true` is the default success path — without it, the PR's stale `Request changes` verdict is never replaced and the worker-pool automerge gate never fires unless the operator explicitly overrides that head. `false` is reserved for deliberate human-intervention exits (cite the reason in `blockers`). The bounded risk-class loop is the safety net against thrashing; after the last remediation round the fresh adversarial pass still runs, and only the next remediation consume attempt is stopped by the cap. The final-round lenient threshold (see `prompts/code-pr/reviewer.last.md`) relaxes the categorization bar but never relaxes the automated merge gate.
 
 ---
 
@@ -540,8 +540,13 @@ src/
   retrigger-review.mjs             # operator: re-review a PR
 
 prompts/
-  reviewer-prompt.md
-  follow-up-remediation.md
+  code-pr/
+    reviewer.first.md
+    reviewer.middle.md
+    reviewer.last.md
+    remediator.first.md
+    remediator.middle.md
+    remediator.last.md
 
 hooks/
   worker-provenance-commit-msg     # stamps Worker-Class trailers

@@ -227,6 +227,16 @@ test('reviewer controller aborts do not engage cascade backoff', () => {
   );
 });
 
+test('externally signalled reviewer subprocesses still preserve killed semantics', () => {
+  const externalKillErr = Object.assign(new Error('killed by operator'), {
+    code: null,
+    killed: true,
+    signal: 'SIGTERM',
+  });
+
+  assert.equal(isReviewerSubprocessTimeout(externalKillErr, { killSignal: 'SIGTERM' }), true);
+});
+
 test('recovery clears cascade state after a successful review', () => {
   const { rootDir, db } = setupFixture();
   try {

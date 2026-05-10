@@ -4,6 +4,20 @@ import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
 
 const DEFAULT_KILL_GRACE_MS = 5_000;
 const DEFAULT_FAILURE_TAIL_BYTES = 8 * 1024;
+const SUPPORTED_OPTIONS = new Set([
+  'cwd',
+  'env',
+  'failureTailBytes',
+  'input',
+  'killGraceMs',
+  'maxBuffer',
+  'progressTimeout',
+  'signal',
+  'timeout',
+]);
+const activeChildren = new Set();
+
+let installedExitCleanup = false;
 
 function tailText(value, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
   const text = String(value || '');
@@ -45,45 +59,81 @@ function signalProcessGroup(child, signal) {
   }
 }
 
-function spawnCapturedProcessGroup(command, args, {
-  env,
-  cwd,
-  input = null,
-  timeout = 0,
-  progressTimeout = resolveProgressTimeoutMs(env),
-  killGraceMs = DEFAULT_KILL_GRACE_MS,
-  maxBuffer = 10 * 1024 * 1024,
-  signal,
-  failureTailBytes = DEFAULT_FAILURE_TAIL_BYTES,
-} = {}) {
+function installExitCleanup() {
+  if (installedExitCleanup) return;
+  installedExitCleanup = true;
+  process.on('exit', () => {
+    for (const child of activeChildren) {
+      signalProcessGroup(child, 'SIGKILL');
+    }
+  });
+}
+
+function validateOptions(options = {}) {
+  const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
+  if (unknown.length > 0) {
+    throw new TypeError(`Unsupported spawnCapturedProcessGroup options: ${unknown.join(', ')}`);
+  }
+}
+
+function spawnCapturedProcessGroup(command, args, options = {}) {
+  validateOptions(options);
+  const {
+    env,
+    cwd,
+    input = null,
+    timeout = 0,
+    progressTimeout = resolveProgressTimeoutMs(env),
+    killGraceMs = DEFAULT_KILL_GRACE_MS,
+    maxBuffer = 10 * 1024 * 1024,
+    signal,
+    failureTailBytes = DEFAULT_FAILURE_TAIL_BYTES,
+  } = options;
+
   return new Promise((resolve, reject) => {
+    installExitCleanup();
     const child = spawn(command, args, {
       env,
       cwd,
       detached: true,
       stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     });
+    activeChildren.add(child);
 
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
     let timeoutReason = null;
+    let pendingKill = false;
     let killTimer = null;
     let wallTimer = null;
     let progressTimer = null;
+    let abortListenerAttached = false;
 
-    const clearTimers = () => {
+    const cleanup = () => {
       if (killTimer) clearTimeout(killTimer);
       if (wallTimer) clearTimeout(wallTimer);
       if (progressTimer) clearTimeout(progressTimer);
       killTimer = null;
       wallTimer = null;
       progressTimer = null;
+      if (signal && abortListenerAttached) {
+        signal.removeEventListener('abort', onAbort);
+        abortListenerAttached = false;
+      }
+      activeChildren.delete(child);
     };
 
     const requestKill = (reason) => {
       if (settled) return;
       if (!timeoutReason) timeoutReason = reason;
+      if (!child.pid) {
+        pendingKill = true;
+        return;
+      }
+      pendingKill = false;
       signalProcessGroup(child, 'SIGTERM');
       if (!killTimer) {
         killTimer = setTimeout(() => {
@@ -104,7 +154,7 @@ function spawnCapturedProcessGroup(command, args, {
     const finishReject = (err) => {
       if (settled) return;
       settled = true;
-      clearTimers();
+      cleanup();
       err.stdout = stdout;
       err.stderr = stderr;
       reject(err);
@@ -114,11 +164,16 @@ function spawnCapturedProcessGroup(command, args, {
       requestKill('aborted');
     };
 
+    child.on('spawn', () => {
+      if (pendingKill) requestKill(timeoutReason || 'aborted');
+    });
+
     if (signal) {
       if (signal.aborted) {
         onAbort();
       } else {
         signal.addEventListener('abort', onAbort, { once: true });
+        abortListenerAttached = true;
       }
     }
 
@@ -129,41 +184,50 @@ function spawnCapturedProcessGroup(command, args, {
     }
     armProgressTimer();
 
-    const appendChecked = (target, chunk) => {
-      const next = target + chunk;
-      if (next.length > maxBuffer) {
+    const appendChecked = (target, targetBytes, chunk) => {
+      const text = dataToText(chunk);
+      const nextBytes = targetBytes + Buffer.byteLength(text, 'utf8');
+      if (nextBytes > maxBuffer) {
         requestKill(`maxBuffer exceeded (${maxBuffer} bytes)`);
         const err = new Error(`Command failed: maxBuffer exceeded (${maxBuffer} bytes)`);
         finishReject(err);
         return null;
       }
-      return next;
+      return { text: target + text, bytes: nextBytes };
     };
+
+    const dataToText = (chunk) => (
+      typeof chunk === 'string' ? chunk : chunk.toString()
+    );
 
     child.stdout.on('data', (data) => {
       if (settled) return;
       armProgressTimer();
-      const next = appendChecked(stdout, data.toString());
-      if (next !== null) stdout = next;
+      const next = appendChecked(stdout, stdoutBytes, data);
+      if (next !== null) {
+        stdout = next.text;
+        stdoutBytes = next.bytes;
+      }
     });
 
     child.stderr.on('data', (data) => {
       if (settled) return;
       armProgressTimer();
-      const next = appendChecked(stderr, data.toString());
-      if (next !== null) stderr = next;
+      const next = appendChecked(stderr, stderrBytes, data);
+      if (next !== null) {
+        stderr = next.text;
+        stderrBytes = next.bytes;
+      }
     });
 
     child.on('error', (err) => {
-      if (signal) signal.removeEventListener('abort', onAbort);
       finishReject(err);
     });
 
     child.on('close', (code, closeSignal) => {
       if (settled) return;
       settled = true;
-      if (signal) signal.removeEventListener('abort', onAbort);
-      clearTimers();
+      cleanup();
       if (code === 0 && !timeoutReason) {
         resolve({ stdout, stderr, code, signal: closeSignal });
         return;
@@ -174,7 +238,7 @@ function spawnCapturedProcessGroup(command, args, {
       err.code = timeoutReason === 'aborted' ? 'ABORT_ERR' : code;
       err.exitCode = code;
       err.signal = closeSignal;
-      err.killed = timeoutReason !== null;
+      err.killed = closeSignal != null || timeoutReason !== null;
       err.timedOut = timeoutReason?.startsWith('timed out') || false;
       err.progressTimedOut = timeoutReason?.startsWith('no output') || false;
       err.aborted = timeoutReason === 'aborted';

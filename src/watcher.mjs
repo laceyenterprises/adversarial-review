@@ -441,9 +441,10 @@ async function spawnReviewer({
     : '';
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
-  // AbortController ties the reviewer subprocess lifetime to the watcher
-  // process. The child is spawned as its own process group so timeout/abort
-  // cleanup can terminate the reviewer and any CLI subprocesses it created.
+  // AbortController covers the normal timeout/abort path, and
+  // spawnCapturedProcessGroup installs an exit-time best-effort SIGKILL for
+  // active detached process groups so abrupt watcher exit does not leave an
+  // orphan reviewer running to completion behind the durable ledger.
   const controller = new AbortController();
   inFlightReviewerControllers.add(controller);
 

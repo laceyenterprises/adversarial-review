@@ -57,6 +57,10 @@ import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-t
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
+import {
+  formatClaudeHealthPausedLog,
+  readClaudeHealthGate,
+} from './claude-health-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -455,6 +459,19 @@ async function spawnReviewer({
       const { authPath, home } = resolveCodexReviewerEnv(reviewerEnv);
       console.log(`[watcher] Using Codex auth for reviewer at ${authPath} with HOME=${home}`);
     }
+    if (String(reviewerModel || '').toLowerCase().includes('claude')) {
+      const gate = readClaudeHealthGate({ env: reviewerEnv });
+      if (gate.paused) {
+        const message = formatClaudeHealthPausedLog(gate);
+        console.warn(`[watcher] ${message}`);
+        return {
+          ok: false,
+          error: message,
+          failureClass: 'claude-health-paused',
+          stderr: message,
+        };
+      }
+    }
 
     const { stdout, stderr } = await spawnCapturedProcessGroup(
       process.execPath,
@@ -529,11 +546,13 @@ function settleReviewerAttempt({
   const failureClass = result.failureClass || 'unknown';
   const transientFailureClasses = new Set([
     'cascade',
+    'claude-health-paused',
     'reviewer-timeout',
     'launchctl-bootstrap',
   ]);
   const defaultFailureMessages = {
     cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
+    'claude-health-paused': 'Claude health monitor reports OAuth expired; watcher backoff engaged.',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     bug: 'Reviewer failed due to an invocation or implementation bug.',
@@ -1262,6 +1281,7 @@ export {
   handlePostedReviewRow,
   pollOnce,
   readWatcherDrainState,
+  spawnReviewer,
   shouldDeferReviewForActiveFollowUp,
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,

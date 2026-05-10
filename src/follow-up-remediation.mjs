@@ -33,6 +33,10 @@ import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-deliv
 import { redactSensitiveText } from './redaction.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
+import {
+  assertClaudeHealthAllowsSpawn,
+  formatClaudeHealthPausedLog,
+} from './claude-health-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -523,6 +527,7 @@ function spawnClaudeCodeRemediationWorker({
   spawnImpl = spawn,
   now = () => new Date().toISOString(),
 }) {
+  assertClaudeHealthAllowsSpawn();
   const claudeCli = resolveClaudeCodeCliPath();
   const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv();
   const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
@@ -2529,7 +2534,6 @@ async function consumeNextFollowUpJob({
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
 
-    spawnAttempted = true;
     const worker = spawnRemediationWorker(workerClass, {
       workspaceDir,
       promptPath,
@@ -2541,6 +2545,7 @@ async function consumeNextFollowUpJob({
       spawnImpl,
       now,
     });
+    spawnAttempted = true;
 
     const updated = markFollowUpJobSpawned({
       jobPath: claimed.jobPath,
@@ -2565,7 +2570,16 @@ async function consumeNextFollowUpJob({
     let failure = {};
     let failureCode = 'worker-failure';
 
-    if (err.isOAuthError) {
+    if (err.isClaudeHealthPaused) {
+      failureCode = 'claude-health-paused';
+      log.warn?.(`[follow-up-remediation] ${formatClaudeHealthPausedLog(err.gate)}`);
+      failure = {
+        claudeHealth: {
+          classifier: err.classifier,
+          lastHealthyAt: err.lastHealthyAt,
+        },
+      };
+    } else if (err.isOAuthError) {
       failureCode = 'oauth-preflight-failure';
       failure = {
         oauthError: {

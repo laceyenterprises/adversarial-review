@@ -68,6 +68,12 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
   stoppedArchived: ['data', 'follow-up-jobs', 'stopped-archived'],
   workspaces: ['data', 'follow-up-jobs', 'workspaces'],
 });
+const RETRIGGERABLE_STOP_CODES = Object.freeze([
+  'max-rounds-reached',
+  'round-budget-exhausted',
+  'daemon-bounce-safety',
+]);
+const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
 
 function getFollowUpJobDir(rootDir, key) {
   const parts = FOLLOW_UP_JOB_DIRS[key];
@@ -1245,6 +1251,12 @@ function listFollowUpJobsInDir(rootDir, key) {
     }));
 }
 
+function relatedJobEntryNames(entryNames, jobFileName) {
+  return entryNames
+    .filter((entry) => entry === jobFileName || entry.startsWith(`${jobFileName}.`))
+    .sort();
+}
+
 function archiveStoppedFollowUpJobs({
   rootDir,
   nowMs = Date.now(),
@@ -1260,7 +1272,8 @@ function archiveStoppedFollowUpJobs({
   let skipped = 0;
   const archivedPaths = [];
 
-  for (const name of readdirSync(stoppedDir).filter((entry) => entry.endsWith('.json')).sort()) {
+  const stoppedEntries = readdirSync(stoppedDir).sort();
+  for (const name of stoppedEntries.filter((entry) => entry.endsWith('.json'))) {
     scanned += 1;
     const sourcePath = join(stoppedDir, name);
     if (!existsSync(sourcePath)) {
@@ -1279,27 +1292,33 @@ function archiveStoppedFollowUpJobs({
     } catch {}
 
     const archiveTimestamp = job?.stoppedAt || new Date(st.mtimeMs).toISOString();
-    const archiveMonth = /^\d{4}-(0[1-9]|1[0-2])/.test(archiveTimestamp)
+    const archiveMonth = (
+      typeof archiveTimestamp === 'string'
+        && /^\d{4}-(0[1-9]|1[0-2])-\d{2}T/u.test(archiveTimestamp)
+        && Number.isFinite(Date.parse(archiveTimestamp))
+    )
       ? archiveTimestamp.slice(0, 7)
       : new Date(nowMs).toISOString().slice(0, 7);
     const archiveDir = join(getFollowUpJobDir(rootDir, 'stoppedArchived'), archiveMonth);
     mkdirSync(archiveDir, { recursive: true });
 
     const targetPath = join(archiveDir, name);
+    const relatedNames = relatedJobEntryNames(stoppedEntries, name);
     if (existsSync(targetPath)) {
-      rmSync(sourcePath, { force: true });
+      for (const entryName of relatedNames) {
+        const entrySourcePath = join(stoppedDir, entryName);
+        const entryTargetPath = join(archiveDir, entryName);
+        if (!existsSync(entrySourcePath)) continue;
+        if (existsSync(entryTargetPath)) {
+          rmSync(entrySourcePath, { force: true });
+        } else {
+          renameSync(entrySourcePath, entryTargetPath);
+        }
+      }
       skipped += 1;
       continue;
     }
 
-    const stem = name.replace(/\.json$/u, '');
-    const relatedNames = readdirSync(stoppedDir)
-      .filter((entry) => (
-        entry === name
-          || entry.startsWith(`${stem}.`)
-          || entry.startsWith(`${stem}-`)
-      ))
-      .sort();
     for (const entryName of relatedNames) {
       renameSync(join(stoppedDir, entryName), join(archiveDir, entryName));
     }
@@ -2076,6 +2095,10 @@ function requeueFollowUpJobForNextRound({
   if (!['completed', 'failed', 'stopped'].includes(currentJob.status)) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
   }
+  if (currentJob.status === 'stopped' && !isRetriggerableStoppedFollowUpJob(currentJob)) {
+    const code = currentJob?.remediationPlan?.stop?.code || 'unknown';
+    throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from stopped:${code}`);
+  }
 
   if (currentRound >= maxRounds) {
     return markFollowUpJobStopped({
@@ -2166,12 +2189,18 @@ function stopFollowUpJob({
   });
 }
 
+function isRetriggerableStoppedFollowUpJob(job) {
+  if (job?.status !== 'stopped') return false;
+  return RETRIGGERABLE_STOP_CODE_SET.has(job?.remediationPlan?.stop?.code);
+}
+
 export {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS,
   PUBLIC_REPLY_MAX_CHARS,
+  RETRIGGERABLE_STOP_CODES,
   ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
@@ -2187,6 +2216,7 @@ export {
   extractReviewSummary,
   getCurrentRound,
   getFollowUpJobDir,
+  isRetriggerableStoppedFollowUpJob,
   listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,
   listInProgressFollowUpJobs,

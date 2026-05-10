@@ -235,6 +235,94 @@ test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old int
   );
 });
 
+test('archiveStoppedFollowUpJobs keeps retry-suffixed job sidecars separate', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  const nowMs = Date.parse('2026-05-10T12:00:00.000Z');
+
+  function writeStoppedJob(id) {
+    const jobPath = path.join(stoppedDir, `${id}.json`);
+    writeFollowUpJob(jobPath, {
+      ...buildFollowUpJob({
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 480,
+        reviewerModel: 'codex',
+        reviewBody: '## Summary\nStopped job',
+        reviewPostedAt: '2026-05-09T08:00:00.000Z',
+        critical: false,
+      }),
+      jobId: id,
+      status: 'stopped',
+      stoppedAt: '2026-05-09T12:00:00.000Z',
+    });
+    writeFileSync(`${jobPath}.posted`, `${id} sidecar\n`, 'utf8');
+    const mtime = new Date(nowMs - (48 * 60 * 60 * 1000));
+    utimesSync(jobPath, mtime, mtime);
+    utimesSync(`${jobPath}.posted`, mtime, mtime);
+  }
+
+  const base = 'laceyenterprises__adversarial-review-pr-480-2026-05-09T19-00-00-000Z';
+  writeStoppedJob(base);
+  writeStoppedJob(`${base}-2`);
+
+  const result = archiveStoppedFollowUpJobs({ rootDir, nowMs });
+
+  assert.equal(result.scanned, 2);
+  assert.equal(result.archived, 2);
+  assert.equal(result.skipped, 0);
+
+  const archiveDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped-archived', '2026-05');
+  assert.deepEqual(
+    readdirSync(archiveDir).sort(),
+    [
+      `${base}-2.json`,
+      `${base}-2.json.posted`,
+      `${base}.json`,
+      `${base}.json.posted`,
+    ]
+  );
+});
+
+test('archiveStoppedFollowUpJobs cleans sidecars when target json already exists', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  const nowMs = Date.parse('2026-05-10T12:00:00.000Z');
+  const id = 'stopped-duplicate-target';
+  const sourcePath = path.join(stoppedDir, `${id}.json`);
+  writeFollowUpJob(sourcePath, {
+    ...buildFollowUpJob({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 480,
+      reviewerModel: 'codex',
+      reviewBody: '## Summary\nStopped job',
+      reviewPostedAt: '2026-05-09T08:00:00.000Z',
+      critical: false,
+    }),
+    jobId: id,
+    status: 'stopped',
+    stoppedAt: '2026-05-09T12:00:00.000Z',
+  });
+  writeFileSync(`${sourcePath}.posted`, 'sidecar\n', 'utf8');
+  const mtime = new Date(nowMs - (48 * 60 * 60 * 1000));
+  utimesSync(sourcePath, mtime, mtime);
+  utimesSync(`${sourcePath}.posted`, mtime, mtime);
+
+  const archiveDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped-archived', '2026-05');
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(path.join(archiveDir, `${id}.json`), 'existing archive\n', 'utf8');
+
+  const result = archiveStoppedFollowUpJobs({ rootDir, nowMs });
+
+  assert.equal(result.archived, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(existsSync(sourcePath), false);
+  assert.equal(existsSync(`${sourcePath}.posted`), false);
+  assert.equal(existsSync(path.join(archiveDir, `${id}.json`)), true);
+  assert.equal(existsSync(path.join(archiveDir, `${id}.json.posted`)), true);
+});
+
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const input = makeJobInput(rootDir);
@@ -2860,7 +2948,7 @@ test('requeueFollowUpJobForNextRound accepts stopped:round-budget-exhausted jobs
   assert.equal(requeued.job.status, 'pending');
 });
 
-test('requeueFollowUpJobForNextRound accepts stopped:abandoned jobs as terminal after a budget bump', () => {
+test('requeueFollowUpJobForNextRound rejects stopped:abandoned jobs', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
@@ -2877,13 +2965,14 @@ test('requeueFollowUpJobForNextRound accepts stopped:abandoned jobs as terminal 
   job.remediationPlan.maxRounds = 2;
   writeFollowUpJob(stopped.jobPath, job);
 
-  const requeued = requeueFollowUpJobForNextRound({
-    rootDir,
-    jobPath: stopped.jobPath,
-    requestedAt: '2026-04-21T10:06:00.000Z',
-  });
-
-  assert.equal(requeued.job.status, 'pending');
+  assert.throws(
+    () => requeueFollowUpJobForNextRound({
+      rootDir,
+      jobPath: stopped.jobPath,
+      requestedAt: '2026-04-21T10:06:00.000Z',
+    }),
+    /stopped:abandoned/
+  );
 });
 
 test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible metadata', () => {

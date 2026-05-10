@@ -7,11 +7,11 @@
 // requeueing, the watcher removes the label so the next tick doesn't
 // re-fire.
 //
-// Eligibility: the latest follow-up job must be in a halted-terminal
-// state (`stopped`, `failed`, or `completed` with
-// `reReview.requested = true`). Active jobs leave the label in place;
-// the operator can wait out the in-flight round and the next tick will
-// re-evaluate.
+// Eligibility: the latest follow-up job must be an eligible terminal
+// state (`failed`, `completed` with `reReview.requested = true`, or an
+// explicitly retriggerable stopped code). Active or non-retriggerable
+// stopped jobs leave the label in place; the operator can resolve the
+// blocking state and the next tick will re-evaluate.
 //
 // SPEC §5.1.3 documents this as the PR-side counterpart to the CLI.
 
@@ -19,7 +19,10 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
-import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
+import {
+  isRetriggerableStoppedFollowUpJob,
+  requeueFollowUpJobForNextRound,
+} from './follow-up-jobs.mjs';
 import {
   bumpRemediationBudget,
   findLatestFollowUpJob,
@@ -87,7 +90,7 @@ function isHaltedTerminal(job) {
   if (!job) return false;
   if (job.status === 'failed') return true;
   if (job.status === 'completed' && job?.reReview?.requested === true) return true;
-  if (job.status === 'stopped') return true;
+  if (job.status === 'stopped') return isRetriggerableStoppedFollowUpJob(job);
   return false;
 }
 

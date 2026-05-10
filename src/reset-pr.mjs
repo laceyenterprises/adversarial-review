@@ -84,26 +84,24 @@ function operatorResetDir(rootDir, ts) {
   return join(rootDir, 'data', 'follow-up-jobs', '_operator-reset', sanitizeTimestamp(ts));
 }
 
-function receiptPath(auditRootDir, ts) {
-  return join(auditRootDir, 'data', 'operator-mutations', `${sanitizeTimestamp(ts)}.json`);
+function receiptPath(auditRootDir, ts, attempt = 0) {
+  const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
+  return join(auditRootDir, 'data', 'operator-mutations', `${sanitizeTimestamp(ts)}${suffix}.json`);
 }
 
 function relatedEntryNames(dir, jobFileName) {
-  const stem = jobFileName.replace(/\.json$/u, '');
   return readdirSync(dir)
-    .filter((name) => (
-      name === jobFileName
-        || name.startsWith(`${stem}.`)
-        || name.startsWith(`${stem}-`)
-    ))
+    .filter((name) => name === jobFileName || name.startsWith(`${jobFileName}.`))
     .sort();
 }
 
 function findResetCandidates(rootDir, { repo, prNumber }) {
   const dirs = [
+    { key: 'pending', name: 'pending' },
     { key: 'inProgress', name: 'in-progress' },
     { key: 'stopped', name: 'stopped' },
     { key: 'failed', name: 'failed' },
+    { key: 'completed', name: 'completed' },
   ];
   const candidates = [];
 
@@ -120,6 +118,9 @@ function findResetCandidates(rootDir, { repo, prNumber }) {
         continue;
       }
       if (job.repo !== repo || Number(job.prNumber) !== Number(prNumber)) {
+        continue;
+      }
+      if (dirInfo.key === 'completed' && job?.reReview?.requested !== true) {
         continue;
       }
       candidates.push({
@@ -168,10 +169,21 @@ function moveCandidates(rootDir, candidates, ts) {
 }
 
 function writeReceipt(auditRootDir, receipt) {
-  const targetPath = receiptPath(auditRootDir, receipt.ts);
-  mkdirSync(dirname(targetPath), { recursive: true });
-  writeFileAtomic(targetPath, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o640 });
-  return targetPath;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const targetPath = receiptPath(auditRootDir, receipt.ts, attempt);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    try {
+      writeFileAtomic(targetPath, `${JSON.stringify(receipt, null, 2)}\n`, {
+        mode: 0o640,
+        overwrite: false,
+      });
+      return targetPath;
+    } catch (err) {
+      if (err?.code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+  throw new Error(`could not allocate reset receipt path for timestamp ${receipt.ts}`);
 }
 
 function main(argv, {

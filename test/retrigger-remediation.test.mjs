@@ -122,6 +122,36 @@ test('retrigger-remediation bumps and requeues eligible stopped jobs', () => {
   assert.equal(latest.job.remediationPlan.maxRounds, 2);
 });
 
+test('retrigger-remediation refuses stopped jobs that encode operator intent or settled review state', () => {
+  for (const stopCode of ['operator-stop', 'review-settled', 'rereview-blocked']) {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+    makeJob(rootDir, {
+      status: 'stopped',
+      stoppedAt: '2026-05-05T04:05:00.000Z',
+      remediationPlan: {
+        maxRounds: 1,
+        currentRound: 0,
+        stop: { code: stopCode, reason: stopCode },
+        nextAction: null,
+      },
+    });
+
+    const err = makeCaptureStream();
+    const rc = main([
+      '--repo', 'laceyenterprises/agent-os',
+      '--pr', '238',
+      '--reason', 'grant one more round',
+      '--root-dir', rootDir,
+      '--audit-root-dir', rootDir,
+    ], { stdout: makeCaptureStream(), stderr: err });
+
+    assert.equal(rc, 1);
+    assert.match(err.text(), new RegExp(`refused:not-eligible: laceyenterprises/agent-os#238 \\(stopped:${stopCode}\\)`));
+    const latest = findLatestFollowUpJob(rootDir, { repo: 'laceyenterprises/agent-os', prNumber: 238 });
+    assert.equal(latest.job.status, 'stopped');
+  }
+});
+
 test('retrigger-remediation writes the audit ledger under data/operator-mutations by default', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
   makeJob(rootDir, {

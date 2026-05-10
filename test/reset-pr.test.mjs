@@ -19,7 +19,11 @@ function makeCaptureStream() {
   };
 }
 
-function writeJob(rootDir, dirKey, id, { repo = 'laceyenterprises/agent-os', prNumber = 480 } = {}) {
+function writeJob(rootDir, dirKey, id, {
+  repo = 'laceyenterprises/agent-os',
+  prNumber = 480,
+  reReview = undefined,
+} = {}) {
   const dir = getFollowUpJobDir(rootDir, dirKey);
   mkdirSync(dir, { recursive: true });
   const jobPath = path.join(dir, `${id}.json`);
@@ -34,6 +38,7 @@ function writeJob(rootDir, dirKey, id, { repo = 'laceyenterprises/agent-os', prN
     }),
     jobId: id,
     status: dirKey === 'inProgress' ? 'inProgress' : dirKey,
+    ...(reReview === undefined ? {} : { reReview }),
   });
   return jobPath;
 }
@@ -85,6 +90,113 @@ test('reset-pr moves stopped entries to operator reset archive and writes receip
   assert.equal(receipt.repo, 'laceyenterprises/agent-os');
   assert.equal(receipt.pr, 480);
   assert.equal(receipt.outcome, 'reset');
+});
+
+test('reset-pr does not merge retry-suffixed job sidecars into the first candidate', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reset-pr-'));
+  const base = 'laceyenterprises__adversarial-review-pr-480-2026-05-09T19-00-00-000Z';
+  const first = writeJob(rootDir, 'stopped', base);
+  const second = writeJob(rootDir, 'stopped', `${base}-2`);
+  writeFileSync(`${first}.posted`, 'first sidecar\n', 'utf8');
+  writeFileSync(`${second}.posted`, 'second sidecar\n', 'utf8');
+
+  const out = makeCaptureStream();
+  const rc = main([
+    'laceyenterprises/agent-os',
+    '480',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    now: () => '2026-05-09T19:00:00.000Z',
+  });
+
+  assert.equal(rc, 0);
+  const result = JSON.parse(out.text());
+  assert.equal(result.movedJobCount, 2);
+  assert.deepEqual(result.moved.map((item) => item.entries.length), [2, 2]);
+
+  const resetDir = path.join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    '_operator-reset',
+    '2026-05-09T19-00-00-000Z',
+    'stopped'
+  );
+  assert.deepEqual(
+    readdirSync(resetDir).sort(),
+    [
+      `${base}-2.json`,
+      `${base}-2.json.posted`,
+      `${base}.json`,
+      `${base}.json.posted`,
+    ]
+  );
+});
+
+test('reset-pr includes pending and completed rereview-requested jobs', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reset-pr-'));
+  writeJob(rootDir, 'pending', 'job-pending');
+  writeJob(rootDir, 'completed', 'job-completed-rereview', {
+    reReview: { requested: true },
+  });
+  const settled = writeJob(rootDir, 'completed', 'job-completed-settled', {
+    reReview: { requested: false },
+  });
+
+  const out = makeCaptureStream();
+  const rc = main([
+    'laceyenterprises/agent-os',
+    '480',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    now: () => '2026-05-09T19:00:00.000Z',
+  });
+
+  assert.equal(rc, 0);
+  const result = JSON.parse(out.text());
+  assert.equal(result.movedJobCount, 2);
+  assert.equal(existsSync(settled), true);
+  assert.deepEqual(result.moved.map((item) => item.status).sort(), ['completed', 'pending']);
+});
+
+test('reset-pr disambiguates receipt paths created in the same millisecond', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reset-pr-'));
+
+  const first = main([
+    'laceyenterprises/agent-os',
+    '480',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+    '--quiet',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: makeCaptureStream(),
+    now: () => '2026-05-09T19:00:00.000Z',
+  });
+  const second = main([
+    'laceyenterprises/agent-os',
+    '480',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+    '--quiet',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: makeCaptureStream(),
+    now: () => '2026-05-09T19:00:00.000Z',
+  });
+
+  assert.equal(first, 0);
+  assert.equal(second, 0);
+  assert.deepEqual(
+    readdirSync(path.join(rootDir, 'data', 'operator-mutations')).sort(),
+    ['2026-05-09T19-00-00-000Z-2.json', '2026-05-09T19-00-00-000Z.json']
+  );
 });
 
 test('reset-pr is idempotent when no matching entries remain', () => {

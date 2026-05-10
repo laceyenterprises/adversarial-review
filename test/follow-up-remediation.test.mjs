@@ -1,7 +1,7 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -2563,6 +2563,41 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
     else process.env.CODEX_HOME = prevCodexHome;
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+  }
+});
+
+test('consumeNextFollowUpJob pauses before claiming when codex health is oauth-degraded', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const statusPath = path.join(hqRoot, 'codex-health', 'status.json');
+  const prevHqRoot = process.env.HQ_ROOT;
+  try {
+    mkdirSync(path.dirname(statusPath), { recursive: true });
+    writeFileSync(statusPath, JSON.stringify({
+      observedAt: new Date().toISOString(),
+      status: 'degraded',
+      classifier: 'codex_oauth_refresh_failed',
+      lastHealthyAt: '2026-05-10T11:00:00Z',
+    }));
+    process.env.HQ_ROOT = hqRoot;
+    const lines = [];
+
+    const result = await consumeNextFollowUpJob({
+      rootDir,
+      promptTemplate: 'prompt',
+      log: { log: (line) => lines.push(line), error: () => {} },
+    });
+
+    assert.equal(result.consumed, false);
+    assert.equal(result.reason, 'codex-health-paused');
+    assert.equal(result.classifier, 'codex_oauth_refresh_failed');
+    assert.match(lines[0], /event=codex_health_paused/);
+    const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+    assert.equal(existsSync(inProgressDir) ? readdirSync(inProgressDir).length : 0, 0);
+  } finally {
+    if (prevHqRoot === undefined) delete process.env.HQ_ROOT;
+    else process.env.HQ_ROOT = prevHqRoot;
+    rmSync(rootDir, { recursive: true, force: true });
   }
 });
 

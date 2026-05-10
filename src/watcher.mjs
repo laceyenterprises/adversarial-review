@@ -57,6 +57,7 @@ import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-t
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
+import { codexSpawningPauseDecision, logCodexHealthPause } from './codex-health-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1081,6 +1082,18 @@ async function pollOnce(octokit) {
       });
       if (roundBudgetDecision.skip) {
         continue;
+      }
+
+      if (String(route.reviewerModel || '').toLowerCase().includes('codex')) {
+        const pauseDecision = codexSpawningPauseDecision();
+        if (pauseDecision.pause) {
+          logCodexHealthPause(console, pauseDecision, {
+            repo: repoPath,
+            prNumber,
+            site: 'watcher',
+          });
+          continue;
+        }
       }
 
       const attemptAt = new Date().toISOString();

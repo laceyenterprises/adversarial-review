@@ -33,6 +33,7 @@ import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-deliv
 import { redactSensitiveText } from './redaction.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
+import { codexSpawningPauseDecision, logCodexHealthPause } from './codex-health-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -2314,6 +2315,17 @@ async function consumeNextFollowUpJob({
   postCommentImpl = postRemediationOutcomeComment,
   log = console,
 } = {}) {
+  const pauseDecision = codexSpawningPauseDecision();
+  if (pauseDecision.pause) {
+    logCodexHealthPause(log, pauseDecision, { site: 'follow-up-remediation' });
+    return {
+      consumed: false,
+      reason: 'codex-health-paused',
+      classifier: pauseDecision.classifier,
+      lastHealthyAt: pauseDecision.lastHealthyAt,
+    };
+  }
+
   // Claim first so we know which worker class we're running. This lets
   // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
   // pointed at Claude Code's CLI rather than incorrectly blocking on

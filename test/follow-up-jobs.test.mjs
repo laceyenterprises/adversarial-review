@@ -207,7 +207,7 @@ test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old int
       }),
       jobId: id,
       status: 'stopped',
-      stoppedAt: '2026-05-09T12:00:00.000Z',
+      stoppedAt: new Date(nowMs - (ageHours * 60 * 60 * 1000)).toISOString(),
     });
     const mtime = new Date(nowMs - (ageHours * 60 * 60 * 1000));
     utimesSync(jobPath, mtime, mtime);
@@ -224,6 +224,7 @@ test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old int
 
   assert.equal(result.scanned, 3);
   assert.equal(result.archived, 2);
+  assert.equal(result.collisions, 0);
   assert.equal(existsSync(fresh), true);
   assert.equal(existsSync(boundary), false);
   assert.equal(existsSync(old), false);
@@ -233,6 +234,42 @@ test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old int
     readdirSync(archiveDir).sort(),
     ['stopped-24h.json', 'stopped-48h.json', 'stopped-48h.json.posted']
   );
+});
+
+test('archiveStoppedFollowUpJobs uses stoppedAt age before mtime fallback', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  const nowMs = Date.parse('2026-05-10T12:00:00.000Z');
+  const jobPath = path.join(stoppedDir, 'semantically-old.json');
+  writeFollowUpJob(jobPath, {
+    ...buildFollowUpJob({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 480,
+      reviewerModel: 'codex',
+      reviewBody: '## Summary\nStopped job',
+      reviewPostedAt: '2026-05-09T08:00:00.000Z',
+      critical: false,
+    }),
+    jobId: 'semantically-old',
+    status: 'stopped',
+    stoppedAt: '2026-05-09T11:00:00.000Z',
+  });
+  const freshMtime = new Date(nowMs - (2 * 60 * 60 * 1000));
+  utimesSync(jobPath, freshMtime, freshMtime);
+
+  const result = archiveStoppedFollowUpJobs({ rootDir, nowMs });
+
+  assert.equal(result.archived, 1);
+  assert.equal(existsSync(jobPath), false);
+  assert.equal(existsSync(path.join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    'stopped-archived',
+    '2026-05',
+    'semantically-old.json'
+  )), true);
 });
 
 test('archiveStoppedFollowUpJobs keeps retry-suffixed job sidecars separate', () => {
@@ -284,7 +321,7 @@ test('archiveStoppedFollowUpJobs keeps retry-suffixed job sidecars separate', ()
   );
 });
 
-test('archiveStoppedFollowUpJobs cleans sidecars when target json already exists', () => {
+test('archiveStoppedFollowUpJobs keeps stopped entries when archive target differs', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
   mkdirSync(stoppedDir, { recursive: true });
@@ -316,11 +353,61 @@ test('archiveStoppedFollowUpJobs cleans sidecars when target json already exists
   const result = archiveStoppedFollowUpJobs({ rootDir, nowMs });
 
   assert.equal(result.archived, 0);
-  assert.equal(result.skipped, 1);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.collisions, 1);
+  assert.equal(result.anomalyPaths.length, 1);
+  assert.equal(existsSync(sourcePath), true);
+  assert.equal(existsSync(`${sourcePath}.posted`), true);
+  assert.equal(existsSync(path.join(archiveDir, `${id}.json`)), true);
+  assert.equal(existsSync(path.join(archiveDir, `${id}.json.posted`)), false);
+
+  const anomaly = JSON.parse(readFileSync(result.anomalyPaths[0], 'utf8'));
+  assert.equal(anomaly.type, 'stopped-archive-collision');
+  assert.equal(anomaly.action, 'left-source-in-stopped');
+});
+
+test('archiveStoppedFollowUpJobs deduplicates identical archive collisions only', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  mkdirSync(stoppedDir, { recursive: true });
+  const nowMs = Date.parse('2026-05-10T12:00:00.000Z');
+  const id = 'stopped-identical-target';
+  const sourcePath = path.join(stoppedDir, `${id}.json`);
+  writeFollowUpJob(sourcePath, {
+    ...buildFollowUpJob({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 480,
+      reviewerModel: 'codex',
+      reviewBody: '## Summary\nStopped job',
+      reviewPostedAt: '2026-05-09T08:00:00.000Z',
+      critical: false,
+    }),
+    jobId: id,
+    status: 'stopped',
+    stoppedAt: '2026-05-09T12:00:00.000Z',
+  });
+  writeFileSync(`${sourcePath}.posted`, 'sidecar\n', 'utf8');
+  const mtime = new Date(nowMs - (48 * 60 * 60 * 1000));
+  utimesSync(sourcePath, mtime, mtime);
+  utimesSync(`${sourcePath}.posted`, mtime, mtime);
+
+  const archiveDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped-archived', '2026-05');
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(path.join(archiveDir, `${id}.json`), readFileSync(sourcePath, 'utf8'), 'utf8');
+
+  const result = archiveStoppedFollowUpJobs({ rootDir, nowMs });
+
+  assert.equal(result.archived, 0);
+  assert.equal(result.collisions, 1);
+  assert.equal(result.anomalyPaths.length, 1);
   assert.equal(existsSync(sourcePath), false);
   assert.equal(existsSync(`${sourcePath}.posted`), false);
   assert.equal(existsSync(path.join(archiveDir, `${id}.json`)), true);
   assert.equal(existsSync(path.join(archiveDir, `${id}.json.posted`)), true);
+
+  const anomaly = JSON.parse(readFileSync(result.anomalyPaths[0], 'utf8'));
+  assert.equal(anomaly.type, 'stopped-archive-duplicate');
+  assert.equal(anomaly.related[0].action, 'removed-identical-source');
 });
 
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {

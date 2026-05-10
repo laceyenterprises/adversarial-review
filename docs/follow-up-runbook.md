@@ -143,6 +143,8 @@ terminal queue state
        -> watcher may pick the PR up again
 ```
 
+The follow-up daemon runs a daily stopped-job archive sweep during its normal tick loop. Jobs remain in `stopped/` until their semantic `stoppedAt` age is at least 24 hours old (mtime is only a fallback for legacy or corrupt records), then move to `stopped-archived/YYYY-MM/`. Archive target collisions are not silently destructive: byte-identical sources may be deduplicated, divergent sources stay in `stopped/`, the daemon logs a separate `collisions` count, and a structured anomaly record is written under `data/archive-anomalies/`.
+
 ---
 
 ## State transition diagram
@@ -303,6 +305,8 @@ Current worker authority and expectations:
 - do not merge the PR
 
 Operator-triggered retriggers use a separate durable ledger under `data/operator-mutations/` by default. The storage is repo-local so the CLIs stay writable under the normal `placey` runtime account; `--audit-root-dir` can relocate that ledger when an operator intentionally wants it elsewhere. Successful mutations are idempotent by key; previously refused attempts stay in the ledger for operator history but do not block a later retry after conditions change. PR-label retriggers are keyed to the GitHub `labeled` event id, not just the current job, so a stale `retrigger-remediation` label can retry audit/label cleanup without authorizing another budget bump after a later halt.
+
+`reset-pr` is also an operator mutation and reserves a `pending` receipt in `data/operator-mutations/` before moving queue files into `_operator-reset/`. A successful run rewrites that receipt with the final moved list. If a move fails after partial mutation, the same receipt is rewritten with `outcome: "partial"` and the moved entries known so far, leaving operators with a durable audit trail instead of a silent filesystem change.
 
 If launch preparation fails, the claimed job moves to:
 

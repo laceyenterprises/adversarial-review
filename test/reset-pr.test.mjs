@@ -199,6 +199,49 @@ test('reset-pr disambiguates receipt paths created in the same millisecond', () 
   );
 });
 
+test('reset-pr preserves a partial receipt when a move fails after mutation starts', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reset-pr-'));
+  const stoppedPath = writeJob(rootDir, 'stopped', 'job-stopped');
+  writeFileSync(`${stoppedPath}.posted`, 'posted sidecar\n', 'utf8');
+
+  const resetSidecarTarget = path.join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    '_operator-reset',
+    '2026-05-09T19-00-00-000Z',
+    'stopped',
+    'job-stopped.json.posted'
+  );
+  mkdirSync(resetSidecarTarget, { recursive: true });
+
+  const rc = main([
+    'laceyenterprises/agent-os',
+    '480',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+    '--quiet',
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: makeCaptureStream(),
+    now: () => '2026-05-09T19:00:00.000Z',
+  });
+
+  assert.equal(rc, 4);
+  assert.equal(existsSync(stoppedPath), false);
+  assert.equal(existsSync(`${stoppedPath}.posted`), true);
+
+  const receipt = JSON.parse(readFileSync(path.join(
+    rootDir,
+    'data',
+    'operator-mutations',
+    '2026-05-09T19-00-00-000Z.json'
+  ), 'utf8'));
+  assert.equal(receipt.outcome, 'partial');
+  assert.equal(receipt.movedEntryCount, 1);
+  assert.match(receipt.error, /reset-pr move failed/u);
+});
+
 test('reset-pr is idempotent when no matching entries remain', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'reset-pr-'));
 

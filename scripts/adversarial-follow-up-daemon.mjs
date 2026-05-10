@@ -83,7 +83,7 @@ async function runStoppedArchiveSweepIfDue({ nowMs = Date.now() } = {}) {
     const result = archiveStoppedFollowUpJobs({ rootDir: ROOT, nowMs });
     logTick(
       'archive-stopped',
-      `scanned=${result.scanned} archived=${result.archived} skipped=${result.skipped}`
+      `scanned=${result.scanned} archived=${result.archived} skipped=${result.skipped} collisions=${result.collisions}`
     );
   });
 }

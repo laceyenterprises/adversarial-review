@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
+  FOLLOW_UP_JOB_DIRS,
   getFollowUpJobDir,
   readFollowUpJob,
 } from './follow-up-jobs.mjs';
@@ -40,6 +41,15 @@ Exit codes:
 `;
 
 class UsageError extends Error {}
+class ResetMoveError extends Error {
+  constructor(message, { cause, resetRoot, moved }) {
+    super(message);
+    this.name = 'ResetMoveError';
+    this.cause = cause;
+    this.resetRoot = resetRoot;
+    this.moved = moved;
+  }
+}
 
 function parseArgs(argv) {
   let parsed;
@@ -80,13 +90,16 @@ function sanitizeTimestamp(ts) {
   return String(ts).replace(/[:.]/g, '-');
 }
 
-function operatorResetDir(rootDir, ts) {
-  return join(rootDir, 'data', 'follow-up-jobs', '_operator-reset', sanitizeTimestamp(ts));
+function attemptSuffix(attempt = 0) {
+  return attempt === 0 ? '' : `-${attempt + 1}`;
+}
+
+function operatorResetDir(rootDir, ts, attempt = 0) {
+  return join(rootDir, 'data', 'follow-up-jobs', '_operator-reset', `${sanitizeTimestamp(ts)}${attemptSuffix(attempt)}`);
 }
 
 function receiptPath(auditRootDir, ts, attempt = 0) {
-  const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
-  return join(auditRootDir, 'data', 'operator-mutations', `${sanitizeTimestamp(ts)}${suffix}.json`);
+  return join(auditRootDir, 'data', 'operator-mutations', `${sanitizeTimestamp(ts)}${attemptSuffix(attempt)}.json`);
 }
 
 function relatedEntryNames(dir, jobFileName) {
@@ -96,13 +109,8 @@ function relatedEntryNames(dir, jobFileName) {
 }
 
 function findResetCandidates(rootDir, { repo, prNumber }) {
-  const dirs = [
-    { key: 'pending', name: 'pending' },
-    { key: 'inProgress', name: 'in-progress' },
-    { key: 'stopped', name: 'stopped' },
-    { key: 'failed', name: 'failed' },
-    { key: 'completed', name: 'completed' },
-  ];
+  const dirs = ['pending', 'inProgress', 'stopped', 'failed', 'completed']
+    .map((key) => ({ key, name: FOLLOW_UP_JOB_DIRS[key].at(-1) }));
   const candidates = [];
 
   for (const dirInfo of dirs) {
@@ -135,8 +143,7 @@ function findResetCandidates(rootDir, { repo, prNumber }) {
   return candidates;
 }
 
-function moveCandidates(rootDir, candidates, ts) {
-  const resetRoot = operatorResetDir(rootDir, ts);
+function moveCandidates(candidates, resetRoot) {
   const moved = [];
 
   for (const candidate of candidates) {
@@ -145,15 +152,30 @@ function moveCandidates(rootDir, candidates, ts) {
     mkdirSync(targetDir, { recursive: true });
 
     const movedEntries = [];
-    for (const entryName of candidate.entryNames) {
-      const sourcePath = join(sourceDir, entryName);
-      if (!existsSync(sourcePath)) continue;
+    try {
+      for (const entryName of candidate.entryNames) {
+        const sourcePath = join(sourceDir, entryName);
+        if (!existsSync(sourcePath)) continue;
 
-      const targetPath = join(targetDir, entryName);
-      renameSync(sourcePath, targetPath);
-      movedEntries.push({
-        from: sourcePath,
-        to: targetPath,
+        const targetPath = join(targetDir, entryName);
+        renameSync(sourcePath, targetPath);
+        movedEntries.push({
+          from: sourcePath,
+          to: targetPath,
+        });
+      }
+    } catch (err) {
+      moved.push({
+        status: candidate.statusDir,
+        jobId: candidate.jobId,
+        jobFile: basename(candidate.jobPath),
+        entries: movedEntries,
+        error: err?.message || String(err),
+      });
+      throw new ResetMoveError(`reset-pr move failed for ${candidate.jobId}: ${err?.message || err}`, {
+        cause: err,
+        resetRoot,
+        moved,
       });
     }
 
@@ -168,22 +190,29 @@ function moveCandidates(rootDir, candidates, ts) {
   return { resetRoot, moved };
 }
 
-function writeReceipt(auditRootDir, receipt) {
+function reserveReceipt(auditRootDir, receipt) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const targetPath = receiptPath(auditRootDir, receipt.ts, attempt);
     mkdirSync(dirname(targetPath), { recursive: true });
     try {
-      writeFileAtomic(targetPath, `${JSON.stringify(receipt, null, 2)}\n`, {
+      writeFileAtomic(targetPath, `${JSON.stringify({ ...receipt, outcome: 'pending' }, null, 2)}\n`, {
         mode: 0o640,
         overwrite: false,
       });
-      return targetPath;
+      return { path: targetPath, attempt };
     } catch (err) {
       if (err?.code === 'EEXIST') continue;
       throw err;
     }
   }
   throw new Error(`could not allocate reset receipt path for timestamp ${receipt.ts}`);
+}
+
+function finalizeReceipt(path, receipt) {
+  writeFileAtomic(path, `${JSON.stringify(receipt, null, 2)}\n`, {
+    mode: 0o640,
+    overwrite: true,
+  });
 }
 
 function main(argv, {
@@ -214,22 +243,55 @@ function main(argv, {
       repo: parsed.repo,
       prNumber: parsed.pr,
     });
-    const { resetRoot, moved } = moveCandidates(rootDir, candidates, ts);
-    const movedEntryCount = moved.reduce((sum, item) => sum + item.entries.length, 0);
-    const receipt = {
+    const baseReceipt = {
       ts,
       verb: VERB,
       repo: parsed.repo,
       pr: parsed.pr,
       operator,
+    };
+    const reservation = reserveReceipt(auditRootDir, {
+      ...baseReceipt,
+      candidateJobCount: candidates.length,
+      candidates: candidates.map((candidate) => ({
+        status: candidate.statusDir,
+        jobId: candidate.jobId,
+        jobFile: basename(candidate.jobPath),
+        entryCount: candidate.entryNames.length,
+      })),
+    });
+
+    const resetRoot = operatorResetDir(rootDir, ts, reservation.attempt);
+    let moved;
+    try {
+      ({ moved } = moveCandidates(candidates, resetRoot));
+    } catch (err) {
+      if (err instanceof ResetMoveError) {
+        const movedEntryCount = err.moved.reduce((sum, item) => sum + item.entries.length, 0);
+        finalizeReceipt(reservation.path, {
+          ...baseReceipt,
+          outcome: 'partial',
+          resetRoot: err.resetRoot,
+          movedJobCount: err.moved.length,
+          movedEntryCount,
+          moved: err.moved,
+          error: err.message,
+        });
+      }
+      throw err;
+    }
+
+    const movedEntryCount = moved.reduce((sum, item) => sum + item.entries.length, 0);
+    const receipt = {
+      ...baseReceipt,
       outcome: movedEntryCount > 0 ? 'reset' : 'noop',
       resetRoot,
       movedJobCount: moved.length,
       movedEntryCount,
       moved,
     };
-    const path = writeReceipt(auditRootDir, receipt);
-    const emitted = { ...receipt, receiptPath: path };
+    finalizeReceipt(reservation.path, receipt);
+    const emitted = { ...receipt, receiptPath: reservation.path };
     if (!parsed.values.quiet) stdout.write(`${JSON.stringify(emitted)}\n`);
     return 0;
   } catch (err) {

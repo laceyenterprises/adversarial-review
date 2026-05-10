@@ -7,7 +7,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 
@@ -68,6 +68,7 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
   stoppedArchived: ['data', 'follow-up-jobs', 'stopped-archived'],
   workspaces: ['data', 'follow-up-jobs', 'workspaces'],
 });
+const ARCHIVE_ANOMALY_DIR = ['data', 'archive-anomalies'];
 const RETRIGGERABLE_STOP_CODES = Object.freeze([
   'max-rounds-reached',
   'round-budget-exhausted',
@@ -1257,6 +1258,43 @@ function relatedJobEntryNames(entryNames, jobFileName) {
     .sort();
 }
 
+function archiveAnomalyPath(rootDir, nowMs, sourceName, attempt = 0) {
+  const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
+  const safeName = sourceName.replace(/[^A-Za-z0-9_.-]/gu, '_');
+  return join(
+    rootDir,
+    ...ARCHIVE_ANOMALY_DIR,
+    `${new Date(nowMs).toISOString().replace(/[:.]/gu, '-')}-${safeName}${suffix}.json`
+  );
+}
+
+function writeArchiveAnomaly(rootDir, nowMs, anomaly) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const targetPath = archiveAnomalyPath(rootDir, nowMs, anomaly.name, attempt);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    try {
+      writeFileAtomic(targetPath, `${JSON.stringify(anomaly, null, 2)}\n`, {
+        mode: 0o640,
+        overwrite: false,
+      });
+      return targetPath;
+    } catch (err) {
+      if (err?.code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+  throw new Error(`could not allocate archive anomaly path for ${anomaly.name}`);
+}
+
+function sameFileBytes(leftPath, rightPath) {
+  return readFileSync(leftPath).equals(readFileSync(rightPath));
+}
+
+function stoppedAgeMs(job, st, nowMs) {
+  const stoppedAtMs = typeof job?.stoppedAt === 'string' ? Date.parse(job.stoppedAt) : NaN;
+  return Number.isFinite(stoppedAtMs) ? nowMs - stoppedAtMs : nowMs - st.mtimeMs;
+}
+
 function archiveStoppedFollowUpJobs({
   rootDir,
   nowMs = Date.now(),
@@ -1264,13 +1302,15 @@ function archiveStoppedFollowUpJobs({
 } = {}) {
   const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
   if (!existsSync(stoppedDir)) {
-    return { scanned: 0, archived: 0, skipped: 0, archivedPaths: [] };
+    return { scanned: 0, archived: 0, skipped: 0, collisions: 0, archivedPaths: [], anomalyPaths: [] };
   }
 
   let scanned = 0;
   let archived = 0;
   let skipped = 0;
+  let collisions = 0;
   const archivedPaths = [];
+  const anomalyPaths = [];
 
   const stoppedEntries = readdirSync(stoppedDir).sort();
   for (const name of stoppedEntries.filter((entry) => entry.endsWith('.json'))) {
@@ -1281,15 +1321,15 @@ function archiveStoppedFollowUpJobs({
       continue;
     }
     const st = statSync(sourcePath);
-    if ((nowMs - st.mtimeMs) < ttlMs) {
-      skipped += 1;
-      continue;
-    }
 
     let job = null;
     try {
       job = readFollowUpJob(sourcePath);
     } catch {}
+    if (stoppedAgeMs(job, st, nowMs) < ttlMs) {
+      skipped += 1;
+      continue;
+    }
 
     const archiveTimestamp = job?.stoppedAt || new Date(st.mtimeMs).toISOString();
     const archiveMonth = (
@@ -1305,28 +1345,113 @@ function archiveStoppedFollowUpJobs({
     const targetPath = join(archiveDir, name);
     const relatedNames = relatedJobEntryNames(stoppedEntries, name);
     if (existsSync(targetPath)) {
+      const related = [];
+      let hasDivergentCollision = false;
       for (const entryName of relatedNames) {
         const entrySourcePath = join(stoppedDir, entryName);
         const entryTargetPath = join(archiveDir, entryName);
         if (!existsSync(entrySourcePath)) continue;
         if (existsSync(entryTargetPath)) {
-          rmSync(entrySourcePath, { force: true });
+          const bytesMatch = sameFileBytes(entrySourcePath, entryTargetPath);
+          hasDivergentCollision ||= !bytesMatch;
+          related.push({
+            sourcePath: entrySourcePath,
+            targetPath: entryTargetPath,
+            action: bytesMatch ? 'duplicate-target' : 'left-in-stopped',
+            bytesMatch,
+          });
         } else {
-          renameSync(entrySourcePath, entryTargetPath);
+          related.push({
+            sourcePath: entrySourcePath,
+            targetPath: entryTargetPath,
+            action: 'move-sidecar',
+            bytesMatch: null,
+          });
         }
       }
-      skipped += 1;
+
+      if (!hasDivergentCollision) {
+        for (const item of related) {
+          if (item.action === 'duplicate-target') {
+            rmSync(item.sourcePath, { force: true });
+            item.action = 'removed-identical-source';
+          } else if (item.action === 'move-sidecar') {
+            mkdirSync(dirname(item.targetPath), { recursive: true });
+            renameSync(item.sourcePath, item.targetPath);
+            item.action = 'moved';
+          }
+        }
+      }
+
+      collisions += 1;
+      anomalyPaths.push(writeArchiveAnomaly(rootDir, nowMs, {
+        ts: new Date(nowMs).toISOString(),
+        type: hasDivergentCollision ? 'stopped-archive-collision' : 'stopped-archive-duplicate',
+        name,
+        sourcePath,
+        targetPath,
+        archiveDir,
+        action: hasDivergentCollision ? 'left-source-in-stopped' : 'deduplicated-identical-source',
+        related,
+      }));
       continue;
     }
 
     for (const entryName of relatedNames) {
-      renameSync(join(stoppedDir, entryName), join(archiveDir, entryName));
+      const sourceEntryPath = join(stoppedDir, entryName);
+      if (!existsSync(sourceEntryPath)) {
+        continue;
+      }
+      const targetEntryPath = join(archiveDir, entryName);
+      if (existsSync(targetEntryPath)) {
+        const bytesMatch = sameFileBytes(sourceEntryPath, targetEntryPath);
+        if (bytesMatch) {
+          rmSync(sourceEntryPath, { force: true });
+          collisions += 1;
+          anomalyPaths.push(writeArchiveAnomaly(rootDir, nowMs, {
+            ts: new Date(nowMs).toISOString(),
+            type: 'stopped-archive-duplicate',
+            name: entryName,
+            sourcePath: sourceEntryPath,
+            targetPath: targetEntryPath,
+            archiveDir,
+            action: 'removed-identical-source',
+            related: [{
+              sourcePath: sourceEntryPath,
+              targetPath: targetEntryPath,
+              action: 'removed-identical-source',
+              bytesMatch: true,
+            }],
+          }));
+          continue;
+        }
+        collisions += 1;
+        anomalyPaths.push(writeArchiveAnomaly(rootDir, nowMs, {
+          ts: new Date(nowMs).toISOString(),
+          type: 'stopped-archive-collision',
+          name: entryName,
+          sourcePath: sourceEntryPath,
+          targetPath: targetEntryPath,
+          archiveDir,
+          action: 'left-source-in-stopped',
+          related: [{
+            sourcePath: sourceEntryPath,
+            targetPath: targetEntryPath,
+            action: 'left-in-stopped',
+            bytesMatch: false,
+          }],
+        }));
+      } else {
+        renameSync(sourceEntryPath, targetEntryPath);
+      }
     }
-    archived += 1;
-    archivedPaths.push(targetPath);
+    if (relatedNames.every((entryName) => !existsSync(join(stoppedDir, entryName)))) {
+      archived += 1;
+      archivedPaths.push(targetPath);
+    }
   }
 
-  return { scanned, archived, skipped, archivedPaths };
+  return { scanned, archived, skipped, collisions, archivedPaths, anomalyPaths };
 }
 
 // Per-PR remediation ledger summary. The bounded loop's "round number"

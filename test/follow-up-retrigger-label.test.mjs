@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  claimNextFollowUpJob,
   createFollowUpJob,
   readFollowUpJob,
   writeFollowUpJob,
@@ -182,6 +183,37 @@ test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted',
   assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
 });
 
+test('tryRetriggerRemediationFromLabel requeues stopped:daemon-bounce-safety for the next claim', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'daemon-bounce-safety',
+    currentRound: 1,
+    maxRounds: 2,
+  });
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-stopped-terminal' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+    now: () => '2026-05-09T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  const requeued = readFollowUpJob(result.jobPath);
+  assert.equal(requeued.status, 'pending');
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    workerType: 'codex-remediation',
+    claimedAt: '2026-05-09T18:00:01.000Z',
+  });
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.match(claimed.jobPath, /data\/follow-up-jobs\/in-progress\/.+\.json$/);
+});
+
 test('tryRetriggerRemediationFromLabel works on completed jobs that requested re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   makeHaltedJob(rootDir, {
@@ -250,6 +282,33 @@ test('tryRetriggerRemediationFromLabel leaves label in place when job is still a
   // No bump, no requeue, no label removal.
   assert.equal(result.outcome, 'job-active');
   assert.equal(ghCalls.length, 0);
+});
+
+test('tryRetriggerRemediationFromLabel leaves label in place for non-retriggerable stopped jobs', async () => {
+  for (const stopCode of ['operator-stop', 'review-settled', 'rereview-blocked']) {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+    makeHaltedJob(rootDir, {
+      stopCode,
+      currentRound: 0,
+      maxRounds: 2,
+    });
+
+    const ghCalls = [];
+    const result = await tryRetriggerRemediationFromLabel({
+      rootDir,
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 238,
+      labelEvent: makeLabelEvent({ id: `evt-${stopCode}` }),
+      execFileImpl: async (cmd, args) => {
+        ghCalls.push({ cmd, args });
+        return { stdout: '', stderr: '' };
+      },
+      appendAuditRow: () => {},
+    });
+
+    assert.equal(result.outcome, 'job-active');
+    assert.equal(ghCalls.length, 0);
+  }
 });
 
 test('tryRetriggerRemediationFromLabel returns no-job when there is no follow-up job for the PR', async () => {

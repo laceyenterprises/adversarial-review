@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
+import {
+  isRetriggerableStoppedFollowUpJob,
+  requeueFollowUpJobForNextRound,
+} from './follow-up-jobs.mjs';
 import { bumpRemediationBudget, findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import {
   EX_DATAERR,
@@ -125,11 +128,9 @@ function remediationEligibility(job) {
   if (job.status === 'completed' && job?.reReview?.requested !== true) {
     return { ok: false, outcome: 'refused:not-eligible', detail: 'completed-without-rereview-request' };
   }
-  if (job.status === 'stopped') {
-    const stopCode = job?.remediationPlan?.stop?.code || null;
-    if (!['max-rounds-reached', 'round-budget-exhausted'].includes(stopCode)) {
-      return { ok: false, outcome: 'refused:not-eligible', detail: `stopped:${stopCode || 'unknown'}` };
-    }
+  if (job.status === 'stopped' && !isRetriggerableStoppedFollowUpJob(job)) {
+    const code = job?.remediationPlan?.stop?.code || 'unknown';
+    return { ok: false, outcome: 'refused:not-eligible', detail: `stopped:${code}` };
   }
   if (!['completed', 'failed', 'stopped'].includes(job.status)) {
     return { ok: false, outcome: 'refused:not-eligible', detail: job.status };

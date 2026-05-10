@@ -143,6 +143,8 @@ terminal queue state
        -> watcher may pick the PR up again
 ```
 
+The follow-up daemon runs a daily stopped-job archive sweep during its normal tick loop. Jobs remain in `stopped/` until their semantic `stoppedAt` age is at least 24 hours old (mtime is only a fallback for legacy or corrupt records), then move to `stopped-archived/YYYY-MM/`. Archive target collisions are not silently destructive: byte-identical sources may be deduplicated, divergent sources stay in `stopped/`, the daemon logs a separate `collisions` count, and a structured anomaly record is written under `data/archive-anomalies/`.
+
 ---
 
 ## State transition diagram
@@ -304,6 +306,8 @@ Current worker authority and expectations:
 
 Operator-triggered retriggers use a separate durable ledger under `data/operator-mutations/` by default. The storage is repo-local so the CLIs stay writable under the normal `placey` runtime account; `--audit-root-dir` can relocate that ledger when an operator intentionally wants it elsewhere. Successful mutations are idempotent by key; previously refused attempts stay in the ledger for operator history but do not block a later retry after conditions change. PR-label retriggers are keyed to the GitHub `labeled` event id, not just the current job, so a stale `retrigger-remediation` label can retry audit/label cleanup without authorizing another budget bump after a later halt.
 
+`reset-pr` is also an operator mutation and reserves a `pending` receipt in `data/operator-mutations/` before moving queue files into `_operator-reset/`. A successful run rewrites that receipt with the final moved list. If a move fails after partial mutation, the same receipt is rewritten with `outcome: "partial"` and the moved entries known so far, leaving operators with a durable audit trail instead of a silent filesystem change.
+
 If launch preparation fails, the claimed job moves to:
 
 ```text
@@ -394,7 +398,7 @@ Operator action:
 `retrigger-review` and `retrigger-remediation` are distinct surfaces and are intentionally idempotent:
 
 - `retrigger-review` resets the watcher row back to `review_status='pending'`. Its exit-code contract is stable: `0=triggered/already-pending`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
-- `retrigger-remediation` requeues the latest terminal follow-up job and optionally bumps `remediationPlan.maxRounds`. It starts with a remediation worker responding to the last posted review; it does not reset `reviews.db` for another review first. If the watcher row is already `review_status='pending'`, reviewer dispatch is still deferred while the latest follow-up job is `pending` or `inProgress`, so the worker cannot race a fresh review verdict. It only accepts terminal jobs in `failed`, `completed` with `reReview.requested=true`, or `stopped:{max-rounds-reached,round-budget-exhausted}`. If the worker fails or is stopped before leaving a durable `reReview.requested=true` reply, no fresh adversarial review is queued; apply `retrigger-review` separately when an operator wants a review without another worker pass. Its exit-code contract is also stable: `0=success`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
+- `retrigger-remediation` requeues the latest terminal follow-up job and optionally bumps `remediationPlan.maxRounds`. It starts with a remediation worker responding to the last posted review; it does not reset `reviews.db` for another review first. If the watcher row is already `review_status='pending'`, reviewer dispatch is still deferred while the latest follow-up job is `pending` or `inProgress`, so the worker cannot race a fresh review verdict. It only accepts terminal jobs in `failed`, `completed` with `reReview.requested=true`, or `stopped:{max-rounds-reached,round-budget-exhausted,daemon-bounce-safety}`. It refuses `stopped:operator-stop`, `stopped:review-settled`, and `stopped:rereview-blocked` so explicit operator halts, clean reviews, and watcher refusals do not silently spawn another worker. If the worker fails or is stopped before leaving a durable `reReview.requested=true` reply, no fresh adversarial review is queued; apply `retrigger-review` separately when an operator wants a review without another worker pass. Its exit-code contract is also stable: `0=success`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
 - Both commands default their durable mutation ledger to `data/operator-mutations/` under the tool root, not `HQ_ROOT/dispatch/`, so they remain writable from the documented `placey` LaunchAgent topology.
 - Both commands derive a default idempotency key from `(verb, repo, pr, reason)`. A previously successful key replays as a no-op success; a previously refused key is re-evaluated so operators can retry after state changes without minting a new key.
 

@@ -27,17 +27,20 @@
 // behavior — only the daemon's own subprocess churn.
 
 import { setTimeout as sleep } from 'node:timers/promises';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/comment-delivery.mjs';
+import { archiveStoppedFollowUpJobs } from '../src/follow-up-jobs.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(__dirname, '..');
 
 const TICK_INTERVAL_SECONDS = Number(process.env.TICK_INTERVAL_SECONDS) || 120;
 const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
+const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
 
 function ts() {
   return new Date().toISOString();
@@ -70,6 +73,21 @@ async function runStep(label, fn) {
   }
 }
 
+let lastStoppedArchiveSweepMs = 0;
+async function runStoppedArchiveSweepIfDue({ nowMs = Date.now() } = {}) {
+  if (lastStoppedArchiveSweepMs && (nowMs - lastStoppedArchiveSweepMs) < STOPPED_ARCHIVE_INTERVAL_MS) {
+    return;
+  }
+  lastStoppedArchiveSweepMs = nowMs;
+  await runStep('archive-stopped', () => {
+    const result = archiveStoppedFollowUpJobs({ rootDir: ROOT, nowMs });
+    logTick(
+      'archive-stopped',
+      `scanned=${result.scanned} archived=${result.archived} skipped=${result.skipped} collisions=${result.collisions}`
+    );
+  });
+}
+
 let stopping = false;
 function installSignalHandlers() {
   for (const sig of ['SIGTERM', 'SIGINT']) {
@@ -91,6 +109,8 @@ async function main() {
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
     if (stopping) break;
     await runStep('retry-comments', () => retryFailedCommentDeliveries());
+    if (stopping) break;
+    await runStoppedArchiveSweepIfDue();
     logTick('tick', `complete; sleeping ${TICK_INTERVAL_SECONDS}s`);
 
     if (stopping) break;
@@ -120,4 +140,4 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   });
 }
 
-export { main };
+export { main, runStoppedArchiveSweepIfDue };

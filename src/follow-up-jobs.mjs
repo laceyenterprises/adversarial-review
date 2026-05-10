@@ -5,8 +5,9 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
 } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 
@@ -64,8 +65,16 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
   completed: ['data', 'follow-up-jobs', 'completed'],
   failed: ['data', 'follow-up-jobs', 'failed'],
   stopped: ['data', 'follow-up-jobs', 'stopped'],
+  stoppedArchived: ['data', 'follow-up-jobs', 'stopped-archived'],
   workspaces: ['data', 'follow-up-jobs', 'workspaces'],
 });
+const ARCHIVE_ANOMALY_DIR = ['data', 'archive-anomalies'];
+const RETRIGGERABLE_STOP_CODES = Object.freeze([
+  'max-rounds-reached',
+  'round-budget-exhausted',
+  'daemon-bounce-safety',
+]);
+const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
 
 function getFollowUpJobDir(rootDir, key) {
   const parts = FOLLOW_UP_JOB_DIRS[key];
@@ -1243,6 +1252,208 @@ function listFollowUpJobsInDir(rootDir, key) {
     }));
 }
 
+function relatedJobEntryNames(entryNames, jobFileName) {
+  return entryNames
+    .filter((entry) => entry === jobFileName || entry.startsWith(`${jobFileName}.`))
+    .sort();
+}
+
+function archiveAnomalyPath(rootDir, nowMs, sourceName, attempt = 0) {
+  const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
+  const safeName = sourceName.replace(/[^A-Za-z0-9_.-]/gu, '_');
+  return join(
+    rootDir,
+    ...ARCHIVE_ANOMALY_DIR,
+    `${new Date(nowMs).toISOString().replace(/[:.]/gu, '-')}-${safeName}${suffix}.json`
+  );
+}
+
+function writeArchiveAnomaly(rootDir, nowMs, anomaly) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const targetPath = archiveAnomalyPath(rootDir, nowMs, anomaly.name, attempt);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    try {
+      writeFileAtomic(targetPath, `${JSON.stringify(anomaly, null, 2)}\n`, {
+        mode: 0o640,
+        overwrite: false,
+      });
+      return targetPath;
+    } catch (err) {
+      if (err?.code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+  throw new Error(`could not allocate archive anomaly path for ${anomaly.name}`);
+}
+
+function sameFileBytes(leftPath, rightPath) {
+  return readFileSync(leftPath).equals(readFileSync(rightPath));
+}
+
+function stoppedAgeMs(job, st, nowMs) {
+  const stoppedAtMs = typeof job?.stoppedAt === 'string' ? Date.parse(job.stoppedAt) : NaN;
+  return Number.isFinite(stoppedAtMs) ? nowMs - stoppedAtMs : nowMs - st.mtimeMs;
+}
+
+function archiveStoppedFollowUpJobs({
+  rootDir,
+  nowMs = Date.now(),
+  ttlMs = 24 * 60 * 60 * 1000,
+} = {}) {
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  if (!existsSync(stoppedDir)) {
+    return { scanned: 0, archived: 0, skipped: 0, collisions: 0, archivedPaths: [], anomalyPaths: [] };
+  }
+
+  let scanned = 0;
+  let archived = 0;
+  let skipped = 0;
+  let collisions = 0;
+  const archivedPaths = [];
+  const anomalyPaths = [];
+
+  const stoppedEntries = readdirSync(stoppedDir).sort();
+  for (const name of stoppedEntries.filter((entry) => entry.endsWith('.json'))) {
+    scanned += 1;
+    const sourcePath = join(stoppedDir, name);
+    if (!existsSync(sourcePath)) {
+      skipped += 1;
+      continue;
+    }
+    const st = statSync(sourcePath);
+
+    let job = null;
+    try {
+      job = readFollowUpJob(sourcePath);
+    } catch {}
+    if (stoppedAgeMs(job, st, nowMs) < ttlMs) {
+      skipped += 1;
+      continue;
+    }
+
+    const archiveTimestamp = job?.stoppedAt || new Date(st.mtimeMs).toISOString();
+    const archiveMonth = (
+      typeof archiveTimestamp === 'string'
+        && /^\d{4}-(0[1-9]|1[0-2])-\d{2}T/u.test(archiveTimestamp)
+        && Number.isFinite(Date.parse(archiveTimestamp))
+    )
+      ? archiveTimestamp.slice(0, 7)
+      : new Date(nowMs).toISOString().slice(0, 7);
+    const archiveDir = join(getFollowUpJobDir(rootDir, 'stoppedArchived'), archiveMonth);
+    mkdirSync(archiveDir, { recursive: true });
+
+    const targetPath = join(archiveDir, name);
+    const relatedNames = relatedJobEntryNames(stoppedEntries, name);
+    if (existsSync(targetPath)) {
+      const related = [];
+      let hasDivergentCollision = false;
+      for (const entryName of relatedNames) {
+        const entrySourcePath = join(stoppedDir, entryName);
+        const entryTargetPath = join(archiveDir, entryName);
+        if (!existsSync(entrySourcePath)) continue;
+        if (existsSync(entryTargetPath)) {
+          const bytesMatch = sameFileBytes(entrySourcePath, entryTargetPath);
+          hasDivergentCollision ||= !bytesMatch;
+          related.push({
+            sourcePath: entrySourcePath,
+            targetPath: entryTargetPath,
+            action: bytesMatch ? 'duplicate-target' : 'left-in-stopped',
+            bytesMatch,
+          });
+        } else {
+          related.push({
+            sourcePath: entrySourcePath,
+            targetPath: entryTargetPath,
+            action: 'move-sidecar',
+            bytesMatch: null,
+          });
+        }
+      }
+
+      if (!hasDivergentCollision) {
+        for (const item of related) {
+          if (item.action === 'duplicate-target') {
+            rmSync(item.sourcePath, { force: true });
+            item.action = 'removed-identical-source';
+          } else if (item.action === 'move-sidecar') {
+            mkdirSync(dirname(item.targetPath), { recursive: true });
+            renameSync(item.sourcePath, item.targetPath);
+            item.action = 'moved';
+          }
+        }
+      }
+
+      collisions += 1;
+      anomalyPaths.push(writeArchiveAnomaly(rootDir, nowMs, {
+        ts: new Date(nowMs).toISOString(),
+        type: hasDivergentCollision ? 'stopped-archive-collision' : 'stopped-archive-duplicate',
+        name,
+        sourcePath,
+        targetPath,
+        archiveDir,
+        action: hasDivergentCollision ? 'left-source-in-stopped' : 'deduplicated-identical-source',
+        related,
+      }));
+      continue;
+    }
+
+    for (const entryName of relatedNames) {
+      const sourceEntryPath = join(stoppedDir, entryName);
+      if (!existsSync(sourceEntryPath)) {
+        continue;
+      }
+      const targetEntryPath = join(archiveDir, entryName);
+      if (existsSync(targetEntryPath)) {
+        const bytesMatch = sameFileBytes(sourceEntryPath, targetEntryPath);
+        if (bytesMatch) {
+          rmSync(sourceEntryPath, { force: true });
+          collisions += 1;
+          anomalyPaths.push(writeArchiveAnomaly(rootDir, nowMs, {
+            ts: new Date(nowMs).toISOString(),
+            type: 'stopped-archive-duplicate',
+            name: entryName,
+            sourcePath: sourceEntryPath,
+            targetPath: targetEntryPath,
+            archiveDir,
+            action: 'removed-identical-source',
+            related: [{
+              sourcePath: sourceEntryPath,
+              targetPath: targetEntryPath,
+              action: 'removed-identical-source',
+              bytesMatch: true,
+            }],
+          }));
+          continue;
+        }
+        collisions += 1;
+        anomalyPaths.push(writeArchiveAnomaly(rootDir, nowMs, {
+          ts: new Date(nowMs).toISOString(),
+          type: 'stopped-archive-collision',
+          name: entryName,
+          sourcePath: sourceEntryPath,
+          targetPath: targetEntryPath,
+          archiveDir,
+          action: 'left-source-in-stopped',
+          related: [{
+            sourcePath: sourceEntryPath,
+            targetPath: targetEntryPath,
+            action: 'left-in-stopped',
+            bytesMatch: false,
+          }],
+        }));
+      } else {
+        renameSync(sourceEntryPath, targetEntryPath);
+      }
+    }
+    if (relatedNames.every((entryName) => !existsSync(join(stoppedDir, entryName)))) {
+      archived += 1;
+      archivedPaths.push(targetPath);
+    }
+  }
+
+  return { scanned, archived, skipped, collisions, archivedPaths, anomalyPaths };
+}
+
 // Per-PR remediation ledger summary. The bounded loop's "round number"
 // must be derived from the durable follow-up-jobs ledger (the only
 // counter that actually advances when remediation work completes), not
@@ -1995,11 +2206,6 @@ function requeueFollowUpJobForNextRound({
   const currentJob = readFollowUpJob(jobPath);
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
   const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
-  const stoppedCode = currentJob?.remediationPlan?.stop?.code || null;
-  const requeueableStoppedCodes = new Set([
-    'max-rounds-reached',
-    'round-budget-exhausted',
-  ]);
   const stopCode = selectStopCode({
     currentRound,
     maxRounds,
@@ -2011,13 +2217,12 @@ function requeueFollowUpJobForNextRound({
   if (currentJob.status === 'pending' || currentJob.status === 'inProgress') {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
   }
-  if (currentJob.status === 'stopped' && !requeueableStoppedCodes.has(stoppedCode)) {
-    throw new Error(
-      `Cannot requeue follow-up job ${currentJob.jobId} from stopped:${stoppedCode || 'unknown'}`
-    );
-  }
   if (!['completed', 'failed', 'stopped'].includes(currentJob.status)) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
+  }
+  if (currentJob.status === 'stopped' && !isRetriggerableStoppedFollowUpJob(currentJob)) {
+    const code = currentJob?.remediationPlan?.stop?.code || 'unknown';
+    throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from stopped:${code}`);
   }
 
   if (currentRound >= maxRounds) {
@@ -2109,12 +2314,18 @@ function stopFollowUpJob({
   });
 }
 
+function isRetriggerableStoppedFollowUpJob(job) {
+  if (job?.status !== 'stopped') return false;
+  return RETRIGGERABLE_STOP_CODE_SET.has(job?.remediationPlan?.stop?.code);
+}
+
 export {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS,
   PUBLIC_REPLY_MAX_CHARS,
+  RETRIGGERABLE_STOP_CODES,
   ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
@@ -2122,6 +2333,7 @@ export {
   buildStopMetadata,
   buildRemediationReply,
   buildRemediationReplyArtifact,
+  archiveStoppedFollowUpJobs,
   claimNextFollowUpJob,
   createFollowUpJob,
   detectPublicReplyNoiseSignal,
@@ -2129,6 +2341,7 @@ export {
   extractReviewSummary,
   getCurrentRound,
   getFollowUpJobDir,
+  isRetriggerableStoppedFollowUpJob,
   listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,
   listInProgressFollowUpJobs,

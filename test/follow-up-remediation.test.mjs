@@ -1966,6 +1966,7 @@ test('reconcileFollowUpJob flags suspicious live PIDs for manual inspection inst
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T16:30:01.000Z',
     isWorkerRunning: () => true,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.equal(result.action, 'failed');

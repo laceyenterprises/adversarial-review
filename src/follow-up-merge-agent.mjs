@@ -359,7 +359,9 @@ function isScopedOperatorApproval(job) {
   const approval = job?.operatorApproval;
   if (!approval) return false;
   if (!approval.actor || String(approval.actor).trim().toLowerCase() === 'unknown') return false;
-  if (job?.prAuthor && normalizeLogin(approval.actor) === normalizeLogin(job.prAuthor)) return false;
+  // Self-approval check intentionally removed at single-operator scale; see
+  // buildScopedOperatorApproval for the design note. Re-introduce the
+  // distinct-actor rule when there is a second human reviewer.
   if (!approval.labelEventId && !approval.labelEventNodeId) return false;
   if (!approval.createdAt) return false;
   if (String(approval.headSha || '') !== String(job?.headSha || '')) return false;
@@ -390,7 +392,13 @@ function buildScopedOperatorApproval(candidate, latestJob) {
   const event = candidate?.operatorApprovalEvent;
   if (!event) return null;
   if (!candidate?.headSha) return null;
-  if (candidate?.prAuthor && normalizeLogin(event.actor) === normalizeLogin(candidate.prAuthor)) return null;
+  // Self-approval check intentionally removed at single-operator scale: every
+  // PR is authored by the operator's gh CLI identity (workers push under the
+  // operator's GitHub account), so requiring a distinct actor was a 100%
+  // false-positive rule and made `operator-approved` non-functional. The
+  // headSha + codeScopedAt + commit-timing checks below remain as the real
+  // freshness gates. Re-introduce a distinct-actor check when there is a
+  // second human reviewer.
   if (String(event.headSha || '') !== String(candidate.headSha || '')) return null;
   if (!event.codeScopedAt || !isoAtOrAfter(event.createdAt, event.codeScopedAt)) return null;
   return {

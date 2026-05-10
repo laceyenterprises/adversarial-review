@@ -175,7 +175,7 @@ test('pickMergeAgentDispatch dispatches a Request-changes PR when the operator-a
   assert.equal(decision, 'dispatch');
 });
 
-test('operator-approved must be scoped to the current head SHA and non-author actor', () => {
+test('operator-approved must be scoped to the current head SHA', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
@@ -184,6 +184,14 @@ test('operator-approved must be scoped to the current head SHA and non-author ac
     })),
     'skip-operator-approval-stale'
   );
+});
+
+test('operator-approved is honored even when label actor matches PR author (single-operator scale)', () => {
+  // At single-operator scale every PR is authored by the operator's gh CLI
+  // identity (workers push under the operator), so the previous
+  // "actor must differ from prAuthor" rule made operator-approved a 100%
+  // false-positive no-op. The label is now honored when the headSha and
+  // commit-timing scope checks pass, regardless of actor identity.
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
@@ -191,7 +199,7 @@ test('operator-approved must be scoped to the current head SHA and non-author ac
       prAuthor: 'VirtualPaul',
       operatorApproval: makeOperatorApproval(),
     })),
-    'skip-operator-approval-stale'
+    'dispatch'
   );
 });
 

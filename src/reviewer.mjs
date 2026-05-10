@@ -149,6 +149,11 @@ const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/install
 
 // OPENAI_API_KEY is stripped from env so Codex cannot fall back to API-key auth.
 
+function resolveClaudeAuthProbeTimeoutMs(env = process.env) {
+  const parsed = Number.parseInt(env.CLAUDE_AUTH_PROBE_TIMEOUT_MS || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
+}
+
 // ── OAuth credential checks ──────────────────────────────────────────────────
 
 /**
@@ -170,7 +175,7 @@ async function assertClaudeOAuth() {
   try {
     ({ stdout, stderr } = await spawnClaude(
       ['auth', 'status'],
-      { env, timeout: 10_000 }
+      { env, timeout: resolveClaudeAuthProbeTimeoutMs(env) }
     ));
   } catch (err) {
     if (err?.isLaunchctlSessionError) {
@@ -179,7 +184,7 @@ async function assertClaudeOAuth() {
     stdout = err.stdout || '';
     stderr = err.stderr || '';
     const msg = `${err.message || ''}\n${stdout}\n${stderr}`.toLowerCase();
-    if (msg.includes('not logged in') || msg.includes('login required') || msg.includes('unauthorized')) {
+    if (msg.includes('"loggedin": false') || msg.includes('not logged in') || msg.includes('login required') || msg.includes('unauthorized')) {
       throw new OAuthError('claude', `Claude CLI reports not logged in: ${(stdout || stderr || err.message).trim()}`);
     }
     throw new OAuthError('claude', `Claude auth probe failed: ${(stdout || stderr || err.message).trim()}`);
@@ -218,8 +223,8 @@ async function spawnClaude(args, options = {}) {
         execOptions
       );
     } catch (err) {
-      const details = `${err?.message || ''}\n${err?.stdout || ''}\n${err?.stderr || ''}`;
-      if (isLaunchctlSessionFailure(details)) {
+      const details = formatChildProcessFailureDetails(err);
+      if (!isClaudeLoggedOutStatus(details) && isLaunchctlSessionFailure(details)) {
         throw new LaunchctlSessionError(details.trim(), { cause: err, stdout: err?.stdout, stderr: err?.stderr });
       }
       throw err;
@@ -339,8 +344,21 @@ function previewText(text, limit = 200) {
   return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized;
 }
 
+function formatChildProcessFailureDetails(err) {
+  return [
+    err?.message || '',
+    `code=${err?.code ?? '<none>'} exitCode=${err?.exitCode ?? '<none>'} signal=${err?.signal ?? '<none>'} killed=${err?.killed === true}`,
+    err?.stdout ? `stdout:\n${err.stdout}` : '',
+    err?.stderr ? `stderr:\n${err.stderr}` : '',
+  ].filter(Boolean).join('\n');
+}
+
 function isLaunchctlSessionFailure(text) {
   return /(launchctl|bootstrap failed|could not find domain|input\/output error|not privileged to set domain|gui\/\d+)/i.test(String(text ?? ''));
+}
+
+function isClaudeLoggedOutStatus(text) {
+  return /"loggedin"\s*:\s*false|"authmethod"\s*:\s*"none"/i.test(String(text ?? ''));
 }
 
 // ── Adversarial prompt (NON-NEGOTIABLE) ──────────────────────────────────────
@@ -1007,6 +1025,8 @@ const __test__ = {
   shouldQueueFollowUpForReview,
   queueFollowUpForPostedReview,
   isLaunchctlSessionFailure,
+  isClaudeLoggedOutStatus,
+  resolveClaudeAuthProbeTimeoutMs,
   resolveReviewerTimeoutMs,
 };
 

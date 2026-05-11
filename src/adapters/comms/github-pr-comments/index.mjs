@@ -19,7 +19,7 @@ import {
   openReviewStateDb,
 } from '../../../review-state.mjs';
 import { CODE_PR_DOMAIN_ID } from '../../../identity-shapes.mjs';
-import { parseCommentUrlFromStdout } from './pr-comments.mjs';
+import { parseCommentUrlFromStdout, resolveCommentBotTokenEnv } from './pr-comments.mjs';
 import { redactPublicSafeText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -150,7 +150,40 @@ function legacyRowToDeliveryRecord(row, key) {
     deliveryExternalId: `legacy-reviewed-pr:${row.id ?? `${row.repo}#${row.pr_number}`}`,
     attemptedAt: row.last_attempted_at || row.reviewed_at,
     deliveredAt: row.posted_at || row.reviewed_at,
-    delivered: row.review_status !== 'failed',
+    delivered: row.review_status === 'posted',
+  };
+}
+
+function buildAllowlistedGhEnv(env, token) {
+  return {
+    PATH: env?.PATH ?? '/usr/bin:/bin',
+    HOME: env?.HOME ?? '',
+    GH_TOKEN: token,
+  };
+}
+
+function resolveGhCommentAuth({
+  env,
+  workerClass,
+  resolveGhToken,
+  key,
+  event = null,
+}) {
+  const explicit = typeof resolveGhToken === 'function'
+    ? resolveGhToken({ key, event })
+    : null;
+  const tokenEnvName = explicit?.tokenEnvName
+    || resolveCommentBotTokenEnv(explicit?.workerClass || workerClass);
+  if (!tokenEnvName) {
+    throw new Error(`No gh token routing configured for ${key.kind} delivery`);
+  }
+  const token = explicit?.token || env?.[tokenEnvName];
+  if (!token) {
+    throw new Error(`${tokenEnvName} not set in env`);
+  }
+  return {
+    tokenEnvName,
+    env: buildAllowlistedGhEnv(env, token),
   };
 }
 
@@ -190,32 +223,15 @@ function renderVerdictBody(verdict) {
   return String(verdict?.body ?? verdict?.summary ?? '');
 }
 
-function renderRemediationReplyBody(reply) {
-  if (reply?.body) return String(reply.body);
-  const lines = ['### Remediation Worker Reply', ''];
-  if (reply?.summary) {
-    lines.push('**Summary**', '', String(reply.summary), '');
-  }
-  if (Array.isArray(reply?.validation) && reply.validation.length > 0) {
-    lines.push('**Validation**', '');
-    for (const item of reply.validation) lines.push(`- ${String(item)}`);
-    lines.push('');
-  }
-  if (Array.isArray(reply?.blockers) && reply.blockers.length > 0) {
-    lines.push('**Blockers**', '');
-    for (const item of reply.blockers) {
-      lines.push(`- ${typeof item === 'string' ? item : (item?.finding || item?.reasoning || JSON.stringify(item))}`);
-    }
-  }
-  return lines.join('\n').trim();
-}
-
 /**
  * @param {{
  *   octokit?: any,
  *   rootDir?: string,
  *   execFileImpl?: typeof execFileAsync,
  *   commentTimeoutMs?: number,
+ *   env?: NodeJS.ProcessEnv,
+ *   workerClass?: string | null,
+ *   resolveGhToken?: ((context: { key: DeliveryKey, event?: OperatorEvent | null }) => { tokenEnvName?: string, token?: string, workerClass?: string | null } | null) | null,
  *   now?: () => Date | string,
  *   log?: Console,
  * }} options
@@ -231,10 +247,13 @@ function createGitHubPRCommentsAdapter({
   rootDir = null,
   execFileImpl = execFileAsync,
   commentTimeoutMs = 30_000,
+  env = process.env,
+  workerClass = null,
+  resolveGhToken = null,
   now = () => new Date(),
   log = console,
 } = {}) {
-  async function postRawComment({ key, body }) {
+  async function postRawComment({ key, body, event = null }) {
     const { repo, prNumber } = parseSubjectExternalId(key.subjectExternalId);
     const safeBody = redactPublicSafeText(body, 60_000);
 
@@ -252,6 +271,14 @@ function createGitHubPRCommentsAdapter({
       };
     }
 
+    const ghAuth = resolveGhCommentAuth({
+      env,
+      workerClass,
+      resolveGhToken,
+      key,
+      event,
+    });
+
     const result = await execFileImpl('gh', [
       'pr',
       'comment',
@@ -261,6 +288,7 @@ function createGitHubPRCommentsAdapter({
       '--body',
       safeBody,
     ], {
+      env: ghAuth.env,
       maxBuffer: 5 * 1024 * 1024,
       timeout: commentTimeoutMs,
       killSignal: 'SIGTERM',
@@ -320,7 +348,7 @@ function createGitHubPRCommentsAdapter({
     }
   }
 
-  async function postWithDedupe({ key, body }) {
+  async function postWithDedupe({ key, body, event = null }) {
     const existing = await lookupExistingDeliveries(key);
     const deliveredExisting = existing.find((record) => record.delivered);
     if (deliveredExisting) {
@@ -334,7 +362,7 @@ function createGitHubPRCommentsAdapter({
     const attemptedAt = isoString(now());
     let db = null;
     try {
-      const posted = await postRawComment({ key, body });
+      const posted = await postRawComment({ key, body, event });
       const deliveredAt = isoString(now());
       db = openDeliveryDb(rootDir);
       if (db) {
@@ -374,14 +402,16 @@ function createGitHubPRCommentsAdapter({
     return postWithDedupe({ key, body: renderVerdictBody(verdict) });
   }
 
-  async function postRemediationReply(reply, deliveryKey) {
-    const key = normalizeDeliveryKey(deliveryKey);
-    return postWithDedupe({ key, body: renderRemediationReplyBody(reply) });
+  async function postRemediationReply(_reply, deliveryKey) {
+    normalizeDeliveryKey(deliveryKey);
+    throw new Error(
+      'GitHub PR comments adapter does not support remediation-reply delivery; use the hardened remediation comment pipeline instead'
+    );
   }
 
   async function postOperatorNotice(event, body, deliveryKey) {
     const key = normalizeDeliveryKey(deliveryKey, { event });
-    return postWithDedupe({ key, body });
+    return postWithDedupe({ key, body, event });
   }
 
   return {

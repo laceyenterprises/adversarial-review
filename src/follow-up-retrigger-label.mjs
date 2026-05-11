@@ -255,10 +255,12 @@ async function postRetriggerAckComment({
       prNumber,
       revisionRef: revisionRef || 'unknown',
     });
+    const deliveryRound = Math.max(0, Number(requeueResult?.job?.remediationPlan?.currentRound || 0));
     const adapter = createGitHubPRCommentsAdapter({
       rootDir,
       execFileImpl,
       commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
+      resolveGhToken: () => ({ tokenEnvName: 'GITHUB_TOKEN' }),
     });
     const receipt = await adapter.postOperatorNotice(
       {
@@ -279,7 +281,7 @@ async function postRetriggerAckComment({
         domainId: subjectIdentity.domainId,
         subjectExternalId: subjectIdentity.subjectExternalId,
         revisionRef: subjectIdentity.revisionRef,
-        round: Number(bumpResult?.newMaxRounds || 0),
+        round: deliveryRound,
         kind: 'operator-notice',
         noticeRef: labelEventKey,
       }

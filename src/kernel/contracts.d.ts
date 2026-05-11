@@ -91,6 +91,7 @@ export interface SubjectState {
   builderClass?: string;
   labels?: readonly string[];
   updatedAt?: IsoTimestamp;
+  headSha?: string;
   riskClass?: RiskClass;
   currentRound: number;
   completedRemediationRounds: number;

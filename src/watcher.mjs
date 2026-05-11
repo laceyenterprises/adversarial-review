@@ -886,12 +886,12 @@ async function pollOnce(octokit) {
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
       async function projectGateStatusSafe(reviewRow) {
-        if (!subject.ref?.revisionRef) return;
+        if (!subject.headSha) return;
         try {
           const projected = await projectAdversarialGateStatus(ROOT, {
             repo: repoPath,
             prNumber,
-            headSha: subject.ref.revisionRef,
+            headSha: subject.headSha,
             labels: subject.labels,
             prUpdatedAt: subject.updatedAt || null,
             prAuthor: subject.authorRef || null,
@@ -1017,6 +1017,8 @@ async function pollOnce(octokit) {
           repoPath,
           prNumber
         );
+        // Store normalized label names in reviewed_prs.labels_json. Readers
+        // still accept the older GitHub label-object shape for historical rows.
         stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
@@ -1075,7 +1077,9 @@ async function pollOnce(octokit) {
             ` | previous status=${current?.review_status || existing.review_status}`
         );
       }
-      stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(pr.labels) ? pr.labels : []), repoPath, prNumber);
+      // Store normalized label names in reviewed_prs.labels_json. Readers
+      // still accept the older GitHub label-object shape for historical rows.
+      stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
 
       const roundBudgetDecision = evaluateRoundBudgetForReview({
         rootDir: ROOT,

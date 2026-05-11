@@ -28,7 +28,7 @@ function makeSubjectExternalId(repo, prNumber) {
 
 function parseSubjectExternalId(subjectExternalId) {
   const raw = String(subjectExternalId || '').trim();
-  const match = /^(.+)#(\d+)$/.exec(raw);
+  const match = /^([^#/]+\/[^#/]+)#(\d+)$/.exec(raw);
   if (!match) {
     throw new TypeError(`Invalid GitHub PR subjectExternalId: ${subjectExternalId}`);
   }
@@ -47,8 +47,12 @@ function splitRepo(repoPath) {
   return { owner, repo };
 }
 
+function headShaFromPR(pr) {
+  return String(pr?.head?.sha || '');
+}
+
 function revisionRefFromPR(pr) {
-  return String(pr?.head?.sha || pr?.head?.ref || `pr-${pr?.number || 'unknown'}`);
+  return headShaFromPR(pr);
 }
 
 function refFromPR(repoPath, pr) {
@@ -68,6 +72,7 @@ function normalizePRSnapshot(repoPath, pr) {
     prNumber: Number(pr.number),
     title: String(pr?.title || ''),
     state: String(pr?.state || '').trim().toLowerCase(),
+    headSha: headShaFromPR(pr) || undefined,
     labels: Array.isArray(pr?.labels)
       ? pr.labels
         .map((label) => (typeof label === 'string' ? label : label?.name))
@@ -99,6 +104,7 @@ function stateFromSnapshot(snapshot, {
     builderClass: snapshot.builderClass || undefined,
     labels: snapshot.labels,
     updatedAt: snapshot.updatedAt,
+    headSha: snapshot.headSha,
     currentRound,
     completedRemediationRounds,
     maxRemediationRounds,
@@ -126,6 +132,9 @@ function createGitHubPRSubjectAdapter({
   prepareWorkspaceForJobImpl = null,
   now = () => new Date(),
 } = {}) {
+  // Per-adapter-instance scratch cache: discoverSubjects() warms it so the
+  // matching fetchState()/fetchContent() calls in the same watcher poll do not
+  // re-fetch PRs. It is not intended as a cross-poll freshness cache.
   const snapshotBySubjectExternalId = new Map();
 
   async function fetchPRSnapshot(ref) {
@@ -234,10 +243,7 @@ function createGitHubPRSubjectAdapter({
     },
 
     async recordRemediationCommit(ref, commit) {
-      const snapshot = await fetchPRSnapshot({
-        ...ref,
-        revisionRef: commit?.revisionRef || ref.revisionRef,
-      });
+      const snapshot = await fetchPRSnapshot(ref);
       return stateFromSnapshot({
         ...snapshot,
         revisionRef: commit?.revisionRef || snapshot.revisionRef,
@@ -262,6 +268,7 @@ function createGitHubPRSubjectAdapter({
 export {
   DOMAIN_ID,
   createGitHubPRSubjectAdapter,
+  headShaFromPR,
   makeSubjectExternalId,
   normalizePRSnapshot,
   parseSubjectExternalId,

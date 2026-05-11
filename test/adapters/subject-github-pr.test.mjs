@@ -6,6 +6,7 @@ import {
   createGitHubPRSubjectAdapter,
   makeSubjectExternalId,
   parseSubjectExternalId,
+  revisionRefFromPR,
   stateFromSnapshot,
 } from '../../src/adapters/subject/github-pr/index.mjs';
 import { routeSubject } from '../../src/adapters/subject/github-pr/routing.mjs';
@@ -63,6 +64,7 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
   assert.equal(subject.builderClass, 'codex');
   assert.deepEqual(subject.labels, ['risk:medium']);
   assert.equal(subject.updatedAt, '2026-05-10T21:20:00.000Z');
+  assert.equal(subject.headSha, 'abc123def456');
   assert.equal(subject.terminal, false);
   assert.equal(subject.observedAt, '2026-05-10T21:30:00.000Z');
   assert.equal('pr' in subject, false);
@@ -138,6 +140,18 @@ test('github-pr subject identity helpers round-trip repo and number', () => {
   });
 });
 
+test('github-pr subject identity rejects malformed repo slugs', () => {
+  assert.throws(
+    () => parseSubjectExternalId('laceyenterprises/adversarial-review#extra#70'),
+    /Invalid GitHub PR subjectExternalId/
+  );
+});
+
+test('revisionRef only uses the real GitHub head SHA', () => {
+  assert.equal(revisionRefFromPR({ number: 12, head: { sha: 'abc123', ref: 'branch-name' } }), 'abc123');
+  assert.equal(revisionRefFromPR({ number: 12, head: { ref: 'branch-name' } }), '');
+});
+
 test('stateFromSnapshot always emits a boolean terminal flag', () => {
   const state = stateFromSnapshot({
     domainId: 'code-pr',
@@ -150,4 +164,32 @@ test('stateFromSnapshot always emits a boolean terminal flag', () => {
 
   assert.equal(state.terminal, false);
   assert.equal(typeof state.terminal, 'boolean');
+});
+
+test('recordRemediationCommit reports commit revision without poisoning cached PR state', async () => {
+  let getCalls = 0;
+  const octokit = makeOctokitSnapshot();
+  const originalGet = octokit.rest.pulls.get;
+  octokit.rest.pulls.get = async (...args) => {
+    getCalls += 1;
+    return originalGet(...args);
+  };
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit,
+    repos: [fixture.repo],
+    now: () => new Date('2026-05-10T21:33:00.000Z'),
+  });
+  const [ref] = await adapter.discoverSubjects();
+
+  const recorded = await adapter.recordRemediationCommit(ref, {
+    ref,
+    commitExternalId: 'commit-1',
+    revisionRef: 'remediation-sha',
+    committedAt: '2026-05-10T21:32:30.000Z',
+  });
+  const current = await adapter.fetchState(ref);
+
+  assert.equal(getCalls, 0);
+  assert.equal(recorded.ref.revisionRef, 'remediation-sha');
+  assert.equal(current.ref.revisionRef, 'abc123def456');
 });

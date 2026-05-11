@@ -18,6 +18,10 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 const CLAIM_SQL = `UPDATE reviewed_prs
      SET review_status = 'reviewing',
          last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = ?,
+         reviewer_head_sha = ?,
+         reviewer_pgid = NULL,
          failed_at = CASE
            WHEN review_status = 'pending-upstream' THEN failed_at
            ELSE NULL
@@ -29,6 +33,20 @@ const CLAIM_SQL = `UPDATE reviewed_prs
    WHERE repo = ?
      AND pr_number = ?
      AND review_status IN ('pending', 'failed', 'pending-upstream')`;
+
+function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
+  sessionUuid = 'session-999',
+  headSha = 'head-999',
+} = {}) {
+  return db.prepare(CLAIM_SQL).run(
+    attemptedAt,
+    sessionUuid,
+    attemptedAt,
+    headSha,
+    repo,
+    prNumber
+  );
+}
 
 const REPO = 'laceyenterprises/agent-os';
 const PR = 999;
@@ -66,16 +84,16 @@ test('atomic claim succeeds for a pending row and flips status to reviewing', ()
   const db = setupDb();
   seedReviewRow(db, { reviewStatus: 'pending' });
 
-  const claim = db.prepare(CLAIM_SQL).run(
-    '2026-05-02T18:10:00.000Z',
-    REPO,
-    PR
-  );
+  const claim = runClaim(db, '2026-05-02T18:10:00.000Z');
 
   assert.equal(claim.changes, 1);
   const row = readRow(db);
   assert.equal(row.review_status, 'reviewing');
   assert.equal(row.last_attempted_at, '2026-05-02T18:10:00.000Z');
+  assert.equal(row.reviewer_session_uuid, 'session-999');
+  assert.equal(row.reviewer_started_at, '2026-05-02T18:10:00.000Z');
+  assert.equal(row.reviewer_head_sha, 'head-999');
+  assert.equal(row.reviewer_pgid, null);
   assert.equal(row.failed_at, null);
   assert.equal(row.failure_message, null);
 });
@@ -87,11 +105,7 @@ test('atomic claim succeeds for a failed row (preserves auto-retry contract)', (
   const db = setupDb();
   seedReviewRow(db, { reviewStatus: 'failed', failureMessage: 'transient OAuth failure' });
 
-  const claim = db.prepare(CLAIM_SQL).run(
-    '2026-05-02T18:10:00.000Z',
-    REPO,
-    PR
-  );
+  const claim = runClaim(db, '2026-05-02T18:10:00.000Z');
 
   assert.equal(claim.changes, 1, 'failed rows must remain auto-retryable');
   const row = readRow(db);
@@ -103,11 +117,7 @@ test('atomic claim succeeds for a pending-upstream row once backoff has expired'
   const db = setupDb();
   seedReviewRow(db, { reviewStatus: 'pending-upstream', failureMessage: 'LiteLLM upstream cascade' });
 
-  const claim = db.prepare(CLAIM_SQL).run(
-    '2026-05-02T18:10:00.000Z',
-    REPO,
-    PR
-  );
+  const claim = runClaim(db, '2026-05-02T18:10:00.000Z');
 
   assert.equal(claim.changes, 1, 'pending-upstream rows must be reclaimable after the watcher backoff gate opens');
   const row = readRow(db);
@@ -122,11 +132,7 @@ test('atomic claim refuses when status is already reviewing (in-flight claim)', 
     lastAttemptedAt: '2026-05-02T18:09:00.000Z',
   });
 
-  const claim = db.prepare(CLAIM_SQL).run(
-    '2026-05-02T18:10:00.000Z',
-    REPO,
-    PR
-  );
+  const claim = runClaim(db, '2026-05-02T18:10:00.000Z');
 
   assert.equal(claim.changes, 0, 'claim must lose the race against an in-flight reviewer');
   const row = readRow(db);
@@ -143,11 +149,7 @@ test('atomic claim refuses for terminal and orphan-locked statuses', () => {
     const db = setupDb();
     seedReviewRow(db, { reviewStatus: status });
 
-    const claim = db.prepare(CLAIM_SQL).run(
-      '2026-05-02T18:10:00.000Z',
-      REPO,
-      PR
-    );
+    const claim = runClaim(db, '2026-05-02T18:10:00.000Z');
 
     assert.equal(claim.changes, 0, `claim must refuse status='${status}'`);
     const row = readRow(db);
@@ -162,33 +164,26 @@ test('atomic claim simulates a real two-process race — only one wins', () => {
   const db = setupDb();
   seedReviewRow(db, { reviewStatus: 'pending' });
 
-  const claimA = db.prepare(CLAIM_SQL).run(
-    '2026-05-02T18:10:00.000Z',
-    REPO,
-    PR
-  );
-  const claimB = db.prepare(CLAIM_SQL).run(
-    '2026-05-02T18:10:00.001Z',
-    REPO,
-    PR
-  );
+  const claimA = runClaim(db, '2026-05-02T18:10:00.000Z', REPO, PR, {
+    sessionUuid: 'session-a',
+  });
+  const claimB = runClaim(db, '2026-05-02T18:10:00.001Z', REPO, PR, {
+    sessionUuid: 'session-b',
+  });
 
   assert.equal(claimA.changes, 1, 'first claim wins');
   assert.equal(claimB.changes, 0, 'second claim loses — status is no longer pending');
   const row = readRow(db);
   assert.equal(row.review_status, 'reviewing');
   assert.equal(row.last_attempted_at, '2026-05-02T18:10:00.000Z', 'winner timestamp persists');
+  assert.equal(row.reviewer_session_uuid, 'session-a', 'winner session persists');
 });
 
 test('atomic claim refuses pending row from a different PR — repo/pr scoping is correct', () => {
   const db = setupDb();
   seedReviewRow(db, { reviewStatus: 'pending' });
 
-  const claim = db.prepare(CLAIM_SQL).run(
-    '2026-05-02T18:10:00.000Z',
-    REPO,
-    PR + 1, // different PR number
-  );
+  const claim = runClaim(db, '2026-05-02T18:10:00.000Z', REPO, PR + 1);
 
   assert.equal(claim.changes, 0);
   const row = readRow(db);

@@ -11,6 +11,7 @@ const SUPPORTED_OPTIONS = new Set([
   'input',
   'killGraceMs',
   'maxBuffer',
+  'onSpawn',
   'progressTimeout',
   'signal',
   'timeout',
@@ -86,6 +87,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     progressTimeout = resolveProgressTimeoutMs(env),
     killGraceMs = DEFAULT_KILL_GRACE_MS,
     maxBuffer = 10 * 1024 * 1024,
+    onSpawn,
     signal,
     failureTailBytes = DEFAULT_FAILURE_TAIL_BYTES,
   } = options;
@@ -165,6 +167,13 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     };
 
     child.on('spawn', () => {
+      if (typeof onSpawn === 'function') {
+        try {
+          onSpawn({ pid: child.pid, pgid: child.pid });
+        } catch (err) {
+          requestKill(`onSpawn callback failed: ${err?.message || err}`);
+        }
+      }
       if (pendingKill) requestKill(timeoutReason || 'aborted');
     });
 

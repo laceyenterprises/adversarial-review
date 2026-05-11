@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
+const REVIEW_STATE_SCHEMA_VERSION = 2;
 const execFileAsyncDefault = promisify(execFile);
 
 function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
@@ -36,6 +37,10 @@ function ensureReviewStateSchema(db) {
       rereview_requested_at TEXT,
       rereview_reason   TEXT,
       labels_json       TEXT,
+      reviewer_session_uuid TEXT,
+      reviewer_pgid     INTEGER,
+      reviewer_started_at TEXT,
+      reviewer_head_sha TEXT,
       UNIQUE(repo, pr_number)
     )
   `);
@@ -53,6 +58,15 @@ function ensureReviewStateSchema(db) {
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN rereview_requested_at TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN rereview_reason TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN labels_json TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN reviewer_session_uuid TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN reviewer_pgid INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN reviewer_started_at TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN reviewer_head_sha TEXT`); } catch {}
+
+  const currentVersion = Number(db.pragma('user_version', { simple: true }) || 0);
+  if (currentVersion < REVIEW_STATE_SCHEMA_VERSION) {
+    db.pragma(`user_version = ${REVIEW_STATE_SCHEMA_VERSION}`);
+  }
 }
 
 function getReviewRow(db, { repo, prNumber }) {
@@ -291,10 +305,10 @@ function requestReviewRereview({
     //
     // The CAS below refuses to reset:
     //   - `'reviewing'` — the watcher has an active reviewer subprocess.
-    //     The recovery path is letting the watcher restart and flip the
-    //     row to `'failed-orphan'` via reconcileOrphanedReviewing, then
-    //     using `retrigger-review --allow-failed-reset` after operator
-    //     GitHub verification.
+    //     The recovery path is letting the watcher restart and run
+    //     reconcileOrphanedReviewing, which reattaches, recovers a
+    //     posted review, or moves the row to a retryable/sticky failure
+    //     according to the durable reviewer handle.
     //   - `'malformed'` — terminal; not a runtime-recoverable state.
     //   - `'pending'` — already armed for review; no reset needed.
     //
@@ -368,6 +382,7 @@ function requestReviewRereview({
 }
 
 export {
+  REVIEW_STATE_SCHEMA_VERSION,
   ensureReviewStateSchema,
   openReviewStateDb,
   getReviewRow,

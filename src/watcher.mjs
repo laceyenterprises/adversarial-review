@@ -6,6 +6,7 @@
 
 import { Octokit } from '@octokit/rest';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -55,6 +56,7 @@ import {
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
+import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 
@@ -179,12 +181,10 @@ function handlePollError(err, source = 'pollOnce') {
 // Set of AbortControllers for in-flight reviewer subprocesses. The
 // watchdog-timeout exit path aborts every controller in this set
 // before exiting so spawned reviewers cannot post a review after the
-// parent watcher has died — without this, an orphan child can post,
-// the parent never gets to mark the row 'posted', the row stays in
-// 'reviewing' (or 'pending' under the previous design), restart
-// spawns a second reviewer, and the same PR gets two reviews. See
-// reconcileOrphanedReviewing() for the durable-state half of this
-// guard.
+// parent watcher has died. The durable reviewer-session handle below
+// is the startup recovery half of the same guard: if a reviewer does
+// survive a restart, the next watcher reattaches or recovers its posted
+// GitHub review before any new spawn is allowed.
 const inFlightReviewerControllers = new Set();
 
 function abortInFlightReviewers(reason) {
@@ -210,10 +210,9 @@ function exitForPollDeadline(err, source) {
   // Tear down spawned reviewer children synchronously BEFORE setting
   // up the deferred exit. Without this, an orphan child can finish
   // its `gh pr review` call after we exit, posting a review the
-  // parent watcher never recorded — and the next watcher run, seeing
-  // the row stuck in 'reviewing', will turn it into 'failed-orphan'
-  // (sticky, requires operator). Aborting up front prevents that
-  // case in the first place.
+  // parent watcher never recorded. The startup reattach probe can
+  // recover that case now, but aborting up front still narrows the
+  // window where a live child outlasts its parent.
   abortInFlightReviewers('poll deadline exceeded');
   process.exitCode = POLL_DEADLINE_EXIT_CODE;
   setImmediate(() => process.exit(POLL_DEADLINE_EXIT_CODE));
@@ -262,10 +261,10 @@ const stmtMarkMalformed = db.prepare(
 // (watchdog timeout, OOM kill, launchd restart), the row stays in
 // 'reviewing' on disk — that is the operator-visible signal that a
 // review subprocess was in flight when the parent died and may have
-// posted a review the parent never recorded. reconcileOrphanedReviewing
-// converts these on startup to 'failed-orphan' (sticky), which is the
-// signal to a human that the GitHub PR may already carry a review
-// from the killed child and a blind retry would produce a duplicate.
+// posted a review the parent never recorded. On startup, the durable
+// reviewer handle below lets reconcileReviewerSessions reattach to a
+// still-live reviewer or recover a posted GitHub review before falling
+// back to sticky operator action for legacy/anomalous rows.
 // Compare-and-swap claim: only flip `pending` / `failed` rows to
 // `'reviewing'`. The unconditional UPDATE the previous version of this
 // statement performed was safe under the in-process pollOnce
@@ -303,6 +302,10 @@ const stmtMarkAttemptStarted = db.prepare(
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
          last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = ?,
+         reviewer_head_sha = ?,
+         reviewer_pgid = NULL,
          failed_at = CASE
            WHEN review_status = 'pending-upstream' THEN failed_at
            ELSE NULL
@@ -314,6 +317,14 @@ const stmtMarkAttemptStarted = db.prepare(
    WHERE repo = ?
      AND pr_number = ?
      AND review_status IN ('pending', 'failed', 'pending-upstream')`
+);
+const stmtMarkReviewerPgid = db.prepare(
+  `UPDATE reviewed_prs
+      SET reviewer_pgid = ?
+    WHERE reviewer_session_uuid = ?
+      AND repo = ?
+      AND pr_number = ?
+      AND review_status = 'reviewing'`
 );
 const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
@@ -327,12 +338,6 @@ const stmtMarkCascadeFailed = db.prepare(
 const stmtMarkPendingUpstream = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
 );
-const stmtListReviewing = db.prepare(
-  "SELECT repo, pr_number, last_attempted_at FROM reviewed_prs WHERE review_status = 'reviewing'"
-);
-const stmtMarkOrphan = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-);
 const stmtGetOpenPRs = db.prepare(
   "SELECT repo, pr_number, linear_ticket FROM reviewed_prs WHERE pr_state = 'open'"
 );
@@ -343,7 +348,7 @@ const stmtMarkClosed = db.prepare(
   "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = ? WHERE repo = ? AND pr_number = ?"
 );
 
-// ── Orphan review reconciliation (startup) ───────────────────────────────────
+// ── Reviewer session reconciliation (startup) ────────────────────────────────
 //
 // On startup, find any rows still in 'reviewing' from a previous
 // watcher run that exited (watchdog timeout, crash, OOM, launchd
@@ -351,9 +356,12 @@ const stmtMarkClosed = db.prepare(
 // rows mean a reviewer subprocess was in flight when the parent died
 // — and may have posted a review to GitHub the parent never recorded.
 //
-// Auto-retrying these rows would risk a duplicate review post. Mark
-// them sticky-failed ('failed-orphan') so pollOnce skips them and the
-// operator gets a clear, durable record. Recovery path:
+// Rows created before reviewer handles existed still fall through to
+// sticky failed-orphan so pollOnce skips them and the operator gets a
+// clear, durable record. Rows with handles are probed first: a live,
+// current reviewer remains 'reviewing', a dead reviewer with a posted
+// GitHub review is recovered to 'posted', and dead/stale sessions move
+// to retryable 'failed'.
 //
 //   1. Inspect the GitHub PR to see whether a review was already posted.
 //   2. If yes: leave the row alone (it's effectively done) — or use
@@ -363,27 +371,11 @@ const stmtMarkClosed = db.prepare(
 //      --reason "verified no orphan review present"` to clear the
 //      sticky state and re-arm review_status='pending'.
 //
-// This is the durable half of the duplicate-review guard; the abort-
-// children-on-timeout path in exitForPollDeadline is the proactive
-// half. Together they close the race the previous design left open.
-function reconcileOrphanedReviewing() {
-  const orphans = stmtListReviewing.all();
-  if (orphans.length === 0) return;
-
-  const failureAt = new Date().toISOString();
-  for (const row of orphans) {
-    const message =
-      'Watcher restarted while review subprocess was in flight. ' +
-      'A review may have been posted on GitHub by the orphaned child. ' +
-      'Verify the PR before retriggering with `npm run retrigger-review`.';
-    stmtMarkOrphan.run(failureAt, message, row.repo, row.pr_number);
-    console.warn(
-      `[watcher] Orphan reviewer detected for ${row.repo}#${row.pr_number} ` +
-      `(last_attempted_at=${row.last_attempted_at || 'unknown'}); ` +
-      `marked review_status='failed-orphan'. Operator must verify GitHub ` +
-      `before clearing.`
-    );
-  }
+// This remains the durable half of the duplicate-review guard; the
+// cross-process claim CAS below is still the only place new reviewer
+// subprocesses are admitted.
+async function reconcileOrphanedReviewing(octokit) {
+  return reconcileReviewerSessions({ db, octokit });
 }
 
 // ── Author tag detection ─────────────────────────────────────────────────────
@@ -418,6 +410,8 @@ async function spawnReviewer({
   builderTag,
   reviewAttemptNumber,
   maxRemediationRounds,
+  reviewerSessionUuid,
+  onReviewerPgid = () => {},
 }) {
   const reviewerPath = join(__dirname, 'reviewer.mjs');
   const args = JSON.stringify({
@@ -464,6 +458,9 @@ async function spawnReviewer({
         timeout: resolveReviewerTimeoutMs(reviewerEnv),
         progressTimeout: resolveProgressTimeoutMs(reviewerEnv),
         signal: controller.signal,
+        onSpawn: ({ pgid }) => {
+          onReviewerPgid({ sessionUuid: reviewerSessionUuid, pgid });
+        },
       }
     );
     if (stdout) console.log(`[reviewer:${prNumber}] ${stdout.trim()}`);
@@ -905,13 +902,11 @@ async function pollOnce(octokit) {
         }
       }
 
-      // 'failed-orphan' is a sticky state set by reconcileOrphanedReviewing()
-      // when the watcher restarted with a row stuck in 'reviewing' — i.e.
-      // a reviewer subprocess was in flight when the watcher died and may
-      // have posted a review the parent never recorded. Auto-retrying that
-      // row would risk a duplicate review post on GitHub; the operator
-      // must explicitly clear it via `npm run retrigger-review` after
-      // verifying the actual GitHub PR state.
+      // 'failed-orphan' is a sticky state reserved for legacy rows
+      // without a reviewer handle and true anomalies where GitHub shows
+      // a posted review but the reviewer process group is still alive.
+      // Auto-retrying that row would risk a duplicate review post; the
+      // operator must explicitly clear it via `npm run retrigger-review`.
       if (
         existing?.review_status === 'malformed' ||
         existing?.review_status === 'failed-orphan'
@@ -1084,7 +1079,16 @@ async function pollOnce(octokit) {
       }
 
       const attemptAt = new Date().toISOString();
-      const claim = stmtMarkAttemptStarted.run(attemptAt, repoPath, prNumber);
+      const reviewerSessionUuid = randomUUID();
+      const reviewerHeadSha = pr?.head?.sha || null;
+      const claim = stmtMarkAttemptStarted.run(
+        attemptAt,
+        reviewerSessionUuid,
+        attemptAt,
+        reviewerHeadSha,
+        repoPath,
+        prNumber
+      );
       if (claim.changes === 0) {
         // Lost the cross-process compare-and-swap. Either another
         // watcher just claimed this row, or the row's status moved to
@@ -1138,6 +1142,19 @@ async function pollOnce(octokit) {
         builderTag: route.tag,
         reviewAttemptNumber,
         maxRemediationRounds,
+        reviewerSessionUuid,
+        onReviewerPgid: ({ pgid }) => {
+          try {
+            stmtMarkReviewerPgid.run(pgid, reviewerSessionUuid, repoPath, prNumber);
+            console.log(
+              `[watcher] reviewer_session_handle_persisted repo=${repoPath} pr=${prNumber} ` +
+              `session=${reviewerSessionUuid} pgid=${pgid}`
+            );
+          } catch (err) {
+            handlePollError(err, 'stmtMarkReviewerPgid');
+            throw err;
+          }
+        },
       });
 
       settleReviewerAttempt({
@@ -1160,7 +1177,7 @@ function requireEnv(name) {
   }
 }
 
-function main() {
+async function main() {
   requireEnv('GITHUB_TOKEN');
 
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
@@ -1177,7 +1194,7 @@ function main() {
   // Reconcile any rows stuck in 'reviewing' from a previous watcher
   // run that died mid-spawn before this poll loop touches the queue.
   // See reconcileOrphanedReviewing for the recovery contract.
-  reconcileOrphanedReviewing();
+  await reconcileOrphanedReviewing(octokit);
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped
   // on legitimate org-wide work (a single spawnReviewer can already
@@ -1253,7 +1270,10 @@ function main() {
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
-  main();
+  main().catch((err) => {
+    console.error('[watcher] startup failed:', err);
+    process.exit(1);
+  });
 }
 
 export {
@@ -1262,6 +1282,7 @@ export {
   handlePostedReviewRow,
   pollOnce,
   readWatcherDrainState,
+  reconcileOrphanedReviewing,
   shouldDeferReviewForActiveFollowUp,
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,

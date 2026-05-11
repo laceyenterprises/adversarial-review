@@ -456,6 +456,10 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
       `UPDATE reviewed_prs
           SET review_status = 'reviewing',
               last_attempted_at = ?,
+              reviewer_session_uuid = ?,
+              reviewer_started_at = ?,
+              reviewer_head_sha = ?,
+              reviewer_pgid = NULL,
               failed_at = CASE
                 WHEN review_status = 'pending-upstream' THEN failed_at
                 ELSE NULL
@@ -467,7 +471,14 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
         WHERE repo = ?
           AND pr_number = ?
           AND review_status IN ('pending', 'failed', 'pending-upstream')`
-    ).run('2026-05-04T07:30:00.000Z', repo, prNumber);
+    ).run(
+      '2026-05-04T07:30:00.000Z',
+      'session-cascade',
+      '2026-05-04T07:30:00.000Z',
+      'head-cascade',
+      repo,
+      prNumber
+    );
 
     let row = db.prepare(
       'SELECT review_status, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'

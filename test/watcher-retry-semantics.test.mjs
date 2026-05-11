@@ -102,11 +102,10 @@ test('malformed titles are terminal but explicitly marked malformed', () => {
   assert.match(row.failure_message, /Malformed PR title/);
 });
 
-// Reconciliation contract for orphaned 'reviewing' rows. These tests
-// model the SQL the watcher's reconcileOrphanedReviewing() runs on
-// startup against a fresh in-memory DB, so the schema and the
-// transition contract are exercised without spinning up the full
-// watcher module (which has DB-open side effects at import time).
+// Legacy reconciliation contract for pre-LAC-532 'reviewing' rows with
+// no reviewer_session_uuid. New rows are handled by the startup
+// reattach probe; legacy rows still fall through to failed-orphan so
+// old in-flight state remains operator-actionable after deploy.
 
 const RECONCILE_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
@@ -115,7 +114,7 @@ const RECONCILE_FAILURE_MESSAGE =
 
 function reconcileOrphans(db, failureAt) {
   const rows = db
-    .prepare("SELECT repo, pr_number FROM reviewed_prs WHERE review_status = 'reviewing'")
+    .prepare("SELECT repo, pr_number FROM reviewed_prs WHERE review_status = 'reviewing' AND reviewer_session_uuid IS NULL")
     .all();
   const stmt = db.prepare(
     "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"

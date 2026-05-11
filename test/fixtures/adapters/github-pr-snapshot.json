@@ -1,0 +1,24 @@
+{
+  "repo": "laceyenterprises/adversarial-review",
+  "pulls": [
+    {
+      "number": 484,
+      "title": "[codex] LAC-484 carve subject channel adapter",
+      "state": "open",
+      "updated_at": "2026-05-10T21:20:00.000Z",
+      "head": {
+        "sha": "abc123def456",
+        "ref": "codex-ara-04/ARA-04"
+      },
+      "user": {
+        "login": "codex-worker"
+      },
+      "labels": [
+        {
+          "name": "risk:medium"
+        }
+      ]
+    }
+  ],
+  "diff": "diff --git a/src/watcher.mjs b/src/watcher.mjs\n--- a/src/watcher.mjs\n+++ b/src/watcher.mjs\n@@ -1 +1 @@\n-old\n+new\n"
+}

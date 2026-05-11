@@ -10,10 +10,9 @@ import { promisify } from 'node:util';
 import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import {
-  routePR,
-} from './watcher-title-guardrails.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
+import { createGitHubPRSubjectAdapter } from './adapters/subject/github-pr/index.mjs';
+import { routeSubject } from './adapters/subject/github-pr/routing.mjs';
 import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
@@ -851,26 +850,32 @@ async function pollOnce(octokit) {
 
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
+    const subjectAdapter = createGitHubPRSubjectAdapter({
+      octokit,
+      repos: [repoPath],
+      rootDir: ROOT,
+      execFileImpl: execFileAsync,
+    });
 
-    let prs;
+    let subjectRefs;
     try {
-      const { data } = await octokit.rest.pulls.list({
-        owner,
-        repo,
-        state: 'open',
-        per_page: 50,
-        sort: 'created',
-        direction: 'desc',
-      });
-      prs = data;
+      subjectRefs = await subjectAdapter.discoverSubjects();
     } catch (err) {
       console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
       continue;
     }
 
-    for (const pr of prs) {
+    for (const subjectRef of subjectRefs) {
+      let subject;
+      try {
+        subject = await subjectAdapter.fetchState(subjectRef);
+      } catch (err) {
+        console.error(`[watcher] Failed to fetch subject state for ${subjectRef.subjectExternalId}:`, err.message);
+        continue;
+      }
+      const pr = subject.pr;
       const prNumber = pr.number;
-      const prTitle = pr.title;
+      const prTitle = subject.title || pr.title;
       const prState = String(pr.state || '').trim().toLowerCase();
       const staleDriftSkip = shouldSkipReviewerForStaleDrift(pr);
       if (staleDriftSkip) {
@@ -980,7 +985,7 @@ async function pollOnce(octokit) {
         continue;
       }
 
-      const route = routePR(prTitle);
+      const route = routeSubject(subject);
       if (!route) {
         if (!existing) {
           stmtCreateReviewRow.run(

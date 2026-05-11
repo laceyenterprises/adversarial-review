@@ -83,3 +83,29 @@ test('signalMalformedTitleFailure posts fail-loud PR comment', async () => {
   assert.match(calls[0].body, /Adversarial review did not trigger/i);
   assert.match(calls[0].body, /retitling may not retrigger adversarial review/i);
 });
+
+test('signalMalformedTitleFailure still posts when head SHA is missing', async () => {
+  const calls = [];
+  const octokit = {
+    rest: {
+      issues: {
+        createComment: async (payload) => {
+          calls.push(payload);
+          return { data: { id: 2 } };
+        },
+      },
+    },
+  };
+
+  await signalMalformedTitleFailure(octokit, {
+    repoPath: 'laceyenterprises/clio',
+    owner: 'laceyenterprises',
+    repo: 'clio',
+    prNumber: 43,
+    prTitle: 'LAC-181: missing tag',
+    revisionRef: null,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].issue_number, 43);
+});

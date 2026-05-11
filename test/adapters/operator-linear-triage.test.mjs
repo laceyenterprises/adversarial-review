@@ -136,6 +136,52 @@ test('adapter memoizes the Linear client across triage calls', async () => {
   assert.equal(comments.length, 1);
 });
 
+test('adapter retries after a transient Linear client provider failure', async () => {
+  const { linear, updates } = makeLinearFixture();
+  let providerCalls = 0;
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        throw new Error('transient import failure');
+      }
+      return linear;
+    },
+    logger: {},
+  });
+
+  await assert.rejects(
+    adapter.syncTriageStatus(subjectRef(), 'in-review'),
+    /transient import failure/
+  );
+  await adapter.syncTriageStatus(subjectRef(), 'in-review');
+
+  assert.equal(providerCalls, 2);
+  assert.deepEqual(updates, [
+    { issueId: 'issue-1', payload: { stateId: 'state-review' } },
+  ]);
+});
+
+test('adapter does not memoize a null Linear client result', async () => {
+  const { linear, updates } = makeLinearFixture();
+  let providerCalls = 0;
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => {
+      providerCalls += 1;
+      return providerCalls === 1 ? null : linear;
+    },
+    logger: {},
+  });
+
+  await adapter.syncTriageStatus(subjectRef(), 'in-review');
+  await adapter.syncTriageStatus(subjectRef(), 'in-review');
+
+  assert.equal(providerCalls, 2);
+  assert.deepEqual(updates, [
+    { issueId: 'issue-1', payload: { stateId: 'state-review' } },
+  ]);
+});
+
 test('buildCriticalFlagComment includes matching critical words', () => {
   const body = buildCriticalFlagComment('Possible injection vulnerability.');
 

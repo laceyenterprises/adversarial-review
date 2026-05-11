@@ -1318,6 +1318,7 @@ function claimNextFollowUpJob({
   markStoppedImpl = markFollowUpJobStopped,
   returnStopped = false,
   excludedRepoPrKeys = new Set(),
+  onExcludedRepoPrKey = null,
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
   const normalizedExcludedRepoPrKeys = new Set(
@@ -1335,6 +1336,7 @@ function claimNextFollowUpJob({
       }
       const repoPrKey = followUpJobRepoPrKey(pendingJob);
       if (normalizedExcludedRepoPrKeys.has(repoPrKey)) {
+        onExcludedRepoPrKey?.(pendingPath, repoPrKey, pendingJob);
         continue;
       }
     }

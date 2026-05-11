@@ -77,7 +77,7 @@ test('3 consecutive empty polls with open pending PR emits no_progress and one a
   assert.match(alerts[0].text, /watcher\.no_progress/);
 });
 
-test('6 consecutive empty polls with open pending PR keeps alert transition-gated', async () => {
+test('6 consecutive empty polls with open pending PR re-alerts on the next threshold boundary', async () => {
   const { probe, events, alerts } = makeProbe();
 
   for (let i = 0; i < 6; i += 1) {
@@ -89,8 +89,12 @@ test('6 consecutive empty polls with open pending PR keeps alert transition-gate
     events.map((event) => event.pollsSinceLastSpawn),
     [3, 4, 5, 6]
   );
-  assert.equal(alerts.length, 1);
-  assert.equal(alerts[0].event, 'watcher.no_progress');
+  assert.equal(alerts.length, 2);
+  assert.deepEqual(
+    alerts.map((alert) => alert.event),
+    ['watcher.no_progress', 'watcher.no_progress']
+  );
+  assert.equal(alerts[1].payload.pollsSinceLastSpawn, 6);
 });
 
 test('spawn after no_progress emits recovered and one recovery alert', async () => {

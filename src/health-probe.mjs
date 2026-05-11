@@ -161,7 +161,7 @@ function createWatcherHealthProbe({
       state.healthState = 'no_progress';
       state.noProgressSilentPolls = state.pollsSinceLastSpawn;
       state.spawnsSinceRecovery = 0;
-      if (isTransition) {
+      if (isTransition || (state.pollsSinceLastSpawn % config.threshold === 0)) {
         await sendTransitionAlert(buildNoProgressAlertText(payload), payload);
       }
       return payload;

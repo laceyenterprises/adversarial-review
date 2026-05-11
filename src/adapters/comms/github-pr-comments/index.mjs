@@ -154,7 +154,7 @@ function buildAllowlistedGhEnv(env, {
   allowGhAuthFallback = false,
 } = {}) {
   const allowlisted = {
-    PATH: env?.PATH ?? '/usr/bin:/bin',
+    PATH: env?.PATH ?? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
     HOME: env?.HOME ?? '',
   };
   if (token) {

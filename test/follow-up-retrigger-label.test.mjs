@@ -16,6 +16,8 @@ import {
   tryRetriggerRemediationFromLabel,
 } from '../src/follow-up-retrigger-label.mjs';
 
+const COMMENT_ONLY_REVIEW_BODY = '## Summary\nsummary\n\n## Verdict\nComment only';
+
 function makeHaltedJob(rootDir, {
   status = 'stopped',
   stopCode = 'max-rounds-reached',
@@ -23,13 +25,14 @@ function makeHaltedJob(rootDir, {
   maxRounds = 2,
   currentRound = 2,
   riskClass = 'medium',
+  reviewBody = '## Summary\nsummary',
 } = {}) {
   const created = createFollowUpJob({
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
     reviewerModel: 'claude',
-    reviewBody: '## Summary\nsummary',
+    reviewBody,
     reviewPostedAt: '2026-05-05T04:00:00.000Z',
     critical: false,
     maxRemediationRounds: maxRounds,
@@ -159,6 +162,51 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   const updated = readFollowUpJob(result.jobPath);
   assert.equal(updated.remediationPlan.maxRounds, 3);
   assert.equal(updated.status, 'pending');
+  assert.equal(updated.remediationPlan.nextAction.operatorOverride, true);
+});
+
+test('tryRetriggerRemediationFromLabel requeues stopped:review-settled jobs for explicit operator flags', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'review-settled',
+    currentRound: 1,
+    maxRounds: 2,
+    reviewBody: COMMENT_ONLY_REVIEW_BODY,
+  });
+
+  const ghCalls = [];
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelActor: 'VirtualPaul',
+    labelEvent: makeLabelEvent({ id: 'evt-review-settled' }),
+    execFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: () => {},
+    now: () => '2026-05-06T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  assert.equal(result.labelRemoved, true);
+  assert.equal(result.requeueOutcome, 'requeued');
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
+  assert.equal(readFollowUpJob(result.jobPath).remediationPlan.nextAction.operatorOverride, true);
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    workerType: 'codex-remediation',
+    claimedAt: '2026-05-06T18:00:01.000Z',
+  });
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.equal(claimed.job.remediationPlan.currentRound, 2);
+  assert.deepEqual(claimed.job.remediationPlan.nextAction, {
+    type: 'worker-spawn',
+    round: 2,
+    operatorVisibility: 'explicit',
+  });
 });
 
 test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted', async () => {
@@ -285,7 +333,7 @@ test('tryRetriggerRemediationFromLabel leaves label in place when job is still a
 });
 
 test('tryRetriggerRemediationFromLabel leaves label in place for non-retriggerable stopped jobs', async () => {
-  for (const stopCode of ['operator-stop', 'review-settled', 'rereview-blocked']) {
+  for (const stopCode of ['operator-stop', 'rereview-blocked']) {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
     makeHaltedJob(rootDir, {
       stopCode,

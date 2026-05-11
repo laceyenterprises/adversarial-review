@@ -721,6 +721,55 @@ test('claimNextFollowUpJob records clean review jobs without spawning remediatio
   assert.equal(existsSync(created.jobPath), false);
 });
 
+test('claimNextFollowUpJob honors explicit operator requeues for settled reviews', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    critical: false,
+    reviewBody: [
+      '## Summary',
+      'Everything is settled.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      '',
+      'Comment only',
+    ].join('\n'),
+  });
+
+  const stopped = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    launcherPid: 4242,
+    returnStopped: true,
+  });
+  const requeued = requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath: stopped.jobPath,
+    requestedAt: '2026-04-21T10:05:00.000Z',
+    requestedBy: 'pr-label:VirtualPaul',
+    reason: 'Operator asked to address non-blocking review flags.',
+  });
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:06:00.000Z',
+    launcherPid: 4243,
+    returnStopped: true,
+  });
+
+  assert.match(requeued.jobPath, /data\/follow-up-jobs\/pending\/.+\.json$/);
+  assert.equal(requeued.job.remediationPlan.nextAction.operatorOverride, true);
+  assert.ok(claimed);
+  assert.equal(claimed.stopped, undefined);
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.equal(claimed.job.remediationPlan.currentRound, 1);
+  assert.equal(claimed.job.remediationPlan.rounds[0].state, 'claimed');
+  assert.equal(claimed.job.remediationPlan.rounds[0].claimedBy.launcherPid, 4243);
+});
+
 test('claimNextFollowUpJob logs and retries settled jobs when stopped-marking fails', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const settled = createFollowUpJob({

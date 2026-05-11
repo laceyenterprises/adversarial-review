@@ -89,14 +89,14 @@ test('pickAdversarialGateStatus settles comment-only posted rows even without a 
   assert.equal(decision.reason, 'review-settled');
 });
 
-test('pickAdversarialGateStatus settles pending clean verdict-carrier jobs', () => {
+test('pickAdversarialGateStatus keeps pending clean verdict-carrier jobs queued', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
     latestJob: makeJob({ status: 'pending' }),
   });
 
-  assert.equal(decision.state, 'success');
-  assert.equal(decision.reason, 'review-settled');
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'remediation-queued');
 });
 
 test('pickAdversarialGateStatus returns pending while remediation is active', () => {
@@ -105,6 +105,28 @@ test('pickAdversarialGateStatus returns pending while remediation is active', ()
     latestJob: makeJob({
       status: 'in_progress',
       reviewBody: '## Summary\nStill blocked.\n## Verdict\nRequest changes',
+    }),
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'remediation-in-progress');
+});
+
+test('pickAdversarialGateStatus keeps operator-retriggered clean jobs pending while active', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      status: 'in_progress',
+      reviewBody: '## Summary\nOperator requested another pass.\n## Verdict\nComment only',
+      remediationPlan: {
+        currentRound: 2,
+        maxRounds: 3,
+        nextAction: {
+          type: 'reconcile-worker',
+          round: 2,
+          operatorVisibility: 'explicit',
+        },
+      },
     }),
   });
 

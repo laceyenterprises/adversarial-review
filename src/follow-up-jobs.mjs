@@ -77,6 +77,9 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   'max-rounds-reached',
   'round-budget-exhausted',
   'daemon-bounce-safety',
+  // A settled review stops the automatic loop, but an explicit operator
+  // retrigger label/CLI call means "address the remaining non-blocking flags."
+  'review-settled',
 ]);
 const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
 
@@ -272,6 +275,12 @@ function buildRecommendedFollowUpAction({ critical }) {
 }
 
 function isSettledReviewJob(job) {
+  const nextAction = job?.remediationPlan?.nextAction;
+  // An explicit operator retrigger requeues a settled job back to pending
+  // with a durable one-shot override. Allow exactly that next claim to
+  // proceed even if the stored review body is still Comment-only.
+  if (nextAction?.operatorOverride === true) return false;
+
   const verdict = normalizeReviewVerdict(extractReviewVerdict(job?.reviewBody));
   return verdict === 'comment-only' || verdict === 'approved';
 }
@@ -1722,6 +1731,7 @@ function requeueFollowUpJobForNextRound({
         type: 'consume-pending-round',
         round: currentRound + 1,
         operatorVisibility: 'explicit',
+        operatorOverride: true,
         requestedAt,
         requestedBy,
         reason,

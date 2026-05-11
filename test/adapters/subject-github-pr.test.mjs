@@ -149,7 +149,7 @@ test('github-pr subject identity rejects malformed repo slugs', () => {
 
 test('revisionRef only uses the real GitHub head SHA', () => {
   assert.equal(revisionRefFromPR({ number: 12, head: { sha: 'abc123', ref: 'branch-name' } }), 'abc123');
-  assert.equal(revisionRefFromPR({ number: 12, head: { ref: 'branch-name' } }), '');
+  assert.equal(revisionRefFromPR({ number: 12, head: { ref: 'branch-name' } }), null);
 });
 
 test('stateFromSnapshot always emits a boolean terminal flag', () => {

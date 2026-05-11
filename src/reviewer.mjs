@@ -1027,7 +1027,7 @@ async function main() {
     await linearTriage.recordReviewCompleted({
       domainId: 'code-pr',
       subjectExternalId: `${repo}#${prNumber}`,
-      revisionRef: '',
+      revisionRef: null,
       linearTicketId,
     }, {
       critical,

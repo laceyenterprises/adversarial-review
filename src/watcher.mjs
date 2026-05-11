@@ -747,6 +747,15 @@ let lastRepoRefresh = 0;
 const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
   execFileImpl: execFileAsync,
 });
+const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 3;
+
+function resolveStaleReviewerReconcilePerPoll(env = process.env) {
+  const raw = env.ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL;
+  return parsed;
+}
 
 async function refreshOrgRepos(octokit) {
   if (!config.org) return;
@@ -805,7 +814,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         subjectRefWithLinearTicket({
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.head?.sha || '',
+          revisionRef: pr.head?.sha || null,
         }, linearTicketId),
         'finalized'
       );
@@ -817,7 +826,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         subjectRefWithLinearTicket({
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.head?.sha || '',
+          revisionRef: pr.head?.sha || null,
         }, linearTicketId),
         'halted'
       );
@@ -853,9 +862,9 @@ async function handlePostedReviewRow({
       const controlSubjectRef = subjectRef || {
         domainId: 'code-pr',
         subjectExternalId: `${repoPath}#${prNumber}`,
-        revisionRef: currentRevisionRef || '',
+        revisionRef: currentRevisionRef || null,
       };
-      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || '';
+      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
       const [operatorApproval, mergeAgentRequest] = await Promise.all([
         labelNames.includes(OPERATOR_APPROVED_LABEL)
           ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
@@ -891,11 +900,17 @@ async function handlePostedReviewRow({
 async function pollOnce(octokit) {
   const operatorSurface = createWatcherOperatorSurface();
   await refreshOrgRepos(octokit);
-  await reconcileReviewerSessions({
+  const reattach = await reconcileReviewerSessions({
     db,
     octokit,
+    maxRows: resolveStaleReviewerReconcilePerPoll(),
     shouldReconcileRow: (row, now) => shouldReconcileStaleReviewerSession(row, now),
   });
+  if (reattach.skipped > 0) {
+    console.log(
+      `[watcher] stale reviewer reattach capped: reconciled=${reattach.reconciled} skipped=${reattach.skipped}`
+    );
+  }
 
   await warnForMissingAdversarialGateBranchProtection(activeRepos, {
     checker: adversarialGateBranchProtectionChecker,
@@ -1398,6 +1413,7 @@ export {
   persistReviewerPgid,
   readWatcherDrainState,
   reconcileOrphanedReviewing,
+  resolveStaleReviewerReconcilePerPoll,
   shouldDeferReviewForActiveFollowUp,
   shouldReconcileStaleReviewerSession,
   WATCHER_DRAIN_FILE,

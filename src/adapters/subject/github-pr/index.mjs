@@ -48,7 +48,7 @@ function splitRepo(repoPath) {
 }
 
 function headShaFromPR(pr) {
-  return String(pr?.head?.sha || '');
+  return pr?.head?.sha ? String(pr.head.sha) : null;
 }
 
 function revisionRefFromPR(pr) {

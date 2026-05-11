@@ -39,6 +39,16 @@ function normalizeDays(value) {
   return Number.isFinite(days) && days > 0 ? days : DEFAULT_WINDOW_DAYS;
 }
 
+function normalizeRoundCap(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'number') return Number.isInteger(raw) ? raw : null;
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || !/^-?\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
 function windowStart({ now = new Date(), days = DEFAULT_WINDOW_DAYS, since = null } = {}) {
   const explicit = iso(since);
   if (explicit) return explicit;
@@ -135,8 +145,19 @@ function normalizeVerdictState(record = {}) {
   try {
     return normalizeReviewVerdict(extractReviewVerdict(sanitizeCodexReviewPayload(String(body)))) || 'unknown';
   } catch {
-    return normalizeReviewVerdict(extractReviewVerdict(String(body))) || 'unknown';
+    try {
+      return normalizeReviewVerdict(extractReviewVerdict(String(body))) || 'unknown';
+    } catch {
+      return 'unknown';
+    }
   }
+}
+
+function mergeVerdictStates(...states) {
+  const verdictStates = Array.from(new Set(states.filter((value) => value && value !== 'unknown'))).sort();
+  if (verdictStates.length === 0) return { verdictState: 'unknown', verdictStates };
+  if (verdictStates.length === 1) return { verdictState: verdictStates[0], verdictStates };
+  return { verdictState: 'conflict', verdictStates };
 }
 
 function entryText(entry) {
@@ -265,11 +286,7 @@ function normalizeOperatorOverrideEvent(event = {}, setContext = {}, subjectFall
     observedRevisionRef: String(observedRevisionRef),
     expectedRevisionRef: currentRevisionRef ? String(currentRevisionRef) : null,
     eventExternalId: event.eventExternalId ?? event.eventId ?? event.id ?? null,
-    // roundCap can plausibly arrive as `"3"` (string) from upstream GitHub
-    // label parsing. The rest of this file is defensive about string/number
-    // coercion (e.g. `Number(row.round ?? 0)`); be symmetric here so we
-    // don't silently null-out a valid cap from string-shaped input.
-    roundCap: Number.isInteger(Number(event.roundCap)) ? Number(event.roundCap) : null,
+    roundCap: normalizeRoundCap(event.roundCap),
   };
 }
 
@@ -363,9 +380,7 @@ function normalizeReplaySnapshot(snapshot = {}) {
       bySubject.set(normalized.key, normalized);
       continue;
     }
-    const verdictStates = Array.from(new Set(
-      [existing.verdictState, normalized.verdictState].filter((value) => value && value !== 'unknown')
-    )).sort();
+    const { verdictState, verdictStates } = mergeVerdictStates(existing.verdictState, normalized.verdictState);
     if (verdictStates.length > 1) {
       subjectConflicts.push({
         subject: normalized.subject,
@@ -374,7 +389,7 @@ function normalizeReplaySnapshot(snapshot = {}) {
     }
     bySubject.set(normalized.key, {
       ...existing,
-      verdictState: verdictStates[0] || existing.verdictState || normalized.verdictState,
+      verdictState,
       remediation: {
         addressed: dedupeSorted([...existing.remediation.addressed, ...normalized.remediation.addressed]),
         pushback: dedupeSorted([...existing.remediation.pushback, ...normalized.remediation.pushback]),
@@ -690,7 +705,7 @@ function loadSnapshot(filePath) {
 }
 
 function runCommand(command, env) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolvePromise, reject) => {
     const child = spawn(command.command, command.args, {
       cwd: ROOT,
       env,
@@ -698,7 +713,7 @@ function runCommand(command, env) {
     });
     child.on('error', reject);
     child.on('close', (code, signal) => {
-      if (code === 0) resolve();
+      if (code === 0) resolvePromise();
       else reject(new Error(`Replay command exited with ${signal || code}`));
     });
   });

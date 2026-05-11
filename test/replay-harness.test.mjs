@@ -143,6 +143,30 @@ test('approval override normalization drops stale observed revisions', () => {
   }]);
 });
 
+test('approval override normalization only accepts integer round caps from numeric input', () => {
+  const normalizeRoundCap = (roundCap) => normalizeApprovalOverrides({
+    approvalOverrides: [{
+      subjectRef,
+      expectedRevisionRef: 'sha-current',
+      observedRevisionRef: 'sha-current',
+      events: [{
+        type: 'operator-approved',
+        revisionRef: 'sha-current',
+        eventExternalId: 'fresh',
+        roundCap,
+      }],
+    }],
+  }, subjectRef)[0]?.roundCap ?? null;
+
+  assert.equal(normalizeRoundCap(3), 3);
+  assert.equal(normalizeRoundCap(' 3 '), 3);
+  assert.equal(normalizeRoundCap(''), null);
+  assert.equal(normalizeRoundCap(null), null);
+  assert.equal(normalizeRoundCap(false), null);
+  assert.equal(normalizeRoundCap([]), null);
+  assert.equal(normalizeRoundCap('3.5'), null);
+});
+
 test('collectReplaySnapshot surfaces terminal job JSON parse failures', () => {
   const rootDir = mkdtempSync(join(os.tmpdir(), 'replay-harness-'));
   const completedDir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
@@ -182,6 +206,7 @@ test('normalizeReplaySnapshot surfaces conflicting verdict merges deterministica
   const second = normalizeReplaySnapshot({ records: [commentOnly, requestChanges] });
 
   assert.deepEqual(first, second);
+  assert.equal(first.records[0].verdictState, 'conflict');
   assert.deepEqual(first.subjectConflicts, [{
     subject: subjectRef,
     verdictStates: ['comment-only', 'request-changes'],

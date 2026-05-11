@@ -265,7 +265,11 @@ function normalizeOperatorOverrideEvent(event = {}, setContext = {}, subjectFall
     observedRevisionRef: String(observedRevisionRef),
     expectedRevisionRef: currentRevisionRef ? String(currentRevisionRef) : null,
     eventExternalId: event.eventExternalId ?? event.eventId ?? event.id ?? null,
-    roundCap: Number.isInteger(event.roundCap) ? event.roundCap : null,
+    // roundCap can plausibly arrive as `"3"` (string) from upstream GitHub
+    // label parsing. The rest of this file is defensive about string/number
+    // coercion (e.g. `Number(row.round ?? 0)`); be symmetric here so we
+    // don't silently null-out a valid cap from string-shaped input.
+    roundCap: Number.isInteger(Number(event.roundCap)) ? Number(event.roundCap) : null,
   };
 }
 
@@ -419,16 +423,28 @@ function diffReplaySnapshots(productionSnapshot, stagingSnapshot) {
     actual: actual.unkeyedRecords,
   });
 
+  // Asymmetric-subject coverage is the most common replay mismatch.
+  // Earlier versions collapsed the entire asymmetry into a single
+  // `field: 'subject'` row, which carried the least info for the case
+  // operators need to triage hardest. Use an empty per-field baseline
+  // so verdict / remediation / delivery / override deltas all surface
+  // alongside the subject diff.
+  const emptySubjectRecord = {
+    verdictState: 'unknown',
+    remediation: { addressed: [], pushback: [], blockers: [] },
+    deliveries: [],
+    duplicateDeliveries: [],
+    approvalOverrides: [],
+    subject: null,
+  };
+
   for (const subject of subjects) {
-    const prod = expectedByKey.get(subject);
-    const stage = actualByKey.get(subject);
-    if (!prod) {
+    const prod = expectedByKey.get(subject) || { ...emptySubjectRecord };
+    const stage = actualByKey.get(subject) || { ...emptySubjectRecord };
+    if (!expectedByKey.has(subject)) {
       diffs.push({ subject, field: 'subject', expected: null, actual: stage.subject });
-      continue;
-    }
-    if (!stage) {
+    } else if (!actualByKey.has(subject)) {
       diffs.push({ subject, field: 'subject', expected: prod.subject, actual: null });
-      continue;
     }
     diffValue({ diffs, subject, field: 'verdictState', expected: prod.verdictState, actual: stage.verdictState });
     diffValue({ diffs, subject, field: 'remediation', expected: prod.remediation, actual: stage.remediation });
@@ -523,7 +539,21 @@ function collectTerminalJobs(rootDir, sinceIso) {
         job.commentDelivery?.deliveredAt,
         stat.mtime.toISOString(),
       ].map((value) => Date.parse(value)).filter((value) => Number.isFinite(value));
-      if (timestamps.length && Math.max(...timestamps) < sinceTime) continue;
+      // A job with no parseable timestamps cannot be window-filtered and
+      // would otherwise leak past `--days` / `--since` regardless of
+      // bounds — polluting production snapshots with arbitrarily old
+      // records and producing spurious diffs against staging. Drop it
+      // explicitly and surface as a parse error so the operator can
+      // audit the upstream producer.
+      if (timestamps.length === 0) {
+        recordParseError(parseErrors, {
+          source: 'terminal-job-no-timestamp',
+          file: filePath,
+          message: 'Terminal job has no parseable timestamps; cannot apply replay window filter.',
+        });
+        continue;
+      }
+      if (Math.max(...timestamps) < sinceTime) continue;
       jobs.push({
         ...job,
         deliveries: job.commentDelivery ? [job.commentDelivery] : [],

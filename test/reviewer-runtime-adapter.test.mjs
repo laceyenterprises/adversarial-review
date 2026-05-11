@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -111,8 +111,51 @@ test('cli-direct writes atomic reviewer run records and refuses double-spawn for
     release();
     const completed = await first;
     assert.equal(completed.ok, true);
-    const record = JSON.parse(readFileSync(reviewerRunStatePath(rootDir, req.sessionUuid), 'utf8'));
-    assert.equal(record.state, 'completed');
+    assert.equal(existsSync(reviewerRunStatePath(rootDir, req.sessionUuid)), true);
+
+    const terminalDuplicate = await adapter.spawnReviewer(req);
+    assert.equal(terminalDuplicate.ok, false);
+    assert.equal(terminalDuplicate.failureClass, 'bug');
+    assert.match(terminalDuplicate.stderrTail, /terminal state completed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct preserves cancelled state across abort races', async () => {
+  const rootDir = makeRoot();
+  let release;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        options.onSpawn({ pgid: 4243 });
+        await new Promise((resolve) => { release = resolve; });
+        const err = new Error('aborted');
+        err.code = 'ABORT_ERR';
+        err.signal = 'SIGTERM';
+        throw err;
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const req = {
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2 },
+      timeoutMs: 100,
+      sessionUuid: 'cancelled-session',
+      forbiddenFallbacks: ['api-key'],
+    };
+    const run = adapter.spawnReviewer(req);
+    await new Promise((resolve) => setImmediate(resolve));
+    await adapter.cancel(req.sessionUuid);
+    release();
+
+    const cancelled = await run;
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.failureClass, 'unknown');
+    assert.equal(existsSync(reviewerRunStatePath(rootDir, req.sessionUuid)), true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -195,10 +238,73 @@ test('bounce recovery reattaches active run records and requeues reviewing rows'
       log: { log() {} },
       now: new Date('2026-05-11T20:01:00.000Z'),
     });
-    assert.deepEqual(recovered, { recovered: 1 });
+    assert.deepEqual(recovered, { recovered: 1, pruned: 0 });
     const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE reviewer_session_uuid = ?').get('bounce-session');
     assert.equal(row.review_status, 'failed');
     assert.match(row.failure_message, /daemon-bounce/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('bounce recovery counts only rows it actually requeued', async () => {
+  const rootDir = makeRoot();
+  const db = new Database(':memory:');
+  ensureReviewStateSchema(db);
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'posted-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      pgid: 6060,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'posted-session',
+    });
+
+    const recovered = await recoverReviewerRunRecords({
+      rootDir,
+      adapter,
+      db,
+      log: { log() {} },
+      now: new Date('2026-05-11T20:01:00.000Z'),
+    });
+    assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('bounce recovery prunes old terminal run-state files on startup', async () => {
+  const rootDir = makeRoot();
+  const db = new Database(':memory:');
+  ensureReviewStateSchema(db);
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'old-terminal-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'failed',
+      pgid: 6060,
+      spawnedAt: '2026-05-09T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-09T20:00:30.000Z',
+      reattachToken: 'old-terminal-session',
+    });
+
+    const recovered = await recoverReviewerRunRecords({
+      rootDir,
+      adapter,
+      db,
+      log: { log() {} },
+      now: new Date('2026-05-11T20:01:00.000Z'),
+    });
+    assert.deepEqual(recovered, { recovered: 0, pruned: 1 });
+    assert.equal(existsSync(reviewerRunStatePath(rootDir, 'old-terminal-session')), false);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

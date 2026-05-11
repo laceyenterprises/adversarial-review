@@ -4,6 +4,7 @@ import { writeFileAtomic } from '../../atomic-write.mjs';
 
 const RUN_STATE_DIR = ['data', 'reviewer-runs'];
 const ACTIVE_RUN_STATES = new Set(['spawned', 'heartbeating']);
+const TERMINAL_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
 
 function reviewerRunStateDir(rootDir) {
   return join(rootDir, ...RUN_STATE_DIR);
@@ -99,13 +100,41 @@ function removeReviewerRunRecord(rootDir, sessionUuid) {
   rmSync(reviewerRunStatePath(rootDir, sessionUuid), { force: true });
 }
 
+function pruneReviewerRunRecords(rootDir, {
+  now = new Date(),
+  ttlMs = 24 * 60 * 60 * 1000,
+} = {}) {
+  const dir = reviewerRunStateDir(rootDir);
+  if (!existsSync(dir)) return 0;
+  const cutoff = now.getTime() - ttlMs;
+  if (!Number.isFinite(cutoff)) return 0;
+  let pruned = 0;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      const record = normalizeReviewerRunRecord(JSON.parse(readFileSync(join(dir, name), 'utf8')));
+      if (ACTIVE_RUN_STATES.has(record.state)) continue;
+      const ageAnchor = Date.parse(record.lastHeartbeatAt || record.spawnedAt || '');
+      if (!Number.isFinite(ageAnchor) || ageAnchor > cutoff) continue;
+      removeReviewerRunRecord(rootDir, record.sessionUuid);
+      pruned += 1;
+    } catch {
+      // Corrupt records are ignored here; startup recovery should stay
+      // best-effort and avoid deleting files it could not parse.
+    }
+  }
+  return pruned;
+}
+
 export {
   ACTIVE_RUN_STATES,
   claimReviewerRunRecord,
+  pruneReviewerRunRecords,
   readActiveReviewerRunRecords,
   readReviewerRunRecord,
   removeReviewerRunRecord,
   reviewerRunStatePath,
+  TERMINAL_RUN_STATES,
   updateReviewerRunRecord,
   writeReviewerRunRecord,
 };

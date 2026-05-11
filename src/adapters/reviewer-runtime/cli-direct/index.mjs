@@ -19,17 +19,13 @@ const DEFAULT_FORBIDDEN_FALLBACKS = ['api-key', 'anthropic-api-key'];
 
 function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
   const text = String(value || '');
-  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
-  let result = '';
-  let bytes = 0;
-  for (let index = text.length - 1; index >= 0; index -= 1) {
-    const char = text[index];
-    const charBytes = Buffer.byteLength(char, 'utf8');
-    if (bytes + charBytes > maxBytes) break;
-    result = char + result;
-    bytes += charBytes;
+  const buffer = Buffer.from(text, 'utf8');
+  if (buffer.byteLength <= maxBytes) return text;
+  let start = buffer.byteLength - maxBytes;
+  while (start < buffer.byteLength && (buffer[start] & 0xC0) === 0x80) {
+    start += 1;
   }
-  return result;
+  return buffer.subarray(start).toString('utf8');
 }
 
 function emptyResult({
@@ -148,10 +144,21 @@ function createCliDirectReviewerRuntimeAdapter({
         error: `reviewer run ${sessionUuid} is already active`,
       });
     }
+    if (!claim.claimed) {
+      return emptyResult({
+        ok: false,
+        spawnedAt: claim.record?.spawnedAt || spawnedAt,
+        failureClass: 'bug',
+        stderrTail: `reviewer run ${sessionUuid} already reached terminal state ${claim.record?.state || 'unknown'}; mint a new session UUID before retrying`,
+        reattachToken: claim.record?.reattachToken || sessionUuid,
+        error: `reviewer run ${sessionUuid} already reached terminal state ${claim.record?.state || 'unknown'}`,
+      });
+    }
 
     let record = claim.record || initialRecord;
     const controller = new AbortController();
-    activeRuns.set(sessionUuid, { controller, record });
+    const activeRun = { controller, record, cancelled: false };
+    activeRuns.set(sessionUuid, activeRun);
 
     try {
       const reviewerEnv = {
@@ -180,7 +187,8 @@ function createCliDirectReviewerRuntimeAdapter({
               pgid,
               lastHeartbeatAt: now(),
             });
-            activeRuns.set(sessionUuid, { controller, record });
+            activeRun.record = record;
+            activeRuns.set(sessionUuid, activeRun);
             req.onReviewerPgid?.({ sessionUuid, pgid });
           },
         }
@@ -190,6 +198,7 @@ function createCliDirectReviewerRuntimeAdapter({
         state: 'completed',
         lastHeartbeatAt: now(),
       });
+      activeRun.record = record;
       return emptyResult({
         ok: true,
         spawnedAt: record.spawnedAt,
@@ -213,6 +222,7 @@ function createCliDirectReviewerRuntimeAdapter({
       const errorCode = typeof err?.code === 'string' ? err.code : null;
       const stderrTail = tailText(err?.stderr || detail || '');
       const stdoutTail = tailText(err?.stdout || '');
+      const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
       const failureClass = classifyReviewerFailure(
         err?.stderr || detail || '',
         exitCode,
@@ -225,9 +235,10 @@ function createCliDirectReviewerRuntimeAdapter({
         },
       );
       record = updateReviewerRunRecord(rootDir, record, {
-        state: failureClass === 'daemon-bounce' ? 'cancelled' : 'failed',
+        state: cancelled || failureClass === 'daemon-bounce' ? 'cancelled' : 'failed',
         lastHeartbeatAt: now(),
       });
+      activeRun.record = record;
       return emptyResult({
         ok: false,
         spawnedAt: record.spawnedAt,
@@ -264,12 +275,12 @@ function createCliDirectReviewerRuntimeAdapter({
   async function cancel(sessionUuid) {
     const active = activeRuns.get(sessionUuid);
     if (active) {
+      active.cancelled = true;
       active.controller.abort('kernel SIGTERM');
-      updateReviewerRunRecord(rootDir, active.record, {
+      active.record = updateReviewerRunRecord(rootDir, active.record, {
         state: 'cancelled',
         lastHeartbeatAt: now(),
       });
-      activeRuns.delete(sessionUuid);
       return;
     }
     const record = readReviewerRunRecord(rootDir, sessionUuid);

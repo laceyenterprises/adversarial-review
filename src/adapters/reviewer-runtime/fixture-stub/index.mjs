@@ -42,6 +42,20 @@ function createFixtureStubReviewerRuntimeAdapter({
         reattachToken: claim.record.reattachToken,
       };
     }
+    if (!claim.claimed) {
+      return {
+        ok: false,
+        reviewBody: null,
+        failureClass: 'bug',
+        stderrTail: `fixture reviewer run ${sessionUuid} already reached terminal state ${claim.record?.state || 'unknown'}; mint a new session UUID before retrying`,
+        stdoutTail: null,
+        exitCode: null,
+        signal: null,
+        pgid: null,
+        spawnedAt: claim.record?.spawnedAt || spawnedAt,
+        reattachToken: claim.record?.reattachToken || `fixture:${sessionUuid}`,
+      };
+    }
     let record = updateReviewerRunRecord(rootDir, claim.record, {
       state: 'heartbeating',
       lastHeartbeatAt: now(),

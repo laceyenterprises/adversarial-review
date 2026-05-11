@@ -1120,7 +1120,14 @@ async function pollOnce(octokit) {
 
       const attemptAt = new Date().toISOString();
       const reviewerSessionUuid = randomUUID();
-      const reviewerHeadSha = pr?.head?.sha || null;
+      // After ARA-06's operator-surface carve, the per-PR loop iterates
+      // typed `subject` (SubjectState) values from the subject adapter
+      // — there is no `pr` GitHub-PR object in scope here. The handle
+      // we need to persist is the head SHA we observed at claim time,
+      // which is `subject.headSha`. (Was: `pr?.head?.sha`, which raised
+      // `ReferenceError: pr is not defined` on every poll cycle for any
+      // PR that reached the claim site, silently blocking review spawns.)
+      const reviewerHeadSha = subject?.headSha || null;
       const claim = stmtMarkAttemptStarted.run(
         attemptAt,
         reviewerSessionUuid,

@@ -1224,6 +1224,27 @@ function isWorkerProcessRunning(processId) {
   }
 }
 
+function killDetachedWorkerProcessGroup(processId, signal = 'SIGKILL') {
+  if (!Number.isInteger(processId) || processId <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(-processId, signal);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') {
+      return false;
+    }
+    try {
+      process.kill(processId, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 function parseIsoTime(value) {
   const timestamp = Date.parse(String(value ?? ''));
   return Number.isFinite(timestamp) ? timestamp : null;
@@ -2479,6 +2500,7 @@ async function consumeNextFollowUpJob({
   // never-spawned so the PR-wide ledger does not count this round —
   // an OAuth/workspace-prep failure burned no remediation budget.
   let spawnAttempted = false;
+  let spawnedWorker = null;
 
   try {
     // Round-budget check first (cheap, short-circuits before any
@@ -2582,7 +2604,6 @@ async function consumeNextFollowUpJob({
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
 
-    spawnAttempted = true;
     const worker = spawnRemediationWorker(workerClass, {
       workspaceDir,
       promptPath,
@@ -2594,6 +2615,7 @@ async function consumeNextFollowUpJob({
       spawnImpl,
       now,
     });
+    spawnedWorker = worker;
 
     const updated = markFollowUpJobSpawned({
       jobPath: claimed.jobPath,
@@ -2608,6 +2630,7 @@ async function consumeNextFollowUpJob({
         replyPath,
       },
     });
+    spawnAttempted = true;
 
     return {
       consumed: true,
@@ -2638,15 +2661,25 @@ async function consumeNextFollowUpJob({
       };
     }
 
-    // If we never made it to the spawn call, this round burned no
-    // remediation budget — tag the failed record with `never-spawned`
-    // so summarizePRRemediationLedger excludes it from the PR-wide
-    // count. Without this, an OAuth/workspace-prep failure permanently
-    // consumes a round and can trip the final-round threshold for a PR
-    // that never actually ran a worker.
-    const remediationWorker = spawnAttempted
-      ? undefined
-      : { state: 'never-spawned', reconciledAt: now() };
+    let remediationWorker;
+    if (spawnAttempted) {
+      remediationWorker = undefined;
+    } else if (spawnedWorker) {
+      const cleanupAt = now();
+      remediationWorker = {
+        ...spawnedWorker,
+        state: 'spawn-preparation-failed',
+        cleanupAttemptedAt: cleanupAt,
+        cleanupSignal: 'SIGKILL',
+        cleanupResult: killDetachedWorkerProcessGroup(spawnedWorker.processId) ? 'killed' : 'not-found',
+      };
+    } else {
+      // If we never made it to the spawn call, this round burned no
+      // remediation budget — tag the failed record with `never-spawned`
+      // so summarizePRRemediationLedger excludes it from the PR-wide
+      // count.
+      remediationWorker = { state: 'never-spawned', reconciledAt: now() };
+    }
 
     const failed = markFollowUpJobFailed({
       rootDir,
@@ -2891,6 +2924,7 @@ export {
   inspectWorkspaceState,
   digestWorkerFinalMessage,
   isWorkerProcessRunning,
+  killDetachedWorkerProcessGroup,
   loadFollowUpPromptTemplate,
   prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,

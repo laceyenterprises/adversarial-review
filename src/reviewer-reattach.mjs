@@ -191,8 +191,9 @@ async function reconcileReviewerSessions({
   killProcessGroup = killPgid,
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
   findPostedReview = makeReviewPostedProbe(octokit),
+  shouldReconcileRow = () => true,
 } = {}) {
-  const rows = statements.listReviewing.all();
+  const rows = statements.listReviewing.all().filter((row) => shouldReconcileRow(row, now));
   if (rows.length === 0) return { reconciled: 0 };
 
   const failureAt = now.toISOString();

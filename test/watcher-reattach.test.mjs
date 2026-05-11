@@ -95,6 +95,31 @@ test('reattaches when pgid is alive, head sha is unchanged, and no review is pos
   assert.match(log.lines.join('\n'), /session=session-70 pgid=9001/);
 });
 
+test('selective stale probing recovers only overdue reviewing rows during steady-state polls', async () => {
+  const db = setupDb();
+  seedReviewing(db, { prNumber: 70, startedAt: '2026-05-11T04:30:00.000Z', lastAttemptedAt: '2026-05-11T04:30:00.000Z' });
+  seedReviewing(db, { prNumber: 71, sessionUuid: 'session-71', pgid: 9002, startedAt: '2026-05-11T05:18:00.000Z', lastAttemptedAt: '2026-05-11T05:18:00.000Z' });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log,
+    shouldReconcileRow: (row, now) => Date.parse(row.reviewer_started_at) <= (now.getTime() - (20 * 60 * 1000)),
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const staleRow = readRow(db, REPO, 70);
+  const freshRow = readRow(db, REPO, 71);
+  assert.equal(staleRow.review_status, 'posted');
+  assert.equal(freshRow.review_status, 'reviewing');
+  assert.match(log.lines.join('\n'), /reviewer_reattach_recovered/);
+});
+
 test('invalidates an alive reviewer when the PR head sha changed', async () => {
   const db = setupDb();
   seedReviewing(db);

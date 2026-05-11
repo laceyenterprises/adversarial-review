@@ -175,6 +175,41 @@ test('adapter dedupe does not suppress a legacy hit from a different head', asyn
   assert.equal(readDeliveries(rootDir)[0].revision_ref, 'sha-current');
 });
 
+test('adapter dedupe does not treat non-posted legacy rows as delivered', async () => {
+  const rootDir = makeRootDir();
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      `INSERT INTO reviewed_prs
+         (repo, pr_number, domain_id, subject_external_id, revision_ref, reviewed_at, reviewer, review_status, review_attempts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'laceyenterprises/demo',
+      7,
+      'code-pr',
+      'laceyenterprises/demo#7',
+      'sha-current',
+      '2026-05-11T11:00:00.000Z',
+      'codex',
+      'reviewing',
+      1
+    );
+  } finally {
+    db.close();
+  }
+
+  const calls = [];
+  const adapter = createGitHubPRCommentsAdapter({
+    rootDir,
+    octokit: makeOctokit(calls),
+  });
+
+  await adapter.deliverReviewComment({ body: 'still needs a post' }, makeKey());
+
+  assert.equal(calls.length, 1);
+});
+
 test('adapter redacts public body content before posting', async () => {
   const rootDir = makeRootDir();
   const calls = [];
@@ -256,5 +291,130 @@ test('operator notice noticeRef is distinct from review-verdict dedupe', async (
       ['operator-notice', 'notice-a'],
       ['operator-notice', 'notice-b'],
     ]
+  );
+});
+
+test('adapter gh fallback passes only an allowlisted env and worker-routed GH_TOKEN', async () => {
+  /** @type {Array<{cmd: string, args: string[], options: any}>} */
+  const calls = [];
+  const adapter = createGitHubPRCommentsAdapter({
+    workerClass: 'codex',
+    env: {
+      PATH: '/usr/local/bin:/usr/bin:/bin',
+      HOME: '/Users/airlock',
+      GH_CODEX_REVIEWER_TOKEN: 'codex-bot-token',
+      OP_SERVICE_ACCOUNT_TOKEN: 'op-secret',
+      ANTHROPIC_AUTH_TOKEN: 'anthropic-secret',
+    },
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { stdout: 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-101\n' };
+    },
+  });
+
+  const receipt = await adapter.deliverReviewComment({ body: 'gh review path' }, makeKey({ revisionRef: 'sha-gh' }));
+
+  assert.equal(receipt.deliveryExternalId, 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-101');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'gh');
+  assert.deepEqual(calls[0].options.env, {
+    PATH: '/usr/local/bin:/usr/bin:/bin',
+    HOME: '/Users/airlock',
+    GH_TOKEN: 'codex-bot-token',
+  });
+  assert.equal(calls[0].options.env.OP_SERVICE_ACCOUNT_TOKEN, undefined);
+  assert.equal(calls[0].options.env.ANTHROPIC_AUTH_TOKEN, undefined);
+});
+
+test('adapter gh fallback requires explicit token routing for operator notices', async () => {
+  const adapter = createGitHubPRCommentsAdapter({
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/airlock',
+      GITHUB_TOKEN: 'operator-token',
+    },
+    execFileImpl: async () => {
+      throw new Error('should not run gh without routing');
+    },
+  });
+
+  await assert.rejects(
+    adapter.deliverOperatorNotice(
+      {
+        type: 'raised-round-cap',
+        subjectRef: {
+          domainId: 'code-pr',
+          subjectExternalId: 'laceyenterprises/demo#7',
+          revisionRef: 'sha-notice-gh',
+        },
+        revisionRef: 'sha-notice-gh',
+        eventExternalId: 'notice-gh',
+        observedAt: '2026-05-11T12:00:00.000Z',
+      },
+      'notice body',
+      makeKey({ revisionRef: 'sha-notice-gh', kind: 'operator-notice', noticeRef: 'notice-gh' })
+    ),
+    /No gh token routing configured/
+  );
+});
+
+test('adapter gh fallback honors explicit operator-notice token routing', async () => {
+  /** @type {Array<{cmd: string, args: string[], options: any}>} */
+  const calls = [];
+  const adapter = createGitHubPRCommentsAdapter({
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/airlock',
+      GITHUB_TOKEN: 'operator-token',
+      GH_CODEX_REVIEWER_TOKEN: 'wrong-token',
+    },
+    resolveGhToken: () => ({ tokenEnvName: 'GITHUB_TOKEN' }),
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { stdout: 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-102\n' };
+    },
+  });
+
+  const receipt = await adapter.deliverOperatorNotice(
+    {
+      type: 'raised-round-cap',
+      subjectRef: {
+        domainId: 'code-pr',
+        subjectExternalId: 'laceyenterprises/demo#7',
+        revisionRef: 'sha-notice-gh',
+      },
+      revisionRef: 'sha-notice-gh',
+      eventExternalId: 'notice-gh',
+      observedAt: '2026-05-11T12:00:00.000Z',
+    },
+    'notice body',
+    makeKey({ revisionRef: 'sha-notice-gh', kind: 'operator-notice', noticeRef: 'notice-gh' })
+  );
+
+  assert.equal(receipt.deliveryExternalId, 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-102');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'operator-token');
+});
+
+test('adapter remediation-reply path fails closed until wired to the hardened renderer', async () => {
+  const adapter = createGitHubPRCommentsAdapter({
+    octokit: makeOctokit([]),
+  });
+
+  await assert.rejects(
+    adapter.deliverRemediationReply(
+      {
+        kind: 'adversarial-review-remediation-reply',
+        schemaVersion: 1,
+        jobId: 'job-1',
+        outcome: 'completed',
+        summary: 'unsafe body',
+        validation: [],
+        blockers: [],
+        reReview: { requested: true, reason: 'ready' },
+      },
+      makeKey({ kind: 'remediation-reply' })
+    ),
+    /does not support remediation-reply delivery/
   );
 });

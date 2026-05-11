@@ -426,6 +426,48 @@ test('adapter gh fallback honors explicit operator-notice token routing', async 
   assert.equal(receipt.deliveryExternalId, 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-102');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].options.env.GH_TOKEN, 'operator-token');
+  assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
+});
+
+test('adapter gh fallback does not pass through GITHUB_TOKEN when an explicit token is resolved', async () => {
+  /** @type {Array<{cmd: string, args: string[], options: any}>} */
+  const calls = [];
+  const adapter = createGitHubPRCommentsAdapter({
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/airlock',
+      GITHUB_TOKEN: 'operator-token',
+      GH_CODEX_REVIEWER_TOKEN: 'worker-token',
+    },
+    resolveGhToken: () => ({ token: 'explicit-bot-token', allowGhAuthFallback: true }),
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { stdout: 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-104\n' };
+    },
+  });
+
+  await adapter.deliverOperatorNotice(
+    {
+      type: 'raised-round-cap',
+      subjectRef: {
+        domainId: 'code-pr',
+        subjectExternalId: 'laceyenterprises/demo#7',
+        revisionRef: 'sha-explicit-token',
+      },
+      revisionRef: 'sha-explicit-token',
+      eventExternalId: 'notice-explicit-token',
+      observedAt: '2026-05-11T12:00:00.000Z',
+    },
+    'notice body',
+    makeKey({ revisionRef: 'sha-explicit-token', kind: 'operator-notice', noticeRef: 'notice-explicit-token' })
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].options.env, {
+    PATH: '/usr/bin:/bin',
+    HOME: '/Users/airlock',
+    GH_TOKEN: 'explicit-bot-token',
+  });
 });
 
 test('adapter gh fallback honors ambient GH_TOKEN when operator notices allow fallback auth', async () => {

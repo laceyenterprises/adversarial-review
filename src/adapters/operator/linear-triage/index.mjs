@@ -15,13 +15,7 @@ import {
 const DEFAULT_CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
 function resolveLinearTicketId(subjectRef) {
-  return (
-    subjectRef?.linearTicketId
-    || subjectRef?.linearTicket
-    || subjectRef?.triageRef
-    || subjectRef?.ticketId
-    || null
-  );
+  return subjectRef?.linearTicketId || null;
 }
 
 async function defaultLinearClientProvider() {

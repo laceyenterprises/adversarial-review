@@ -1481,7 +1481,7 @@ function summarizeWorkerFinalMessage(text, limit = 400) {
   // headers / private keys / labelled secrets the worker may have echoed
   // from logs or environment. Whitespace is collapsed so a one-line
   // preview fits in a digest field even if the worker dumped multi-line
-  // output. Centralized in src/redaction.mjs so PR comments and final-
+        // output. Centralized in the GitHub PR comments redaction adapter so PR comments and final-
   // message previews share the same masking pipeline.
   const collapsed = String(text ?? '').trim().replace(/\s+/g, ' ');
   if (!collapsed) {

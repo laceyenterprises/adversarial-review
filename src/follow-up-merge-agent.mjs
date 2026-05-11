@@ -4,6 +4,10 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import {
+  MERGE_AGENT_REQUESTED_LABEL,
+  OPERATOR_APPROVED_LABEL,
+} from './adapters/operator/github-pr-label-controls/index.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
@@ -12,7 +16,6 @@ const execFileAsync = promisify(execFile);
 
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
-const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
 // "I approve merging this current PR head now; do not wait for the
@@ -28,7 +31,6 @@ const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
 //     (those signal "do not dispatch merge-agent now"; if both are
 //     present, skip wins)
 //   - `pr-not-open` / `merged` (trivially N/A)
-const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const DEFAULT_MERGE_AGENT_PARENT_SESSION = 'session:adversarial-review:watcher';
 const DEFAULT_MERGE_AGENT_PROJECT = 'pr-merge-orchestration';
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);

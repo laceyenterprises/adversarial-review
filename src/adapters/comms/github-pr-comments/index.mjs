@@ -161,8 +161,7 @@ function buildAllowlistedGhEnv(env, {
     allowlisted.GH_TOKEN = token;
   } else if (allowGhAuthFallback && env?.GH_TOKEN) {
     allowlisted.GH_TOKEN = env.GH_TOKEN;
-  }
-  if (allowGhAuthFallback && env?.GITHUB_TOKEN) {
+  } else if (allowGhAuthFallback && env?.GITHUB_TOKEN) {
     allowlisted.GITHUB_TOKEN = env.GITHUB_TOKEN;
   }
   return allowlisted;
@@ -184,11 +183,11 @@ function resolveGhCommentAuth({
   const allowGhAuthFallback = explicit?.allowGhAuthFallback === true;
   const tokenEnvName = explicit?.tokenEnvName
     || resolveCommentBotTokenEnv(explicit?.workerClass || workerClass);
-  if (!tokenEnvName) {
+  if (!tokenEnvName && !explicit?.token) {
     throw new Error(`No gh token routing configured for ${key.kind} delivery`);
   }
   const token = explicit?.token
-    || env?.[tokenEnvName]
+    || (tokenEnvName ? env?.[tokenEnvName] : null)
     || fallbackTokenEnvNames.map((name) => env?.[name]).find(Boolean)
     || null;
   if (!token && !allowGhAuthFallback) {

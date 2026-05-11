@@ -1,7 +1,21 @@
+import { execFileSync } from 'node:child_process';
+
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
   'A review may have been posted on GitHub by the orphaned child. ' +
   'Verify the PR before retriggering with `npm run retrigger-review`.';
+
+const NULL_PGID_FAILURE_MESSAGE =
+  'Reviewer session was claimed but its pgid was never persisted. ' +
+  'The watcher likely died between the claim and spawn callback; operator must verify GitHub before clearing.';
+const UNKNOWN_REVIEWER_FAILURE_MESSAGE =
+  'Reviewer session has an unknown reviewer value; operator must verify GitHub before retrying.';
+const CORRUPT_SESSION_FAILURE_MESSAGE =
+  'Reviewer session metadata is corrupt or incomplete; operator must verify GitHub before retrying.';
+const PROBE_FAILURE_MESSAGE =
+  'Reviewer session reattach probe failed; operator must verify GitHub before retrying.';
+const PGID_IDENTITY_FAILURE_MESSAGE =
+  'Reviewer process group is alive but does not match the recorded reviewer session; treating as sticky until operator verifies GitHub.';
 
 const REVIEWER_BOT_LOGINS = new Map([
   ['claude', 'claude-reviewer-lacey'],
@@ -16,7 +30,7 @@ function splitRepoPath(repoPath) {
 function reviewerBotLogin(reviewer) {
   const value = String(reviewer || '').trim();
   const lower = value.toLowerCase();
-  return REVIEWER_BOT_LOGINS.get(lower) || value;
+  return REVIEWER_BOT_LOGINS.get(lower) || null;
 }
 
 function parseTime(value) {
@@ -37,6 +51,27 @@ function probePgidAlive(pgid) {
   }
 }
 
+function probeReviewerSession({ pgid, sessionUuid, probeAlive = probePgidAlive } = {}) {
+  const alive = probeAlive(pgid);
+  if (!alive) return { alive: false, matched: false };
+
+  const numericPgid = Number(pgid);
+  if (!Number.isInteger(numericPgid) || numericPgid <= 0 || !sessionUuid) {
+    return { alive: true, matched: false };
+  }
+
+  try {
+    const stdout = execFileSync('ps', ['-p', String(numericPgid), '-o', 'command='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    });
+    return { alive: true, matched: stdout.includes(String(sessionUuid)) };
+  } catch {
+    return { alive: true, matched: false };
+  }
+}
+
 function killPgid(pgid, signal = 'SIGKILL') {
   const numericPgid = Number(pgid);
   if (!Number.isInteger(numericPgid) || numericPgid <= 0) return false;
@@ -54,7 +89,7 @@ function killPgid(pgid, signal = 'SIGKILL') {
   }
 }
 
-function makeReviewPostedProbe(octokit) {
+function makeReviewPostedProbe(octokit, { log = console } = {}) {
   const cache = new Map();
 
   return async function reviewPostedAfter(row) {
@@ -71,13 +106,22 @@ function makeReviewPostedProbe(octokit) {
         pull_number: row.pr_number,
         per_page: 100,
       };
-      reviews = typeof octokit.paginate === 'function'
-        ? await octokit.paginate(octokit.rest.pulls.listReviews, params)
-        : (await octokit.rest.pulls.listReviews(params)).data;
+      if (typeof octokit.paginate === 'function') {
+        reviews = await octokit.paginate(octokit.rest.pulls.listReviews, params);
+      } else {
+        reviews = (await octokit.rest.pulls.listReviews(params)).data;
+        if (Array.isArray(reviews) && reviews.length === params.per_page) {
+          log.warn(
+            `[watcher] reviewer_reattach_review_probe_truncated repo=${row.repo} pr=${row.pr_number} ` +
+            'octokit.paginate unavailable and first page is full'
+          );
+        }
+      }
       cache.set(key, Array.isArray(reviews) ? reviews : []);
     }
 
     const expectedLogin = reviewerBotLogin(row.reviewer);
+    if (!expectedLogin) return null;
     return cache.get(key)
       .filter((review) => review?.user?.login === expectedLogin)
       .filter((review) => {
@@ -128,6 +172,14 @@ function markLegacyOrphan({ statements, row, failureAt, log }) {
   );
 }
 
+function markStickyOrphan({ statements, row, failureAt, message, log, event }) {
+  statements.markOrphan.run(failureAt, message, row.repo, row.pr_number);
+  log.warn(
+    `[watcher] ${event} repo=${row.repo} pr=${row.pr_number} ` +
+    `session=${row.reviewer_session_uuid || 'unknown'} pgid=${row.reviewer_pgid || 'unknown'}`
+  );
+}
+
 async function reconcileReviewerSessions({
   db,
   octokit,
@@ -135,6 +187,7 @@ async function reconcileReviewerSessions({
   log = console,
   statements = prepareStatements(db),
   probeAlive = probePgidAlive,
+  probeSession,
   killProcessGroup = killPgid,
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
   findPostedReview = makeReviewPostedProbe(octokit),
@@ -149,6 +202,42 @@ async function reconcileReviewerSessions({
       continue;
     }
 
+    if (row.reviewer_pgid === null || row.reviewer_pgid === undefined || row.reviewer_pgid === '') {
+      markStickyOrphan({
+        statements,
+        row,
+        failureAt,
+        message: NULL_PGID_FAILURE_MESSAGE,
+        log,
+        event: 'reviewer_reattach_missing_pgid',
+      });
+      continue;
+    }
+
+    if (!reviewerBotLogin(row.reviewer)) {
+      markStickyOrphan({
+        statements,
+        row,
+        failureAt,
+        message: `${UNKNOWN_REVIEWER_FAILURE_MESSAGE} reviewer=${row.reviewer || 'unknown'}`,
+        log,
+        event: 'reviewer_reattach_unknown_reviewer',
+      });
+      continue;
+    }
+
+    if (parseTime(row.reviewer_started_at) === null) {
+      markStickyOrphan({
+        statements,
+        row,
+        failureAt,
+        message: `${CORRUPT_SESSION_FAILURE_MESSAGE} reviewer_started_at=${row.reviewer_started_at || 'missing'}`,
+        log,
+        event: 'reviewer_reattach_corrupt_started_at',
+      });
+      continue;
+    }
+
     let currentHeadSha = null;
     try {
       currentHeadSha = await fetchHeadSha(row);
@@ -157,6 +246,15 @@ async function reconcileReviewerSessions({
         `[watcher] reviewer_reattach_head_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} error=${err?.message || err}`
       );
+      markStickyOrphan({
+        statements,
+        row,
+        failureAt,
+        message: `${PROBE_FAILURE_MESSAGE} head probe failed: ${err?.message || err}`,
+        log,
+        event: 'reviewer_reattach_probe_failed',
+      });
+      continue;
     }
 
     let postedReview = null;
@@ -167,9 +265,26 @@ async function reconcileReviewerSessions({
         `[watcher] reviewer_reattach_review_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} error=${err?.message || err}`
       );
+      markStickyOrphan({
+        statements,
+        row,
+        failureAt,
+        message: `${PROBE_FAILURE_MESSAGE} review probe failed: ${err?.message || err}`,
+        log,
+        event: 'reviewer_reattach_probe_failed',
+      });
+      continue;
     }
 
-    const alive = probeAlive(row.reviewer_pgid);
+    const sessionProbe = typeof probeSession === 'function'
+      ? probeSession(row)
+      : probeReviewerSession({
+        pgid: row.reviewer_pgid,
+        sessionUuid: row.reviewer_session_uuid,
+        probeAlive,
+      });
+    const alive = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.alive === true;
+    const sessionMatched = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.matched === true;
     const headChanged = Boolean(
       row.reviewer_head_sha &&
       currentHeadSha &&
@@ -177,6 +292,18 @@ async function reconcileReviewerSessions({
     );
 
     if (alive) {
+      if (!sessionMatched) {
+        markStickyOrphan({
+          statements,
+          row,
+          failureAt,
+          message: PGID_IDENTITY_FAILURE_MESSAGE,
+          log,
+          event: 'reviewer_reattach_identity_mismatch',
+        });
+        continue;
+      }
+
       if (headChanged) {
         killProcessGroup(row.reviewer_pgid, 'SIGKILL');
         statements.markFailed.run(
@@ -240,9 +367,12 @@ async function reconcileReviewerSessions({
 
 export {
   LEGACY_ORPHAN_FAILURE_MESSAGE,
+  NULL_PGID_FAILURE_MESSAGE,
+  PGID_IDENTITY_FAILURE_MESSAGE,
   killPgid,
   makeReviewPostedProbe,
   probePgidAlive,
+  probeReviewerSession,
   reconcileReviewerSessions,
   reviewerBotLogin,
 };

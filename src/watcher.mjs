@@ -423,6 +423,7 @@ async function spawnReviewer({
     builderTag,
     reviewAttemptNumber,
     maxRemediationRounds,
+    reviewerSessionUuid,
   });
 
   const finalRound = (
@@ -443,7 +444,10 @@ async function spawnReviewer({
   inFlightReviewerControllers.add(controller);
 
   try {
-    const reviewerEnv = { ...process.env };
+    const reviewerEnv = {
+      ...process.env,
+      REVIEWER_SESSION_UUID: reviewerSessionUuid,
+    };
 
     if (String(reviewerModel || '').toLowerCase().includes('codex')) {
       const { authPath, home } = resolveCodexReviewerEnv(reviewerEnv);

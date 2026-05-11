@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
+import assert from 'node:assert/strict';
 
 import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
 
 const DEFAULT_KILL_GRACE_MS = 5_000;
 const DEFAULT_FAILURE_TAIL_BYTES = 8 * 1024;
+const SPAWN_DETACHED = true;
 const SUPPORTED_OPTIONS = new Set([
   'cwd',
   'env',
@@ -97,7 +99,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     const child = spawn(command, args, {
       env,
       cwd,
-      detached: true,
+      detached: SPAWN_DETACHED,
       stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     });
     activeChildren.add(child);
@@ -169,6 +171,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     child.on('spawn', () => {
       if (typeof onSpawn === 'function') {
         try {
+          assert.equal(SPAWN_DETACHED, true, 'onSpawn pgid=pid assumes detached process groups');
           onSpawn({ pid: child.pid, pgid: child.pid });
         } catch (err) {
           requestKill(`onSpawn callback failed: ${err?.message || err}`);

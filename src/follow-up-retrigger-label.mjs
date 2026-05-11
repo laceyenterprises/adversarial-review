@@ -250,17 +250,22 @@ async function postRetriggerAckComment({
     };
   }
   try {
+    const normalizedRevisionRef = requireRevisionRef(revisionRef, 'postRetriggerAckComment');
     const subjectIdentity = buildCodePrSubjectIdentity({
       repo,
       prNumber,
-      revisionRef: revisionRef || 'unknown',
+      revisionRef: normalizedRevisionRef,
     });
     const deliveryRound = Math.max(0, Number(requeueResult?.job?.remediationPlan?.currentRound || 0));
     const adapter = createGitHubPRCommentsAdapter({
       rootDir,
       execFileImpl,
       commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
-      resolveGhToken: () => ({ tokenEnvName: 'GITHUB_TOKEN' }),
+      resolveGhToken: () => ({
+        tokenEnvName: 'GITHUB_TOKEN',
+        fallbackTokenEnvNames: ['GH_TOKEN'],
+        allowGhAuthFallback: true,
+      }),
     });
     const receipt = await adapter.postOperatorNotice(
       {
@@ -320,6 +325,14 @@ function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpRe
       revisionRef: revisionRef || null,
     },
   };
+}
+
+function requireRevisionRef(revisionRef, context) {
+  const normalized = String(revisionRef || '').trim();
+  if (!normalized) {
+    throw new TypeError(`${context} requires a revisionRef`);
+  }
+  return normalized;
 }
 
 function buildLabelConsumptionDoc({

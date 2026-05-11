@@ -2,7 +2,16 @@ import { buildMalformedTitleFailureComment } from './watcher-title-guardrails.mj
 import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-comments/index.mjs';
 import { buildDeliveryKey } from './identity-shapes.mjs';
 
-async function signalMalformedTitleFailure(octokit, { repoPath, owner, repo, prNumber, prTitle, revisionRef = 'unknown', rootDir = null }) {
+function requireRevisionRef(revisionRef, context) {
+  const normalized = String(revisionRef || '').trim();
+  if (!normalized) {
+    throw new TypeError(`${context} requires a revisionRef`);
+  }
+  return normalized;
+}
+
+async function signalMalformedTitleFailure(octokit, { repoPath, owner, repo, prNumber, prTitle, revisionRef, rootDir = null }) {
+  const normalizedRevisionRef = requireRevisionRef(revisionRef, 'signalMalformedTitleFailure');
   const structuredFailure = {
     repo: repoPath,
     prNumber,
@@ -15,7 +24,7 @@ async function signalMalformedTitleFailure(octokit, { repoPath, owner, repo, prN
   const deliveryKey = buildDeliveryKey({
     repo: repoPath,
     prNumber,
-    revisionRef,
+    revisionRef: normalizedRevisionRef,
     round: 0,
     kind: 'operator-notice',
     noticeRef: 'malformed-title',

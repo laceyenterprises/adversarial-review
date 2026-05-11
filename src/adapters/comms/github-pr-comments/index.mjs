@@ -11,6 +11,9 @@
  */
 
 import { execFile } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import {
@@ -19,11 +22,15 @@ import {
   openReviewStateDb,
 } from '../../../review-state.mjs';
 import { CODE_PR_DOMAIN_ID } from '../../../identity-shapes.mjs';
+import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
 import { parseCommentUrlFromStdout, resolveCommentBotTokenEnv } from './pr-comments.mjs';
 import { redactPublicSafeText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
 const COMMENT_DELIVERIES_SCHEMA_VERSION = 1;
+const COMMENT_DELIVERY_CLAIM_STALE_MS = 5 * 60 * 1000;
+const COMMENT_DELIVERY_CLAIM_WAIT_MS = 35_000;
+const COMMENT_DELIVERY_CLAIM_POLL_MS = 200;
 
 function splitRepo(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -31,18 +38,6 @@ function splitRepo(repoPath) {
     throw new TypeError(`Invalid GitHub repo slug: ${repoPath}`);
   }
   return { owner, repo };
-}
-
-function parseSubjectExternalId(subjectExternalId) {
-  const raw = String(subjectExternalId || '').trim();
-  const match = /^([^#/]+\/[^#/]+)#(\d+)$/.exec(raw);
-  if (!match) {
-    throw new TypeError(`Invalid GitHub PR subjectExternalId: ${subjectExternalId}`);
-  }
-  return {
-    repo: match[1],
-    prNumber: Number(match[2]),
-  };
 }
 
 function isoString(value) {
@@ -154,12 +149,23 @@ function legacyRowToDeliveryRecord(row, key) {
   };
 }
 
-function buildAllowlistedGhEnv(env, token) {
-  return {
+function buildAllowlistedGhEnv(env, {
+  token = null,
+  allowGhAuthFallback = false,
+} = {}) {
+  const allowlisted = {
     PATH: env?.PATH ?? '/usr/bin:/bin',
     HOME: env?.HOME ?? '',
-    GH_TOKEN: token,
   };
+  if (token) {
+    allowlisted.GH_TOKEN = token;
+  } else if (allowGhAuthFallback && env?.GH_TOKEN) {
+    allowlisted.GH_TOKEN = env.GH_TOKEN;
+  }
+  if (allowGhAuthFallback && env?.GITHUB_TOKEN) {
+    allowlisted.GITHUB_TOKEN = env.GITHUB_TOKEN;
+  }
+  return allowlisted;
 }
 
 function resolveGhCommentAuth({
@@ -172,19 +178,88 @@ function resolveGhCommentAuth({
   const explicit = typeof resolveGhToken === 'function'
     ? resolveGhToken({ key, event })
     : null;
+  const fallbackTokenEnvNames = Array.isArray(explicit?.fallbackTokenEnvNames)
+    ? explicit.fallbackTokenEnvNames.filter(Boolean)
+    : [];
+  const allowGhAuthFallback = explicit?.allowGhAuthFallback === true;
   const tokenEnvName = explicit?.tokenEnvName
     || resolveCommentBotTokenEnv(explicit?.workerClass || workerClass);
   if (!tokenEnvName) {
     throw new Error(`No gh token routing configured for ${key.kind} delivery`);
   }
-  const token = explicit?.token || env?.[tokenEnvName];
-  if (!token) {
+  const token = explicit?.token
+    || env?.[tokenEnvName]
+    || fallbackTokenEnvNames.map((name) => env?.[name]).find(Boolean)
+    || null;
+  if (!token && !allowGhAuthFallback) {
     throw new Error(`${tokenEnvName} not set in env`);
   }
   return {
     tokenEnvName,
-    env: buildAllowlistedGhEnv(env, token),
+    env: buildAllowlistedGhEnv(env, { token, allowGhAuthFallback }),
   };
+}
+
+function commentDeliveryClaimsDir(rootDir) {
+  return join(rootDir, 'data', 'comment-delivery-claims');
+}
+
+function commentDeliveryClaimName(key) {
+  return createHash('sha256').update(JSON.stringify(key)).digest('hex');
+}
+
+function commentDeliveryClaimPath(rootDir, key) {
+  mkdirSync(commentDeliveryClaimsDir(rootDir), { recursive: true });
+  return join(commentDeliveryClaimsDir(rootDir), `${commentDeliveryClaimName(key)}.lock`);
+}
+
+function buildCommentDeliveryClaimerId() {
+  return `${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`;
+}
+
+function tryAcquireCommentDeliveryClaim(rootDir, key, claimerId, {
+  now = () => new Date().toISOString(),
+  staleMs = COMMENT_DELIVERY_CLAIM_STALE_MS,
+} = {}) {
+  const lockPath = commentDeliveryClaimPath(rootDir, key);
+  const claim = { claimer: claimerId, claimedAt: now() };
+  let fd;
+  try {
+    fd = openSync(lockPath, 'wx');
+    writeSync(fd, JSON.stringify(claim));
+    closeSync(fd);
+    return { acquired: true, claimer: claimerId };
+  } catch (err) {
+    if (err?.code !== 'EEXIST') throw err;
+  }
+
+  let existing = null;
+  try {
+    existing = JSON.parse(readFileSync(lockPath, 'utf8'));
+  } catch {
+    existing = null;
+  }
+  const ageMs = existing?.claimedAt
+    ? Math.max(0, Date.now() - new Date(existing.claimedAt).getTime())
+    : Number.POSITIVE_INFINITY;
+  if (ageMs <= staleMs) {
+    return { acquired: false, claimer: existing?.claimer || null, ageMs };
+  }
+
+  writeFileSync(lockPath, JSON.stringify(claim), 'utf8');
+  return { acquired: true, claimer: claimerId, reclaimedFromStale: true, previousAgeMs: ageMs };
+}
+
+function releaseCommentDeliveryClaim(rootDir, key) {
+  try {
+    rmSync(commentDeliveryClaimPath(rootDir, key), { force: true });
+  } catch {
+    // Best-effort.
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function insertDeliveryRecord(db, {
@@ -349,51 +424,84 @@ function createGitHubPRCommentsAdapter({
   }
 
   async function postWithDedupe({ key, body, event = null }) {
-    const existing = await lookupExistingDeliveries(key);
-    const deliveredExisting = existing.find((record) => record.delivered);
-    if (deliveredExisting) {
-      return {
-        key,
-        deliveryExternalId: deliveredExisting.deliveryExternalId,
-        deliveredAt: deliveredExisting.deliveredAt,
-      };
-    }
+    const deadline = Date.now() + COMMENT_DELIVERY_CLAIM_WAIT_MS;
 
-    const attemptedAt = isoString(now());
-    let db = null;
-    try {
-      const posted = await postRawComment({ key, body, event });
-      const deliveredAt = isoString(now());
-      db = openDeliveryDb(rootDir);
-      if (db) {
-        insertDeliveryRecord(db, {
+    while (true) {
+      const existing = await lookupExistingDeliveries(key);
+      const deliveredExisting = existing.find((record) => record.delivered);
+      if (deliveredExisting) {
+        return {
+          key,
+          deliveryExternalId: deliveredExisting.deliveryExternalId,
+          deliveredAt: deliveredExisting.deliveredAt,
+        };
+      }
+
+      const claim = rootDir
+        ? tryAcquireCommentDeliveryClaim(
+            rootDir,
+            key,
+            buildCommentDeliveryClaimerId(),
+            { now: () => isoString(now()) }
+          )
+        : { acquired: true };
+      if (!claim.acquired) {
+        if (Date.now() >= deadline) {
+          throw new Error(`Timed out waiting for comment delivery claim for ${key.subjectExternalId}`);
+        }
+        await sleep(COMMENT_DELIVERY_CLAIM_POLL_MS);
+        continue;
+      }
+
+      const attemptedAt = isoString(now());
+      let db = null;
+      try {
+        const claimedExisting = await lookupExistingDeliveries(key);
+        const claimedDelivered = claimedExisting.find((record) => record.delivered);
+        if (claimedDelivered) {
+          return {
+            key,
+            deliveryExternalId: claimedDelivered.deliveryExternalId,
+            deliveredAt: claimedDelivered.deliveredAt,
+          };
+        }
+
+        const posted = await postRawComment({ key, body, event });
+        const deliveredAt = isoString(now());
+        db = openDeliveryDb(rootDir);
+        if (db) {
+          insertDeliveryRecord(db, {
+            key,
+            deliveryExternalId: posted.deliveryExternalId,
+            attemptedAt,
+            deliveredAt,
+            delivered: true,
+          });
+        }
+        return {
           key,
           deliveryExternalId: posted.deliveryExternalId,
-          attemptedAt,
           deliveredAt,
-          delivered: true,
-        });
+        };
+      } catch (err) {
+        db = openDeliveryDb(rootDir);
+        if (db) {
+          insertDeliveryRecord(db, {
+            key,
+            deliveryExternalId: null,
+            attemptedAt,
+            deliveredAt: null,
+            delivered: false,
+            failureReason: err?.message || String(err),
+          });
+        }
+        throw err;
+      } finally {
+        db?.close();
+        if (rootDir) {
+          releaseCommentDeliveryClaim(rootDir, key);
+        }
       }
-      return {
-        key,
-        deliveryExternalId: posted.deliveryExternalId,
-        deliveredAt,
-      };
-    } catch (err) {
-      db = openDeliveryDb(rootDir);
-      if (db) {
-        insertDeliveryRecord(db, {
-          key,
-          deliveryExternalId: null,
-          attemptedAt,
-          deliveredAt: null,
-          delivered: false,
-          failureReason: err?.message || String(err),
-        });
-      }
-      throw err;
-    } finally {
-      db?.close();
     }
   }
 

@@ -58,7 +58,11 @@ function stableStringify(value) {
 }
 
 function compareStable(a, b) {
-  return stableStringify(a).localeCompare(stableStringify(b));
+  const left = stableStringify(a);
+  const right = stableStringify(b);
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 function subjectIdentityFromParts({
@@ -91,13 +95,22 @@ function subjectKey(identity = {}) {
   if (normalized.domainId && normalized.subjectExternalId && normalized.revisionRef) {
     return `${normalized.domainId}:${normalized.subjectExternalId}@${normalized.revisionRef}`;
   }
-  if (normalized.domainId && normalized.subjectExternalId) {
-    return `${normalized.domainId}:${normalized.subjectExternalId}@unknown`;
-  }
   if (normalized.repo && normalized.prNumber) {
     return `legacy:${normalized.repo}#${normalized.prNumber}`;
   }
   return 'unknown-subject';
+}
+
+function dedupeSorted(values = []) {
+  return Array.from(new Set(values)).sort();
+}
+
+function recordParseError(parseErrors, error) {
+  parseErrors.push({
+    source: error.source,
+    file: error.file || null,
+    message: error.message,
+  });
 }
 
 function normalizeVerdictState(record = {}) {
@@ -329,20 +342,39 @@ function recordsFromSnapshot(snapshot = {}) {
 
 function normalizeReplaySnapshot(snapshot = {}) {
   const bySubject = new Map();
+  const subjectConflicts = [];
+  const unkeyedRecords = [];
   for (const record of recordsFromSnapshot(snapshot)) {
     const normalized = normalizeReplayRecord(record);
+    const subjectHasTypedIdentity = normalized.subject.domainId && normalized.subject.subjectExternalId;
+    if (subjectHasTypedIdentity && !normalized.subject.revisionRef) {
+      unkeyedRecords.push({
+        subject: normalized.subject,
+        verdictState: normalized.verdictState,
+      });
+      continue;
+    }
     const existing = bySubject.get(normalized.key);
     if (!existing) {
       bySubject.set(normalized.key, normalized);
       continue;
     }
+    const verdictStates = Array.from(new Set(
+      [existing.verdictState, normalized.verdictState].filter((value) => value && value !== 'unknown')
+    )).sort();
+    if (verdictStates.length > 1) {
+      subjectConflicts.push({
+        subject: normalized.subject,
+        verdictStates,
+      });
+    }
     bySubject.set(normalized.key, {
       ...existing,
-      verdictState: normalized.verdictState !== 'unknown' ? normalized.verdictState : existing.verdictState,
+      verdictState: verdictStates[0] || existing.verdictState || normalized.verdictState,
       remediation: {
-        addressed: [...existing.remediation.addressed, ...normalized.remediation.addressed].sort(),
-        pushback: [...existing.remediation.pushback, ...normalized.remediation.pushback].sort(),
-        blockers: [...existing.remediation.blockers, ...normalized.remediation.blockers].sort(),
+        addressed: dedupeSorted([...existing.remediation.addressed, ...normalized.remediation.addressed]),
+        pushback: dedupeSorted([...existing.remediation.pushback, ...normalized.remediation.pushback]),
+        blockers: dedupeSorted([...existing.remediation.blockers, ...normalized.remediation.blockers]),
       },
       deliveries: [...existing.deliveries, ...normalized.deliveries].sort(compareStable),
       duplicateDeliveries: findDuplicateDeliveries([...existing.deliveries, ...normalized.deliveries]),
@@ -351,7 +383,10 @@ function normalizeReplaySnapshot(snapshot = {}) {
   }
   return {
     schemaVersion: REPLAY_SNAPSHOT_SCHEMA_VERSION,
-    records: Array.from(bySubject.values()).sort((a, b) => a.key.localeCompare(b.key)),
+    parseErrors: Array.isArray(snapshot.parseErrors) ? snapshot.parseErrors.slice().sort(compareStable) : [],
+    subjectConflicts: subjectConflicts.sort(compareStable),
+    unkeyedRecords: unkeyedRecords.sort(compareStable),
+    records: Array.from(bySubject.values()).sort((a, b) => compareStable(a.key, b.key)),
   };
 }
 
@@ -367,6 +402,22 @@ function diffReplaySnapshots(productionSnapshot, stagingSnapshot) {
   const actualByKey = new Map(actual.records.map((record) => [record.key, record]));
   const subjects = Array.from(new Set([...expectedByKey.keys(), ...actualByKey.keys()])).sort();
   const diffs = [];
+
+  diffValue({ diffs, subject: '__snapshot__', field: 'parseErrors', expected: expected.parseErrors, actual: actual.parseErrors });
+  diffValue({
+    diffs,
+    subject: '__snapshot__',
+    field: 'subjectConflicts',
+    expected: expected.subjectConflicts,
+    actual: actual.subjectConflicts,
+  });
+  diffValue({
+    diffs,
+    subject: '__snapshot__',
+    field: 'unkeyedRecords',
+    expected: expected.unkeyedRecords,
+    actual: actual.unkeyedRecords,
+  });
 
   for (const subject of subjects) {
     const prod = expectedByKey.get(subject);
@@ -435,17 +486,15 @@ function collectDeliveryRows(db, sinceIso) {
 }
 
 function safeReadJson(filePath) {
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf8'));
-  } catch {
-    return null;
-  }
+  const raw = readFileSync(filePath, 'utf8');
+  return JSON.parse(raw);
 }
 
 function collectTerminalJobs(rootDir, sinceIso) {
   const base = join(rootDir, 'data', 'follow-up-jobs');
   const sinceTime = new Date(sinceIso).getTime();
   const jobs = [];
+  const parseErrors = [];
   for (const dirName of TERMINAL_JOB_DIRS) {
     const dirPath = join(base, dirName);
     if (!existsSync(dirPath)) continue;
@@ -453,8 +502,17 @@ function collectTerminalJobs(rootDir, sinceIso) {
       if (!entry.endsWith('.json')) continue;
       const filePath = join(dirPath, entry);
       const stat = statSync(filePath);
-      const job = safeReadJson(filePath);
-      if (!job) continue;
+      let job;
+      try {
+        job = safeReadJson(filePath);
+      } catch (error) {
+        recordParseError(parseErrors, {
+          source: 'terminal-job-json',
+          file: filePath,
+          message: error?.message || String(error),
+        });
+        continue;
+      }
       const timestamps = [
         job.createdAt,
         job.claimedAt,
@@ -472,58 +530,84 @@ function collectTerminalJobs(rootDir, sinceIso) {
       });
     }
   }
-  return jobs.sort((a, b) => String(a.jobId || '').localeCompare(String(b.jobId || '')));
+  return {
+    jobs: jobs.sort((a, b) => compareStable(String(a.jobId || ''), String(b.jobId || ''))),
+    parseErrors,
+  };
 }
 
 function collectReplaySnapshot(rootDir, { since = null, days = DEFAULT_WINDOW_DAYS, now = new Date() } = {}) {
   const sinceIso = windowStart({ since, days, now });
   const dbPath = join(rootDir, 'data', 'reviews.db');
   const records = [];
+  const parseErrors = [];
   if (existsSync(dbPath)) {
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    let db;
     try {
-      const reviewRows = collectReviewRows(db, sinceIso);
-      const deliveryRows = collectDeliveryRows(db, sinceIso);
-      const deliveriesBySubject = new Map();
-      for (const row of deliveryRows) {
-        const identity = subjectIdentityFromParts({
-          domain_id: row.domain_id,
-          subject_external_id: row.subject_external_id,
-          revision_ref: row.revision_ref,
-          repo: row.legacy_repo,
-          pr_number: row.legacy_pr_number,
-        });
-        const key = subjectKey(identity);
-        const list = deliveriesBySubject.get(key) || [];
-        list.push(row);
-        deliveriesBySubject.set(key, list);
+      db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    } catch (error) {
+      recordParseError(parseErrors, {
+        source: 'reviews-db-open',
+        file: dbPath,
+        message: error?.message || String(error),
+      });
+    }
+    if (db) {
+      try {
+        const reviewRows = collectReviewRows(db, sinceIso);
+        const deliveryRows = collectDeliveryRows(db, sinceIso);
+        const deliveriesBySubject = new Map();
+        for (const row of deliveryRows) {
+          const identity = subjectIdentityFromParts({
+            domain_id: row.domain_id,
+            subject_external_id: row.subject_external_id,
+            revision_ref: row.revision_ref,
+            repo: row.legacy_repo,
+            pr_number: row.legacy_pr_number,
+          });
+          const key = subjectKey(identity);
+          const list = deliveriesBySubject.get(key) || [];
+          list.push(row);
+          deliveriesBySubject.set(key, list);
+        }
+        for (const row of reviewRows) {
+          const identity = subjectIdentityFromParts(row);
+          records.push({
+            ...row,
+            subjectRef: identity,
+            deliveries: deliveriesBySubject.get(subjectKey(identity)) || [],
+          });
+        }
+        for (const [key, deliveries] of deliveriesBySubject) {
+          if (records.some((record) => subjectKey(record.subjectRef) === key)) continue;
+          records.push({
+            subjectRef: deliveries[0],
+            deliveries,
+          });
+        }
+      } finally {
+        db.close();
       }
-      for (const row of reviewRows) {
-        const identity = subjectIdentityFromParts(row);
-        records.push({
-          ...row,
-          subjectRef: identity,
-          deliveries: deliveriesBySubject.get(subjectKey(identity)) || [],
-        });
-      }
-      for (const [key, deliveries] of deliveriesBySubject) {
-        if (records.some((record) => subjectKey(record.subjectRef) === key)) continue;
-        records.push({
-          subjectRef: deliveries[0],
-          deliveries,
-        });
-      }
-    } finally {
-      db.close();
     }
   }
 
-  records.push(...collectTerminalJobs(rootDir, sinceIso));
+  const terminalJobs = collectTerminalJobs(rootDir, sinceIso);
+  records.push(...terminalJobs.jobs);
+  parseErrors.push(...terminalJobs.parseErrors);
   return {
     schemaVersion: REPLAY_SNAPSHOT_SCHEMA_VERSION,
     capturedAt: now.toISOString(),
     window: { since: sinceIso, until: now.toISOString() },
+    parseErrors: parseErrors.sort(compareStable),
     records,
+  };
+}
+
+function parseReplayCommandArg(value) {
+  if (!value) throw new Error('--replay-command requires an executable path');
+  return {
+    command: resolve(value),
+    args: [],
   };
 }
 
@@ -547,7 +631,11 @@ function parseArgs(argv) {
     else if (arg === '--out') args.output = next();
     else if (arg === '--since') args.since = next();
     else if (arg === '--days') args.days = normalizeDays(next());
-    else if (arg === '--replay-command') args.replayCommand = next();
+    else if (arg === '--replay-command') args.replayCommand = parseReplayCommandArg(next());
+    else if (arg === '--replay-command-arg') {
+      if (!args.replayCommand) throw new Error('--replay-command-arg requires --replay-command first');
+      args.replayCommand.args.push(next());
+    }
     else if (arg === '--help' || arg === '-h') args.help = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -560,7 +648,8 @@ function usage() {
     '   or: node scripts/replay-30-day.mjs --production-snapshot prod.json --staging-snapshot staging.json',
     '',
     'Options:',
-    '  --replay-command <cmd>  optional staging replay command run after production snapshot collection',
+    '  --replay-command <path> optional staging replay executable run after production snapshot collection',
+    '  --replay-command-arg <arg>  optional argument for --replay-command (repeatable)',
     '  --out <path>            write the diff report JSON',
     '  --since <iso>           explicit lower bound instead of --days',
   ].join('\n');
@@ -572,10 +661,9 @@ function loadSnapshot(filePath) {
 
 function runCommand(command, env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, {
+    const child = spawn(command.command, command.args, {
       cwd: ROOT,
       env,
-      shell: true,
       stdio: 'inherit',
     });
     child.on('error', reject);
@@ -642,4 +730,5 @@ export {
   normalizeReplaySnapshot,
   normalizeReplayRecord,
   normalizeVerdictState,
+  parseArgs,
 };

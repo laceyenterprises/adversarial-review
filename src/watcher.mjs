@@ -952,6 +952,7 @@ async function pollOnce(octokit) {
             prNumber,
             labelActor: labelEvent?.actor || 'unknown',
             labelEvent,
+            revisionRef: subject.ref.revisionRef,
             execFileImpl: execFileAsync,
           });
           console.log(
@@ -1005,6 +1006,8 @@ async function pollOnce(octokit) {
           repo,
           prNumber,
           prTitle,
+          revisionRef: subject.ref.revisionRef,
+          rootDir: ROOT,
         });
 
         // Malformed titles are terminal in watcher state to avoid ambiguous retitle retries.

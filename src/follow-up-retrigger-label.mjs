@@ -37,6 +37,7 @@ import {
   resolveIdempotencyKey,
 } from './operator-mutation-audit.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
+import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-comments/index.mjs';
 
 const VERB = 'hq.adversarial.retrigger-remediation';
 
@@ -215,6 +216,7 @@ async function findExistingAckComment({
 }
 
 async function postRetriggerAckComment({
+  rootDir,
   repo,
   prNumber,
   execFileImpl,
@@ -223,6 +225,7 @@ async function postRetriggerAckComment({
   reason,
   bumpResult,
   requeueResult,
+  revisionRef = null,
 }) {
   const body = buildAckCommentBody({
     labelEventKey,
@@ -247,20 +250,41 @@ async function postRetriggerAckComment({
     };
   }
   try {
-    const result = await execFileImpl('gh', [
-      'pr',
-      'comment',
-      String(prNumber),
-      '--repo',
+    const subjectIdentity = buildCodePrSubjectIdentity({
       repo,
-      '--body',
-      body,
-    ], {
-      maxBuffer: 5 * 1024 * 1024,
-      timeout: ACK_COMMENT_TIMEOUT_MS,
-      killSignal: 'SIGTERM',
+      prNumber,
+      revisionRef: revisionRef || 'unknown',
     });
-    return { posted: true, stdout: result?.stdout || '', marker };
+    const adapter = createGitHubPRCommentsAdapter({
+      rootDir,
+      execFileImpl,
+      commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
+    });
+    const receipt = await adapter.postOperatorNotice(
+      {
+        type: 'raised-round-cap',
+        subjectRef: {
+          domainId: subjectIdentity.domainId,
+          subjectExternalId: subjectIdentity.subjectExternalId,
+          revisionRef: subjectIdentity.revisionRef,
+        },
+        revisionRef: subjectIdentity.revisionRef,
+        eventExternalId: labelEventKey,
+        observedAt: new Date().toISOString(),
+        reason,
+        roundCap: bumpResult?.newMaxRounds ?? null,
+      },
+      body,
+      {
+        domainId: subjectIdentity.domainId,
+        subjectExternalId: subjectIdentity.subjectExternalId,
+        revisionRef: subjectIdentity.revisionRef,
+        round: Number(bumpResult?.newMaxRounds || 0),
+        kind: 'operator-notice',
+        noticeRef: labelEventKey,
+      }
+    );
+    return { posted: true, stdout: '', marker, commentId: receipt.deliveryExternalId };
   } catch (err) {
     return {
       posted: false,
@@ -270,7 +294,7 @@ async function postRetriggerAckComment({
   }
 }
 
-function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpResult, requeueResult }) {
+function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpResult, requeueResult, revisionRef = null }) {
   return {
     posted: false,
     reason: 'pending',
@@ -291,6 +315,7 @@ function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpRe
         reason: requeueResult?.reason || null,
         error: requeueResult?.error || null,
       },
+      revisionRef: revisionRef || null,
     },
   };
 }
@@ -339,6 +364,7 @@ async function retryAckCommentForConsumption({
   const previousAttempts = Number(consumption?.ackComment?.attempts || 0);
   if (previousAttempts >= ACK_COMMENT_MAX_ATTEMPTS) return consumption;
   const ackComment = await postRetriggerAckComment({
+    rootDir,
     repo,
     prNumber,
     execFileImpl,
@@ -347,6 +373,7 @@ async function retryAckCommentForConsumption({
     reason: context.reason,
     bumpResult: context.bumpResult,
     requeueResult: context.requeueResult,
+    revisionRef: context.revisionRef,
   });
   const nextConsumption = {
     ...consumption,
@@ -479,6 +506,7 @@ export async function tryRetriggerRemediationFromLabel({
   findAuditRow = findOperatorMutationAuditRow,
   requeueImpl = requeueFollowUpJobForNextRound,
   labelEvent = null,
+  revisionRef = null,
 }) {
   const labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
   if (!labelEventKey) {
@@ -541,7 +569,7 @@ export async function tryRetriggerRemediationFromLabel({
 
   const jobKey = `${latest.job.repo}#${latest.job.prNumber}@${latest.job.jobId}`;
   const ts = now();
-  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber });
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef });
   const auditRow = {
     ts,
     verb: VERB,
@@ -604,6 +632,7 @@ export async function tryRetriggerRemediationFromLabel({
       reason: 'requeue step pending',
       jobPath: bumpResult.jobPath,
     },
+    revisionRef,
   });
   const baseConsumption = buildLabelConsumptionDoc({
     labelEventKey,
@@ -641,6 +670,7 @@ export async function tryRetriggerRemediationFromLabel({
       reason,
       bumpResult,
       requeueResult,
+      revisionRef,
     });
 
     try {
@@ -682,6 +712,7 @@ export async function tryRetriggerRemediationFromLabel({
     }
 
     const ackComment = await postRetriggerAckComment({
+      rootDir,
       repo,
       prNumber,
       execFileImpl,
@@ -690,6 +721,7 @@ export async function tryRetriggerRemediationFromLabel({
       reason,
       bumpResult,
       requeueResult,
+      revisionRef,
     });
     writeLabelConsumption(rootDir, labelEventKey, buildLabelConsumptionDoc({
       labelEventKey,

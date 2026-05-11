@@ -9,7 +9,7 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { retryFailedCommentDeliveries } from './comment-delivery.mjs';
+import { retryFailedCommentDeliveries } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');

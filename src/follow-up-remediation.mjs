@@ -28,9 +28,9 @@ import {
   WORKER_CLASS_TO_BOT_TOKEN_ENV,
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
-} from './pr-comments.mjs';
-import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
-import { redactSensitiveText } from './redaction.mjs';
+} from './adapters/comms/github-pr-comments/pr-comments.mjs';
+import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
+import { redactSensitiveText } from './adapters/comms/github-pr-comments/redaction.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
 import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';

@@ -106,6 +106,38 @@ test('unsupported options fail loudly instead of being ignored', async () => {
   );
 });
 
+test('onSpawn receives the detached reviewer process group id', async () => {
+  const handles = [];
+
+  await spawnCapturedProcessGroup(
+    process.execPath,
+    ['-e', ''],
+    {
+      onSpawn: (handle) => handles.push(handle),
+    }
+  );
+
+  assert.equal(handles.length, 1);
+  assert.equal(Number.isInteger(handles[0].pid), true);
+  assert.equal(handles[0].pgid, handles[0].pid);
+});
+
+test('onSpawn failures kill the detached process group and reject', async () => {
+  await assert.rejects(
+    () => spawnCapturedProcessGroup(
+      'bash',
+      ['-c', 'trap "" TERM; while :; do sleep 1; done'],
+      {
+        killGraceMs: 100,
+        onSpawn: () => {
+          throw new Error('persist pgid failed');
+        },
+      }
+    ),
+    /onSpawn callback failed: persist pgid failed/
+  );
+});
+
 test('exit-time cleanup kills detached grandchildren when the parent process exits abruptly', async () => {
   const fixtureDir = mkdtempSync(path.join(tmpdir(), 'process-group-exit-'));
   const bashPidPath = path.join(fixtureDir, 'bash.pid');

@@ -7,7 +7,7 @@
  *   node src/reviewer.mjs '<JSON args>'
  *
  * Args JSON shape:
- *   { repo, prNumber, reviewerModel, botTokenEnv, linearTicketId }
+ *   { repo, prNumber, reviewerModel, botTokenEnv, linearTicketId, reviewerSessionUuid }
  *
  * ── Auth Policy (NON-NEGOTIABLE) ────────────────────────────────────────────
  * Claude reviews MUST use OAuth (claude CLI), never ANTHROPIC_API_KEY.
@@ -850,11 +850,15 @@ async function main() {
     reviewAttemptNumber,
     completedRemediationRounds,
     maxRemediationRounds,
+    reviewerSessionUuid,
   } = args;
 
   if (!repo || !prNumber || !reviewerModel || !botTokenEnv) {
     console.error('[reviewer] Missing required fields in args:', args);
     process.exit(1);
+  }
+  if (reviewerSessionUuid && !process.env.REVIEWER_SESSION_UUID) {
+    process.env.REVIEWER_SESSION_UUID = String(reviewerSessionUuid);
   }
 
   // The reviewer treats the final allowed review pass as a lenient

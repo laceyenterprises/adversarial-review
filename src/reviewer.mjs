@@ -868,9 +868,6 @@ async function main() {
     console.error('[reviewer] Missing required fields in args:', args);
     process.exit(1);
   }
-  if (reviewerSessionUuid && !process.env.REVIEWER_SESSION_UUID) {
-    process.env.REVIEWER_SESSION_UUID = String(reviewerSessionUuid);
-  }
 
   // The reviewer treats the final allowed review pass as a lenient
   // verdict round (only blocking on data corruption / secret leakage /
@@ -1030,7 +1027,7 @@ async function main() {
     await linearTriage.recordReviewCompleted({
       domainId: 'code-pr',
       subjectExternalId: `${repo}#${prNumber}`,
-      revisionRef: '',
+      revisionRef: null,
       linearTicketId,
     }, {
       critical,

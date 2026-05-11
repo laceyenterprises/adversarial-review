@@ -721,6 +721,31 @@ test('claimNextFollowUpJob records clean review jobs without spawning remediatio
   assert.equal(existsSync(created.jobPath), false);
 });
 
+test('claimNextFollowUpJob treats excluded repo/pr keys as case-insensitive', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    repo: 'LaceyEnterprises/Clio',
+    prNumber: 7,
+  });
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    repo: 'laceyenterprises/clio',
+    prNumber: 8,
+    reviewPostedAt: '2026-04-21T09:00:00.000Z',
+  });
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    launcherPid: 4242,
+    excludedRepoPrKeys: new Set(['laceyenterprises/clio#7']),
+  });
+
+  assert.ok(claimed);
+  assert.equal(claimed.job.prNumber, 8);
+});
+
 test('claimNextFollowUpJob honors explicit operator requeues for settled reviews', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({

@@ -36,6 +36,7 @@ import {
   isCommittedOperatorMutationOutcome,
   resolveIdempotencyKey,
 } from './operator-mutation-audit.mjs';
+import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 
 const VERB = 'hq.adversarial.retrigger-remediation';
 
@@ -540,11 +541,15 @@ export async function tryRetriggerRemediationFromLabel({
 
   const jobKey = `${latest.job.repo}#${latest.job.prNumber}@${latest.job.jobId}`;
   const ts = now();
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber });
   const auditRow = {
     ts,
     verb: VERB,
     repo,
     pr: prNumber,
+    domainId: subjectIdentity.domainId,
+    subjectExternalId: subjectIdentity.subjectExternalId,
+    revisionRef: subjectIdentity.revisionRef,
     reason,
     operator: `pr-label:${labelEventActor}`,
     jobKey,

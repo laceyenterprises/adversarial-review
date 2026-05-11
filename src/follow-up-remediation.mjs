@@ -1532,6 +1532,9 @@ function buildReconcileCommentDelivery({
     prNumber: job?.prNumber,
     workerClass,
     owedAt: now(),
+    revisionRef: job?.revisionRef || null,
+    round: job?.remediationPlan?.currentRound || null,
+    kind: 'remediation-reply',
   });
   return { body, workerClass, commentDelivery };
 }
@@ -1585,6 +1588,9 @@ async function postReconcileOutcomeCommentSafe({
         repo: job?.repo,
         prNumber: job?.prNumber,
         workerClass,
+        revisionRef: job?.revisionRef || null,
+        round: job?.remediationPlan?.currentRound || null,
+        kind: 'remediation-reply',
         postCommentImpl: (args) => postCommentImpl(args),
         postCommentArgs: {
           repo: job?.repo,

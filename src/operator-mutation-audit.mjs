@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 
 const EX_USAGE = 64;
 const EX_DATAERR = 65;
@@ -108,7 +109,18 @@ function assertNoIdempotencyMismatch(existingRow, requestFingerprint) {
 
 function appendOperatorMutationAuditRow(rootDir, row) {
   const filePath = monthFilePath(rootDir, row.ts);
-  const line = `${JSON.stringify(row)}\n`;
+  const subjectIdentity = buildCodePrSubjectIdentity({
+    repo: row?.repo,
+    prNumber: row?.pr,
+    revisionRef: row?.revisionRef || null,
+  });
+  const enrichedRow = {
+    ...row,
+    domainId: row?.domainId || subjectIdentity.domainId,
+    subjectExternalId: row?.subjectExternalId || subjectIdentity.subjectExternalId,
+    revisionRef: row?.revisionRef || subjectIdentity.revisionRef,
+  };
+  const line = `${JSON.stringify(enrichedRow)}\n`;
   if (Buffer.byteLength(line, 'utf8') > MAX_AUDIT_ROW_BYTES) {
     const err = new Error(`Operator mutation audit row exceeds ${MAX_AUDIT_ROW_BYTES} bytes`);
     err.code = 'AUDIT_ROW_TOO_LARGE';

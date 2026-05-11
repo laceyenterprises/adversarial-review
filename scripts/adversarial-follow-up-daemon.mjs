@@ -17,11 +17,13 @@
 // node process exists, and TCC's per-binary trust is granted once.
 //
 // The daemon's tick loop:
-//   1. consumeNextFollowUpJob — claim + spawn one pending job
-//   2. reconcileInProgressFollowUpJobs — finalize exited workers
+//   1. reconcileInProgressFollowUpJobs — finalize exited workers
+//   2. consumeFollowUpJobsUntilCapacity — claim + spawn pending jobs
+//      until active workers reach ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS
+//      (default 1, preserving the legacy one-worker behavior)
 //   3. retryFailedCommentDeliveries — bounded historical retry drain
 //
-// Workers spawned by step 1 are detached subprocesses of `codex` /
+// Workers spawned by the consume step are detached subprocesses of `codex` /
 // `claude` (separate binaries with their own TCC identity), not
 // further `node` children, so this collapse doesn't change worker
 // behavior — only the daemon's own subprocess churn.
@@ -30,7 +32,11 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
+import {
+  REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
+  consumeFollowUpJobsUntilCapacity,
+  resolveRemediationMaxConcurrentJobs,
+} from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/comment-delivery.mjs';
 import { archiveStoppedFollowUpJobs } from '../src/follow-up-jobs.mjs';
@@ -41,6 +47,7 @@ const ROOT = resolve(__dirname, '..');
 const TICK_INTERVAL_SECONDS = Number(process.env.TICK_INTERVAL_SECONDS) || 120;
 const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
 const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
+const MAX_CONCURRENT_REMEDIATION_JOBS = resolveRemediationMaxConcurrentJobs();
 
 function ts() {
   return new Date().toISOString();
@@ -101,12 +108,26 @@ function installSignalHandlers() {
 
 async function main() {
   installSignalHandlers();
-  logInfo(`startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s)`);
+  logInfo(
+    `startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s ` +
+    `${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${MAX_CONCURRENT_REMEDIATION_JOBS})`
+  );
 
   while (!stopping) {
-    await runStep('consume', () => consumeNextFollowUpJob());
-    if (stopping) break;
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
+    if (stopping) break;
+    await runStep('consume', async () => {
+      const result = await consumeFollowUpJobsUntilCapacity({
+        maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
+      });
+      logTick(
+        'consume',
+        `maxConcurrent=${result.maxConcurrent} activeAtStart=${result.activeAtStart} ` +
+        `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
+        `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
+        `capacityRemaining=${result.capacityRemaining}`
+      );
+    });
     if (stopping) break;
     await runStep('retry-comments', () => retryFailedCommentDeliveries());
     if (stopping) break;

@@ -1,6 +1,6 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -17,6 +17,7 @@ import {
   consumeNextFollowUpJob,
   digestWorkerFinalMessage,
   installWorkerProvenanceHook,
+  killDetachedWorkerProcessGroup,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   prepareCodexRemediationStartupEnv,
@@ -1696,6 +1697,19 @@ test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job 
   assert.match(warnings[0], /continuing drain after failed spawn preparation/);
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'failed')).filter((name) => name.endsWith('.json')).length, 1);
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 1);
+});
+
+test('killDetachedWorkerProcessGroup terminates detached remediation workers by process group', async () => {
+  const child = spawn('bash', ['-c', 'trap "" TERM; while :; do sleep 1; done'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+
+  assert.equal(killDetachedWorkerProcessGroup(child.pid), true);
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
 });
 
 test('consumeFollowUpJobsUntilCapacity stops draining when shutdown flips mid-tick', async () => {

@@ -396,6 +396,39 @@ async function reconcileOrphanedReviewing(octokit) {
   return reconcileReviewerSessions({ db, octokit });
 }
 
+function shouldReconcileStaleReviewerSession(row, now, {
+  reviewerTimeoutMs = resolveReviewerTimeoutMs(),
+} = {}) {
+  const startedAtMs = Date.parse(row?.reviewer_started_at || '');
+  if (!Number.isFinite(startedAtMs)) return true;
+  return (startedAtMs + reviewerTimeoutMs) <= now.getTime();
+}
+
+function persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber, log = console }) {
+  try {
+    const result = stmtMarkReviewerPgid.run(pgid, reviewerSessionUuid, repoPath, prNumber);
+    if (result.changes === 0) {
+      log.warn?.(
+        `[watcher] reviewer_session_handle_cas_miss repo=${repoPath} pr=${prNumber} ` +
+        `session=${reviewerSessionUuid} pgid=${pgid}`
+      );
+      return false;
+    }
+    log.log?.(
+      `[watcher] reviewer_session_handle_persisted repo=${repoPath} pr=${prNumber} ` +
+      `session=${reviewerSessionUuid} pgid=${pgid}`
+    );
+    return true;
+  } catch (err) {
+    handlePollError(err, 'stmtMarkReviewerPgid');
+    log.warn?.(
+      `[watcher] reviewer_session_handle_persist_failed repo=${repoPath} pr=${prNumber} ` +
+      `session=${reviewerSessionUuid} pgid=${pgid} error=${err?.message || err}`
+    );
+    return false;
+  }
+}
+
 // ── Author tag detection ─────────────────────────────────────────────────────
 
 function resolveCodexReviewerEnv(reviewerEnv) {
@@ -858,6 +891,11 @@ async function handlePostedReviewRow({
 async function pollOnce(octokit) {
   const operatorSurface = createWatcherOperatorSurface();
   await refreshOrgRepos(octokit);
+  await reconcileReviewerSessions({
+    db,
+    octokit,
+    shouldReconcileRow: (row, now) => shouldReconcileStaleReviewerSession(row, now),
+  });
 
   await warnForMissingAdversarialGateBranchProtection(activeRepos, {
     checker: adversarialGateBranchProtectionChecker,
@@ -1229,16 +1267,7 @@ async function pollOnce(octokit) {
         maxRemediationRounds,
         reviewerSessionUuid,
         onReviewerPgid: ({ pgid }) => {
-          try {
-            stmtMarkReviewerPgid.run(pgid, reviewerSessionUuid, repoPath, prNumber);
-            console.log(
-              `[watcher] reviewer_session_handle_persisted repo=${repoPath} pr=${prNumber} ` +
-              `session=${reviewerSessionUuid} pgid=${pgid}`
-            );
-          } catch (err) {
-            handlePollError(err, 'stmtMarkReviewerPgid');
-            throw err;
-          }
+          persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });
         },
       });
 
@@ -1366,9 +1395,11 @@ export {
   evaluateRoundBudgetForReview,
   handlePostedReviewRow,
   pollOnce,
+  persistReviewerPgid,
   readWatcherDrainState,
   reconcileOrphanedReviewing,
   shouldDeferReviewForActiveFollowUp,
+  shouldReconcileStaleReviewerSession,
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,

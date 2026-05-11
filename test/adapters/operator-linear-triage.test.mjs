@@ -114,6 +114,28 @@ test('recordReviewCompleted posts critical flag comments for critical reviews', 
   assert.match(comments[0].body, /critical, vulnerability, security/);
 });
 
+test('adapter memoizes the Linear client across triage calls', async () => {
+  const { linear, updates, comments } = makeLinearFixture();
+  let providerCalls = 0;
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => {
+      providerCalls += 1;
+      return linear;
+    },
+    logger: {},
+  });
+
+  await adapter.syncTriageStatus(subjectRef(), 'in-review');
+  await adapter.recordReviewCompleted(subjectRef(), {
+    critical: true,
+    reviewSummary: 'Critical security vulnerability in request handling.',
+  });
+
+  assert.equal(providerCalls, 1);
+  assert.equal(updates.length, 2);
+  assert.equal(comments.length, 1);
+});
+
 test('buildCriticalFlagComment includes matching critical words', () => {
   const body = buildCriticalFlagComment('Possible injection vulnerability.');
 

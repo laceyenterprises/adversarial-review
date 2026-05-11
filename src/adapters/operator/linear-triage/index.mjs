@@ -142,12 +142,20 @@ function createLinearTriageAdapter({
     done: stateNames.done || ['Done', 'Review Complete'],
     cancelled: stateNames.cancelled || 'Cancelled',
   };
+  let linearClientPromise = null;
+
+  function getLinearClient() {
+    if (!linearClientPromise) {
+      linearClientPromise = Promise.resolve().then(() => linearClientProvider());
+    }
+    return linearClientPromise;
+  }
 
   async function syncTriageStatus(subjectRef, status) {
     const ticketId = resolveLinearTicketId(subjectRef);
     const targetStateName = normalizeStatusName(status, resolvedStateNames);
     await setLinearState({
-      linearClientProvider,
+      linearClientProvider: getLinearClient,
       logger,
       ticketId,
       targetStateName,
@@ -173,7 +181,7 @@ function createLinearTriageAdapter({
     await syncTriageStatus(subjectRef, 'done');
 
     if (!critical) return;
-    const linear = await linearClientProvider();
+    const linear = await getLinearClient();
     if (!linear) return;
     try {
       const issue = await linear.issue(ticketId);

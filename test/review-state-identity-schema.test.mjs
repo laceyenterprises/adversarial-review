@@ -29,6 +29,11 @@ test('fresh DB includes subject identity columns and schema version 3', () => {
     assert.ok(columns.includes('domain_id'));
     assert.ok(columns.includes('subject_external_id'));
     assert.ok(columns.includes('revision_ref'));
+    const tableInfo = db.prepare('PRAGMA table_info(reviewed_prs)').all();
+    const repoColumn = tableInfo.find((column) => column.name === 'repo');
+    const prNumberColumn = tableInfo.find((column) => column.name === 'pr_number');
+    assert.equal(repoColumn.notnull, 1);
+    assert.equal(prNumberColumn.notnull, 1);
     assert.equal(db.pragma('user_version', { simple: true }), REVIEW_STATE_SCHEMA_VERSION);
   } finally {
     db.close();
@@ -88,42 +93,13 @@ test('migration from v2 adds identity columns and backfills available head SHA',
   }
 });
 
-test('composite identity UNIQUE rejects duplicate round and kind', () => {
+test('fresh schema does not carry the redundant identity round/status unique index', () => {
   const rootDir = makeRootDir();
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
-    const insert = db.prepare(
-      `INSERT INTO reviewed_prs
-         (repo, pr_number, domain_id, subject_external_id, revision_ref, reviewed_at, reviewer, review_status, review_attempts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    insert.run(
-      'laceyenterprises/agent-os',
-      360,
-      'code-pr',
-      'laceyenterprises/agent-os#360',
-      'sha-360',
-      '2026-05-10T12:00:00.000Z',
-      'codex',
-      'posted',
-      2
-    );
-
-    assert.throws(
-      () => insert.run(
-        'laceyenterprises/agent-os-copy',
-        999,
-        'code-pr',
-        'laceyenterprises/agent-os#360',
-        'sha-360',
-        '2026-05-10T12:01:00.000Z',
-        'claude',
-        'posted',
-        2
-      ),
-      /UNIQUE constraint failed/
-    );
+    const indexNames = db.prepare('PRAGMA index_list(reviewed_prs)').all().map((row) => row.name);
+    assert.equal(indexNames.includes('reviewed_prs_identity_round_kind_unique'), false);
   } finally {
     db.close();
   }

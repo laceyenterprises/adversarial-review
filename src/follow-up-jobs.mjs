@@ -116,6 +116,14 @@ function normalizeRiskClass(riskClass, { fallback = null } = {}) {
     : fallback;
 }
 
+function normalizeFollowUpJobRepoPrKey(repo, prNumber) {
+  return `${String(repo || '').toLowerCase()}#${prNumber || ''}`;
+}
+
+function followUpJobRepoPrKey(job) {
+  return normalizeFollowUpJobRepoPrKey(job?.repo, job?.prNumber);
+}
+
 function buildRoundBudgetResolution({
   riskClass = DEFAULT_RISK_CLASS,
   roundBudget = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS],
@@ -1312,18 +1320,21 @@ function claimNextFollowUpJob({
   excludedRepoPrKeys = new Set(),
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
+  const normalizedExcludedRepoPrKeys = new Set(
+    Array.from(excludedRepoPrKeys || [], (key) => String(key || '').toLowerCase())
+  );
 
   for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
-    if (excludedRepoPrKeys?.size) {
-      let pendingJob;
+    let pendingJob = null;
+    if (normalizedExcludedRepoPrKeys.size) {
       try {
         pendingJob = readFollowUpJob(pendingPath);
       } catch (err) {
         if (err?.code === 'ENOENT') continue;
         throw err;
       }
-      const repoPrKey = `${pendingJob.repo}#${pendingJob.prNumber}`;
-      if (excludedRepoPrKeys.has(repoPrKey)) {
+      const repoPrKey = followUpJobRepoPrKey(pendingJob);
+      if (normalizedExcludedRepoPrKeys.has(repoPrKey)) {
         continue;
       }
     }
@@ -1337,7 +1348,7 @@ function claimNextFollowUpJob({
       throw err;
     }
 
-    const job = readFollowUpJob(inProgressPath);
+    const job = pendingJob || readFollowUpJob(inProgressPath);
     if (isSettledReviewJob(job)) {
       let stopped = null;
       try {

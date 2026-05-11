@@ -47,7 +47,6 @@ const ROOT = resolve(__dirname, '..');
 const TICK_INTERVAL_SECONDS = Number(process.env.TICK_INTERVAL_SECONDS) || 120;
 const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
 const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
-const MAX_CONCURRENT_REMEDIATION_JOBS = resolveRemediationMaxConcurrentJobs();
 
 function ts() {
   return new Date().toISOString();
@@ -64,6 +63,14 @@ function logTick(label, msg) {
 function logError(msg) {
   console.error(`[follow-up-daemon ${ts()}] ${msg}`);
 }
+
+const MAX_CONCURRENT_REMEDIATION_JOBS = resolveRemediationMaxConcurrentJobs(process.env, {
+  onClamp: ({ requested, clamped }) => {
+    logInfo(
+      `clamped ${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${requested} to ${clamped} to avoid runaway worker fan-out`
+    );
+  },
+});
 
 // Run a tick step, swallowing errors so one step's failure can't
 // stop the daemon. Each underlying function already moves jobs to
@@ -119,6 +126,7 @@ async function main() {
     await runStep('consume', async () => {
       const result = await consumeFollowUpJobsUntilCapacity({
         maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
+        shouldStop: () => stopping,
       });
       logTick(
         'consume',

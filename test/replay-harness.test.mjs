@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import { join, resolve } from 'node:path';
+import Database from 'better-sqlite3';
 
 import {
   collectReplaySnapshot,
@@ -190,6 +191,76 @@ test('collectReplaySnapshot surfaces terminal job JSON parse failures', () => {
     expected: [],
     actual: snapshot.parseErrors,
   });
+});
+
+test('collectReplaySnapshot reads older replay DB schemas with partial timestamp columns', () => {
+  const rootDir = mkdtempSync(join(os.tmpdir(), 'replay-harness-'));
+  const dataDir = join(rootDir, 'data');
+  mkdirSync(dataDir, { recursive: true });
+  const db = new Database(join(dataDir, 'reviews.db'));
+  db.exec(`
+    CREATE TABLE reviewed_prs (
+      repo TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      reviewed_at TEXT NOT NULL,
+      review_body TEXT
+    );
+    CREATE TABLE comment_deliveries (
+      id INTEGER PRIMARY KEY,
+      legacy_repo TEXT NOT NULL,
+      legacy_pr_number INTEGER NOT NULL,
+      attempted_at TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      round INTEGER
+    );
+  `);
+  db.prepare(`
+    INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, review_body)
+    VALUES (?, ?, ?, ?)
+  `).run('laceyenterprises/demo', 80, '2026-05-10T12:00:00.000Z', '## Verdict\nComment only');
+  db.prepare(`
+    INSERT INTO comment_deliveries (legacy_repo, legacy_pr_number, attempted_at, kind, round)
+    VALUES (?, ?, ?, ?, ?)
+  `).run('laceyenterprises/demo', 80, '2026-05-10T12:01:00.000Z', 'review-verdict', 1);
+  db.close();
+
+  const snapshot = collectReplaySnapshot(rootDir, {
+    since: '2026-05-01T00:00:00.000Z',
+    now: new Date('2026-05-11T12:00:00.000Z'),
+  });
+
+  assert.deepEqual(snapshot.parseErrors, []);
+  assert.equal(snapshot.records.length, 1);
+  assert.equal(snapshot.records[0].deliveries.length, 1);
+});
+
+test('collectReplaySnapshot skips replay DB tables without window timestamp columns', () => {
+  const rootDir = mkdtempSync(join(os.tmpdir(), 'replay-harness-'));
+  const dataDir = join(rootDir, 'data');
+  mkdirSync(dataDir, { recursive: true });
+  const db = new Database(join(dataDir, 'reviews.db'));
+  db.exec(`
+    CREATE TABLE reviewed_prs (
+      repo TEXT NOT NULL,
+      pr_number INTEGER NOT NULL
+    );
+    CREATE TABLE comment_deliveries (
+      id INTEGER PRIMARY KEY,
+      legacy_repo TEXT NOT NULL,
+      legacy_pr_number INTEGER NOT NULL
+    );
+  `);
+  db.prepare('INSERT INTO reviewed_prs (repo, pr_number) VALUES (?, ?)').run('laceyenterprises/demo', 80);
+  db.prepare('INSERT INTO comment_deliveries (legacy_repo, legacy_pr_number) VALUES (?, ?)').run('laceyenterprises/demo', 80);
+  db.close();
+
+  const snapshot = collectReplaySnapshot(rootDir, {
+    since: '2026-05-01T00:00:00.000Z',
+    now: new Date('2026-05-11T12:00:00.000Z'),
+  });
+
+  assert.deepEqual(snapshot.parseErrors, []);
+  assert.deepEqual(snapshot.records, []);
 });
 
 test('normalizeReplaySnapshot surfaces conflicting verdict merges deterministically', () => {

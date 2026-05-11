@@ -522,23 +522,54 @@ function tableExists(db, tableName) {
   return Boolean(row);
 }
 
+function tableColumns(db, tableName) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(tableName)) {
+    throw new Error(`Unsafe table name: ${tableName}`);
+  }
+  return new Set(db.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => row.name));
+}
+
+function timestampExpression(columns, candidates) {
+  const present = candidates.filter((column) => columns.has(column));
+  if (present.length === 0) return null;
+  if (present.length === 1) return present[0];
+  return `COALESCE(${present.join(', ')})`;
+}
+
+function presentOrderColumns(columns, candidates) {
+  return candidates.filter((column) => columns.has(column));
+}
+
 function collectReviewRows(db, sinceIso) {
   if (!tableExists(db, 'reviewed_prs')) return [];
+  const columns = tableColumns(db, 'reviewed_prs');
+  const observedAt = timestampExpression(columns, [
+    'posted_at',
+    'last_attempted_at',
+    'failed_at',
+    'reviewed_at',
+  ]);
+  if (!observedAt) return [];
+  const orderBy = [observedAt, ...presentOrderColumns(columns, ['repo', 'pr_number'])].join(', ');
   return db.prepare(
     `SELECT *
        FROM reviewed_prs
-      WHERE COALESCE(posted_at, last_attempted_at, failed_at, reviewed_at) >= ?
-      ORDER BY COALESCE(posted_at, last_attempted_at, failed_at, reviewed_at), repo, pr_number`
+      WHERE ${observedAt} >= ?
+      ORDER BY ${orderBy}`
   ).all(sinceIso);
 }
 
 function collectDeliveryRows(db, sinceIso) {
   if (!tableExists(db, 'comment_deliveries')) return [];
+  const columns = tableColumns(db, 'comment_deliveries');
+  const observedAt = timestampExpression(columns, ['delivered_at', 'attempted_at']);
+  if (!observedAt) return [];
+  const orderBy = [observedAt, ...presentOrderColumns(columns, ['id'])].join(', ');
   return db.prepare(
     `SELECT *
        FROM comment_deliveries
-      WHERE COALESCE(delivered_at, attempted_at) >= ?
-      ORDER BY COALESCE(delivered_at, attempted_at), id`
+      WHERE ${observedAt} >= ?
+      ORDER BY ${orderBy}`
   ).all(sinceIso);
 }
 

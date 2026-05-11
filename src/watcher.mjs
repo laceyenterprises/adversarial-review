@@ -174,6 +174,20 @@ function exitForSqliteOrphan(err, contextLabel) {
   setImmediate(() => process.exit(SQLITE_ORPHAN_EXIT_CODE));
 }
 
+// LAC-545: head+tail preview for diagnostic log lines. For short payloads
+// (under 800 chars) emit verbatim; for longer ones, the first 400 +
+// `…<truncated N chars>…` + last 400. Newlines are collapsed to a single
+// space so the line stays grep-able. The intent is to surface enough of
+// codex's actual output to a) classify the failure mode and b) feed the
+// sanitizer's rejection signature back into a real fix.
+function previewLogText(text, { head = 400, tail = 400 } = {}) {
+  const normalized = String(text ?? '').replace(/\r?\n+/g, ' ').trim();
+  if (!normalized) return '<empty>';
+  if (normalized.length <= head + tail) return normalized;
+  const elided = normalized.length - head - tail;
+  return `${normalized.slice(0, head)} …<truncated ${elided} chars>… ${normalized.slice(-tail)}`;
+}
+
 function handlePollError(err, source = 'pollOnce') {
   if (isSqliteOrphanError(err)) {
     exitForSqliteOrphan(err, source);
@@ -485,6 +499,7 @@ async function spawnReviewer({
       signal: typeof err?.signal === 'string' ? err.signal : null,
       timedOut,
       stderr: String(err?.stderr || detail || ''),
+      stdout: String(err?.stdout || ''),
       failureClass: classifyReviewerFailure(
         err?.stderr || detail || '',
         Number.isInteger(err?.exitCode) ? err.exitCode : err?.code,
@@ -525,6 +540,26 @@ function settleReviewerAttempt({
   }
 
   const failureClass = result.failureClass || 'unknown';
+
+  // LAC-545: every reviewer failure now logs its captured stderr/stdout
+  // with the failure class. Previously these were swallowed by the
+  // classifier — the silent-stall on every `[claude-code]` PR codex
+  // reviewer attempt was invisible until forensic instrumentation got
+  // bolted on. Mirror the success-path `[reviewer:<N>] stderr: ...`
+  // shape so success and failure produce parallel diagnostic lines.
+  const failureStderrText = String(result.stderr || '').trim();
+  const failureStdoutText = String(result.stdout || '').trim();
+  if (failureStderrText) {
+    log.warn(
+      `[reviewer:${prNumber}] stderr (failure-class=${failureClass}): ${previewLogText(failureStderrText)}`
+    );
+  }
+  if (failureStdoutText) {
+    log.warn(
+      `[reviewer:${prNumber}] stdout (failure-class=${failureClass}): ${previewLogText(failureStdoutText)}`
+    );
+  }
+
   const transientFailureClasses = new Set([
     'cascade',
     'reviewer-timeout',

@@ -3,11 +3,19 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 2;
+const REVIEW_STATE_SCHEMA_VERSION = 3;
 const execFileAsyncDefault = promisify(execFile);
+
+const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
+  'head_sha',
+  'headSha',
+  'head_ref_oid',
+  'headRefOid',
+]);
 
 function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
   mkdirSync(join(rootDir, 'data'), { recursive: true });
@@ -20,8 +28,11 @@ function ensureReviewStateSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS reviewed_prs (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
-      repo              TEXT NOT NULL,
-      pr_number         INTEGER NOT NULL,
+      repo              TEXT,
+      pr_number         INTEGER,
+      domain_id         TEXT,
+      subject_external_id TEXT,
+      revision_ref      TEXT,
       reviewed_at       TEXT NOT NULL,
       reviewer          TEXT NOT NULL,
       pr_state          TEXT NOT NULL DEFAULT 'open',
@@ -62,15 +73,117 @@ function ensureReviewStateSchema(db) {
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN reviewer_pgid INTEGER`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN reviewer_started_at TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN reviewer_head_sha TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN domain_id TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN subject_external_id TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN revision_ref TEXT`); } catch {}
 
-  const currentVersion = Number(db.pragma('user_version', { simple: true }) || 0);
-  if (currentVersion < REVIEW_STATE_SCHEMA_VERSION) {
-    db.pragma(`user_version = ${REVIEW_STATE_SCHEMA_VERSION}`);
-  }
+  backfillReviewedPRSubjectIdentity(db);
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
+      ON reviewed_prs(domain_id, subject_external_id, revision_ref, review_attempts, review_status)
+      WHERE domain_id IS NOT NULL
+        AND subject_external_id IS NOT NULL
+        AND revision_ref IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS reviewed_prs_identity_lookup_idx
+      ON reviewed_prs(domain_id, subject_external_id, revision_ref);
+
+    PRAGMA user_version = ${REVIEW_STATE_SCHEMA_VERSION};
+  `);
 }
 
 function getReviewRow(db, { repo, prNumber }) {
   return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber) || null;
+}
+
+function tableColumns(db, tableName) {
+  return db.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => column.name);
+}
+
+function pickExistingColumn(db, tableName, candidates) {
+  const columnSet = new Set(tableColumns(db, tableName));
+  return candidates.find((candidate) => columnSet.has(candidate)) || null;
+}
+
+function backfillReviewedPRSubjectIdentity(db) {
+  const headShaColumn = pickExistingColumn(db, 'reviewed_prs', REVIEWED_PRS_HEAD_SHA_COLUMNS);
+  const revisionExpr = headShaColumn ? `"${headShaColumn}"` : 'NULL';
+
+  db.prepare(
+    `UPDATE reviewed_prs
+        SET domain_id = ?,
+            subject_external_id = repo || '#' || pr_number,
+            revision_ref = ${revisionExpr}
+      WHERE domain_id IS NULL
+        AND repo IS NOT NULL
+        AND pr_number IS NOT NULL`
+  ).run(CODE_PR_DOMAIN_ID);
+}
+
+function normalizeSubjectIdentity({ domainId, domain_id, subjectExternalId, subject_external_id, revisionRef, revision_ref } = {}) {
+  return {
+    domainId: domainId ?? domain_id ?? null,
+    subjectExternalId: subjectExternalId ?? subject_external_id ?? null,
+    revisionRef: revisionRef ?? revision_ref ?? null,
+  };
+}
+
+function getReviewRowBySubjectIdentity(db, identity) {
+  const { domainId, subjectExternalId, revisionRef } = normalizeSubjectIdentity(identity);
+  if (!domainId || !subjectExternalId || !revisionRef) return null;
+  return db.prepare(
+    `SELECT *
+       FROM reviewed_prs
+      WHERE domain_id = ?
+        AND subject_external_id = ?
+        AND revision_ref = ?
+      ORDER BY id DESC
+      LIMIT 1`
+  ).get(domainId, subjectExternalId, revisionRef) || null;
+}
+
+function lookupReviewRowDualRead(db, {
+  repo,
+  prNumber,
+  domainId,
+  subjectExternalId,
+  revisionRef,
+  legacyRevisionProven = false,
+} = {}) {
+  const normalizedSubjectExternalId = subjectExternalId || makeCodePrSubjectExternalId(repo, prNumber);
+  const typedRow = getReviewRowBySubjectIdentity(db, {
+    domainId: domainId || (normalizedSubjectExternalId ? CODE_PR_DOMAIN_ID : null),
+    subjectExternalId: normalizedSubjectExternalId,
+    revisionRef,
+  });
+  if (typedRow) {
+    return { found: true, source: 'typed', row: typedRow };
+  }
+
+  const legacyRow = repo && prNumber ? getReviewRow(db, { repo, prNumber }) : null;
+  if (!legacyRow) {
+    return { found: false, source: null, row: null };
+  }
+
+  const legacyRevisionMatches = revisionRef
+    && legacyRow.revision_ref
+    && String(legacyRow.revision_ref) === String(revisionRef);
+  if (legacyRevisionMatches || legacyRevisionProven) {
+    return { found: true, source: 'legacy', row: legacyRow };
+  }
+
+  return {
+    found: false,
+    source: null,
+    row: null,
+    legacyRow,
+    reason: 'legacy-row-unproven-revision',
+  };
+}
+
+function hasReviewRowForSubject(db, options = {}) {
+  return lookupReviewRowDualRead(db, options).found;
 }
 
 // Read just the PR-lifecycle columns the watcher's syncPRLifecycle
@@ -386,6 +499,9 @@ export {
   ensureReviewStateSchema,
   openReviewStateDb,
   getReviewRow,
+  getReviewRowBySubjectIdentity,
+  lookupReviewRowDualRead,
+  hasReviewRowForSubject,
   readPRState,
   fetchLivePRLifecycle,
   persistPRStateToMirror,

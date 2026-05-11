@@ -148,6 +148,7 @@ GitHub PR opened
 \#\#\# 5\. Follow-up Handoff Queue (first slice)
 \- After a GitHub review post succeeds, write a durable JSON job under \`data/follow-up-jobs/pending/\`
 \- Record repo, PR number, reviewer model, review summary/body, criticality, and recommended follow-up action
+\- Review, follow-up remediation, comment-delivery, and operator-mutation records carry the additive subject identity fields \`domainId\`, \`subjectExternalId\`, and \`revisionRef\` (SQLite: \`domain_id\`, \`subject_external_id\`, \`revision_ref\`) alongside legacy \`repo\` / \`pr_number\`. Legacy rows that predate persisted PR head SHA keep \`revisionRef = null\`; migrations backfill the \`code-pr\` revision only when a head SHA column is available and never synthesize one.
 \- Clean verdicts (\`Comment only\` / \`Approved\`) still get a durable job as the verdict carrier; the follow-up consumer records them as settled without spawning a remediation worker
 \- Keep the handoff explicit and append-only; do not hide it behind undocumented local hooks
 \- This queue is the minimal bridge until session-aware continuation exists natively

@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
 import { getFollowUpJobDir, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
+import { buildDeliveryKey } from './identity-shapes.mjs';
 import { buildRemediationOutcomeCommentBody, postRemediationOutcomeComment } from './pr-comments.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -95,7 +96,12 @@ function buildOwedDelivery({
   prNumber,
   workerClass,
   owedAt,
+  revisionRef = null,
+  round = null,
+  kind = 'remediation-reply',
+  noticeRef = null,
 }) {
+  const deliveryKey = buildDeliveryKey({ repo, prNumber, revisionRef, round, kind, noticeRef });
   return {
     posted: false,
     attempting: false,
@@ -109,6 +115,12 @@ function buildOwedDelivery({
     body,
     repo,
     prNumber,
+    domainId: deliveryKey.domainId,
+    subjectExternalId: deliveryKey.subjectExternalId,
+    revisionRef: deliveryKey.revisionRef,
+    round: deliveryKey.round,
+    deliveryKind: deliveryKey.kind,
+    noticeRef: deliveryKey.noticeRef,
     workerClass,
   };
 }
@@ -120,7 +132,12 @@ function buildPendingDelivery({
   workerClass,
   postResult,
   attemptedAt,
+  revisionRef = null,
+  round = null,
+  kind = 'remediation-reply',
+  noticeRef = null,
 }) {
+  const deliveryKey = buildDeliveryKey({ repo, prNumber, revisionRef, round, kind, noticeRef });
   // Always include the rendered body + addressing info so the retry
   // pass doesn't need to reconstruct the body from the job record
   // (which would require re-parsing the worker's reply artifact and
@@ -140,6 +157,12 @@ function buildPendingDelivery({
     body,
     repo,
     prNumber,
+    domainId: deliveryKey.domainId,
+    subjectExternalId: deliveryKey.subjectExternalId,
+    revisionRef: deliveryKey.revisionRef,
+    round: deliveryKey.round,
+    deliveryKind: deliveryKey.kind,
+    noticeRef: deliveryKey.noticeRef,
     workerClass,
   };
 }
@@ -152,7 +175,12 @@ function buildAttemptingDelivery({
   attemptedAt,
   attempts = 1,
   firstAttemptAt,
+  revisionRef = null,
+  round = null,
+  kind = 'remediation-reply',
+  noticeRef = null,
 }) {
+  const deliveryKey = buildDeliveryKey({ repo, prNumber, revisionRef, round, kind, noticeRef });
   // Pre-flight stamp written BEFORE the gh call. If the process
   // dies between this write and the post-call update, the retry
   // pass sees attempting=true and (assuming the lock is stale)
@@ -171,6 +199,12 @@ function buildAttemptingDelivery({
     body,
     repo,
     prNumber,
+    domainId: deliveryKey.domainId,
+    subjectExternalId: deliveryKey.subjectExternalId,
+    revisionRef: deliveryKey.revisionRef,
+    round: deliveryKey.round,
+    deliveryKind: deliveryKey.kind,
+    noticeRef: deliveryKey.noticeRef,
     workerClass,
   };
 }
@@ -299,8 +333,19 @@ function readPostedSidecar(jobPath) {
   }
 }
 
-function writePostedSidecar(jobPath, { repo, prNumber, workerClass, postResult, attemptedAt }) {
+function writePostedSidecar(jobPath, {
+  repo,
+  prNumber,
+  workerClass,
+  revisionRef = null,
+  round = null,
+  kind = 'remediation-reply',
+  noticeRef = null,
+  postResult,
+  attemptedAt,
+}) {
   const path = postedSidecarPath(jobPath);
+  const deliveryKey = buildDeliveryKey({ repo, prNumber, revisionRef, round, kind, noticeRef });
   try {
     writeFileSync(
       path,
@@ -308,6 +353,12 @@ function writePostedSidecar(jobPath, { repo, prNumber, workerClass, postResult, 
         posted: true,
         repo,
         prNumber,
+        domainId: deliveryKey.domainId,
+        subjectExternalId: deliveryKey.subjectExternalId,
+        revisionRef: deliveryKey.revisionRef,
+        round: deliveryKey.round,
+        deliveryKind: deliveryKey.kind,
+        noticeRef: deliveryKey.noticeRef,
         workerClass,
         attemptedAt,
         postResult,
@@ -352,6 +403,10 @@ function recordInitialCommentDelivery({
   repo,
   prNumber,
   workerClass,
+  revisionRef = null,
+  round = null,
+  kind = 'remediation-reply',
+  noticeRef = null,
   postCommentImpl,
   postCommentArgs = null,
   now = () => new Date().toISOString(),
@@ -388,6 +443,10 @@ function recordInitialCommentDelivery({
         repo,
         prNumber,
         workerClass,
+        revisionRef,
+        round,
+        kind,
+        noticeRef,
         attemptedAt: firstAttemptAt,
         attempts: 1,
         firstAttemptAt,
@@ -427,6 +486,10 @@ function recordInitialCommentDelivery({
           repo,
           prNumber,
           workerClass,
+          revisionRef,
+          round,
+          kind,
+          noticeRef,
           postResult: existingSidecar.postResult || { posted: true },
           attemptedAt: existingSidecar.attemptedAt || recoveredAt,
         }),
@@ -473,6 +536,7 @@ function recordInitialCommentDelivery({
     if (postResult?.posted) {
       writePostedSidecar(jobPath, {
         repo, prNumber, workerClass,
+        revisionRef, round, kind, noticeRef,
         postResult,
         attemptedAt: settledAt,
       });
@@ -484,6 +548,10 @@ function recordInitialCommentDelivery({
         repo,
         prNumber,
         workerClass,
+        revisionRef,
+        round,
+        kind,
+        noticeRef,
         postResult,
         attemptedAt: settledAt,
       }),
@@ -650,6 +718,13 @@ function reconstructDeliveryFromRecord(record) {
     return null;
   }
 
+  const deliveryKey = buildDeliveryKey({
+    repo: record.repo,
+    prNumber: record.prNumber,
+    revisionRef: record?.revisionRef || null,
+    round: record?.remediationPlan?.currentRound || null,
+    kind: 'remediation-reply',
+  });
   return {
     posted: false,
     attempting: false,
@@ -663,6 +738,12 @@ function reconstructDeliveryFromRecord(record) {
     body,
     repo: record.repo,
     prNumber: record.prNumber,
+    domainId: deliveryKey.domainId,
+    subjectExternalId: deliveryKey.subjectExternalId,
+    revisionRef: deliveryKey.revisionRef,
+    round: deliveryKey.round,
+    deliveryKind: deliveryKey.kind,
+    noticeRef: deliveryKey.noticeRef,
     workerClass,
     reconstructed: true,
   };
@@ -894,6 +975,12 @@ async function retryFailedCommentDeliveries({
         body: previous.body || delivery.body,
         repo: previous.repo || delivery.repo,
         prNumber: previous.prNumber || delivery.prNumber,
+        domainId: previous.domainId || delivery.domainId || sidecar.domainId || null,
+        subjectExternalId: previous.subjectExternalId || delivery.subjectExternalId || sidecar.subjectExternalId || null,
+        revisionRef: previous.revisionRef || delivery.revisionRef || sidecar.revisionRef || null,
+        round: previous.round ?? delivery.round ?? sidecar.round ?? null,
+        deliveryKind: previous.deliveryKind || delivery.deliveryKind || sidecar.deliveryKind || null,
+        noticeRef: previous.noticeRef || delivery.noticeRef || sidecar.noticeRef || null,
         workerClass: previous.workerClass || delivery.workerClass,
         attempts: Math.max((previous.attempts || 0), 1),
         firstAttemptAt: previous.firstAttemptAt || attemptedAt,
@@ -948,6 +1035,10 @@ async function retryFailedCommentDeliveries({
         repo: delivery.repo,
         prNumber: delivery.prNumber,
         workerClass: delivery.workerClass,
+        revisionRef: delivery.revisionRef || null,
+        round: delivery.round ?? null,
+        kind: delivery.deliveryKind || 'remediation-reply',
+        noticeRef: delivery.noticeRef || null,
         postResult: result,
         attemptedAt,
       });
@@ -971,6 +1062,12 @@ async function retryFailedCommentDeliveries({
       body: previous.body || delivery.body,
       repo: previous.repo || delivery.repo,
       prNumber: previous.prNumber || delivery.prNumber,
+      domainId: previous.domainId || delivery.domainId || null,
+      subjectExternalId: previous.subjectExternalId || delivery.subjectExternalId || null,
+      revisionRef: previous.revisionRef || delivery.revisionRef || null,
+      round: previous.round ?? delivery.round ?? null,
+      deliveryKind: previous.deliveryKind || delivery.deliveryKind || null,
+      noticeRef: previous.noticeRef || delivery.noticeRef || null,
       workerClass: previous.workerClass || delivery.workerClass,
       attempts: (previous.attempts || 0) + 1,
       firstAttemptAt: previous.firstAttemptAt || attemptedAt,

@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { buildCodePrSubjectIdentity, buildDeliveryKey } from './identity-shapes.mjs';
 import {
   PUBLIC_REPLY_MAX_CHARS,
   REMEDIATION_REPLY_KIND,
@@ -636,9 +637,17 @@ function normalizeFollowUpJob(job) {
     ? persistedRemediationReply.path
     : null;
   const normalizedRiskClass = normalizeRiskClass(job?.riskClass);
+  const subjectIdentity = buildCodePrSubjectIdentity({
+    repo: job?.repo,
+    prNumber: job?.prNumber,
+    revisionRef: job?.revisionRef || null,
+  });
   return {
     ...job,
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+    domainId: job?.domainId || subjectIdentity.domainId,
+    subjectExternalId: job?.subjectExternalId || subjectIdentity.subjectExternalId,
+    revisionRef: job?.revisionRef || subjectIdentity.revisionRef,
     riskClass: normalizedRiskClass,
     recommendedFollowUpAction: {
       ...buildRecommendedFollowUpAction({ critical: job.critical }),
@@ -1189,6 +1198,7 @@ function buildFollowUpJob({
 }) {
   const createdAt = reviewPostedAt || new Date().toISOString();
   const jobId = `${sanitizeRepo(repo)}-pr-${prNumber}-${sanitizeTimestamp(createdAt)}`;
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber });
   const basePlan = buildRemediationRoundPlan(maxRemediationRounds);
   const seededRounds = Number.isFinite(Number(priorCompletedRounds)) && priorCompletedRounds > 0
     ? Math.floor(Number(priorCompletedRounds))
@@ -1214,6 +1224,9 @@ function buildFollowUpJob({
     },
     repo,
     prNumber,
+    domainId: subjectIdentity.domainId,
+    subjectExternalId: subjectIdentity.subjectExternalId,
+    revisionRef: subjectIdentity.revisionRef,
     linearTicketId,
     riskClass: normalizeRiskClass(riskClass),
     reviewerModel,
@@ -1412,6 +1425,13 @@ function claimNextFollowUpJob({
           ...(job?.remediationPlan?.rounds || []),
           {
             round: nextRoundNumber,
+            ...buildDeliveryKey({
+              repo: job?.repo,
+              prNumber: job?.prNumber,
+              revisionRef: job?.revisionRef || null,
+              round: nextRoundNumber,
+              kind: 'remediation',
+            }),
             state: 'claimed',
             claimedAt,
             claimedBy: {

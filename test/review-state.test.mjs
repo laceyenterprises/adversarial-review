@@ -50,6 +50,9 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     assert.ok(columns.includes('reviewer_pgid'));
     assert.ok(columns.includes('reviewer_started_at'));
     assert.ok(columns.includes('reviewer_head_sha'));
+    assert.ok(columns.includes('domain_id'));
+    assert.ok(columns.includes('subject_external_id'));
+    assert.ok(columns.includes('revision_ref'));
     assert.equal(db.pragma('user_version', { simple: true }), REVIEW_STATE_SCHEMA_VERSION);
   } finally {
     db.close();

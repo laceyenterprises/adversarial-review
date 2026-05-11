@@ -18,6 +18,7 @@ import {
   isCommittedOperatorMutationOutcome,
   resolveIdempotencyKey,
 } from './operator-mutation-audit.mjs';
+import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -183,11 +184,15 @@ function makeAuditRow({
   idempotencyKey,
   outcome,
 }) {
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber: pr });
   return {
     ts,
     verb: 'hq.adversarial.retrigger-review',
     repo,
     pr,
+    domainId: subjectIdentity.domainId,
+    subjectExternalId: subjectIdentity.subjectExternalId,
+    revisionRef: subjectIdentity.revisionRef,
     reason,
     operator,
     priorMaxRounds,

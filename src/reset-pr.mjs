@@ -11,6 +11,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 import {
   FOLLOW_UP_JOB_DIRS,
   getFollowUpJobDir,
@@ -243,11 +244,18 @@ function main(argv, {
       repo: parsed.repo,
       prNumber: parsed.pr,
     });
+    const subjectIdentity = buildCodePrSubjectIdentity({
+      repo: parsed.repo,
+      prNumber: parsed.pr,
+    });
     const baseReceipt = {
       ts,
       verb: VERB,
       repo: parsed.repo,
       pr: parsed.pr,
+      domainId: subjectIdentity.domainId,
+      subjectExternalId: subjectIdentity.subjectExternalId,
+      revisionRef: subjectIdentity.revisionRef,
       operator,
     };
     const reservation = reserveReceipt(auditRootDir, {

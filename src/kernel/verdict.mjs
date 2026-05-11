@@ -1,3 +1,8 @@
+/**
+ * @typedef {import('./contracts.js').ReviewVerdictKind} ReviewVerdictKind
+ * @typedef {import('./contracts.js').Verdict} Verdict
+ */
+
 function looksLikeRuntimeJunk(text) {
   const normalized = String(text ?? '').toLowerCase();
   return /\[client\]|\[agent\]|running|initializ|session|reading additional input|reading prompt from stdin|could not update path|operation not permitted|error:|timed out/.test(normalized);
@@ -18,6 +23,10 @@ function titleCaseWords(value) {
     .join(' ');
 }
 
+/**
+ * @param {string} reviewText
+ * @returns {Verdict['body']}
+ */
 function sanitizeCodexReviewPayload(reviewText) {
   let text = normalizeWhitespace(reviewText)
     .replace(/^#\s+/gm, '## ')
@@ -69,6 +78,10 @@ function extractReviewVerdict(reviewBody) {
   return match ? match[1].trim() : null;
 }
 
+/**
+ * @param {string | null | undefined} verdict
+ * @returns {ReviewVerdictKind | null}
+ */
 function normalizeReviewVerdict(verdict) {
   const text = String(verdict ?? '')
     .replace(/[*_`~]/g, ' ')
@@ -91,4 +104,3 @@ export {
   normalizeReviewVerdict,
   sanitizeCodexReviewPayload,
 };
-

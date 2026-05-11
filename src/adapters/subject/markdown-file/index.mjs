@@ -10,11 +10,14 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { writeFileAtomic } from '../../../atomic-write.mjs';
 
 const DOMAIN_ID = 'research-finding';
 const DEFAULT_SUBJECT_PATH = 'subject.md';
+const STATE_DIR = '.markdown-file-state';
+const STATE_FILE = 'state.json';
 
 function isoString(value) {
   if (value instanceof Date) return value.toISOString();
@@ -23,24 +26,26 @@ function isoString(value) {
 
 function assertRootDir(rootDir) {
   if (!rootDir) throw new Error('markdown-file subject adapter requires rootDir');
-  return resolve(rootDir);
+  const resolved = resolve(rootDir);
+  return existsSync(resolved) ? realpathSync(resolved) : resolved;
 }
 
 function resolveSubjectPath(rootDir, subjectPath) {
   const root = assertRootDir(rootDir);
   const resolved = resolve(root, subjectPath || DEFAULT_SUBJECT_PATH);
-  const rel = relative(root, resolved);
+  const candidate = existsSync(resolved) ? realpathSync(resolved) : resolved;
+  const rel = relative(root, candidate);
   if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
     throw new Error(`markdown-file subject path escapes rootDir: ${subjectPath}`);
   }
-  if (!resolved.endsWith('.md')) {
+  if (!candidate.endsWith('.md')) {
     throw new Error(`markdown-file subject path must end with .md: ${subjectPath}`);
   }
-  return resolved;
+  return candidate;
 }
 
 function hashMarkdownContent(content) {
-  return `sha256:${createHash('sha256').update(content).digest('hex').slice(0, 16)}`;
+  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }
 
 function titleFromMarkdown(content, subjectPath) {
@@ -67,6 +72,31 @@ function readMarkdownSubject(rootDir, subjectPath) {
     filePath,
     content: readFileSync(filePath, 'utf8'),
   };
+}
+
+function statePathForSubject(rootDir, subjectExternalId) {
+  const root = assertRootDir(rootDir);
+  const relativeSubjectPath = String(subjectExternalId || '').replaceAll('\\', '/');
+  const resolved = resolve(root, STATE_DIR, relativeSubjectPath, STATE_FILE);
+  const rel = relative(root, resolved);
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+    throw new Error(`markdown-file state path escapes rootDir: ${subjectExternalId}`);
+  }
+  return resolved;
+}
+
+function readPersistedState(rootDir, subjectExternalId) {
+  const statePath = statePathForSubject(rootDir, subjectExternalId);
+  if (!existsSync(statePath)) {
+    return {};
+  }
+  return JSON.parse(readFileSync(statePath, 'utf8'));
+}
+
+function writePersistedState(rootDir, subjectExternalId, state) {
+  const statePath = statePathForSubject(rootDir, subjectExternalId);
+  writeFileAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  return statePath;
 }
 
 /**
@@ -96,12 +126,11 @@ function createMarkdownFileSubjectAdapter({
 } = {}) {
   const root = assertRootDir(rootDir);
   const canonicalSubjectPath = subjectPath;
-  const stateBySubjectExternalId = new Map();
 
   function currentSnapshot() {
     const { filePath, content } = readMarkdownSubject(root, canonicalSubjectPath);
     const ref = refFromMarkdownFile(root, canonicalSubjectPath, content, { domainId, linearTicketId });
-    const cached = stateBySubjectExternalId.get(ref.subjectExternalId) || {};
+    const cached = readPersistedState(root, ref.subjectExternalId);
     return {
       filePath,
       content,
@@ -189,13 +218,21 @@ function createMarkdownFileSubjectAdapter({
       if (ref?.subjectExternalId && ref.subjectExternalId !== snapshot.ref.subjectExternalId) {
         throw new Error(`Unknown markdown-file subject: ${ref.subjectExternalId}`);
       }
+      if (snapshot.terminal) {
+        throw new Error(`Cannot record remediation commit for terminal markdown-file subject: ${snapshot.ref.subjectExternalId}`);
+      }
+      const nextRevisionRef = hashMarkdownContent(snapshot.content);
+      if (commit?.revisionRef && commit.revisionRef !== nextRevisionRef) {
+        throw new Error(`markdown-file remediation revisionRef mismatch: expected ${nextRevisionRef}, received ${commit.revisionRef}`);
+      }
       const next = {
-        revisionRef: commit?.revisionRef || snapshot.ref.revisionRef,
+        revisionRef: nextRevisionRef,
         completedRemediationRounds: snapshot.completedRemediationRounds + 1,
         terminal: false,
+        latestVerdict: snapshot.latestVerdict,
         latestRemediationReply: snapshot.latestRemediationReply,
       };
-      stateBySubjectExternalId.set(snapshot.ref.subjectExternalId, next);
+      writePersistedState(root, snapshot.ref.subjectExternalId, next);
       return stateFromSnapshot({
         ...snapshot,
         ref: {
@@ -212,10 +249,15 @@ function createMarkdownFileSubjectAdapter({
       if (ref?.subjectExternalId && ref.subjectExternalId !== snapshot.ref.subjectExternalId) {
         throw new Error(`Unknown markdown-file subject: ${ref.subjectExternalId}`);
       }
-      stateBySubjectExternalId.set(snapshot.ref.subjectExternalId, {
+      if (snapshot.terminal) {
+        return stateFromSnapshot(snapshot, 'terminal');
+      }
+      writePersistedState(root, snapshot.ref.subjectExternalId, {
         revisionRef: snapshot.ref.revisionRef,
         completedRemediationRounds: snapshot.completedRemediationRounds,
         terminal: true,
+        latestVerdict: snapshot.latestVerdict,
+        latestRemediationReply: snapshot.latestRemediationReply,
       });
       return stateFromSnapshot({ ...snapshot, terminal: true }, 'terminal');
     },

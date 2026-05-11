@@ -10,10 +10,14 @@
  * @typedef {import('../../../kernel/contracts.d.ts').Verdict} Verdict
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const DEFAULT_TRANSCRIPT_FILE = 'slack-thread.jsonl';
+const DEFAULT_TRANSCRIPT_DIR = '.slack-thread-transcripts';
+const LOCK_RETRY_MS = 10;
+const LOCK_TIMEOUT_MS = 5000;
 
 function isoString(value) {
   if (value instanceof Date) return value.toISOString();
@@ -45,9 +49,15 @@ function normalizeDeliveryKey(deliveryKey, { event = null } = {}) {
   const revisionRef = deliveryKey?.revisionRef ?? deliveryKey?.revision_ref ?? null;
   const round = Number(deliveryKey?.round);
   const kind = deliveryKey?.kind ?? deliveryKey?.deliveryKind ?? deliveryKey?.delivery_kind ?? null;
-  const noticeRef = deliveryKey?.noticeRef
-    ?? deliveryKey?.notice_ref
-    ?? (kind === 'operator-notice' ? (event?.eventExternalId || event?.type || null) : null);
+  const noticeRef = kind === 'operator-notice'
+    ? (
+      deliveryKey?.noticeRef
+      ?? deliveryKey?.notice_ref
+      ?? event?.eventExternalId
+      ?? event?.type
+      ?? null
+    )
+    : null;
 
   if (!domainId || !subjectExternalId || !revisionRef || !Number.isInteger(round) || round < 0 || !kind) {
     throw new TypeError('Delivery key must include domainId, subjectExternalId, revisionRef, round, and kind');
@@ -78,7 +88,12 @@ function keyEquals(left, right) {
 }
 
 function lineToDeliveryRecord(line) {
-  const parsed = JSON.parse(line);
+  let parsed;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
   return {
     key: parsed.key,
     deliveryExternalId: parsed.deliveryExternalId,
@@ -87,6 +102,53 @@ function lineToDeliveryRecord(line) {
     delivered: parsed.delivered === true,
     ...(parsed.failureReason ? { failureReason: parsed.failureReason } : {}),
   };
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function acquireLock(lockPath) {
+  const startedAt = Date.now();
+  while (true) {
+    try {
+      writeFileSync(lockPath, `${process.pid}\n`, { flag: 'wx' });
+      return;
+    } catch (err) {
+      if (err?.code !== 'EEXIST') {
+        throw err;
+      }
+      if ((Date.now() - startedAt) >= LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for slack-thread lock: ${lockPath}`);
+      }
+      sleepMs(LOCK_RETRY_MS);
+    }
+  }
+}
+
+function withExclusiveLock(lockPath, callback) {
+  mkdirSync(dirname(lockPath), { recursive: true });
+  acquireLock(lockPath);
+  try {
+    return callback();
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+}
+
+function sanitizePathSegments(subjectExternalId) {
+  return String(subjectExternalId || '')
+    .split(/[\\/]+/u)
+    .filter(Boolean)
+    .map((segment) => segment.replace(/[^A-Za-z0-9._-]/gu, '_'))
+    .filter((segment) => segment && segment !== '.' && segment !== '..');
+}
+
+function deliveryExternalIdForKey(key) {
+  const digest = createHash('sha256')
+    .update(stableStringify(key))
+    .digest('hex');
+  return `comms-slack-thread:${digest}`;
 }
 
 /**
@@ -105,30 +167,56 @@ function createSlackThreadCommsAdapter({
   now = () => new Date(),
 } = {}) {
   const root = assertRootDir(rootDir);
-  const resolvedTranscriptPath = transcriptPath
-    ? resolve(transcriptPath)
-    : join(root, transcriptFile);
+
+  function transcriptPathForKey(key) {
+    if (transcriptPath) {
+      return resolve(transcriptPath);
+    }
+    const subjectSegments = sanitizePathSegments(key?.subjectExternalId);
+    if (subjectSegments.length === 0) {
+      throw new Error('slack-thread delivery key subjectExternalId must resolve to a subject transcript path');
+    }
+    return join(root, DEFAULT_TRANSCRIPT_DIR, ...subjectSegments, transcriptFile);
+  }
+
+  function lockPathForTranscript(transcriptPathValue) {
+    return `${transcriptPathValue}.lock`;
+  }
 
   function appendDelivery({ key, payload }) {
-    mkdirSync(dirname(resolvedTranscriptPath), { recursive: true });
-    const priorCount = readTranscriptLines(resolvedTranscriptPath).length;
-    const deliveredAt = isoString(now());
-    const deliveryExternalId = `comms-slack-thread:${priorCount + 1}`;
-    const record = {
-      adapter: 'comms-slack-thread',
-      attemptedAt: deliveredAt,
-      delivered: true,
-      deliveredAt,
-      deliveryExternalId,
-      key,
-      payload,
-    };
-    appendFileSync(resolvedTranscriptPath, `${stableStringify(record)}\n`, 'utf8');
-    return {
-      key,
-      deliveryExternalId,
-      deliveredAt,
-    };
+    const resolvedTranscriptPath = transcriptPathForKey(key);
+    return withExclusiveLock(lockPathForTranscript(resolvedTranscriptPath), () => {
+      mkdirSync(dirname(resolvedTranscriptPath), { recursive: true });
+      const existing = readTranscriptLines(resolvedTranscriptPath)
+        .map(lineToDeliveryRecord)
+        .filter(Boolean)
+        .find((record) => keyEquals(record.key, key));
+      if (existing) {
+        return {
+          key,
+          deliveryExternalId: existing.deliveryExternalId,
+          deliveredAt: existing.deliveredAt,
+        };
+      }
+
+      const deliveredAt = isoString(now());
+      const deliveryExternalId = deliveryExternalIdForKey(key);
+      const record = {
+        adapter: 'comms-slack-thread',
+        attemptedAt: deliveredAt,
+        delivered: true,
+        deliveredAt,
+        deliveryExternalId,
+        key,
+        payload,
+      };
+      appendFileSync(resolvedTranscriptPath, `${stableStringify(record)}\n`, 'utf8');
+      return {
+        key,
+        deliveryExternalId,
+        deliveredAt,
+      };
+    });
   }
 
   async function postReview(verdict, deliveryKey) {
@@ -167,8 +255,9 @@ function createSlackThreadCommsAdapter({
 
   async function lookupExistingDeliveries(deliveryKey) {
     const key = normalizeDeliveryKey(deliveryKey);
-    return readTranscriptLines(resolvedTranscriptPath)
+    return readTranscriptLines(transcriptPathForKey(key))
       .map(lineToDeliveryRecord)
+      .filter(Boolean)
       .filter((record) => keyEquals(record.key, key));
   }
 

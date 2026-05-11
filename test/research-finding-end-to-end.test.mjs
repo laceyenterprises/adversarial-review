@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
@@ -25,6 +26,7 @@ import {
   sanitizeCodexReviewPayload,
 } from '../src/kernel/verdict.mjs';
 import { validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
+import { ROUND_BUDGET_BY_RISK_CLASS } from '../src/follow-up-jobs.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -101,6 +103,10 @@ function makeReviewerStub() {
     ].join('\n'),
   ];
   return async () => bodies.shift();
+}
+
+function deliveryExternalIdForKey(key) {
+  return `comms-slack-thread:${createHash('sha256').update(stableStringify(key)).digest('hex')}`;
 }
 
 async function runResearchFindingFixtureKernel({ rootDir }) {
@@ -198,13 +204,22 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
     domainId: initialRef.domainId,
     subjectExternalId: initialRef.subjectExternalId,
     revisionRef: initialRef.revisionRef,
-    round: 1,
-    kind: 'remediation-reply',
+      round: 1,
+      kind: 'remediation-reply',
   });
+  const remediatedMarkdown = [
+    '# Trial retention finding',
+    '',
+    'Claim: The onboarding experiment may have improved day-7 retention in a small cohort comparison.',
+    '',
+    'Evidence: A small cohort comparison from two adjacent weeks, with causal limits called out explicitly.',
+  ].join('\n');
+  writeFileSync(join(rootDir, 'subject.md'), remediatedMarkdown, 'utf8');
+  const remediatedRevisionRef = createHash('sha256').update(remediatedMarkdown).digest('hex');
   const remediatedState = await subject.recordRemediationCommit(initialRef, {
     ref: initialRef,
     commitExternalId: 'fixture-edit-1',
-    revisionRef: 'sha256:remediated-research-finding',
+    revisionRef: `sha256:${remediatedRevisionRef}`,
     summary: remediationReply.summary,
     committedAt: '2026-05-11T19:00:00.000Z',
     changedPaths: ['subject.md'],
@@ -255,25 +270,40 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
 test('research-finding fixture runs review remediation rereview terminal without kernel edits', async () => {
   const rootDir = makeFixtureRoot();
   const result = await runResearchFindingFixtureKernel({ rootDir });
+  const firstReviewKey = {
+    domainId: 'research-finding',
+    subjectExternalId: 'subject.md',
+    revisionRef: result.initialRef.revisionRef,
+    round: 1,
+    kind: 'review',
+  };
+  const remediationReplyKey = {
+    domainId: 'research-finding',
+    subjectExternalId: 'subject.md',
+    revisionRef: result.initialRef.revisionRef,
+    round: 1,
+    kind: 'remediation-reply',
+  };
+  const rereviewKey = {
+    domainId: 'research-finding',
+    subjectExternalId: 'subject.md',
+    revisionRef: result.remediatedRef.revisionRef,
+    round: 2,
+    kind: 'review',
+  };
 
   assert.equal(result.finalState.terminal, true);
   assert.equal(result.finalState.lifecycle, 'terminal');
 
-  const lines = readFileSync(join(rootDir, 'slack-thread.jsonl'), 'utf8').trim().split('\n');
+  const lines = readFileSync(join(rootDir, '.slack-thread-transcripts', 'subject.md', 'slack-thread.jsonl'), 'utf8').trim().split('\n');
   assert.deepEqual(lines, [
     stableStringify({
       adapter: 'comms-slack-thread',
       attemptedAt: '2026-05-11T19:00:00.000Z',
       delivered: true,
       deliveredAt: '2026-05-11T19:00:00.000Z',
-      deliveryExternalId: 'comms-slack-thread:1',
-      key: {
-        domainId: 'research-finding',
-        subjectExternalId: 'subject.md',
-        revisionRef: result.initialRef.revisionRef,
-        round: 1,
-        kind: 'review',
-      },
+      deliveryExternalId: deliveryExternalIdForKey(firstReviewKey),
+      key: firstReviewKey,
       payload: {
         type: 'reviewer-verdict',
         verdict: result.firstVerdict,
@@ -284,14 +314,8 @@ test('research-finding fixture runs review remediation rereview terminal without
       attemptedAt: '2026-05-11T19:00:00.000Z',
       delivered: true,
       deliveredAt: '2026-05-11T19:00:00.000Z',
-      deliveryExternalId: 'comms-slack-thread:2',
-      key: {
-        domainId: 'research-finding',
-        subjectExternalId: 'subject.md',
-        revisionRef: result.initialRef.revisionRef,
-        round: 1,
-        kind: 'remediation-reply',
-      },
+      deliveryExternalId: deliveryExternalIdForKey(remediationReplyKey),
+      key: remediationReplyKey,
       payload: {
         type: 'remediation-reply',
         reply: result.remediationReply,
@@ -302,14 +326,8 @@ test('research-finding fixture runs review remediation rereview terminal without
       attemptedAt: '2026-05-11T19:00:00.000Z',
       delivered: true,
       deliveredAt: '2026-05-11T19:00:00.000Z',
-      deliveryExternalId: 'comms-slack-thread:3',
-      key: {
-        domainId: 'research-finding',
-        subjectExternalId: 'subject.md',
-        revisionRef: result.remediatedRef.revisionRef,
-        round: 2,
-        kind: 'review',
-      },
+      deliveryExternalId: deliveryExternalIdForKey(rereviewKey),
+      key: rereviewKey,
       payload: {
         type: 'reviewer-verdict',
         verdict: result.rereviewVerdict,
@@ -328,6 +346,22 @@ test('research-finding domain config mirrors code-pr domain shape', () => {
   assert.equal(researchFinding.commsChannel, 'slack-thread');
   assert.equal(researchFinding.operatorSurface.triageSync, 'linear');
   assert.deepEqual(researchFinding.riskClasses, codePr.riskClasses);
+});
+
+test('research-finding domain config round budget matches runtime round budget table', () => {
+  const researchFinding = JSON.parse(readFileSync(join(ROOT, 'domains', 'research-finding.json'), 'utf8'));
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(researchFinding.riskClasses).map(([riskClass, config]) => [riskClass, config.maxRemediationRounds]),
+    ),
+    ROUND_BUDGET_BY_RISK_CLASS,
+  );
+});
+
+test('research-finding final reviewer prompt carries the final-round threshold guidance', () => {
+  const prompt = readFileSync(join(ROOT, 'prompts', 'research-finding', 'reviewer.last.md'), 'utf8');
+  assert.match(prompt, /Final-round verdict threshold/);
+  assert.match(prompt, /Comment only.*Non-blocking issues.*- None\./s);
 });
 
 test('research-finding prompt set loads all six staged prompts', () => {

@@ -35,3 +35,42 @@ Output requirements:
 - In ## Verdict, end with exactly one of:
   - Request changes
   - Comment only
+
+---
+
+# Final-round verdict threshold (load-bearing)
+
+This is the **final** review on this finding under the current remediation
+budget. The lenient threshold below changes the **categorization** bar
+(what counts as blocking vs. non-blocking), but it does **not** change
+the merge gate. On the final round, `Comment only` is allowed only when
+there are no remaining findings in either issue section.
+
+## Categorization (use on the final round)
+
+Only escalate to `## Blocking issues` for:
+
+- Unsupported conclusions that a downstream consumer could reasonably act on as if proven
+- Material evidence or methodology gaps that make the core finding unreliable
+- Safety, privacy, or compliance risk that could cause real-world harm
+- Broken external contract or required governance/prompt guidance missing from the shipped path
+
+Everything else goes under `## Non-blocking issues`, including wording
+polish, lower-risk evidence improvements, future-proofing, speculative
+refactors, and test/documentation gaps that do not make the current
+finding unsafe or materially misleading.
+
+## Verdict policy (do NOT downgrade to `Comment only` to force convergence)
+
+- **`Comment only`** — only when `## Blocking issues` and `## Non-blocking issues` are both `- None.`
+- **`Request changes`** — whenever either issue section contains any item
+
+The lenient threshold exists to keep the final round honest about which
+issues are truly blocking, not to hide remaining concerns so the loop
+converges artificially.
+
+## When to ship clean (`Comment only`)
+
+Look hard before declaring the finding clean. If you find nothing
+substantive in either category after a careful pass, say so plainly and
+emit `Comment only`.

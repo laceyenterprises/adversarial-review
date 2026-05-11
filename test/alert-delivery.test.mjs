@@ -60,12 +60,41 @@ test('watcher alert defaults require an explicit recipient', () => {
 });
 
 test('watcher alert defaults use the operator Telegram route once ALERT_TO is configured', () => {
-  assert.deepEqual(resolveAlertDefaults({ ALERT_TO: '123456' }), {
-    openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
-    hooksTokenFile: join(homedir(), '.config', 'adversarial-review', 'secrets', 'litellm-alert-bridge.token'),
-    alertChannel: 'telegram',
-    alertTo: '123456',
-    alertAgentId: 'main',
-    alertName: 'Adversarial Watcher Health',
-  });
+  assert.deepEqual(
+    resolveAlertDefaults(
+      { ALERT_TO: '123456' },
+      { fsImpl: { existsSync: () => false } }
+    ),
+    {
+      openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
+      hooksTokenFile: join(homedir(), '.config', 'adversarial-review', 'secrets', 'litellm-alert-bridge.token'),
+      alertChannel: 'telegram',
+      alertTo: '123456',
+      alertAgentId: 'main',
+      alertName: 'Adversarial Watcher Health',
+    }
+  );
+});
+
+test('watcher alert defaults fall back to the legacy secrets root when the new default token file is absent', () => {
+  assert.deepEqual(
+    resolveAlertDefaults(
+      { ALERT_TO: '123456' },
+      {
+        fsImpl: {
+          existsSync(filePath) {
+            return filePath === '/Users/airlock/agent-os/agents/clio/credentials/local/litellm-alert-bridge.token';
+          },
+        },
+      }
+    ),
+    {
+      openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
+      hooksTokenFile: '/Users/airlock/agent-os/agents/clio/credentials/local/litellm-alert-bridge.token',
+      alertChannel: 'telegram',
+      alertTo: '123456',
+      alertAgentId: 'main',
+      alertName: 'Adversarial Watcher Health',
+    }
+  );
 });

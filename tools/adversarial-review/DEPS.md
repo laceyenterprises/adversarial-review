@@ -130,3 +130,6 @@ Claude runtime is supposed to use.
 
 Use `bounce.sh` for operator restarts. It stops the supervisor, waits for
 recorded reviewer process groups to drain, then starts the supervisor again.
+If the drain times out, the helper still restarts the supervisor, exits
+non-zero, and removes `data/watcher-drain.json` on exit so a manual
+recovery does not leave the watcher idling behind a stale drain marker.

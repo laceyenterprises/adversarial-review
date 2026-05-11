@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SERVICE="${1:-}"
 TIMEOUT_SECONDS="${BOUNCE_DRAIN_TIMEOUT_SECONDS:-900}"
+DRAIN_FILE="$REPO_ROOT/data/watcher-drain.json"
 
 if [[ -z "$SERVICE" ]]; then
   echo "usage: tools/adversarial-review/bounce.sh <launchd-plist|systemd-service>" >&2
@@ -25,6 +26,10 @@ fs.writeFileSync(file, JSON.stringify({
   expiresAt: new Date(Date.now() + timeout * 1000).toISOString()
 }, null, 2) + '\n');
 " "$REPO_ROOT" "$TIMEOUT_SECONDS"
+}
+
+cleanup_drain_marker() {
+  rm -f "$DRAIN_FILE"
 }
 
 active_pgids() {
@@ -66,7 +71,11 @@ wait_for_reviewer_drain() {
   done
 }
 
+trap cleanup_drain_marker EXIT
+
 write_drain_marker
+
+drain_status=0
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
   if [[ ! -f "$SERVICE" ]]; then
@@ -74,10 +83,22 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     exit 2
   fi
   launchctl bootout "gui/$UID" "$SERVICE" 2>/dev/null || true
-  wait_for_reviewer_drain
+  if wait_for_reviewer_drain; then
+    drain_status=0
+  else
+    drain_status=$?
+    echo "drain timed out; restarting launchd service anyway" >&2
+  fi
   launchctl bootstrap "gui/$UID" "$SERVICE"
 else
   systemctl --user stop "$SERVICE"
-  wait_for_reviewer_drain
+  if wait_for_reviewer_drain; then
+    drain_status=0
+  else
+    drain_status=$?
+    echo "drain timed out; restarting systemd service anyway" >&2
+  fi
   systemctl --user start "$SERVICE"
 fi
+
+exit "$drain_status"

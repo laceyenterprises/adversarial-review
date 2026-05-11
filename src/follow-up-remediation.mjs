@@ -29,9 +29,9 @@ import {
   WORKER_CLASS_TO_BOT_TOKEN_ENV,
   buildRemediationOutcomeCommentBody,
   postRemediationOutcomeComment,
-} from './pr-comments.mjs';
-import { buildOwedDelivery, recordInitialCommentDelivery } from './comment-delivery.mjs';
-import { redactSensitiveText } from './redaction.mjs';
+} from './adapters/comms/github-pr-comments/pr-comments.mjs';
+import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
+import { redactSensitiveText } from './adapters/comms/github-pr-comments/redaction.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
 import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
@@ -1481,7 +1481,7 @@ function summarizeWorkerFinalMessage(text, limit = 400) {
   // headers / private keys / labelled secrets the worker may have echoed
   // from logs or environment. Whitespace is collapsed so a one-line
   // preview fits in a digest field even if the worker dumped multi-line
-  // output. Centralized in src/redaction.mjs so PR comments and final-
+        // output. Centralized in the GitHub PR comments redaction adapter so PR comments and final-
   // message previews share the same masking pipeline.
   const collapsed = String(text ?? '').trim().replace(/\s+/g, ' ');
   if (!collapsed) {

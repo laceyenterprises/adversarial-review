@@ -29,12 +29,12 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
-import { getFollowUpJobDir, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
-import { buildDeliveryKey } from './identity-shapes.mjs';
+import { getFollowUpJobDir, readRemediationReplyArtifact } from '../../../follow-up-jobs.mjs';
+import { buildDeliveryKey } from '../../../identity-shapes.mjs';
 import { buildRemediationOutcomeCommentBody, postRemediationOutcomeComment } from './pr-comments.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, '..');
+const ROOT = join(__dirname, '../../../..');
 
 // Dedicated retry index. Each pointer is a small JSON file naming the
 // terminal job that owes a comment retry. We add pointers when an

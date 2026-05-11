@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { fetchLatestLabelEvent } from '../../../github-label-events.mjs';
+import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,18 +36,6 @@ function emptyControlResult(reason = 'missing-label-event') {
 
 function normalizeEventId(event) {
   return event?.id || event?.nodeId || null;
-}
-
-function parseSubjectExternalId(subjectExternalId) {
-  const raw = String(subjectExternalId || '').trim();
-  const match = /^([^#/]+\/[^#/]+)#(\d+)$/.exec(raw);
-  if (!match) {
-    throw new TypeError(`Invalid GitHub PR subjectExternalId: ${subjectExternalId}`);
-  }
-  return {
-    repo: match[1],
-    prNumber: Number(match[2]),
-  };
 }
 
 function legacyLabelEventFromControlResult(result, label) {

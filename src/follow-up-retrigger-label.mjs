@@ -37,6 +37,7 @@ import {
   resolveIdempotencyKey,
 } from './operator-mutation-audit.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
+import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-comments/index.mjs';
 
 const VERB = 'hq.adversarial.retrigger-remediation';
 
@@ -215,6 +216,7 @@ async function findExistingAckComment({
 }
 
 async function postRetriggerAckComment({
+  rootDir,
   repo,
   prNumber,
   execFileImpl,
@@ -223,6 +225,7 @@ async function postRetriggerAckComment({
   reason,
   bumpResult,
   requeueResult,
+  revisionRef = null,
 }) {
   const body = buildAckCommentBody({
     labelEventKey,
@@ -247,20 +250,48 @@ async function postRetriggerAckComment({
     };
   }
   try {
-    const result = await execFileImpl('gh', [
-      'pr',
-      'comment',
-      String(prNumber),
-      '--repo',
+    const normalizedRevisionRef = requireRevisionRef(revisionRef, 'postRetriggerAckComment');
+    const subjectIdentity = buildCodePrSubjectIdentity({
       repo,
-      '--body',
-      body,
-    ], {
-      maxBuffer: 5 * 1024 * 1024,
-      timeout: ACK_COMMENT_TIMEOUT_MS,
-      killSignal: 'SIGTERM',
+      prNumber,
+      revisionRef: normalizedRevisionRef,
     });
-    return { posted: true, stdout: result?.stdout || '', marker };
+    const deliveryRound = Math.max(0, Number(requeueResult?.job?.remediationPlan?.currentRound || 0));
+    const adapter = createGitHubPRCommentsAdapter({
+      rootDir,
+      execFileImpl,
+      commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
+      resolveGhToken: () => ({
+        tokenEnvName: 'GITHUB_TOKEN',
+        fallbackTokenEnvNames: ['GH_TOKEN'],
+        allowGhAuthFallback: true,
+      }),
+    });
+    const receipt = await adapter.postOperatorNotice(
+      {
+        type: 'raised-round-cap',
+        subjectRef: {
+          domainId: subjectIdentity.domainId,
+          subjectExternalId: subjectIdentity.subjectExternalId,
+          revisionRef: subjectIdentity.revisionRef,
+        },
+        revisionRef: subjectIdentity.revisionRef,
+        eventExternalId: labelEventKey,
+        observedAt: new Date().toISOString(),
+        reason,
+        roundCap: bumpResult?.newMaxRounds ?? null,
+      },
+      body,
+      {
+        domainId: subjectIdentity.domainId,
+        subjectExternalId: subjectIdentity.subjectExternalId,
+        revisionRef: subjectIdentity.revisionRef,
+        round: deliveryRound,
+        kind: 'operator-notice',
+        noticeRef: labelEventKey,
+      }
+    );
+    return { posted: true, stdout: '', marker, commentId: receipt.deliveryExternalId };
   } catch (err) {
     return {
       posted: false,
@@ -270,7 +301,7 @@ async function postRetriggerAckComment({
   }
 }
 
-function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpResult, requeueResult }) {
+function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpResult, requeueResult, revisionRef = null }) {
   return {
     posted: false,
     reason: 'pending',
@@ -291,8 +322,22 @@ function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpRe
         reason: requeueResult?.reason || null,
         error: requeueResult?.error || null,
       },
+      revisionRef: revisionRef || null,
     },
   };
+}
+
+function normalizeRevisionRef(revisionRef) {
+  const normalized = String(revisionRef || '').trim();
+  return normalized || null;
+}
+
+function requireRevisionRef(revisionRef, context) {
+  const normalized = normalizeRevisionRef(revisionRef);
+  if (!normalized) {
+    throw new TypeError(`${context} requires a revisionRef`);
+  }
+  return normalized;
 }
 
 function buildLabelConsumptionDoc({
@@ -337,8 +382,25 @@ async function retryAckCommentForConsumption({
   const context = consumption?.ackComment?.context;
   if (!context) return consumption;
   const previousAttempts = Number(consumption?.ackComment?.attempts || 0);
+  if (!normalizeRevisionRef(context.revisionRef)) {
+    const nextConsumption = {
+      ...consumption,
+      ackComment: {
+        posted: false,
+        reason: 'missing-revision-ref',
+        error: 'cannot retry retrigger acknowledgement without a revisionRef',
+        context,
+        attempts: ACK_COMMENT_MAX_ATTEMPTS,
+        maxAttempts: ACK_COMMENT_MAX_ATTEMPTS,
+        attemptedAt: new Date().toISOString(),
+      },
+    };
+    writeLabelConsumption(rootDir, labelEventKey, nextConsumption);
+    return nextConsumption;
+  }
   if (previousAttempts >= ACK_COMMENT_MAX_ATTEMPTS) return consumption;
   const ackComment = await postRetriggerAckComment({
+    rootDir,
     repo,
     prNumber,
     execFileImpl,
@@ -347,6 +409,7 @@ async function retryAckCommentForConsumption({
     reason: context.reason,
     bumpResult: context.bumpResult,
     requeueResult: context.requeueResult,
+    revisionRef: context.revisionRef,
   });
   const nextConsumption = {
     ...consumption,
@@ -479,12 +542,26 @@ export async function tryRetriggerRemediationFromLabel({
   findAuditRow = findOperatorMutationAuditRow,
   requeueImpl = requeueFollowUpJobForNextRound,
   labelEvent = null,
+  revisionRef = null,
 }) {
   const labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
   if (!labelEventKey) {
     return {
       outcome: 'label-event-missing',
       detail: 'cannot attribute retrigger-remediation to a GitHub labeled event',
+    };
+  }
+  const normalizedRevisionRef = normalizeRevisionRef(
+    revisionRef || labelEvent?.headSha || labelEvent?.head_sha
+  );
+  if (!normalizedRevisionRef) {
+    return {
+      outcome: 'missing-revision-ref',
+      detail: 'retrigger-remediation label requires the current PR head revisionRef before it can bump or requeue',
+      ackComment: {
+        posted: false,
+        reason: 'missing-revision-ref',
+      },
     };
   }
   const labelEventActor = labelEvent?.actor || labelActor || 'unknown';
@@ -541,7 +618,7 @@ export async function tryRetriggerRemediationFromLabel({
 
   const jobKey = `${latest.job.repo}#${latest.job.prNumber}@${latest.job.jobId}`;
   const ts = now();
-  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber });
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef: normalizedRevisionRef });
   const auditRow = {
     ts,
     verb: VERB,
@@ -604,6 +681,7 @@ export async function tryRetriggerRemediationFromLabel({
       reason: 'requeue step pending',
       jobPath: bumpResult.jobPath,
     },
+    revisionRef: normalizedRevisionRef,
   });
   const baseConsumption = buildLabelConsumptionDoc({
     labelEventKey,
@@ -641,6 +719,7 @@ export async function tryRetriggerRemediationFromLabel({
       reason,
       bumpResult,
       requeueResult,
+      revisionRef: normalizedRevisionRef,
     });
 
     try {
@@ -682,6 +761,7 @@ export async function tryRetriggerRemediationFromLabel({
     }
 
     const ackComment = await postRetriggerAckComment({
+      rootDir,
       repo,
       prNumber,
       execFileImpl,
@@ -690,6 +770,7 @@ export async function tryRetriggerRemediationFromLabel({
       reason,
       bumpResult,
       requeueResult,
+      revisionRef: normalizedRevisionRef,
     });
     writeLabelConsumption(rootDir, labelEventKey, buildLabelConsumptionDoc({
       labelEventKey,

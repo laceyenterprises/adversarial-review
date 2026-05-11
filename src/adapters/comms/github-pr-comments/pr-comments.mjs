@@ -20,7 +20,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from './follow-up-jobs.mjs';
+import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from '../../../follow-up-jobs.mjs';
 import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -570,7 +570,7 @@ function buildRemediationOutcomeCommentBody({
   }
 
   // Worker-supplied fields below are *untrusted*. They go through
-  // src/redaction.mjs (token / Bearer / private-key / labelled-secret
+  // redaction.mjs (token / Bearer / private-key / labelled-secret
   // patterns) and are length-capped before being written to the PR.
   // See review of PR #18 for the leakage path this guards against:
   // a worker echoing a token from a log line into reply.summary

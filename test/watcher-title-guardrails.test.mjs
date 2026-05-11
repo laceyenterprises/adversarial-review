@@ -73,6 +73,7 @@ test('signalMalformedTitleFailure posts fail-loud PR comment', async () => {
     repo: 'clio',
     prNumber: 42,
     prTitle: 'LAC-181: missing tag',
+    revisionRef: 'sha-malformed',
   });
 
   assert.equal(calls.length, 1);

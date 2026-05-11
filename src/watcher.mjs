@@ -452,6 +452,7 @@ async function spawnReviewer({
   botTokenEnv,
   linearTicketId,
   builderTag,
+  reviewerHeadSha,
   reviewAttemptNumber,
   maxRemediationRounds,
   reviewerSessionUuid,
@@ -465,6 +466,7 @@ async function spawnReviewer({
     botTokenEnv,
     linearTicketId,
     builderTag,
+    reviewerHeadSha,
     reviewAttemptNumber,
     maxRemediationRounds,
     reviewerSessionUuid,
@@ -1062,6 +1064,7 @@ async function pollOnce(octokit) {
             prNumber,
             labelActor: labelEvent?.actor || 'unknown',
             labelEvent,
+            revisionRef: subject.ref.revisionRef,
             execFileImpl: execFileAsync,
           });
           console.log(
@@ -1119,6 +1122,8 @@ async function pollOnce(octokit) {
           repo,
           prNumber,
           prTitle,
+          revisionRef: subject.ref.revisionRef,
+          rootDir: ROOT,
         });
 
         // Malformed titles are terminal in watcher state to avoid ambiguous retitle retries.
@@ -1278,6 +1283,7 @@ async function pollOnce(octokit) {
         botTokenEnv: route.botTokenEnv,
         linearTicketId,
         builderTag: route.tag,
+        reviewerHeadSha,
         reviewAttemptNumber,
         maxRemediationRounds,
         reviewerSessionUuid,

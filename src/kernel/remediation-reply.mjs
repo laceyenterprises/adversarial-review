@@ -193,7 +193,7 @@ function validatePushbackField(items, options = {}) {
 //     which item is unresolved.
 //   - legacy non-empty string: free-text blocker description.
 //     Predates the structured contract. The renderer in
-//     `pr-comments.mjs` (line ~172) already handles strings; the
+//     `adapters/comms/github-pr-comments/pr-comments.mjs` already handles strings; the
 //     validator must also accept them under `schemaVersion: 1` so
 //     previously-persisted reply artifacts (re-read during
 //     reconciliation and comment recovery) do not become invalid data

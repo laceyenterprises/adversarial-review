@@ -70,6 +70,7 @@ export interface SubjectRef {
   domainId: string;
   subjectExternalId: string;
   revisionRef: string;
+  linearTicketId?: string | null;
 }
 
 export type SubjectLifecycleState =

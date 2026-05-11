@@ -38,7 +38,7 @@ import {
   resolveRemediationMaxConcurrentJobs,
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
-import { retryFailedCommentDeliveries } from '../src/comment-delivery.mjs';
+import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { archiveStoppedFollowUpJobs } from '../src/follow-up-jobs.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

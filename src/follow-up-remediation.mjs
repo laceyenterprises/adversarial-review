@@ -10,6 +10,7 @@ import {
   claimNextFollowUpJob,
   getFollowUpJobDir,
   listInProgressFollowUpJobs,
+  listPendingFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobStopped,
@@ -75,6 +76,8 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 // per-job field) will pass the appropriate class through to
 // `prepareWorkspaceForJob` / `spawnCodexRemediationWorker`.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
+const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
+const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 
 // The Worker-Class trailer this pipeline stamps on commits via the
 // commit-msg hook. Different from the worker-model class — encodes
@@ -623,6 +626,21 @@ function spawnRemediationWorker(workerClass, opts) {
     default:
       throw new Error(`unknown remediation worker class: ${workerClass}`);
   }
+}
+
+function normalizeMaxConcurrentFollowUpJobs(value, {
+  fallback = DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
+} = {}) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveRemediationMaxConcurrentJobs(env = process.env) {
+  return normalizeMaxConcurrentFollowUpJobs(env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV]);
+}
+
+function followUpJobRepoPrKey(job) {
+  return `${job?.repo || ''}#${job?.prNumber || ''}`;
 }
 
 function loadFollowUpPromptTemplate(rootDir = ROOT, { stage = 'first' } = {}) {
@@ -2332,6 +2350,7 @@ async function consumeNextFollowUpJob({
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
+  excludedRepoPrKeys = new Set(),
   log = console,
 } = {}) {
   // Claim first so we know which worker class we're running. This lets
@@ -2342,6 +2361,7 @@ async function consumeNextFollowUpJob({
     rootDir,
     claimedAt: now(),
     returnStopped: true,
+    excludedRepoPrKeys,
   });
 
   if (!claimed) {
@@ -2629,6 +2649,74 @@ async function consumeNextFollowUpJob({
   }
 }
 
+async function consumeFollowUpJobsUntilCapacity({
+  rootDir = ROOT,
+  maxConcurrent = resolveRemediationMaxConcurrentJobs(),
+  execFileImpl = execFileAsync,
+  spawnImpl = spawn,
+  now = () => new Date().toISOString(),
+  promptTemplate = loadFollowUpPromptTemplate(rootDir),
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  postCommentImpl = postRemediationOutcomeComment,
+  log = console,
+} = {}) {
+  const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
+  const activeJobs = listInProgressFollowUpJobs(rootDir);
+  const blockedRepoPrKeys = new Set(activeJobs.map(({ job }) => followUpJobRepoPrKey(job)));
+  const results = [];
+  let spawned = 0;
+  let stopped = 0;
+
+  while ((activeJobs.length + spawned) < concurrencyCap) {
+    /* eslint-disable no-await-in-loop */
+    const result = await consumeNextFollowUpJob({
+      rootDir,
+      execFileImpl,
+      spawnImpl,
+      now,
+      promptTemplate,
+      resolvePRLifecycleImpl,
+      postCommentImpl,
+      excludedRepoPrKeys: blockedRepoPrKeys,
+      log,
+    });
+    /* eslint-enable no-await-in-loop */
+    results.push(result);
+
+    if (result.consumed) {
+      spawned += 1;
+      blockedRepoPrKeys.add(followUpJobRepoPrKey(result.job));
+      continue;
+    }
+
+    if (result.reason === 'no-pending-jobs') {
+      break;
+    }
+
+    if (result.job) {
+      stopped += 1;
+      continue;
+    }
+
+    break;
+  }
+
+  const deferredSamePR = listPendingFollowUpJobs(rootDir)
+    .filter(({ job }) => blockedRepoPrKeys.has(followUpJobRepoPrKey(job)))
+    .length;
+
+  return {
+    maxConcurrent: concurrencyCap,
+    activeAtStart: activeJobs.length,
+    availableAtStart: Math.max(0, concurrencyCap - activeJobs.length),
+    spawned,
+    stopped,
+    deferredSamePR,
+    capacityRemaining: Math.max(0, concurrencyCap - activeJobs.length - spawned),
+    results,
+  };
+}
+
 // Stamp a comment-delivery record onto a consume-time terminal job
 // before publishing the public PR comment. Mirrors the reconcile-side
 // flow (`buildReconcileCommentDelivery` → `markFollowUpJob*` →
@@ -2758,6 +2846,8 @@ async function main() {
 export {
   FOLLOW_UP_PROMPT_PATH,
   REMEDIATION_WORKER_TRAILER_CLASS,
+  DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
+  REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   WORKER_PROVENANCE_HOOK_SRC,
   installWorkerProvenanceHook,
   OAuthError,
@@ -2767,6 +2857,7 @@ export {
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,
+  consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
   inspectWorkspaceState,
   digestWorkerFinalMessage,
@@ -2786,6 +2877,7 @@ export {
   resolveHqRoot,
   resolveJobRelativePath,
   resolveReplyStorageKey,
+  resolveRemediationMaxConcurrentJobs,
   summarizeWorkerFinalMessage,
   assessWorkerLiveness,
   spawnCodexRemediationWorker,

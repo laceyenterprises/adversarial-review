@@ -1309,10 +1309,25 @@ function claimNextFollowUpJob({
   launcherPid = process.pid,
   markStoppedImpl = markFollowUpJobStopped,
   returnStopped = false,
+  excludedRepoPrKeys = new Set(),
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
 
   for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+    if (excludedRepoPrKeys?.size) {
+      let pendingJob;
+      try {
+        pendingJob = readFollowUpJob(pendingPath);
+      } catch (err) {
+        if (err?.code === 'ENOENT') continue;
+        throw err;
+      }
+      const repoPrKey = `${pendingJob.repo}#${pendingJob.prNumber}`;
+      if (excludedRepoPrKeys.has(repoPrKey)) {
+        continue;
+      }
+    }
+
     const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
 
     try {

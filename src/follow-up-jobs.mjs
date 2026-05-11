@@ -77,6 +77,9 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   'max-rounds-reached',
   'round-budget-exhausted',
   'daemon-bounce-safety',
+  // A settled review stops the automatic loop, but an explicit operator
+  // retrigger label/CLI call means "address the remaining non-blocking flags."
+  'review-settled',
 ]);
 const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
 
@@ -272,6 +275,14 @@ function buildRecommendedFollowUpAction({ critical }) {
 }
 
 function isSettledReviewJob(job) {
+  const nextAction = job?.remediationPlan?.nextAction;
+  const operatorRequestedRound = (
+    nextAction?.type === 'consume-pending-round'
+    && nextAction?.requestedAt
+    && nextAction?.requestedBy
+  );
+  if (operatorRequestedRound) return false;
+
   const verdict = normalizeReviewVerdict(extractReviewVerdict(job?.reviewBody));
   return verdict === 'comment-only' || verdict === 'approved';
 }

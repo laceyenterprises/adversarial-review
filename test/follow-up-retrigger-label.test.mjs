@@ -161,6 +161,35 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   assert.equal(updated.status, 'pending');
 });
 
+test('tryRetriggerRemediationFromLabel requeues stopped:review-settled jobs for explicit operator flags', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'review-settled',
+    currentRound: 1,
+    maxRounds: 2,
+  });
+
+  const ghCalls = [];
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelActor: 'VirtualPaul',
+    labelEvent: makeLabelEvent({ id: 'evt-review-settled' }),
+    execFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: () => {},
+    now: () => '2026-05-06T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  assert.equal(result.labelRemoved, true);
+  assert.equal(result.requeueOutcome, 'requeued');
+  assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
+});
+
 test('tryRetriggerRemediationFromLabel works on stopped:round-budget-exhausted', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   makeHaltedJob(rootDir, { stopCode: 'round-budget-exhausted' });
@@ -285,7 +314,7 @@ test('tryRetriggerRemediationFromLabel leaves label in place when job is still a
 });
 
 test('tryRetriggerRemediationFromLabel leaves label in place for non-retriggerable stopped jobs', async () => {
-  for (const stopCode of ['operator-stop', 'review-settled', 'rereview-blocked']) {
+  for (const stopCode of ['operator-stop', 'rereview-blocked']) {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
     makeHaltedJob(rootDir, {
       stopCode,

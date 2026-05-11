@@ -9,9 +9,11 @@
 //
 // Eligibility: the latest follow-up job must be an eligible terminal
 // state (`failed`, `completed` with `reReview.requested = true`, or an
-// explicitly retriggerable stopped code). Active or non-retriggerable
-// stopped jobs leave the label in place; the operator can resolve the
-// blocking state and the next tick will re-evaluate.
+// explicitly retriggerable stopped code). `review-settled` is retriggerable:
+// the automatic loop stops on Comment-only reviews, but an operator-applied
+// label means "address the remaining non-blocking flags." Active or
+// non-retriggerable stopped jobs leave the label in place; the operator can
+// resolve the blocking state and the next tick will re-evaluate.
 //
 // SPEC §5.1.3 documents this as the PR-side counterpart to the CLI.
 

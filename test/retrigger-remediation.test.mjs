@@ -122,8 +122,39 @@ test('retrigger-remediation bumps and requeues eligible stopped jobs', () => {
   assert.equal(latest.job.remediationPlan.maxRounds, 2);
 });
 
-test('retrigger-remediation refuses stopped jobs that encode operator intent or settled review state', () => {
-  for (const stopCode of ['operator-stop', 'review-settled', 'rereview-blocked']) {
+test('retrigger-remediation requeues stopped:review-settled jobs for explicit operator requests', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  makeJob(rootDir, {
+    status: 'stopped',
+    stoppedAt: '2026-05-05T04:05:00.000Z',
+    remediationPlan: {
+      maxRounds: 2,
+      currentRound: 1,
+      stop: { code: 'review-settled', reason: 'Comment-only review settled the automatic loop' },
+      nextAction: null,
+    },
+  });
+
+  const out = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'address non-blocking review flags',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+  ], { stdout: out, stderr: makeCaptureStream() });
+
+  assert.equal(rc, 0);
+  const row = JSON.parse(out.text());
+  assert.equal(row.outcome, 'bumped');
+  assert.equal(row.newMaxRounds, 3);
+  const latest = findLatestFollowUpJob(rootDir, { repo: 'laceyenterprises/agent-os', prNumber: 238 });
+  assert.equal(latest.job.status, 'pending');
+  assert.equal(latest.job.remediationPlan.maxRounds, 3);
+});
+
+test('retrigger-remediation refuses stopped jobs that encode operator intent or blocked re-review state', () => {
+  for (const stopCode of ['operator-stop', 'rereview-blocked']) {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
     makeJob(rootDir, {
       status: 'stopped',

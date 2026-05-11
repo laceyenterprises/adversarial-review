@@ -276,6 +276,9 @@ function buildRecommendedFollowUpAction({ critical }) {
 
 function isSettledReviewJob(job) {
   const nextAction = job?.remediationPlan?.nextAction;
+  // An explicit operator retrigger requeues a settled job back to pending
+  // with a durable consume-pending-round marker. Allow exactly that next
+  // claim to proceed even if the stored review body is still Comment-only.
   const operatorRequestedRound = (
     nextAction?.type === 'consume-pending-round'
     && nextAction?.requestedAt

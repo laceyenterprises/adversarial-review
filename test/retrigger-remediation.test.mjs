@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { main } from '../src/retrigger-remediation.mjs';
-import { createFollowUpJob, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { claimNextFollowUpJob, createFollowUpJob, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { findLatestFollowUpJob } from '../src/operator-retrigger-helpers.mjs';
+
+const COMMENT_ONLY_REVIEW_BODY = '## Summary\nsummary\n\n## Verdict\nComment only';
 
 function makeCaptureStream() {
   const chunks = [];
@@ -22,7 +24,7 @@ function makeJob(rootDir, overrides = {}) {
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
     reviewerModel: 'claude',
-    reviewBody: '## Summary\nsummary',
+    reviewBody: overrides.reviewBody ?? '## Summary\nsummary',
     reviewPostedAt: '2026-05-05T04:00:00.000Z',
     critical: true,
     maxRemediationRounds: 1,
@@ -127,6 +129,7 @@ test('retrigger-remediation requeues stopped:review-settled jobs for explicit op
   makeJob(rootDir, {
     status: 'stopped',
     stoppedAt: '2026-05-05T04:05:00.000Z',
+    reviewBody: COMMENT_ONLY_REVIEW_BODY,
     remediationPlan: {
       maxRounds: 2,
       currentRound: 1,
@@ -151,6 +154,19 @@ test('retrigger-remediation requeues stopped:review-settled jobs for explicit op
   const latest = findLatestFollowUpJob(rootDir, { repo: 'laceyenterprises/agent-os', prNumber: 238 });
   assert.equal(latest.job.status, 'pending');
   assert.equal(latest.job.remediationPlan.maxRounds, 3);
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    workerType: 'codex-remediation',
+    claimedAt: '2026-05-05T04:06:00.000Z',
+  });
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.equal(claimed.job.remediationPlan.currentRound, 2);
+  assert.deepEqual(claimed.job.remediationPlan.nextAction, {
+    type: 'worker-spawn',
+    round: 2,
+    operatorVisibility: 'explicit',
+  });
 });
 
 test('retrigger-remediation refuses stopped jobs that encode operator intent or blocked re-review state', () => {

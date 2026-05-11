@@ -11,7 +11,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
-import { createGitHubPRSubjectAdapter } from './adapters/subject/github-pr/index.mjs';
+import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import { routeSubject } from './adapters/subject/github-pr/routing.mjs';
 import {
   buildSafePollOnce,
@@ -873,11 +873,12 @@ async function pollOnce(octokit) {
         console.error(`[watcher] Failed to fetch subject state for ${subjectRef.subjectExternalId}:`, err.message);
         continue;
       }
-      const pr = subject.pr;
-      const prNumber = pr.number;
-      const prTitle = subject.title || pr.title;
-      const prState = String(pr.state || '').trim().toLowerCase();
-      const staleDriftSkip = shouldSkipReviewerForStaleDrift(pr);
+      const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
+      const prTitle = subject.title || '';
+      const staleDriftSkip = shouldSkipReviewerForStaleDrift({
+        number: prNumber,
+        labels: subject.labels,
+      });
       if (staleDriftSkip) {
         console.log(staleDriftSkip.message);
         continue;
@@ -885,15 +886,15 @@ async function pollOnce(octokit) {
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
       async function projectGateStatusSafe(reviewRow) {
-        if (!pr?.head?.sha) return;
+        if (!subject.ref?.revisionRef) return;
         try {
           const projected = await projectAdversarialGateStatus(ROOT, {
             repo: repoPath,
             prNumber,
-            headSha: pr.head.sha,
-            labels: pr.labels,
-            prUpdatedAt: pr.updated_at || null,
-            prAuthor: pr.user?.login || null,
+            headSha: subject.ref.revisionRef,
+            labels: subject.labels,
+            prUpdatedAt: subject.updatedAt || null,
+            prAuthor: subject.authorRef || null,
             reviewRow,
             execFileImpl: execFileAsync,
             fetchLatestLabelEventImpl: fetchLatestLabelEvent,
@@ -925,7 +926,7 @@ async function pollOnce(octokit) {
         continue;
       }
 
-      if (prState && prState !== 'open') {
+      if (subject.terminal) {
         continue;
       }
 
@@ -935,7 +936,7 @@ async function pollOnce(octokit) {
       // on a halted PR; watcher detects it here, bumps maxRounds,
       // requeues the latest follow-up job, and removes the label.
       // Active jobs leave the label in place for the next tick.
-      const prLabelNames = (Array.isArray(pr.labels) ? pr.labels : [])
+      const prLabelNames = (Array.isArray(subject.labels) ? subject.labels : [])
         .map((l) => (typeof l === 'string' ? l : l?.name || ''))
         .filter(Boolean);
       if (prLabelNames.includes(RETRIGGER_REMEDIATION_LABEL)) {
@@ -1016,7 +1017,7 @@ async function pollOnce(octokit) {
           repoPath,
           prNumber
         );
-        stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(pr.labels) ? pr.labels : []), repoPath, prNumber);
+        stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
       }

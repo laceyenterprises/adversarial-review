@@ -6,6 +6,7 @@ import {
   createGitHubPRSubjectAdapter,
   makeSubjectExternalId,
   parseSubjectExternalId,
+  stateFromSnapshot,
 } from '../../src/adapters/subject/github-pr/index.mjs';
 import { routeSubject } from '../../src/adapters/subject/github-pr/routing.mjs';
 
@@ -60,8 +61,11 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
   assert.equal(subject.title, '[codex] LAC-484 carve subject channel adapter');
   assert.equal(subject.authorRef, 'codex-worker');
   assert.equal(subject.builderClass, 'codex');
+  assert.deepEqual(subject.labels, ['risk:medium']);
+  assert.equal(subject.updatedAt, '2026-05-10T21:20:00.000Z');
   assert.equal(subject.terminal, false);
   assert.equal(subject.observedAt, '2026-05-10T21:30:00.000Z');
+  assert.equal('pr' in subject, false);
 
   assert.deepEqual(routeSubject(subject), {
     builderClass: 'codex',
@@ -132,4 +136,18 @@ test('github-pr subject identity helpers round-trip repo and number', () => {
     repo: 'laceyenterprises/clio',
     prNumber: 12,
   });
+});
+
+test('stateFromSnapshot always emits a boolean terminal flag', () => {
+  const state = stateFromSnapshot({
+    domainId: 'code-pr',
+    subjectExternalId: 'laceyenterprises/clio#12',
+    revisionRef: 'sha-1',
+    title: 'Example',
+    state: '',
+    labels: [],
+  });
+
+  assert.equal(state.terminal, false);
+  assert.equal(typeof state.terminal, 'boolean');
 });

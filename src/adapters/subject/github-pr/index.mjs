@@ -11,8 +11,8 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { prepareWorkspaceForJob as defaultPrepareWorkspaceForJob } from '../../../follow-up-remediation.mjs';
 import { builderClassFromTitle } from './title-tagging.mjs';
-import { routeSubject } from './routing.mjs';
 
 const execFileAsync = promisify(execFile);
 const DOMAIN_ID = 'code-pr';
@@ -32,6 +32,7 @@ function parseSubjectExternalId(subjectExternalId) {
   if (!match) {
     throw new TypeError(`Invalid GitHub PR subjectExternalId: ${subjectExternalId}`);
   }
+  splitRepo(match[1]);
   return {
     repo: match[1],
     prNumber: Number(match[2]),
@@ -67,10 +68,15 @@ function normalizePRSnapshot(repoPath, pr) {
     prNumber: Number(pr.number),
     title: String(pr?.title || ''),
     state: String(pr?.state || '').trim().toLowerCase(),
-    labels: Array.isArray(pr?.labels) ? pr.labels : [],
+    labels: Array.isArray(pr?.labels)
+      ? pr.labels
+        .map((label) => (typeof label === 'string' ? label : label?.name))
+        .filter((label) => typeof label === 'string' && label.trim())
+        .map((label) => label.trim())
+      : [],
+    updatedAt: pr?.updated_at ? String(pr.updated_at) : undefined,
     authorRef: pr?.user?.login ? String(pr.user.login) : undefined,
     builderClass,
-    pr,
   };
 }
 
@@ -80,7 +86,7 @@ function stateFromSnapshot(snapshot, {
   maxRemediationRounds = 0,
   observedAt = new Date().toISOString(),
 } = {}) {
-  const terminal = snapshot.state && snapshot.state !== 'open';
+  const terminal = Boolean(snapshot.state) && snapshot.state !== 'open';
   return {
     ref: {
       domainId: snapshot.domainId,
@@ -91,16 +97,13 @@ function stateFromSnapshot(snapshot, {
     title: snapshot.title,
     authorRef: snapshot.authorRef,
     builderClass: snapshot.builderClass || undefined,
+    labels: snapshot.labels,
+    updatedAt: snapshot.updatedAt,
     currentRound,
     completedRemediationRounds,
     maxRemediationRounds,
     terminal,
     observedAt,
-    repo: snapshot.repo,
-    prNumber: snapshot.prNumber,
-    labels: snapshot.labels,
-    pr: snapshot.pr,
-    route: routeSubject(snapshot),
   };
 }
 
@@ -169,9 +172,6 @@ function createGitHubPRSubjectAdapter({
             domainId: snapshot.domainId,
             subjectExternalId: snapshot.subjectExternalId,
             revisionRef: snapshot.revisionRef,
-            repo: snapshot.repo,
-            prNumber: snapshot.prNumber,
-            pr: snapshot.pr,
           });
         }
       }
@@ -208,8 +208,7 @@ function createGitHubPRSubjectAdapter({
 
     async prepareRemediationWorkspace(ref, jobId) {
       const snapshot = await fetchPRSnapshot(ref);
-      const prepareWorkspace = prepareWorkspaceForJobImpl
-        || (await import('../../../follow-up-remediation.mjs')).prepareWorkspaceForJob;
+      const prepareWorkspace = prepareWorkspaceForJobImpl || defaultPrepareWorkspaceForJob;
       const { workspaceDir } = await prepareWorkspace({
         rootDir,
         job: {

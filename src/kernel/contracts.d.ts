@@ -1,3 +1,9 @@
+/**
+ * Target contract surface for the auto-remediation kernel boundary.
+ * Runtime modules only bind a subset of these shapes today; the
+ * governing intent and rollout status are documented in
+ * docs/SPEC-adversarial-review-auto-remediation.md.
+ */
 export type IsoTimestamp = string;
 
 export type RiskClass = 'low' | 'medium' | 'high' | 'critical';
@@ -50,6 +56,9 @@ export interface RemediationReply {
   validation: readonly string[];
   addressed?: readonly RemediationReplyAddressed[];
   pushback?: readonly RemediationReplyPushback[];
+  // Legacy string blockers remain valid under schemaVersion 1 so older
+  // persisted replies still parse during reconciliation. New producer
+  // code should prefer structured RemediationReplyBlocker objects.
   blockers: readonly (string | RemediationReplyBlocker)[];
   reReview: {
     requested: boolean;

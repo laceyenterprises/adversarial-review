@@ -20,7 +20,7 @@
     "retrigger-review": "node src/retrigger-review.mjs",
     "retrigger-remediation": "node src/retrigger-remediation.mjs",
     "reset-pr": "node src/reset-pr.mjs",
-    "typecheck:contracts": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --strict test/fixtures/kernel/contracts-check.ts"
+    "typecheck:contracts": "node ./node_modules/typescript/bin/tsc -p tsconfig.contracts.json"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -30,6 +30,6 @@
     "openai": "^4.98.0"
   },
   "devDependencies": {
-    "typescript": "^5.9.3"
+    "typescript": "5.9.3"
   }
 }

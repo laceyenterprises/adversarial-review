@@ -5,6 +5,19 @@ import { join } from 'node:path';
  * @typedef {import('./contracts.js').PromptStage} PromptStage
  */
 
+/**
+ * @typedef {object} ReviewerStageContext
+ * @property {number} [reviewAttemptNumber]
+ * @property {number} [completedRemediationRounds]
+ * @property {number} [maxRemediationRounds]
+ */
+
+/**
+ * @typedef {object} RemediatorStageContext
+ * @property {number} [remediationRound]
+ * @property {number} [maxRemediationRounds]
+ */
+
 const STAGES = new Set(['first', 'middle', 'last']);
 const PROMPT_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/;
 
@@ -33,6 +46,7 @@ function assertPromptPathSegment(name, value) {
 }
 
 /**
+ * @param {ReviewerStageContext} [context]
  * @returns {PromptStage}
  */
 function pickReviewerStage({
@@ -53,6 +67,7 @@ function pickReviewerStage({
 }
 
 /**
+ * @param {RemediatorStageContext} [context]
  * @returns {PromptStage}
  */
 function pickRemediatorStage({

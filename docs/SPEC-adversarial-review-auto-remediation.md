@@ -3,6 +3,19 @@
 _Status: Living contract_
 _Related: `SPEC.md`, `docs/follow-up-runbook.md`_
 
+## Kernel Contract Surface
+
+`src/kernel/contracts.d.ts` defines the target kernel contract surface for
+the review/remediation boundary. Today only the verdict, remediation-reply,
+and prompt-stage shapes are bound directly from runtime `.mjs` modules via
+JSDoc; the adapter interfaces remain the intended steady-state shape for the
+in-flight kernel split and are exercised by `test/fixtures/kernel/contracts-check.ts`.
+
+This split is intentional. When the runtime grows a concrete kernel adapter
+boundary, those modules should bind to these interfaces rather than fork new
+shapes. Until then, updates to the declaration file must keep the fixture and
+the runtime-bound JSDoc consumers in sync.
+
 ## Adversarial Gate Commit Status
 
 The watcher projects the durable adversarial-review ledger onto the PR head SHA as a GitHub commit status with context `agent-os/adversarial-gate`.

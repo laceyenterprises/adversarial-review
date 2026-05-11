@@ -40,6 +40,7 @@ import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-t
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { looksLikeRuntimeJunk, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
+import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -785,43 +786,10 @@ async function alertClioOAuthFailure(model, repo, prNumber, reason) {
 
 // ── Linear integration (LAC-13) ──────────────────────────────────────────────
 
-async function updateLinearTicket(ticketId, { reviewComplete, critical, reviewSummary }) {
-  if (!ticketId || !process.env.LINEAR_API_KEY) return;
-
-  const { LinearClient } = await import('@linear/sdk');
-  const linear = new LinearClient({ apiKey: process.env.LINEAR_API_KEY });
-
-  let issue;
-  try {
-    issue = await linear.issue(ticketId);
-  } catch (err) {
-    console.error(`[reviewer] Linear: could not find issue ${ticketId}:`, err.message);
-    return;
-  }
-
-  if (reviewComplete) {
-    const team = await issue.team;
-    const states = await team.states();
-    const doneState = states.nodes.find((s) => {
-      const name = s.name.toLowerCase();
-      return name === 'review complete' || name === 'done';
-    });
-    if (doneState) {
-      await linear.updateIssue(issue.id, { stateId: doneState.id });
-      console.log(`[reviewer] Linear ${ticketId} → ${doneState.name}`);
-    }
-  }
-
-  if (critical) {
-    const flagComment =
-      `⚠️ **Adversarial review flagged critical issues** — Paul, please review.\n\n` +
-      `Issues detected: ${CRITICAL_WORDS.filter((w) => reviewSummary.toLowerCase().includes(w)).join(', ')}\n\n` +
-      `Full review posted as a GitHub PR comment.`;
-
-    await linear.createComment({ issueId: issue.id, body: flagComment });
-    console.log(`[reviewer] Linear ${ticketId} — critical flag comment added`);
-  }
-}
+const linearTriage = createLinearTriageAdapter({
+  logger: console,
+  criticalWords: CRITICAL_WORDS,
+});
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -1000,8 +968,12 @@ async function main() {
   // 4. Update Linear (LAC-13)
   try {
     console.error(`[reviewer] DEBUG: updating Linear ticket ${linearTicketId || '<none>'}; critical=${critical}`);
-    await updateLinearTicket(linearTicketId, {
-      reviewComplete: true,
+    await linearTriage.recordReviewCompleted({
+      domainId: 'code-pr',
+      subjectExternalId: `${repo}#${prNumber}`,
+      revisionRef: '',
+      linearTicketId,
+    }, {
       critical,
       reviewSummary: reviewText,
     });

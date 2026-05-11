@@ -740,6 +740,8 @@ async function dispatchMergeAgentForPR({
 
 async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync,
+  operatorApprovalEvent = undefined,
+  mergeAgentRequestEvent = undefined,
 } = {}) {
   const { stdout } = await execFileImpl(
     'gh',
@@ -759,13 +761,13 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   const normalizedLabels = normalizeLabelNames(labels);
   const hasOperatorApproved = normalizedLabels.includes(OPERATOR_APPROVED_LABEL);
   const hasMergeAgentRequested = normalizedLabels.includes(MERGE_AGENT_REQUESTED_LABEL);
-  const [operatorApprovalEvent, mergeAgentRequestEvent] = await Promise.all([
-    hasOperatorApproved
+  const [resolvedOperatorApprovalEvent, resolvedMergeAgentRequestEvent] = await Promise.all([
+    hasOperatorApproved && operatorApprovalEvent === undefined
       ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
-      : null,
-    hasMergeAgentRequested
+      : operatorApprovalEvent ?? null,
+    hasMergeAgentRequested && mergeAgentRequestEvent === undefined
       ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
-      : null,
+      : mergeAgentRequestEvent ?? null,
   ]);
   return {
     repo,
@@ -783,8 +785,8 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     closedAt: parsed.closedAt || null,
     mergedAt: parsed.mergedAt || null,
     prUpdatedAt: parsed.updatedAt || null,
-    operatorApprovalEvent,
-    mergeAgentRequestEvent,
+    operatorApprovalEvent: resolvedOperatorApprovalEvent,
+    mergeAgentRequestEvent: resolvedMergeAgentRequestEvent,
   };
 }
 
@@ -806,6 +808,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
 
 export {
   OPERATOR_APPROVED_LABEL,
+  MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_SKIP_LABELS,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,

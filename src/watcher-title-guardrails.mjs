@@ -1,9 +1,19 @@
 import { TAG_PREFIXES } from './pr-title-tagging.mjs';
-import { routePR } from './adapters/subject/github-pr/routing.mjs';
+import { routePR as routeOperatorPR } from './adapters/operator/linear-triage/index.mjs';
 
 const REQUIRED_PREFIXES = Object.values(TAG_PREFIXES);
 
 const MALFORMED_TITLE_COMMENT_HEADER = '## Adversarial Review Trigger Failure';
+
+function routePR(prTitle) {
+  const route = routeOperatorPR(prTitle);
+  if (!route) return null;
+  return {
+    tag: route.tag,
+    reviewerModel: route.reviewerModel,
+    botTokenEnv: route.botTokenEnv,
+  };
+}
 function escapeForInlineCode(input) {
   return String(input ?? '')
     .replace(/\\/g, '\\\\')

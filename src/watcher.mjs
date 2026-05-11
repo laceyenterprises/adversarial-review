@@ -14,6 +14,12 @@ import { dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import { routeSubject } from './adapters/subject/github-pr/routing.mjs';
+import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
+import {
+  MERGE_AGENT_REQUESTED_LABEL,
+  OPERATOR_APPROVED_LABEL,
+  legacyLabelEventFromControlResult,
+} from './adapters/operator/github-pr-label-controls/index.mjs';
 import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
@@ -52,7 +58,6 @@ import {
   retryPendingRetriggerAckComments,
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
-import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
@@ -379,13 +384,6 @@ async function reconcileOrphanedReviewing(octokit) {
 
 // ── Author tag detection ─────────────────────────────────────────────────────
 
-// ── Linear ticket extraction ─────────────────────────────────────────────────
-
-function extractLinearTicketId(prTitle) {
-  const match = prTitle.match(/\b(LAC-\d+)\b/i);
-  return match ? match[1].toUpperCase() : null;
-}
-
 function resolveCodexReviewerEnv(reviewerEnv) {
   const sourceDir = process.env.CODEX_SOURCE_HOME || '/Users/placey/.codex';
   const sourceAuthPath = join(sourceDir, 'auth.json');
@@ -648,61 +646,31 @@ function shouldDeferReviewForActiveFollowUp({
   };
 }
 
-// ── Linear state helpers ─────────────────────────────────────────────────────
+// ── Operator surface ─────────────────────────────────────────────────────────
 
-let linearClient = null;
-
-async function getLinearClient() {
-  if (!process.env.LINEAR_API_KEY) return null;
-  if (!linearClient) {
-    const { LinearClient } = await import('@linear/sdk');
-    linearClient = new LinearClient({ apiKey: process.env.LINEAR_API_KEY });
-  }
-  return linearClient;
+function createWatcherOperatorSurface() {
+  return createCompositeOperatorSurface({
+    controls: {
+      execFileImpl: execFileAsync,
+    },
+    triage: {
+      stateNames: {
+        inReview: config.linearStates?.inReview ?? 'In Review',
+        inProgress: config.linearStates?.inProgress ?? 'In Progress',
+        done: config.linearStates?.done ?? 'Done',
+        cancelled: config.linearStates?.cancelled ?? 'Cancelled',
+      },
+      logger: console,
+    },
+  });
 }
 
-async function setLinearState(ticketId, targetStateName) {
-  if (!ticketId) return;
-  const linear = await getLinearClient();
-  if (!linear) return;
-
-  try {
-    const issue = await linear.issue(ticketId);
-    if (!issue) return;
-
-    const team = await issue.team;
-    const states = await team.states();
-    const targetState = states.nodes.find(
-      (s) => s.name.toLowerCase() === targetStateName.toLowerCase()
-    );
-    if (!targetState) {
-      console.warn(`[watcher] Linear state "${targetStateName}" not found for team`);
-      return;
-    }
-
-    const currentState = await issue.state;
-    if (currentState?.name?.toLowerCase() === targetStateName.toLowerCase()) {
-      console.log(`[watcher] Linear ${ticketId} already in "${targetStateName}" — skipping`);
-      return;
-    }
-
-    await linear.updateIssue(issue.id, { stateId: targetState.id });
-    console.log(`[watcher] Linear ${ticketId} → "${targetStateName}"`);
-  } catch (err) {
-    console.error(`[watcher] Linear update failed for ${ticketId} (→ ${targetStateName}):`, err.message);
-  }
+function subjectRefWithLinearTicket(subjectRef, linearTicketId) {
+  return {
+    ...subjectRef,
+    linearTicketId,
+  };
 }
-
-// Convenience wrappers using configurable state names
-const linearStates = {
-  inReview:   config.linearStates?.inReview   ?? 'In Review',
-  done:       config.linearStates?.done       ?? 'Done',
-  cancelled:  config.linearStates?.cancelled  ?? 'Cancelled',
-};
-
-const setLinearInReview  = (id) => setLinearState(id, linearStates.inReview);
-const setLinearDone      = (id) => setLinearState(id, linearStates.done);
-const setLinearCancelled = (id) => setLinearState(id, linearStates.cancelled);
 
 // ── Org repo discovery ───────────────────────────────────────────────────────
 
@@ -744,7 +712,7 @@ async function refreshOrgRepos(octokit) {
  * For every PR we previously marked as "open", check if it has since been
  * merged or closed and update Linear accordingly.
  */
-async function syncPRLifecycle(octokit) {
+async function syncPRLifecycle(octokit, operatorSurface) {
   const openRows = stmtGetOpenPRs.all();
   if (openRows.length === 0) return;
 
@@ -765,12 +733,26 @@ async function syncPRLifecycle(octokit) {
       console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
       stmtMarkMerged.run(pr.merged_at, repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
-      await setLinearDone(linearTicketId);
+      await operatorSurface.syncTriageStatus(
+        subjectRefWithLinearTicket({
+          domainId: 'code-pr',
+          subjectExternalId: `${repo}#${prNumber}`,
+          revisionRef: pr.head?.sha || '',
+        }, linearTicketId),
+        'finalized'
+      );
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
       stmtMarkClosed.run(pr.closed_at ?? new Date().toISOString(), repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
-      await setLinearCancelled(linearTicketId);
+      await operatorSurface.syncTriageStatus(
+        subjectRefWithLinearTicket({
+          domainId: 'code-pr',
+          subjectExternalId: `${repo}#${prNumber}`,
+          revisionRef: pr.head?.sha || '',
+        }, linearTicketId),
+        'halted'
+      );
     }
     // Still open → nothing to do
   }
@@ -783,18 +765,44 @@ async function handlePostedReviewRow({
   repoPath,
   prNumber,
   existing,
+  subjectRef,
+  currentRevisionRef,
+  labelNames = [],
   projectGateStatusSafe,
   execFileImpl = execFileAsync,
   fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
   dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
+  operatorSurface = null,
   logger = console,
 } = {}) {
   await projectGateStatusSafe(existing);
 
   try {
+    let operatorApprovalEvent;
+    let mergeAgentRequestEvent;
+    if (operatorSurface) {
+      const controlSubjectRef = subjectRef || {
+        domainId: 'code-pr',
+        subjectExternalId: `${repoPath}#${prNumber}`,
+        revisionRef: currentRevisionRef || '',
+      };
+      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || '';
+      const [operatorApproval, mergeAgentRequest] = await Promise.all([
+        labelNames.includes(OPERATOR_APPROVED_LABEL)
+          ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
+          : null,
+        labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
+          ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
+          : null,
+      ]);
+      operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
+      mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
+    }
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
       execFileImpl,
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
     });
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate);
     const dispatched = await dispatchMergeAgentForPRImpl({
@@ -813,6 +821,7 @@ async function handlePostedReviewRow({
 }
 
 async function pollOnce(octokit) {
+  const operatorSurface = createWatcherOperatorSurface();
   await refreshOrgRepos(octokit);
 
   await warnForMissingAdversarialGateBranchProtection(activeRepos, {
@@ -823,7 +832,7 @@ async function pollOnce(octokit) {
   });
 
   // Check lifecycle of previously-seen PRs first
-  await syncPRLifecycle(octokit);
+  await syncPRLifecycle(octokit, operatorSurface);
 
   try {
     const ackRetry = await retryPendingRetriggerAckComments({
@@ -880,6 +889,9 @@ async function pollOnce(octokit) {
         number: prNumber,
         labels: subject.labels,
       });
+      const prLabelNames = (Array.isArray(subject.labels) ? subject.labels : [])
+        .map((l) => (typeof l === 'string' ? l : l?.name || ''))
+        .filter(Boolean);
       if (staleDriftSkip) {
         console.log(staleDriftSkip.message);
         continue;
@@ -889,6 +901,16 @@ async function pollOnce(octokit) {
       async function projectGateStatusSafe(reviewRow) {
         if (!subject.headSha) return;
         try {
+          const operatorApproval = prLabelNames.includes(OPERATOR_APPROVED_LABEL)
+            ? await operatorSurface.observeOperatorApproved(
+              subject.ref,
+              subject.ref.revisionRef
+            )
+            : null;
+          const operatorApprovalEvent = legacyLabelEventFromControlResult(
+            operatorApproval,
+            OPERATOR_APPROVED_LABEL
+          );
           const projected = await projectAdversarialGateStatus(ROOT, {
             repo: repoPath,
             prNumber,
@@ -898,7 +920,7 @@ async function pollOnce(octokit) {
             prAuthor: subject.authorRef || null,
             reviewRow,
             execFileImpl: execFileAsync,
-            fetchLatestLabelEventImpl: fetchLatestLabelEvent,
+            operatorApprovalEvent,
           });
           console.log(
             `[watcher] adversarial gate for ${repoPath}#${prNumber}: ${projected.decision.state}` +
@@ -935,16 +957,16 @@ async function pollOnce(octokit) {
       // on a halted PR; watcher detects it here, bumps maxRounds,
       // requeues the latest follow-up job, and removes the label.
       // Active jobs leave the label in place for the next tick.
-      const prLabelNames = (Array.isArray(subject.labels) ? subject.labels : [])
-        .map((l) => (typeof l === 'string' ? l : l?.name || ''))
-        .filter(Boolean);
       if (prLabelNames.includes(RETRIGGER_REMEDIATION_LABEL)) {
         try {
-          const labelEvent = await fetchLatestLabelEvent(
-            repoPath,
-            prNumber,
-            RETRIGGER_REMEDIATION_LABEL,
-            { execFileImpl: execFileAsync }
+          const labelControl = await operatorSurface.observeLabelControl(
+            subject.ref,
+            subject.ref.revisionRef,
+            RETRIGGER_REMEDIATION_LABEL
+          );
+          const labelEvent = legacyLabelEventFromControlResult(
+            labelControl,
+            RETRIGGER_REMEDIATION_LABEL
           );
           const result = await tryRetriggerRemediationFromLabel({
             rootDir: ROOT,
@@ -972,8 +994,12 @@ async function pollOnce(octokit) {
           repoPath,
           prNumber,
           existing,
+          subjectRef: subject.ref,
+          currentRevisionRef: subject.ref.revisionRef,
+          labelNames: prLabelNames,
           projectGateStatusSafe,
           execFileImpl: execFileAsync,
+          operatorSurface,
         });
         continue;
       }
@@ -1026,7 +1052,7 @@ async function pollOnce(octokit) {
       // (stale-drift check already ran at the top of the per-PR loop;
       // duplicate block removed — caused SyntaxError on import per LAC-439.)
 
-      const linearTicketId = extractLinearTicketId(prTitle);
+      const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       if (!existing) {
         stmtCreateReviewRow.run(
           repoPath,
@@ -1114,7 +1140,10 @@ async function pollOnce(octokit) {
         );
         continue;
       }
-      await setLinearInReview(linearTicketId);
+      await operatorSurface.syncTriageStatus(
+        subjectRefWithLinearTicket(subject.ref, linearTicketId),
+        'in-review'
+      );
 
       // Final-round inputs come from the durable per-PR follow-up ledger,
       // not from `reviewed_prs.review_attempts`. Two reasons (reviewer

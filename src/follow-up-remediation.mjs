@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -34,6 +34,7 @@ import { redactSensitiveText } from './adapters/comms/github-pr-comments/redacti
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
 import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
+import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -525,7 +526,7 @@ function spawnClaudeCodeRemediationWorker({
   launchRequestId,
   jobId = null,
   workerClass = 'claude-code-remediation',
-  spawnImpl = spawn,
+  spawnImpl,
   now = () => new Date().toISOString(),
 }) {
   const claudeCli = resolveClaudeCodeCliPath();
@@ -565,20 +566,16 @@ function spawnClaudeCodeRemediationWorker({
   const stderrFd = openSync(logPath, 'a');
 
   try {
-    const child = spawnImpl(
+    const child = spawnDetachedCli(
       claudeCli,
       ['--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
       {
         cwd: workspaceDir,
-        detached: true,
         env,
         stdio: [promptFd, stdoutFd, stderrFd],
+        spawnImpl,
       }
     );
-
-    if (typeof child.unref === 'function') {
-      child.unref();
-    }
 
     return {
       model: 'claude-code',
@@ -1122,7 +1119,7 @@ function spawnCodexRemediationWorker({
   launchRequestId,
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
   jobId = null,
-  spawnImpl = spawn,
+  spawnImpl,
   now = () => new Date().toISOString(),
 }) {
   const codexCli = resolveCodexCliPath();
@@ -1155,7 +1152,7 @@ function spawnCodexRemediationWorker({
   const stderrFd = openSync(logPath, 'a');
 
   try {
-    const child = spawnImpl(
+    const child = spawnDetachedCli(
       codexCli,
       [
         'exec',
@@ -1167,15 +1164,11 @@ function spawnCodexRemediationWorker({
       ],
       {
         cwd: workspaceDir,
-        detached: true,
         env,
         stdio: [promptFd, stdoutFd, stderrFd],
+        spawnImpl,
       }
     );
-
-    if (typeof child.unref === 'function') {
-      child.unref();
-    }
 
     return {
       model: 'codex',
@@ -2384,7 +2377,7 @@ async function reconcileInProgressFollowUpJobs({
 async function consumeNextFollowUpJob({
   rootDir = ROOT,
   execFileImpl = execFileAsync,
-  spawnImpl = spawn,
+  spawnImpl,
   now = () => new Date().toISOString(),
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
@@ -2710,7 +2703,7 @@ async function consumeFollowUpJobsUntilCapacity({
   rootDir = ROOT,
   maxConcurrent = resolveRemediationMaxConcurrentJobs(),
   execFileImpl = execFileAsync,
-  spawnImpl = spawn,
+  spawnImpl,
   now = () => new Date().toISOString(),
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,

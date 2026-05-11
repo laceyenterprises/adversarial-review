@@ -1,10 +1,10 @@
 # Adversarial Review Adapter Architecture
 
-Adversarial Review separates the convergence loop from the systems that host reviewed artifacts. New domains plug in through adapters, prompts, and `domains/<id>.json`; they should not require changes under `src/kernel/`.
+Adversarial Review separates the convergence loop from the systems that host reviewed artifacts and reviewer processes. New domains plug in through adapters, prompts, and `domains/<id>.json`; they should not require changes under `src/kernel/`.
 
 ```text
                          domains/<id>.json
-             wiring: subject + comms + operator + prompts
+             wiring: subject + comms + operator + reviewer runtime + prompts
                                   |
                                   v
 +-------------------+     +---------------------+     +-------------------+
@@ -46,6 +46,8 @@ The comms-channel adapter is responsible for delivery. `src/adapters/comms/slack
 
 The operator surface is responsible for maintainer-facing status. `src/adapters/operator/linear-triage/index.mjs` maps lifecycle states onto Linear issue states when a subject ref includes a Linear ticket id, and otherwise becomes a no-op fixture surface.
 
+The reviewer-runtime adapter is responsible for invoking reviewer and remediator processes. `src/adapters/reviewer-runtime/cli-direct/index.mjs` preserves the current direct CLI reviewer behavior while making process-group isolation, forbidden API-key stripping, failure classification, cancellation, reattach, and atomic `data/reviewer-runs/<sessionUuid>.json` state records part of the adapter contract. `fixture-stub` provides deterministic review bodies for end-to-end domain tests.
+
 ## Domain Config
 
 `domains/research-finding.json` shows the wiring layer:
@@ -55,6 +57,7 @@ The operator surface is responsible for maintainer-facing status. `src/adapters/
   "id": "research-finding",
   "subjectChannel": "markdown-file",
   "commsChannel": "slack-thread",
+  "reviewerRuntime": "fixture-stub",
   "operatorSurface": {
     "triageSync": "linear"
   },

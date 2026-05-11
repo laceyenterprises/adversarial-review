@@ -29,13 +29,19 @@ import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
   CASCADE_FAILURE_CAP,
-  classifyReviewerFailure,
   clearCascadeState,
   formatTransientFailureBreakdown,
-  isReviewerSubprocessTimeout,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
+import {
+  createReviewerRuntimeAdapterForDomain,
+  recoverReviewerRunRecords,
+} from './adapters/reviewer-runtime/index.mjs';
+import {
+  classifyReviewerFailure,
+  isReviewerSubprocessTimeout,
+} from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
@@ -58,8 +64,7 @@ import {
   retryPendingRetriggerAckComments,
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
-import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
-import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
@@ -71,6 +76,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
 const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
+const reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
+  rootDir: ROOT,
+  domainId: 'code-pr',
+  logger: console,
+});
 
 // ── DB setup ────────────────────────────────────────────────────────────────
 
@@ -206,6 +216,7 @@ function handlePollError(err, source = 'pollOnce') {
 // survive a restart, the next watcher reattaches or recovers its posted
 // GitHub review before any new spawn is allowed.
 const inFlightReviewerControllers = new Set();
+const inFlightReviewerSessions = new Set();
 
 function abortInFlightReviewers(reason) {
   for (const controller of inFlightReviewerControllers) {
@@ -217,6 +228,21 @@ function abortInFlightReviewers(reason) {
     }
   }
   inFlightReviewerControllers.clear();
+}
+
+async function cancelInFlightReviewerRuntimeSessions(reason) {
+  const sessions = Array.from(inFlightReviewerSessions);
+  inFlightReviewerSessions.clear();
+  await Promise.all(sessions.map(async (sessionUuid) => {
+    try {
+      await reviewerRuntimeAdapter.cancel(sessionUuid);
+    } catch (err) {
+      console.error(
+        `[watcher] reviewer_runtime_cancel_failed session=${sessionUuid} reason=${reason}:`,
+        err?.message || err
+      );
+    }
+  }));
 }
 
 function exitForPollDeadline(err, source) {
@@ -258,6 +284,13 @@ process.on('unhandledRejection', (err) => {
     return;
   }
   console.error('[watcher] unhandledRejection:', err);
+});
+
+process.on('SIGTERM', () => {
+  console.error('[watcher] SIGTERM received; cancelling active reviewer runtime sessions before exit');
+  cancelInFlightReviewerRuntimeSessions('SIGTERM').finally(() => {
+    process.exit(143);
+  });
 });
 
 const stmtGetReviewRow = db.prepare(
@@ -431,20 +464,6 @@ function persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber, lo
   }
 }
 
-// ── Author tag detection ─────────────────────────────────────────────────────
-
-function resolveCodexReviewerEnv(reviewerEnv) {
-  const sourceDir = process.env.CODEX_SOURCE_HOME || '/Users/placey/.codex';
-  const sourceAuthPath = join(sourceDir, 'auth.json');
-
-  reviewerEnv.HOME = reviewerEnv.HOME || '/Users/airlock';
-  reviewerEnv.CODEX_AUTH_PATH = sourceAuthPath;
-  reviewerEnv.CODEX_SOURCE_HOME = sourceDir;
-  delete reviewerEnv.OPENAI_API_KEY;
-
-  return { authPath: sourceAuthPath, home: reviewerEnv.HOME };
-}
-
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
 async function spawnReviewer({
@@ -460,20 +479,6 @@ async function spawnReviewer({
   reviewerSessionUuid,
   onReviewerPgid = () => {},
 }) {
-  const reviewerPath = join(__dirname, 'reviewer.mjs');
-  const args = JSON.stringify({
-    repo,
-    prNumber,
-    reviewerModel,
-    botTokenEnv,
-    linearTicketId,
-    builderTag,
-    reviewerHeadSha,
-    reviewAttemptNumber,
-    maxRemediationRounds,
-    reviewerSessionUuid,
-  });
-
   const finalRound = (
     Number.isFinite(reviewAttemptNumber) &&
     Number.isFinite(maxRemediationRounds) &&
@@ -484,73 +489,34 @@ async function spawnReviewer({
     : '';
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
-  // AbortController covers the normal timeout/abort path, and
-  // spawnCapturedProcessGroup installs an exit-time best-effort SIGKILL for
-  // active detached process groups so abrupt watcher exit does not leave an
-  // orphan reviewer running to completion behind the durable ledger.
-  const controller = new AbortController();
-  inFlightReviewerControllers.add(controller);
-
+  inFlightReviewerSessions.add(reviewerSessionUuid);
   try {
-    const reviewerEnv = {
-      ...process.env,
-      REVIEWER_SESSION_UUID: reviewerSessionUuid,
-    };
-
-    if (String(reviewerModel || '').toLowerCase().includes('codex')) {
-      const { authPath, home } = resolveCodexReviewerEnv(reviewerEnv);
-      console.log(`[watcher] Using Codex auth for reviewer at ${authPath} with HOME=${home}`);
-    }
-
-    const { stdout, stderr } = await spawnCapturedProcessGroup(
-      process.execPath,
-      [reviewerPath, args],
-      {
-        env: reviewerEnv,
-        timeout: resolveReviewerTimeoutMs(reviewerEnv),
-        progressTimeout: resolveProgressTimeoutMs(reviewerEnv),
-        signal: controller.signal,
-        onSpawn: ({ pgid }) => {
-          onReviewerPgid({ sessionUuid: reviewerSessionUuid, pgid });
-        },
-      }
-    );
-    if (stdout) console.log(`[reviewer:${prNumber}] ${stdout.trim()}`);
-    if (stderr) console.error(`[reviewer:${prNumber}] stderr: ${stderr.trim()}`);
-    return { ok: true };
-  } catch (err) {
-    const timedOut = isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' });
-    const detail = [err.message, err.stdout, err.stderr]
-      .filter(Boolean)
-      .join('\n')
-      .trim()
-      .slice(0, 4000);
-    return {
-      ok: false,
-      error: detail || err.message,
-      exitCode: Number.isInteger(err?.exitCode)
-        ? err.exitCode
-        : (Number.isInteger(err?.code) ? err.code : null),
-      errorCode: typeof err?.code === 'string' ? err.code : null,
-      killed: err?.killed === true,
-      signal: typeof err?.signal === 'string' ? err.signal : null,
-      timedOut,
-      stderr: String(err?.stderr || detail || ''),
-      stdout: String(err?.stdout || ''),
-      failureClass: classifyReviewerFailure(
-        err?.stderr || detail || '',
-        Number.isInteger(err?.exitCode) ? err.exitCode : err?.code,
-        err?.code,
-        {
-          killed: err?.killed === true,
-          signal: err?.signal,
-          code: err?.code,
-          timeoutKilled: timedOut,
-        }
-      ),
-    };
+    const result = await reviewerRuntimeAdapter.spawnReviewer({
+      model: reviewerModel,
+      prompt: '',
+      subjectContext: {
+        domainId: 'code-pr',
+        repo,
+        prNumber,
+        reviewerModel,
+        botTokenEnv,
+        linearTicketId,
+        builderTag,
+        reviewerHeadSha,
+        reviewAttemptNumber,
+        maxRemediationRounds,
+        reviewerSessionUuid,
+      },
+      timeoutMs: resolveReviewerTimeoutMs(),
+      sessionUuid: reviewerSessionUuid,
+      forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
+      onReviewerPgid,
+    });
+    if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
+    if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
+    return result;
   } finally {
-    inFlightReviewerControllers.delete(controller);
+    inFlightReviewerSessions.delete(reviewerSessionUuid);
   }
 }
 
@@ -601,11 +567,13 @@ function settleReviewerAttempt({
     'cascade',
     'reviewer-timeout',
     'launchctl-bootstrap',
+    'daemon-bounce',
   ]);
   const defaultFailureMessages = {
     cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
+    'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',
     bug: 'Reviewer failed due to an invocation or implementation bug.',
     unknown: 'Unknown reviewer failure',
   };
@@ -1355,6 +1323,12 @@ async function main() {
   // Reconcile any rows stuck in 'reviewing' from a previous watcher
   // run that died mid-spawn before this poll loop touches the queue.
   // See reconcileOrphanedReviewing for the recovery contract.
+  await recoverReviewerRunRecords({
+    rootDir: ROOT,
+    adapter: reviewerRuntimeAdapter,
+    db,
+    log: console,
+  });
   await reconcileOrphanedReviewing(octokit);
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped

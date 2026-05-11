@@ -10,10 +10,9 @@ import { promisify } from 'node:util';
 import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import {
-  routePR,
-} from './watcher-title-guardrails.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
+import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
+import { routeSubject } from './adapters/subject/github-pr/routing.mjs';
 import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
@@ -851,28 +850,35 @@ async function pollOnce(octokit) {
 
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
+    const subjectAdapter = createGitHubPRSubjectAdapter({
+      octokit,
+      repos: [repoPath],
+      rootDir: ROOT,
+      execFileImpl: execFileAsync,
+    });
 
-    let prs;
+    let subjectRefs;
     try {
-      const { data } = await octokit.rest.pulls.list({
-        owner,
-        repo,
-        state: 'open',
-        per_page: 50,
-        sort: 'created',
-        direction: 'desc',
-      });
-      prs = data;
+      subjectRefs = await subjectAdapter.discoverSubjects();
     } catch (err) {
       console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
       continue;
     }
 
-    for (const pr of prs) {
-      const prNumber = pr.number;
-      const prTitle = pr.title;
-      const prState = String(pr.state || '').trim().toLowerCase();
-      const staleDriftSkip = shouldSkipReviewerForStaleDrift(pr);
+    for (const subjectRef of subjectRefs) {
+      let subject;
+      try {
+        subject = await subjectAdapter.fetchState(subjectRef);
+      } catch (err) {
+        console.error(`[watcher] Failed to fetch subject state for ${subjectRef.subjectExternalId}:`, err.message);
+        continue;
+      }
+      const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
+      const prTitle = subject.title || '';
+      const staleDriftSkip = shouldSkipReviewerForStaleDrift({
+        number: prNumber,
+        labels: subject.labels,
+      });
       if (staleDriftSkip) {
         console.log(staleDriftSkip.message);
         continue;
@@ -880,15 +886,15 @@ async function pollOnce(octokit) {
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
 
       async function projectGateStatusSafe(reviewRow) {
-        if (!pr?.head?.sha) return;
+        if (!subject.headSha) return;
         try {
           const projected = await projectAdversarialGateStatus(ROOT, {
             repo: repoPath,
             prNumber,
-            headSha: pr.head.sha,
-            labels: pr.labels,
-            prUpdatedAt: pr.updated_at || null,
-            prAuthor: pr.user?.login || null,
+            headSha: subject.headSha,
+            labels: subject.labels,
+            prUpdatedAt: subject.updatedAt || null,
+            prAuthor: subject.authorRef || null,
             reviewRow,
             execFileImpl: execFileAsync,
             fetchLatestLabelEventImpl: fetchLatestLabelEvent,
@@ -920,7 +926,7 @@ async function pollOnce(octokit) {
         continue;
       }
 
-      if (prState && prState !== 'open') {
+      if (subject.terminal) {
         continue;
       }
 
@@ -930,7 +936,7 @@ async function pollOnce(octokit) {
       // on a halted PR; watcher detects it here, bumps maxRounds,
       // requeues the latest follow-up job, and removes the label.
       // Active jobs leave the label in place for the next tick.
-      const prLabelNames = (Array.isArray(pr.labels) ? pr.labels : [])
+      const prLabelNames = (Array.isArray(subject.labels) ? subject.labels : [])
         .map((l) => (typeof l === 'string' ? l : l?.name || ''))
         .filter(Boolean);
       if (prLabelNames.includes(RETRIGGER_REMEDIATION_LABEL)) {
@@ -980,7 +986,7 @@ async function pollOnce(octokit) {
         continue;
       }
 
-      const route = routePR(prTitle);
+      const route = routeSubject(subject);
       if (!route) {
         if (!existing) {
           stmtCreateReviewRow.run(
@@ -1011,7 +1017,9 @@ async function pollOnce(octokit) {
           repoPath,
           prNumber
         );
-        stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(pr.labels) ? pr.labels : []), repoPath, prNumber);
+        // Store normalized label names in reviewed_prs.labels_json. Readers
+        // still accept the older GitHub label-object shape for historical rows.
+        stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
       }
@@ -1069,7 +1077,9 @@ async function pollOnce(octokit) {
             ` | previous status=${current?.review_status || existing.review_status}`
         );
       }
-      stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(pr.labels) ? pr.labels : []), repoPath, prNumber);
+      // Store normalized label names in reviewed_prs.labels_json. Readers
+      // still accept the older GitHub label-object shape for historical rows.
+      stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
 
       const roundBudgetDecision = evaluateRoundBudgetForReview({
         rootDir: ROOT,

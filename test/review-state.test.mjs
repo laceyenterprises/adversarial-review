@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   ensureReviewStateSchema,
   openReviewStateDb,
+  REVIEW_STATE_SCHEMA_VERSION,
   requestReviewRereview,
 } from '../src/review-state.mjs';
 
@@ -34,7 +35,7 @@ function insertReviewRow(rootDir, overrides = {}) {
   }
 }
 
-test('openReviewStateDb applies a busy timeout and shared schema adds rereview columns', () => {
+test('openReviewStateDb applies a busy timeout and shared schema adds reviewer handle columns', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const db = openReviewStateDb(rootDir);
 
@@ -45,6 +46,11 @@ test('openReviewStateDb applies a busy timeout and shared schema adds rereview c
     const columns = db.prepare('PRAGMA table_info(reviewed_prs)').all().map((column) => column.name);
     assert.ok(columns.includes('rereview_requested_at'));
     assert.ok(columns.includes('rereview_reason'));
+    assert.ok(columns.includes('reviewer_session_uuid'));
+    assert.ok(columns.includes('reviewer_pgid'));
+    assert.ok(columns.includes('reviewer_started_at'));
+    assert.ok(columns.includes('reviewer_head_sha'));
+    assert.equal(db.pragma('user_version', { simple: true }), REVIEW_STATE_SCHEMA_VERSION);
   } finally {
     db.close();
   }

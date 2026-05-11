@@ -227,7 +227,7 @@ function writeReviewRefusal(stderr, { repo, pr, refusalReason }) {
         'A reviewer subprocess is currently in flight; resetting now would queue a second reviewer and risk a duplicate GitHub review.',
         'Recovery path:',
         '1. Wait for the watcher to finish or reconcile the orphaned reviewing row.',
-        '2. If the watcher died, run reconcileOrphanedReviewing before retrying this command.',
+        '2. If the watcher died, let startup reconcileOrphanedReviewing run before retrying this command.',
         '',
       ].join('\n')
     );

@@ -16,6 +16,7 @@ import {
   evaluateRoundBudgetForReview,
   shouldDeferReviewForActiveFollowUp,
 } from '../src/watcher.mjs';
+import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 
 function setupDb() {
   const db = new Database(':memory:');
@@ -102,26 +103,20 @@ test('malformed titles are terminal but explicitly marked malformed', () => {
   assert.match(row.failure_message, /Malformed PR title/);
 });
 
-// Reconciliation contract for orphaned 'reviewing' rows. These tests
-// model the SQL the watcher's reconcileOrphanedReviewing() runs on
-// startup against a fresh in-memory DB, so the schema and the
-// transition contract are exercised without spinning up the full
-// watcher module (which has DB-open side effects at import time).
-
-const RECONCILE_FAILURE_MESSAGE =
-  'Watcher restarted while review subprocess was in flight. ' +
-  'A review may have been posted on GitHub by the orphaned child. ' +
-  'Verify the PR before retriggering with `npm run retrigger-review`.';
+// Legacy reconciliation contract for pre-LAC-532 'reviewing' rows with
+// no reviewer_session_uuid. New rows are handled by the startup
+// reattach probe; legacy rows still fall through to failed-orphan so
+// old in-flight state remains operator-actionable after deploy.
 
 function reconcileOrphans(db, failureAt) {
   const rows = db
-    .prepare("SELECT repo, pr_number FROM reviewed_prs WHERE review_status = 'reviewing'")
+    .prepare("SELECT repo, pr_number FROM reviewed_prs WHERE review_status = 'reviewing' AND reviewer_session_uuid IS NULL")
     .all();
   const stmt = db.prepare(
     "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
   );
   for (const row of rows) {
-    stmt.run(failureAt, RECONCILE_FAILURE_MESSAGE, row.repo, row.pr_number);
+    stmt.run(failureAt, LEGACY_ORPHAN_FAILURE_MESSAGE, row.repo, row.pr_number);
   }
   return rows.length;
 }
@@ -177,7 +172,7 @@ test("'failed-orphan' rows stay sticky and are not auto-retried by the watcher's
     'failed-orphan',
     2,
     '2026-05-02T19:30:00.000Z',
-    RECONCILE_FAILURE_MESSAGE
+    LEGACY_ORPHAN_FAILURE_MESSAGE
   );
 
   const row = db
@@ -254,7 +249,7 @@ test("requestReviewRereview accepts 'failed-orphan' rows so retrigger-review can
       'failed-orphan',
       2,
       '2026-05-02T19:30:00.000Z',
-      RECONCILE_FAILURE_MESSAGE
+      LEGACY_ORPHAN_FAILURE_MESSAGE
     );
     db.close();
 

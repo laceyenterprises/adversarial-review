@@ -815,6 +815,7 @@ async function main() {
     botTokenEnv,
     linearTicketId,
     builderTag,
+    reviewerHeadSha,
     reviewAttemptNumber,
     completedRemediationRounds,
     maxRemediationRounds,
@@ -857,6 +858,21 @@ async function main() {
     ` (OAuth-only mode; prompt stage=${reviewerPromptStage}${isFinalRound ? `; FINAL round attempt ${reviewAttemptNumber} of ${1 + Number(maxRemediationRounds || 0)} — lenient verdict threshold active` : ''})`
   );
   console.error(`[reviewer] DEBUG: args=${JSON.stringify(args)}`);
+
+  if (reviewerHeadSha) {
+    try {
+      await linearTriage.recordReviewerEngagement({
+        domainId: 'code-pr',
+        subjectExternalId: `${repo}#${prNumber}`,
+        revisionRef: reviewerHeadSha,
+        linearTicketId,
+      }, {
+        startedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error(`[reviewer] LINEAR REVIEW-START UPDATE FAILED for ${linearTicketId}:`, err.message);
+    }
+  }
 
   // 1. Fetch diff
   let diff;
@@ -971,7 +987,7 @@ async function main() {
     await linearTriage.recordReviewCompleted({
       domainId: 'code-pr',
       subjectExternalId: `${repo}#${prNumber}`,
-      revisionRef: '',
+      revisionRef: reviewerHeadSha || null,
       linearTicketId,
     }, {
       critical,

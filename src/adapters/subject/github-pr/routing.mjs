@@ -8,7 +8,7 @@
  * @typedef {import('../../../kernel/contracts.d.ts').SubjectState} SubjectState
  */
 
-import { tagFromBuilderClass } from './title-tagging.mjs';
+import { builderClassFromTitle, tagFromBuilderClass } from './title-tagging.mjs';
 
 const ROUTE_BY_BUILDER_CLASS = {
   codex: {
@@ -44,8 +44,31 @@ function routeSubject(subject) {
   };
 }
 
+function extractLinearTicketId(title) {
+  const match = String(title || '').match(/\b(LAC-\d+)\b/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+function routePR(prTitle, subject = null) {
+  const builderClass = normalizeBuilderClass(
+    subject?.builderClass || builderClassFromTitle(prTitle)
+  );
+  if (!builderClass) return null;
+  const route = routeSubject({ builderClass });
+  if (!route) return null;
+  return {
+    builderClass,
+    tag: route.tag,
+    reviewerModel: route.reviewerModel,
+    botTokenEnv: route.botTokenEnv,
+    linearTicketId: extractLinearTicketId(prTitle),
+  };
+}
+
 export {
+  extractLinearTicketId,
   ROUTE_BY_BUILDER_CLASS,
   normalizeBuilderClass,
+  routePR,
   routeSubject,
 };

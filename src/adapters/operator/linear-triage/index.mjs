@@ -7,31 +7,12 @@
  * @typedef {import('../../../kernel/contracts.d.ts').TriageStatus} TriageStatus
  */
 
-import { builderClassFromTitle } from '../../subject/github-pr/title-tagging.mjs';
-import { normalizeBuilderClass, routeSubject } from '../../subject/github-pr/routing.mjs';
+import {
+  extractLinearTicketId,
+  routePR,
+} from '../../subject/github-pr/routing.mjs';
 
 const DEFAULT_CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
-
-function extractLinearTicketId(title) {
-  const match = String(title || '').match(/\b(LAC-\d+)\b/i);
-  return match ? match[1].toUpperCase() : null;
-}
-
-function routePR(prTitle, subject = null) {
-  const builderClass = normalizeBuilderClass(
-    subject?.builderClass || builderClassFromTitle(prTitle)
-  );
-  if (!builderClass) return null;
-  const route = routeSubject({ builderClass });
-  if (!route) return null;
-  return {
-    builderClass,
-    tag: route.tag,
-    reviewerModel: route.reviewerModel,
-    botTokenEnv: route.botTokenEnv,
-    linearTicketId: extractLinearTicketId(prTitle),
-  };
-}
 
 function resolveLinearTicketId(subjectRef) {
   return (
@@ -45,8 +26,11 @@ function resolveLinearTicketId(subjectRef) {
 
 async function defaultLinearClientProvider() {
   if (!process.env.LINEAR_API_KEY) return null;
-  const { LinearClient } = await import('@linear/sdk');
-  return new LinearClient({ apiKey: process.env.LINEAR_API_KEY });
+  if (!defaultLinearClientProvider.clientPromise) {
+    defaultLinearClientProvider.clientPromise = import('@linear/sdk')
+      .then(({ LinearClient }) => new LinearClient({ apiKey: process.env.LINEAR_API_KEY }));
+  }
+  return defaultLinearClientProvider.clientPromise;
 }
 
 function normalizeStatusName(status, stateNames) {
@@ -105,7 +89,7 @@ async function setLinearState({
     }
 
     await linear.updateIssue(issue.id, { stateId: targetState.id });
-    logger.log?.(`[linear-triage] Linear ${ticketId} -> "${targetStateName}"`);
+    logger.log?.(`[linear-triage] Linear ${ticketId} -> "${targetState.name}"`);
   } catch (err) {
     logger.error?.(
       `[linear-triage] Linear update failed for ${ticketId} (-> ${targetStateNames[0]}):`,

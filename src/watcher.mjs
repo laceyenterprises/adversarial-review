@@ -405,6 +405,7 @@ async function spawnReviewer({
   botTokenEnv,
   linearTicketId,
   builderTag,
+  reviewerHeadSha,
   reviewAttemptNumber,
   maxRemediationRounds,
   reviewerSessionUuid,
@@ -418,6 +419,7 @@ async function spawnReviewer({
     botTokenEnv,
     linearTicketId,
     builderTag,
+    reviewerHeadSha,
     reviewAttemptNumber,
     maxRemediationRounds,
     reviewerSessionUuid,
@@ -737,7 +739,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         subjectRefWithLinearTicket({
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.head?.sha || '',
+          revisionRef: pr.head?.sha || null,
         }, linearTicketId),
         'finalized'
       );
@@ -749,7 +751,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         subjectRefWithLinearTicket({
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.head?.sha || '',
+          revisionRef: pr.head?.sha || null,
         }, linearTicketId),
         'halted'
       );
@@ -785,9 +787,9 @@ async function handlePostedReviewRow({
       const controlSubjectRef = subjectRef || {
         domainId: 'code-pr',
         subjectExternalId: `${repoPath}#${prNumber}`,
-        revisionRef: currentRevisionRef || '',
+        revisionRef: currentRevisionRef || null,
       };
-      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || '';
+      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
       const [operatorApproval, mergeAgentRequest] = await Promise.all([
         labelNames.includes(OPERATOR_APPROVED_LABEL)
           ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
@@ -1193,6 +1195,7 @@ async function pollOnce(octokit) {
         botTokenEnv: route.botTokenEnv,
         linearTicketId,
         builderTag: route.tag,
+        reviewerHeadSha,
         reviewAttemptNumber,
         maxRemediationRounds,
         reviewerSessionUuid,

@@ -15,6 +15,8 @@ test('watcher alert delivery uses the litellm drift-watch ALERT env shape', asyn
   };
 
   await deliverAlert('watcher.no_progress text', {
+    event: 'watcher.no_progress',
+    payload: { openPendingPRs: 2 },
     env,
     fsImpl: {
       readFileSync(filePath, encoding) {
@@ -43,15 +45,24 @@ test('watcher alert delivery uses the litellm drift-watch ALERT env shape', asyn
     deliver: true,
     channel: 'telegram',
     to: '123456',
+    event: 'watcher.no_progress',
+    payload: { openPendingPRs: 2 },
   });
 });
 
-test('watcher alert defaults match the operator Telegram route', () => {
-  assert.deepEqual(resolveAlertDefaults({}), {
+test('watcher alert defaults require an explicit recipient', () => {
+  assert.throws(
+    () => resolveAlertDefaults({}),
+    /ALERT_TO must be configured for alert delivery/
+  );
+});
+
+test('watcher alert defaults use the operator Telegram route once ALERT_TO is configured', () => {
+  assert.deepEqual(resolveAlertDefaults({ ALERT_TO: '123456' }), {
     openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
     hooksTokenFile: '/Users/airlock/agent-os/agents/clio/credentials/local/litellm-alert-bridge.token',
     alertChannel: 'telegram',
-    alertTo: '8655363024',
+    alertTo: '123456',
     alertAgentId: 'main',
     alertName: 'Adversarial Watcher Health',
   });

@@ -4,10 +4,12 @@ import https from 'node:https';
 
 const DEFAULT_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';
 const DEFAULT_OPENCLAW_AGENT_HOOKS_URL = 'http://127.0.0.1:18789/hooks/agent';
-const DEFAULT_ALERT_TO = '8655363024';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
-const HTTP_TIMEOUT_MS = Number(process.env.HTTP_TIMEOUT_MS || 45_000);
+const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
+const HTTP_TIMEOUT_MS = Number(
+  process.env.ALERT_HTTP_TIMEOUT_MS || process.env.HTTP_TIMEOUT_MS || DEFAULT_HTTP_TIMEOUT_MS
+);
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -18,6 +20,10 @@ function firstNonEmpty(...values) {
 
 function resolveAlertDefaults(env = process.env) {
   const secretsRoot = env.LITELLM_SECRETS_ROOT || DEFAULT_SECRETS_ROOT;
+  const alertTo = firstNonEmpty(env.ALERT_TO);
+  if (!alertTo) {
+    throw new Error('ALERT_TO must be configured for alert delivery');
+  }
   return {
     openclawAgentHooksUrl: env.OPENCLAW_AGENT_HOOKS_URL || DEFAULT_OPENCLAW_AGENT_HOOKS_URL,
     hooksTokenFile:
@@ -25,7 +31,7 @@ function resolveAlertDefaults(env = process.env) {
       env.HOOKS_TOKEN_FILE ||
       `${secretsRoot}/litellm-alert-bridge.token`,
     alertChannel: env.ALERT_CHANNEL || 'telegram',
-    alertTo: env.ALERT_TO || DEFAULT_ALERT_TO,
+    alertTo,
     alertAgentId: env.ALERT_AGENT_ID || DEFAULT_ALERT_AGENT_ID,
     alertName: env.ALERT_NAME || DEFAULT_ALERT_NAME,
   };
@@ -100,6 +106,8 @@ function httpRequestText(urlString, { method = 'GET', headers = {}, body, timeou
 }
 
 async function deliverAlert(text, {
+  event = null,
+  payload = null,
   env = process.env,
   fsImpl = { readFileSync },
   requestText = httpRequestText,
@@ -117,6 +125,8 @@ async function deliverAlert(text, {
       deliver: true,
       channel: config.alertChannel,
       to: config.alertTo,
+      ...(event ? { event } : {}),
+      ...(payload ? { payload } : {}),
     },
   });
 }

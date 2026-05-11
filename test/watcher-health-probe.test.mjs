@@ -172,3 +172,32 @@ test('disabled health probe emits no events and sends no alerts', async () => {
   assert.equal(alerts.length, 0);
   assert.equal(probe.getConfig().enabled, false);
 });
+
+test('health alerts do not block poll completion while delivery is still pending', async () => {
+  const events = [];
+  let alertCalls = 0;
+  const probe = createWatcherHealthProbe({
+    env: DEFAULT_ENV,
+    pid: 12345,
+    stdout: {
+      write(line) {
+        events.push(JSON.parse(line));
+      },
+    },
+    logger: {
+      error() {},
+    },
+    deliverAlertFn: async () => {
+      alertCalls += 1;
+      await new Promise(() => {});
+    },
+  });
+
+  await silentTick(probe);
+  await silentTick(probe);
+  await silentTick(probe);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].event, 'watcher.no_progress');
+  assert.equal(alertCalls, 1);
+});

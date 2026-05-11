@@ -2903,6 +2903,12 @@ test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral wh
         })(),
         promptTemplate: 'Remediation prompt template.',
         resolvePRLifecycleImpl: async () => null,
+        execFileImpl: async (command, args) => {
+          if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+            mkdirSync(path.join(args[3], '.git'), { recursive: true });
+          }
+          return { stdout: '', stderr: '' };
+        },
       }),
       /post-spawn bookkeeping failed/
     );

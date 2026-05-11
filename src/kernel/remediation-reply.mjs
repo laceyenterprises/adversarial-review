@@ -1,3 +1,7 @@
+/**
+ * @typedef {import('./contracts.js').RemediationReply} RemediationReply
+ */
+
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
 const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
 const PUBLIC_REPLY_MAX_CHARS = 1200;
@@ -468,6 +472,10 @@ function validateBlockingCoverage(reply, expectedJob) {
   }
 }
 
+/**
+ * @param {unknown} reply
+ * @returns {RemediationReply}
+ */
 function validateRemediationReply(reply, { expectedJob = null, publicCommentLabel = 'public reply' } = {}) {
   if (!reply || typeof reply !== 'object' || Array.isArray(reply)) {
     throw new Error('Remediation reply must be a JSON object');
@@ -578,6 +586,10 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
   return reply;
 }
 
+/**
+ * @param {string} raw
+ * @returns {RemediationReply}
+ */
 function parseRemediationReply(raw, options = {}) {
   return validateRemediationReply(JSON.parse(raw), options);
 }

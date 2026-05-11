@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+/**
+ * @typedef {import('./contracts.js').PromptStage} PromptStage
+ */
+
 const STAGES = new Set(['first', 'middle', 'last']);
 const PROMPT_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/;
 
@@ -28,6 +32,9 @@ function assertPromptPathSegment(name, value) {
   return value;
 }
 
+/**
+ * @returns {PromptStage}
+ */
 function pickReviewerStage({
   reviewAttemptNumber,
   completedRemediationRounds,
@@ -45,6 +52,9 @@ function pickReviewerStage({
   return 'middle';
 }
 
+/**
+ * @returns {PromptStage}
+ */
 function pickRemediatorStage({
   remediationRound,
   maxRemediationRounds,

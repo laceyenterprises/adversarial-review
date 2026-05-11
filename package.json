@@ -19,7 +19,8 @@
     "check-branch-protection": "node src/check-branch-protection.mjs",
     "retrigger-review": "node src/retrigger-review.mjs",
     "retrigger-remediation": "node src/retrigger-remediation.mjs",
-    "reset-pr": "node src/reset-pr.mjs"
+    "reset-pr": "node src/reset-pr.mjs",
+    "typecheck:contracts": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --strict test/fixtures/kernel/contracts-check.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -27,5 +28,8 @@
     "@octokit/rest": "^21.1.1",
     "better-sqlite3": "^11.9.1",
     "openai": "^4.98.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

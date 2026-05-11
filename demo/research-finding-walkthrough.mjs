@@ -9,7 +9,7 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { createSlackThreadCommsAdapter } from '../src/adapters/comms/slack-thread/index.mjs';
+import { createSlackThreadCommsAdapter, stableStringify } from '../src/adapters/comms/slack-thread/index.mjs';
 import { createLinearTriageAdapter } from '../src/adapters/operator/linear-triage/index.mjs';
 import { createMarkdownFileSubjectAdapter } from '../src/adapters/subject/markdown-file/index.mjs';
 import {
@@ -29,6 +29,10 @@ const NOW = '2026-05-11T19:00:00.000Z';
 
 function marker(label) {
   console.log(`[research-finding demo] ${label}`);
+}
+
+function deliveryExternalIdForKey(key) {
+  return `comms-slack-thread:${createHash('sha256').update(stableStringify(key)).digest('hex')}`;
 }
 
 function copyPromptSet(rootDir) {
@@ -267,6 +271,64 @@ assert.equal(finalState.lifecycle, 'terminal');
 
 const transcriptPath = join(rootDir, '.slack-thread-transcripts', 'subject.md', 'slack-thread.jsonl');
 const transcriptLines = readFileSync(transcriptPath, 'utf8').trim().split('\n');
-assert.equal(transcriptLines.length, 3);
-marker(`converge -> terminal state reached with ${transcriptLines.length} transcript deliveries`);
+const firstReviewKey = {
+  domainId: initialRef.domainId,
+  subjectExternalId: initialRef.subjectExternalId,
+  revisionRef: initialRef.revisionRef,
+  round: 1,
+  kind: 'review',
+};
+const remediationReplyKey = {
+  domainId: initialRef.domainId,
+  subjectExternalId: initialRef.subjectExternalId,
+  revisionRef: initialRef.revisionRef,
+  round: 1,
+  kind: 'remediation-reply',
+};
+const rereviewKey = {
+  domainId: remediatedState.ref.domainId,
+  subjectExternalId: remediatedState.ref.subjectExternalId,
+  revisionRef: remediatedState.ref.revisionRef,
+  round: 2,
+  kind: 'review',
+};
+assert.deepEqual(transcriptLines, [
+  stableStringify({
+    adapter: 'comms-slack-thread',
+    attemptedAt: NOW,
+    delivered: true,
+    deliveredAt: NOW,
+    deliveryExternalId: deliveryExternalIdForKey(firstReviewKey),
+    key: firstReviewKey,
+    payload: {
+      type: 'reviewer-verdict',
+      verdict: firstVerdict,
+    },
+  }),
+  stableStringify({
+    adapter: 'comms-slack-thread',
+    attemptedAt: NOW,
+    delivered: true,
+    deliveredAt: NOW,
+    deliveryExternalId: deliveryExternalIdForKey(remediationReplyKey),
+    key: remediationReplyKey,
+    payload: {
+      type: 'remediation-reply',
+      reply: remediationReply,
+    },
+  }),
+  stableStringify({
+    adapter: 'comms-slack-thread',
+    attemptedAt: NOW,
+    delivered: true,
+    deliveredAt: NOW,
+    deliveryExternalId: deliveryExternalIdForKey(rereviewKey),
+    key: rereviewKey,
+    payload: {
+      type: 'reviewer-verdict',
+      verdict: rereviewVerdict,
+    },
+  }),
+]);
+marker(`converge -> terminal state reached with ${transcriptLines.length} byte-stable transcript deliveries`);
 marker(`done -> transcript fixture: ${transcriptPath}`);

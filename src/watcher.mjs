@@ -1322,7 +1322,7 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
   }
   } finally {
     try {
-      healthProbe?.finishTick?.(healthTick);
+      await healthProbe?.finishTick?.(healthTick);
     } catch (err) {
       console.error('[watcher] health probe finalize failed:', err?.message || err);
     }

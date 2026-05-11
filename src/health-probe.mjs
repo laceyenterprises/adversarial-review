@@ -135,7 +135,7 @@ function createWatcherHealthProbe({
         state.healthState = 'healthy';
         state.noProgressSilentPolls = 0;
         state.spawnsSinceRecovery = 0;
-        void sendTransitionAlert(buildRecoveredAlertText(payload), payload);
+        await sendTransitionAlert(buildRecoveredAlertText(payload), payload);
         return payload;
       }
       state.spawnsSinceRecovery = 0;
@@ -162,7 +162,7 @@ function createWatcherHealthProbe({
       state.noProgressSilentPolls = state.pollsSinceLastSpawn;
       state.spawnsSinceRecovery = 0;
       if (isTransition || (state.pollsSinceLastSpawn % config.threshold === 0)) {
-        void sendTransitionAlert(buildNoProgressAlertText(payload), payload);
+        await sendTransitionAlert(buildNoProgressAlertText(payload), payload);
       }
       return payload;
     }

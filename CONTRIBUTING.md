@@ -87,7 +87,7 @@ For your domain, create the same names under `prompts/your-domain/`. The reviewe
 
 The remediator prompts must ask for a remediation reply JSON object with `addressed[]`, `pushback[]`, `blockers[]`, and `reReview`.
 
-Finally, add an end-to-end fixture test. `test/research-finding-end-to-end.test.mjs` is the worked example. It:
+Finally, add an end-to-end fixture test. `test/research-finding-end-to-end.test.mjs` is the regression-net worked example, and `demo/research-finding-walkthrough.mjs` mirrors the same byte-stable transcript contract as a smoke walkthrough. The end-to-end test:
 
 - Builds a temporary fixture root.
 - Copies `domains/research-finding.json`.
@@ -129,12 +129,12 @@ npm run typecheck:contracts
 
 ## Pull Requests
 
-Use a title prefix that identifies the contributor or worker class, such as:
+Worker-generated PRs use title prefixes that identify the worker class, such as:
 
 ```text
 [codex] add markdown policy finding domain
 ```
 
-Maintainers can route review and automation from that prefix without requiring contributors to know about any private bot names. Keep PRs small enough that one domain, adapter, or kernel behavior change can be reviewed independently.
+If you are contributing as a human from an existing clone, omit the worker prefix and use a normal descriptive title instead. Maintainers can route review and automation from the worker prefixes without asking outside contributors to participate in the private worker-class contract. Keep PRs small enough that one domain, adapter, or kernel behavior change can be reviewed independently.
 
 For licensing, this project defaults to Apache-2.0 because it is permissive and includes an explicit patent grant. If maintainers decide MIT is a better fit later, that can be changed with project-level approval.

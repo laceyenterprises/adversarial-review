@@ -13,15 +13,15 @@ The open-source path above does not require the local deployment paths listed he
 Audit command used for LAC-529:
 
 ```bash
-rg -n "/Users/airlock|agent-os-hq|HQ_ROOT|agent-os/\\.agent-os|agent-os" .
+rg -n "/Users/[^/]+|agent-os-hq|HQ_ROOT|agent-os/\\.agent-os|agent-os" .
 ```
 
 ## Load-Bearing Runtime Defaults
 
-- `src/alert-delivery.mjs` has `DEFAULT_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local'`. This is a maintainer-local default for alert bridge credentials.
-- `src/watcher.mjs` defaults reviewer subprocess `HOME` to `/Users/airlock` when no environment override is present. This is a maintainer-local daemon default.
-- `src/reviewer.mjs` has `ACPX_CLI = '/Users/airlock/.openclaw/tools/acpx/node_modules/.bin/acpx'`. This is a maintainer-local reviewer CLI path.
-- `src/follow-up-remediation.mjs` defaults reply storage to `~/agent-os-hq` and supports `HQ_ROOT`. That path is part of the existing hosted remediation-worker contract for code PRs.
+- `src/alert-delivery.mjs` has `DEFAULT_SECRETS_ROOT = '<operator-home>/agent-os/agents/clio/credentials/local'`. This is a maintainer-local default for alert bridge credentials.
+- `src/watcher.mjs` defaults reviewer subprocess `HOME` to `<operator-home>` when no environment override is present. This is a maintainer-local daemon default.
+- `src/reviewer.mjs` has `ACPX_CLI = '<operator-home>/.openclaw/tools/acpx/node_modules/.bin/acpx'`. This is a maintainer-local reviewer CLI path.
+- `src/follow-up-remediation.mjs` defaults reply storage to `<operator-home>/agent-os-hq` and supports `HQ_ROOT`. That path is part of the existing hosted remediation-worker contract for code PRs.
 - `src/adversarial-gate-status.mjs` and `src/check-branch-protection.mjs` use the GitHub status context `agent-os/adversarial-gate`. That string is an external status-context name, not a filesystem path.
 - `src/follow-up-merge-agent.mjs`, `src/follow-up-retrigger-label.mjs`, `src/retrigger-review.mjs`, `src/retrigger-remediation.mjs`, and `src/reset-pr.mjs` contain `hq.*` verbs or `hq` CLI integration points. These are maintainer deployment hooks for existing PR-review automation.
 

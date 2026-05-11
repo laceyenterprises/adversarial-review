@@ -1,9 +1,9 @@
 # Adversarial Review
 
-Try the pluggable research-finding pipeline in five minutes:
+Try the pluggable research-finding pipeline from an existing clone in five minutes:
 
 ```bash
-git clone git@github.com:laceyenterprises/adversarial-review.git && cd adversarial-review && npm install && bash demo/research-finding-walkthrough.sh
+npm install && bash demo/research-finding-walkthrough.sh
 ```
 
 Adversarial Review runs a cross-model review loop: one actor writes or changes a subject, a separate reviewer model looks for problems, a remediation worker fixes the findings, and the reviewer checks again until the subject converges or the configured round budget is spent.
@@ -85,6 +85,12 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md). It walks through the `research-fi
 ## Deployment Notes
 
 This repository still includes some maintainer-local deployment wrappers and regression fixtures from the original hosted environment. They are not required for the local demo or test suite. The current audit is documented in [DEPLOYMENT.md](DEPLOYMENT.md).
+
+## Operators
+
+If you are running the live PR-review loop rather than the local research-finding demo, start with [docs/follow-up-runbook.md](docs/follow-up-runbook.md) and [docs/SPEC-adversarial-review-auto-remediation.md](docs/SPEC-adversarial-review-auto-remediation.md).
+
+The operator surface includes `npm run retrigger-review`, `npm run retrigger-remediation`, and the watcher drain marker at `data/watcher-drain.json`. Reconcile-time public PR comments and retries are tracked durably under `commentDelivery`; see the runbook for the delivery and retry contract.
 
 ## License
 

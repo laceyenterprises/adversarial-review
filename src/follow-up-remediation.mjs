@@ -78,6 +78,7 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
+const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
 
 // The Worker-Class trailer this pipeline stamps on commits via the
 // commit-msg hook. Different from the worker-model class — encodes
@@ -630,17 +631,29 @@ function spawnRemediationWorker(workerClass, opts) {
 
 function normalizeMaxConcurrentFollowUpJobs(value, {
   fallback = DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
+  max = MAX_REMEDIATION_MAX_CONCURRENT_JOBS,
+  onClamp = null,
 } = {}) {
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  if (parsed > max) {
+    onClamp?.({
+      requested: parsed,
+      clamped: max,
+    });
+    return max;
+  }
+  return parsed;
 }
 
-function resolveRemediationMaxConcurrentJobs(env = process.env) {
-  return normalizeMaxConcurrentFollowUpJobs(env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV]);
+function resolveRemediationMaxConcurrentJobs(env = process.env, options = {}) {
+  return normalizeMaxConcurrentFollowUpJobs(env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV], options);
 }
 
 function followUpJobRepoPrKey(job) {
-  return `${job?.repo || ''}#${job?.prNumber || ''}`;
+  return `${String(job?.repo || '').toLowerCase()}#${job?.prNumber || ''}`;
 }
 
 function loadFollowUpPromptTemplate(rootDir = ROOT, { stage = 'first' } = {}) {
@@ -2644,6 +2657,7 @@ async function consumeNextFollowUpJob({
       failure,
       remediationWorker,
     });
+    err.followUpJobId = claimed.job?.jobId || null;
     err.followUpJobPath = failed.jobPath;
     throw err;
   }
@@ -2658,6 +2672,7 @@ async function consumeFollowUpJobsUntilCapacity({
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
+  shouldStop = () => false,
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
@@ -2667,19 +2682,33 @@ async function consumeFollowUpJobsUntilCapacity({
   let spawned = 0;
   let stopped = 0;
 
-  while ((activeJobs.length + spawned) < concurrencyCap) {
+  while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
     /* eslint-disable no-await-in-loop */
-    const result = await consumeNextFollowUpJob({
-      rootDir,
-      execFileImpl,
-      spawnImpl,
-      now,
-      promptTemplate,
-      resolvePRLifecycleImpl,
-      postCommentImpl,
-      excludedRepoPrKeys: blockedRepoPrKeys,
-      log,
-    });
+    let result;
+    try {
+      result = await consumeNextFollowUpJob({
+        rootDir,
+        execFileImpl,
+        spawnImpl,
+        now,
+        promptTemplate,
+        resolvePRLifecycleImpl,
+        postCommentImpl,
+        excludedRepoPrKeys: blockedRepoPrKeys,
+        log,
+      });
+    } catch (err) {
+      if (!err?.followUpJobPath) {
+        throw err;
+      }
+      const jobIdTag = err.followUpJobId ? ` jobId=${err.followUpJobId}` : '';
+      const jobPathTag = err.followUpJobPath ? ` jobPath=${err.followUpJobPath}` : '';
+      const detail = err?.message || String(err);
+      log.warn?.(
+        `[follow-up-remediation] continuing drain after failed spawn preparation${jobIdTag}${jobPathTag}: ${detail}`
+      );
+      continue;
+    }
     /* eslint-enable no-await-in-loop */
     results.push(result);
 

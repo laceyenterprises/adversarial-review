@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
@@ -57,7 +57,13 @@ function windowStart({ now = new Date(), days = DEFAULT_WINDOW_DAYS, since = nul
 
 function stableStringify(value) {
   if (Array.isArray(value)) {
-    return `[${value.map(stableStringify).join(',')}]`;
+    // `JSON.stringify(undefined)` returns the string undefined-the-value
+    // (not "undefined"), which then coerces to "" when joined. That makes
+    // `stableStringify([1, undefined, 2])` and `stableStringify([1, 2])`
+    // indistinguishable — two semantically different arrays compare equal.
+    // Substitute a sentinel for any undefined slot so distinct content
+    // produces distinct serialization, preserving the diff guarantee.
+    return `[${value.map((item) => (item === undefined ? '"__undefined__"' : stableStringify(item))).join(',')}]`;
   }
   if (value && typeof value === 'object') {
     return `{${Object.keys(value).sort().map((key) => (
@@ -275,20 +281,37 @@ function normalizeOperatorOverrideEvent(event = {}, setContext = {}, subjectFall
     ?? subjectFallback.revisionRef
     ?? subjectFallback.revision_ref
     ?? null;
-  if (!observedRevisionRef || String(observedRevisionRef) !== String(currentRevisionRef || '')) {
-    return null;
-  }
-
+  if (!observedRevisionRef) return null;
+  // When the expected/current revision is missing, the prior `String(...)
+  // !== String('')` comparison rejected EVERY real observed revision —
+  // override events vanished silently because of upstream metadata gaps.
+  // The harness is supposed to surface that gap, not hide it. Emit the
+  // event with `revisionMismatch: 'unknown-expected'` so it shows up
+  // in the diff axis and operators can audit the cause.
   const subject = subjectIdentityFromParts({
     ...subjectFallback,
     ...(event.subjectRef || setContext.subjectRef || {}),
     revisionRef: currentRevisionRef,
   });
+  if (!currentRevisionRef) {
+    return {
+      type,
+      subject: `${subject.domainId || CODE_PR_DOMAIN_ID}:${subject.subjectExternalId || `${subject.repo}#${subject.prNumber}`}`,
+      observedRevisionRef: String(observedRevisionRef),
+      expectedRevisionRef: null,
+      eventExternalId: event.eventExternalId ?? event.eventId ?? event.id ?? null,
+      roundCap: normalizeRoundCap(event.roundCap),
+      revisionMismatch: 'unknown-expected',
+    };
+  }
+  if (String(observedRevisionRef) !== String(currentRevisionRef)) {
+    return null;
+  }
   return {
     type,
     subject: `${subject.domainId || CODE_PR_DOMAIN_ID}:${subject.subjectExternalId || `${subject.repo}#${subject.prNumber}`}`,
     observedRevisionRef: String(observedRevisionRef),
-    expectedRevisionRef: currentRevisionRef ? String(currentRevisionRef) : null,
+    expectedRevisionRef: String(currentRevisionRef),
     eventExternalId: event.eventExternalId ?? event.eventId ?? event.id ?? null,
     roundCap: normalizeRoundCap(event.roundCap),
   };
@@ -359,9 +382,22 @@ function normalizeReplayRecord(record = {}) {
 }
 
 function recordsFromSnapshot(snapshot = {}) {
-  if (Array.isArray(snapshot.records)) return snapshot.records;
-  if (Array.isArray(snapshot.subjects)) return snapshot.subjects;
-  if (Array.isArray(snapshot.jobs)) return snapshot.jobs;
+  // Silent source-priority hid the case where a hand-massaged snapshot
+  // populated more than one of `records`/`subjects`/`jobs` — only the
+  // first was read and the rest were silently dropped. Warn loudly via
+  // the snapshot's parseErrors if multiple are populated; the harness's
+  // value is "shows me everything that changed."
+  const sources = ['records', 'subjects', 'jobs'].filter((key) => Array.isArray(snapshot[key]));
+  if (sources.length > 1 && Array.isArray(snapshot.parseErrors)) {
+    snapshot.parseErrors.push({
+      source: 'snapshot-multi-key',
+      file: null,
+      message: `Snapshot has multiple record arrays populated (${sources.join(', ')}); only "${sources[0]}" is read. Merge upstream or pick one.`,
+    });
+  }
+  for (const source of sources) {
+    return snapshot[source];
+  }
   return [];
 }
 
@@ -415,7 +451,23 @@ function normalizeReplaySnapshot(snapshot = {}) {
       },
       deliveries: [...existing.deliveries, ...normalized.deliveries].sort(compareStable),
       duplicateDeliveries: findDuplicateDeliveries([...existing.deliveries, ...normalized.deliveries]),
-      approvalOverrides: [...existing.approvalOverrides, ...normalized.approvalOverrides].sort(compareStable),
+      // Dedupe approvalOverrides on merge — when both source records
+      // reference the same `eventExternalId` (the normal case for a
+      // label that fires once and appears in both reviewed_prs and the
+      // terminal job JSON), the un-deduped concat doubles it and
+      // surfaces as a spurious diff. `remediation` is folded with
+      // `dedupeSorted`; mirror that here.
+      approvalOverrides: (() => {
+        const seen = new Set();
+        const merged = [];
+        for (const event of [...existing.approvalOverrides, ...normalized.approvalOverrides]) {
+          const sig = stableStringify(event);
+          if (seen.has(sig)) continue;
+          seen.add(sig);
+          merged.push(event);
+        }
+        return merged.sort(compareStable);
+      })(),
     });
   }
   return {
@@ -573,7 +625,11 @@ function collectDeliveryRows(db, sinceIso) {
   ).all(sinceIso);
 }
 
-function safeReadJson(filePath) {
+function readJson(filePath) {
+  // Throws on either I/O or parse failure. Caller MUST wrap in try/catch
+  // and route into `recordParseError`. The earlier name `safeReadJson`
+  // was misleading — nothing about this helper is safe; the safety is
+  // the caller's job.
   const raw = readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
 }
@@ -592,7 +648,7 @@ function collectTerminalJobs(rootDir, sinceIso) {
       const stat = statSync(filePath);
       let job;
       try {
-        job = safeReadJson(filePath);
+        job = readJson(filePath);
       } catch (error) {
         recordParseError(parseErrors, {
           source: 'terminal-job-json',
@@ -771,7 +827,10 @@ function runCommand(command, env) {
     child.on('error', reject);
     child.on('close', (code, signal) => {
       if (code === 0) resolvePromise();
-      else reject(new Error(`Replay command exited with ${signal || code}`));
+      // Render code AND signal explicitly: a child killed by a signal
+      // has code=null and the old `${signal || code}` rendered "null"
+      // — useless to a triaging operator. Keep both tokens grep-able.
+      else reject(new Error(`Replay command exited code=${code ?? 'null'} signal=${signal ?? 'null'}`));
     });
   });
 }
@@ -806,7 +865,14 @@ async function main(argv = process.argv.slice(2)) {
 
   const report = diffReplaySnapshots(productionSnapshot, stagingSnapshot);
   if (args.output) {
-    writeFileSync(resolve(args.output), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    // Atomic write: write to a tmp sibling then rename over the target.
+    // Ctrl-C or disk-full mid-write would otherwise leave a half-written
+    // file at the operator-supplied path, silently corrupting the
+    // reference baseline this harness exists to produce.
+    const target = resolve(args.output);
+    const tmp = `${target}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    renameSync(tmp, target);
   }
   console.log(JSON.stringify({
     ok: report.ok,

@@ -106,7 +106,11 @@ function subjectKey(identity = {}) {
     return `${normalized.domainId}:${normalized.subjectExternalId}@${normalized.revisionRef}`;
   }
   if (normalized.repo && normalized.prNumber) {
-    return `legacy:${normalized.repo}#${normalized.prNumber}`;
+    // Include revisionRef in the legacy key so two legacy-shaped records
+    // for the same PR at different SHAs don't collapse into one subject
+    // and get merged across revisions. Legacy paths are dying out but
+    // still present in 30-day windows during rollout.
+    return `legacy:${normalized.repo}#${normalized.prNumber}@${normalized.revisionRef || 'no-revision'}`;
   }
   return 'unknown-subject';
 }
@@ -365,11 +369,25 @@ function normalizeReplaySnapshot(snapshot = {}) {
   const bySubject = new Map();
   const subjectConflicts = [];
   const unkeyedRecords = [];
+  const unidentifiedRecords = [];
   for (const record of recordsFromSnapshot(snapshot)) {
     const normalized = normalizeReplayRecord(record);
     const subjectHasTypedIdentity = normalized.subject.domainId && normalized.subject.subjectExternalId;
     if (subjectHasTypedIdentity && !normalized.subject.revisionRef) {
       unkeyedRecords.push({
+        subject: normalized.subject,
+        verdictState: normalized.verdictState,
+      });
+      continue;
+    }
+    // Fully-unidentifiable records (neither typed identity nor legacy
+    // repo+prNumber) MUST NOT be merged through `bySubject`. Earlier
+    // versions used `'unknown-subject'` as a synthetic merge key,
+    // collapsing N malformed records into one blob and hiding input drift
+    // — the exact failure mode this harness is supposed to surface.
+    // Route them to their own list so the diff preserves them.
+    if (normalized.key === 'unknown-subject') {
+      unidentifiedRecords.push({
         subject: normalized.subject,
         verdictState: normalized.verdictState,
       });
@@ -405,6 +423,7 @@ function normalizeReplaySnapshot(snapshot = {}) {
     parseErrors: Array.isArray(snapshot.parseErrors) ? snapshot.parseErrors.slice().sort(compareStable) : [],
     subjectConflicts: subjectConflicts.sort(compareStable),
     unkeyedRecords: unkeyedRecords.sort(compareStable),
+    unidentifiedRecords: unidentifiedRecords.sort(compareStable),
     records: Array.from(bySubject.values()).sort((a, b) => compareStable(a.key, b.key)),
   };
 }
@@ -436,6 +455,13 @@ function diffReplaySnapshots(productionSnapshot, stagingSnapshot) {
     field: 'unkeyedRecords',
     expected: expected.unkeyedRecords,
     actual: actual.unkeyedRecords,
+  });
+  diffValue({
+    diffs,
+    subject: '__snapshot__',
+    field: 'unidentifiedRecords',
+    expected: expected.unidentifiedRecords,
+    actual: actual.unidentifiedRecords,
   });
 
   // Asymmetric-subject coverage is the most common replay mismatch.

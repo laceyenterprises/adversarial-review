@@ -213,6 +213,37 @@ test('normalizeReplaySnapshot surfaces conflicting verdict merges deterministica
   }]);
 });
 
+test('normalizeReplaySnapshot routes fully-unidentifiable records into unidentifiedRecords', () => {
+  // Records without typed identity AND without legacy repo+prNumber must
+  // not be merged through 'unknown-subject' — that hides input drift.
+  const snapshot = normalizeReplaySnapshot({
+    records: [
+      { reviewBody: '## Verdict\nRequest changes' },
+      { reviewBody: '## Verdict\nComment only' },
+    ],
+  });
+  assert.deepEqual(snapshot.records, []);
+  assert.equal(snapshot.unidentifiedRecords.length, 2);
+});
+
+test('two records for one PR at different revisions stay distinct (no cross-revision collision)', () => {
+  // Whether keyed typed (`code-pr:...@sha`) or legacy (`legacy:...@sha`),
+  // two records at different revisionRefs must NOT merge into one subject.
+  // The earlier legacy key omitted revisionRef and would have collapsed
+  // these; the typed path already includes it. Pin both behaviors.
+  const snapshot = normalizeReplaySnapshot({
+    records: [
+      { repo: 'foo/bar', prNumber: 7, revisionRef: 'sha-a', reviewBody: '## Verdict\nRequest changes' },
+      { repo: 'foo/bar', prNumber: 7, revisionRef: 'sha-b', reviewBody: '## Verdict\nComment only' },
+    ],
+  });
+  assert.equal(snapshot.records.length, 2);
+  const keys = snapshot.records.map((r) => r.key).sort();
+  for (const key of keys) {
+    assert.ok(key.includes('@sha-a') || key.includes('@sha-b'), `expected revisionRef in key, got ${key}`);
+  }
+});
+
 test('normalizeReplaySnapshot routes typed records without revisionRef into unkeyedRecords', () => {
   const snapshot = normalizeReplaySnapshot({
     records: [{

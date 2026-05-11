@@ -761,6 +761,7 @@ test('claimNextFollowUpJob honors explicit operator requeues for settled reviews
   });
 
   assert.match(requeued.jobPath, /data\/follow-up-jobs\/pending\/.+\.json$/);
+  assert.equal(requeued.job.remediationPlan.nextAction.operatorOverride, true);
   assert.ok(claimed);
   assert.equal(claimed.stopped, undefined);
   assert.equal(claimed.job.status, 'in_progress');

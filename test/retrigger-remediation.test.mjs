@@ -154,6 +154,7 @@ test('retrigger-remediation requeues stopped:review-settled jobs for explicit op
   const latest = findLatestFollowUpJob(rootDir, { repo: 'laceyenterprises/agent-os', prNumber: 238 });
   assert.equal(latest.job.status, 'pending');
   assert.equal(latest.job.remediationPlan.maxRounds, 3);
+  assert.equal(latest.job.remediationPlan.nextAction.operatorOverride, true);
 
   const claimed = claimNextFollowUpJob({
     rootDir,

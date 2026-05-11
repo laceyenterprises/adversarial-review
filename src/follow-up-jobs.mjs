@@ -277,14 +277,9 @@ function buildRecommendedFollowUpAction({ critical }) {
 function isSettledReviewJob(job) {
   const nextAction = job?.remediationPlan?.nextAction;
   // An explicit operator retrigger requeues a settled job back to pending
-  // with a durable consume-pending-round marker. Allow exactly that next
-  // claim to proceed even if the stored review body is still Comment-only.
-  const operatorRequestedRound = (
-    nextAction?.type === 'consume-pending-round'
-    && nextAction?.requestedAt
-    && nextAction?.requestedBy
-  );
-  if (operatorRequestedRound) return false;
+  // with a durable one-shot override. Allow exactly that next claim to
+  // proceed even if the stored review body is still Comment-only.
+  if (nextAction?.operatorOverride === true) return false;
 
   const verdict = normalizeReviewVerdict(extractReviewVerdict(job?.reviewBody));
   return verdict === 'comment-only' || verdict === 'approved';
@@ -1736,6 +1731,7 @@ function requeueFollowUpJobForNextRound({
         type: 'consume-pending-round',
         round: currentRound + 1,
         operatorVisibility: 'explicit',
+        operatorOverride: true,
         requestedAt,
         requestedBy,
         reason,

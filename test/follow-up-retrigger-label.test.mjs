@@ -162,6 +162,7 @@ test('tryRetriggerRemediationFromLabel bumps + requeues + removes label on halte
   const updated = readFollowUpJob(result.jobPath);
   assert.equal(updated.remediationPlan.maxRounds, 3);
   assert.equal(updated.status, 'pending');
+  assert.equal(updated.remediationPlan.nextAction.operatorOverride, true);
 });
 
 test('tryRetriggerRemediationFromLabel requeues stopped:review-settled jobs for explicit operator flags', async () => {
@@ -192,6 +193,7 @@ test('tryRetriggerRemediationFromLabel requeues stopped:review-settled jobs for 
   assert.equal(result.labelRemoved, true);
   assert.equal(result.requeueOutcome, 'requeued');
   assert.deepEqual(ghCalls.map((call) => call.args[1]), ['edit', '--paginate', 'comment']);
+  assert.equal(readFollowUpJob(result.jobPath).remediationPlan.nextAction.operatorOverride, true);
 
   const claimed = claimNextFollowUpJob({
     rootDir,

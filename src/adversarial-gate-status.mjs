@@ -276,15 +276,15 @@ function pickAdversarialGateStatus({
     return makeDecision('pending', 'Posted review is waiting for follow-up ledger reconciliation.', 'awaiting-ledger');
   }
 
-  const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(latestJob.reviewBody));
-  if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
-    return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
-  }
   if (latestJobStatus === 'pending') {
     return makeDecision('pending', 'Remediation is queued.', 'remediation-queued');
   }
   if (latestJobStatus === 'in-progress') {
     return makeDecision('pending', 'Remediation is in progress.', 'remediation-in-progress');
+  }
+  const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(latestJob.reviewBody));
+  if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
+    return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
   }
   if (latestJobStatus === 'failed') {
     // Pipeline gave up (remediation worker died / infra issue) — don't block

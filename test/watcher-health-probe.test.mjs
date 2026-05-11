@@ -175,7 +175,7 @@ test('disabled health probe emits no events and sends no alerts', async () => {
 
 test('health alerts do not block poll completion while delivery is still pending', async () => {
   const events = [];
-  let alertCalls = 0;
+  let releaseAlert;
   const probe = createWatcherHealthProbe({
     env: DEFAULT_ENV,
     pid: 12345,
@@ -188,8 +188,45 @@ test('health alerts do not block poll completion while delivery is still pending
       error() {},
     },
     deliverAlertFn: async () => {
-      alertCalls += 1;
-      await new Promise(() => {});
+      await new Promise((resolve) => {
+        releaseAlert = resolve;
+      });
+    },
+  });
+
+  await silentTick(probe);
+  await silentTick(probe);
+
+  const thirdTick = silentTick(probe);
+  await Promise.resolve();
+  assert.equal(events.length, 1, 'health event is emitted before alert delivery settles');
+
+  let settled = false;
+  void thirdTick.then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false, 'finishTick waits for alert delivery');
+
+  releaseAlert();
+  await thirdTick;
+});
+
+test('health alert delivery rejection is logged and does not reject finishTick', async () => {
+  const errors = [];
+  const probe = createWatcherHealthProbe({
+    env: DEFAULT_ENV,
+    pid: 12345,
+    stdout: {
+      write() {},
+    },
+    logger: {
+      error(message) {
+        errors.push(message);
+      },
+    },
+    deliverAlertFn: async () => {
+      throw new Error('slack down');
     },
   });
 
@@ -197,7 +234,7 @@ test('health alerts do not block poll completion while delivery is still pending
   await silentTick(probe);
   await silentTick(probe);
 
-  assert.equal(events.length, 1);
-  assert.equal(events[0].event, 'watcher.no_progress');
-  assert.equal(alertCalls, 1);
+  assert.deepEqual(errors, [
+    '[watcher] health alert delivery failed: slack down',
+  ]);
 });

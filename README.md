@@ -1,592 +1,97 @@
----
-delegation: full
-confidence: 0.95
-last_verified: 2026-05-01
-influence_weight: medium
-tags: [adversarial-review-hq, documentation, reference]
-staleness_window: 30d
----
-# Adversarial Code Review Service
+# Adversarial Review
 
-Cross-model review for agent-authored pull requests, with a bounded follow-up remediation loop.
+Try the pluggable research-finding pipeline from an existing clone in five minutes:
 
-**Core rule:** the model that builds the code never reviews it.
-
-| Builder tag | Reviewer path | Review bot |
-|---|---|---|
-| `[codex]` | Claude | `claude-reviewer-lacey` |
-| `[claude-code]` | Codex | `codex-reviewer-lacey` |
-| `[clio-agent]` | Codex | `codex-reviewer-lacey` |
-| missing / malformed tag | fail-loud guardrail, no review spawned | n/a |
-
----
-
-## Docs map
-
-Start here depending on what you need:
-
-- **Quick orientation:** `README.md`
-- **Operating the remediation loop:** `docs/follow-up-runbook.md`
-- **Understanding states and transitions:** `docs/STATE-MACHINE.md`
-- **Debugging auth/runtime scars:** `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md`
-- **Silencing macOS TCC popups on worker spawn:** `docs/MACOS-TCC.md`
-- **Changing behavior in code:** `src/watcher.mjs`, `src/reviewer.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-remediation.mjs`
-
-Fast triage:
-
-- “Why didn’t review trigger?” → `README.md` + `docs/STATE-MACHINE.md`
-- “Why didn’t rereview happen?” → `docs/follow-up-runbook.md` + inspect `remediation-reply.json`
-- “What state is the system actually in?” → `docs/STATE-MACHINE.md` + `data/reviews.db` + `data/follow-up-jobs/*`
-- “What should I run next?” → `docs/follow-up-runbook.md`
-
----
-
-## What this module does
-
-### 1. First-pass review
-
-- watcher polls GitHub for tagged PRs
-- validates title guardrails
-- routes to the opposite reviewer model
-- posts the GitHub review through the correct bot
-- records durable delivery state in `data/reviews.db`
-
-### 2. Follow-up remediation
-
-After a successful review post, the service creates a durable follow-up job.
-
-The pipeline is **automated end-to-end**:
-
-- a LaunchAgent (`ai.laceyenterprises.adversarial-follow-up`) ticks every 2 min
-- each tick claims one pending job, spawns a detached remediation worker (codex or claude-code, picked from the PR's `builderTag`), then reconciles any in-progress jobs whose worker has exited
-- on every terminal transition (completed / stopped / failed) the reconciler posts a public PR comment under the matching reviewer-bot identity so operators can read the loop status from the PR itself
-- bounded by the risk-class cap in `ROUND_BUDGET_BY_RISK_CLASS` (in `src/follow-up-jobs.mjs`): `low=1`, `medium=2` (default for spec-less PRs), `high=3`, `critical=4`. `requestReviewRereview` in `src/review-state.mjs` does not implement a per-PR cooldown — the round cap is the only re-arm bound, and the cap is enforced PR-wide (each new follow-up job is seeded with the PR's prior round count so `claimNextFollowUpJob` stops past the budget). After every remediation round that asks for rereview, the watcher queues a fresh adversarial pass even when the PR has just consumed its final remediation round; the cap only prevents another worker spawn. Fresh jobs re-derive the default cap from the current risk class, but the watcher preserves a latest PR cap that is higher than the current tier so legacy in-flight PRs and operator-raised budgets are not silently truncated mid-deploy.
-
-Operator-visible state is preserved in `data/follow-up-jobs/` (the durable JSON queue) and `data/reviews.db` (the review ledger). Operators retain explicit control: `npm run follow-up:requeue`, `npm run follow-up:stop`, `npm run retrigger-review`, and `npm run retrigger-remediation` are the canonical levers when manual intervention is required.
-
-### 3. Convergence and automerge
-
-A PR's review verdict is what the worker-pool automerge gate watches (it reads the GitHub review body's `## Verdict` section: `Comment only` = pass, `Request changes` = fail). The remediation worker drives convergence by setting `reReview.requested` in `remediation-reply.json`:
-
-- `true` (the default success path) — fresh adversarial pass runs; new verdict replaces the stale `Request changes`; if it lands as `Comment only`, the gate fires automerge
-- `false` — deliberate human-intervention exit; the PR keeps its current verdict; a public PR comment flags that human review is needed (use the `blockers` array to explain)
-
-After the PR has consumed its remediation budget (`low=1`, `medium=2`, `high=3`, `critical=4` for default jobs, or a preserved higher legacy/operator cap), the next adversarial review pass still runs and uses the **lenient final-round threshold** (`prompts/code-pr/reviewer.last.md`). That threshold relaxes the *categorization* bar — it stops marginal nits from generating new blocking findings every round and stacking complexity faster than they remove risk. It does **not** relax the automated merge gate: on the final round, the verdict is only `Comment only` when both `## Blocking issues` and `## Non-blocking issues` are empty. Any remaining finding (blocking or non-blocking) keeps the verdict at `Request changes`, the bounded loop hits `max-rounds-reached` on the next consume attempt, and the system posts a public PR comment saying human intervention is required. If an operator decides the current head is acceptable, the `operator-approved` label can dispatch merge-agent even while review/remediation state is missing, pending, active, or still carrying `Request changes`, but only when the latest matching GitHub `labeled` event is attributable, was applied after the current head's PR timeline code event, and was not applied by the PR author. It still does not bypass not-mergeable state, failed, pending, or unknown CI, closed PRs, or explicit skip labels (`do-not-merge`, `merge-agent-skip`, `merge-agent-stuck`). Operators can use `merge-agent-requested` as a scoped one-shot request to dispatch merge-agent for a stuck branch; it must be attributable and current-head scoped, can bypass verdict/mergeable/check/remediation-round gates, and still respects closed PRs, active remediation, explicit skip labels, and duplicate-dispatch protection.
-
-If the loop reaches the stored round cap without converging, the job stops with code `max-rounds-reached` (or `round-budget-exhausted` when the consume site refuses a spawn over budget) and the PR comment explicitly says human intervention is required.
-
----
-
-## Architecture
-
-```text
-                          ┌──────────────────────────────┐
-                          │      GitHub Pull Request     │
-                          │ tagged at creation time      │
-                          │ [codex]/[claude-code]/...    │
-                          └──────────────┬───────────────┘
-                                         │
-                                         ▼
-                          ┌──────────────────────────────┐
-                          │         watcher.mjs          │
-                          │ poll + title validation      │
-                          │ + route selection            │
-                          └───────┬───────────┬──────────┘
-                                  │           │
-                    malformed tag  │           │ valid tagged PR
-                                  │           ▼
-                                  │  ┌──────────────────────────┐
-                                  │  │       reviewer.mjs       │
-                                  │  │ fetch diff, run reviewer │
-                                  │  │ post GitHub review       │
-                                  │  └──────────┬───────────────┘
-                                  │             │
-                                  ▼             ▼
-                    ┌──────────────────────┐  ┌──────────────────────────────┐
-                    │ fail-loud comment +  │  │ durable review row updated   │
-                    │ malformed DB state   │  │ + follow-up job created      │
-                    └──────────────────────┘  └──────────┬───────────────────┘
-                                                         │
-                                                         ▼
-                                  ┌──────────────────────────────────────────┐
-                                  │ data/follow-up-jobs/pending/*.json      │
-                                  └─────────────────┬────────────────────────┘
-                                                    │
-                                                    ▼
-                                  ┌──────────────────────────────────────────┐
-                                  │ adversarial-follow-up LaunchAgent        │
-                                  │ ticks every 2 min:                       │
-                                  │   1. consume one pending job             │
-                                  │   2. reconcile in-progress jobs          │
-                                  └─────────────────┬────────────────────────┘
-                                                    │
-                                                    ▼
-                         ┌─────────────────────────────────────────────────────────┐
-                         │ workspace artifacts                                     │
-                         │   codex-last-message.md                                 │
-                         │   remediation-reply.json                                │
-                         └─────────────────┬──────────────────────────────────────┘
-                                           │
-                                           ▼
-                              ┌──────────────────────────────┐
-                              │   reconcileFollowUpJob       │
-                              │ validate artifacts,          │
-                              │ finalize queue state,        │
-                              │ post PR comment              │
-                              └─────────────┬────────────────┘
-                                            │
-                    ┌───────────────────────┴────────────────────────┐
-                    ▼                                                ▼
-      ┌──────────────────────────────┐                 ┌──────────────────────────────┐
-      │ rereview requested=false     │                 │ rereview requested=true      │
-      │ -> stopped/no-progress       │                 │ -> review_status='pending'   │
-      │ -> PR comment: human needed  │                 │ -> watcher reviews again     │
-      └──────────────────────────────┘                 └─────────────┬────────────────┘
-                                                                     │
-                                                                     ▼
-                                                       ┌──────────────────────────────┐
-                                                       │ verdict on PR:               │
-                                                       │   Comment only -> automerge  │
-                                                       │   Request changes -> loop    │
-                                                       └──────────────────────────────┘
+```bash
+npm install && bash demo/research-finding-walkthrough.sh
 ```
 
----
+Adversarial Review runs a cross-model review loop: one actor writes or changes a subject, a separate reviewer model looks for problems, a remediation worker fixes the findings, and the reviewer checks again until the subject converges or the configured round budget is spent.
 
-## Quick start
+The project started with code pull-request review, but the important idea is broader than PRs. A "subject" can be a markdown research finding, a design memo, a policy change, a generated report, or any other artifact where a second model should challenge unsupported claims before humans rely on it.
 
-### Install
+## Why Cross-Model Review?
+
+Model-generated work can be fluent and wrong at the same time. The review loop helps by separating incentives:
+
+- The builder is optimized for producing the artifact.
+- The reviewer is optimized for finding risk, ambiguity, missing evidence, and contract violations.
+- The remediation worker is optimized for making the smallest durable fix.
+- The final verdict is parsed into a machine-readable gate.
+
+That separation makes the loop useful for open-ended work while still giving maintainers deterministic boundaries: prompt stages, verdict parsing, remediation-reply validation, and round budgets all live in the kernel.
+
+## What Makes It Pluggable?
+
+The kernel does not know whether the reviewed subject is a GitHub PR, a markdown file, a Slack thread, or something else. A domain config wires four pieces together:
+
+- `domains/<id>.json` chooses the adapters and prompt set.
+- A subject-channel adapter discovers the subject, reads content, prepares remediation workspaces, records remediation commits, and finalizes terminal state.
+- A comms-channel adapter posts reviewer verdicts, remediation replies, and operator notices with stable delivery keys.
+- An operator-surface adapter syncs external triage state or records human override events.
+
+The ARA-08 reference domain is `research-finding`. It uses:
+
+- `domains/research-finding.json`
+- `prompts/research-finding/reviewer.first.md`
+- `prompts/research-finding/reviewer.middle.md`
+- `prompts/research-finding/reviewer.last.md`
+- `prompts/research-finding/remediator.first.md`
+- `prompts/research-finding/remediator.middle.md`
+- `prompts/research-finding/remediator.last.md`
+- `src/adapters/subject/markdown-file/index.mjs`
+- `src/adapters/comms/slack-thread/index.mjs`
+- `src/adapters/operator/linear-triage/index.mjs`
+
+For the full seam diagram, see [docs/ARCH-adversarial-review-adapter-architecture.md](docs/ARCH-adversarial-review-adapter-architecture.md).
+
+## Quick Local Workflow
+
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-### Configure
-
-```bash
-cp .env.example .env
-# fill in runtime values
-```
-
-At minimum, expect to provide:
-
-- `GITHUB_TOKEN`
-- `GH_CODEX_REVIEWER_TOKEN`
-- `GH_CLAUDE_REVIEWER_TOKEN`
-- `LINEAR_API_KEY` (if using Linear sync)
-
-### Important auth note
-
-The real runtime contract is stricter than the generic `.env.example` suggests:
-
-- **Claude review path is OAuth-first**
-- **Codex review path is OAuth-first**
-- silent API-key fallback is not the intended operating mode
-
-If auth drifts, fail loud and fix auth. Don’t normalize degraded reviewer identity.
-
-### Configure watched repos
-
-Edit `config.json`.
-
-Minimal example:
-
-```json
-{
-  "repos": ["laceyenterprises/clio"],
-  "pollIntervalMs": 300000,
-  "linear": { "teamKey": "LAC" }
-}
-```
-
-### Install LaunchAgents
-
-Two agents drive the system:
-
-| Agent | Cadence | What it runs |
-|---|---|---|
-| `ai.laceyenterprises.adversarial-watcher` | KeepAlive (long-lived) | `src/watcher.mjs` — polls for tagged PRs, spawns reviewers |
-| `ai.laceyenterprises.adversarial-follow-up` | KeepAlive (long-lived, internal 120s loop) | `scripts/adversarial-follow-up-tick.sh` — consume + reconcile + retry-comments |
-
-Both plists live in `launchd/` and are automatically provisioned at boot by `scripts/os-restart.sh` in the parent agent-os repo.
-
-> **macOS TCC: read `docs/MACOS-TCC.md` before silencing popups.** Both the watcher's first-pass reviewer subprocess and the follow-up daemon's remediation workers exec the AI CLIs with bypass-style approvals (`--dangerously-bypass-approvals-and-sandbox` for codex; `--permission-mode bypassPermissions` / `--dangerously-skip-permissions` for claude) against untrusted PR content. The recommended posture is to run this stack on an **isolated worker account or VM**, not the operator's primary daily-driver account. The Full Disk Access workaround that approves `node`, `claude`, and the real Mach-O `codex` binary is a documented break-glass for non-isolated dev hosts that expands the trust boundary — read the security tradeoff and resolve authoritative paths with `node scripts/print-tcc-targets.mjs` before approving anything. Use `⌘⇧G` in the file picker to navigate into `/opt` and `~/.local` (Finder hides them). Full details: `docs/MACOS-TCC.md`.
-
-> **The shipped plists are user-bound.** The filename suffix (`.placey.plist`) names the operator the plist's `HOME` and log paths point at. If you are running as `placey`, the manual install below works as-is. If you are running as a different operator, **do not bootstrap the shipped plist directly** — it would write logs to the wrong account and resolve `gh`/Codex auth from the wrong home directory. Copy with the matching suffix and substitute paths first (see `Install for a different user` below).
-
-#### Install for `placey` (the shipped binding)
-
-```bash
-cp launchd/ai.laceyenterprises.adversarial-follow-up.placey.plist \
-   ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
-launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
-```
-
-#### Install for a different user
-
-Replace `<USER>` with the running operator's username everywhere:
-
-```bash
-sed "s|/Users/placey|/Users/<USER>|g" \
-  launchd/ai.laceyenterprises.adversarial-follow-up.placey.plist \
-  > ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
-plutil -lint ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
-launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
-```
-
-You will also need to add a matching entry to `USER_AGENTS_ONESHOT` in `scripts/os-restart.sh` so the daemon is picked up on a system restart. The corresponding `INSTALLABLE_USER_AGENT_PLISTS` entry must also point at the per-user template (the auto-install path copies the file verbatim — it does not substitute placeholders).
-
-#### Pause / resume
-
-```bash
-launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-follow-up   # pause
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist  # resume
-```
-
-The follow-up daemon resolves the same secrets the watcher does (`OP_SERVICE_ACCOUNT_TOKEN`, `GITHUB_TOKEN`, `GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`, `CODEX_AUTH_PATH`) and uses `unset` to scrub direct-provider API keys before exec — same OAuth-first contract as `src/reviewer.mjs`. Per-user paths (`CODEX_AUTH_PATH`, log dirs) are derived at runtime from `$HOME` set by the plist; only the WorkingDirectory and `AGENT_OS_ROOT` reference the repo location explicitly.
-
----
-
-## Commands
-
-### Start watcher
-
-```bash
-npm start
-```
-
-### Run one-shot review
-
-```bash
-node src/reviewer.mjs '{"repo":"laceyenterprises/clio","prNumber":42,"reviewerModel":"codex","botTokenEnv":"GH_CODEX_REVIEWER_TOKEN","linearTicketId":"LAC-42"}'
-```
-
-### Create a correctly tagged PR
-
-```bash
-npm run pr:create:tagged -- --tag codex --title "LAC-180: build PR creation helper" -- --body "..." --base main
-```
-
-### Follow-up queue operations
-
-```bash
-npm run follow-up:consume
-npm run follow-up:reconcile
-npm run follow-up:requeue -- data/follow-up-jobs/completed/<jobId>.json "Need one more bounded remediation pass"
-npm run follow-up:stop -- data/follow-up-jobs/in-progress/<jobId>.json "Operator requested stop"
-```
-
-### Test
+Run the full test suite:
 
 ```bash
 npm test
 ```
 
----
-
-## PR title contract
-
-Tagged titles are mandatory at PR creation time.
-
-Examples:
-
-```text
-[codex] fix: resolve null pointer in auth middleware (LAC-17)
-[claude-code] feat: add payment webhook handler (LAC-42)
-[clio-agent] chore: refresh docs and scripts
-```
-
-If the title is malformed:
-
-- watcher records `review_status = 'malformed'`
-- a fail-loud GitHub comment explains why review did not trigger
-- this state is terminal by design
-- safe recovery is usually opening a new correctly tagged PR
-
----
-
-## State you should know exists
-
-### Review ledger
-
-SQLite database:
-
-```text
-data/reviews.db
-```
-
-Important `review_status` values:
-
-- `pending`
-- `posted`
-- `failed`
-- `malformed`
-
-### Follow-up queue
-
-```text
-data/follow-up-jobs/
-  pending/
-  in-progress/
-  completed/
-  failed/
-  stopped/
-  workspaces/
-```
-
-Queue directories are the state machine.
-
----
-
-## The rereview contract
-
-Another adversarial review pass only happens if the remediation worker writes a valid reply JSON with:
-
-```json
-{
-  "reReview": {
-    "requested": true,
-    "reason": "..."
-  }
-}
-```
-
-That durable artifact causes reconciliation to reset the corresponding row in `reviews.db` back to:
-
-```text
-review_status = 'pending'
-```
-
-That is what re-arms the watcher.
-
-Not enough:
-
-- prose in the final message
-- commit text
-- PR comments
-- human assumptions
-
-The JSON artifact is the contract.
-
-**Convergence rule (see `prompts/code-pr/remediator.*.md`):** `reReview.requested = true` is the default success path — without it, the PR's stale `Request changes` verdict is never replaced and the worker-pool automerge gate never fires unless the operator explicitly overrides that head. `false` is reserved for deliberate human-intervention exits (cite the reason in `blockers`). The bounded risk-class loop is the safety net against thrashing; after the last remediation round the fresh adversarial pass still runs, and only the next remediation consume attempt is stopped by the cap. The final-round lenient threshold (see `prompts/code-pr/reviewer.last.md`) relaxes the categorization bar but never relaxes the automated merge gate.
-
----
-
-## Maintenance cheatsheet
-
-Inspect the queue:
+Run only the research-finding walkthrough:
 
 ```bash
-find data/follow-up-jobs -maxdepth 2 -type f -name '*.json' | sort
-jq '.' data/follow-up-jobs/in-progress/<jobId>.json
+bash demo/research-finding-walkthrough.sh
 ```
 
-Inspect review DB:
+The demo has no network dependency. It builds a temporary fixture, drives the markdown-file subject through the reviewer, verdict parser, remediation reply parser, slack-thread JSONL transcript adapter, re-review, and convergence path, then exits non-zero if any kernel or adapter invariant fails.
 
-```bash
-sqlite3 data/reviews.db "select repo,pr_number,review_status,pr_state,review_attempts,posted_at,failed_at,rereview_requested_at from reviewed_prs order by id desc limit 20;"
-```
+## Repository Map
 
-Quiesce the watcher before a managed service bounce:
+- `src/kernel/` contains the stable review-loop logic: verdict parsing, remediation-reply parsing, prompt-stage selection, and adapter contracts.
+- `src/adapters/subject/` contains subject-channel adapters.
+- `src/adapters/comms/` contains delivery adapters for review and remediation messages.
+- `src/adapters/operator/` contains maintainer-facing triage and override surfaces.
+- `domains/` contains wiring configs.
+- `prompts/` contains staged reviewer and remediator prompt sets.
+- `test/` contains kernel, adapter, and end-to-end fixtures.
+- `demo/` contains local walkthroughs that should run from a fresh clone.
 
-```bash
-mkdir -p data
-jq -n \
-  --arg reason "main-catchup bouncing adversarial-review" \
-  --arg requestedBy "main-catchup" \
-  --arg expiresAt "$(date -u -v+20M '+%Y-%m-%dT%H:%M:%SZ')" \
-  '{reason:$reason, requestedBy:$requestedBy, expiresAt:$expiresAt}' \
-  > data/watcher-drain.json
-```
+## Adding a Domain
 
-While `data/watcher-drain.json` exists and has not expired, `src/watcher.mjs` keeps lifecycle and merge-agent checks running but skips new review spawns. This is the watcher-only handoff main-catchup should use before `launchctl kickstart -k`: write the marker, wait until `data/reviews.db` has no `review_status='reviewing'` rows, bounce the watcher, then remove the marker. Invalid drain JSON or a missing/invalid `expiresAt` fails closed, but the watcher caps any marker at one hour from the marker file's mtime so a bad marker cannot silence reviews forever. The reviewer subprocess timeout defaults to 10 minutes, so a normal drain may wait that long for a slow in-flight review. This marker does not quiesce the follow-up daemon; follow-up remediation workers are governed by the follow-up job ledger and dispatch/HQ controls.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). It walks through the `research-finding` domain file-by-file and shows how to add your own subject adapter, comms adapter, prompt set, fixtures, and byte-equivalence assertions without changing the kernel.
 
-Re-trigger a review for a previously-reviewed PR (canonical path):
+## Deployment Notes
 
-```bash
-npm run retrigger-review -- \
-  --repo laceyenterprises/adversarial-review \
-  --pr 212 \
-  --reason "operator triggered: <why you're rerunning>"
-```
+This repository still includes some maintainer-local deployment wrappers and regression fixtures from the original hosted environment. They are not required for the local demo or test suite. The current audit is documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-This wraps the same atomic transition the follow-up flow uses — `review_status='pending'`, clears `posted_at`/`failed_at`/`failure_message`, stamps `rereview_requested_at` and `rereview_reason`. Hand-written SQL that only sets `rereview_requested_at` is a silent no-op because the watcher polls on `review_status`, not on the rereview metadata. By default the CLI refuses rows whose `review_status` is `'failed'` (the watcher already retries those automatically and the reset would erase diagnostic evidence) or `'failed-orphan'` (operator must first verify no orphan review posted on GitHub); pass `--allow-failed-reset` after reviewing the failure/orphan evidence if you really want a clean rerun. See `npm run retrigger-review -- --help` for the full surface.
+## Operators
 
-Force one more remediation round for an existing follow-up job:
+If you are running the live PR-review loop rather than the local research-finding demo, start with [docs/follow-up-runbook.md](docs/follow-up-runbook.md) and [docs/SPEC-adversarial-review-auto-remediation.md](docs/SPEC-adversarial-review-auto-remediation.md).
 
-```bash
-npm run retrigger-remediation -- \
-  --repo laceyenterprises/adversarial-review \
-  --pr 212 \
-  --reason "operator approved one more remediation pass"
-```
+The operator surface includes `npm run retrigger-review`, `npm run retrigger-remediation`, and the watcher drain marker at `data/watcher-drain.json`. Reconcile-time public PR comments and retries are tracked durably under `commentDelivery`; see the runbook for the delivery and retry contract.
 
-This path is for the follow-up queue, not the watcher row: it optionally bumps `remediationPlan.maxRounds`, then requeues the latest terminal follow-up job when the stop reason is `max-rounds-reached` or `round-budget-exhausted` (or when the last terminal job failed, or completed with a durable rereview request). Both operator CLIs write durable mutation records under `data/operator-mutations/` by default; a replay of a previously successful idempotency key is a no-op, while previously refused attempts are treated as history and the CLI re-checks current eligibility on retry.
+## License
 
-**Emergency-only direct SQL** (use only if the npm script is unavailable, e.g. partial repo state during an incident):
-
-```bash
-sqlite3 data/reviews.db "BEGIN; UPDATE reviewed_prs SET review_status='pending', posted_at=NULL, failed_at=NULL, failure_message=NULL WHERE repo='laceyenterprises/adversarial-review' AND pr_number=212; COMMIT;"
-```
-
-Note that this path skips the rereview audit metadata (`rereview_requested_at`, `rereview_reason`) — the npm wrapper is preferred for any non-emergency operator action.
-
-Check worker artifacts:
-
-```bash
-ls -la data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/
-jq '.' data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/remediation-reply.json
-```
-
-If a remediation round "finished" but nothing advanced, the first thing to ask is usually:
-
-- did the follow-up LaunchAgent tick? (`tail -200 ~/Library/Logs/adversarial-follow-up.log`)
-- did `remediation-reply.json` exist?
-- did it actually set `reReview.requested = true`?
-
-**The terminal job JSON is the durable source of truth, not the PR comment.** Each terminal record carries a `commentDelivery` field stamped at the time reconcile attempted to post:
-
-```bash
-jq '.commentDelivery' data/follow-up-jobs/{completed,stopped,failed}/<jobId>.json
-```
-
-If `commentDelivery.posted === false`, the queue advanced but the public PR comment failed (timeout, gh outage, missing token). The retry-comments step at the start of every daemon tick re-attempts up to `MAX_COMMENT_DELIVERY_ATTEMPTS = 5` times — see `src/adapters/comms/github-pr-comments/comment-delivery.mjs`. Reasons in `NON_RETRYABLE_DELIVERY_REASONS` (e.g. `no-token-mapping`) are never retried; those records sit for operator inspection.
-
-So:
-
-- comment present on the PR → reconcile ran AND delivery succeeded.
-- comment missing on the PR → reconcile may still have run; check `commentDelivery.posted` in the terminal record.
-- terminal record has `commentDelivery.posted === false` past 5 attempts → operator inspection needed.
-
-Inspect daemon logs:
-
-```bash
-tail -100 ~/Library/Logs/adversarial-follow-up.log
-launchctl list | grep adversarial
-```
-
----
-
-## Common failure modes
-
-### Review never triggered
-
-Usually one of:
-
-- PR title missing required creation-time tag
-- watcher is not polling the repo you expect
-- `GITHUB_TOKEN` lacks read access
-- row already landed in `malformed`
-
-### Reviewer failed to post
-
-Usually one of:
-
-- reviewer bot PAT missing/invalid
-- Claude/Codex OAuth drift
-- CLI path drift
-- cross-user permission drift
-- runtime/env mismatch
-
-### Follow-up worker ran but queue did not advance
-
-Usually one of:
-
-- `follow-up:reconcile` was not run yet
-- final artifact missing/empty
-- `remediation-reply.json` invalid or absent
-- rereview was not requested durably
-
-### Queue round completed but no new review appeared yet
-
-Usually one of:
-
-- watcher has not polled again yet
-- `reviews.db` was not actually reset to `pending`
-- PR is no longer open
-
-### Sharp edges worth remembering
-
-- malformed-title state is terminal by design
-- `completed` does not mean merged/done; it means rereview was armed successfully
-- `no-progress` is healthy defensive behavior, not necessarily a bug
-- the `.env.example` is generic; real reviewer auth is stricter
-
-For the compact control-plane view, see `docs/STATE-MACHINE.md`.
-For the full operator guide, see `docs/follow-up-runbook.md`.
-For auth/runtime history, see `docs/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md`.
-
----
-
-## Repository map
-
-```text
-src/
-  watcher.mjs                      # poll loop + tag routing
-  reviewer.mjs                     # cross-model review post
-  review-state.mjs                 # reviews.db ledger
-  watcher-title-guardrails.mjs     # PR title tag enforcement
-  watcher-fail-loud.mjs            # fail-loud comment posting
-  pr-title-tagging.mjs             # title parsing
-  pr-create-tagged.mjs             # operator helper for tagged PRs
-  adapters/comms/github-pr-comments/pr-comments.mjs
-                                    # remediation outcome comments
-  follow-up-jobs.mjs               # durable JSON queue + reply schema
-  follow-up-remediation.mjs        # consume + reconcile + worker spawn
-  follow-up-reconcile.mjs          # canonical reconcile entrypoint
-  follow-up-requeue.mjs            # operator: re-arm a completed job
-  follow-up-stop.mjs               # operator: stop an in-progress job
-  retrigger-review.mjs             # operator: re-review a PR
-
-prompts/
-  code-pr/
-    reviewer.first.md
-    reviewer.middle.md
-    reviewer.last.md
-    remediator.first.md
-    remediator.middle.md
-    remediator.last.md
-
-hooks/
-  worker-provenance-commit-msg     # stamps Worker-Class trailers
-
-scripts/
-  adversarial-watcher-start-placey.sh
-  adversarial-follow-up-tick.sh    # daemon tick driver
-
-launchd/
-  ai.laceyenterprises.adversarial-watcher.placey.plist
-  ai.laceyenterprises.adversarial-follow-up.placey.plist
-
-docs/
-  follow-up-runbook.md
-  STATE-MACHINE.md
-  INCIDENT-2026-04-21-ACPX-codex-exec-regression.md
-  MACOS-TCC.md
-```
-
----
-
-## For deeper operator detail
-
-See:
-
-- `docs/follow-up-runbook.md`
-- `src/watcher.mjs`
-- `src/reviewer.mjs`
-- `src/follow-up-jobs.mjs`
-- `src/follow-up-remediation.mjs`
-
----
-
-## Status
-
-As of 2026-05-01, the pipeline is automated end-to-end:
-- watcher posts reviews
-- follow-up daemon claims jobs every 2 min, spawns workers, reconciles
-- public PR comments narrate every terminal outcome
-- convergence rule + PR-wide risk-class cap for new jobs (`low=1`, `medium=2`, `high=3`, `critical=4`) + lenient final-round verdict-policy + durable rereview requests bound the loop (no per-PR rereview cooldown is implemented; the cap only stops the next remediation spawn, not the fresh rereview after a completed round; jobs persisted with legacy 3- or 6-round caps continue to use those caps)
-
-This README is optimized for quick scanning. Heavier operator semantics and maintenance detail live in `docs/follow-up-runbook.md`.
+Apache-2.0. See [LICENSE](LICENSE).

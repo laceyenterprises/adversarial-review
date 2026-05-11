@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 
-import { deliverAlert, resolveAlertDefaults } from '../src/alert-delivery.mjs';
+import {
+  deliverAlert,
+  httpRequestText,
+  readHooksToken,
+  resolveAlertDefaults,
+} from '../src/alert-delivery.mjs';
 
 test('watcher alert delivery uses the litellm drift-watch ALERT env shape', async () => {
   const calls = [];
@@ -19,6 +25,10 @@ test('watcher alert delivery uses the litellm drift-watch ALERT env shape', asyn
     payload: { openPendingPRs: 2 },
     env,
     fsImpl: {
+      statSync(filePath) {
+        assert.equal(filePath, '/secrets/hooks.token');
+        return { mtimeMs: 1 };
+      },
       readFileSync(filePath, encoding) {
         assert.equal(filePath, '/secrets/hooks.token');
         assert.equal(encoding, 'utf8');
@@ -66,4 +76,82 @@ test('watcher alert defaults use the operator Telegram route once ALERT_TO is co
     alertAgentId: 'main',
     alertName: 'Adversarial Watcher Health',
   });
+});
+
+test('readHooksToken throws when no env token or token file is available', () => {
+  assert.throws(
+    () => readHooksToken({
+      env: { ALERT_TO: '123456' },
+      fsImpl: {
+        statSync() {
+          const error = new Error('missing');
+          error.code = 'ENOENT';
+          throw error;
+        },
+        readFileSync() {
+          throw new Error('should not read without stat');
+        },
+      },
+      logger: { warn() {} },
+    }),
+    /Missing OpenClaw hooks token/
+  );
+});
+
+test('readHooksToken logs non-ENOENT token file failures', () => {
+  const warnings = [];
+  assert.throws(
+    () => readHooksToken({
+      env: { ALERT_TO: '123456' },
+      fsImpl: {
+        statSync() {
+          const error = new Error('permission denied');
+          error.code = 'EACCES';
+          throw error;
+        },
+        readFileSync() {
+          throw new Error('should not read without stat');
+        },
+      },
+      logger: {
+        warn(message) {
+          warnings.push(message);
+        },
+      },
+    }),
+    /Missing OpenClaw hooks token/
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /failed to read hooks token file/);
+});
+
+test('httpRequestText rejects with response body details on server errors', async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end('gateway unavailable');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+
+  await assert.rejects(
+    () => httpRequestText(`http://127.0.0.1:${port}/hooks`, { timeoutMs: 250 }),
+    /HTTP 500: gateway unavailable/
+  );
+
+  await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+});
+
+test('httpRequestText rejects on timeout and destroys the request', async () => {
+  const server = http.createServer(() => {
+    // Intentionally never respond so the client timeout path fires.
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+
+  await assert.rejects(
+    () => httpRequestText(`http://127.0.0.1:${port}/hooks`, { timeoutMs: 25 }),
+    /timed out after 25ms/
+  );
+
+  await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });

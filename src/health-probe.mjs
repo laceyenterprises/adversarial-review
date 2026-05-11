@@ -25,7 +25,9 @@ function nowIso(now = () => new Date()) {
 }
 
 function formatSamplePR(repo, prNumber) {
-  return `${repo}#${Number(prNumber)}`;
+  const normalizedPrNumber = Number(prNumber);
+  if (!Number.isInteger(normalizedPrNumber)) return null;
+  return `${repo}#${normalizedPrNumber}`;
 }
 
 function buildNoProgressAlertText(payload) {
@@ -60,6 +62,7 @@ function createWatcherHealthProbe({
 } = {}) {
   const config = resolveHealthProbeConfig(env);
   const state = {
+    tickInFlight: false,
     healthState: 'healthy',
     pollsSinceLastSpawn: 0,
     lastSpawnAt: null,
@@ -68,12 +71,16 @@ function createWatcherHealthProbe({
   };
 
   function beginTick() {
+    if (state.tickInFlight) {
+      logger?.warn?.('[watcher] health probe skipped overlapping tick');
+      return { enabled: false, skippedOverlap: true };
+    }
+    state.tickInFlight = true;
     return {
       enabled: config.enabled,
       openPendingPRs: 0,
       samplePRs: [],
       pendingSet: new Set(),
-      sampleSet: new Set(),
       spawnCount: 0,
       recoveredFromSilentPolls: 0,
     };
@@ -82,11 +89,16 @@ function createWatcherHealthProbe({
   function recordOpenPending(tick, { repo, prNumber } = {}) {
     if (!config.enabled || !tick?.enabled || !repo || !prNumber) return;
     const sample = formatSamplePR(repo, prNumber);
+    if (!sample) {
+      logger?.debug?.(
+        `[watcher] health probe ignoring invalid PR sample for ${repo}#${String(prNumber)}`
+      );
+      return;
+    }
     if (tick.pendingSet.has(sample)) return;
     tick.pendingSet.add(sample);
     tick.openPendingPRs += 1;
-    if (tick.samplePRs.length >= sampleLimit || tick.sampleSet.has(sample)) return;
-    tick.sampleSet.add(sample);
+    if (tick.samplePRs.length >= sampleLimit) return;
     tick.samplePRs.push(sample);
   }
 
@@ -105,72 +117,72 @@ function createWatcherHealthProbe({
     stdout?.write?.(`${JSON.stringify(payload)}\n`);
   }
 
-  async function sendTransitionAlert(text, payload) {
-    try {
-      await deliverAlertFn(text, { event: payload?.event || null, payload });
-      return true;
-    } catch (err) {
+  function sendTransitionAlert(text, payload) {
+    void Promise.resolve(deliverAlertFn(text, { event: payload?.event || null, payload })).catch((err) => {
       logger?.error?.(
         `[watcher] health alert delivery failed: ${err?.message || err}`
       );
-      return false;
-    }
+    });
   }
 
   function finishTick(tick) {
-    if (!config.enabled || !tick?.enabled) return null;
+    try {
+      if (!config.enabled || !tick?.enabled) return null;
 
-    if (tick.spawnCount > 0) {
-      const wasNoProgress = state.healthState === 'no_progress';
-      if (wasNoProgress) {
-        state.spawnsSinceRecovery += tick.spawnCount;
+      if (tick.spawnCount > 0) {
+        const wasNoProgress = state.healthState === 'no_progress';
+        if (wasNoProgress) {
+          state.spawnsSinceRecovery += tick.spawnCount;
+          const payload = {
+            event: 'watcher.recovered',
+            spawnsSinceRecovery: state.spawnsSinceRecovery,
+            recoveredFromSilentPolls:
+              tick.recoveredFromSilentPolls || state.noProgressSilentPolls,
+            watcherPid: pid,
+          };
+          emit(payload);
+          state.healthState = 'healthy';
+          state.noProgressSilentPolls = 0;
+          state.spawnsSinceRecovery = 0;
+          sendTransitionAlert(buildRecoveredAlertText(payload), payload);
+          return payload;
+        }
+        state.spawnsSinceRecovery = 0;
+        return null;
+      }
+
+      state.pollsSinceLastSpawn += 1;
+      if (
+        state.pollsSinceLastSpawn >= config.threshold &&
+        tick.openPendingPRs >= 1
+      ) {
         const payload = {
-          event: 'watcher.recovered',
-          spawnsSinceRecovery: state.spawnsSinceRecovery,
-          recoveredFromSilentPolls:
-            tick.recoveredFromSilentPolls || state.noProgressSilentPolls,
+          event: 'watcher.no_progress',
+          pollsSinceLastSpawn: state.pollsSinceLastSpawn,
+          openPendingPRs: tick.openPendingPRs,
+          samplePRs: tick.samplePRs,
+          lastSpawnAt: state.lastSpawnAt,
           watcherPid: pid,
+          thresholdConfigured: config.threshold,
         };
         emit(payload);
-        state.healthState = 'healthy';
-        state.noProgressSilentPolls = 0;
+        const isTransition = state.healthState !== 'no_progress';
+        state.healthState = 'no_progress';
+        state.noProgressSilentPolls = state.pollsSinceLastSpawn;
         state.spawnsSinceRecovery = 0;
-        void sendTransitionAlert(buildRecoveredAlertText(payload), payload);
+        if (isTransition) {
+          sendTransitionAlert(buildNoProgressAlertText(payload), payload);
+        }
         return payload;
       }
-      state.spawnsSinceRecovery = 0;
-      return null;
-    }
 
-    state.pollsSinceLastSpawn += 1;
-    if (
-      state.pollsSinceLastSpawn >= config.threshold &&
-      tick.openPendingPRs >= 1
-    ) {
-      const payload = {
-        event: 'watcher.no_progress',
-        pollsSinceLastSpawn: state.pollsSinceLastSpawn,
-        openPendingPRs: tick.openPendingPRs,
-        samplePRs: tick.samplePRs,
-        lastSpawnAt: state.lastSpawnAt,
-        watcherPid: pid,
-        thresholdConfigured: config.threshold,
-      };
-      emit(payload);
-      const isTransition = state.healthState !== 'no_progress';
-      state.healthState = 'no_progress';
-      state.noProgressSilentPolls = state.pollsSinceLastSpawn;
-      state.spawnsSinceRecovery = 0;
-      if (isTransition) {
-        void sendTransitionAlert(buildNoProgressAlertText(payload), payload);
+      if (state.healthState === 'no_progress' && tick.openPendingPRs === 0) {
+        state.noProgressSilentPolls = state.pollsSinceLastSpawn;
       }
-      return payload;
+      return null;
+    } finally {
+      state.tickInFlight = false;
     }
-
-    if (state.healthState === 'no_progress' && tick.openPendingPRs === 0) {
-      state.noProgressSilentPolls = state.pollsSinceLastSpawn;
-    }
-    return null;
   }
 
   return {

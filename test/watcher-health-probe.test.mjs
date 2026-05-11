@@ -11,6 +11,8 @@ const DEFAULT_ENV = Object.freeze({
 function makeProbe({ env = {}, pid = 12345 } = {}) {
   const events = [];
   const alerts = [];
+  const warnings = [];
+  const debug = [];
   let nowTick = 0;
   const probe = createWatcherHealthProbe({
     env: { ...DEFAULT_ENV, ...env },
@@ -23,12 +25,18 @@ function makeProbe({ env = {}, pid = 12345 } = {}) {
     },
     logger: {
       error() {},
+      warn(message) {
+        warnings.push(message);
+      },
+      debug(message) {
+        debug.push(message);
+      },
     },
     deliverAlertFn: async (text, meta) => {
       alerts.push({ text, ...meta });
     },
   });
-  return { probe, events, alerts };
+  return { probe, events, alerts, warnings, debug };
 }
 
 async function silentTick(probe, prs = [['laceyenterprises/adversarial-review', 75]]) {
@@ -196,4 +204,32 @@ test('health alerts do not block poll completion while delivery is still pending
   assert.equal(events.length, 1);
   assert.equal(events[0].event, 'watcher.no_progress');
   assert.equal(alertCalls, 1);
+});
+
+test('invalid PR identifiers do not collapse samples into repo#NaN', async () => {
+  const { probe, events, alerts, debug } = makeProbe();
+
+  const tick = probe.beginTick();
+  probe.recordOpenPending(tick, { repo: 'laceyenterprises/adversarial-review', prNumber: 'not-a-number' });
+  await probe.finishTick(tick);
+
+  assert.equal(events.length, 0);
+  assert.equal(alerts.length, 0);
+  assert.equal(debug.length, 1);
+  assert.match(debug[0], /ignoring invalid PR sample/);
+});
+
+test('overlapping probe ticks are skipped instead of mutating shared state', async () => {
+  const { probe, warnings } = makeProbe();
+
+  const firstTick = probe.beginTick();
+  const overlappingTick = probe.beginTick();
+
+  assert.equal(overlappingTick.enabled, false);
+  assert.equal(overlappingTick.skippedOverlap, true);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /skipped overlapping tick/);
+
+  await probe.finishTick(firstTick);
+  assert.equal(probe.getState().tickInFlight, false);
 });

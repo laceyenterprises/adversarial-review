@@ -10,7 +10,6 @@ import {
   claimNextFollowUpJob,
   getFollowUpJobDir,
   listInProgressFollowUpJobs,
-  listPendingFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobStopped,
@@ -1228,6 +1227,12 @@ function killDetachedWorkerProcessGroup(processId, signal = 'SIGKILL') {
   if (!Number.isInteger(processId) || processId <= 0) {
     return false;
   }
+  if (processId === process.pid) {
+    console.error(
+      `[follow-up-remediation] refusing to kill daemon-owned process group for pid=${processId}`
+    );
+    return false;
+  }
 
   try {
     process.kill(-processId, signal);
@@ -2385,6 +2390,7 @@ async function consumeNextFollowUpJob({
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
   excludedRepoPrKeys = new Set(),
+  onExcludedRepoPrKey = null,
   log = console,
 } = {}) {
   // Claim first so we know which worker class we're running. This lets
@@ -2396,6 +2402,7 @@ async function consumeNextFollowUpJob({
     claimedAt: now(),
     returnStopped: true,
     excludedRepoPrKeys,
+    onExcludedRepoPrKey,
   });
 
   if (!claimed) {
@@ -2717,6 +2724,7 @@ async function consumeFollowUpJobsUntilCapacity({
   const results = [];
   let spawned = 0;
   let stopped = 0;
+  const deferredSamePRPaths = new Set();
 
   while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
     /* eslint-disable no-await-in-loop */
@@ -2731,11 +2739,20 @@ async function consumeFollowUpJobsUntilCapacity({
         resolvePRLifecycleImpl,
         postCommentImpl,
         excludedRepoPrKeys: blockedRepoPrKeys,
+        onExcludedRepoPrKey: (pendingPath) => {
+          deferredSamePRPaths.add(String(pendingPath));
+        },
         log,
       });
     } catch (err) {
       if (!err?.followUpJobPath) {
         throw err;
+      }
+      try {
+        const failedJob = JSON.parse(readFileSync(err.followUpJobPath, 'utf8'));
+        blockedRepoPrKeys.add(followUpJobRepoPrKey(failedJob));
+      } catch {
+        // Best-effort: keep draining even if the failed record can't be re-read.
       }
       const jobIdTag = err.followUpJobId ? ` jobId=${err.followUpJobId}` : '';
       const jobPathTag = err.followUpJobPath ? ` jobPath=${err.followUpJobPath}` : '';
@@ -2766,17 +2783,13 @@ async function consumeFollowUpJobsUntilCapacity({
     break;
   }
 
-  const deferredSamePR = listPendingFollowUpJobs(rootDir)
-    .filter(({ job }) => blockedRepoPrKeys.has(followUpJobRepoPrKey(job)))
-    .length;
-
   return {
     maxConcurrent: concurrencyCap,
     activeAtStart: activeJobs.length,
     availableAtStart: Math.max(0, concurrencyCap - activeJobs.length),
     spawned,
     stopped,
-    deferredSamePR,
+    deferredSamePR: deferredSamePRPaths.size,
     capacityRemaining: Math.max(0, concurrencyCap - activeJobs.length - spawned),
     results,
   };

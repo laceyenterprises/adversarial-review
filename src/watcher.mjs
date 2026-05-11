@@ -63,6 +63,7 @@ import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
+import { createWatcherHealthProbe } from './health-probe.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -75,6 +76,7 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 
 const db = openReviewStateDb(ROOT);
 ensureReviewStateSchema(db);
+const watcherHealthProbe = createWatcherHealthProbe();
 const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 
@@ -899,7 +901,9 @@ async function handlePostedReviewRow({
   }
 }
 
-async function pollOnce(octokit) {
+async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
+  const healthTick = healthProbe?.beginTick?.();
+  try {
   const operatorSurface = createWatcherOperatorSurface();
   await refreshOrgRepos(octokit);
   const reattach = await reconcileReviewerSessions({
@@ -987,6 +991,12 @@ async function pollOnce(octokit) {
         continue;
       }
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
+      if (!subject.terminal && existing?.review_status === 'pending') {
+        healthProbe?.recordOpenPending?.(healthTick, {
+          repo: repoPath,
+          prNumber,
+        });
+      }
 
       async function projectGateStatusSafe(reviewRow) {
         if (!subject.headSha) return;
@@ -1161,6 +1171,12 @@ async function pollOnce(octokit) {
       }
 
       const current = stmtGetReviewRow.get(repoPath, prNumber);
+      if (current?.review_status === 'pending') {
+        healthProbe?.recordOpenPending?.(healthTick, {
+          repo: repoPath,
+          prNumber,
+        });
+      }
       await projectGateStatusSafe(current);
       const activeFollowUp = shouldDeferReviewForActiveFollowUp({
         rootDir: ROOT,
@@ -1291,6 +1307,9 @@ async function pollOnce(octokit) {
           persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });
         },
       });
+      if (result.ok) {
+        healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
+      }
 
       settleReviewerAttempt({
         rootDir: ROOT,
@@ -1299,6 +1318,13 @@ async function pollOnce(octokit) {
         result,
         maxRemediationRounds,
       });
+    }
+  }
+  } finally {
+    try {
+      healthProbe?.finishTick?.(healthTick);
+    } catch (err) {
+      console.error('[watcher] health probe finalize failed:', err?.message || err);
     }
   }
 }

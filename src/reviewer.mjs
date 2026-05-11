@@ -898,6 +898,9 @@ async function main() {
     ` (OAuth-only mode; prompt stage=${reviewerPromptStage}${isFinalRound ? `; FINAL round attempt ${reviewAttemptNumber} of ${1 + Number(maxRemediationRounds || 0)} — lenient verdict threshold active` : ''})`
   );
   console.error(`[reviewer] DEBUG: args=${JSON.stringify(args)}`);
+  if (reviewerSessionUuid && !process.env.REVIEWER_SESSION_UUID) {
+    process.env.REVIEWER_SESSION_UUID = String(reviewerSessionUuid);
+  }
 
   if (reviewerHeadSha) {
     try {

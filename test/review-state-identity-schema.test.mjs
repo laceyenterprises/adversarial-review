@@ -109,13 +109,13 @@ test('schema migration rethrows non-duplicate ALTER TABLE failures', () => {
   }
 });
 
-test('fresh schema does not carry the redundant identity round/status unique index', () => {
+test('fresh schema keeps the typed identity unique index', () => {
   const rootDir = makeRootDir();
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
     const indexNames = db.prepare('PRAGMA index_list(reviewed_prs)').all().map((row) => row.name);
-    assert.equal(indexNames.includes('reviewed_prs_identity_round_kind_unique'), false);
+    assert.equal(indexNames.includes('reviewed_prs_identity_round_kind_unique'), true);
   } finally {
     db.close();
   }
@@ -135,7 +135,7 @@ test('identity lookup uses the covering index for dedupe reads', () => {
           AND revision_ref = ?`
     ).all('code-pr', 'laceyenterprises/agent-os#360', 'sha-360');
     const details = plan.map((row) => row.detail).join('\n');
-    assert.match(details, /reviewed_prs_identity_lookup_idx/);
+    assert.match(details, /reviewed_prs_identity_round_kind_unique|reviewed_prs_identity_lookup_idx/);
   } finally {
     db.close();
   }

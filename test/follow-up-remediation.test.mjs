@@ -1700,6 +1700,42 @@ test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job 
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 1);
 });
 
+test('consumeFollowUpJobsUntilCapacity blocks same-PR retries after a spawn-preparation failure', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createPendingRemediationJob(rootDir, {
+    prNumber: 7,
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+  });
+  createPendingRemediationJob(rootDir, {
+    prNumber: 7,
+    reviewPostedAt: '2026-04-21T08:01:00.000Z',
+  });
+  createPendingRemediationJob(rootDir, {
+    prNumber: 8,
+    reviewPostedAt: '2026-04-21T08:02:00.000Z',
+  });
+
+  const spawnCalls = [];
+  let attempt = 0;
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, {
+      maxConcurrent: 2,
+      spawnImpl: (command, args, options) => {
+        if (attempt++ === 0) {
+          throw new Error('spawn boom');
+        }
+        const pid = 9000 + spawnCalls.length;
+        spawnCalls.push({ command, args, options, pid });
+        return { pid, unref() {} };
+      },
+    })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(result.deferredSamePR, 1);
+  assert.deepEqual(result.results.filter((entry) => entry.consumed).map((entry) => entry.job.prNumber), [8]);
+});
+
 test('killDetachedWorkerProcessGroup terminates detached remediation workers by process group', async () => {
   const child = spawn('bash', ['-c', 'trap "" TERM; while :; do sleep 1; done'], {
     detached: true,
@@ -1711,6 +1747,10 @@ test('killDetachedWorkerProcessGroup terminates detached remediation workers by 
 
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
+});
+
+test('killDetachedWorkerProcessGroup refuses to target the daemon pid', () => {
+  assert.equal(killDetachedWorkerProcessGroup(process.pid), false);
 });
 
 test('consumeFollowUpJobsUntilCapacity stops draining when shutdown flips mid-tick', async () => {

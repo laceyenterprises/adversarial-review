@@ -8,7 +8,7 @@
  * @typedef {import('../../../kernel/contracts.d.ts').SubjectState} SubjectState
  */
 
-import { builderClassFromTitle, tagFromBuilderClass } from './title-tagging.mjs';
+import { tagFromBuilderClass } from './title-tagging.mjs';
 
 const ROUTE_BY_BUILDER_CLASS = {
   codex: {
@@ -44,20 +44,8 @@ function routeSubject(subject) {
   };
 }
 
-function routePR(prTitle) {
-  const builderClass = builderClassFromTitle(prTitle);
-  const route = routeSubject({ builderClass });
-  if (!route) return null;
-  return {
-    tag: route.tag,
-    reviewerModel: route.reviewerModel,
-    botTokenEnv: route.botTokenEnv,
-  };
-}
-
 export {
   ROUTE_BY_BUILDER_CLASS,
   normalizeBuilderClass,
-  routePR,
   routeSubject,
 };

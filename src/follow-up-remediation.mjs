@@ -2668,7 +2668,10 @@ async function consumeNextFollowUpJob({
       const cleanupAt = now();
       remediationWorker = {
         ...spawnedWorker,
-        state: 'spawn-preparation-failed',
+        // The worker was killed before we durably recorded a spawned
+        // round, so this path must stay budget-neutral in the PR-wide
+        // remediation ledger.
+        state: 'never-spawned',
         cleanupAttemptedAt: cleanupAt,
         cleanupSignal: 'SIGKILL',
         cleanupResult: killDetachedWorkerProcessGroup(spawnedWorker.processId) ? 'killed' : 'not-found',

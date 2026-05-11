@@ -34,12 +34,13 @@ import { redactSensitiveText } from './adapters/comms/github-pr-comments/redacti
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
 import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
+import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-const DEFAULT_HQ_ROOT = join(homedir(), 'agent-os-hq');
+const DEFAULT_REPLIES_ROOT = join(ROOT, 'data', 'replies');
 const REMEDIATOR_PROMPT_SET = 'code-pr';
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', REMEDIATOR_PROMPT_SET, 'remediator.first.md');
 const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
@@ -188,14 +189,54 @@ function validateReplyStorageKey(key, label = 'replyStorageKey') {
 }
 
 function resolveHqRoot(env = process.env, { requireExists = false } = {}) {
-  const root = resolve(env.HQ_ROOT || DEFAULT_HQ_ROOT);
+  if (!env.HQ_ROOT) {
+    throw new Error('HQ_ROOT must be set when --with-hq-integration is enabled');
+  }
+  const root = resolve(env.HQ_ROOT);
   if (requireExists && !existsSync(root)) {
     throw new Error(
       `HQ remediation root does not exist: ${root}. ` +
-      'Set HQ_ROOT to an existing agent-os-hq checkout before consuming follow-up jobs.'
+      'Set HQ_ROOT to an existing agent-os-hq checkout and run with --with-hq-integration before consuming follow-up jobs.'
     );
   }
   return root;
+}
+
+function shouldUseHqIntegration(env = process.env) {
+  return env.ADV_WITH_HQ_INTEGRATION === '1' || Boolean(env.HQ_ROOT);
+}
+
+function resolveLocalRepliesRoot(env = process.env, { requireExists = false } = {}) {
+  const root = resolve(env.ADV_REPLIES_ROOT || DEFAULT_REPLIES_ROOT);
+  if (requireExists && !existsSync(root)) {
+    throw new Error(`Local remediation replies root does not exist: ${root}`);
+  }
+  return root;
+}
+
+function resolveRemediationReplyTarget(env = process.env, { requireExists = false } = {}) {
+  if (shouldUseHqIntegration(env)) {
+    const hqRoot = resolveHqRoot(env, { requireExists });
+    return {
+      mode: 'hq',
+      root: hqRoot,
+      resolvePath: ({ launchRequestId }) => resolveHqReplyPath({ hqRoot, launchRequestId }),
+    };
+  }
+  const repliesRoot = resolveLocalRepliesRoot(env, { requireExists: false });
+  return {
+    mode: 'local',
+    root: repliesRoot,
+    resolvePath: ({ launchRequestId }) => {
+      const replyStorageKey = validateReplyStorageKey(launchRequestId, 'launchRequestId');
+      const replyPath = resolve(repliesRoot, replyStorageKey, 'remediation-reply.json');
+      const relativePath = relative(repliesRoot, replyPath);
+      if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+        throw new Error(`Invalid local remediation reply path outside replies root: ${replyPath}`);
+      }
+      return { replyDir: dirname(replyPath), replyPath };
+    },
+  };
 }
 
 function resolveHqReplyPath({ hqRoot, launchRequestId }) {
@@ -400,12 +441,7 @@ async function assertClaudeCodeOAuth({ execFileImpl = execFileAsync } = {}) {
   // ANTHROPIC_API_KEY set, the CLI may report `authMethod: 'apiKey'` even
   // when the OAuth subscription is also configured, masking the real
   // login state. Mirrors `reviewer.mjs`'s `assertClaudeOAuth` hardening.
-  const probeEnv = { ...process.env };
-  delete probeEnv.ANTHROPIC_API_KEY;
-  delete probeEnv.ANTHROPIC_BASE_URL;
-  delete probeEnv.CLAUDE_CODE_USE_BEDROCK;
-  delete probeEnv.CLAUDE_CODE_USE_VERTEX;
-  delete probeEnv.AWS_BEARER_TOKEN_BEDROCK;
+  const { env: probeEnv } = scrubOAuthFallbackEnv(process.env);
 
   let raw;
   try {
@@ -476,24 +512,7 @@ function prepareClaudeCodeRemediationStartupEnv() {
   // expected to be the billing path. Mirror of the worker-pool's
   // claude-code adapter ENV_CLEAR list, applied as JS-side env hygiene
   // (since this spawn doesn't go through that adapter).
-  const env = { ...process.env };
-  const stripped = [];
-  const FORBIDDEN_ENV = [
-    'ANTHROPIC_API_KEY',
-    'ANTHROPIC_BASE_URL',
-    'CLAUDE_CODE_USE_BEDROCK',
-    'CLAUDE_CODE_USE_VERTEX',
-    'AWS_BEARER_TOKEN_BEDROCK',
-    'OPENAI_API_KEY',
-    'GOOGLE_API_KEY',
-    'GEMINI_API_KEY',
-  ];
-  for (const key of FORBIDDEN_ENV) {
-    if (env[key] !== undefined) {
-      delete env[key];
-      stripped.push(key);
-    }
-  }
+  const { env, stripped } = scrubOAuthFallbackEnv(process.env);
   // ANTHROPIC_AUTH_TOKEN, when set, can be the OAuth bearer the worker
   // is supposed to use. NOT stripped — see worker-pool/lib/adapters/
   // claude-code.sh for the same rationale.
@@ -716,9 +735,8 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null } = {}) {
   const overriddenGitEnv = [];
   const policyViolations = [];
 
-  if (process.env.OPENAI_API_KEY) {
-    strippedEnv.push('OPENAI_API_KEY');
-  }
+  const scrubbed = scrubOAuthFallbackEnv(process.env);
+  strippedEnv.push(...scrubbed.stripped);
 
   if (process.env.CODEX_AUTH_PATH && resolve(process.env.CODEX_AUTH_PATH) !== resolve(authPath)) {
     policyViolations.push(
@@ -787,13 +805,12 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null } = {}) {
   }
 
   const env = {
-    ...process.env,
+    ...scrubbed.env,
     PATH: buildInheritedPath(process.env.PATH),
     CODEX_AUTH_PATH: authPath,
     CODEX_HOME: codexHome,
     HOME: authHome,
   };
-  delete env.OPENAI_API_KEY;
   delete env.WORKER_CLASS;
   delete env.WORKER_JOB_ID;
   delete env.WORKER_RUN_AT;
@@ -1403,10 +1420,9 @@ function assertContainedInWorkspace(label, workspaceDir, candidate) {
 
 function buildReconciliationPaths(rootDir, job) {
   const worker = job?.remediationWorker || {};
-  const hqRoot = resolveHqRoot();
+  const replyTarget = resolveRemediationReplyTarget(process.env, { requireExists: false });
   const replyStorageKey = resolveReplyStorageKey(job);
-  const { replyPath: expectedHqReplyPath } = resolveHqReplyPath({
-    hqRoot,
+  const { replyPath: expectedReplyPath } = replyTarget.resolvePath({
     launchRequestId: replyStorageKey,
   });
   const workspaceDir = resolveJobRelativePath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
@@ -1419,10 +1435,18 @@ function buildReconciliationPaths(rootDir, job) {
     label: 'logPath',
   });
   const storedReplyPath = worker.replyPath || job?.remediationReply?.path || null;
-  let replyPath = expectedHqReplyPath;
+  let replyPath = expectedReplyPath;
   let legacyReplyPath = join(workspaceDir, '.adversarial-follow-up', 'remediation-reply.json');
   if (storedReplyPath && isAbsolute(storedReplyPath)) {
-    replyPath = resolveHqReplyArtifactPath(storedReplyPath, { hqRoot });
+    if (replyTarget.mode === 'hq') {
+      replyPath = resolveHqReplyArtifactPath(storedReplyPath, { hqRoot: replyTarget.root });
+    } else {
+      replyPath = resolve(storedReplyPath);
+      const rel = relative(replyTarget.root, replyPath);
+      if (rel.startsWith('..') || isAbsolute(rel)) {
+        throw new Error(`Invalid local remediation reply path outside replies root: ${replyPath}`);
+      }
+    }
   } else if (storedReplyPath) {
     legacyReplyPath = resolveJobRelativePath(rootDir, storedReplyPath, {
       label: 'replyPath',
@@ -2579,7 +2603,8 @@ async function consumeNextFollowUpJob({
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
     resetWorkspaceDir(artifactDir);
     mkdirSync(artifactDir, { recursive: true });
-    const hqRoot = resolveHqRoot(process.env, { requireExists: true });
+    const replyTarget = resolveRemediationReplyTarget(process.env, { requireExists: true });
+    const hqRoot = replyTarget.root;
     const replyStorageKey = resolveReplyStorageKey(claimed.job);
     if (claimed.job.replyStorageKey !== replyStorageKey) {
       claimed.job = {
@@ -2588,10 +2613,10 @@ async function consumeNextFollowUpJob({
       };
       writeFollowUpJob(claimed.jobPath, claimed.job);
     }
-    const { replyPath } = prepareHqReplyLandingPad({
-      hqRoot,
+    const { replyDir, replyPath } = replyTarget.resolvePath({
       launchRequestId: replyStorageKey,
     });
+    mkdirSync(replyDir, { recursive: true });
 
     const promptPath = join(artifactDir, 'prompt.md');
     // Output / log filenames are kept generic across worker classes so
@@ -2860,7 +2885,10 @@ async function stopConsumedJobWithComment({
 }
 
 async function main() {
-  const mode = process.argv[2] === 'reconcile' ? 'reconcile' : 'consume';
+  if (process.argv.includes('--with-hq-integration')) {
+    process.env.ADV_WITH_HQ_INTEGRATION = '1';
+  }
+  const mode = process.argv.includes('reconcile') ? 'reconcile' : 'consume';
 
   try {
     if (mode === 'reconcile') {
@@ -2924,7 +2952,9 @@ async function main() {
 export {
   FOLLOW_UP_PROMPT_PATH,
   REMEDIATION_WORKER_TRAILER_CLASS,
+  DEFAULT_REPLIES_ROOT,
   DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
+  OAUTH_ENV_STRIP_LIST,
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   WORKER_PROVENANCE_HOOK_SRC,
   installWorkerProvenanceHook,
@@ -2954,6 +2984,9 @@ export {
   resolveHqReplyPath,
   prepareHqReplyLandingPad,
   resolveHqRoot,
+  resolveLocalRepliesRoot,
+  resolveRemediationReplyTarget,
+  shouldUseHqIntegration,
   resolveJobRelativePath,
   resolveReplyStorageKey,
   resolveRemediationMaxConcurrentJobs,

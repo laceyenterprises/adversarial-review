@@ -114,6 +114,9 @@ function installSignalHandlers() {
 }
 
 async function main() {
+  if (process.argv.includes('--with-hq-integration')) {
+    process.env.ADV_WITH_HQ_INTEGRATION = '1';
+  }
   installSignalHandlers();
   logInfo(
     `startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s ` +

@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 
-const DEFAULT_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';
+const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
 const DEFAULT_OPENCLAW_AGENT_HOOKS_URL = 'http://127.0.0.1:18789/hooks/agent';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
@@ -19,7 +21,7 @@ function firstNonEmpty(...values) {
 }
 
 function resolveAlertDefaults(env = process.env) {
-  const secretsRoot = env.LITELLM_SECRETS_ROOT || DEFAULT_SECRETS_ROOT;
+  const secretsRoot = env.ADV_SECRETS_ROOT || env.LITELLM_SECRETS_ROOT || DEFAULT_SECRETS_ROOT;
   const alertTo = firstNonEmpty(env.ALERT_TO);
   if (!alertTo) {
     throw new Error('ALERT_TO must be configured for alert delivery');

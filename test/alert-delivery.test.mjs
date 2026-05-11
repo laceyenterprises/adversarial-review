@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import { deliverAlert, resolveAlertDefaults } from '../src/alert-delivery.mjs';
 
@@ -60,7 +62,7 @@ test('watcher alert defaults require an explicit recipient', () => {
 test('watcher alert defaults use the operator Telegram route once ALERT_TO is configured', () => {
   assert.deepEqual(resolveAlertDefaults({ ALERT_TO: '123456' }), {
     openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
-    hooksTokenFile: '/Users/airlock/agent-os/agents/clio/credentials/local/litellm-alert-bridge.token',
+    hooksTokenFile: join(homedir(), '.config', 'adversarial-review', 'secrets', 'litellm-alert-bridge.token'),
     alertChannel: 'telegram',
     alertTo: '123456',
     alertAgentId: 'main',

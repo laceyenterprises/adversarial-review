@@ -1292,7 +1292,6 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
         ? latestMaxRounds
         : roundBudget.roundBudget;
 
-      healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
       const result = await spawnReviewer({
         repo: repoPath,
         prNumber,
@@ -1308,6 +1307,9 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
           persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });
         },
       });
+      if (result.ok) {
+        healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
+      }
 
       settleReviewerAttempt({
         rootDir: ROOT,
@@ -1319,7 +1321,11 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
     }
   }
   } finally {
-    await healthProbe?.finishTick?.(healthTick);
+    try {
+      healthProbe?.finishTick?.(healthTick);
+    } catch (err) {
+      console.error('[watcher] health probe finalize failed:', err?.message || err);
+    }
   }
 }
 

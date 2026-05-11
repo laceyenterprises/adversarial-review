@@ -117,7 +117,7 @@ function createWatcherHealthProbe({
     }
   }
 
-  async function finishTick(tick) {
+  function finishTick(tick) {
     if (!config.enabled || !tick?.enabled) return null;
 
     if (tick.spawnCount > 0) {
@@ -135,7 +135,7 @@ function createWatcherHealthProbe({
         state.healthState = 'healthy';
         state.noProgressSilentPolls = 0;
         state.spawnsSinceRecovery = 0;
-        await sendTransitionAlert(buildRecoveredAlertText(payload), payload);
+        void sendTransitionAlert(buildRecoveredAlertText(payload), payload);
         return payload;
       }
       state.spawnsSinceRecovery = 0;
@@ -162,7 +162,7 @@ function createWatcherHealthProbe({
       state.noProgressSilentPolls = state.pollsSinceLastSpawn;
       state.spawnsSinceRecovery = 0;
       if (isTransition) {
-        await sendTransitionAlert(buildNoProgressAlertText(payload), payload);
+        void sendTransitionAlert(buildNoProgressAlertText(payload), payload);
       }
       return payload;
     }

@@ -335,20 +335,19 @@ async function buildAdversarialGateSnapshot(rootDir, {
   reviewRow = null,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
+  operatorApprovalEvent = undefined,
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
 
   let operatorApproval = null;
   const hasOperatorApprovedLabel = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
-  if (
-    hasOperatorApprovedLabel
-    && headSha
-    && typeof fetchLatestLabelEventImpl === 'function'
-  ) {
-    const event = await fetchLatestLabelEventImpl(repo, prNumber, OPERATOR_APPROVED_LABEL, {
-      execFileImpl,
-    });
+  if (hasOperatorApprovedLabel && headSha) {
+    const event = operatorApprovalEvent === undefined && typeof fetchLatestLabelEventImpl === 'function'
+      ? await fetchLatestLabelEventImpl(repo, prNumber, OPERATOR_APPROVED_LABEL, {
+        execFileImpl,
+      })
+      : operatorApprovalEvent;
     operatorApproval = buildScopedOperatorApproval(
       {
         headSha,
@@ -460,6 +459,7 @@ async function projectAdversarialGateStatus(rootDir, {
   reviewRow = null,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
+  operatorApprovalEvent = undefined,
   env = process.env,
 } = {}) {
   const snapshot = await buildAdversarialGateSnapshot(rootDir, {
@@ -472,6 +472,7 @@ async function projectAdversarialGateStatus(rootDir, {
     reviewRow,
     execFileImpl,
     fetchLatestLabelEventImpl,
+    operatorApprovalEvent,
   });
   const decision = pickAdversarialGateStatus(snapshot);
   const publish = await publishAdversarialGateStatus(rootDir, {

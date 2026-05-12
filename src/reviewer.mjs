@@ -21,7 +21,7 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -41,6 +41,7 @@ import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { looksLikeRuntimeJunk, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
+import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -92,25 +93,50 @@ async function spawnCaptured(command, args, {
 // Claude Code CLI — runs as the current user.
 // Must NOT have ANTHROPIC_API_KEY in env when validating or invoking,
 // otherwise the CLI may report API-key auth instead of its native login state.
-const CLAUDE_CLI = '/opt/homebrew/bin/claude';
+const DEFAULT_CLAUDE_CLI = '/opt/homebrew/bin/claude';
+const CLAUDE_CLI = resolveClaudeCliPath();
 const LAUNCHCTL = '/bin/launchctl';
 const ENV_BIN = '/usr/bin/env';
-const CLAUDE_STRIPPED_ENV_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'];
+const CLAUDE_STRIPPED_ENV_VARS = OAUTH_ENV_STRIP_LIST;
 
 // ACPX-local Codex adapter path. The reviewer keeps wrapper-owned completion
 // semantics: ACPX/Codex does the work, and the outer wrapper owns parsing /
 // posting / downstream side effects. Today the handoff is ACPX stdout capture;
 // explicit file-artifact handoff remains a valid future refinement.
-const ACPX_CLI = '/Users/airlock/.openclaw/tools/acpx/node_modules/.bin/acpx';
+const MAINTAINER_ACPX_CLI = join(homedir(), '.openclaw', 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
 
 // Raw Codex CLI is still used only for login-status probing.
-const CODEX_CLI = '/Users/placey/.local/share/fnm/node-versions/v24.14.0/installation/bin/codex';
+const CODEX_CLI = resolveCodexCliPath();
 
 // OPENAI_API_KEY is stripped from env so Codex cannot fall back to API-key auth.
 
 function resolveClaudeAuthProbeTimeoutMs(env = process.env) {
   const parsed = Number.parseInt(env.CLAUDE_AUTH_PROBE_TIMEOUT_MS || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
+}
+
+function findOnPath(binaryName, pathValue = process.env.PATH || '') {
+  for (const dir of pathValue.split(':').filter(Boolean)) {
+    const candidate = join(dir, binaryName);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolveClaudeCliPath(env = process.env) {
+  return env.CLAUDE_CLI_PATH || env.CLAUDE_CLI || findOnPath('claude', env.PATH) || DEFAULT_CLAUDE_CLI;
+}
+
+function resolveCodexCliPath(env = process.env) {
+  return env.CODEX_CLI_PATH || env.CODEX_CLI || findOnPath('codex', env.PATH) || 'codex';
+}
+
+function resolveAcpxCliPath({ env = process.env, preferLocalAcpx = false } = {}) {
+  if (env.ACPX_CLI) return env.ACPX_CLI;
+  if (env.ACPX_CLI_PATH) return env.ACPX_CLI_PATH;
+  const fromPath = findOnPath('acpx', env.PATH);
+  if (fromPath) return fromPath;
+  return preferLocalAcpx ? MAINTAINER_ACPX_CLI : 'acpx';
 }
 
 // ── OAuth credential checks ──────────────────────────────────────────────────
@@ -126,8 +152,7 @@ async function assertClaudeOAuth() {
     throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
   }
 
-  const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
+  const { env } = scrubOAuthFallbackEnv(process.env);
 
   let stdout = '';
   let stderr = '';
@@ -649,8 +674,7 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
-  const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
+  const { env } = scrubOAuthFallbackEnv(process.env);
 
   let stdout, stderr;
   try {
@@ -705,13 +729,12 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
   const authPath = resolveCodexAuthPath();
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
 
-  const env = {
+  const { env } = scrubOAuthFallbackEnv({
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     CODEX_AUTH_PATH: authPath,
-    HOME: process.env.HOME || '/Users/placey',
-  };
-  delete env.OPENAI_API_KEY;
+    HOME: process.env.HOME || homedir(),
+  });
 
   let stdout = '';
   let stderr = '';
@@ -1068,6 +1091,9 @@ const __test__ = {
   LAUNCHCTL,
   ENV_BIN,
   CLAUDE_STRIPPED_ENV_VARS,
+  resolveAcpxCliPath,
+  resolveClaudeCliPath,
+  resolveCodexCliPath,
   spawnClaude,
   shouldQueueFollowUpForReview,
   queueFollowUpForPostedReview,

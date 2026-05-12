@@ -25,7 +25,7 @@ When you finish:
 - Report the validation you ran.
 - Report any blockers or follow-ups that remain.
 - Write the required remediation reply JSON artifact so re-review requests are machine-readable, not prose-only.
-- Write that JSON artifact ONLY to `${HQ_ROOT}/dispatch/remediation-replies/${LRQ_ID}/remediation-reply.json`.
+- Write that JSON artifact ONLY to `${REPLY_PATH}`.
 - Do NOT write or commit `.adversarial-follow-up/remediation-reply.json`. That path is forbidden.
 - Before `git commit`, run:
   - `git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true`

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.laceyenterprises.adversarial-review</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>bash</string>
+    <string>/ABS/PATH/TO/adversarial-review/scripts/adversarial-watcher-start.sh</string>
+  </array>
+
+  <!-- Long-running daemons are KeepAlive=true. Timer-driven jobs use
+       StartCalendarInterval and are bounced with bootout + bootstrap, not
+       kickstart -k. The watcher relies on KeepAlive=true plus
+       ThrottleInterval=30 for SQLite orphan-recovery exits such as code 75. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!-- macOS TCC trust is per real binary. Prefer long-lived in-process tick
+       loops over per-tick subprocess wrappers so node/claude/codex prompt
+       once per trusted binary path instead of once per timer tick. Re-run the
+       TCC target helper after Homebrew, fnm, Claude Code, or Codex upgrades. -->
+
+  <!-- Probe files must be per-user and live under $TMPDIR or another
+       user-owned directory. A shared /tmp file can be left behind by another
+       account and make a healthy better-sqlite3 ABI look broken. -->
+
+  <key>StandardOutPath</key>
+  <string>/tmp/adversarial-review-watcher.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/adversarial-review-watcher.err.log</string>
+</dict>
+</plist>

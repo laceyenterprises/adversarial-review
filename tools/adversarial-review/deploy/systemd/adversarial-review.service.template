@@ -1,0 +1,21 @@
+[Unit]
+Description=Adversarial Review Watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/ABS/PATH/TO/adversarial-review
+EnvironmentFile=/ABS/PATH/TO/adversarial-review/tools/adversarial-review/adversarial-review.env
+ExecStart=/usr/bin/env node src/watcher.mjs
+Restart=on-failure
+RestartSec=30
+KillMode=mixed
+TimeoutStopSec=900
+
+# Reviewer subprocesses run in isolated process groups. Keep TimeoutStopSec
+# large enough for in-flight reviewers to observe SIGTERM, flush artifacts,
+# and exit before systemd escalates.
+
+[Install]
+WantedBy=default.target

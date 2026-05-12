@@ -7,6 +7,7 @@
 import { Octokit } from '@octokit/rest';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +65,7 @@ import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
+import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -434,13 +436,15 @@ function persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber, lo
 // ── Author tag detection ─────────────────────────────────────────────────────
 
 function resolveCodexReviewerEnv(reviewerEnv) {
-  const sourceDir = process.env.CODEX_SOURCE_HOME || '/Users/placey/.codex';
+  const sourceDir = process.env.CODEX_SOURCE_HOME || join(process.env.HOME || homedir(), '.codex');
   const sourceAuthPath = join(sourceDir, 'auth.json');
 
-  reviewerEnv.HOME = reviewerEnv.HOME || '/Users/airlock';
+  reviewerEnv.HOME = reviewerEnv.HOME || process.env.HOME;
   reviewerEnv.CODEX_AUTH_PATH = sourceAuthPath;
   reviewerEnv.CODEX_SOURCE_HOME = sourceDir;
-  delete reviewerEnv.OPENAI_API_KEY;
+  const scrubbed = scrubOAuthFallbackEnv(reviewerEnv);
+  Object.keys(reviewerEnv).forEach((key) => delete reviewerEnv[key]);
+  Object.assign(reviewerEnv, scrubbed.env);
 
   return { authPath: sourceAuthPath, home: reviewerEnv.HOME };
 }
@@ -493,7 +497,7 @@ async function spawnReviewer({
 
   try {
     const reviewerEnv = {
-      ...process.env,
+      ...scrubOAuthFallbackEnv(process.env).env,
       REVIEWER_SESSION_UUID: reviewerSessionUuid,
     };
 

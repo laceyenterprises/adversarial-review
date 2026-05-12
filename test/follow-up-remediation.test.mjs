@@ -2,7 +2,7 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   REMEDIATION_WORKER_TRAILER_CLASS,
@@ -26,6 +26,8 @@ import {
   reconcileInProgressFollowUpJobs,
   resolveHqReplyPath,
   resolveHqRoot,
+  resolveLocalRepliesRoot,
+  resolveRemediationReplyTarget,
   remediationWorkerGitIdentity,
   resetOAuthPreflightCache,
   resolveClaudeCodeCliPath,
@@ -338,7 +340,14 @@ test('resolveHqRoot honors HQ_ROOT when set', async () => {
 });
 
 test('resolveHqRoot defaults under the current home directory and can require an existing root', () => {
-  assert.equal(resolveHqRoot({}), path.join(homedir(), 'agent-os-hq'));
+  assert.throws(
+    () => resolveHqRoot({}),
+    /HQ_ROOT must be set/
+  );
+  assert.equal(resolveLocalRepliesRoot({}), path.join(process.cwd(), 'data', 'replies'));
+  const target = resolveRemediationReplyTarget({});
+  assert.equal(target.mode, 'local');
+  assert.equal(target.root, path.join(process.cwd(), 'data', 'replies'));
   assert.throws(
     () => resolveHqRoot({ HQ_ROOT: path.join(tmpdir(), 'missing-hq-root-does-not-exist') }, { requireExists: true }),
     /HQ remediation root does not exist/
@@ -1166,7 +1175,7 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     assert.equal(spawnCalls[0].options.env.CODEX_HOME, codexHome);
     assert.equal(spawnCalls[0].options.env.HOME, workspaceDir);
     assert.equal(spawnCalls[0].options.env.OPENAI_API_KEY, undefined);
-    assert.deepEqual(worker.startupEvidence.sanitizedEnv.stripped, ['OPENAI_API_KEY']);
+    assert.match(worker.startupEvidence.sanitizedEnv.stripped.join(','), /(^|,)OPENAI_API_KEY(,|$)/);
     assert.match(spawnCalls[0].options.env.PATH, /\/custom\/bin/);
     // Worker env must explicitly carry the worker git identity so that an
     // inherited GIT_AUTHOR_*/GIT_COMMITTER_* cannot silently override the

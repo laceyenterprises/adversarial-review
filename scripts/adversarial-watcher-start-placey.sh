@@ -22,10 +22,11 @@ export CODEX_AUTH_PATH="/Users/placey/.codex/auth.json"
 # gate BEFORE any 1Password resolution so a broken native module produces
 # zero popups.
 WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
-if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >/tmp/adversarial-watcher-native-check.err 2>&1; then
+WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"
+if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$WATCHER_NATIVE_CHECK_ERR" 2>&1; then
   echo "[adversarial-watcher] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
   echo "[adversarial-watcher] details:" >&2
-  sed 's/^/  /' /tmp/adversarial-watcher-native-check.err >&2
+  sed 's/^/  /' "$WATCHER_NATIVE_CHECK_ERR" >&2
   echo "[adversarial-watcher] fix: cd $WATCHER_DIR && npm rebuild better-sqlite3" >&2
   echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; bootout the agent and rebuild to recover sooner." >&2
   sleep 3600
@@ -70,9 +71,16 @@ if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   exit 1
 fi
 
-# Scrub direct-provider API keys — reviewers must use OAuth only
+# Scrub direct-provider API/provider fallbacks — reviewers must use OAuth only.
 unset ANTHROPIC_API_KEY
+unset ANTHROPIC_BASE_URL
 unset OPENAI_API_KEY
+unset GOOGLE_API_KEY
+unset GEMINI_API_KEY
+unset CLAUDE_CODE_USE_BEDROCK
+unset CLAUDE_CODE_USE_VERTEX
+unset AWS_BEARER_TOKEN_BEDROCK
+# Preserve ANTHROPIC_AUTH_TOKEN: it may be the OAuth bearer.
 
 cd /Users/airlock/agent-os/tools/adversarial-review
 exec /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs

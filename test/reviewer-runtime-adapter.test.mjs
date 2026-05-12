@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
+  createAgentOsHqReviewerRuntimeAdapter,
   createReviewerRuntimeAdapterForDomain,
   recoverReviewerRunRecords,
   resolveReviewerRuntimeName,
@@ -27,6 +28,8 @@ const noopPreflight = async ({ model }) => (
     ? { codexCli: '/tmp/fake-codex' }
     : { claudeCli: '/tmp/fake-claude' }
 );
+const TEST_HQ_PARENT_SESSION = 'session:test:hq';
+const TEST_HQ_PROJECT = 'adversarial-review';
 
 function makeRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-runtime-'));
@@ -48,6 +51,35 @@ async function waitFor(assertion, { timeoutMs = 5_000, intervalMs = 25 } = {}) {
   throw lastError || new Error('waitFor timed out');
 }
 
+function makeHqRoot(ownerUser = process.env.USER || 'test-user') {
+  const hqRoot = mkdtempSync(join(tmpdir(), 'reviewer-runtime-hq-'));
+  mkdirSync(join(hqRoot, '.hq'), { recursive: true });
+  writeFileSync(join(hqRoot, '.hq', 'config.json'), `${JSON.stringify({ ownerUser })}\n`);
+  return hqRoot;
+}
+
+function makeHqEnv(hqRoot, overrides = {}) {
+  return {
+    HQ_ROOT: hqRoot,
+    HQ_PARENT_SESSION: TEST_HQ_PARENT_SESSION,
+    HQ_PROJECT: TEST_HQ_PROJECT,
+    USER: process.env.USER || 'test-user',
+    ...overrides,
+  };
+}
+
+function validReviewBody(verdict = 'Comment only') {
+  return [
+    '## Summary',
+    '',
+    'The reviewed change is acceptable.',
+    '',
+    '## Verdict',
+    verdict,
+    '',
+  ].join('\n');
+}
+
 test('loads reviewer runtime by name from domain config with cli-direct default', () => {
   assert.equal(resolveReviewerRuntimeName({}), 'cli-direct');
   assert.equal(resolveReviewerRuntimeName({ reviewerRuntime: 'fixture-stub' }), 'fixture-stub');
@@ -61,8 +93,607 @@ test('loads reviewer runtime by name from domain config with cli-direct default'
       reviewerBodies: ['## Verdict\nComment only'],
     });
     assert.equal(adapter.describe().id, 'fixture-stub');
+    assert.equal(
+      createReviewerRuntimeAdapterForDomain({
+        rootDir,
+        domainId: 'code-pr',
+        domainConfig: { id: 'code-pr', reviewerRuntime: 'agent-os-hq' },
+        env: { HQ_ROOT: rootDir, USER: process.env.USER || 'test-user' },
+        hqBin: '/bin/hq',
+      }).describe().id,
+      'agent-os-hq',
+    );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq dispatches via hq with artifact completion and stripped fallback env', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  const calls = [];
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: {
+        ...makeHqEnv(hqRoot),
+        OPENAI_API_KEY: 'must-not-propagate',
+        ANTHROPIC_API_KEY: 'must-not-propagate',
+        PATH: '/usr/bin:/bin',
+      },
+      execFileImpl: async (command, args, options) => {
+        calls.push({ command, args, env: options.env });
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          const promptPath = args[args.indexOf('--prompt') + 1];
+          const prompt = readFileSync(promptPath, 'utf8');
+          const artifactPath = prompt.match(/^Artifact path: (.+)$/m)?.[1];
+          assert.ok(artifactPath, 'prompt should name the artifact path');
+          writeFileSync(artifactPath, validReviewBody('Approved'));
+          return {
+            stdout: JSON.stringify({ dispatchId: 'lrq_lac_566', launchRequestId: 'lrq_lac_566' }),
+            stderr: '',
+          };
+        }
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+        }
+        throw new Error(`unexpected hq call: ${args.join(' ')}`);
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: 'Review the PR.',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-dispatch-session',
+      forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
+      tokenBudget: 12345,
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.reviewBody, /^## Summary/m);
+    assert.match(result.reviewBody, /^## Verdict\nApproved/m);
+    assert.equal(result.stderrTail, null);
+    assert.equal(calls.length, 2);
+    const promptArg = calls[0].args[calls[0].args.indexOf('--prompt') + 1];
+    assert.deepEqual(calls[0].args, [
+      'dispatch',
+      '--ticket', 'LAC-566',
+      '--worker-class', 'codex',
+      '--prompt', promptArg,
+      '--completion-shape', 'artifact',
+      '--parent-session', TEST_HQ_PARENT_SESSION,
+      '--project', TEST_HQ_PROJECT,
+      '--task-kind', 'analysis',
+      '--token-budget', '12345',
+      '--root', hqRoot,
+    ]);
+    assert.equal(Object.hasOwn(calls[0].env, 'OPENAI_API_KEY'), false);
+    assert.equal(Object.hasOwn(calls[0].env, 'ANTHROPIC_API_KEY'), false);
+    assert.equal(calls[0].env.HQ_ROOT, hqRoot);
+    assert.equal(calls[0].env.HQ_PARENT_SESSION, TEST_HQ_PARENT_SESSION);
+    assert.equal(calls[0].env.HQ_PROJECT, TEST_HQ_PROJECT);
+    assert.deepEqual(calls[1].args, ['dispatch', 'status', 'lrq_lac_566', '--root', hqRoot]);
+    assert.equal(Object.hasOwn(calls[1].env, 'OPENAI_API_KEY'), false);
+    assert.equal(Object.hasOwn(calls[1].env, 'ANTHROPIC_API_KEY'), false);
+    const record = readReviewerRunRecord(rootDir, 'agent-hq-dispatch-session');
+    assert.deepEqual(record.subjectContext.agentOsHq.forbiddenFallbacks, ['api-key', 'anthropic-api-key']);
+    assert.equal(record.subjectContext.agentOsHq.parentSession, TEST_HQ_PARENT_SESSION);
+    assert.equal(record.subjectContext.agentOsHq.project, TEST_HQ_PROJECT);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq reports owner mismatch as configuration error without invoking hq', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot('somebody-else');
+  let invoked = false;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async () => {
+        invoked = true;
+        throw new Error('should not run');
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14 },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-owner-mismatch',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(invoked, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /HQ owner mismatch/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq rejects missing ticket references before dispatch', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  let invoked = false;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async () => {
+        invoked = true;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14 },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-missing-ticket',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(invoked, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /requires subjectContext\.linearTicketId or subjectContext\.subjectExternalId/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq rejects missing HQ_PARENT_SESSION before dispatch', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  let invoked = false;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot, { HQ_PARENT_SESSION: '' }),
+      execFileImpl: async () => {
+        invoked = true;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-missing-parent-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(invoked, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /requires HQ_PARENT_SESSION/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq rejects missing HQ_PROJECT before dispatch', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  let invoked = false;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot, { HQ_PROJECT: '' }),
+      execFileImpl: async () => {
+        invoked = true;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-missing-project',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(invoked, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /requires HQ_PROJECT/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq rejects unknown model fallback without explicit worker class', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  let invoked = false;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async () => {
+        invoked = true;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'claude-3.7',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-unknown-model',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(invoked, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /does not know how to map model/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq fails loud when HQ_ROOT is missing', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: { HQ_PARENT_SESSION: TEST_HQ_PARENT_SESSION, HQ_PROJECT: TEST_HQ_PROJECT, USER: process.env.USER || 'test-user' },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-missing-root',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /set HQ_ROOT or use cli-direct\/acpx/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq fails loud when hq binary is missing', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      env: makeHqEnv(hqRoot, { PATH: '' }),
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-missing-bin',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /hq binary not found/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq polling uses 30s cadence plus jitter', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  const sleeps = [];
+  let statusCount = 0;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      jitterImpl: () => 1234,
+      sleepImpl: async (ms) => { sleeps.push(ms); },
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_polling' }), stderr: '' };
+        }
+        statusCount += 1;
+        if (statusCount < 3) {
+          return { stdout: JSON.stringify({ status: 'running', health: 'ok', lastProgressAt: `t${statusCount}` }), stderr: '' };
+        }
+        const recordPath = join(rootDir, 'data', 'reviewer-runs', 'agent-hq-polling.agent-os-hq.review.md');
+        writeFileSync(recordPath, validReviewBody());
+        return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-polling',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(sleeps, [31_234, 31_234]);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq sustained lease_expired is surfaced with trace guidance', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  let elapsed = 0;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      jitterImpl: () => 0,
+      sleepImpl: async (ms) => { elapsed += ms; },
+      nowMs: () => elapsed,
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_lease_expired' }), stderr: '' };
+        }
+        return {
+          stdout: JSON.stringify({
+            status: 'running',
+            health: 'lease_expired',
+            phase: 'running',
+            lastProgressAt: '2026-05-11T20:00:00.000Z',
+            lastProgressSummary: 'same',
+          }),
+          stderr: '',
+        };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 120_000,
+      sessionUuid: 'agent-hq-lease-expired',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'lease-expired');
+    assert.match(result.stderrTail, /hq dispatch trace lrq_lease_expired/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq validates missing and malformed artifacts', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          const promptPath = args[args.indexOf('--prompt') + 1];
+          const prompt = readFileSync(promptPath, 'utf8');
+          const artifactPath = prompt.match(/^Artifact path: (.+)$/m)?.[1];
+          if (artifactPath?.includes('malformed-artifact')) {
+            writeFileSync(artifactPath, 'not a review at all');
+          }
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_bad_artifact' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+      },
+    });
+    const missing = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-missing-artifact',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.failureClass, 'reviewer-output');
+    assert.match(missing.stderrTail, /review artifact missing/);
+
+    const malformed = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 15, linearTicketId: 'LAC-567' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-malformed-artifact',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(malformed.ok, false);
+    assert.equal(malformed.failureClass, 'reviewer-output');
+    assert.match(malformed.stderrTail, /recognizable review sections|review artifact/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq enforces timeoutMs and cancels the dispatch on expiry', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  const calls = [];
+  let elapsed = 0;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      jitterImpl: () => 0,
+      sleepImpl: async (ms) => { elapsed += ms; },
+      nowMs: () => elapsed,
+      execFileImpl: async (_command, args, options) => {
+        calls.push({ args, timeout: options.timeout });
+        if (args[0] === 'dispatch' && args[1] !== 'status' && args[1] !== 'cancel') {
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_timeout' }), stderr: '' };
+        }
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'running', health: 'ok' }), stderr: '' };
+        }
+        if (args[0] === 'dispatch' && args[1] === 'cancel') {
+          return { stdout: JSON.stringify({ canceled: true }), stderr: '' };
+        }
+        throw new Error(`unexpected hq call: ${args.join(' ')}`);
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 50_000,
+      sessionUuid: 'agent-hq-timeout',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'reviewer-timeout');
+    assert.equal(result.reattachToken, 'lrq_timeout');
+    assert.match(result.stderrTail, /exceeded reviewer timeout/);
+    const timeoutPromptArg = calls[0].args[calls[0].args.indexOf('--prompt') + 1];
+    assert.deepEqual(calls.map(({ args }) => args), [
+      ['dispatch', '--ticket', 'LAC-566', '--worker-class', 'codex', '--prompt', timeoutPromptArg, '--completion-shape', 'artifact', '--parent-session', TEST_HQ_PARENT_SESSION, '--project', TEST_HQ_PROJECT, '--task-kind', 'analysis', '--root', hqRoot],
+      ['dispatch', 'status', 'lrq_timeout', '--root', hqRoot],
+      ['dispatch', 'status', 'lrq_timeout', '--root', hqRoot],
+      ['dispatch', 'cancel', 'lrq_timeout', '--root', hqRoot],
+    ]);
+    assert.equal(calls[0].timeout, 50_000);
+    assert.equal(calls[1].timeout, 50_000);
+    assert.equal(calls[2].timeout, 20_000);
+    assert.equal(calls[3].timeout, 1_000);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq cancel does not overwrite terminal completed records', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  let cancelCalls = 0;
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'agent-hq-completed',
+      domain: 'code-pr',
+      runtime: 'agent-os-hq',
+      state: 'completed',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:05:00.000Z',
+      reattachToken: 'lrq_completed',
+      subjectContext: {
+        domainId: 'code-pr',
+        linearTicketId: 'LAC-566',
+        agentOsHq: { hqRoot, hqBin: '/bin/hq' },
+      },
+    });
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async () => {
+        cancelCalls += 1;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    await adapter.cancel('agent-hq-completed');
+    assert.equal(cancelCalls, 0);
+    assert.equal(readReviewerRunRecord(rootDir, 'agent-hq-completed').state, 'completed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq reattaches by polling persisted launch request id', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  const artifactPath = join(rootDir, 'data', 'reviewer-runs', 'agent-hq-reattach.agent-os-hq.review.md');
+  try {
+    mkdirSync(dirname(artifactPath), { recursive: true });
+    writeFileSync(artifactPath, validReviewBody('Comment only'));
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'agent-hq-reattach',
+      domain: 'code-pr',
+      runtime: 'agent-os-hq',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'lrq_reattach',
+      subjectContext: {
+        domainId: 'code-pr',
+        agentOsHq: { artifactPath, hqRoot, hqBin: '/bin/hq' },
+      },
+    });
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        assert.deepEqual(args, ['dispatch', 'status', 'lrq_reattach', '--root', hqRoot]);
+        return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+      },
+    });
+    const record = readRecoverableReviewerRunRecords(rootDir)[0];
+    const result = await adapter.reattach(record);
+    assert.equal(result.ok, true);
+    assert.match(result.reviewBody, /^## Verdict\nComment only/m);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq reattach classifies never-dispatched records as daemon-bounce', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+    });
+    const result = await adapter.reattach({
+      sessionUuid: 'agent-hq-never-dispatched',
+      reattachToken: 'agent-hq-never-dispatched',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      subjectContext: { domainId: 'code-pr' },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'daemon-bounce');
+    assert.match(result.stderrTail, /no launch request id/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
   }
 });
 

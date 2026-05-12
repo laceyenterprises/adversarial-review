@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createAgentOsHqReviewerRuntimeAdapter } from './agent-os-hq/index.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from './cli-direct/index.mjs';
 import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mjs';
 import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './run-state.mjs';
@@ -18,6 +19,8 @@ function createReviewerRuntimeAdapterByName(name = 'cli-direct', options = {}) {
       return createCliDirectReviewerRuntimeAdapter(options);
     case 'fixture-stub':
       return createFixtureStubReviewerRuntimeAdapter(options);
+    case 'agent-os-hq':
+      return createAgentOsHqReviewerRuntimeAdapter(options);
     default:
       throw new Error(`Unknown reviewer runtime adapter: ${name}`);
   }
@@ -70,6 +73,7 @@ async function recoverReviewerRunRecords({
 }
 
 export {
+  createAgentOsHqReviewerRuntimeAdapter,
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
   loadDomainConfig,

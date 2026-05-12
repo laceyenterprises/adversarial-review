@@ -44,7 +44,32 @@ function routeSubject(subject) {
   };
 }
 
+<<<<<<< HEAD
+=======
+function extractLinearTicketId(title) {
+  const match = String(title || '').match(/\b(LAC-\d+)\b/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+function routePR(prTitle, subject = null) {
+  const builderClass = normalizeBuilderClass(
+    subject?.builderClass || builderClassFromTitle(prTitle)
+  );
+  if (!builderClass) return null;
+  const route = routeSubject({ builderClass });
+  if (!route) return null;
+  return {
+    builderClass,
+    tag: route.tag,
+    reviewerModel: route.reviewerModel,
+    botTokenEnv: route.botTokenEnv,
+    linearTicketId: extractLinearTicketId(prTitle),
+  };
+}
+
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 export {
+  extractLinearTicketId,
   ROUTE_BY_BUILDER_CLASS,
   normalizeBuilderClass,
   routeSubject,

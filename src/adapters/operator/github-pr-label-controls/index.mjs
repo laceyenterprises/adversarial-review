@@ -9,6 +9,10 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { fetchLatestLabelEvent } from '../../../github-label-events.mjs';
+<<<<<<< HEAD
+=======
+import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 
 const execFileAsync = promisify(execFile);
 
@@ -37,6 +41,7 @@ function normalizeEventId(event) {
   return event?.id || event?.nodeId || null;
 }
 
+<<<<<<< HEAD
 function parseSubjectExternalId(subjectExternalId) {
   const raw = String(subjectExternalId || '').trim();
   const match = /^([^#/]+\/[^#/]+)#(\d+)$/.exec(raw);
@@ -49,6 +54,8 @@ function parseSubjectExternalId(subjectExternalId) {
   };
 }
 
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 function legacyLabelEventFromControlResult(result, label) {
   if (!result?.applied) return null;
   return {

@@ -10,6 +10,7 @@ import {
   claimNextFollowUpJob,
   getFollowUpJobDir,
   listInProgressFollowUpJobs,
+  listPendingFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobStopped,
@@ -75,6 +76,9 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 // per-job field) will pass the appropriate class through to
 // `prepareWorkspaceForJob` / `spawnCodexRemediationWorker`.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
+const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
+const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
+const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
 
 // The Worker-Class trailer this pipeline stamps on commits via the
 // commit-msg hook. Different from the worker-model class — encodes
@@ -623,6 +627,33 @@ function spawnRemediationWorker(workerClass, opts) {
     default:
       throw new Error(`unknown remediation worker class: ${workerClass}`);
   }
+}
+
+function normalizeMaxConcurrentFollowUpJobs(value, {
+  fallback = DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
+  max = MAX_REMEDIATION_MAX_CONCURRENT_JOBS,
+  onClamp = null,
+} = {}) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  if (parsed > max) {
+    onClamp?.({
+      requested: parsed,
+      clamped: max,
+    });
+    return max;
+  }
+  return parsed;
+}
+
+function resolveRemediationMaxConcurrentJobs(env = process.env, options = {}) {
+  return normalizeMaxConcurrentFollowUpJobs(env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV], options);
+}
+
+function followUpJobRepoPrKey(job) {
+  return `${String(job?.repo || '').toLowerCase()}#${job?.prNumber || ''}`;
 }
 
 function loadFollowUpPromptTemplate(rootDir = ROOT, { stage = 'first' } = {}) {
@@ -1193,6 +1224,27 @@ function isWorkerProcessRunning(processId) {
   }
 }
 
+function killDetachedWorkerProcessGroup(processId, signal = 'SIGKILL') {
+  if (!Number.isInteger(processId) || processId <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(-processId, signal);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') {
+      return false;
+    }
+    try {
+      process.kill(processId, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 function parseIsoTime(value) {
   const timestamp = Date.parse(String(value ?? ''));
   return Number.isFinite(timestamp) ? timestamp : null;
@@ -1429,7 +1481,7 @@ function summarizeWorkerFinalMessage(text, limit = 400) {
   // headers / private keys / labelled secrets the worker may have echoed
   // from logs or environment. Whitespace is collapsed so a one-line
   // preview fits in a digest field even if the worker dumped multi-line
-  // output. Centralized in src/redaction.mjs so PR comments and final-
+        // output. Centralized in the GitHub PR comments redaction adapter so PR comments and final-
   // message previews share the same masking pipeline.
   const collapsed = String(text ?? '').trim().replace(/\s+/g, ' ');
   if (!collapsed) {
@@ -2332,6 +2384,7 @@ async function consumeNextFollowUpJob({
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
+  excludedRepoPrKeys = new Set(),
   log = console,
 } = {}) {
   // Claim first so we know which worker class we're running. This lets
@@ -2342,6 +2395,7 @@ async function consumeNextFollowUpJob({
     rootDir,
     claimedAt: now(),
     returnStopped: true,
+    excludedRepoPrKeys,
   });
 
   if (!claimed) {
@@ -2446,6 +2500,7 @@ async function consumeNextFollowUpJob({
   // never-spawned so the PR-wide ledger does not count this round —
   // an OAuth/workspace-prep failure burned no remediation budget.
   let spawnAttempted = false;
+  let spawnedWorker = null;
 
   try {
     // Round-budget check first (cheap, short-circuits before any
@@ -2549,7 +2604,6 @@ async function consumeNextFollowUpJob({
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
 
-    spawnAttempted = true;
     const worker = spawnRemediationWorker(workerClass, {
       workspaceDir,
       promptPath,
@@ -2561,6 +2615,7 @@ async function consumeNextFollowUpJob({
       spawnImpl,
       now,
     });
+    spawnedWorker = worker;
 
     const updated = markFollowUpJobSpawned({
       jobPath: claimed.jobPath,
@@ -2575,6 +2630,7 @@ async function consumeNextFollowUpJob({
         replyPath,
       },
     });
+    spawnAttempted = true;
 
     return {
       consumed: true,
@@ -2605,15 +2661,28 @@ async function consumeNextFollowUpJob({
       };
     }
 
-    // If we never made it to the spawn call, this round burned no
-    // remediation budget — tag the failed record with `never-spawned`
-    // so summarizePRRemediationLedger excludes it from the PR-wide
-    // count. Without this, an OAuth/workspace-prep failure permanently
-    // consumes a round and can trip the final-round threshold for a PR
-    // that never actually ran a worker.
-    const remediationWorker = spawnAttempted
-      ? undefined
-      : { state: 'never-spawned', reconciledAt: now() };
+    let remediationWorker;
+    if (spawnAttempted) {
+      remediationWorker = undefined;
+    } else if (spawnedWorker) {
+      const cleanupAt = now();
+      remediationWorker = {
+        ...spawnedWorker,
+        // The worker was killed before we durably recorded a spawned
+        // round, so this path must stay budget-neutral in the PR-wide
+        // remediation ledger.
+        state: 'never-spawned',
+        cleanupAttemptedAt: cleanupAt,
+        cleanupSignal: 'SIGKILL',
+        cleanupResult: killDetachedWorkerProcessGroup(spawnedWorker.processId) ? 'killed' : 'not-found',
+      };
+    } else {
+      // If we never made it to the spawn call, this round burned no
+      // remediation budget — tag the failed record with `never-spawned`
+      // so summarizePRRemediationLedger excludes it from the PR-wide
+      // count.
+      remediationWorker = { state: 'never-spawned', reconciledAt: now() };
+    }
 
     const failed = markFollowUpJobFailed({
       rootDir,
@@ -2624,9 +2693,93 @@ async function consumeNextFollowUpJob({
       failure,
       remediationWorker,
     });
+    err.followUpJobId = claimed.job?.jobId || null;
     err.followUpJobPath = failed.jobPath;
     throw err;
   }
+}
+
+async function consumeFollowUpJobsUntilCapacity({
+  rootDir = ROOT,
+  maxConcurrent = resolveRemediationMaxConcurrentJobs(),
+  execFileImpl = execFileAsync,
+  spawnImpl = spawn,
+  now = () => new Date().toISOString(),
+  promptTemplate = loadFollowUpPromptTemplate(rootDir),
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  postCommentImpl = postRemediationOutcomeComment,
+  shouldStop = () => false,
+  log = console,
+} = {}) {
+  const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
+  const activeJobs = listInProgressFollowUpJobs(rootDir);
+  const blockedRepoPrKeys = new Set(activeJobs.map(({ job }) => followUpJobRepoPrKey(job)));
+  const results = [];
+  let spawned = 0;
+  let stopped = 0;
+
+  while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
+    /* eslint-disable no-await-in-loop */
+    let result;
+    try {
+      result = await consumeNextFollowUpJob({
+        rootDir,
+        execFileImpl,
+        spawnImpl,
+        now,
+        promptTemplate,
+        resolvePRLifecycleImpl,
+        postCommentImpl,
+        excludedRepoPrKeys: blockedRepoPrKeys,
+        log,
+      });
+    } catch (err) {
+      if (!err?.followUpJobPath) {
+        throw err;
+      }
+      const jobIdTag = err.followUpJobId ? ` jobId=${err.followUpJobId}` : '';
+      const jobPathTag = err.followUpJobPath ? ` jobPath=${err.followUpJobPath}` : '';
+      const detail = err?.message || String(err);
+      log.warn?.(
+        `[follow-up-remediation] continuing drain after failed spawn preparation${jobIdTag}${jobPathTag}: ${detail}`
+      );
+      continue;
+    }
+    /* eslint-enable no-await-in-loop */
+    results.push(result);
+
+    if (result.consumed) {
+      spawned += 1;
+      blockedRepoPrKeys.add(followUpJobRepoPrKey(result.job));
+      continue;
+    }
+
+    if (result.reason === 'no-pending-jobs') {
+      break;
+    }
+
+    if (result.job) {
+      stopped += 1;
+      continue;
+    }
+
+    break;
+  }
+
+  const deferredSamePR = listPendingFollowUpJobs(rootDir)
+    .filter(({ job }) => blockedRepoPrKeys.has(followUpJobRepoPrKey(job)))
+    .length;
+
+  return {
+    maxConcurrent: concurrencyCap,
+    activeAtStart: activeJobs.length,
+    availableAtStart: Math.max(0, concurrencyCap - activeJobs.length),
+    spawned,
+    stopped,
+    deferredSamePR,
+    capacityRemaining: Math.max(0, concurrencyCap - activeJobs.length - spawned),
+    results,
+  };
 }
 
 // Stamp a comment-delivery record onto a consume-time terminal job
@@ -2758,6 +2911,8 @@ async function main() {
 export {
   FOLLOW_UP_PROMPT_PATH,
   REMEDIATION_WORKER_TRAILER_CLASS,
+  DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
+  REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   WORKER_PROVENANCE_HOOK_SRC,
   installWorkerProvenanceHook,
   OAuthError,
@@ -2767,10 +2922,12 @@ export {
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,
+  consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
   inspectWorkspaceState,
   digestWorkerFinalMessage,
   isWorkerProcessRunning,
+  killDetachedWorkerProcessGroup,
   loadFollowUpPromptTemplate,
   prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,
@@ -2786,6 +2943,7 @@ export {
   resolveHqRoot,
   resolveJobRelativePath,
   resolveReplyStorageKey,
+  resolveRemediationMaxConcurrentJobs,
   summarizeWorkerFinalMessage,
   assessWorkerLiveness,
   spawnCodexRemediationWorker,

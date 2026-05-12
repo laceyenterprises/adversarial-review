@@ -103,6 +103,41 @@ test('adapter dedupe suppresses a second post for the same typed key', async () 
   assert.equal(readDeliveries(rootDir).length, 1);
 });
 
+<<<<<<< HEAD
+=======
+test('adapter claim lock suppresses concurrent duplicate posts for the same typed key', async () => {
+  const rootDir = makeRootDir();
+  const calls = [];
+  const octokit = {
+    rest: {
+      issues: {
+        async createComment(payload) {
+          calls.push(payload);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return {
+            data: {
+              id: calls.length,
+              html_url: `https://github.test/comment/${calls.length}`,
+            },
+          };
+        },
+      },
+    },
+  };
+  const adapterA = createGitHubPRCommentsAdapter({ rootDir, octokit });
+  const adapterB = createGitHubPRCommentsAdapter({ rootDir, octokit });
+
+  const [first, second] = await Promise.all([
+    adapterA.deliverReviewComment({ body: 'first concurrent' }, makeKey({ revisionRef: 'sha-race' })),
+    adapterB.deliverReviewComment({ body: 'second concurrent' }, makeKey({ revisionRef: 'sha-race' })),
+  ]);
+
+  assert.equal(calls.length, 1);
+  assert.equal(first.deliveryExternalId, second.deliveryExternalId);
+  assert.equal(readDeliveries(rootDir).length, 1);
+});
+
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 test('adapter dedupe suppresses a legacy hit only when it matches the same head', async () => {
   const rootDir = makeRootDir();
   const db = openReviewStateDb(rootDir);
@@ -394,6 +429,91 @@ test('adapter gh fallback honors explicit operator-notice token routing', async 
   assert.equal(receipt.deliveryExternalId, 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-102');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].options.env.GH_TOKEN, 'operator-token');
+<<<<<<< HEAD
+=======
+  assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
+});
+
+test('adapter gh fallback does not pass through GITHUB_TOKEN when an explicit token is resolved', async () => {
+  /** @type {Array<{cmd: string, args: string[], options: any}>} */
+  const calls = [];
+  const adapter = createGitHubPRCommentsAdapter({
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/airlock',
+      GITHUB_TOKEN: 'operator-token',
+      GH_CODEX_REVIEWER_TOKEN: 'worker-token',
+    },
+    resolveGhToken: () => ({ token: 'explicit-bot-token', allowGhAuthFallback: true }),
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { stdout: 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-104\n' };
+    },
+  });
+
+  await adapter.deliverOperatorNotice(
+    {
+      type: 'raised-round-cap',
+      subjectRef: {
+        domainId: 'code-pr',
+        subjectExternalId: 'laceyenterprises/demo#7',
+        revisionRef: 'sha-explicit-token',
+      },
+      revisionRef: 'sha-explicit-token',
+      eventExternalId: 'notice-explicit-token',
+      observedAt: '2026-05-11T12:00:00.000Z',
+    },
+    'notice body',
+    makeKey({ revisionRef: 'sha-explicit-token', kind: 'operator-notice', noticeRef: 'notice-explicit-token' })
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].options.env, {
+    PATH: '/usr/bin:/bin',
+    HOME: '/Users/airlock',
+    GH_TOKEN: 'explicit-bot-token',
+  });
+});
+
+test('adapter gh fallback honors ambient GH_TOKEN when operator notices allow fallback auth', async () => {
+  /** @type {Array<{cmd: string, args: string[], options: any}>} */
+  const calls = [];
+  const adapter = createGitHubPRCommentsAdapter({
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/airlock',
+      GH_TOKEN: 'operator-fallback-token',
+    },
+    resolveGhToken: () => ({
+      tokenEnvName: 'GITHUB_TOKEN',
+      fallbackTokenEnvNames: ['GH_TOKEN'],
+      allowGhAuthFallback: true,
+    }),
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { stdout: 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-103\n' };
+    },
+  });
+
+  await adapter.deliverOperatorNotice(
+    {
+      type: 'raised-round-cap',
+      subjectRef: {
+        domainId: 'code-pr',
+        subjectExternalId: 'laceyenterprises/demo#7',
+        revisionRef: 'sha-notice-fallback',
+      },
+      revisionRef: 'sha-notice-fallback',
+      eventExternalId: 'notice-fallback',
+      observedAt: '2026-05-11T12:00:00.000Z',
+    },
+    'notice body',
+    makeKey({ revisionRef: 'sha-notice-fallback', kind: 'operator-notice', noticeRef: 'notice-fallback' })
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'operator-fallback-token');
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 });
 
 test('adapter remediation-reply path fails closed until wired to the hardened renderer', async () => {

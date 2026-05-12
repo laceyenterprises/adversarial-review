@@ -1,12 +1,20 @@
 import { TAG_PREFIXES } from './pr-title-tagging.mjs';
+<<<<<<< HEAD
 import { routePR as routeOperatorPR } from './adapters/operator/linear-triage/index.mjs';
+=======
+import { routePR as routeSubjectPR } from './adapters/subject/github-pr/routing.mjs';
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 
 const REQUIRED_PREFIXES = Object.values(TAG_PREFIXES);
 
 const MALFORMED_TITLE_COMMENT_HEADER = '## Adversarial Review Trigger Failure';
 
 function routePR(prTitle) {
+<<<<<<< HEAD
   const route = routeOperatorPR(prTitle);
+=======
+  const route = routeSubjectPR(prTitle);
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
   if (!route) return null;
   return {
     tag: route.tag,

@@ -10,7 +10,7 @@ import {
   findExistingRemediationComment,
   postRemediationOutcomeComment,
   resolveCommentBotTokenEnv,
-} from '../src/pr-comments.mjs';
+} from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
 
 function makeJob(overrides = {}) {
   return {
@@ -743,7 +743,7 @@ test('reReview.reason redacts host-local paths inline (in the status line)', () 
       requested: true,
       triggered: true,
       status: 'pending',
-      reason: 'Confirm fix at /Users/placey/agent-os/tools/adversarial-review/src/pr-comments.mjs',
+      reason: 'Confirm fix at /Users/placey/agent-os/tools/adversarial-review/src/adapters/comms/github-pr-comments/pr-comments.mjs',
     },
   });
   assert.doesNotMatch(body, /\/Users\/placey/);

@@ -7,6 +7,7 @@
  * @typedef {import('../../../kernel/contracts.d.ts').TriageStatus} TriageStatus
  */
 
+<<<<<<< HEAD
 import { builderClassFromTitle } from '../../subject/github-pr/title-tagging.mjs';
 import { normalizeBuilderClass, routeSubject } from '../../subject/github-pr/routing.mjs';
 
@@ -41,12 +42,31 @@ function resolveLinearTicketId(subjectRef) {
     || subjectRef?.ticketId
     || null
   );
+=======
+import {
+  extractLinearTicketId,
+  routePR,
+} from '../../subject/github-pr/routing.mjs';
+
+const DEFAULT_CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
+
+function resolveLinearTicketId(subjectRef) {
+  return subjectRef?.linearTicketId || null;
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 }
 
 async function defaultLinearClientProvider() {
   if (!process.env.LINEAR_API_KEY) return null;
+<<<<<<< HEAD
   const { LinearClient } = await import('@linear/sdk');
   return new LinearClient({ apiKey: process.env.LINEAR_API_KEY });
+=======
+  if (!defaultLinearClientProvider.clientPromise) {
+    defaultLinearClientProvider.clientPromise = import('@linear/sdk')
+      .then(({ LinearClient }) => new LinearClient({ apiKey: process.env.LINEAR_API_KEY }));
+  }
+  return defaultLinearClientProvider.clientPromise;
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 }
 
 function normalizeStatusName(status, stateNames) {
@@ -105,7 +125,11 @@ async function setLinearState({
     }
 
     await linear.updateIssue(issue.id, { stateId: targetState.id });
+<<<<<<< HEAD
     logger.log?.(`[linear-triage] Linear ${ticketId} -> "${targetStateName}"`);
+=======
+    logger.log?.(`[linear-triage] Linear ${ticketId} -> "${targetState.name}"`);
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
   } catch (err) {
     logger.error?.(
       `[linear-triage] Linear update failed for ${ticketId} (-> ${targetStateNames[0]}):`,
@@ -142,12 +166,27 @@ function createLinearTriageAdapter({
     done: stateNames.done || ['Done', 'Review Complete'],
     cancelled: stateNames.cancelled || 'Cancelled',
   };
+<<<<<<< HEAD
+=======
+  let linearClientPromise = null;
+
+  function getLinearClient() {
+    if (!linearClientPromise) {
+      linearClientPromise = Promise.resolve().then(() => linearClientProvider());
+    }
+    return linearClientPromise;
+  }
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 
   async function syncTriageStatus(subjectRef, status) {
     const ticketId = resolveLinearTicketId(subjectRef);
     const targetStateName = normalizeStatusName(status, resolvedStateNames);
     await setLinearState({
+<<<<<<< HEAD
       linearClientProvider,
+=======
+      linearClientProvider: getLinearClient,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
       logger,
       ticketId,
       targetStateName,
@@ -155,6 +194,14 @@ function createLinearTriageAdapter({
   }
 
   async function recordReviewerEngagement(subjectRef, attempt) {
+<<<<<<< HEAD
+=======
+    // Reserved operator-surface hook for LAC-486's reviewer-attempt-start
+    // integration. Keep the method live in the composite adapter so future
+    // watcher/reviewer callers can adopt it without another public-surface
+    // churn, even though the current watcher only calls syncTriageStatus and
+    // recordReviewCompleted directly.
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
     if (attempt?.startedAt && !attempt?.completedAt) {
       await syncTriageStatus(subjectRef, 'in-review');
     }
@@ -173,7 +220,11 @@ function createLinearTriageAdapter({
     await syncTriageStatus(subjectRef, 'done');
 
     if (!critical) return;
+<<<<<<< HEAD
     const linear = await linearClientProvider();
+=======
+    const linear = await getLinearClient();
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
     if (!linear) return;
     try {
       const issue = await linear.issue(ticketId);

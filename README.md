@@ -452,7 +452,7 @@ If a remediation round "finished" but nothing advanced, the first thing to ask i
 jq '.commentDelivery' data/follow-up-jobs/{completed,stopped,failed}/<jobId>.json
 ```
 
-If `commentDelivery.posted === false`, the queue advanced but the public PR comment failed (timeout, gh outage, missing token). The retry-comments step at the start of every daemon tick re-attempts up to `MAX_COMMENT_DELIVERY_ATTEMPTS = 5` times — see `src/comment-delivery.mjs`. Reasons in `NON_RETRYABLE_DELIVERY_REASONS` (e.g. `no-token-mapping`) are never retried; those records sit for operator inspection.
+If `commentDelivery.posted === false`, the queue advanced but the public PR comment failed (timeout, gh outage, missing token). The retry-comments step at the start of every daemon tick re-attempts up to `MAX_COMMENT_DELIVERY_ATTEMPTS = 5` times — see `src/adapters/comms/github-pr-comments/comment-delivery.mjs`. Reasons in `NON_RETRYABLE_DELIVERY_REASONS` (e.g. `no-token-mapping`) are never retried; those records sit for operator inspection.
 
 So:
 
@@ -531,7 +531,8 @@ src/
   watcher-fail-loud.mjs            # fail-loud comment posting
   pr-title-tagging.mjs             # title parsing
   pr-create-tagged.mjs             # operator helper for tagged PRs
-  pr-comments.mjs                  # remediation outcome comments (this PR)
+  adapters/comms/github-pr-comments/pr-comments.mjs
+                                    # remediation outcome comments
   follow-up-jobs.mjs               # durable JSON queue + reply schema
   follow-up-remediation.mjs        # consume + reconcile + worker spawn
   follow-up-reconcile.mjs          # canonical reconcile entrypoint

@@ -163,6 +163,14 @@ function createLinearTriageAdapter({
   }
 
   async function recordReviewerEngagement(subjectRef, attempt) {
+<<<<<<< HEAD
+=======
+    // Reserved operator-surface hook for LAC-486's reviewer-attempt-start
+    // integration. Keep the method live in the composite adapter so future
+    // watcher/reviewer callers can adopt it without another public-surface
+    // churn, even though the current watcher only calls syncTriageStatus and
+    // recordReviewCompleted directly.
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
     if (attempt?.startedAt && !attempt?.completedAt) {
       await syncTriageStatus(subjectRef, 'in-review');
     }

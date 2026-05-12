@@ -120,6 +120,7 @@ test('onSpawn receives the detached reviewer process group id', async () => {
   assert.equal(handles.length, 1);
   assert.equal(Number.isInteger(handles[0].pid), true);
   assert.equal(handles[0].pgid, handles[0].pid);
+  assert.notEqual(handles[0].pgid, process.pid);
 });
 
 test('onSpawn failures kill the detached process group and reject', async () => {

@@ -679,7 +679,7 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
   let stdout, stderr;
   try {
     ({ stdout, stderr } = await spawnClaude(
-      ['--print', '--permission-mode', 'bypassPermissions', prompt],
+      buildClaudeReviewArgs(prompt),
       {
         env,
         timeout: resolveReviewerTimeoutMs(env),
@@ -704,6 +704,44 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
   }
 
   return stdout.trim();
+}
+
+function buildClaudeReviewArgs(prompt) {
+  return ['--print', '--permission-mode', 'bypassPermissions', prompt];
+}
+
+function buildCodexReviewArgs({ outputPath, prompt }) {
+  return [
+    'exec',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--ephemeral',
+    '--output-last-message',
+    outputPath,
+    '--',
+    prompt,
+  ];
+}
+
+async function spawnCodexReview({
+  codexCli = CODEX_CLI,
+  outputPath,
+  prompt,
+  env,
+  cwd = process.cwd(),
+  timeout = resolveReviewerTimeoutMs(env),
+  maxBuffer = 10 * 1024 * 1024,
+  spawnCapturedImpl = spawnCaptured,
+}) {
+  return spawnCapturedImpl(
+    codexCli,
+    buildCodexReviewArgs({ outputPath, prompt }),
+    {
+      env,
+      cwd,
+      timeout,
+      maxBuffer,
+    },
+  );
 }
 
 /**
@@ -740,18 +778,11 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
   let stderr = '';
   try {
     console.error('[reviewWithCodex] invoking native Codex CLI');
-    const result = await spawnCaptured(
-      CODEX_CLI,
-      [
-        'exec',
-        '--dangerously-bypass-approvals-and-sandbox',
-        '--ephemeral',
-        '--output-last-message',
-        outputPath,
-        '--',
-        prompt,
-      ],
+    const result = await spawnCodexReview(
       {
+        codexCli: CODEX_CLI,
+        outputPath,
+        prompt,
         env,
         cwd: process.cwd(),
         timeout: resolveReviewerTimeoutMs(env),
@@ -1103,6 +1134,9 @@ const __test__ = {
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
   spawnCaptured,
+  buildClaudeReviewArgs,
+  buildCodexReviewArgs,
+  spawnCodexReview,
 };
 
 export {

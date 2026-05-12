@@ -41,6 +41,14 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'launchctl-bootstrap';
   }
 
+  if (/forbidden fallback|env-strip violation|oauth strip.*violation|api[-_ ]?key fallback/.test(lower)) {
+    return 'forbidden-fallback';
+  }
+
+  if (/oauth|not logged in|login required|unauthorized|auth.*expired|credentials unavailable/.test(lower)) {
+    return 'oauth-broken';
+  }
+
   if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
   }

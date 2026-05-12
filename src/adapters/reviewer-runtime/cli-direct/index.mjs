@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
@@ -5,16 +6,24 @@ import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import {
   claimReviewerRunRecord,
   readReviewerRunRecord,
+  reviewerRunSideChannelPaths,
   updateReviewerRunRecord,
 } from '../run-state.mjs';
 import {
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
 } from './classification.mjs';
+import {
+  CliDirectPreflightError,
+  probeReviewerCliOAuth,
+} from './discovery.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REVIEWER_PATH = join(__dirname, '..', '..', '..', 'reviewer.mjs');
 const DEFAULT_TAIL_BYTES = 8 * 1024;
+const DEFAULT_CANCEL_GRACE_MS = 10_000;
+const DEFAULT_CANCEL_POLL_MS = 250;
+const DEFAULT_REATTACH_POLL_MS = 1_000;
 const DEFAULT_FORBIDDEN_FALLBACKS = ['api-key', 'anthropic-api-key'];
 const FORBIDDEN_FALLBACK_ENV_ALIASES = new Map([
   ['OPENAI_API_KEY', ['api-key', 'openai-api-key']],
@@ -124,21 +133,124 @@ function buildReviewerProcessArgs(subjectContext = {}) {
 }
 
 function resolveCodexReviewerEnv(reviewerEnv) {
-  const sourceDir = process.env.CODEX_SOURCE_HOME || '/Users/placey/.codex';
+  const home = reviewerEnv.HOME || process.env.HOME || null;
+  if (home) reviewerEnv.HOME = home;
+  const sourceDir = reviewerEnv.CODEX_SOURCE_HOME || process.env.CODEX_SOURCE_HOME || (home ? join(home, '.codex') : null);
+  if (!sourceDir) {
+    throw new CliDirectPreflightError(
+      'Cannot resolve Codex OAuth home. Set HOME or CODEX_SOURCE_HOME before using cli-direct Codex reviews.',
+      { layer: 'codex-home', command: 'resolve codex home' },
+    );
+  }
   const sourceAuthPath = join(sourceDir, 'auth.json');
 
-  reviewerEnv.HOME = reviewerEnv.HOME || '/Users/airlock';
-  reviewerEnv.CODEX_AUTH_PATH = sourceAuthPath;
+  reviewerEnv.CODEX_AUTH_PATH = reviewerEnv.CODEX_AUTH_PATH || sourceAuthPath;
   reviewerEnv.CODEX_SOURCE_HOME = sourceDir;
   delete reviewerEnv.OPENAI_API_KEY;
 
-  return { authPath: sourceAuthPath, home: reviewerEnv.HOME };
+  return { authPath: reviewerEnv.CODEX_AUTH_PATH, home: reviewerEnv.HOME || null };
+}
+
+function assertForbiddenFallbackEnvStripped(env) {
+  const remaining = CANONICAL_OAUTH_STRIP_ENV.filter((name) => Object.prototype.hasOwnProperty.call(env, name));
+  if (remaining.length > 0) {
+    const err = new Error(`forbidden fallback env-strip violation: ${remaining.join(', ')} remained in reviewer subprocess env`);
+    err.failureClass = 'forbidden-fallback';
+    err.stderr = err.message;
+    throw err;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isPgidAlive(pgid, processKillImpl = process.kill) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    processKillImpl(-pgid, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') return false;
+    if (err?.code === 'EPERM') return true;
+    throw err;
+  }
+}
+
+async function waitForPgidExit(pgid, {
+  timeoutMs,
+  pollIntervalMs,
+  processKillImpl,
+  sleepImpl,
+} = {}) {
+  const deadline = Date.now() + Math.max(0, timeoutMs || 0);
+  while (isPgidAlive(pgid, processKillImpl)) {
+    if (timeoutMs > 0 && Date.now() >= deadline) return false;
+    await sleepImpl(Math.max(1, pollIntervalMs || DEFAULT_REATTACH_POLL_MS));
+  }
+  return true;
+}
+
+async function terminateProcessGroup(pgid, {
+  processKillImpl,
+  sleepImpl,
+  graceMs = DEFAULT_CANCEL_GRACE_MS,
+  pollIntervalMs = DEFAULT_CANCEL_POLL_MS,
+} = {}) {
+  if (!Number.isInteger(pgid) || pgid <= 0) {
+    throw new Error(`Cannot cancel reviewer run without a valid pgid (got ${pgid ?? 'null'})`);
+  }
+  if (!isPgidAlive(pgid, processKillImpl)) return;
+  processKillImpl(-pgid, 'SIGTERM');
+  const exited = await waitForPgidExit(pgid, {
+    timeoutMs: graceMs,
+    pollIntervalMs,
+    processKillImpl,
+    sleepImpl,
+  });
+  if (exited) return;
+  processKillImpl(-pgid, 'SIGKILL');
+  const killed = await waitForPgidExit(pgid, {
+    timeoutMs: Math.max(1_000, pollIntervalMs),
+    pollIntervalMs,
+    processKillImpl,
+    sleepImpl,
+  });
+  if (!killed) {
+    throw new Error(`Reviewer process group ${pgid} survived SIGKILL`);
+  }
+}
+
+function readSideChannelTails(rootDir, sessionUuid) {
+  const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
+  let stdout = '';
+  let stderr = '';
+  try {
+    stdout = readFileSync(stdoutPath, 'utf8');
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  try {
+    stderr = readFileSync(stderrPath, 'utf8');
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  return {
+    stdoutTail: tailText(stdout),
+    stderrTail: tailText(stderr),
+  };
 }
 
 function createCliDirectReviewerRuntimeAdapter({
   rootDir = process.cwd(),
   reviewerProcessPath = DEFAULT_REVIEWER_PATH,
   spawnCapturedImpl = spawnCapturedProcessGroup,
+  preflightImpl = probeReviewerCliOAuth,
+  processKillImpl = process.kill,
+  sleepImpl = sleep,
+  cancelGraceMs = DEFAULT_CANCEL_GRACE_MS,
+  cancelPollIntervalMs = DEFAULT_CANCEL_POLL_MS,
+  reattachPollIntervalMs = DEFAULT_REATTACH_POLL_MS,
   logger = console,
   now = () => new Date().toISOString(),
 } = {}) {
@@ -151,6 +263,41 @@ function createCliDirectReviewerRuntimeAdapter({
     }
 
     const spawnedAt = now();
+    const reviewerEnv = {
+      ...process.env,
+      REVIEWER_SESSION_UUID: sessionUuid,
+    };
+    let stripped = [];
+    let preflightResult = null;
+    try {
+      if (String(req.model || '').toLowerCase().includes('codex')) {
+        const { authPath, home } = resolveCodexReviewerEnv(reviewerEnv);
+        logger.log?.(`[watcher] Using Codex auth for reviewer at ${authPath} with HOME=${home || '<unset>'}`);
+      }
+      stripped = stripForbiddenFallbackEnv(reviewerEnv, req.forbiddenFallbacks);
+      assertForbiddenFallbackEnvStripped(reviewerEnv);
+      if (typeof preflightImpl === 'function') {
+        preflightResult = await preflightImpl({
+          model: req.model,
+          env: reviewerEnv,
+          cwd: rootDir,
+          timeout: req.preflightTimeoutMs || 30_000,
+        });
+        if (preflightResult?.claudeCli) reviewerEnv.CLAUDE_CLI = preflightResult.claudeCli;
+        if (preflightResult?.codexCli) reviewerEnv.CODEX_CLI = preflightResult.codexCli;
+      }
+    } catch (err) {
+      const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();
+      const failureClass = err?.failureClass || classifyReviewerFailure(err?.stderr || detail, null, err?.code);
+      return emptyResult({
+        ok: false,
+        spawnedAt,
+        failureClass,
+        stderrTail: tailText(detail),
+        error: detail || err.message,
+      });
+    }
+
     const subjectContext = {
       ...(req.subjectContext || {}),
       domainId: req.subjectContext?.domainId || 'code-pr',
@@ -197,18 +344,8 @@ function createCliDirectReviewerRuntimeAdapter({
     activeRuns.set(sessionUuid, activeRun);
 
     try {
-      const reviewerEnv = {
-        ...process.env,
-        REVIEWER_SESSION_UUID: sessionUuid,
-      };
-      const stripped = stripForbiddenFallbackEnv(reviewerEnv, req.forbiddenFallbacks);
-
-      if (String(req.model || '').toLowerCase().includes('codex')) {
-        const { authPath, home } = resolveCodexReviewerEnv(reviewerEnv);
-        logger.log?.(`[watcher] Using Codex auth for reviewer at ${authPath} with HOME=${home}`);
-      }
-
       const reviewerArgs = buildReviewerProcessArgs(subjectContext);
+      const sideChannels = reviewerRunSideChannelPaths(rootDir, sessionUuid);
       const { stdout, stderr } = await spawnCapturedImpl(
         process.execPath,
         [reviewerProcessPath, JSON.stringify(reviewerArgs)],
@@ -217,6 +354,8 @@ function createCliDirectReviewerRuntimeAdapter({
           timeout: req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
           progressTimeout: resolveProgressTimeoutMs(reviewerEnv),
           signal: controller.signal,
+          stdoutPath: sideChannels.stdoutPath,
+          stderrPath: sideChannels.stderrPath,
           onSpawn: ({ pgid }) => {
             record = updateReviewerRunRecord(rootDir, record, {
               state: 'heartbeating',
@@ -312,7 +451,16 @@ function createCliDirectReviewerRuntimeAdapter({
     const active = activeRuns.get(sessionUuid);
     if (active) {
       active.cancelled = true;
-      active.controller.abort('kernel SIGTERM');
+      if (Number.isInteger(active.record?.pgid)) {
+        await terminateProcessGroup(active.record.pgid, {
+          processKillImpl,
+          sleepImpl,
+          graceMs: cancelGraceMs,
+          pollIntervalMs: cancelPollIntervalMs,
+        });
+      } else {
+        active.controller.abort('kernel SIGTERM');
+      }
       active.record = updateReviewerRunRecord(rootDir, active.record, {
         state: 'cancelled',
         lastHeartbeatAt: now(),
@@ -320,31 +468,80 @@ function createCliDirectReviewerRuntimeAdapter({
       return;
     }
     const record = readReviewerRunRecord(rootDir, sessionUuid);
-    if (record && ['spawned', 'heartbeating'].includes(record.state)) {
-      updateReviewerRunRecord(rootDir, record, {
-        state: 'cancelled',
-        lastHeartbeatAt: now(),
+    if (!record) {
+      throw new Error(`Cannot cancel unknown reviewer run ${sessionUuid}`);
+    }
+    if (['spawned', 'heartbeating'].includes(record.state) && Number.isInteger(record.pgid)) {
+      await terminateProcessGroup(record.pgid, {
+        processKillImpl,
+        sleepImpl,
+        graceMs: cancelGraceMs,
+        pollIntervalMs: cancelPollIntervalMs,
       });
     }
+    updateReviewerRunRecord(rootDir, record, {
+      state: 'cancelled',
+      lastHeartbeatAt: now(),
+    });
   }
 
   async function reattach(record) {
     const normalized = record || {};
     const spawnedAt = normalized.spawnedAt || now();
+    const pgid = Number.isInteger(normalized.pgid) ? normalized.pgid : null;
+    if (normalized.sessionUuid && pgid && isPgidAlive(pgid, processKillImpl)) {
+      const completed = await waitForPgidExit(pgid, {
+        timeoutMs: resolveReviewerTimeoutMs(process.env),
+        pollIntervalMs: reattachPollIntervalMs,
+        processKillImpl,
+        sleepImpl,
+      });
+      const tails = readSideChannelTails(rootDir, normalized.sessionUuid);
+      if (completed) {
+        const completedRecord = updateReviewerRunRecord(rootDir, normalized, {
+          state: 'completed',
+          lastHeartbeatAt: now(),
+        });
+        return emptyResult({
+          ok: true,
+          spawnedAt: completedRecord.spawnedAt,
+          stdoutTail: tails.stdoutTail,
+          stderrTail: tails.stderrTail,
+          pgid,
+          reattachToken: completedRecord.reattachToken,
+        });
+      }
+      const failedRecord = updateReviewerRunRecord(rootDir, normalized, {
+        state: 'failed',
+        lastHeartbeatAt: now(),
+      });
+      return emptyResult({
+        ok: false,
+        spawnedAt: failedRecord.spawnedAt,
+        failureClass: 'reviewer-timeout',
+        stderrTail: tails.stderrTail || `cli-direct reattach timed out waiting for reviewer process group ${pgid}`,
+        stdoutTail: tails.stdoutTail,
+        pgid,
+        reattachToken: failedRecord.reattachToken,
+        error: `cli-direct reattach timed out waiting for reviewer process group ${pgid}`,
+      });
+    }
     if (normalized.sessionUuid) {
       updateReviewerRunRecord(rootDir, normalized, {
         state: 'failed',
         lastHeartbeatAt: now(),
       });
     }
+    const tails = normalized.sessionUuid ? readSideChannelTails(rootDir, normalized.sessionUuid) : {};
     return emptyResult({
       ok: false,
       spawnedAt,
       failureClass: 'daemon-bounce',
-      stderrTail: 'cli-direct cannot reattach to a reviewer after kernel daemon bounce',
-      pgid: Number.isInteger(normalized.pgid) ? normalized.pgid : null,
+      stderrTail: tails.stderrTail || 'cli-direct reviewer process group is no longer alive after kernel daemon bounce',
+      stdoutTail: tails.stdoutTail || null,
+      pgid,
       reattachToken: normalized.reattachToken || normalized.sessionUuid || null,
-      error: 'cli-direct cannot reattach to a reviewer after kernel daemon bounce',
+      error: 'cli-direct reviewer process group is no longer alive after kernel daemon bounce',
     });
   }
 

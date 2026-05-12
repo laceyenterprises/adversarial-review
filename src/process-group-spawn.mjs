@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
+import { closeSync, openSync, readFileSync, statSync } from 'node:fs';
 
 import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
 
@@ -16,6 +17,8 @@ const SUPPORTED_OPTIONS = new Set([
   'onSpawn',
   'progressTimeout',
   'signal',
+  'stderrPath',
+  'stdoutPath',
   'timeout',
 ]);
 const activeChildren = new Set();
@@ -92,15 +95,23 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     onSpawn,
     signal,
     failureTailBytes = DEFAULT_FAILURE_TAIL_BYTES,
+    stdoutPath = null,
+    stderrPath = null,
   } = options;
 
   return new Promise((resolve, reject) => {
     installExitCleanup();
+    const stdoutFd = stdoutPath ? openSync(stdoutPath, 'w') : null;
+    const stderrFd = stderrPath ? openSync(stderrPath, 'w') : null;
     const child = spawn(command, args, {
       env,
       cwd,
       detached: SPAWN_DETACHED,
-      stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      stdio: [
+        input === null ? 'ignore' : 'pipe',
+        stdoutFd === null ? 'pipe' : stdoutFd,
+        stderrFd === null ? 'pipe' : stderrFd,
+      ],
     });
     activeChildren.add(child);
 
@@ -114,20 +125,27 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     let killTimer = null;
     let wallTimer = null;
     let progressTimer = null;
+    let fileProgressTimer = null;
+    let lastStdoutSize = 0;
+    let lastStderrSize = 0;
     let abortListenerAttached = false;
 
     const cleanup = () => {
       if (killTimer) clearTimeout(killTimer);
       if (wallTimer) clearTimeout(wallTimer);
       if (progressTimer) clearTimeout(progressTimer);
+      if (fileProgressTimer) clearInterval(fileProgressTimer);
       killTimer = null;
       wallTimer = null;
       progressTimer = null;
+      fileProgressTimer = null;
       if (signal && abortListenerAttached) {
         signal.removeEventListener('abort', onAbort);
         abortListenerAttached = false;
       }
       activeChildren.delete(child);
+      if (stdoutFd !== null) closeSync(stdoutFd);
+      if (stderrFd !== null) closeSync(stderrFd);
     };
 
     const requestKill = (reason) => {
@@ -155,9 +173,24 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }
     };
 
+    const statSize = (filePath) => {
+      if (!filePath) return 0;
+      try {
+        return statSync(filePath).size;
+      } catch {
+        return 0;
+      }
+    };
+
+    const readSideChannelOutput = () => {
+      if (stdoutPath) stdout = readFileSync(stdoutPath, 'utf8');
+      if (stderrPath) stderr = readFileSync(stderrPath, 'utf8');
+    };
+
     const finishReject = (err) => {
       if (settled) return;
       settled = true;
+      readSideChannelOutput();
       cleanup();
       err.stdout = stdout;
       err.stderr = stderr;
@@ -195,6 +228,19 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }, timeout);
     }
     armProgressTimer();
+    if ((stdoutPath || stderrPath) && progressTimeout > 0) {
+      const intervalMs = Math.max(25, Math.min(1_000, Math.floor(progressTimeout / 4)));
+      fileProgressTimer = setInterval(() => {
+        if (settled) return;
+        const stdoutSize = statSize(stdoutPath);
+        const stderrSize = statSize(stderrPath);
+        if (stdoutSize !== lastStdoutSize || stderrSize !== lastStderrSize) {
+          lastStdoutSize = stdoutSize;
+          lastStderrSize = stderrSize;
+          armProgressTimer();
+        }
+      }, intervalMs);
+    }
 
     const appendChecked = (target, targetBytes, chunk) => {
       const text = dataToText(chunk);
@@ -212,7 +258,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       typeof chunk === 'string' ? chunk : chunk.toString()
     );
 
-    child.stdout.on('data', (data) => {
+    child.stdout?.on('data', (data) => {
       if (settled) return;
       armProgressTimer();
       const next = appendChecked(stdout, stdoutBytes, data);
@@ -222,7 +268,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }
     });
 
-    child.stderr.on('data', (data) => {
+    child.stderr?.on('data', (data) => {
       if (settled) return;
       armProgressTimer();
       const next = appendChecked(stderr, stderrBytes, data);
@@ -239,7 +285,22 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     child.on('close', (code, closeSignal) => {
       if (settled) return;
       settled = true;
+      readSideChannelOutput();
       cleanup();
+      stdoutBytes = Buffer.byteLength(stdout, 'utf8');
+      stderrBytes = Buffer.byteLength(stderr, 'utf8');
+      if (stdoutBytes > maxBuffer || stderrBytes > maxBuffer) {
+        const exceeded = stdoutBytes > maxBuffer ? stdoutBytes : stderrBytes;
+        const err = new Error(`Command failed: maxBuffer exceeded (${maxBuffer} bytes; saw ${exceeded} bytes)`);
+        err.code = code;
+        err.exitCode = code;
+        err.signal = closeSignal;
+        err.killed = closeSignal != null || timeoutReason !== null;
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
       if (code === 0 && !timeoutReason) {
         resolve({ stdout, stderr, code, signal: closeSignal });
         return;

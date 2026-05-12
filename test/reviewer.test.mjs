@@ -7,8 +7,11 @@ const {
   CLAUDE_STRIPPED_ENV_VARS,
   ENV_BIN,
   LAUNCHCTL,
+  buildClaudeReviewArgs,
+  buildCodexReviewArgs,
   queueFollowUpForPostedReview,
   resolveReviewerTimeoutMs,
+  spawnCodexReview,
   spawnClaude,
 } = __test__;
 
@@ -249,6 +252,72 @@ test('spawnClaude invokes claude directly on non-darwin platforms', async () => 
         env: { PATH: process.env.PATH },
       },
     },
+  ]);
+});
+
+test('Claude review invocation passes prompt as argv in cli-direct shape', async () => {
+  const prompt = 'review this diff';
+  const calls = [];
+
+  await spawnClaude(buildClaudeReviewArgs(prompt), {
+    platform: 'linux',
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { stdout: 'ok', stderr: '' };
+    },
+    env: { HOME: '/tmp/home', PATH: process.env.PATH },
+  });
+
+  assert.deepEqual(calls, [
+    {
+      command: CLAUDE_CLI,
+      args: ['--print', '--permission-mode', 'bypassPermissions', prompt],
+      options: {
+        env: { HOME: '/tmp/home', PATH: process.env.PATH },
+      },
+    },
+  ]);
+});
+
+test('Codex review invocation passes prompt as argv in cli-direct shape', async () => {
+  const calls = [];
+  const prompt = 'review this codex diff';
+  const outputPath = '/tmp/codex-last-message.md';
+
+  await spawnCodexReview({
+    codexCli: '/usr/local/bin/codex',
+    outputPath,
+    prompt,
+    env: { HOME: '/tmp/home', PATH: process.env.PATH },
+    cwd: '/tmp/repo',
+    timeout: 12_345,
+    maxBuffer: 999,
+    spawnCapturedImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    {
+      command: '/usr/local/bin/codex',
+      args: buildCodexReviewArgs({ outputPath, prompt }),
+      options: {
+        env: { HOME: '/tmp/home', PATH: process.env.PATH },
+        cwd: '/tmp/repo',
+        timeout: 12_345,
+        maxBuffer: 999,
+      },
+    },
+  ]);
+  assert.deepEqual(calls[0].args, [
+    'exec',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--ephemeral',
+    '--output-last-message',
+    outputPath,
+    '--',
+    prompt,
   ]);
 });
 

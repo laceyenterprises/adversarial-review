@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,18 +11,41 @@ import {
   resolveReviewerRuntimeName,
 } from '../src/adapters/reviewer-runtime/index.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
+import { resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import {
   readActiveReviewerRunRecords,
   readRecoverableReviewerRunRecords,
+  readReviewerRunRecord,
+  reviewerRunSideChannelPaths,
   reviewerRunStatePath,
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 
+const noopPreflight = async ({ model }) => (
+  String(model || '').toLowerCase().includes('codex')
+    ? { codexCli: '/tmp/fake-codex' }
+    : { claudeCli: '/tmp/fake-claude' }
+);
+
 function makeRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-runtime-'));
   mkdirSync(join(rootDir, 'domains'), { recursive: true });
   return rootDir;
+}
+
+async function waitFor(assertion, { timeoutMs = 5_000, intervalMs = 25 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return assertion();
+    } catch (err) {
+      lastError = err;
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+  throw lastError || new Error('waitFor timed out');
 }
 
 test('loads reviewer runtime by name from domain config with cli-direct default', () => {
@@ -48,6 +71,7 @@ test('cli-direct delegates failure classification to the runtime adapter', async
   try {
     const adapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
+      preflightImpl: noopPreflight,
       spawnCapturedImpl: async () => {
         const err = new Error('reviewer failed');
         err.stderr = 'LiteLLM retry pool: all upstream attempts failed';
@@ -80,6 +104,7 @@ test('cli-direct writes atomic reviewer run records and refuses double-spawn for
   try {
     const adapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
+      preflightImpl: noopPreflight,
       spawnCapturedImpl: async (_command, _args, options) => {
         spawnCount += 1;
         options.onSpawn({ pgid: 4242 });
@@ -129,6 +154,7 @@ test('cli-direct preserves cancelled state across abort races', async () => {
   try {
     const adapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
+      preflightImpl: noopPreflight,
       spawnCapturedImpl: async (_command, _args, options) => {
         options.onSpawn({ pgid: 4243 });
         await new Promise((resolve) => { release = resolve; });
@@ -184,6 +210,7 @@ test('cli-direct strips forbidden API-key fallback env before spawning', async (
     let childEnv;
     const adapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
+      preflightImpl: noopPreflight,
       spawnCapturedImpl: async (_command, _args, options) => {
         childEnv = options.env;
         options.onSpawn({ pgid: 5150 });
@@ -257,6 +284,7 @@ test('cli-direct enforces canonical OAuth strip regardless of forbiddenFallbacks
     let childEnv;
     const adapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
+      preflightImpl: noopPreflight,
       spawnCapturedImpl: async (_command, _args, options) => {
         childEnv = options.env;
         options.onSpawn({ pgid: 5151 });
@@ -281,6 +309,232 @@ test('cli-direct enforces canonical OAuth strip regardless of forbiddenFallbacks
       if (previous[k] === undefined) delete process.env[k];
       else process.env[k] = previous[k];
     }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct path discovery honors env override, PATH fallback, and clear missing-binary errors', async () => {
+  const rootDir = makeRoot();
+  try {
+    const binDir = join(rootDir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const claudePath = join(binDir, 'claude');
+    writeFileSync(claudePath, '#!/bin/sh\nexit 0\n', 'utf8');
+    chmodSync(claudePath, 0o755);
+
+    assert.equal(
+      await resolveCliBinary({
+        binaryName: 'claude',
+        envVar: 'CLAUDE_CLI',
+        env: { CLAUDE_CLI: '/custom/claude', PATH: binDir },
+      }),
+      '/custom/claude',
+    );
+    assert.equal(
+      await resolveCliBinary({
+        binaryName: 'claude',
+        envVar: 'CLAUDE_CLI',
+        env: { PATH: binDir },
+      }),
+      claudePath,
+    );
+    await assert.rejects(
+      () => resolveCliBinary({
+        binaryName: 'codex',
+        envVar: 'CODEX_CLI',
+        env: { PATH: '' },
+      }),
+      /codex CLI not found.*CODEX_CLI.*developers\.openai\.com\/codex\/cli/i,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct preflight failures are oauth-broken and prevent reviewer spawn', async () => {
+  const rootDir = makeRoot();
+  let spawnCount = 0;
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: async () => {
+        const err = new Error('Codex CLI OAuth session probe failed: not logged in');
+        err.failureClass = 'oauth-broken';
+        err.layer = 'codex-cli-oauth';
+        throw err;
+      },
+      spawnCapturedImpl: async () => {
+        spawnCount += 1;
+        return { stdout: '', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+      sessionUuid: 'oauth-broken-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'oauth-broken');
+    assert.match(result.stderrTail, /not logged in/);
+    assert.equal(spawnCount, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct writes reviewer stdout and stderr to side-channel files', async () => {
+  const rootDir = makeRoot();
+  try {
+    let capturedOptions;
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        options.onSpawn({ pgid: 5252 });
+        writeFileSync(options.stdoutPath, 'stdout on disk\n', 'utf8');
+        writeFileSync(options.stderrPath, 'stderr on disk\n', 'utf8');
+        return {
+          stdout: readFileSync(options.stdoutPath, 'utf8'),
+          stderr: readFileSync(options.stderrPath, 'utf8'),
+        };
+      },
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+      timeoutMs: 100,
+      sessionUuid: 'side-channel-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    const paths = reviewerRunSideChannelPaths(rootDir, 'side-channel-session');
+    assert.equal(result.ok, true);
+    assert.equal(capturedOptions.stdoutPath, paths.stdoutPath);
+    assert.equal(capturedOptions.stderrPath, paths.stderrPath);
+    assert.equal(readFileSync(paths.stdoutPath, 'utf8'), 'stdout on disk\n');
+    assert.equal(readFileSync(paths.stderrPath, 'utf8'), 'stderr on disk\n');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct reattach waits on an alive reviewer pgid and reads side-channel output', async () => {
+  const rootDir = makeRoot();
+  const reviewerPath = join(rootDir, 'fixture-reviewer.mjs');
+  writeFileSync(
+    reviewerPath,
+    [
+      'console.log("fixture stdout start");',
+      'console.error("fixture stderr start");',
+      'setTimeout(() => {',
+      '  console.log("fixture stdout done");',
+      '  console.error("fixture stderr done");',
+      '}, 150);',
+    ].join('\n'),
+    'utf8',
+  );
+
+  try {
+    const firstAdapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      reviewerProcessPath: reviewerPath,
+      preflightImpl: noopPreflight,
+      reattachPollIntervalMs: 10,
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const run = firstAdapter.spawnReviewer({
+      model: 'claude',
+      prompt: '',
+      subjectContext: {
+        domainId: 'code-pr',
+        repo: 'lacey/repo',
+        prNumber: 6,
+        botTokenEnv: 'GH_TOKEN',
+      },
+      timeoutMs: 5_000,
+      sessionUuid: 'alive-reattach-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    const record = await waitFor(() => {
+      const current = readReviewerRunRecord(rootDir, 'alive-reattach-session');
+      assert.equal(current?.state, 'heartbeating');
+      assert.equal(Number.isInteger(current.pgid), true);
+      return current;
+    });
+
+    const restartedAdapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      reattachPollIntervalMs: 10,
+      now: () => '2026-05-11T20:00:01.000Z',
+    });
+    const reattached = await restartedAdapter.reattach(record);
+    const original = await run;
+
+    assert.equal(reattached.ok, true);
+    assert.match(reattached.stdoutTail, /fixture stdout done/);
+    assert.match(reattached.stderrTail, /fixture stderr done/);
+    assert.equal(original.ok, true);
+    const finalRecord = readReviewerRunRecord(rootDir, 'alive-reattach-session');
+    assert.equal(finalRecord.state, 'completed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct cancel sends SIGTERM then SIGKILL and atomically marks cancelled', async () => {
+  const rootDir = makeRoot();
+  const signals = [];
+  let alive = true;
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'cancel-pgid-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      pgid: 7777,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'cancel-pgid-session',
+    });
+
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      processKillImpl: (pid, signal) => {
+        assert.equal(pid, -7777);
+        if (signal === 0) {
+          if (alive) return true;
+          const err = new Error('no such process');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        signals.push(signal);
+        if (signal === 'SIGKILL') alive = false;
+        return true;
+      },
+      sleepImpl: async () => {},
+      cancelGraceMs: 1,
+      cancelPollIntervalMs: 1,
+      now: () => '2026-05-11T20:01:00.000Z',
+    });
+
+    await adapter.cancel('cancel-pgid-session');
+
+    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+    const record = readReviewerRunRecord(rootDir, 'cancel-pgid-session');
+    assert.equal(record.state, 'cancelled');
+    assert.equal(record.lastHeartbeatAt, '2026-05-11T20:01:00.000Z');
+  } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

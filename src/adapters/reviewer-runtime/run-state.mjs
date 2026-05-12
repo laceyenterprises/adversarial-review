@@ -22,6 +22,21 @@ function reviewerRunStatePath(rootDir, sessionUuid) {
   return join(reviewerRunStateDir(rootDir), `${normalized}.json`);
 }
 
+function reviewerRunSideChannelPaths(rootDir, sessionUuid) {
+  const normalized = String(sessionUuid || '').trim();
+  if (!normalized) {
+    throw new TypeError('sessionUuid is required for reviewer run side-channel paths');
+  }
+  if (normalized.includes('/') || normalized.includes('\\')) {
+    throw new TypeError(`Invalid reviewer sessionUuid for file path: ${sessionUuid}`);
+  }
+  const dir = reviewerRunStateDir(rootDir);
+  return {
+    stdoutPath: join(dir, `${normalized}.stdout`),
+    stderrPath: join(dir, `${normalized}.stderr`),
+  };
+}
+
 function normalizeReviewerRunRecord(record = {}) {
   const now = new Date().toISOString();
   return {
@@ -155,6 +170,7 @@ export {
   readRecoverableReviewerRunRecords,
   readReviewerRunRecord,
   removeReviewerRunRecord,
+  reviewerRunSideChannelPaths,
   reviewerRunStatePath,
   TERMINAL_RUN_STATES,
   updateReviewerRunRecord,

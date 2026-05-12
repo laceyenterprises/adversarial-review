@@ -83,4 +83,8 @@ unset AWS_BEARER_TOKEN_BEDROCK
 # Preserve ANTHROPIC_AUTH_TOKEN: it may be the OAuth bearer.
 
 cd /Users/airlock/agent-os/tools/adversarial-review
+if command -v setsid >/dev/null 2>&1; then
+  exec setsid /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs
+fi
+
 exec /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs

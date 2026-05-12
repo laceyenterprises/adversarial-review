@@ -2,6 +2,7 @@
   "id": "research-finding",
   "subjectChannel": "markdown-file",
   "commsChannel": "slack-thread",
+  "reviewerRuntime": "fixture-stub",
   "operatorSurface": {
     "triageSync": "linear"
   },

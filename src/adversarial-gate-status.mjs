@@ -17,7 +17,7 @@ import {
   getReviewRow,
   openReviewStateDb,
 } from './review-state.mjs';
-import { classifyReviewerFailure } from './reviewer-cascade.mjs';
+import { classifyReviewerFailure } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 
 const execFileAsync = promisify(execFile);
 

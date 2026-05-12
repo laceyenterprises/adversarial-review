@@ -111,6 +111,23 @@ export interface SubjectContent {
   observedAt: IsoTimestamp;
 }
 
+export interface SubjectContext {
+  domainId: string;
+  subjectExternalId?: string;
+  revisionRef?: string | null;
+  repo?: string;
+  prNumber?: number;
+  reviewerModel?: string;
+  botTokenEnv?: string;
+  linearTicketId?: string | null;
+  builderTag?: string;
+  reviewerHeadSha?: string | null;
+  reviewAttemptNumber?: number;
+  completedRemediationRounds?: number;
+  maxRemediationRounds?: number;
+  reviewerSessionUuid?: string;
+}
+
 export interface RemediationWorkspace {
   ref: SubjectRef;
   workspacePath: string;
@@ -230,3 +247,94 @@ export interface OperatorTriageSync {
 }
 
 export interface OperatorSurfaceAdapter extends OperatorControls, OperatorTriageSync {}
+
+export type ReviewerFailureClass =
+  | 'cascade'
+  | 'reviewer-timeout'
+  | 'rate-limit'
+  | 'queue-back-pressure'
+  | 'forbidden-fallback'
+  | 'oauth-broken'
+  | 'daemon-bounce'
+  | 'launchctl-bootstrap'
+  | 'bug'
+  | 'unknown';
+
+export interface AdapterCapabilities {
+  processGroupIsolation: boolean;
+  daemonBounceSafe: boolean;
+  heartbeatPersisted: boolean;
+  leaseManaged: boolean;
+  oauthStripEnforced: boolean;
+}
+
+export interface ReviewerRunRequest {
+  model: 'claude' | 'codex' | string;
+  prompt: string;
+  subjectContext: SubjectContext;
+  timeoutMs: number;
+  sessionUuid: string;
+  forbiddenFallbacks: readonly string[];
+}
+
+export interface ReviewerRunResult {
+  ok: boolean;
+  reviewBody: string | null;
+  failureClass: ReviewerFailureClass | null;
+  stderrTail: string | null;
+  stdoutTail: string | null;
+  exitCode: number | null;
+  signal: string | null;
+  pgid: number | null;
+  spawnedAt: IsoTimestamp;
+  reattachToken: string | null;
+}
+
+export interface RemediatorRunRequest {
+  model: 'claude-code' | 'codex' | string;
+  prompt: string;
+  subjectContext: SubjectContext;
+  timeoutMs: number;
+  sessionUuid: string;
+  forbiddenFallbacks: readonly string[];
+  workspacePath?: string;
+}
+
+export interface RemediatorRunResult {
+  ok: boolean;
+  remediationBody: string | null;
+  failureClass: ReviewerFailureClass | null;
+  stderrTail: string | null;
+  stdoutTail: string | null;
+  exitCode: number | null;
+  signal: string | null;
+  pgid: number | null;
+  spawnedAt: IsoTimestamp;
+  reattachToken: string | null;
+}
+
+export type ReviewerRunState =
+  | 'spawned'
+  | 'heartbeating'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface ReviewerRunRecord {
+  sessionUuid: string;
+  domain: string;
+  runtime: string;
+  state: ReviewerRunState;
+  pgid: number | null;
+  spawnedAt: IsoTimestamp;
+  lastHeartbeatAt: IsoTimestamp | null;
+  reattachToken: string | null;
+}
+
+export interface ReviewerRuntimeAdapter {
+  spawnReviewer(req: ReviewerRunRequest): Promise<ReviewerRunResult>;
+  spawnRemediator(req: RemediatorRunRequest): Promise<RemediatorRunResult>;
+  cancel(sessionUuid: string): Promise<void>;
+  reattach(record: ReviewerRunRecord): Promise<ReviewerRunResult>;
+  describe(): { id: string; modelFamily: string; capabilities: AdapterCapabilities };
+}

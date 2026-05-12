@@ -2,6 +2,7 @@ import type {
   CommsChannelAdapter,
   DeliveryKey,
   OperatorSurfaceAdapter,
+  ReviewerRuntimeAdapter,
   RemediationCommitMetadata,
   RemediationReply,
   SubjectChannelAdapter,
@@ -178,6 +179,73 @@ const operatorSurface: OperatorSurfaceAdapter = {
   },
 };
 
+const reviewerRuntime: ReviewerRuntimeAdapter = {
+  async spawnReviewer(req) {
+    return {
+      ok: true,
+      reviewBody: `reviewed ${req.subjectContext.domainId}`,
+      failureClass: null,
+      stderrTail: null,
+      stdoutTail: null,
+      exitCode: 0,
+      signal: null,
+      pgid: 123,
+      spawnedAt: '2026-05-10T00:00:00.000Z',
+      reattachToken: req.sessionUuid,
+    };
+  },
+  async spawnRemediator(req) {
+    return {
+      ok: true,
+      remediationBody: req.prompt,
+      failureClass: null,
+      stderrTail: null,
+      stdoutTail: null,
+      exitCode: 0,
+      signal: null,
+      pgid: 124,
+      spawnedAt: '2026-05-10T00:00:00.000Z',
+      reattachToken: req.sessionUuid,
+    };
+  },
+  async cancel(_sessionUuid) {},
+  async reattach(record) {
+    return {
+      ok: false,
+      reviewBody: null,
+      failureClass: 'daemon-bounce',
+      stderrTail: null,
+      stdoutTail: null,
+      exitCode: null,
+      signal: null,
+      pgid: record.pgid,
+      spawnedAt: record.spawnedAt,
+      reattachToken: record.reattachToken,
+    };
+  },
+  describe() {
+    return {
+      id: 'fixture-stub',
+      modelFamily: 'fixture',
+      capabilities: {
+        processGroupIsolation: true,
+        daemonBounceSafe: false,
+        heartbeatPersisted: true,
+        leaseManaged: false,
+        oauthStripEnforced: true,
+      },
+    };
+  },
+};
+
 await subjectAdapter.discoverSubjects();
 await commsAdapter.postRemediationReply(reply, { ...deliveryKey, kind: 'remediation-reply' });
 await operatorSurface.syncTriageStatus(ref, 'awaiting-rereview');
+await reviewerRuntime.spawnReviewer({
+  model: 'codex',
+  prompt: 'review',
+  subjectContext: { domainId: ref.domainId },
+  timeoutMs: 1_000,
+  sessionUuid: 'session-123',
+  forbiddenFallbacks: ['api-key'],
+});

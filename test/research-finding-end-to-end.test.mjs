@@ -27,6 +27,7 @@ import {
 } from '../src/kernel/verdict.mjs';
 import { validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
 import { ROUND_BUDGET_BY_RISK_CLASS } from '../src/follow-up-jobs.mjs';
+import { createReviewerRuntimeAdapterForDomain } from '../src/adapters/reviewer-runtime/index.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -124,7 +125,15 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
     linearClientProvider: async () => null,
     logger: { log() {}, warn() {}, error() {} },
   });
+  const reviewerBodies = [];
   const reviewer = makeReviewerStub();
+  reviewerBodies.push(await reviewer(), await reviewer());
+  const reviewerRuntime = createReviewerRuntimeAdapterForDomain({
+    rootDir,
+    domainId: domain.id,
+    domainConfig: domain,
+    reviewerBodies,
+  });
 
   const [initialRef] = await subject.discoverSubjects();
   const initialState = await subject.fetchState(initialRef);
@@ -145,7 +154,16 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
   });
   assert.match(firstReviewerPrompt, /research finding markdown file/);
 
-  const firstReviewBody = sanitizeCodexReviewPayload(await reviewer());
+  const firstReview = await reviewerRuntime.spawnReviewer({
+    model: 'codex',
+    prompt: firstReviewerPrompt,
+    subjectContext: initialRef,
+    timeoutMs: 1_000,
+    sessionUuid: 'fixture-review-1',
+    forbiddenFallbacks: ['api-key'],
+  });
+  assert.equal(firstReview.ok, true);
+  const firstReviewBody = sanitizeCodexReviewPayload(firstReview.reviewBody);
   const firstVerdict = {
     kind: normalizeReviewVerdict(extractReviewVerdict(firstReviewBody)),
     body: firstReviewBody,
@@ -239,7 +257,21 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
     actor: 'reviewer',
     stage: rereviewStage,
   });
-  const rereviewBody = sanitizeCodexReviewPayload(await reviewer());
+  const rereview = await reviewerRuntime.spawnReviewer({
+    model: 'codex',
+    prompt: loadStagePrompt({
+      rootDir,
+      promptSet: domain.promptSet,
+      actor: 'reviewer',
+      stage: rereviewStage,
+    }),
+    subjectContext: remediatedState.ref,
+    timeoutMs: 1_000,
+    sessionUuid: 'fixture-review-2',
+    forbiddenFallbacks: ['api-key'],
+  });
+  assert.equal(rereview.ok, true);
+  const rereviewBody = sanitizeCodexReviewPayload(rereview.reviewBody);
   const rereviewVerdict = {
     kind: normalizeReviewVerdict(extractReviewVerdict(rereviewBody)),
     body: rereviewBody,

@@ -2,6 +2,7 @@
   "id": "code-pr",
   "subjectChannel": "github-pr",
   "commsChannel": "github-pr-comments",
+  "reviewerRuntime": "cli-direct",
   "operatorSurface": {
     "controls": "github-pr-label-controls",
     "triageSync": "linear"

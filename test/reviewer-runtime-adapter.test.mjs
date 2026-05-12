@@ -1099,7 +1099,7 @@ test('run-state pruning removes orphan stdout and stderr side-channel files', ()
       ttlMs: 0,
     });
 
-    assert.equal(pruned, 2);
+    assert.deepEqual(pruned, { records: 0, orphanSideChannelFiles: 2, total: 2 });
     assert.equal(existsSync(paths.stdoutPath), false);
     assert.equal(existsSync(paths.stderrPath), false);
   } finally {
@@ -1107,7 +1107,7 @@ test('run-state pruning removes orphan stdout and stderr side-channel files', ()
   }
 });
 
-test('cli-direct reattach refuses to adopt an alive process group without identity verification', async () => {
+test('cli-direct reattach refuses and reaps an alive process group without identity verification', async () => {
   const rootDir = makeRoot();
   const reviewerPath = join(rootDir, 'fixture-reviewer.mjs');
   writeFileSync(
@@ -1115,10 +1115,7 @@ test('cli-direct reattach refuses to adopt an alive process group without identi
     [
       'console.log("fixture stdout start");',
       'console.error("fixture stderr start");',
-      'setTimeout(() => {',
-      '  console.log("fixture stdout done");',
-      '  console.error("fixture stderr done");',
-      '}, 150);',
+      'setInterval(() => {}, 1000);',
     ].join('\n'),
     'utf8',
   );
@@ -1157,6 +1154,8 @@ test('cli-direct reattach refuses to adopt an alive process group without identi
       rootDir,
       preflightImpl: noopPreflight,
       reattachPollIntervalMs: 10,
+      cancelGraceMs: 100,
+      cancelPollIntervalMs: 10,
       now: () => '2026-05-11T20:00:01.000Z',
     });
     const reattached = await restartedAdapter.reattach(record);
@@ -1165,9 +1164,9 @@ test('cli-direct reattach refuses to adopt an alive process group without identi
     assert.equal(reattached.ok, false);
     assert.equal(reattached.failureClass, 'daemon-bounce');
     assert.match(reattached.stderrTail, /refuses to reattach live process group/);
-    assert.equal(original.ok, true);
+    assert.equal(original.ok, false);
     const finalRecord = readReviewerRunRecord(rootDir, 'alive-reattach-session');
-    assert.equal(finalRecord.state, 'completed');
+    assert.equal(finalRecord.state, 'failed');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -1195,6 +1194,8 @@ test('cli-direct reattach refuses a recycled detached pgid', async () => {
       rootDir,
       preflightImpl: noopPreflight,
       reattachPollIntervalMs: 10,
+      cancelGraceMs: 100,
+      cancelPollIntervalMs: 10,
       now: () => '2026-05-11T20:01:00.000Z',
     });
     const record = readReviewerRunRecord(rootDir, 'recycled-pgid-session');
@@ -1206,12 +1207,61 @@ test('cli-direct reattach refuses a recycled detached pgid', async () => {
     assert.equal(result.pgid, sleeper.pid);
     assert.match(result.stderrTail, /refuses to reattach live process group/);
     assert.equal(readReviewerRunRecord(rootDir, 'recycled-pgid-session').state, 'failed');
+    await waitFor(() => {
+      assert.throws(() => process.kill(-sleeper.pid, 0), /ESRCH/);
+    }, { timeoutMs: 1_000, intervalMs: 25 });
   } finally {
     try {
       process.kill(-sleeper.pid, 'SIGKILL');
     } catch (err) {
       if (err?.code !== 'ESRCH') throw err;
     }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct reattach degrades side-channel read errors to daemon-bounce tails', async () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'bad-tail-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      pgid: 8888,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'bad-tail-session',
+    });
+    const paths = reviewerRunSideChannelPaths(rootDir, 'bad-tail-session');
+    mkdirSync(paths.stderrPath, { recursive: true });
+    let alive = true;
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      processKillImpl: (pid, signal) => {
+        assert.equal(pid, -8888);
+        if (signal === 0) {
+          if (alive) return true;
+          const err = new Error('no such process');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        alive = false;
+        return true;
+      },
+      sleepImpl: async () => {},
+      cancelGraceMs: 1,
+      cancelPollIntervalMs: 1,
+      now: () => '2026-05-11T20:01:00.000Z',
+    });
+    const record = readReviewerRunRecord(rootDir, 'bad-tail-session');
+
+    const result = await adapter.reattach(record);
+
+    assert.equal(result.failureClass, 'daemon-bounce');
+    assert.match(result.stderrTail, /unable to read reviewer side-channel tails/);
+    assert.equal(readReviewerRunRecord(rootDir, 'bad-tail-session').state, 'failed');
+  } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

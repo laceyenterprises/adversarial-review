@@ -251,6 +251,17 @@ function readSideChannelTails(rootDir, sessionUuid) {
   };
 }
 
+function readSideChannelTailsBestEffort(rootDir, sessionUuid) {
+  try {
+    return readSideChannelTails(rootDir, sessionUuid);
+  } catch (err) {
+    return {
+      stdoutTail: '',
+      stderrTail: `unable to read reviewer side-channel tails: ${err?.message || err}`,
+    };
+  }
+}
+
 function createCliDirectReviewerRuntimeAdapter({
   rootDir = process.cwd(),
   reviewerProcessPath = DEFAULT_REVIEWER_PATH,
@@ -500,30 +511,41 @@ function createCliDirectReviewerRuntimeAdapter({
     const spawnedAt = normalized.spawnedAt || now();
     const pgid = Number.isInteger(normalized.pgid) ? normalized.pgid : null;
     if (normalized.sessionUuid && pgid && isPgidAlive(pgid, processKillImpl)) {
+      const tails = readSideChannelTailsBestEffort(rootDir, normalized.sessionUuid);
+      const refusal = `cli-direct refuses to reattach live process group ${pgid} without reviewer identity verification`;
+      let reaperFailure = null;
+      try {
+        await terminateProcessGroup(pgid, {
+          processKillImpl,
+          sleepImpl,
+          graceMs: cancelGraceMs,
+          pollIntervalMs: cancelPollIntervalMs,
+        });
+      } catch (err) {
+        reaperFailure = `failed to terminate live reviewer process group ${pgid}: ${err?.message || err}`;
+      }
       const failedRecord = updateReviewerRunRecord(rootDir, normalized, {
         state: 'failed',
         lastHeartbeatAt: now(),
       });
-      const tails = readSideChannelTails(rootDir, normalized.sessionUuid);
-      const refusal = `cli-direct refuses to reattach live process group ${pgid} without reviewer identity verification`;
       return emptyResult({
         ok: false,
         spawnedAt: failedRecord.spawnedAt,
         failureClass: 'daemon-bounce',
-        stderrTail: [refusal, tails.stderrTail].filter(Boolean).join('\n'),
+        stderrTail: [refusal, reaperFailure, tails.stderrTail].filter(Boolean).join('\n'),
         stdoutTail: tails.stdoutTail,
         pgid,
         reattachToken: failedRecord.reattachToken,
         error: refusal,
       });
     }
+    const tails = normalized.sessionUuid ? readSideChannelTailsBestEffort(rootDir, normalized.sessionUuid) : {};
     if (normalized.sessionUuid) {
       updateReviewerRunRecord(rootDir, normalized, {
         state: 'failed',
         lastHeartbeatAt: now(),
       });
     }
-    const tails = normalized.sessionUuid ? readSideChannelTails(rootDir, normalized.sessionUuid) : {};
     return emptyResult({
       ok: false,
       spawnedAt,

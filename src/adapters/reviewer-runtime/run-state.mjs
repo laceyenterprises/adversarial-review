@@ -143,10 +143,11 @@ function pruneReviewerRunRecords(rootDir, {
   ttlMs = 24 * 60 * 60 * 1000,
 } = {}) {
   const dir = reviewerRunStateDir(rootDir);
-  if (!existsSync(dir)) return 0;
+  if (!existsSync(dir)) return { records: 0, orphanSideChannelFiles: 0, total: 0 };
   const cutoff = now.getTime() - ttlMs;
-  if (!Number.isFinite(cutoff)) return 0;
-  let pruned = 0;
+  if (!Number.isFinite(cutoff)) return { records: 0, orphanSideChannelFiles: 0, total: 0 };
+  let records = 0;
+  let orphanSideChannelFiles = 0;
   for (const name of readdirSync(dir)) {
     if (!name.endsWith('.json')) continue;
     try {
@@ -155,7 +156,7 @@ function pruneReviewerRunRecords(rootDir, {
       const ageAnchor = Date.parse(record.lastHeartbeatAt || record.spawnedAt || '');
       if (!Number.isFinite(ageAnchor) || ageAnchor > cutoff) continue;
       removeReviewerRunRecord(rootDir, record.sessionUuid);
-      pruned += 1;
+      records += 1;
     } catch {
       // Corrupt records are ignored here; startup recovery should stay
       // best-effort and avoid deleting files it could not parse.
@@ -166,9 +167,9 @@ function pruneReviewerRunRecords(rootDir, {
     const sessionUuid = name.replace(/\.(stdout|stderr)$/, '');
     if (!sessionUuid || existsSync(join(dir, `${sessionUuid}.json`))) continue;
     rmSync(join(dir, name), { force: true });
-    pruned += 1;
+    orphanSideChannelFiles += 1;
   }
-  return pruned;
+  return { records, orphanSideChannelFiles, total: records + orphanSideChannelFiles };
 }
 
 export {

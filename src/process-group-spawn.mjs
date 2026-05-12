@@ -55,7 +55,15 @@ function readTailText(filePath, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
   try {
     const { size } = statSync(filePath);
     if (size <= 0) return '';
-    const bytesToRead = Math.min(size, maxBytes);
+    const truncated = size > maxBytes;
+    const banner = `[truncated to last ${maxBytes} bytes]\n`;
+    if (truncated && Buffer.byteLength(banner, 'utf8') >= maxBytes) {
+      return banner.slice(0, maxBytes);
+    }
+    const payloadMaxBytes = truncated
+      ? maxBytes - Buffer.byteLength(banner, 'utf8')
+      : maxBytes;
+    const bytesToRead = Math.min(size, payloadMaxBytes);
     const buffer = Buffer.alloc(bytesToRead);
     fd = openSync(filePath, 'r');
     readSync(fd, buffer, 0, bytesToRead, size - bytesToRead);
@@ -64,7 +72,7 @@ function readTailText(filePath, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
       start += 1;
     }
     const text = buffer.subarray(start).toString('utf8');
-    return size > maxBytes ? `[truncated to last ${maxBytes} bytes]\n${text}` : text;
+    return truncated ? `${banner}${text}` : text;
   } catch (err) {
     if (err?.code === 'ENOENT') return '';
     throw err;

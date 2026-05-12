@@ -88,6 +88,8 @@ The watcher's reviewer subprocess lifecycle is split across two durable ledgers:
 
 On watcher startup, `recoverReviewerRunRecords` must reconcile every recoverable reviewer-run record, not just records that still look actively heartbeating. Records in `spawned`, `heartbeating`, or `cancelled` state are all recoverable because a parent SIGTERM can cancel the child launch after the SQLite row has already moved to `review_status='reviewing'`. If reattach fails for one of those records, recovery must flip the matching SQLite row from `reviewing` to `failed` with a daemon-bounce message so the PR can be retried; it must not leave the row stuck waiting for a GitHub-side orphan reconciliation that may never exist.
 
+The cli-direct runtime does not adopt a live process group after a daemon bounce unless reviewer identity verification exists for that process. When recovery finds the recorded process group still alive, it must read any side-channel tails best-effort, signal the whole process group with SIGTERM, escalate to SIGKILL after the configured grace period, mark the run record failed, and return a structured `daemon-bounce` result. That refusal always re-queues the review instead of treating a late original completion as authoritative, and it must not throw because of side-channel read errors or one bad record would block recovery of the remaining records.
+
 ## Round-Budget Derivation
 
 Every fresh follow-up job derives its default cap from the PR's current risk class: `low=1`, `medium=2`, `high=3`, and `critical=4`. The PR-wide completed-round count is carried into each new job, so the cap bounds the full PR cycle instead of resetting per job.

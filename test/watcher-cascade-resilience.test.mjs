@@ -198,6 +198,40 @@ test('OAuth-adjacent reviewer failures classify as oauth-broken near stderr end'
   );
 });
 
+test('OAuth detection is anchored to auth context across the full stderr', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      [
+        'Not logged in',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+      ].join('\n'),
+      1
+    ),
+    'oauth-broken'
+  );
+  assert.equal(
+    classifyReviewerFailure('database authentication failed', 1),
+    'unknown'
+  );
+  assert.equal(
+    classifyReviewerFailure('ssh authorization failed', 1),
+    'unknown'
+  );
+});
+
+test('cascade still wins over an OAuth marker in a retry storm', () => {
+  assert.equal(
+    classifyReviewerFailure('OAuth token expired\nLiteLLM retry pool: all upstream attempts failed', 1),
+    'cascade'
+  );
+});
+
 test('launchctl bootstrap errors get a distinct failure class', () => {
   assert.equal(
     classifyReviewerFailure(

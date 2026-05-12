@@ -21,7 +21,6 @@ function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
 function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {
   const text = String(stderr || '');
   const lower = text.toLowerCase();
-  const oauthWindow = lower.split(/\r?\n/).slice(-6).join('\n');
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
   const mentionsReviewerTimeout = REVIEWER_TIMEOUT_MESSAGE_RE.test(lower);
@@ -37,12 +36,16 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
     /timeout.*retries|retries.*timeout/.test(lower) ||
     /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
-  const mentionsOauthBroken =
-    /\boauth\b/.test(oauthWindow) ||
-    /\bnot logged in\b|login required/.test(oauthWindow) ||
-    /auth(?:entication|orization)?\s+(?:expired|invalid|failed)/.test(oauthWindow) ||
-    /unauthorized.*oauth|oauth.*unauthorized/.test(oauthWindow) ||
-    /credentials unavailable/.test(oauthWindow);
+  const mentionsOauthBroken = lower.split(/\r?\n/).some((line) => (
+    /\bnot logged in\b|\blogin required\b/.test(line) ||
+    /\boauth token (?:expired|invalid|missing)\b/.test(line) ||
+    /\boauth\b.*\b(?:expired|invalid|failed|missing|unauthorized)\b/.test(line) ||
+    /\b(?:expired|invalid|failed|missing|unauthorized)\b.*\boauth\b/.test(line) ||
+    /\b(?:bearer|refresh|access|auth) token\b.*\b(?:expired|invalid|failed|missing|unauthorized)\b/.test(line) ||
+    /\b(?:expired|invalid|failed|missing|unauthorized)\b.*\b(?:bearer|refresh|access|auth) token\b/.test(line) ||
+    /\b(?:anthropic|claude|codex|openai)\b.*\bauth(?:entication|orization)?\s+(?:expired|invalid|failed|required)\b/.test(line) ||
+    /\bcredentials unavailable\b/.test(line) && /\b(?:oauth|token|anthropic|claude|codex|openai)\b/.test(line)
+  ));
 
   if (launchctlBootstrap) {
     return 'launchctl-bootstrap';

@@ -125,7 +125,8 @@ test('maxBuffer kills stdout side-channel writers before reading the full file',
       (err) => {
         assert.match(err.message, /maxBuffer exceeded \(8192 bytes; saw \d+ bytes\)/);
         assert.equal(err.killed, true);
-        assert.ok(Buffer.byteLength(err.stdout || '', 'utf8') <= (8 * 1024) + 64);
+        assert.ok(Buffer.byteLength(err.stdout || '', 'utf8') <= (8 * 1024));
+        assert.match(err.stdout || '', /^\[truncated to last 8192 bytes\]/);
         return true;
       }
     );

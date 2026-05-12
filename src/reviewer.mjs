@@ -38,7 +38,7 @@ import {
 } from './prompt-context.mjs';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
-import { looksLikeRuntimeJunk, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
+import { looksLikeRuntimeJunk, normalizeWhitespace, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';

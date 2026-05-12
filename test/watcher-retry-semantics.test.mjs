@@ -15,6 +15,10 @@ import {
 import {
   evaluateRoundBudgetForReview,
   persistReviewerPgid,
+<<<<<<< HEAD
+=======
+  resolveStaleReviewerReconcilePerPoll,
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
   shouldDeferReviewForActiveFollowUp,
   shouldReconcileStaleReviewerSession,
 } from '../src/watcher.mjs';
@@ -212,6 +216,16 @@ test('steady-state reattach only probes reviewer sessions older than the reviewe
   );
 });
 
+<<<<<<< HEAD
+=======
+test('steady-state reattach per-poll cap defaults small and accepts zero for disable', () => {
+  assert.equal(resolveStaleReviewerReconcilePerPoll({}), 3);
+  assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '1' }), 1);
+  assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '0' }), 0);
+  assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: 'bad' }), 3);
+});
+
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 test('persistReviewerPgid logs CAS misses instead of throwing into the spawned reviewer', () => {
   const warnings = [];
   const logs = [];

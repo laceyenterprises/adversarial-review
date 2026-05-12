@@ -93,6 +93,25 @@ test('migration from v2 adds identity columns and backfills available head SHA',
   }
 });
 
+<<<<<<< HEAD
+=======
+test('schema migration rethrows non-duplicate ALTER TABLE failures', () => {
+  const db = new Database(':memory:');
+  try {
+    db.exec(`
+      CREATE VIEW reviewed_prs AS
+      SELECT 'laceyenterprises/agent-os' AS repo, 360 AS pr_number;
+    `);
+    assert.throws(
+      () => ensureReviewStateSchema(db),
+      /not a table|view/i
+    );
+  } finally {
+    db.close();
+  }
+});
+
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 test('fresh schema does not carry the redundant identity round/status unique index', () => {
   const rootDir = makeRootDir();
   const db = openReviewStateDb(rootDir);

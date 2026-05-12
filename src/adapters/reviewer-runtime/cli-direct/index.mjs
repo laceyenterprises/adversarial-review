@@ -67,10 +67,39 @@ function emptyResult({
   };
 }
 
+// CANONICAL_OAUTH_STRIP_ENV is the load-bearing set every adapter advertising
+// `oauthStripEnforced: true` MUST strip from the reviewer subprocess env.
+// Mirrors `ENV_CLEAR` in `modules/worker-pool/lib/adapters/claude-code.sh` and
+// `codex.sh`. Partial stripping is a contract violation because downstream
+// trusts the capability bit — e.g. `ANTHROPIC_BASE_URL=https://attacker.invalid`
+// in a launchd context would otherwise route OAuth bearer traffic through a
+// hostile proxy even though `describe()` claimed enforcement.
+const CANONICAL_OAUTH_STRIP_ENV = [
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'GOOGLE_API_KEY',
+  'GEMINI_API_KEY',
+];
+
 function stripForbiddenFallbackEnv(env, forbiddenFallbacks = DEFAULT_FORBIDDEN_FALLBACKS) {
-  const normalized = new Set((forbiddenFallbacks || []).map((value) => String(value).toLowerCase()));
+  // Adapter advertises `oauthStripEnforced: true`, so the canonical 8-env set
+  // is always scrubbed. `forbiddenFallbacks` is treated as an additive opt-in
+  // list — extra aliases the caller wants stripped — NOT a filter that can
+  // shrink the canonical set. This matches the SPEC §5.4 capability contract.
   const stripped = [];
+  for (const envKey of CANONICAL_OAUTH_STRIP_ENV) {
+    if (Object.prototype.hasOwnProperty.call(env, envKey)) stripped.push(envKey);
+    delete env[envKey];
+  }
+  // Caller-supplied additive aliases (beyond canonical) also strip their
+  // matching envs from the alias map.
+  const normalized = new Set((forbiddenFallbacks || []).map((value) => String(value).toLowerCase()));
   for (const [envKey, aliases] of FORBIDDEN_FALLBACK_ENV_ALIASES) {
+    if (CANONICAL_OAUTH_STRIP_ENV.includes(envKey)) continue;
     if (!aliases.some((alias) => normalized.has(alias))) continue;
     if (Object.prototype.hasOwnProperty.call(env, envKey)) stripped.push(envKey);
     delete env[envKey];
@@ -344,6 +373,7 @@ function createCliDirectReviewerRuntimeAdapter({
 }
 
 export {
+  CANONICAL_OAUTH_STRIP_ENV,
   classifyReviewerFailure,
   createCliDirectReviewerRuntimeAdapter,
   isReviewerSubprocessTimeout,

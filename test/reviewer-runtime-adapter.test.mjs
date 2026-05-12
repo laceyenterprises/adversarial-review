@@ -228,6 +228,63 @@ test('cli-direct strips forbidden API-key fallback env before spawning', async (
   }
 });
 
+test('cli-direct enforces canonical OAuth strip regardless of forbiddenFallbacks shape', async () => {
+  // Regression: the watcher passes only `['api-key', 'anthropic-api-key']` as
+  // forbiddenFallbacks. Previously, only OPENAI_API_KEY / ANTHROPIC_API_KEY /
+  // GOOGLE_API_KEY / GEMINI_API_KEY got stripped (4 of 8) — the bedrock /
+  // vertex / proxy redirectors survived into the reviewer subprocess, so an
+  // ANTHROPIC_BASE_URL=https://attacker.invalid in the launchd context could
+  // route OAuth bearer traffic through a hostile proxy even though the
+  // adapter advertised `oauthStripEnforced: true`. Capability bit MUST mean
+  // "the full canonical 8-env set is stripped" no matter what the caller passes.
+  const rootDir = makeRoot();
+  const previous = {};
+  const canonical = [
+    'OPENAI_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+    'AWS_BEARER_TOKEN_BEDROCK',
+    'GOOGLE_API_KEY',
+    'GEMINI_API_KEY',
+  ];
+  for (const k of canonical) {
+    previous[k] = process.env[k];
+    process.env[k] = 'must-not-propagate';
+  }
+  try {
+    let childEnv;
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        childEnv = options.env;
+        options.onSpawn({ pgid: 5151 });
+        return { stdout: 'ok', stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+      timeoutMs: 100,
+      sessionUuid: 'oauth-strip-canonical-session',
+      // Production watcher value — narrow alias list, only 'api-key' family.
+      forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
+    });
+    assert.equal(result.ok, true);
+    for (const k of canonical) {
+      assert.equal(Object.hasOwn(childEnv, k), false, `${k} must be stripped by canonical-OAuth-strip enforcement`);
+    }
+  } finally {
+    for (const k of canonical) {
+      if (previous[k] === undefined) delete process.env[k];
+      else process.env[k] = previous[k];
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cancelled reviewer run records remain recoverable on next startup', () => {
   const rootDir = makeRoot();
   try {

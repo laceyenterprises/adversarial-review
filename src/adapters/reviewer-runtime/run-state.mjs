@@ -4,6 +4,7 @@ import { writeFileAtomic } from '../../atomic-write.mjs';
 
 const RUN_STATE_DIR = ['data', 'reviewer-runs'];
 const ACTIVE_RUN_STATES = new Set(['spawned', 'heartbeating']);
+const RECOVERABLE_RUN_STATES = new Set(['spawned', 'heartbeating', 'cancelled']);
 const TERMINAL_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
 
 function reviewerRunStateDir(rootDir) {
@@ -96,6 +97,25 @@ function readActiveReviewerRunRecords(rootDir) {
   return records;
 }
 
+function readRecoverableReviewerRunRecords(rootDir) {
+  const dir = reviewerRunStateDir(rootDir);
+  if (!existsSync(dir)) return [];
+  const records = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      const parsed = normalizeReviewerRunRecord(JSON.parse(readFileSync(join(dir, name), 'utf8')));
+      if (RECOVERABLE_RUN_STATES.has(parsed.state)) {
+        records.push(parsed);
+      }
+    } catch {
+      // Corrupt run-state records should not prevent the kernel from
+      // recovering every other in-flight reviewer on startup.
+    }
+  }
+  return records;
+}
+
 function removeReviewerRunRecord(rootDir, sessionUuid) {
   rmSync(reviewerRunStatePath(rootDir, sessionUuid), { force: true });
 }
@@ -128,9 +148,11 @@ function pruneReviewerRunRecords(rootDir, {
 
 export {
   ACTIVE_RUN_STATES,
+  RECOVERABLE_RUN_STATES,
   claimReviewerRunRecord,
   pruneReviewerRunRecords,
   readActiveReviewerRunRecords,
+  readRecoverableReviewerRunRecords,
   readReviewerRunRecord,
   removeReviewerRunRecord,
   reviewerRunStatePath,

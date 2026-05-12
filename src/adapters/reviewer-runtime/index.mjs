@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCliDirectReviewerRuntimeAdapter } from './cli-direct/index.mjs';
 import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mjs';
-import { pruneReviewerRunRecords, readActiveReviewerRunRecords } from './run-state.mjs';
+import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './run-state.mjs';
 
 function loadDomainConfig(rootDir, domainId) {
   return JSON.parse(readFileSync(join(rootDir, 'domains', `${domainId}.json`), 'utf8'));
@@ -48,7 +48,7 @@ async function recoverReviewerRunRecords({
   if (pruned > 0) {
     log.log?.(`[watcher] reviewer_runtime_pruned_records count=${pruned}`);
   }
-  const activeRecords = readActiveReviewerRunRecords(rootDir);
+  const activeRecords = readRecoverableReviewerRunRecords(rootDir);
   let recovered = 0;
   for (const record of activeRecords) {
     const result = await adapter.reattach(record);

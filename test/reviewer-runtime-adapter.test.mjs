@@ -13,6 +13,7 @@ import {
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import {
   readActiveReviewerRunRecords,
+  readRecoverableReviewerRunRecords,
   reviewerRunStatePath,
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
@@ -165,8 +166,20 @@ test('cli-direct strips forbidden API-key fallback env before spawning', async (
   const rootDir = makeRoot();
   const previousOpenAi = process.env.OPENAI_API_KEY;
   const previousAnthropic = process.env.ANTHROPIC_API_KEY;
+  const previousAnthropicBaseUrl = process.env.ANTHROPIC_BASE_URL;
+  const previousClaudeBedrock = process.env.CLAUDE_CODE_USE_BEDROCK;
+  const previousClaudeVertex = process.env.CLAUDE_CODE_USE_VERTEX;
+  const previousAwsBearerTokenBedrock = process.env.AWS_BEARER_TOKEN_BEDROCK;
+  const previousGoogleApiKey = process.env.GOOGLE_API_KEY;
+  const previousGeminiApiKey = process.env.GEMINI_API_KEY;
   process.env.OPENAI_API_KEY = 'must-not-propagate';
   process.env.ANTHROPIC_API_KEY = 'must-not-propagate';
+  process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.invalid';
+  process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+  process.env.CLAUDE_CODE_USE_VERTEX = '1';
+  process.env.AWS_BEARER_TOKEN_BEDROCK = 'must-not-propagate';
+  process.env.GOOGLE_API_KEY = 'must-not-propagate';
+  process.env.GEMINI_API_KEY = 'must-not-propagate';
   try {
     let childEnv;
     const adapter = createCliDirectReviewerRuntimeAdapter({
@@ -183,16 +196,56 @@ test('cli-direct strips forbidden API-key fallback env before spawning', async (
       subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
       timeoutMs: 100,
       sessionUuid: 'oauth-strip-session',
-      forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
+      forbiddenFallbacks: ['api-key', 'anthropic-api-key', 'bedrock', 'vertex'],
     });
     assert.equal(result.ok, true);
     assert.equal(Object.hasOwn(childEnv, 'OPENAI_API_KEY'), false);
     assert.equal(Object.hasOwn(childEnv, 'ANTHROPIC_API_KEY'), false);
+    assert.equal(Object.hasOwn(childEnv, 'ANTHROPIC_BASE_URL'), false);
+    assert.equal(Object.hasOwn(childEnv, 'CLAUDE_CODE_USE_BEDROCK'), false);
+    assert.equal(Object.hasOwn(childEnv, 'CLAUDE_CODE_USE_VERTEX'), false);
+    assert.equal(Object.hasOwn(childEnv, 'AWS_BEARER_TOKEN_BEDROCK'), false);
+    assert.equal(Object.hasOwn(childEnv, 'GOOGLE_API_KEY'), false);
+    assert.equal(Object.hasOwn(childEnv, 'GEMINI_API_KEY'), false);
   } finally {
     if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousOpenAi;
     if (previousAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = previousAnthropic;
+    if (previousAnthropicBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
+    else process.env.ANTHROPIC_BASE_URL = previousAnthropicBaseUrl;
+    if (previousClaudeBedrock === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    else process.env.CLAUDE_CODE_USE_BEDROCK = previousClaudeBedrock;
+    if (previousClaudeVertex === undefined) delete process.env.CLAUDE_CODE_USE_VERTEX;
+    else process.env.CLAUDE_CODE_USE_VERTEX = previousClaudeVertex;
+    if (previousAwsBearerTokenBedrock === undefined) delete process.env.AWS_BEARER_TOKEN_BEDROCK;
+    else process.env.AWS_BEARER_TOKEN_BEDROCK = previousAwsBearerTokenBedrock;
+    if (previousGoogleApiKey === undefined) delete process.env.GOOGLE_API_KEY;
+    else process.env.GOOGLE_API_KEY = previousGoogleApiKey;
+    if (previousGeminiApiKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousGeminiApiKey;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cancelled reviewer run records remain recoverable on next startup', () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'cancelled-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'cancelled',
+      pgid: 7070,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'cancelled-session',
+    });
+
+    const recoverable = readRecoverableReviewerRunRecords(rootDir);
+    assert.equal(recoverable.length, 1);
+    assert.equal(recoverable[0].state, 'cancelled');
+  } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
@@ -273,6 +326,55 @@ test('bounce recovery counts only rows it actually requeued', async () => {
       now: new Date('2026-05-11T20:01:00.000Z'),
     });
     assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('bounce recovery requeues reviewing rows for cancelled reviewer run records', async () => {
+  const rootDir = makeRoot();
+  const db = new Database(':memory:');
+  ensureReviewStateSchema(db);
+  db.prepare(
+    `INSERT INTO reviewed_prs
+       (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+        reviewer_session_uuid, reviewer_started_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'lacey/repo',
+    5,
+    '2026-05-11T19:59:00.000Z',
+    'codex',
+    'open',
+    'reviewing',
+    'cancelled-recovery-session',
+    '2026-05-11T20:00:00.000Z',
+  );
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'cancelled-recovery-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'cancelled',
+      pgid: 6061,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'cancelled-recovery-session',
+    });
+
+    const recovered = await recoverReviewerRunRecords({
+      rootDir,
+      adapter,
+      db,
+      log: { log() {} },
+      now: new Date('2026-05-11T20:01:00.000Z'),
+    });
+    assert.deepEqual(recovered, { recovered: 1, pruned: 0 });
+    const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE reviewer_session_uuid = ?').get('cancelled-recovery-session');
+    assert.equal(row.review_status, 'failed');
+    assert.match(row.failure_message, /daemon-bounce/);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

@@ -77,6 +77,17 @@ For PR-side `retrigger-remediation` labels, a successful budget bump is the dura
 
 The watcher must not run a fresh adversarial review while the latest follow-up job for the same PR is `pending` or `inProgress`. This guard is load-bearing for the PR #48 race: if an operator requeues remediation while the watcher row is already `pending`, the pending follow-up job wins and reviewer dispatch is deferred until the worker reaches a terminal state.
 
+## Reviewer Runtime Recovery Contract
+
+The watcher's reviewer subprocess lifecycle is split across two durable ledgers:
+
+- `data/reviews.db` keeps the review-delivery row for each PR, including `review_status='reviewing'` as the durable claim that a reviewer launch is in flight.
+- `data/reviewer-runs/<sessionUuid>.json` keeps the runtime session record for that launch, including the adapter runtime id, process-group metadata, and the most recent lifecycle state observed by the runtime adapter.
+
+`src/adapters/reviewer-runtime/cli-direct/index.mjs` is the canonical OAuth-first runtime today. When it advertises `oauthStripEnforced: true`, it must strip the full canonical OAuth fallback env set before spawning the reviewer subprocess: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `AWS_BEARER_TOKEN_BEDROCK`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, and `GEMINI_API_KEY`. Partial stripping is a contract violation because downstream code trusts the adapter capability bit.
+
+On watcher startup, `recoverReviewerRunRecords` must reconcile every recoverable reviewer-run record, not just records that still look actively heartbeating. Records in `spawned`, `heartbeating`, or `cancelled` state are all recoverable because a parent SIGTERM can cancel the child launch after the SQLite row has already moved to `review_status='reviewing'`. If reattach fails for one of those records, recovery must flip the matching SQLite row from `reviewing` to `failed` with a daemon-bounce message so the PR can be retried; it must not leave the row stuck waiting for a GitHub-side orphan reconciliation that may never exist.
+
 ## Round-Budget Derivation
 
 Every fresh follow-up job derives its default cap from the PR's current risk class: `low=1`, `medium=2`, `high=3`, and `critical=4`. The PR-wide completed-round count is carried into each new job, so the cap bounds the full PR cycle instead of resetting per job.

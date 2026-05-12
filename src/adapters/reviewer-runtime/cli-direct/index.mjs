@@ -16,6 +16,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REVIEWER_PATH = join(__dirname, '..', '..', '..', 'reviewer.mjs');
 const DEFAULT_TAIL_BYTES = 8 * 1024;
 const DEFAULT_FORBIDDEN_FALLBACKS = ['api-key', 'anthropic-api-key'];
+const FORBIDDEN_FALLBACK_ENV_ALIASES = new Map([
+  ['OPENAI_API_KEY', ['api-key', 'openai-api-key']],
+  ['ANTHROPIC_API_KEY', ['api-key', 'anthropic-api-key']],
+  ['ANTHROPIC_BASE_URL', ['anthropic-base-url', 'bedrock', 'vertex']],
+  ['CLAUDE_CODE_USE_BEDROCK', ['bedrock', 'claude-code-use-bedrock']],
+  ['CLAUDE_CODE_USE_VERTEX', ['vertex', 'claude-code-use-vertex']],
+  ['AWS_BEARER_TOKEN_BEDROCK', ['bedrock', 'aws-bearer-token-bedrock']],
+  ['GOOGLE_API_KEY', ['api-key', 'google-api-key', 'vertex']],
+  ['GEMINI_API_KEY', ['api-key', 'gemini-api-key', 'vertex']],
+]);
 
 function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
   const text = String(value || '');
@@ -60,13 +70,10 @@ function emptyResult({
 function stripForbiddenFallbackEnv(env, forbiddenFallbacks = DEFAULT_FORBIDDEN_FALLBACKS) {
   const normalized = new Set((forbiddenFallbacks || []).map((value) => String(value).toLowerCase()));
   const stripped = [];
-  if (normalized.has('api-key') || normalized.has('openai-api-key')) {
-    if (Object.prototype.hasOwnProperty.call(env, 'OPENAI_API_KEY')) stripped.push('OPENAI_API_KEY');
-    delete env.OPENAI_API_KEY;
-  }
-  if (normalized.has('api-key') || normalized.has('anthropic-api-key')) {
-    if (Object.prototype.hasOwnProperty.call(env, 'ANTHROPIC_API_KEY')) stripped.push('ANTHROPIC_API_KEY');
-    delete env.ANTHROPIC_API_KEY;
+  for (const [envKey, aliases] of FORBIDDEN_FALLBACK_ENV_ALIASES) {
+    if (!aliases.some((alias) => normalized.has(alias))) continue;
+    if (Object.prototype.hasOwnProperty.call(env, envKey)) stripped.push(envKey);
+    delete env[envKey];
   }
   return stripped;
 }

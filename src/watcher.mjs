@@ -214,6 +214,7 @@ function handlePollError(err, source = 'pollOnce') {
 // of the same guard for the residual race where the child outlives the
 // watcher long enough to post anyway.
 const inFlightReviewerSessions = new Set();
+let exitInProgress = false;
 
 async function cancelInFlightReviewerRuntimeSessions(reason) {
   const sessions = Array.from(inFlightReviewerSessions);
@@ -237,6 +238,8 @@ function exitAfterReviewerCleanup({
   message,
   err = null,
 } = {}) {
+  if (exitInProgress) return;
+  exitInProgress = true;
   const detail = err ? `: ${err?.stack || err?.message || err}` : '';
   console.error(`[watcher] ${message}${source ? ` (source=${source})` : ''}${detail}`);
   process.exitCode = code;

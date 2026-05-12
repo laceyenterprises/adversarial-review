@@ -1,0 +1,28 @@
+{
+  "id": "acpx-smoke",
+  "subjectChannel": "markdown-file",
+  "commsChannel": "slack-thread",
+  "reviewerRuntime": "acpx",
+  "operatorSurface": {
+    "triageSync": "linear"
+  },
+  "promptSet": "research-finding",
+  "riskClasses": {
+    "low": {
+      "maxRemediationRounds": 1
+    },
+    "medium": {
+      "maxRemediationRounds": 2
+    },
+    "high": {
+      "maxRemediationRounds": 3
+    },
+    "critical": {
+      "maxRemediationRounds": 4
+    }
+  },
+  "reviewerRouting": {
+    "human": "codex-reviewer-lacey",
+    "researcher": "codex-reviewer-lacey"
+  }
+}

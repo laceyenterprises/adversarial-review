@@ -1,8 +1,11 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 
-const DEFAULT_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';
+const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
+const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';
 const DEFAULT_OPENCLAW_AGENT_HOOKS_URL = 'http://127.0.0.1:18789/hooks/agent';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
@@ -18,8 +21,15 @@ function firstNonEmpty(...values) {
   return null;
 }
 
-function resolveAlertDefaults(env = process.env) {
-  const secretsRoot = env.LITELLM_SECRETS_ROOT || DEFAULT_SECRETS_ROOT;
+function resolveDefaultHooksTokenFile(fsImpl = { existsSync }) {
+  const defaultTokenFile = join(DEFAULT_SECRETS_ROOT, 'litellm-alert-bridge.token');
+  const legacyTokenFile = join(LEGACY_SECRETS_ROOT, 'litellm-alert-bridge.token');
+  if (fsImpl.existsSync(defaultTokenFile)) return defaultTokenFile;
+  if (fsImpl.existsSync(legacyTokenFile)) return legacyTokenFile;
+  return defaultTokenFile;
+}
+
+function resolveAlertDefaults(env = process.env, { fsImpl = { existsSync } } = {}) {
   const alertTo = firstNonEmpty(env.ALERT_TO);
   if (!alertTo) {
     throw new Error('ALERT_TO must be configured for alert delivery');
@@ -29,7 +39,9 @@ function resolveAlertDefaults(env = process.env) {
     hooksTokenFile:
       env.OPENCLAW_HOOKS_TOKEN_FILE ||
       env.HOOKS_TOKEN_FILE ||
-      `${secretsRoot}/litellm-alert-bridge.token`,
+      (env.ADV_SECRETS_ROOT && join(env.ADV_SECRETS_ROOT, 'litellm-alert-bridge.token')) ||
+      (env.LITELLM_SECRETS_ROOT && join(env.LITELLM_SECRETS_ROOT, 'litellm-alert-bridge.token')) ||
+      resolveDefaultHooksTokenFile(fsImpl),
     alertChannel: env.ALERT_CHANNEL || 'telegram',
     alertTo,
     alertAgentId: env.ALERT_AGENT_ID || DEFAULT_ALERT_AGENT_ID,
@@ -38,7 +50,7 @@ function resolveAlertDefaults(env = process.env) {
 }
 
 function readHooksToken({ env = process.env, fsImpl = { readFileSync } } = {}) {
-  const config = resolveAlertDefaults(env);
+  const config = resolveAlertDefaults(env, { fsImpl: { existsSync: fsImpl.existsSync || existsSync } });
   let tokenFromFile = null;
   try {
     tokenFromFile = fsImpl.readFileSync(config.hooksTokenFile, 'utf8');

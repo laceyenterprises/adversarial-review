@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Adversarial cross-model code review service for agent-built PRs",
   "type": "module",
+  "engines": {
+    "node": ">=20 <26"
+  },
   "main": "src/watcher.mjs",
   "bin": {
     "adversarial-review": "src/cli.mjs"

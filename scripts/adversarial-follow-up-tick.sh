@@ -23,7 +23,7 @@
 #
 # Auth policy mirrors the reviewer watcher:
 # - Reviewer/remediator CLIs use OAuth credentials only.
-# - ANTHROPIC_API_KEY / OPENAI_API_KEY are explicitly unset before exec.
+# - API-key/provider fallback env vars are explicitly unset before exec.
 # - The two reviewer-bot PATs are loaded so the comment poster can
 #   speak as @claude-reviewer-lacey or @codex-reviewer-lacey on the PR
 #   (see src/adapters/comms/github-pr-comments/pr-comments.mjs::WORKER_CLASS_TO_BOT_TOKEN_ENV).
@@ -63,7 +63,7 @@ TICK_INTERVAL_SECONDS="${TICK_INTERVAL_SECONDS:-120}"
 # launch when an old placey-owned file existed (cross-user redirect denied,
 # masking a healthy ABI as a false mismatch). UID-suffixed paths give every
 # user their own scratch file with no cleanup coupling.
-FOLLOW_UP_NATIVE_CHECK_ERR="/tmp/adversarial-follow-up-native-check.${UID}.err"
+FOLLOW_UP_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-follow-up-native-check.${UID}.err"
 if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$FOLLOW_UP_NATIVE_CHECK_ERR" 2>&1; then
   echo "[follow-up-tick] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
   echo "[follow-up-tick] details:" >&2
@@ -128,9 +128,16 @@ fi
 # resolves to the operator's path even when launchd doesn't carry HOME.
 export CODEX_AUTH_PATH="${CODEX_AUTH_PATH:-$HOME/.codex/auth.json}"
 
-# Scrub direct-provider API keys — remediation workers must use OAuth only.
+# Scrub direct-provider API/provider fallbacks — workers must use OAuth only.
 unset ANTHROPIC_API_KEY
+unset ANTHROPIC_BASE_URL
 unset OPENAI_API_KEY
+unset GOOGLE_API_KEY
+unset GEMINI_API_KEY
+unset CLAUDE_CODE_USE_BEDROCK
+unset CLAUDE_CODE_USE_VERTEX
+unset AWS_BEARER_TOKEN_BEDROCK
+# Preserve ANTHROPIC_AUTH_TOKEN: it may be the OAuth bearer.
 
 cd "$WATCHER_DIR"
 

@@ -23,7 +23,7 @@ WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
 # launch when an old placey-owned file existed (cross-user redirect denied,
 # masking a healthy ABI as a false "ABI mismatch" failure). UID-suffixed paths
 # give every user their own scratch file with no cleanup coupling.
-WATCHER_NATIVE_CHECK_ERR="/tmp/adversarial-watcher-native-check.${UID}.err"
+WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"
 if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$WATCHER_NATIVE_CHECK_ERR" 2>&1; then
   echo "[adversarial-watcher] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
   echo "[adversarial-watcher] details:" >&2
@@ -75,9 +75,16 @@ if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   exit 1
 fi
 
-# Scrub direct-provider API keys — reviewers must use OAuth only
+# Scrub direct-provider API/provider fallbacks — reviewers must use OAuth only.
 unset ANTHROPIC_API_KEY
+unset ANTHROPIC_BASE_URL
 unset OPENAI_API_KEY
+unset GOOGLE_API_KEY
+unset GEMINI_API_KEY
+unset CLAUDE_CODE_USE_BEDROCK
+unset CLAUDE_CODE_USE_VERTEX
+unset AWS_BEARER_TOKEN_BEDROCK
+# Preserve ANTHROPIC_AUTH_TOKEN: it may be the OAuth bearer.
 
 if command -v setsid >/dev/null 2>&1; then
   exec setsid /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs

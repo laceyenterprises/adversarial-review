@@ -7,6 +7,7 @@
 import { Octokit } from '@octokit/rest';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -515,6 +516,11 @@ async function spawnReviewer({
 
   inFlightReviewerSessions.add(reviewerSessionUuid);
   try {
+    // The reviewer-runtime adapter (LAC-563) owns the spawn contract:
+    // canonical OAuth env-strip, atomic run-state records, process-group
+    // isolation, failure classification. The `forbiddenFallbacks` arg is
+    // additive opt-in beyond the canonical 8-env set the adapter always
+    // strips when `oauthStripEnforced: true`.
     const result = await reviewerRuntimeAdapter.spawnReviewer({
       model: reviewerModel,
       prompt: '',

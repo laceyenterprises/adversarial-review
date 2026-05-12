@@ -132,7 +132,10 @@ function readRecoverableReviewerRunRecords(rootDir) {
 }
 
 function removeReviewerRunRecord(rootDir, sessionUuid) {
+  const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
   rmSync(reviewerRunStatePath(rootDir, sessionUuid), { force: true });
+  rmSync(stdoutPath, { force: true });
+  rmSync(stderrPath, { force: true });
 }
 
 function pruneReviewerRunRecords(rootDir, {
@@ -157,6 +160,13 @@ function pruneReviewerRunRecords(rootDir, {
       // Corrupt records are ignored here; startup recovery should stay
       // best-effort and avoid deleting files it could not parse.
     }
+  }
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.stdout') && !name.endsWith('.stderr')) continue;
+    const sessionUuid = name.replace(/\.(stdout|stderr)$/, '');
+    if (!sessionUuid || existsSync(join(dir, `${sessionUuid}.json`))) continue;
+    rmSync(join(dir, name), { force: true });
+    pruned += 1;
   }
   return pruned;
 }

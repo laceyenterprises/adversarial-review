@@ -21,6 +21,7 @@ function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
 function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {
   const text = String(stderr || '');
   const lower = text.toLowerCase();
+  const oauthWindow = lower.split(/\r?\n/).slice(-6).join('\n');
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
   const mentionsReviewerTimeout = REVIEWER_TIMEOUT_MESSAGE_RE.test(lower);
@@ -36,6 +37,12 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
     /timeout.*retries|retries.*timeout/.test(lower) ||
     /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
+  const mentionsOauthBroken =
+    /\boauth\b/.test(oauthWindow) ||
+    /\bnot logged in\b|login required/.test(oauthWindow) ||
+    /auth(?:entication|orization)?\s+(?:expired|invalid|failed)/.test(oauthWindow) ||
+    /unauthorized.*oauth|oauth.*unauthorized/.test(oauthWindow) ||
+    /credentials unavailable/.test(oauthWindow);
 
   if (launchctlBootstrap) {
     return 'launchctl-bootstrap';
@@ -45,12 +52,12 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'forbidden-fallback';
   }
 
-  if (/oauth|not logged in|login required|unauthorized|auth.*expired|credentials unavailable/.test(lower)) {
-    return 'oauth-broken';
-  }
-
   if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
+  }
+
+  if (mentionsOauthBroken) {
+    return 'oauth-broken';
   }
 
   if (timeoutKilled || mentionsReviewerTimeout) {

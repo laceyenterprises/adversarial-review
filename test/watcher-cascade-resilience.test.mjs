@@ -176,6 +176,28 @@ test('cascade markers win over wrapped reviewer timeout stderr', () => {
   );
 });
 
+test('unauthorized traces do not mask cascade or become oauth-broken without OAuth context', () => {
+  assert.equal(
+    classifyReviewerFailure('HTTP 401 Unauthorized while fetching repository metadata', 1),
+    'unknown'
+  );
+  assert.equal(
+    classifyReviewerFailure('HTTP 401 Unauthorized\nLiteLLM retry pool: all upstream attempts failed', 1),
+    'cascade'
+  );
+});
+
+test('OAuth-adjacent reviewer failures classify as oauth-broken near stderr end', () => {
+  assert.equal(
+    classifyReviewerFailure('reviewer stderr\nOAuth expired', 1),
+    'oauth-broken'
+  );
+  assert.equal(
+    classifyReviewerFailure('reviewer stderr\nnot logged in', 1),
+    'oauth-broken'
+  );
+});
+
 test('launchctl bootstrap errors get a distinct failure class', () => {
   assert.equal(
     classifyReviewerFailure(

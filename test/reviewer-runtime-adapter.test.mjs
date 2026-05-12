@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,8 @@ import {
   readActiveReviewerRunRecords,
   readRecoverableReviewerRunRecords,
   readReviewerRunRecord,
+  pruneReviewerRunRecords,
+  removeReviewerRunRecord,
   reviewerRunSideChannelPaths,
   reviewerRunStatePath,
   writeReviewerRunRecord,
@@ -1057,7 +1060,54 @@ test('cli-direct writes reviewer stdout and stderr to side-channel files', async
   }
 });
 
-test('cli-direct reattach waits on an alive reviewer pgid and reads side-channel output', async () => {
+test('removing a reviewer run record also removes stdout and stderr side-channel files', () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'remove-side-channel-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'failed',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'remove-side-channel-session',
+    });
+    const paths = reviewerRunSideChannelPaths(rootDir, 'remove-side-channel-session');
+    writeFileSync(paths.stdoutPath, 'stdout\n', 'utf8');
+    writeFileSync(paths.stderrPath, 'stderr\n', 'utf8');
+
+    removeReviewerRunRecord(rootDir, 'remove-side-channel-session');
+
+    assert.equal(existsSync(reviewerRunStatePath(rootDir, 'remove-side-channel-session')), false);
+    assert.equal(existsSync(paths.stdoutPath), false);
+    assert.equal(existsSync(paths.stderrPath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('run-state pruning removes orphan stdout and stderr side-channel files', () => {
+  const rootDir = makeRoot();
+  try {
+    const paths = reviewerRunSideChannelPaths(rootDir, 'orphan-side-channel-session');
+    mkdirSync(dirname(paths.stdoutPath), { recursive: true });
+    writeFileSync(paths.stdoutPath, 'stdout\n', 'utf8');
+    writeFileSync(paths.stderrPath, 'stderr\n', 'utf8');
+
+    const pruned = pruneReviewerRunRecords(rootDir, {
+      now: new Date('2026-05-11T20:00:00.000Z'),
+      ttlMs: 0,
+    });
+
+    assert.equal(pruned, 2);
+    assert.equal(existsSync(paths.stdoutPath), false);
+    assert.equal(existsSync(paths.stderrPath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct reattach refuses to adopt an alive process group without identity verification', async () => {
   const rootDir = makeRoot();
   const reviewerPath = join(rootDir, 'fixture-reviewer.mjs');
   writeFileSync(
@@ -1112,13 +1162,56 @@ test('cli-direct reattach waits on an alive reviewer pgid and reads side-channel
     const reattached = await restartedAdapter.reattach(record);
     const original = await run;
 
-    assert.equal(reattached.ok, true);
-    assert.match(reattached.stdoutTail, /fixture stdout done/);
-    assert.match(reattached.stderrTail, /fixture stderr done/);
+    assert.equal(reattached.ok, false);
+    assert.equal(reattached.failureClass, 'daemon-bounce');
+    assert.match(reattached.stderrTail, /refuses to reattach live process group/);
     assert.equal(original.ok, true);
     const finalRecord = readReviewerRunRecord(rootDir, 'alive-reattach-session');
     assert.equal(finalRecord.state, 'completed');
   } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct reattach refuses a recycled detached pgid', async () => {
+  const rootDir = makeRoot();
+  const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'recycled-pgid-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      pgid: sleeper.pid,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'recycled-pgid-session',
+    });
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      reattachPollIntervalMs: 10,
+      now: () => '2026-05-11T20:01:00.000Z',
+    });
+    const record = readReviewerRunRecord(rootDir, 'recycled-pgid-session');
+
+    const result = await adapter.reattach(record);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'daemon-bounce');
+    assert.equal(result.pgid, sleeper.pid);
+    assert.match(result.stderrTail, /refuses to reattach live process group/);
+    assert.equal(readReviewerRunRecord(rootDir, 'recycled-pgid-session').state, 'failed');
+  } finally {
+    try {
+      process.kill(-sleeper.pid, 'SIGKILL');
+    } catch (err) {
+      if (err?.code !== 'ESRCH') throw err;
+    }
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

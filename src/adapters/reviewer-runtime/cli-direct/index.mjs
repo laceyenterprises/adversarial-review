@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
@@ -45,6 +45,28 @@ function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
     start += 1;
   }
   return buffer.subarray(start).toString('utf8');
+}
+
+function readTailFile(filePath, maxBytes = DEFAULT_TAIL_BYTES) {
+  let fd = null;
+  try {
+    const { size } = statSync(filePath);
+    if (size <= 0) return '';
+    const bytesToRead = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(bytesToRead);
+    fd = openSync(filePath, 'r');
+    readSync(fd, buffer, 0, bytesToRead, size - bytesToRead);
+    let start = 0;
+    while (start < buffer.length && (buffer[start] & 0xC0) === 0x80) {
+      start += 1;
+    }
+    return buffer.subarray(start).toString('utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return '';
+    throw err;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }
 
 function emptyResult({
@@ -223,21 +245,9 @@ async function terminateProcessGroup(pgid, {
 
 function readSideChannelTails(rootDir, sessionUuid) {
   const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
-  let stdout = '';
-  let stderr = '';
-  try {
-    stdout = readFileSync(stdoutPath, 'utf8');
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw err;
-  }
-  try {
-    stderr = readFileSync(stderrPath, 'utf8');
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw err;
-  }
   return {
-    stdoutTail: tailText(stdout),
-    stderrTail: tailText(stderr),
+    stdoutTail: readTailFile(stdoutPath),
+    stderrTail: readTailFile(stderrPath),
   };
 }
 
@@ -490,40 +500,21 @@ function createCliDirectReviewerRuntimeAdapter({
     const spawnedAt = normalized.spawnedAt || now();
     const pgid = Number.isInteger(normalized.pgid) ? normalized.pgid : null;
     if (normalized.sessionUuid && pgid && isPgidAlive(pgid, processKillImpl)) {
-      const completed = await waitForPgidExit(pgid, {
-        timeoutMs: resolveReviewerTimeoutMs(process.env),
-        pollIntervalMs: reattachPollIntervalMs,
-        processKillImpl,
-        sleepImpl,
-      });
-      const tails = readSideChannelTails(rootDir, normalized.sessionUuid);
-      if (completed) {
-        const completedRecord = updateReviewerRunRecord(rootDir, normalized, {
-          state: 'completed',
-          lastHeartbeatAt: now(),
-        });
-        return emptyResult({
-          ok: true,
-          spawnedAt: completedRecord.spawnedAt,
-          stdoutTail: tails.stdoutTail,
-          stderrTail: tails.stderrTail,
-          pgid,
-          reattachToken: completedRecord.reattachToken,
-        });
-      }
       const failedRecord = updateReviewerRunRecord(rootDir, normalized, {
         state: 'failed',
         lastHeartbeatAt: now(),
       });
+      const tails = readSideChannelTails(rootDir, normalized.sessionUuid);
+      const refusal = `cli-direct refuses to reattach live process group ${pgid} without reviewer identity verification`;
       return emptyResult({
         ok: false,
         spawnedAt: failedRecord.spawnedAt,
-        failureClass: 'reviewer-timeout',
-        stderrTail: tails.stderrTail || `cli-direct reattach timed out waiting for reviewer process group ${pgid}`,
+        failureClass: 'daemon-bounce',
+        stderrTail: [refusal, tails.stderrTail].filter(Boolean).join('\n'),
         stdoutTail: tails.stdoutTail,
         pgid,
         reattachToken: failedRecord.reattachToken,
-        error: `cli-direct reattach timed out waiting for reviewer process group ${pgid}`,
+        error: refusal,
       });
     }
     if (normalized.sessionUuid) {

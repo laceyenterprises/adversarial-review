@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 import { readFileSync, statSync } from 'node:fs';
+=======
+import { readFileSync } from 'node:fs';
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
 import http from 'node:http';
 import https from 'node:https';
 
@@ -37,6 +41,7 @@ function resolveAlertDefaults(env = process.env) {
   };
 }
 
+<<<<<<< HEAD
 const cachedHooksToken = {
   filePath: null,
   mtimeMs: null,
@@ -78,6 +83,23 @@ function readHooksToken({ env = process.env, fsImpl = { readFileSync, statSync }
     cachedHooksToken.token = null;
   }
   const token = firstNonEmpty(tokenFromFile, cachedHooksToken.token);
+=======
+function readHooksToken({ env = process.env, fsImpl = { readFileSync } } = {}) {
+  const config = resolveAlertDefaults(env);
+  let tokenFromFile = null;
+  try {
+    tokenFromFile = fsImpl.readFileSync(config.hooksTokenFile, 'utf8');
+  } catch {
+    tokenFromFile = null;
+  }
+  const token = firstNonEmpty(
+    env.GATEWAY_DELIVERY_TOKEN,
+    env.OPENCLAW_GATEWAY_TOKEN,
+    env.OPENCLAW_HOOKS_TOKEN,
+    env.HOOKS_TOKEN,
+    tokenFromFile
+  );
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
   if (!token) {
     throw new Error('Missing OpenClaw hooks token for alert delivery');
   }
@@ -135,12 +157,20 @@ async function deliverAlert(text, {
   event = null,
   payload = null,
   env = process.env,
+<<<<<<< HEAD
   fsImpl = { readFileSync, statSync },
   logger = console,
   requestText = httpRequestText,
 } = {}) {
   const config = resolveAlertDefaults(env);
   const token = readHooksToken({ env, fsImpl, logger });
+=======
+  fsImpl = { readFileSync },
+  requestText = httpRequestText,
+} = {}) {
+  const config = resolveAlertDefaults(env);
+  const token = readHooksToken({ env, fsImpl });
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
   await requestText(config.openclawAgentHooksUrl, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },

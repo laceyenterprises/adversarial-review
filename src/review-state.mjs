@@ -9,7 +9,7 @@ const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
 const REVIEW_STATE_SCHEMA_VERSION = 3;
 const execFileAsyncDefault = promisify(execFile);
-const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs']);
+const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries']);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
   'head_sha',
@@ -81,7 +81,8 @@ function ensureReviewStateSchema(db) {
   backfillReviewedPRSubjectIdentity(db);
 
   db.exec(`
-    DROP INDEX IF EXISTS reviewed_prs_identity_round_kind_unique;
+    CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
+      ON reviewed_prs(domain_id, subject_external_id, revision_ref);
 
     CREATE INDEX IF NOT EXISTS reviewed_prs_identity_lookup_idx
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+<<<<<<< HEAD
 import http from 'node:http';
 
 import {
@@ -8,6 +9,10 @@ import {
   readHooksToken,
   resolveAlertDefaults,
 } from '../src/alert-delivery.mjs';
+=======
+
+import { deliverAlert, resolveAlertDefaults } from '../src/alert-delivery.mjs';
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
 
 test('watcher alert delivery uses the litellm drift-watch ALERT env shape', async () => {
   const calls = [];
@@ -25,10 +30,13 @@ test('watcher alert delivery uses the litellm drift-watch ALERT env shape', asyn
     payload: { openPendingPRs: 2 },
     env,
     fsImpl: {
+<<<<<<< HEAD
       statSync(filePath) {
         assert.equal(filePath, '/secrets/hooks.token');
         return { mtimeMs: 1 };
       },
+=======
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
       readFileSync(filePath, encoding) {
         assert.equal(filePath, '/secrets/hooks.token');
         assert.equal(encoding, 'utf8');
@@ -77,6 +85,7 @@ test('watcher alert defaults use the operator Telegram route once ALERT_TO is co
     alertName: 'Adversarial Watcher Health',
   });
 });
+<<<<<<< HEAD
 
 test('readHooksToken throws when no env token or token file is available', () => {
   assert.throws(
@@ -155,3 +164,5 @@ test('httpRequestText rejects on timeout and destroys the request', async () => 
 
   await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
+=======
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b

@@ -11,8 +11,11 @@ const DEFAULT_ENV = Object.freeze({
 function makeProbe({ env = {}, pid = 12345 } = {}) {
   const events = [];
   const alerts = [];
+<<<<<<< HEAD
   const warnings = [];
   const debug = [];
+=======
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
   let nowTick = 0;
   const probe = createWatcherHealthProbe({
     env: { ...DEFAULT_ENV, ...env },
@@ -25,18 +28,25 @@ function makeProbe({ env = {}, pid = 12345 } = {}) {
     },
     logger: {
       error() {},
+<<<<<<< HEAD
       warn(message) {
         warnings.push(message);
       },
       debug(message) {
         debug.push(message);
       },
+=======
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
     },
     deliverAlertFn: async (text, meta) => {
       alerts.push({ text, ...meta });
     },
   });
+<<<<<<< HEAD
   return { probe, events, alerts, warnings, debug };
+=======
+  return { probe, events, alerts };
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
 }
 
 async function silentTick(probe, prs = [['laceyenterprises/adversarial-review', 75]]) {
@@ -85,7 +95,11 @@ test('3 consecutive empty polls with open pending PR emits no_progress and one a
   assert.match(alerts[0].text, /watcher\.no_progress/);
 });
 
+<<<<<<< HEAD
 test('6 consecutive empty polls with open pending PR keeps alert transition-gated', async () => {
+=======
+test('6 consecutive empty polls with open pending PR re-alerts on the next threshold boundary', async () => {
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
   const { probe, events, alerts } = makeProbe();
 
   for (let i = 0; i < 6; i += 1) {
@@ -97,8 +111,17 @@ test('6 consecutive empty polls with open pending PR keeps alert transition-gate
     events.map((event) => event.pollsSinceLastSpawn),
     [3, 4, 5, 6]
   );
+<<<<<<< HEAD
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].event, 'watcher.no_progress');
+=======
+  assert.equal(alerts.length, 2);
+  assert.deepEqual(
+    alerts.map((alert) => alert.event),
+    ['watcher.no_progress', 'watcher.no_progress']
+  );
+  assert.equal(alerts[1].payload.pollsSinceLastSpawn, 6);
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
 });
 
 test('spawn after no_progress emits recovered and one recovery alert', async () => {
@@ -205,6 +228,7 @@ test('health alerts do not block poll completion while delivery is still pending
   assert.equal(events[0].event, 'watcher.no_progress');
   assert.equal(alertCalls, 1);
 });
+<<<<<<< HEAD
 
 test('invalid PR identifiers do not collapse samples into repo#NaN', async () => {
   const { probe, events, alerts, debug } = makeProbe();
@@ -233,3 +257,5 @@ test('overlapping probe ticks are skipped instead of mutating shared state', asy
   await probe.finishTick(firstTick);
   assert.equal(probe.getState().tickInFlight, false);
 });
+=======
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b

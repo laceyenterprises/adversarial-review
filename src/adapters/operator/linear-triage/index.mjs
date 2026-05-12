@@ -20,11 +20,22 @@ function resolveLinearTicketId(subjectRef) {
 
 async function defaultLinearClientProvider() {
   if (!process.env.LINEAR_API_KEY) return null;
-  if (!defaultLinearClientProvider.clientPromise) {
-    defaultLinearClientProvider.clientPromise = import('@linear/sdk')
-      .then(({ LinearClient }) => new LinearClient({ apiKey: process.env.LINEAR_API_KEY }));
+  if (defaultLinearClientProvider.client) {
+    return defaultLinearClientProvider.client;
   }
-  return defaultLinearClientProvider.clientPromise;
+  if (!defaultLinearClientProvider.clientLoadPromise) {
+    defaultLinearClientProvider.clientLoadPromise = import('@linear/sdk')
+      .then(({ LinearClient }) => new LinearClient({ apiKey: process.env.LINEAR_API_KEY }))
+      .then((client) => {
+        defaultLinearClientProvider.client = client;
+        return client;
+      })
+      .catch((err) => {
+        defaultLinearClientProvider.clientLoadPromise = null;
+        throw err;
+      });
+  }
+  return defaultLinearClientProvider.clientLoadPromise;
 }
 
 function normalizeStatusName(status, stateNames) {
@@ -120,13 +131,32 @@ function createLinearTriageAdapter({
     done: stateNames.done || ['Done', 'Review Complete'],
     cancelled: stateNames.cancelled || 'Cancelled',
   };
-  let linearClientPromise = null;
+  let linearClient = undefined;
+  let linearClientLoadPromise = null;
 
-  function getLinearClient() {
-    if (!linearClientPromise) {
-      linearClientPromise = Promise.resolve().then(() => linearClientProvider());
+  async function getLinearClient() {
+    if (linearClient !== undefined) {
+      return linearClient;
     }
-    return linearClientPromise;
+    if (!linearClientLoadPromise) {
+      linearClientLoadPromise = Promise.resolve()
+        .then(() => linearClientProvider())
+        .then((client) => {
+          if (client) {
+            linearClient = client;
+          }
+          return client;
+        })
+        .catch((err) => {
+          linearClientLoadPromise = null;
+          throw err;
+        });
+    }
+    const client = await linearClientLoadPromise;
+    if (!client) {
+      linearClientLoadPromise = null;
+    }
+    return client;
   }
 
   async function syncTriageStatus(subjectRef, status) {

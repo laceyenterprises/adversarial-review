@@ -25,9 +25,13 @@ function nowIso(now = () => new Date()) {
 }
 
 function formatSamplePR(repo, prNumber) {
+<<<<<<< HEAD
   const normalizedPrNumber = Number(prNumber);
   if (!Number.isInteger(normalizedPrNumber)) return null;
   return `${repo}#${normalizedPrNumber}`;
+=======
+  return `${repo}#${Number(prNumber)}`;
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
 }
 
 function buildNoProgressAlertText(payload) {
@@ -62,7 +66,10 @@ function createWatcherHealthProbe({
 } = {}) {
   const config = resolveHealthProbeConfig(env);
   const state = {
+<<<<<<< HEAD
     tickInFlight: false,
+=======
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
     healthState: 'healthy',
     pollsSinceLastSpawn: 0,
     lastSpawnAt: null,
@@ -71,16 +78,23 @@ function createWatcherHealthProbe({
   };
 
   function beginTick() {
+<<<<<<< HEAD
     if (state.tickInFlight) {
       logger?.warn?.('[watcher] health probe skipped overlapping tick');
       return { enabled: false, skippedOverlap: true };
     }
     state.tickInFlight = true;
+=======
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
     return {
       enabled: config.enabled,
       openPendingPRs: 0,
       samplePRs: [],
       pendingSet: new Set(),
+<<<<<<< HEAD
+=======
+      sampleSet: new Set(),
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
       spawnCount: 0,
       recoveredFromSilentPolls: 0,
     };
@@ -89,6 +103,7 @@ function createWatcherHealthProbe({
   function recordOpenPending(tick, { repo, prNumber } = {}) {
     if (!config.enabled || !tick?.enabled || !repo || !prNumber) return;
     const sample = formatSamplePR(repo, prNumber);
+<<<<<<< HEAD
     if (!sample) {
       logger?.debug?.(
         `[watcher] health probe ignoring invalid PR sample for ${repo}#${String(prNumber)}`
@@ -99,6 +114,13 @@ function createWatcherHealthProbe({
     tick.pendingSet.add(sample);
     tick.openPendingPRs += 1;
     if (tick.samplePRs.length >= sampleLimit) return;
+=======
+    if (tick.pendingSet.has(sample)) return;
+    tick.pendingSet.add(sample);
+    tick.openPendingPRs += 1;
+    if (tick.samplePRs.length >= sampleLimit || tick.sampleSet.has(sample)) return;
+    tick.sampleSet.add(sample);
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
     tick.samplePRs.push(sample);
   }
 
@@ -117,6 +139,7 @@ function createWatcherHealthProbe({
     stdout?.write?.(`${JSON.stringify(payload)}\n`);
   }
 
+<<<<<<< HEAD
   function sendTransitionAlert(text, payload) {
     void Promise.resolve(deliverAlertFn(text, { event: payload?.event || null, payload })).catch((err) => {
       logger?.error?.(
@@ -183,6 +206,74 @@ function createWatcherHealthProbe({
     } finally {
       state.tickInFlight = false;
     }
+=======
+  async function sendTransitionAlert(text, payload) {
+    try {
+      await deliverAlertFn(text, { event: payload?.event || null, payload });
+      return true;
+    } catch (err) {
+      logger?.error?.(
+        `[watcher] health alert delivery failed: ${err?.message || err}`
+      );
+      return false;
+    }
+  }
+
+  async function finishTick(tick) {
+    if (!config.enabled || !tick?.enabled) return null;
+
+    if (tick.spawnCount > 0) {
+      const wasNoProgress = state.healthState === 'no_progress';
+      if (wasNoProgress) {
+        state.spawnsSinceRecovery += tick.spawnCount;
+        const payload = {
+          event: 'watcher.recovered',
+          spawnsSinceRecovery: state.spawnsSinceRecovery,
+          recoveredFromSilentPolls:
+            tick.recoveredFromSilentPolls || state.noProgressSilentPolls,
+          watcherPid: pid,
+        };
+        emit(payload);
+        state.healthState = 'healthy';
+        state.noProgressSilentPolls = 0;
+        state.spawnsSinceRecovery = 0;
+        await sendTransitionAlert(buildRecoveredAlertText(payload), payload);
+        return payload;
+      }
+      state.spawnsSinceRecovery = 0;
+      return null;
+    }
+
+    state.pollsSinceLastSpawn += 1;
+    if (
+      state.pollsSinceLastSpawn >= config.threshold &&
+      tick.openPendingPRs >= 1
+    ) {
+      const payload = {
+        event: 'watcher.no_progress',
+        pollsSinceLastSpawn: state.pollsSinceLastSpawn,
+        openPendingPRs: tick.openPendingPRs,
+        samplePRs: tick.samplePRs,
+        lastSpawnAt: state.lastSpawnAt,
+        watcherPid: pid,
+        thresholdConfigured: config.threshold,
+      };
+      emit(payload);
+      const isTransition = state.healthState !== 'no_progress';
+      state.healthState = 'no_progress';
+      state.noProgressSilentPolls = state.pollsSinceLastSpawn;
+      state.spawnsSinceRecovery = 0;
+      if (isTransition || (state.pollsSinceLastSpawn % config.threshold === 0)) {
+        await sendTransitionAlert(buildNoProgressAlertText(payload), payload);
+      }
+      return payload;
+    }
+
+    if (state.healthState === 'no_progress' && tick.openPendingPRs === 0) {
+      state.noProgressSilentPolls = state.pollsSinceLastSpawn;
+    }
+    return null;
+>>>>>>> b212f532fbee5d5c635e9057b097e32b3c96d39b
   }
 
   return {

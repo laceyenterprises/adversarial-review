@@ -95,12 +95,14 @@ function normalizeReviewVerdict(verdict) {
   return 'unknown';
 }
 
-// normalizeWhitespace and titleCaseWords are intentionally not exported —
-// they are private helpers of sanitizeCodexReviewPayload. Re-introduce
-// exports only when a real second caller appears.
+// titleCaseWords is intentionally not exported — it's a private helper of
+// sanitizeCodexReviewPayload. normalizeWhitespace is now used directly by
+// reviewer.mjs (the second real caller invoked by the prior comment), so
+// it is exported here rather than duplicated inline.
 export {
   extractReviewVerdict,
   looksLikeRuntimeJunk,
   normalizeReviewVerdict,
+  normalizeWhitespace,
   sanitizeCodexReviewPayload,
 };

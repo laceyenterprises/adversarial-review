@@ -15,6 +15,7 @@ import {
 const DEFAULT_CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
 function resolveLinearTicketId(subjectRef) {
+<<<<<<< HEAD
   return (
     subjectRef?.linearTicketId
     || subjectRef?.linearTicket
@@ -22,6 +23,9 @@ function resolveLinearTicketId(subjectRef) {
     || subjectRef?.ticketId
     || null
   );
+=======
+  return subjectRef?.linearTicketId || null;
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 }
 
 async function defaultLinearClientProvider() {
@@ -126,12 +130,27 @@ function createLinearTriageAdapter({
     done: stateNames.done || ['Done', 'Review Complete'],
     cancelled: stateNames.cancelled || 'Cancelled',
   };
+<<<<<<< HEAD
+=======
+  let linearClientPromise = null;
+
+  function getLinearClient() {
+    if (!linearClientPromise) {
+      linearClientPromise = Promise.resolve().then(() => linearClientProvider());
+    }
+    return linearClientPromise;
+  }
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 
   async function syncTriageStatus(subjectRef, status) {
     const ticketId = resolveLinearTicketId(subjectRef);
     const targetStateName = normalizeStatusName(status, resolvedStateNames);
     await setLinearState({
+<<<<<<< HEAD
       linearClientProvider,
+=======
+      linearClientProvider: getLinearClient,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
       logger,
       ticketId,
       targetStateName,
@@ -139,6 +158,14 @@ function createLinearTriageAdapter({
   }
 
   async function recordReviewerEngagement(subjectRef, attempt) {
+<<<<<<< HEAD
+=======
+    // Reserved operator-surface hook for LAC-486's reviewer-attempt-start
+    // integration. Keep the method live in the composite adapter so future
+    // watcher/reviewer callers can adopt it without another public-surface
+    // churn, even though the current watcher only calls syncTriageStatus and
+    // recordReviewCompleted directly.
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
     if (attempt?.startedAt && !attempt?.completedAt) {
       await syncTriageStatus(subjectRef, 'in-review');
     }
@@ -157,7 +184,11 @@ function createLinearTriageAdapter({
     await syncTriageStatus(subjectRef, 'done');
 
     if (!critical) return;
+<<<<<<< HEAD
     const linear = await linearClientProvider();
+=======
+    const linear = await getLinearClient();
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
     if (!linear) return;
     try {
       const issue = await linear.issue(ticketId);

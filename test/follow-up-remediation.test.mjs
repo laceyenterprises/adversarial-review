@@ -1,6 +1,6 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -13,9 +13,11 @@ import {
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,
+  consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
   digestWorkerFinalMessage,
   installWorkerProvenanceHook,
+  killDetachedWorkerProcessGroup,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   prepareCodexRemediationStartupEnv,
@@ -29,6 +31,7 @@ import {
   resolveClaudeCodeCliPath,
   resolveJobRelativePath,
   resolveReplyStorageKey,
+  resolveRemediationMaxConcurrentJobs,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnRemediationWorker,
@@ -47,6 +50,7 @@ import {
   createFollowUpJob,
   getFollowUpJobDir,
   markFollowUpJobSpawned,
+  summarizePRRemediationLedger,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 
@@ -1474,6 +1478,277 @@ function makeQueuedJob(rootDir, overrides = {}) {
   return { created, claimed };
 }
 
+function markActiveInProgressJob(rootDir, overrides = {}) {
+  const { claimed } = makeQueuedJob(rootDir, overrides);
+  return markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: overrides.processId || 4321,
+      workspaceDir: `data/follow-up-jobs/workspaces/${claimed.job.jobId}`,
+      promptPath: `data/follow-up-jobs/workspaces/${claimed.job.jobId}/.adversarial-follow-up/prompt.md`,
+      outputPath: `data/follow-up-jobs/workspaces/${claimed.job.jobId}/.adversarial-follow-up/codex-last-message.md`,
+      logPath: `data/follow-up-jobs/workspaces/${claimed.job.jobId}/.adversarial-follow-up/codex-worker.log`,
+      replyPath: path.join(rootDir, 'hq', 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json'),
+    },
+  });
+}
+
+function createPendingRemediationJob(rootDir, overrides = {}) {
+  return createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    linearTicketId: 'LAC-207',
+    reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: true,
+    ...overrides,
+  });
+}
+
+function drainerTestOptions(rootDir, spawnCalls, overrides = {}) {
+  return {
+    rootDir,
+    now: () => '2026-04-21T10:30:00.000Z',
+    promptTemplate: 'You are a remediation worker.',
+    resolvePRLifecycleImpl: async () => null,
+    execFileImpl: async (command, args) => {
+      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      }
+      return { stdout: '', stderr: '' };
+    },
+    spawnImpl: (command, args, options) => {
+      const pid = 9000 + spawnCalls.length;
+      spawnCalls.push({ command, args, options, pid });
+      return { pid, unref() {} };
+    },
+    ...overrides,
+  };
+}
+
+test('consumeFollowUpJobsUntilCapacity with max concurrency 1 preserves one-job consume behavior', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 1 })
+  ));
+
+  assert.equal(result.maxConcurrent, 1);
+  assert.equal(result.activeAtStart, 0);
+  assert.equal(result.spawned, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 1);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 1);
+});
+
+test('consumeFollowUpJobsUntilCapacity with max concurrency 2 spawns different PRs in one tick', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 2 })
+  ));
+
+  assert.equal(result.spawned, 2);
+  assert.equal(result.capacityRemaining, 0);
+  assert.equal(spawnCalls.length, 2);
+  assert.deepEqual(
+    result.results.filter((entry) => entry.consumed).map((entry) => entry.job.prNumber).sort((a, b) => a - b),
+    [7, 8]
+  );
+});
+
+test('consumeFollowUpJobsUntilCapacity reduces available capacity for existing in-progress jobs', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  markActiveInProgressJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 9, reviewPostedAt: '2026-04-21T08:02:00.000Z' });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 2 })
+  ));
+
+  assert.equal(result.activeAtStart, 1);
+  assert.equal(result.availableAtStart, 1);
+  assert.equal(result.spawned, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 2);
+});
+
+test('consumeFollowUpJobsUntilCapacity defers a pending job for a PR with active remediation', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  markActiveInProgressJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:02:00.000Z' });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 2 })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(result.deferredSamePR, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(result.results.filter((entry) => entry.consumed).map((entry) => entry.job.prNumber), [8]);
+
+  const pendingJobs = readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json'));
+  assert.equal(pendingJobs.length, 1);
+  assert.match(pendingJobs[0], /pr-7-/);
+});
+
+test('consumeFollowUpJobsUntilCapacity treats repo casing drift as the same PR for deferral', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  markActiveInProgressJob(rootDir, {
+    repo: 'LaceyEnterprises/Clio',
+    prNumber: 7,
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+  });
+  createPendingRemediationJob(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewPostedAt: '2026-04-21T08:01:00.000Z',
+  });
+  createPendingRemediationJob(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 8,
+    reviewPostedAt: '2026-04-21T08:02:00.000Z',
+  });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 2 })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(result.deferredSamePR, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(result.results.filter((entry) => entry.consumed).map((entry) => entry.job.prNumber), [8]);
+});
+
+test('consumeFollowUpJobsUntilCapacity does not charge claim-time terminal transitions as spawned slots', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createPendingRemediationJob(rootDir, {
+    prNumber: 6,
+    critical: false,
+    reviewBody: '## Summary\nClean.\n\n## Verdict\nComment only',
+    reviewPostedAt: '2026-04-21T07:59:00.000Z',
+  });
+  createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 2 })
+  ));
+
+  assert.equal(result.stopped, 1);
+  assert.equal(result.spawned, 2);
+  assert.equal(spawnCalls.length, 2);
+  assert.deepEqual(
+    result.results.map((entry) => entry.reason || (entry.consumed ? 'spawned' : 'unknown')),
+    ['review-settled', 'spawned', 'spawned']
+  );
+});
+
+test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job fails to spawn', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createPendingRemediationJob(rootDir, {
+    prNumber: 7,
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+  });
+  createPendingRemediationJob(rootDir, {
+    prNumber: 8,
+    reviewPostedAt: '2026-04-21T08:01:00.000Z',
+  });
+
+  const spawnCalls = [];
+  const warnings = [];
+  let attempt = 0;
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, {
+      maxConcurrent: 2,
+      spawnImpl: (command, args, options) => {
+        if (attempt++ === 0) {
+          throw new Error('spawn boom');
+        }
+        const pid = 9000 + spawnCalls.length;
+        spawnCalls.push({ command, args, options, pid });
+        return { pid, unref() {} };
+      },
+      log: {
+        warn: (message) => warnings.push(message),
+        log() {},
+      },
+    })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /continuing drain after failed spawn preparation/);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'failed')).filter((name) => name.endsWith('.json')).length, 1);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 1);
+});
+
+test('killDetachedWorkerProcessGroup terminates detached remediation workers by process group', async () => {
+  const child = spawn('bash', ['-c', 'trap "" TERM; while :; do sleep 1; done'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+
+  assert.equal(killDetachedWorkerProcessGroup(child.pid), true);
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
+});
+
+test('consumeFollowUpJobsUntilCapacity stops draining when shutdown flips mid-tick', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+
+  const spawnCalls = [];
+  let stopping = false;
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, {
+      maxConcurrent: 2,
+      shouldStop: () => stopping,
+      spawnImpl: (command, args, options) => {
+        const pid = 9000 + spawnCalls.length;
+        spawnCalls.push({ command, args, options, pid });
+        stopping = true;
+        return { pid, unref() {} };
+      },
+    })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 1);
+});
+
+test('resolveRemediationMaxConcurrentJobs clamps runaway env values', () => {
+  const clampEvents = [];
+  const result = resolveRemediationMaxConcurrentJobs(
+    { ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS: '1000' },
+    { onClamp: (event) => clampEvents.push(event) }
+  );
+
+  assert.equal(result, 8);
+  assert.deepEqual(clampEvents, [{ requested: 1000, clamped: 8 }]);
+});
+
 test('consumeNextFollowUpJob honors persisted maxRounds=2 on a medium-risk legacy job (riskClass downgrade is suppressed)', async () => {
   // Reviewer blocking finding: `resolveRoundBudgetForJob` used to give
   // `riskClass` precedence over the persisted `remediationPlan.maxRounds`.
@@ -2563,6 +2838,120 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
     else process.env.CODEX_HOME = prevCodexHome;
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+  }
+});
+
+test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral when spawn bookkeeping throws', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const prevAuthPath = process.env.CODEX_AUTH_PATH;
+  const prevCliPath = process.env.CODEX_CLI_PATH;
+  const prevCodexHome = process.env.CODEX_HOME;
+  const prevHome = process.env.HOME;
+  const prevHqRoot = process.env.HQ_ROOT;
+
+  try {
+    const authDir = path.join(rootDir, '.codex');
+    const authPath = path.join(authDir, 'auth.json');
+    mkdirSync(authDir, { recursive: true });
+    writeFileSync(authPath, JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+      },
+    }), 'utf8');
+
+    process.env.CODEX_AUTH_PATH = authPath;
+    process.env.CODEX_CLI_PATH = '/usr/bin/true';
+    process.env.CODEX_HOME = authDir;
+    process.env.HOME = rootDir;
+    process.env.HQ_ROOT = path.join(rootDir, 'hq');
+    mkdirSync(process.env.HQ_ROOT, { recursive: true });
+
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      reviewerModel: 'codex',
+      builderTag: 'claude-code',
+      linearTicketId: 'LAC-207',
+      reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: true,
+    });
+
+    await assert.rejects(
+      () => consumeNextFollowUpJob({
+        rootDir,
+        spawnImpl: () => ({
+          pid: 4321,
+          detached: true,
+          unref() {},
+          stdout: { destroy() {} },
+          stderr: { destroy() {} },
+        }),
+        now: (() => {
+          let callCount = 0;
+          return () => {
+            callCount += 1;
+            if (callCount === 1) return '2026-04-21T10:00:00.000Z';
+            if (callCount === 2) return '2026-04-21T10:00:01.000Z';
+            if (callCount === 3) throw new Error('post-spawn bookkeeping failed');
+            if (callCount === 4) return '2026-04-21T10:00:03.000Z';
+            return '2026-04-21T10:00:04.000Z';
+          };
+        })(),
+        promptTemplate: 'Remediation prompt template.',
+        resolvePRLifecycleImpl: async () => null,
+        execFileImpl: async (command, args) => {
+          if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+            mkdirSync(path.join(args[3], '.git'), { recursive: true });
+          }
+          return { stdout: '', stderr: '' };
+        },
+      }),
+      /post-spawn bookkeeping failed/
+    );
+
+    const failedDir = getFollowUpJobDir(rootDir, 'failed');
+    const failedFiles = readdirSync(failedDir).filter((name) => name.endsWith('.json'));
+    assert.equal(failedFiles.length, 1, 'failed/ should contain the bookkeeping-failed job');
+
+    const failedJob = JSON.parse(readFileSync(path.join(failedDir, failedFiles[0]), 'utf8'));
+    assert.equal(failedJob.status, 'failed');
+    assert.equal(failedJob.failure.code, 'worker-failure');
+    assert.equal(
+      failedJob.remediationWorker?.state,
+      'never-spawned',
+      'killed-before-ledger workers must reuse the budget-neutral never-spawned tag',
+    );
+    assert.equal(failedJob.remediationWorker?.cleanupSignal, 'SIGKILL');
+    assert.match(
+      failedJob.remediationWorker?.cleanupResult || '',
+      /^(killed|not-found)$/,
+      'cleanup metadata should still record the attempted kill result',
+    );
+
+    const ledger = summarizePRRemediationLedger(rootDir, {
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+    });
+    assert.equal(
+      ledger.completedRoundsForPR,
+      0,
+      'spawn bookkeeping failures must not consume a PR-wide remediation round',
+    );
+  } finally {
+    if (prevAuthPath === undefined) delete process.env.CODEX_AUTH_PATH;
+    else process.env.CODEX_AUTH_PATH = prevAuthPath;
+    if (prevCliPath === undefined) delete process.env.CODEX_CLI_PATH;
+    else process.env.CODEX_CLI_PATH = prevCliPath;
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCodexHome;
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevHqRoot === undefined) delete process.env.HQ_ROOT;
+    else process.env.HQ_ROOT = prevHqRoot;
   }
 });
 

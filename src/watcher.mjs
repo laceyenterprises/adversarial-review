@@ -174,6 +174,20 @@ function exitForSqliteOrphan(err, contextLabel) {
   setImmediate(() => process.exit(SQLITE_ORPHAN_EXIT_CODE));
 }
 
+// LAC-545: head+tail preview for diagnostic log lines. For short payloads
+// (under 800 chars) emit verbatim; for longer ones, the first 400 +
+// `…<truncated N chars>…` + last 400. Newlines are collapsed to a single
+// space so the line stays grep-able. The intent is to surface enough of
+// codex's actual output to a) classify the failure mode and b) feed the
+// sanitizer's rejection signature back into a real fix.
+function previewLogText(text, { head = 400, tail = 400 } = {}) {
+  const normalized = String(text ?? '').replace(/\r?\n+/g, ' ').trim();
+  if (!normalized) return '<empty>';
+  if (normalized.length <= head + tail) return normalized;
+  const elided = normalized.length - head - tail;
+  return `${normalized.slice(0, head)} …<truncated ${elided} chars>… ${normalized.slice(-tail)}`;
+}
+
 function handlePollError(err, source = 'pollOnce') {
   if (isSqliteOrphanError(err)) {
     exitForSqliteOrphan(err, source);
@@ -382,6 +396,42 @@ async function reconcileOrphanedReviewing(octokit) {
   return reconcileReviewerSessions({ db, octokit });
 }
 
+<<<<<<< HEAD
+=======
+function shouldReconcileStaleReviewerSession(row, now, {
+  reviewerTimeoutMs = resolveReviewerTimeoutMs(),
+} = {}) {
+  const startedAtMs = Date.parse(row?.reviewer_started_at || '');
+  if (!Number.isFinite(startedAtMs)) return true;
+  return (startedAtMs + reviewerTimeoutMs) <= now.getTime();
+}
+
+function persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber, log = console }) {
+  try {
+    const result = stmtMarkReviewerPgid.run(pgid, reviewerSessionUuid, repoPath, prNumber);
+    if (result.changes === 0) {
+      log.warn?.(
+        `[watcher] reviewer_session_handle_cas_miss repo=${repoPath} pr=${prNumber} ` +
+        `session=${reviewerSessionUuid} pgid=${pgid}`
+      );
+      return false;
+    }
+    log.log?.(
+      `[watcher] reviewer_session_handle_persisted repo=${repoPath} pr=${prNumber} ` +
+      `session=${reviewerSessionUuid} pgid=${pgid}`
+    );
+    return true;
+  } catch (err) {
+    handlePollError(err, 'stmtMarkReviewerPgid');
+    log.warn?.(
+      `[watcher] reviewer_session_handle_persist_failed repo=${repoPath} pr=${prNumber} ` +
+      `session=${reviewerSessionUuid} pgid=${pgid} error=${err?.message || err}`
+    );
+    return false;
+  }
+}
+
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 // ── Author tag detection ─────────────────────────────────────────────────────
 
 function resolveCodexReviewerEnv(reviewerEnv) {
@@ -487,6 +537,7 @@ async function spawnReviewer({
       signal: typeof err?.signal === 'string' ? err.signal : null,
       timedOut,
       stderr: String(err?.stderr || detail || ''),
+      stdout: String(err?.stdout || ''),
       failureClass: classifyReviewerFailure(
         err?.stderr || detail || '',
         Number.isInteger(err?.exitCode) ? err.exitCode : err?.code,
@@ -527,6 +578,26 @@ function settleReviewerAttempt({
   }
 
   const failureClass = result.failureClass || 'unknown';
+
+  // LAC-545: every reviewer failure now logs its captured stderr/stdout
+  // with the failure class. Previously these were swallowed by the
+  // classifier — the silent-stall on every `[claude-code]` PR codex
+  // reviewer attempt was invisible until forensic instrumentation got
+  // bolted on. Mirror the success-path `[reviewer:<N>] stderr: ...`
+  // shape so success and failure produce parallel diagnostic lines.
+  const failureStderrText = String(result.stderr || '').trim();
+  const failureStdoutText = String(result.stdout || '').trim();
+  if (failureStderrText) {
+    log.warn(
+      `[reviewer:${prNumber}] stderr (failure-class=${failureClass}): ${previewLogText(failureStderrText)}`
+    );
+  }
+  if (failureStdoutText) {
+    log.warn(
+      `[reviewer:${prNumber}] stdout (failure-class=${failureClass}): ${previewLogText(failureStdoutText)}`
+    );
+  }
+
   const transientFailureClasses = new Set([
     'cascade',
     'reviewer-timeout',
@@ -681,6 +752,15 @@ let lastRepoRefresh = 0;
 const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
   execFileImpl: execFileAsync,
 });
+const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 3;
+
+function resolveStaleReviewerReconcilePerPoll(env = process.env) {
+  const raw = env.ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL;
+  return parsed;
+}
 
 async function refreshOrgRepos(octokit) {
   if (!config.org) return;
@@ -825,6 +905,17 @@ async function handlePostedReviewRow({
 async function pollOnce(octokit) {
   const operatorSurface = createWatcherOperatorSurface();
   await refreshOrgRepos(octokit);
+  const reattach = await reconcileReviewerSessions({
+    db,
+    octokit,
+    maxRows: resolveStaleReviewerReconcilePerPoll(),
+    shouldReconcileRow: (row, now) => shouldReconcileStaleReviewerSession(row, now),
+  });
+  if (reattach.skipped > 0) {
+    console.log(
+      `[watcher] stale reviewer reattach capped: reconciled=${reattach.reconciled} skipped=${reattach.skipped}`
+    );
+  }
 
   await warnForMissingAdversarialGateBranchProtection(activeRepos, {
     checker: adversarialGateBranchProtectionChecker,
@@ -1200,16 +1291,7 @@ async function pollOnce(octokit) {
         maxRemediationRounds,
         reviewerSessionUuid,
         onReviewerPgid: ({ pgid }) => {
-          try {
-            stmtMarkReviewerPgid.run(pgid, reviewerSessionUuid, repoPath, prNumber);
-            console.log(
-              `[watcher] reviewer_session_handle_persisted repo=${repoPath} pr=${prNumber} ` +
-              `session=${reviewerSessionUuid} pgid=${pgid}`
-            );
-          } catch (err) {
-            handlePollError(err, 'stmtMarkReviewerPgid');
-            throw err;
-          }
+          persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });
         },
       });
 
@@ -1337,9 +1419,12 @@ export {
   evaluateRoundBudgetForReview,
   handlePostedReviewRow,
   pollOnce,
+  persistReviewerPgid,
   readWatcherDrainState,
   reconcileOrphanedReviewing,
+  resolveStaleReviewerReconcilePerPoll,
   shouldDeferReviewForActiveFollowUp,
+  shouldReconcileStaleReviewerSession,
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,

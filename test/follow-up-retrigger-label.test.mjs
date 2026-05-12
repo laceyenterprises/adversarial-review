@@ -75,6 +75,7 @@ function makeLabelEvent(overrides = {}) {
     actor: 'VirtualPaul',
     createdAt: '2026-05-06T17:59:00.000Z',
     label: RETRIGGER_REMEDIATION_LABEL,
+    headSha: 'sha-retrigger',
     ...overrides,
   };
 }
@@ -397,6 +398,28 @@ test('tryRetriggerRemediationFromLabel refuses unattributed labels', async () =>
   });
 
   assert.equal(result.outcome, 'label-event-missing');
+});
+
+test('tryRetriggerRemediationFromLabel refuses missing revisionRef before consuming label', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir);
+
+  const ghCalls = [];
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-missing-revision', headSha: null }),
+    execFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    appendAuditRow: () => {},
+  });
+
+  assert.equal(result.outcome, 'missing-revision-ref');
+  assert.equal(result.ackComment.reason, 'missing-revision-ref');
+  assert.equal(ghCalls.length, 0);
 });
 
 test('tryRetriggerRemediationFromLabel consumes label and audits bump when requeue fails', async () => {

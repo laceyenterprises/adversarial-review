@@ -26,7 +26,7 @@
 # - ANTHROPIC_API_KEY / OPENAI_API_KEY are explicitly unset before exec.
 # - The two reviewer-bot PATs are loaded so the comment poster can
 #   speak as @claude-reviewer-lacey or @codex-reviewer-lacey on the PR
-#   (see src/pr-comments.mjs::WORKER_CLASS_TO_BOT_TOKEN_ENV).
+#   (see src/adapters/comms/github-pr-comments/pr-comments.mjs::WORKER_CLASS_TO_BOT_TOKEN_ENV).
 #
 # ── Per-user paths ────────────────────────────────────────────────────────
 #
@@ -95,7 +95,7 @@ fi
 
 # Reviewer-bot PATs for the comment poster. Worker class → bot mapping
 # (canonical): codex → GH_CODEX_REVIEWER_TOKEN, claude-code → GH_CLAUDE_REVIEWER_TOKEN.
-# See src/pr-comments.mjs::WORKER_CLASS_TO_BOT_TOKEN_ENV.
+# See src/adapters/comms/github-pr-comments/pr-comments.mjs::WORKER_CLASS_TO_BOT_TOKEN_ENV.
 #
 # Resolved ONCE at daemon startup. Subsequent ticks within the same
 # daemon process reuse these env vars in-process — no new `op read`

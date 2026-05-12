@@ -327,8 +327,18 @@ function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpRe
   };
 }
 
+<<<<<<< HEAD
 function requireRevisionRef(revisionRef, context) {
   const normalized = String(revisionRef || '').trim();
+=======
+function normalizeRevisionRef(revisionRef) {
+  const normalized = String(revisionRef || '').trim();
+  return normalized || null;
+}
+
+function requireRevisionRef(revisionRef, context) {
+  const normalized = normalizeRevisionRef(revisionRef);
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
   if (!normalized) {
     throw new TypeError(`${context} requires a revisionRef`);
   }
@@ -377,6 +387,22 @@ async function retryAckCommentForConsumption({
   const context = consumption?.ackComment?.context;
   if (!context) return consumption;
   const previousAttempts = Number(consumption?.ackComment?.attempts || 0);
+  if (!normalizeRevisionRef(context.revisionRef)) {
+    const nextConsumption = {
+      ...consumption,
+      ackComment: {
+        posted: false,
+        reason: 'missing-revision-ref',
+        error: 'cannot retry retrigger acknowledgement without a revisionRef',
+        context,
+        attempts: ACK_COMMENT_MAX_ATTEMPTS,
+        maxAttempts: ACK_COMMENT_MAX_ATTEMPTS,
+        attemptedAt: new Date().toISOString(),
+      },
+    };
+    writeLabelConsumption(rootDir, labelEventKey, nextConsumption);
+    return nextConsumption;
+  }
   if (previousAttempts >= ACK_COMMENT_MAX_ATTEMPTS) return consumption;
   const ackComment = await postRetriggerAckComment({
     rootDir,
@@ -530,6 +556,19 @@ export async function tryRetriggerRemediationFromLabel({
       detail: 'cannot attribute retrigger-remediation to a GitHub labeled event',
     };
   }
+  const normalizedRevisionRef = normalizeRevisionRef(
+    revisionRef || labelEvent?.headSha || labelEvent?.head_sha
+  );
+  if (!normalizedRevisionRef) {
+    return {
+      outcome: 'missing-revision-ref',
+      detail: 'retrigger-remediation label requires the current PR head revisionRef before it can bump or requeue',
+      ackComment: {
+        posted: false,
+        reason: 'missing-revision-ref',
+      },
+    };
+  }
   const labelEventActor = labelEvent?.actor || labelActor || 'unknown';
   const fingerprintReason = `${reason}|labelEvent=${labelEventKey}`;
   const { requestFingerprint, idempotencyKey } = resolveIdempotencyKey({
@@ -584,7 +623,11 @@ export async function tryRetriggerRemediationFromLabel({
 
   const jobKey = `${latest.job.repo}#${latest.job.prNumber}@${latest.job.jobId}`;
   const ts = now();
+<<<<<<< HEAD
   const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef });
+=======
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef: normalizedRevisionRef });
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
   const auditRow = {
     ts,
     verb: VERB,
@@ -647,7 +690,11 @@ export async function tryRetriggerRemediationFromLabel({
       reason: 'requeue step pending',
       jobPath: bumpResult.jobPath,
     },
+<<<<<<< HEAD
     revisionRef,
+=======
+    revisionRef: normalizedRevisionRef,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
   });
   const baseConsumption = buildLabelConsumptionDoc({
     labelEventKey,
@@ -685,7 +732,11 @@ export async function tryRetriggerRemediationFromLabel({
       reason,
       bumpResult,
       requeueResult,
+<<<<<<< HEAD
       revisionRef,
+=======
+      revisionRef: normalizedRevisionRef,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
     });
 
     try {
@@ -736,7 +787,11 @@ export async function tryRetriggerRemediationFromLabel({
       reason,
       bumpResult,
       requeueResult,
+<<<<<<< HEAD
       revisionRef,
+=======
+      revisionRef: normalizedRevisionRef,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
     });
     writeLabelConsumption(rootDir, labelEventKey, buildLabelConsumptionDoc({
       labelEventKey,

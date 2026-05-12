@@ -1,3 +1,9 @@
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:src/pr-comments.mjs
+export * from './adapters/comms/github-pr-comments/pr-comments.mjs';
+========
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
 // PR comment poster for the remediation pipeline.
 //
 // Every terminal reconcile transition (completed / stopped / failed) emits a
@@ -570,7 +576,11 @@ function buildRemediationOutcomeCommentBody({
   }
 
   // Worker-supplied fields below are *untrusted*. They go through
+<<<<<<< HEAD
   // src/redaction.mjs (token / Bearer / private-key / labelled-secret
+=======
+  // redaction.mjs (token / Bearer / private-key / labelled-secret
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
   // patterns) and are length-capped before being written to the PR.
   // See review of PR #18 for the leakage path this guards against:
   // a worker echoing a token from a log line into reply.summary
@@ -893,3 +903,7 @@ export {
   postRemediationOutcomeComment,
   resolveCommentBotTokenEnv,
 };
+<<<<<<< HEAD
+=======
+>>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85:src/adapters/comms/github-pr-comments/pr-comments.mjs
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85

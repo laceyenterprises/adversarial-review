@@ -14,7 +14,10 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import {
   evaluateRoundBudgetForReview,
+  persistReviewerPgid,
+  resolveStaleReviewerReconcilePerPoll,
   shouldDeferReviewForActiveFollowUp,
+  shouldReconcileStaleReviewerSession,
 } from '../src/watcher.mjs';
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 
@@ -179,6 +182,63 @@ test("'failed-orphan' rows stay sticky and are not auto-retried by the watcher's
     .prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
     .get('laceyenterprises/adversarial-review', 24);
   assert.ok(stickySkipStates.has(row.review_status));
+});
+
+test('steady-state reattach only probes reviewer sessions older than the reviewer timeout', () => {
+  const now = new Date('2026-05-11T05:20:00.000Z');
+
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      { reviewer_started_at: '2026-05-11T04:59:59.000Z' },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    true
+  );
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      { reviewer_started_at: '2026-05-11T05:01:00.000Z' },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    false
+  );
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      { reviewer_started_at: 'not-a-date' },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    true
+  );
+});
+
+test('steady-state reattach per-poll cap defaults small and accepts zero for disable', () => {
+  assert.equal(resolveStaleReviewerReconcilePerPoll({}), 3);
+  assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '1' }), 1);
+  assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '0' }), 0);
+  assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: 'bad' }), 3);
+});
+
+test('persistReviewerPgid logs CAS misses instead of throwing into the spawned reviewer', () => {
+  const warnings = [];
+  const logs = [];
+
+  const persisted = persistReviewerPgid({
+    pgid: 9001,
+    reviewerSessionUuid: 'session-10',
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    log: {
+      log: (message) => logs.push(String(message)),
+      warn: (message) => warnings.push(String(message)),
+    },
+  });
+
+  assert.equal(persisted, false);
+  assert.equal(logs.length, 0);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /reviewer_session_handle_cas_miss/);
 });
 
 test("reconciliation only touches 'reviewing' rows and leaves other statuses alone", () => {

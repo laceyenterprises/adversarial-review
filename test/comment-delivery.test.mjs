@@ -23,8 +23,8 @@ import {
   retryFailedCommentDeliveries,
   seedDeliveryRetryIndexFromHistory,
   tryAcquireDeliveryClaim,
-} from '../src/comment-delivery.mjs';
-import { postRemediationOutcomeComment } from '../src/pr-comments.mjs';
+} from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
+import { postRemediationOutcomeComment } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
 
 async function makeFakeTerminalRecord(rootDir, dirKey, jobId, body, repo, prNumber, workerClass, postResult) {
   const dir = path.join(rootDir, 'data', 'follow-up-jobs', dirKey);
@@ -565,7 +565,7 @@ test('parseCommentUrlFromStdout (gh stdout) returns the comment URL on success',
   // Indirect: postRemediationOutcomeComment captures the URL via
   // parseCommentUrlFromStdout. Verify the captured URL flows into the
   // result.posted=true path.
-  const { postRemediationOutcomeComment: post } = await import('../src/pr-comments.mjs');
+  const { postRemediationOutcomeComment: post } = await import('../src/adapters/comms/github-pr-comments/pr-comments.mjs');
   const result = await post({
     repo: 'laceyenterprises/demo',
     prNumber: 42,
@@ -583,7 +583,7 @@ test('parseCommentUrlFromStdout (gh stdout) returns the comment URL on success',
 });
 
 test('parseCommentUrlFromStdout returns null when gh stdout has no URL', async () => {
-  const { postRemediationOutcomeComment: post } = await import('../src/pr-comments.mjs');
+  const { postRemediationOutcomeComment: post } = await import('../src/adapters/comms/github-pr-comments/pr-comments.mjs');
   const result = await post({
     repo: 'laceyenterprises/demo',
     prNumber: 42,
@@ -612,7 +612,7 @@ test('parseCommentUrlFromStdout returns null when gh stdout has no URL', async (
 // re-posting.
 
 test('listRetryCandidates reconstructs commentDelivery for terminal records that have none (lost pre-stamp)', async () => {
-  const { listRetryCandidates } = await import('../src/comment-delivery.mjs');
+  const { listRetryCandidates } = await import('../src/adapters/comms/github-pr-comments/comment-delivery.mjs');
   const rootDir = mkdtempSync(path.join(tmpdir(), 'comment-delivery-'));
   const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });

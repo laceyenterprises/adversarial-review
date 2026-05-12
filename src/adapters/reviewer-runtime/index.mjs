@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createAgentOsHqReviewerRuntimeAdapter } from './agent-os-hq/index.mjs';
+import { createAcpxReviewerRuntimeAdapter } from './acpx/index.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from './cli-direct/index.mjs';
 import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mjs';
 import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './run-state.mjs';
@@ -15,6 +16,8 @@ function resolveReviewerRuntimeName(domainConfig = {}) {
 
 function createReviewerRuntimeAdapterByName(name = 'cli-direct', options = {}) {
   switch (name) {
+    case 'acpx':
+      return createAcpxReviewerRuntimeAdapter(options);
     case 'cli-direct':
       return createCliDirectReviewerRuntimeAdapter(options);
     case 'fixture-stub':
@@ -35,6 +38,7 @@ function createReviewerRuntimeAdapterForDomain({
   const runtimeName = resolveReviewerRuntimeName(domainConfig);
   return createReviewerRuntimeAdapterByName(runtimeName, {
     rootDir,
+    domainConfig,
     ...options,
   });
 }

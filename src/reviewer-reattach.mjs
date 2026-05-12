@@ -111,9 +111,14 @@ function makeReviewPostedProbe(octokit, { log = console } = {}) {
       } else {
         reviews = (await octokit.rest.pulls.listReviews(params)).data;
         if (Array.isArray(reviews) && reviews.length === params.per_page) {
+<<<<<<< HEAD
           log.warn(
             `[watcher] reviewer_reattach_review_probe_truncated repo=${row.repo} pr=${row.pr_number} ` +
             'octokit.paginate unavailable and first page is full'
+=======
+          throw new Error(
+            'review probe truncated: octokit.paginate unavailable and first page is full'
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
           );
         }
       }
@@ -191,9 +196,21 @@ async function reconcileReviewerSessions({
   killProcessGroup = killPgid,
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
   findPostedReview = makeReviewPostedProbe(octokit),
+<<<<<<< HEAD
 } = {}) {
   const rows = statements.listReviewing.all();
   if (rows.length === 0) return { reconciled: 0 };
+=======
+  shouldReconcileRow = () => true,
+  maxRows = Number.POSITIVE_INFINITY,
+} = {}) {
+  const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
+    ? Number(maxRows)
+    : Number.POSITIVE_INFINITY;
+  const matchingRows = statements.listReviewing.all().filter((row) => shouldReconcileRow(row, now));
+  const rows = matchingRows.slice(0, limit);
+  if (rows.length === 0) return { reconciled: 0, skipped: matchingRows.length };
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 
   const failureAt = now.toISOString();
   for (const row of rows) {
@@ -257,6 +274,7 @@ async function reconcileReviewerSessions({
       continue;
     }
 
+<<<<<<< HEAD
     let postedReview = null;
     try {
       postedReview = await findPostedReview(row);
@@ -276,6 +294,8 @@ async function reconcileReviewerSessions({
       continue;
     }
 
+=======
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
     const sessionProbe = typeof probeSession === 'function'
       ? probeSession(row)
       : probeReviewerSession({
@@ -290,6 +310,31 @@ async function reconcileReviewerSessions({
       currentHeadSha &&
       row.reviewer_head_sha !== currentHeadSha
     );
+<<<<<<< HEAD
+=======
+    let postedReview = null;
+
+    async function probePostedReviewOrMarkSticky() {
+      try {
+        postedReview = await findPostedReview(row);
+        return true;
+      } catch (err) {
+        log.warn(
+          `[watcher] reviewer_reattach_review_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
+          `session=${row.reviewer_session_uuid} error=${err?.message || err}`
+        );
+        markStickyOrphan({
+          statements,
+          row,
+          failureAt,
+          message: `${PROBE_FAILURE_MESSAGE} review probe failed: ${err?.message || err}`,
+          log,
+          event: 'reviewer_reattach_probe_failed',
+        });
+        return false;
+      }
+    }
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 
     if (alive) {
       if (!sessionMatched) {
@@ -320,6 +365,11 @@ async function reconcileReviewerSessions({
         continue;
       }
 
+<<<<<<< HEAD
+=======
+      if (!(await probePostedReviewOrMarkSticky())) continue;
+
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
       if (postedReview) {
         statements.markOrphan.run(
           failureAt,
@@ -341,6 +391,26 @@ async function reconcileReviewerSessions({
       continue;
     }
 
+<<<<<<< HEAD
+=======
+    if (headChanged) {
+      statements.markFailed.run(
+        failureAt,
+        `Reviewer session ${row.reviewer_session_uuid} invalidated: PR head changed from ${row.reviewer_head_sha} to ${currentHeadSha}.`,
+        row.repo,
+        row.pr_number
+      );
+      log.warn(
+        `[watcher] reviewer_reattach_invalidated repo=${row.repo} pr=${row.pr_number} ` +
+        `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'} ` +
+        `spawn_head=${row.reviewer_head_sha} current_head=${currentHeadSha}`
+      );
+      continue;
+    }
+
+    if (!(await probePostedReviewOrMarkSticky())) continue;
+
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
     if (postedReview) {
       statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
       log.log(
@@ -362,7 +432,11 @@ async function reconcileReviewerSessions({
     );
   }
 
+<<<<<<< HEAD
   return { reconciled: rows.length };
+=======
+  return { reconciled: rows.length, skipped: Math.max(0, matchingRows.length - rows.length) };
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 }
 
 export {

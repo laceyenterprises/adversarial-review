@@ -9,6 +9,14 @@ const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
 const REVIEW_STATE_SCHEMA_VERSION = 3;
 const execFileAsyncDefault = promisify(execFile);
+const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs']);
+
+const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
+  'head_sha',
+  'headSha',
+  'head_ref_oid',
+  'headRefOid',
+]);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
   'head_sha',
@@ -28,8 +36,13 @@ function ensureReviewStateSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS reviewed_prs (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
+<<<<<<< HEAD
       repo              TEXT,
       pr_number         INTEGER,
+=======
+      repo              TEXT NOT NULL,
+      pr_number         INTEGER NOT NULL,
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
       domain_id         TEXT,
       subject_external_id TEXT,
       revision_ref      TEXT,
@@ -56,6 +69,7 @@ function ensureReviewStateSchema(db) {
     )
   `);
 
+<<<<<<< HEAD
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN pr_state TEXT NOT NULL DEFAULT 'open'`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN merged_at TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN closed_at TEXT`); } catch {}
@@ -76,15 +90,41 @@ function ensureReviewStateSchema(db) {
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN domain_id TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN subject_external_id TEXT`); } catch {}
   try { db.exec(`ALTER TABLE reviewed_prs ADD COLUMN revision_ref TEXT`); } catch {}
+=======
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN pr_state TEXT NOT NULL DEFAULT 'open'`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN merged_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN closed_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN linear_ticket TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN review_status TEXT NOT NULL DEFAULT 'posted'`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN review_attempts INTEGER NOT NULL DEFAULT 0`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN last_attempted_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN posted_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN failed_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN failure_message TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_requested_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_reason TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN labels_json TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_session_uuid TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_pgid INTEGER`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_started_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_head_sha TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN domain_id TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN subject_external_id TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN revision_ref TEXT`);
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 
   backfillReviewedPRSubjectIdentity(db);
 
   db.exec(`
+<<<<<<< HEAD
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
       ON reviewed_prs(domain_id, subject_external_id, revision_ref, review_attempts, review_status)
       WHERE domain_id IS NOT NULL
         AND subject_external_id IS NOT NULL
         AND revision_ref IS NOT NULL;
+=======
+    DROP INDEX IF EXISTS reviewed_prs_identity_round_kind_unique;
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 
     CREATE INDEX IF NOT EXISTS reviewed_prs_identity_lookup_idx
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);
@@ -97,8 +137,31 @@ function getReviewRow(db, { repo, prNumber }) {
   return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber) || null;
 }
 
+<<<<<<< HEAD
 function tableColumns(db, tableName) {
   return db.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => column.name);
+=======
+function addReviewedPRsColumnIfMissing(db, sql) {
+  try {
+    db.exec(sql);
+  } catch (err) {
+    if (err?.code === 'SQLITE_ERROR' && /duplicate column name/i.test(err.message || '')) return;
+    throw err;
+  }
+}
+
+function assertKnownReviewStateTableName(tableName) {
+  const value = String(tableName || '');
+  if (!REVIEW_STATE_TABLE_NAMES.has(value)) {
+    throw new TypeError(`Unknown review-state table name: ${tableName}`);
+  }
+  return value;
+}
+
+function tableColumns(db, tableName) {
+  const safeTableName = assertKnownReviewStateTableName(tableName);
+  return db.prepare(`PRAGMA table_info("${safeTableName}")`).all().map((column) => column.name);
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 }
 
 function pickExistingColumn(db, tableName, candidates) {
@@ -151,6 +214,13 @@ function lookupReviewRowDualRead(db, {
   revisionRef,
   legacyRevisionProven = false,
 } = {}) {
+<<<<<<< HEAD
+=======
+  // Reserved for the LAC-491 typed-identity read migration. Current hot
+  // paths still read by legacy repo/pr_number while writes backfill the new
+  // identity columns; keep this helper available so the gate/follow-up readers
+  // can switch call sites incrementally without changing the exported surface.
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
   const normalizedSubjectExternalId = subjectExternalId || makeCodePrSubjectExternalId(repo, prNumber);
   const typedRow = getReviewRowBySubjectIdentity(db, {
     domainId: domainId || (normalizedSubjectExternalId ? CODE_PR_DOMAIN_ID : null),

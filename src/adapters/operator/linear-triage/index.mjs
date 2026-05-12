@@ -142,12 +142,27 @@ function createLinearTriageAdapter({
     done: stateNames.done || ['Done', 'Review Complete'],
     cancelled: stateNames.cancelled || 'Cancelled',
   };
+<<<<<<< HEAD
+=======
+  let linearClientPromise = null;
+
+  function getLinearClient() {
+    if (!linearClientPromise) {
+      linearClientPromise = Promise.resolve().then(() => linearClientProvider());
+    }
+    return linearClientPromise;
+  }
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 
   async function syncTriageStatus(subjectRef, status) {
     const ticketId = resolveLinearTicketId(subjectRef);
     const targetStateName = normalizeStatusName(status, resolvedStateNames);
     await setLinearState({
+<<<<<<< HEAD
       linearClientProvider,
+=======
+      linearClientProvider: getLinearClient,
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
       logger,
       ticketId,
       targetStateName,
@@ -155,6 +170,14 @@ function createLinearTriageAdapter({
   }
 
   async function recordReviewerEngagement(subjectRef, attempt) {
+<<<<<<< HEAD
+=======
+    // Reserved operator-surface hook for LAC-486's reviewer-attempt-start
+    // integration. Keep the method live in the composite adapter so future
+    // watcher/reviewer callers can adopt it without another public-surface
+    // churn, even though the current watcher only calls syncTriageStatus and
+    // recordReviewCompleted directly.
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
     if (attempt?.startedAt && !attempt?.completedAt) {
       await syncTriageStatus(subjectRef, 'in-review');
     }
@@ -173,7 +196,11 @@ function createLinearTriageAdapter({
     await syncTriageStatus(subjectRef, 'done');
 
     if (!critical) return;
+<<<<<<< HEAD
     const linear = await linearClientProvider();
+=======
+    const linear = await getLinearClient();
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
     if (!linear) return;
     try {
       const issue = await linear.issue(ticketId);

@@ -95,6 +95,34 @@ test('reattaches when pgid is alive, head sha is unchanged, and no review is pos
   assert.match(log.lines.join('\n'), /session=session-70 pgid=9001/);
 });
 
+<<<<<<< HEAD
+=======
+test('selective stale probing recovers only overdue reviewing rows during steady-state polls', async () => {
+  const db = setupDb();
+  seedReviewing(db, { prNumber: 70, startedAt: '2026-05-11T04:30:00.000Z', lastAttemptedAt: '2026-05-11T04:30:00.000Z' });
+  seedReviewing(db, { prNumber: 71, sessionUuid: 'session-71', pgid: 9002, startedAt: '2026-05-11T05:18:00.000Z', lastAttemptedAt: '2026-05-11T05:18:00.000Z' });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log,
+    shouldReconcileRow: (row, now) => Date.parse(row.reviewer_started_at) <= (now.getTime() - (20 * 60 * 1000)),
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const staleRow = readRow(db, REPO, 70);
+  const freshRow = readRow(db, REPO, 71);
+  assert.equal(staleRow.review_status, 'posted');
+  assert.equal(freshRow.review_status, 'reviewing');
+  assert.match(log.lines.join('\n'), /reviewer_reattach_recovered/);
+});
+
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 test('invalidates an alive reviewer when the PR head sha changed', async () => {
   const db = setupDb();
   seedReviewing(db);
@@ -148,6 +176,81 @@ test('recovers a dead reviewer when GitHub has a posted review from this bot sin
   assert.match(log.lines.join('\n'), /reviewer_reattach_recovered/);
 });
 
+<<<<<<< HEAD
+=======
+test('dead reviewer with posted review is not recovered when PR head changed', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  const octokit = makeOctokit([
+    { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+  ]);
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit,
+    now: new Date(FAILURE_AT),
+    log,
+    probeAlive: () => false,
+    fetchHeadSha: async () => 'def456',
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed');
+  assert.equal(row.posted_at, null);
+  assert.equal(octokit.calls.length, 0, 'head mismatch must fail before review-list probing');
+  assert.match(row.failure_message, /PR head changed from abc123 to def456/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_invalidated/);
+});
+
+test('full first review page without paginate becomes sticky probe failure', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'codex' });
+  const octokit = makeOctokit(Array.from({ length: 100 }, (_, index) => ({
+    user: { login: index === 99 ? 'codex-reviewer-lacey' : 'human-reviewer' },
+    submitted_at: '2026-05-11T05:13:09.000Z',
+  })));
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit,
+    now: new Date(FAILURE_AT),
+    log,
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed-orphan');
+  assert.equal(row.posted_at, null);
+  assert.match(row.failure_message, /review probe failed: review probe truncated/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_review_probe_failed/);
+});
+
+test('reattach reconciliation can cap stale rows per poll', async () => {
+  const db = setupDb();
+  seedReviewing(db, { prNumber: 70, sessionUuid: 'session-70', pgid: 9001 });
+  seedReviewing(db, { prNumber: 71, sessionUuid: 'session-71', pgid: 9002 });
+  const log = makeLog();
+
+  const result = await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    maxRows: 1,
+    shouldReconcileRow: () => true,
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  assert.deepEqual(result, { reconciled: 1, skipped: 1 });
+  assert.equal(readRow(db, REPO, 70).review_status, 'failed');
+  assert.equal(readRow(db, REPO, 71).review_status, 'reviewing');
+});
+
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 test('marks a dead reviewer without a GitHub review as retryable failed', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'claude' });

@@ -29,6 +29,14 @@ test('fresh DB includes subject identity columns and schema version 3', () => {
     assert.ok(columns.includes('domain_id'));
     assert.ok(columns.includes('subject_external_id'));
     assert.ok(columns.includes('revision_ref'));
+<<<<<<< HEAD
+=======
+    const tableInfo = db.prepare('PRAGMA table_info(reviewed_prs)').all();
+    const repoColumn = tableInfo.find((column) => column.name === 'repo');
+    const prNumberColumn = tableInfo.find((column) => column.name === 'pr_number');
+    assert.equal(repoColumn.notnull, 1);
+    assert.equal(prNumberColumn.notnull, 1);
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
     assert.equal(db.pragma('user_version', { simple: true }), REVIEW_STATE_SCHEMA_VERSION);
   } finally {
     db.close();
@@ -88,11 +96,32 @@ test('migration from v2 adds identity columns and backfills available head SHA',
   }
 });
 
+<<<<<<< HEAD
 test('composite identity UNIQUE rejects duplicate round and kind', () => {
+=======
+test('schema migration rethrows non-duplicate ALTER TABLE failures', () => {
+  const db = new Database(':memory:');
+  try {
+    db.exec(`
+      CREATE VIEW reviewed_prs AS
+      SELECT 'laceyenterprises/agent-os' AS repo, 360 AS pr_number;
+    `);
+    assert.throws(
+      () => ensureReviewStateSchema(db),
+      /not a table|view/i
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('fresh schema does not carry the redundant identity round/status unique index', () => {
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
   const rootDir = makeRootDir();
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
+<<<<<<< HEAD
     const insert = db.prepare(
       `INSERT INTO reviewed_prs
          (repo, pr_number, domain_id, subject_external_id, revision_ref, reviewed_at, reviewer, review_status, review_attempts)
@@ -124,6 +153,10 @@ test('composite identity UNIQUE rejects duplicate round and kind', () => {
       ),
       /UNIQUE constraint failed/
     );
+=======
+    const indexNames = db.prepare('PRAGMA index_list(reviewed_prs)').all().map((row) => row.name);
+    assert.equal(indexNames.includes('reviewed_prs_identity_round_kind_unique'), false);
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
   } finally {
     db.close();
   }

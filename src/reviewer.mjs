@@ -307,6 +307,49 @@ function previewText(text, limit = 200) {
   return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized;
 }
 
+// LAC-545: forensic preservation of codex outputs that the sanitizer
+// rejects. Persists into `data/codex-review-rejected/` with a stable
+// `<owner>__<repo>__pr-<N>__<iso>.md` name. The directory is gitignored
+// so the forensic snapshots don't accumulate into the repo. Capped at
+// 50 KB per file so a runaway codex output can't fill the disk.
+const REJECTED_CODEX_OUTPUT_CAP_BYTES = 50 * 1024;
+
+function persistRejectedCodexOutput({ repo, prNumber, rejectionReason, rawReviewText }) {
+  // Resolve the persistence directory relative to this module so the
+  // path is stable whether the watcher is running from a worktree or
+  // from the deploy checkout.
+  const rootDir = join(
+    fileURLToPath(import.meta.url),
+    '..',
+    '..',
+    'data',
+    'codex-review-rejected'
+  );
+  mkdirSync(rootDir, { recursive: true });
+  const safeRepo = String(repo || 'unknown')
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .slice(0, 80);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const fileName = `${safeRepo}__pr-${prNumber}__${ts}.md`;
+  const filePath = join(rootDir, fileName);
+  const header = [
+    `<!-- LAC-545 forensic dump of codex output that sanitizeCodexReviewPayload rejected -->`,
+    `<!-- repo: ${repo} -->`,
+    `<!-- prNumber: ${prNumber} -->`,
+    `<!-- rejectedAt: ${new Date().toISOString()} -->`,
+    `<!-- rejectionReason: ${String(rejectionReason || '').slice(0, 400)} -->`,
+    `<!-- rawLengthBytes: ${Buffer.byteLength(String(rawReviewText || ''), 'utf8')} -->`,
+    '',
+  ].join('\n');
+  const truncated = String(rawReviewText || '').slice(0, REJECTED_CODEX_OUTPUT_CAP_BYTES);
+  const truncationNotice = String(rawReviewText || '').length > REJECTED_CODEX_OUTPUT_CAP_BYTES
+    ? `\n\n<!-- truncated to ${REJECTED_CODEX_OUTPUT_CAP_BYTES} bytes -->\n`
+    : '';
+  writeFileSync(filePath, `${header}${truncated}${truncationNotice}`, { encoding: 'utf8', mode: 0o600 });
+  console.error(`[reviewer] persisted rejected codex output: ${filePath}`);
+  return filePath;
+}
+
 function formatChildProcessFailureDetails(err) {
   return [
     err?.message || '',
@@ -908,6 +951,22 @@ async function main() {
       } catch (sanitizeErr) {
         console.error(`[reviewer] SANITIZE FAILED: ${sanitizeErr.message}`);
         console.error(`[reviewer] SANITIZE INPUT PREVIEW: ${previewText(rawReviewText, 400)}`);
+        // LAC-545: forensic preservation. Persist the rejected raw codex
+        // output so a future fix to the sanitizer / prompt / codex CLI
+        // can be diagnosed without re-triggering the failure. Before
+        // this, every rejection was lost — the codex output file was
+        // unlinked inside reviewWithCodex and the watcher's classifier
+        // silenced the stderr. Truncate to 50 KB to bound disk usage.
+        try {
+          persistRejectedCodexOutput({
+            repo,
+            prNumber,
+            rejectionReason: sanitizeErr.message,
+            rawReviewText,
+          });
+        } catch (persistErr) {
+          console.error(`[reviewer] WARN: failed to persist rejected codex output: ${persistErr.message}`);
+        }
         throw sanitizeErr;
       }
     }
@@ -971,7 +1030,11 @@ async function main() {
     await linearTriage.recordReviewCompleted({
       domainId: 'code-pr',
       subjectExternalId: `${repo}#${prNumber}`,
+<<<<<<< HEAD
       revisionRef: '',
+=======
+      revisionRef: null,
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
       linearTicketId,
     }, {
       critical,

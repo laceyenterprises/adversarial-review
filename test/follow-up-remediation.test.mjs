@@ -1,6 +1,6 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -17,6 +17,7 @@ import {
   consumeNextFollowUpJob,
   digestWorkerFinalMessage,
   installWorkerProvenanceHook,
+  killDetachedWorkerProcessGroup,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   prepareCodexRemediationStartupEnv,
@@ -49,6 +50,7 @@ import {
   createFollowUpJob,
   getFollowUpJobDir,
   markFollowUpJobSpawned,
+  summarizePRRemediationLedger,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 
@@ -1698,6 +1700,22 @@ test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job 
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 1);
 });
 
+<<<<<<< HEAD
+=======
+test('killDetachedWorkerProcessGroup terminates detached remediation workers by process group', async () => {
+  const child = spawn('bash', ['-c', 'trap "" TERM; while :; do sleep 1; done'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+
+  assert.equal(killDetachedWorkerProcessGroup(child.pid), true);
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
+});
+
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
 test('consumeFollowUpJobsUntilCapacity stops draining when shutdown flips mid-tick', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
@@ -2823,6 +2841,120 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
     else process.env.CODEX_HOME = prevCodexHome;
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+  }
+});
+
+test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral when spawn bookkeeping throws', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const prevAuthPath = process.env.CODEX_AUTH_PATH;
+  const prevCliPath = process.env.CODEX_CLI_PATH;
+  const prevCodexHome = process.env.CODEX_HOME;
+  const prevHome = process.env.HOME;
+  const prevHqRoot = process.env.HQ_ROOT;
+
+  try {
+    const authDir = path.join(rootDir, '.codex');
+    const authPath = path.join(authDir, 'auth.json');
+    mkdirSync(authDir, { recursive: true });
+    writeFileSync(authPath, JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+      },
+    }), 'utf8');
+
+    process.env.CODEX_AUTH_PATH = authPath;
+    process.env.CODEX_CLI_PATH = '/usr/bin/true';
+    process.env.CODEX_HOME = authDir;
+    process.env.HOME = rootDir;
+    process.env.HQ_ROOT = path.join(rootDir, 'hq');
+    mkdirSync(process.env.HQ_ROOT, { recursive: true });
+
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      reviewerModel: 'codex',
+      builderTag: 'claude-code',
+      linearTicketId: 'LAC-207',
+      reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: true,
+    });
+
+    await assert.rejects(
+      () => consumeNextFollowUpJob({
+        rootDir,
+        spawnImpl: () => ({
+          pid: 4321,
+          detached: true,
+          unref() {},
+          stdout: { destroy() {} },
+          stderr: { destroy() {} },
+        }),
+        now: (() => {
+          let callCount = 0;
+          return () => {
+            callCount += 1;
+            if (callCount === 1) return '2026-04-21T10:00:00.000Z';
+            if (callCount === 2) return '2026-04-21T10:00:01.000Z';
+            if (callCount === 3) throw new Error('post-spawn bookkeeping failed');
+            if (callCount === 4) return '2026-04-21T10:00:03.000Z';
+            return '2026-04-21T10:00:04.000Z';
+          };
+        })(),
+        promptTemplate: 'Remediation prompt template.',
+        resolvePRLifecycleImpl: async () => null,
+        execFileImpl: async (command, args) => {
+          if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+            mkdirSync(path.join(args[3], '.git'), { recursive: true });
+          }
+          return { stdout: '', stderr: '' };
+        },
+      }),
+      /post-spawn bookkeeping failed/
+    );
+
+    const failedDir = getFollowUpJobDir(rootDir, 'failed');
+    const failedFiles = readdirSync(failedDir).filter((name) => name.endsWith('.json'));
+    assert.equal(failedFiles.length, 1, 'failed/ should contain the bookkeeping-failed job');
+
+    const failedJob = JSON.parse(readFileSync(path.join(failedDir, failedFiles[0]), 'utf8'));
+    assert.equal(failedJob.status, 'failed');
+    assert.equal(failedJob.failure.code, 'worker-failure');
+    assert.equal(
+      failedJob.remediationWorker?.state,
+      'never-spawned',
+      'killed-before-ledger workers must reuse the budget-neutral never-spawned tag',
+    );
+    assert.equal(failedJob.remediationWorker?.cleanupSignal, 'SIGKILL');
+    assert.match(
+      failedJob.remediationWorker?.cleanupResult || '',
+      /^(killed|not-found)$/,
+      'cleanup metadata should still record the attempted kill result',
+    );
+
+    const ledger = summarizePRRemediationLedger(rootDir, {
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+    });
+    assert.equal(
+      ledger.completedRoundsForPR,
+      0,
+      'spawn bookkeeping failures must not consume a PR-wide remediation round',
+    );
+  } finally {
+    if (prevAuthPath === undefined) delete process.env.CODEX_AUTH_PATH;
+    else process.env.CODEX_AUTH_PATH = prevAuthPath;
+    if (prevCliPath === undefined) delete process.env.CODEX_CLI_PATH;
+    else process.env.CODEX_CLI_PATH = prevCliPath;
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCodexHome;
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevHqRoot === undefined) delete process.env.HQ_ROOT;
+    else process.env.HQ_ROOT = prevHqRoot;
   }
 });
 

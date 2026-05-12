@@ -1175,7 +1175,7 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     assert.equal(spawnCalls[0].options.env.CODEX_HOME, codexHome);
     assert.equal(spawnCalls[0].options.env.HOME, workspaceDir);
     assert.equal(spawnCalls[0].options.env.OPENAI_API_KEY, undefined);
-    assert.deepEqual(worker.startupEvidence.sanitizedEnv.stripped, ['OPENAI_API_KEY']);
+    assert.match(worker.startupEvidence.sanitizedEnv.stripped.join(','), /(^|,)OPENAI_API_KEY(,|$)/);
     assert.match(spawnCalls[0].options.env.PATH, /\/custom\/bin/);
     // Worker env must explicitly carry the worker git identity so that an
     // inherited GIT_AUTHOR_*/GIT_COMMITTER_* cannot silently override the

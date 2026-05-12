@@ -251,18 +251,45 @@ function resolveHqReplyPath({ hqRoot, launchRequestId }) {
   };
 }
 
-function requireWorkerReplyContext({ hqRoot, launchRequestId }) {
+function requireWorkerReplyContext({ replyPath = null, hqRoot = null, launchRequestId = null }) {
+  const normalizedReplyPath = String(replyPath ?? '').trim();
+  let resolvedReplyPath = normalizedReplyPath;
+  let resolvedReplyDir = normalizedReplyPath ? dirname(normalizedReplyPath) : null;
+
+  if (normalizedReplyPath) {
+    if (!isAbsolute(normalizedReplyPath)) {
+      throw new Error(`Invalid replyPath: expected absolute path, got ${JSON.stringify(normalizedReplyPath)}`);
+    }
+    resolvedReplyPath = resolve(normalizedReplyPath);
+    resolvedReplyDir = dirname(resolvedReplyPath);
+  } else {
+    const normalizedHqRoot = String(hqRoot ?? '').trim();
+    if (!normalizedHqRoot) {
+      throw new Error('Missing remediation reply path');
+    }
+    if (!isAbsolute(normalizedHqRoot)) {
+      throw new Error(`Invalid hqRoot: expected absolute path, got ${JSON.stringify(normalizedHqRoot)}`);
+    }
+    const normalizedLaunchRequestId = validateReplyStorageKey(launchRequestId, 'launchRequestId');
+    const hqReplyPath = resolveHqReplyPath({
+      hqRoot: resolve(normalizedHqRoot),
+      launchRequestId: normalizedLaunchRequestId,
+    });
+    resolvedReplyPath = hqReplyPath.replyPath;
+    resolvedReplyDir = hqReplyPath.replyDir;
+  }
+
   const normalizedHqRoot = String(hqRoot ?? '').trim();
-  if (!normalizedHqRoot) {
-    throw new Error('Missing hqRoot for remediation reply path');
-  }
-  if (!isAbsolute(normalizedHqRoot)) {
-    throw new Error(`Invalid hqRoot: expected absolute path, got ${JSON.stringify(normalizedHqRoot)}`);
-  }
-  const normalizedLaunchRequestId = validateReplyStorageKey(launchRequestId, 'launchRequestId');
+  const normalizedLaunchRequestId = String(launchRequestId ?? '').trim();
   return {
-    hqRoot: resolve(normalizedHqRoot),
-    launchRequestId: normalizedLaunchRequestId,
+    replyPath: resolvedReplyPath,
+    replyDir: resolvedReplyDir,
+    hqRoot: normalizedHqRoot
+      ? resolve(normalizedHqRoot)
+      : null,
+    launchRequestId: normalizedLaunchRequestId
+      ? validateReplyStorageKey(normalizedLaunchRequestId, 'launchRequestId')
+      : null,
   };
 }
 
@@ -540,6 +567,7 @@ function spawnClaudeCodeRemediationWorker({
   promptPath,
   outputPath,
   logPath,
+  replyPath = null,
   hqRoot,
   launchRequestId,
   jobId = null,
@@ -549,7 +577,7 @@ function spawnClaudeCodeRemediationWorker({
 }) {
   const claudeCli = resolveClaudeCodeCliPath();
   const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv();
-  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
+  const replyContext = requireWorkerReplyContext({ replyPath, hqRoot, launchRequestId });
 
   // Same worker-provenance env as the Codex spawn. The commit-msg hook
   // installed in the workspace reads these and stamps trailers.
@@ -557,9 +585,13 @@ function spawnClaudeCodeRemediationWorker({
     ...baseEnv,
     WORKER_CLASS: workerClass,
     WORKER_RUN_AT: now(),
-    HQ_ROOT: replyContext.hqRoot,
-    LRQ_ID: replyContext.launchRequestId,
+    ADV_REPLY_DIR: replyContext.replyDir,
+    REMEDIATION_REPLY_PATH: replyContext.replyPath,
   };
+  if (replyContext.hqRoot) env.HQ_ROOT = replyContext.hqRoot;
+  else delete env.HQ_ROOT;
+  if (replyContext.launchRequestId) env.LRQ_ID = replyContext.launchRequestId;
+  else delete env.LRQ_ID;
   delete env.WORKER_JOB_ID;
   if (jobId) env.WORKER_JOB_ID = jobId;
   else delete env.WORKER_JOB_ID;
@@ -911,7 +943,11 @@ function buildRemediationPrompt(job, {
   launchRequestId,
   governingDocContext = '',
 } = {}) {
-  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
+  const replyContext = requireWorkerReplyContext({
+    replyPath: remediationReplyPath,
+    hqRoot,
+    launchRequestId,
+  });
   const remediationRound = Number(job?.remediationPlan?.currentRound || 0) + 1;
   const maxRemediationRounds = Number(job?.remediationPlan?.maxRounds || 1);
   const remediatorPromptStage = pickRemediatorStage({
@@ -961,8 +997,10 @@ function buildRemediationPrompt(job, {
     remediationReplyArtifact: remediationReplyPath,
   };
   const interpolatedTemplate = interpolatePromptTemplate(promptTemplate, {
-    HQ_ROOT: replyContext.hqRoot,
-    LRQ_ID: replyContext.launchRequestId,
+    REPLY_PATH: replyContext.replyPath,
+    ADV_REPLY_DIR: replyContext.replyDir,
+    HQ_ROOT: replyContext.hqRoot || '',
+    LRQ_ID: replyContext.launchRequestId || '',
   }, { strict: true });
 
   return `${interpolatedTemplate}
@@ -1135,6 +1173,7 @@ function spawnCodexRemediationWorker({
   promptPath,
   outputPath,
   logPath,
+  replyPath = null,
   hqRoot,
   launchRequestId,
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
@@ -1145,7 +1184,7 @@ function spawnCodexRemediationWorker({
   const codexCli = resolveCodexCliPath();
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
   const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({ gitIdentity });
-  const replyContext = requireWorkerReplyContext({ hqRoot, launchRequestId });
+  const replyContext = requireWorkerReplyContext({ replyPath, hqRoot, launchRequestId });
 
   // Worker-provenance env. The commit-msg hook installed by
   // prepareWorkspaceForJob reads these at commit time and appends matching
@@ -1159,9 +1198,13 @@ function spawnCodexRemediationWorker({
     ...baseEnv,
     WORKER_CLASS: REMEDIATION_WORKER_TRAILER_CLASS,
     WORKER_RUN_AT: now(),
-    HQ_ROOT: replyContext.hqRoot,
-    LRQ_ID: replyContext.launchRequestId,
+    ADV_REPLY_DIR: replyContext.replyDir,
+    REMEDIATION_REPLY_PATH: replyContext.replyPath,
   };
+  if (replyContext.hqRoot) env.HQ_ROOT = replyContext.hqRoot;
+  else delete env.HQ_ROOT;
+  if (replyContext.launchRequestId) env.LRQ_ID = replyContext.launchRequestId;
+  else delete env.LRQ_ID;
   delete env.WORKER_JOB_ID;
   if (jobId) {
     env.WORKER_JOB_ID = jobId;
@@ -2604,7 +2647,7 @@ async function consumeNextFollowUpJob({
     resetWorkspaceDir(artifactDir);
     mkdirSync(artifactDir, { recursive: true });
     const replyTarget = resolveRemediationReplyTarget(process.env, { requireExists: true });
-    const hqRoot = replyTarget.root;
+    const hqRoot = replyTarget.mode === 'hq' ? replyTarget.root : null;
     const replyStorageKey = resolveReplyStorageKey(claimed.job);
     if (claimed.job.replyStorageKey !== replyStorageKey) {
       claimed.job = {
@@ -2641,6 +2684,7 @@ async function consumeNextFollowUpJob({
       promptPath,
       outputPath,
       logPath,
+      replyPath,
       hqRoot,
       launchRequestId: replyStorageKey,
       jobId: claimed.job.jobId,

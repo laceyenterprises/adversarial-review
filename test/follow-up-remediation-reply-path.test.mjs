@@ -156,7 +156,7 @@ test('prepareHqReplyLandingPad creates the canonical HQ directory', () => {
   assert.equal(existsSync(landingPad.replyDir), true);
 });
 
-test('consumeNextFollowUpJob exports HQ_ROOT/LRQ_ID, pre-creates the HQ landing pad, and excludes workspace artifacts from staging', async () => {
+test('consumeNextFollowUpJob exports the canonical reply env, pre-creates the HQ landing pad, and excludes workspace artifacts from staging', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   await withOAuthTestEnv(rootDir, async (hqRoot) => {
@@ -174,7 +174,7 @@ test('consumeNextFollowUpJob exports HQ_ROOT/LRQ_ID, pre-creates the HQ landing 
     let capturedEnv;
     const result = await consumeNextFollowUpJob({
       rootDir,
-      promptTemplate: 'Reply path: ${HQ_ROOT}/dispatch/remediation-replies/${LRQ_ID}/remediation-reply.json',
+      promptTemplate: 'Reply path: ${REPLY_PATH}',
       now: () => '2026-05-04T09:30:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
@@ -195,6 +195,8 @@ test('consumeNextFollowUpJob exports HQ_ROOT/LRQ_ID, pre-creates the HQ landing 
     const excludePath = path.join(rootDir, result.job.workspaceDir, '.git', 'info', 'exclude');
 
     assert.equal(result.consumed, true);
+    assert.equal(capturedEnv.REMEDIATION_REPLY_PATH, path.join(replyDir, 'remediation-reply.json'));
+    assert.equal(capturedEnv.ADV_REPLY_DIR, replyDir);
     assert.equal(capturedEnv.HQ_ROOT, hqRoot);
     assert.equal(capturedEnv.LRQ_ID, lrqId);
     assert.equal(existsSync(replyDir), true);

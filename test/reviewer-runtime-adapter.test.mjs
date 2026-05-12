@@ -28,6 +28,8 @@ const noopPreflight = async ({ model }) => (
     ? { codexCli: '/tmp/fake-codex' }
     : { claudeCli: '/tmp/fake-claude' }
 );
+const TEST_HQ_PARENT_SESSION = 'session:test:hq';
+const TEST_HQ_PROJECT = 'adversarial-review';
 
 function makeRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-runtime-'));
@@ -54,6 +56,16 @@ function makeHqRoot(ownerUser = process.env.USER || 'test-user') {
   mkdirSync(join(hqRoot, '.hq'), { recursive: true });
   writeFileSync(join(hqRoot, '.hq', 'config.json'), `${JSON.stringify({ ownerUser })}\n`);
   return hqRoot;
+}
+
+function makeHqEnv(hqRoot, overrides = {}) {
+  return {
+    HQ_ROOT: hqRoot,
+    HQ_PARENT_SESSION: TEST_HQ_PARENT_SESSION,
+    HQ_PROJECT: TEST_HQ_PROJECT,
+    USER: process.env.USER || 'test-user',
+    ...overrides,
+  };
 }
 
 function validReviewBody(verdict = 'Comment only') {
@@ -105,8 +117,7 @@ test('agent-os-hq dispatches via hq with artifact completion and stripped fallba
       rootDir,
       hqBin: '/bin/hq',
       env: {
-        HQ_ROOT: hqRoot,
-        USER: process.env.USER || 'test-user',
+        ...makeHqEnv(hqRoot),
         OPENAI_API_KEY: 'must-not-propagate',
         ANTHROPIC_API_KEY: 'must-not-propagate',
         PATH: '/usr/bin:/bin',
@@ -147,12 +158,15 @@ test('agent-os-hq dispatches via hq with artifact completion and stripped fallba
     assert.match(result.reviewBody, /^## Verdict\nApproved/m);
     assert.equal(result.stderrTail, null);
     assert.equal(calls.length, 2);
+    const promptArg = calls[0].args[calls[0].args.indexOf('--prompt') + 1];
     assert.deepEqual(calls[0].args, [
       'dispatch',
       '--ticket', 'LAC-566',
       '--worker-class', 'codex',
-      '--prompt', calls[0].args[6],
+      '--prompt', promptArg,
       '--completion-shape', 'artifact',
+      '--parent-session', TEST_HQ_PARENT_SESSION,
+      '--project', TEST_HQ_PROJECT,
       '--task-kind', 'analysis',
       '--token-budget', '12345',
       '--root', hqRoot,
@@ -160,9 +174,15 @@ test('agent-os-hq dispatches via hq with artifact completion and stripped fallba
     assert.equal(Object.hasOwn(calls[0].env, 'OPENAI_API_KEY'), false);
     assert.equal(Object.hasOwn(calls[0].env, 'ANTHROPIC_API_KEY'), false);
     assert.equal(calls[0].env.HQ_ROOT, hqRoot);
+    assert.equal(calls[0].env.HQ_PARENT_SESSION, TEST_HQ_PARENT_SESSION);
+    assert.equal(calls[0].env.HQ_PROJECT, TEST_HQ_PROJECT);
     assert.deepEqual(calls[1].args, ['dispatch', 'status', 'lrq_lac_566', '--root', hqRoot]);
     assert.equal(Object.hasOwn(calls[1].env, 'OPENAI_API_KEY'), false);
     assert.equal(Object.hasOwn(calls[1].env, 'ANTHROPIC_API_KEY'), false);
+    const record = readReviewerRunRecord(rootDir, 'agent-hq-dispatch-session');
+    assert.deepEqual(record.subjectContext.agentOsHq.forbiddenFallbacks, ['api-key', 'anthropic-api-key']);
+    assert.equal(record.subjectContext.agentOsHq.parentSession, TEST_HQ_PARENT_SESSION);
+    assert.equal(record.subjectContext.agentOsHq.project, TEST_HQ_PROJECT);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });
@@ -177,7 +197,7 @@ test('agent-os-hq reports owner mismatch as configuration error without invoking
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       execFileImpl: async () => {
         invoked = true;
         throw new Error('should not run');
@@ -210,7 +230,7 @@ test('agent-os-hq rejects missing ticket references before dispatch', async () =
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       execFileImpl: async () => {
         invoked = true;
         return { stdout: '', stderr: '' };
@@ -235,6 +255,72 @@ test('agent-os-hq rejects missing ticket references before dispatch', async () =
   }
 });
 
+test('agent-os-hq rejects missing HQ_PARENT_SESSION before dispatch', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  let invoked = false;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot, { HQ_PARENT_SESSION: '' }),
+      execFileImpl: async () => {
+        invoked = true;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-missing-parent-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(invoked, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /requires HQ_PARENT_SESSION/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq rejects missing HQ_PROJECT before dispatch', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  let invoked = false;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot, { HQ_PROJECT: '' }),
+      execFileImpl: async () => {
+        invoked = true;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-missing-project',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(invoked, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
+    assert.match(result.stderrTail, /requires HQ_PROJECT/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq rejects unknown model fallback without explicit worker class', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');
@@ -243,7 +329,7 @@ test('agent-os-hq rejects unknown model fallback without explicit worker class',
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       execFileImpl: async () => {
         invoked = true;
         return { stdout: '', stderr: '' };
@@ -274,7 +360,7 @@ test('agent-os-hq fails loud when HQ_ROOT is missing', async () => {
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { USER: process.env.USER || 'test-user' },
+      env: { HQ_PARENT_SESSION: TEST_HQ_PARENT_SESSION, HQ_PROJECT: TEST_HQ_PROJECT, USER: process.env.USER || 'test-user' },
     });
     const result = await adapter.spawnReviewer({
       model: 'codex',
@@ -285,7 +371,8 @@ test('agent-os-hq fails loud when HQ_ROOT is missing', async () => {
       forbiddenFallbacks: ['api-key'],
     });
     assert.equal(result.ok, false);
-    assert.equal(result.failureClass, 'unknown');
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
     assert.match(result.stderrTail, /set HQ_ROOT or use cli-direct\/acpx/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -298,7 +385,7 @@ test('agent-os-hq fails loud when hq binary is missing', async () => {
   try {
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user', PATH: '' },
+      env: makeHqEnv(hqRoot, { PATH: '' }),
     });
     const result = await adapter.spawnReviewer({
       model: 'codex',
@@ -309,7 +396,8 @@ test('agent-os-hq fails loud when hq binary is missing', async () => {
       forbiddenFallbacks: ['api-key'],
     });
     assert.equal(result.ok, false);
-    assert.equal(result.failureClass, 'unknown');
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.configurationError, true);
     assert.match(result.stderrTail, /hq binary not found/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -326,7 +414,7 @@ test('agent-os-hq polling uses 30s cadence plus jitter', async () => {
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       jitterImpl: () => 1234,
       sleepImpl: async (ms) => { sleeps.push(ms); },
       execFileImpl: async (_command, args) => {
@@ -366,7 +454,7 @@ test('agent-os-hq sustained lease_expired is surfaced with trace guidance', asyn
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       jitterImpl: () => 0,
       sleepImpl: async (ms) => { elapsed += ms; },
       nowMs: () => elapsed,
@@ -410,7 +498,7 @@ test('agent-os-hq validates missing and malformed artifacts', async () => {
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       execFileImpl: async (_command, args) => {
         if (args[0] === 'dispatch' && args[1] !== 'status') {
           const promptPath = args[args.indexOf('--prompt') + 1];
@@ -462,7 +550,7 @@ test('agent-os-hq enforces timeoutMs and cancels the dispatch on expiry', async 
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       jitterImpl: () => 0,
       sleepImpl: async (ms) => { elapsed += ms; },
       nowMs: () => elapsed,
@@ -492,8 +580,9 @@ test('agent-os-hq enforces timeoutMs and cancels the dispatch on expiry', async 
     assert.equal(result.failureClass, 'reviewer-timeout');
     assert.equal(result.reattachToken, 'lrq_timeout');
     assert.match(result.stderrTail, /exceeded reviewer timeout/);
+    const timeoutPromptArg = calls[0].args[calls[0].args.indexOf('--prompt') + 1];
     assert.deepEqual(calls.map(({ args }) => args), [
-      ['dispatch', '--ticket', 'LAC-566', '--worker-class', 'codex', '--prompt', calls[0].args[6], '--completion-shape', 'artifact', '--task-kind', 'analysis', '--root', hqRoot],
+      ['dispatch', '--ticket', 'LAC-566', '--worker-class', 'codex', '--prompt', timeoutPromptArg, '--completion-shape', 'artifact', '--parent-session', TEST_HQ_PARENT_SESSION, '--project', TEST_HQ_PROJECT, '--task-kind', 'analysis', '--root', hqRoot],
       ['dispatch', 'status', 'lrq_timeout', '--root', hqRoot],
       ['dispatch', 'status', 'lrq_timeout', '--root', hqRoot],
       ['dispatch', 'cancel', 'lrq_timeout', '--root', hqRoot],
@@ -530,7 +619,7 @@ test('agent-os-hq cancel does not overwrite terminal completed records', async (
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       execFileImpl: async () => {
         cancelCalls += 1;
         return { stdout: '', stderr: '' };
@@ -568,7 +657,7 @@ test('agent-os-hq reattaches by polling persisted launch request id', async () =
     const adapter = createAgentOsHqReviewerRuntimeAdapter({
       rootDir,
       hqBin: '/bin/hq',
-      env: { HQ_ROOT: hqRoot, USER: process.env.USER || 'test-user' },
+      env: makeHqEnv(hqRoot),
       execFileImpl: async (_command, args) => {
         assert.deepEqual(args, ['dispatch', 'status', 'lrq_reattach', '--root', hqRoot]);
         return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
@@ -578,6 +667,30 @@ test('agent-os-hq reattaches by polling persisted launch request id', async () =
     const result = await adapter.reattach(record);
     assert.equal(result.ok, true);
     assert.match(result.reviewBody, /^## Verdict\nComment only/m);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq reattach classifies never-dispatched records as daemon-bounce', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+    });
+    const result = await adapter.reattach({
+      sessionUuid: 'agent-hq-never-dispatched',
+      reattachToken: 'agent-hq-never-dispatched',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      subjectContext: { domainId: 'code-pr' },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'daemon-bounce');
+    assert.match(result.stderrTail, /no launch request id/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });

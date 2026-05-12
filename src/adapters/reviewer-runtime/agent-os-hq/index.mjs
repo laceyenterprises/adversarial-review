@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
+import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import {
   extractReviewVerdict,
   normalizeReviewVerdict,
@@ -104,23 +105,29 @@ function resolveHqBin(env = process.env) {
       accessSync(explicit, constants.X_OK);
       return explicit;
     } catch {
-      throw new Error(`hq binary not executable at HQ_BIN=${explicit}`);
+      throw makeConfigurationError(`hq binary not executable at HQ_BIN=${explicit}`);
     }
   }
   const fromPath = findOnPath('hq', env.PATH);
   if (fromPath) return fromPath;
-  throw new Error('hq binary not found on PATH; set HQ_BIN or use cli-direct/acpx');
+  throw makeConfigurationError('hq binary not found on PATH; set HQ_BIN or use cli-direct/acpx');
 }
 
 function resolveHqRoot(env = process.env) {
   const hqRoot = String(env.HQ_ROOT || '').trim();
   if (!hqRoot) {
-    throw new Error('HQ_ROOT is required for agent-os-hq reviewer runtime; set HQ_ROOT or use cli-direct/acpx');
+    throw makeConfigurationError('HQ_ROOT is required for agent-os-hq reviewer runtime; set HQ_ROOT or use cli-direct/acpx');
   }
   if (!existsSync(join(hqRoot, '.hq', 'config.json'))) {
-    throw new Error(`HQ_ROOT is not initialized at ${hqRoot}; set HQ_ROOT to an Agent OS HQ root or use cli-direct/acpx`);
+    throw makeConfigurationError(`HQ_ROOT is not initialized at ${hqRoot}; set HQ_ROOT to an Agent OS HQ root or use cli-direct/acpx`);
   }
   return hqRoot;
+}
+
+function requireEnvValue(env, key, message) {
+  const value = String(env[key] || '').trim();
+  if (!value) throw makeConfigurationError(message);
+  return value;
 }
 
 function readHqOwnerUser(hqRoot) {
@@ -246,6 +253,8 @@ function buildDispatchArgs({
   ticketRef,
   workerClass,
   promptPath,
+  parentSession,
+  project,
   tokenBudget,
   taskKind,
   hqRoot,
@@ -256,6 +265,8 @@ function buildDispatchArgs({
     '--worker-class', workerClass,
     '--prompt', promptPath,
     '--completion-shape', 'artifact',
+    '--parent-session', parentSession,
+    '--project', project,
   ];
   if (taskKind) args.push('--task-kind', taskKind);
   if (tokenBudget !== null && tokenBudget !== undefined && tokenBudget !== '') {
@@ -303,9 +314,29 @@ function createAgentOsHqReviewerRuntimeAdapter({
     if (hqBin) runtimeEnv.HQ_BIN = hqBin;
     const resolvedHqRoot = resolveHqRoot(runtimeEnv);
     const resolvedHqBin = hqBin || resolveHqBin(runtimeEnv);
+    const parentSession = requireEnvValue(
+      runtimeEnv,
+      'HQ_PARENT_SESSION',
+      'agent-os-hq reviewer runtime requires HQ_PARENT_SESSION; export it (e.g. via `hq self`) before invoking the reviewer.'
+    );
+    const project = requireEnvValue(
+      runtimeEnv,
+      'HQ_PROJECT',
+      'agent-os-hq reviewer runtime requires HQ_PROJECT; register a project with `hq project register <name>` and export HQ_PROJECT.'
+    );
+    runtimeEnv.HQ_PARENT_SESSION = parentSession;
+    runtimeEnv.HQ_PROJECT = project;
     const ownerUser = assertOwnerMatches({ hqRoot: resolvedHqRoot, env: runtimeEnv });
     const stripped = stripForbiddenFallbackEnv(runtimeEnv, forbiddenFallbacks);
-    return { env: runtimeEnv, hqRoot: resolvedHqRoot, hqBin: resolvedHqBin, ownerUser, stripped };
+    return {
+      env: runtimeEnv,
+      hqRoot: resolvedHqRoot,
+      hqBin: resolvedHqBin,
+      ownerUser,
+      parentSession,
+      project,
+      stripped,
+    };
   }
 
   function resolveDeadline(timeoutMs, startMs = nowMs()) {
@@ -533,8 +564,14 @@ function createAgentOsHqReviewerRuntimeAdapter({
     activeRuns.set(sessionUuid, { record, dispatchId: null });
 
     try {
-      const runtime = resolveRuntimeConfig(req.forbiddenFallbacks || DEFAULT_FORBIDDEN_FALLBACKS);
-      const dispatchEnv = { ...runtime.env, HQ_ROOT: runtime.hqRoot };
+      const effectiveForbiddenFallbacks = req.forbiddenFallbacks || DEFAULT_FORBIDDEN_FALLBACKS;
+      const runtime = resolveRuntimeConfig(effectiveForbiddenFallbacks);
+      const dispatchEnv = {
+        ...runtime.env,
+        HQ_ROOT: runtime.hqRoot,
+        HQ_PARENT_SESSION: runtime.parentSession,
+        HQ_PROJECT: runtime.project,
+      };
       const reviewerPrompt = buildReviewerPrompt(req, artifactPath);
       writeFileAtomic(promptPath, reviewerPrompt);
 
@@ -554,6 +591,8 @@ function createAgentOsHqReviewerRuntimeAdapter({
         ticketRef,
         workerClass: selectedWorkerClass,
         promptPath,
+        parentSession: runtime.parentSession,
+        project: runtime.project,
         tokenBudget: req.tokenBudget,
         taskKind,
         hqRoot: runtime.hqRoot,
@@ -575,7 +614,11 @@ function createAgentOsHqReviewerRuntimeAdapter({
             dispatchId,
             hqRoot: runtime.hqRoot,
             hqBin: runtime.hqBin,
-            forbiddenFallbacks: DEFAULT_FORBIDDEN_FALLBACKS,
+            parentSession: runtime.parentSession,
+            project: runtime.project,
+            forbiddenFallbacks: Array.isArray(effectiveForbiddenFallbacks)
+              ? [...effectiveForbiddenFallbacks]
+              : effectiveForbiddenFallbacks,
           },
         },
       });
@@ -663,15 +706,16 @@ function createAgentOsHqReviewerRuntimeAdapter({
       return result({
         ok: false,
         spawnedAt,
-        failureClass: 'unknown',
-        stderrTail: 'agent-os-hq reviewer run record has no launch request id to reattach',
+        failureClass: 'daemon-bounce',
+        stderrTail: 'agent-os-hq reviewer run record has no launch request id to reattach after daemon bounce',
         reattachToken: dispatchId || null,
-        error: 'agent-os-hq reviewer run record has no launch request id to reattach',
+        error: 'agent-os-hq reviewer run record has no launch request id to reattach after daemon bounce',
       });
     }
     try {
       const runtime = resolveRuntimeConfig();
       const artifactPath = hqContext.artifactPath || hqReviewArtifactPath(rootDir, normalized.sessionUuid);
+      const reattachTimeoutMs = Number(normalized.subjectContext?.timeoutMs);
       return await pollUntilTerminal({
         hqBin: hqContext.hqBin || runtime.hqBin,
         hqRoot: hqContext.hqRoot || runtime.hqRoot,
@@ -680,7 +724,9 @@ function createAgentOsHqReviewerRuntimeAdapter({
         spawnedAt,
         artifactPath,
         record: normalized,
-        timeoutMs: normalized.subjectContext?.timeoutMs || null,
+        timeoutMs: Number.isFinite(reattachTimeoutMs) && reattachTimeoutMs > 0
+          ? Math.floor(reattachTimeoutMs)
+          : resolveReviewerTimeoutMs(runtime.env),
       });
     } catch (err) {
       const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();
@@ -708,7 +754,7 @@ function createAgentOsHqReviewerRuntimeAdapter({
     return {
       id: 'agent-os-hq',
       modelFamily: 'agent-os-worker-pool',
-      deployment: 'Agent OS HQ only; requires HQ_ROOT and hq on PATH or HQ_BIN.',
+      deployment: 'Agent OS HQ only; requires HQ_ROOT, HQ_PARENT_SESSION, HQ_PROJECT, and hq on PATH or HQ_BIN.',
       authContract: {
         forbiddenFallbacks: DEFAULT_FORBIDDEN_FALLBACKS,
         promptTransport: 'file',

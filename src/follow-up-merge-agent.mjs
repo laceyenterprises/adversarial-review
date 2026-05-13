@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { delimiter, join } from 'node:path';
@@ -66,9 +67,17 @@ function isoNow() {
 // We resolve PATH in-process instead of spawning hq itself because hq can be
 // slow to cold-start and we run this on every watcher tick.
 function isExecutableFile(candidatePath, {
-  fsImpl = { accessSync, existsSync },
+  fsImpl = { accessSync, existsSync, statSync },
 } = {}) {
   if (!candidatePath) return false;
+  const stat = fsImpl.statSync;
+  if (typeof stat === 'function') {
+    try {
+      if (!stat(candidatePath).isFile()) return false;
+    } catch {
+      return false;
+    }
+  }
   if (typeof fsImpl.accessSync === 'function') {
     try {
       fsImpl.accessSync(candidatePath, fsConstants.X_OK);
@@ -82,7 +91,7 @@ function isExecutableFile(candidatePath, {
 
 function resolveExecutableOnPath(command, {
   env = process.env,
-  fsImpl = { accessSync, existsSync },
+  fsImpl = { accessSync, existsSync, statSync },
 } = {}) {
   const trimmed = String(command ?? '').trim();
   if (!trimmed) return null;
@@ -103,7 +112,7 @@ function resolveExecutableOnPath(command, {
 function detectAgentOsPresence({
   env = process.env,
   hqPath = 'hq',
-  fsImpl = { accessSync, existsSync },
+  fsImpl = { accessSync, existsSync, statSync },
 } = {}) {
   if (String(env.ADV_REVIEW_MERGE_AGENT_DISABLED ?? '').trim() === '1') {
     return { present: false, source: 'operator-disabled' };
@@ -707,8 +716,6 @@ async function dispatchMergeAgentForPR({
   ghExecFileImpl = execFileAsync,
   now = isoNow(),
   hqPath = 'hq',
-  parentSession = resolveMergeAgentParentSession(),
-  hqProject = resolveMergeAgentProject(),
   agentOsDetectImpl = detectAgentOsPresence,
   env = process.env,
 } = {}) {
@@ -793,6 +800,8 @@ async function dispatchMergeAgentForPR({
     };
   }
   const resolvedHqPath = agentOsState.path || hqPath;
+  const parentSession = resolveMergeAgentParentSession(env);
+  const hqProject = resolveMergeAgentProject(env);
 
   const prompt = buildMergeAgentPrompt(job);
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
@@ -808,7 +817,10 @@ async function dispatchMergeAgentForPR({
     '--project', hqProject,
     '--prompt', promptPath,
   ];
-  const { stdout } = await execFileImpl(resolvedHqPath, args, { maxBuffer: 5 * 1024 * 1024 });
+  const { stdout } = await execFileImpl(resolvedHqPath, args, {
+    env,
+    maxBuffer: 5 * 1024 * 1024,
+  });
   const parsed = parseMergeAgentDispatchOutput(stdout);
 
   recordMergeAgentDispatch(rootDir, job, {

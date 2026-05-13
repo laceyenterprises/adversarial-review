@@ -831,12 +831,15 @@ test('buildMergeAgentDispatchJob drops stale merge-agent-requested events before
 test('dispatchMergeAgentForPR records only successful launches and parses trailing JSON output', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqCalls = [];
+  const env = {
+    MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+    MERGE_AGENT_HQ_PROJECT: 'merge-project',
+  };
   const result = await dispatchMergeAgentForPR({
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob(),
-    parentSession: 'session:test:merge-watcher',
-    hqProject: 'merge-project',
+    env,
     execFileImpl: async (cmd, args) => {
       hqCalls.push({ cmd, args });
       return {
@@ -1200,6 +1203,47 @@ test('dispatchMergeAgentForPR uses HQ_BIN as the dispatch executable when PATH l
   assert.equal(hqCalls[0].cmd, '/opt/agent-os/bin/hq');
 });
 
+test('dispatchMergeAgentForPR uses the supplied env for detection, args, and launch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
+  const env = {
+    PATH: '/custom/bin:/usr/bin',
+    MERGE_AGENT_PARENT_SESSION: 'session:test:custom-parent',
+    MERGE_AGENT_HQ_PROJECT: 'custom-project',
+  };
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: (options) => detectAgentOsPresence({
+      ...options,
+      fsImpl: {
+        statSync: (candidate) => ({
+          isFile: () => candidate === '/custom/bin/hq',
+        }),
+        accessSync: (candidate) => {
+          if (candidate !== '/custom/bin/hq') {
+            throw new Error(`unexpected executable probe: ${candidate}`);
+          }
+        },
+      },
+    }),
+    env,
+    rootDir,
+    ...makeJob(),
+    execFileImpl: async (cmd, args, options) => {
+      hqCalls.push({ cmd, args, options });
+      return { stdout: '{"dispatchId":"disp_path_env","lrq":"lrq_path_env"}\n' };
+    },
+    now: '2026-05-07T12:06:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.dispatchId, 'disp_path_env');
+  assert.equal(hqCalls.length, 1);
+  assert.equal(hqCalls[0].cmd, '/custom/bin/hq');
+  assert.deepEqual(hqCalls[0].options.env, env);
+  assert.match(hqCalls[0].args.join(' '), /--parent-session session:test:custom-parent/);
+  assert.match(hqCalls[0].args.join(' '), /--project custom-project/);
+});
+
 test('dispatchMergeAgentForPR retries consumed-label cleanup even when agent-os is later disabled', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   await dispatchMergeAgentForPR({
@@ -1458,6 +1502,9 @@ test('detectAgentOsPresence: HQ_BIN pointing to an existing file is detected as 
   const state = detectAgentOsPresence({
     env: { HQ_BIN: '/usr/local/bin/hq' },
     fsImpl: {
+      statSync: (candidate) => ({
+        isFile: () => candidate === '/usr/local/bin/hq',
+      }),
       accessSync: (p) => {
         if (p !== '/usr/local/bin/hq') throw new Error('not found');
       },
@@ -1470,6 +1517,9 @@ test('detectAgentOsPresence: PATH-resolved hq path is detected as present withou
   const state = detectAgentOsPresence({
     env: { PATH: '/bin:/Users/airlock/.local/bin' },
     fsImpl: {
+      statSync: (candidate) => ({
+        isFile: () => candidate === '/Users/airlock/.local/bin/hq',
+      }),
       accessSync: (p) => {
         if (p !== '/Users/airlock/.local/bin/hq') throw new Error('not found');
       },
@@ -1498,8 +1548,22 @@ test('detectAgentOsPresence: non-executable resolved path returns not-found', ()
   const state = detectAgentOsPresence({
     env: { PATH: '/usr/local/bin' },
     fsImpl: {
+      statSync: () => ({ isFile: () => true }),
       accessSync: () => {
         throw new Error('not executable');
+      },
+    },
+  });
+  assert.deepEqual(state, { present: false, source: 'not-found' });
+});
+
+test('detectAgentOsPresence: HQ_BIN pointing to a directory returns not-found', () => {
+  const state = detectAgentOsPresence({
+    env: { HQ_BIN: '/usr/local/bin/hq' },
+    fsImpl: {
+      statSync: () => ({ isFile: () => false }),
+      accessSync: () => {
+        throw new Error('directories must not be treated as executables');
       },
     },
   });

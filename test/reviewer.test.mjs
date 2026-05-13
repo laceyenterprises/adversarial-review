@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 
@@ -10,10 +13,28 @@ const {
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
   queueFollowUpForPostedReview,
+  resolveCodexAuthPath,
   resolveReviewerTimeoutMs,
   spawnCodexReview,
   spawnClaude,
 } = __test__;
+
+function withEnv(overrides, fn) {
+  const previous = {};
+  for (const key of Object.keys(overrides)) {
+    previous[key] = process.env[key];
+    if (overrides[key] === undefined) delete process.env[key];
+    else process.env[key] = overrides[key];
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 function queueWithFakes(reviewText) {
   const created = [];
@@ -127,6 +148,64 @@ test('new follow-up jobs re-derive cap when the prior cap is not above the curre
     false,
     'fresh dispatch should let createFollowUpJob derive the current tier cap',
   );
+});
+
+test('Codex reviewer auth path preserves the split-user service fallback', () => {
+  withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined }, () => {
+    assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+  });
+});
+
+test('Codex reviewer auth path honors explicit env overrides before service fallback', () => {
+  withEnv({ CODEX_AUTH_PATH: '/tmp/explicit/auth.json', CODEX_HOME: '/tmp/codex-home' }, () => {
+    assert.equal(resolveCodexAuthPath(), '/tmp/explicit/auth.json');
+  });
+
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-home-'));
+  try {
+    const codexHome = join(root, '.codex');
+    const authPath = join(codexHome, 'auth.json');
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: { access_token: 'access', refresh_token: 'refresh' },
+      }),
+      'utf8'
+    );
+    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: codexHome }, () => {
+      assert.equal(resolveCodexAuthPath(), authPath);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Codex reviewer auth path ignores CODEX_HOME without usable OAuth credentials', () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-home-bad-'));
+  try {
+    const missingHome = join(root, 'missing');
+    const apiKeyHome = join(root, 'apikey');
+    mkdirSync(apiKeyHome, { recursive: true });
+    writeFileSync(
+      join(apiKeyHome, 'auth.json'),
+      JSON.stringify({
+        auth_mode: 'apikey',
+        tokens: { access_token: 'access', refresh_token: 'refresh' },
+      }),
+      { encoding: 'utf8', flag: 'w' }
+    );
+
+    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: missingHome }, () => {
+      assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+    });
+    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: apiKeyHome }, () => {
+      assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {

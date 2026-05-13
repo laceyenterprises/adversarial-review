@@ -1,5 +1,13 @@
 # Adversarial Review
 
+```
+        />                                             /<
+ ()          //------------------------------------------------------(
+(\*)OXOXOXOXO(\*>                  --------                             \
+ (           \\--------------------------------------------------------)
+              \>
+```
+
 Try the pluggable research-finding pipeline from an existing clone in five minutes:
 
 ```bash

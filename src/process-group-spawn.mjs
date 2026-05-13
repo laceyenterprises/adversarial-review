@@ -266,7 +266,13 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }, timeout);
     }
     armProgressTimer();
-    if (stdoutPath || stderrPath) {
+    // Only poll side-channel sizes when there's a reason to: either we need
+    // to re-arm the no-progress kill (progressTimeout > 0) or we need to
+    // enforce maxBuffer mid-flight (Number.isFinite(maxBuffer)). When both
+    // are disabled — agent-os-hq paths sometimes set progressTimeout=0 with
+    // maxBuffer=Infinity — the previous always-on timer was hot for no
+    // reason 99% of the time.
+    if ((stdoutPath || stderrPath) && (progressTimeout > 0 || Number.isFinite(maxBuffer))) {
       const intervalMs = progressTimeout > 0
         ? Math.max(25, Math.min(1_000, Math.floor(progressTimeout / 4)))
         : 250;

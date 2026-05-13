@@ -55,12 +55,19 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'forbidden-fallback';
   }
 
-  if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
-    return 'cascade';
-  }
-
+  // Order matters: OAuth wins over cascade when BOTH match. Cascade is often
+  // the symptom of an OAuth failure (LiteLLM retries on 401, declares the
+  // pool exhausted) — bucketing as 'cascade' would silence the more
+  // actionable oauth-broken alert that prompts an operator to rotate the
+  // token. The OAuth regex was tightened in this same PR to require
+  // OAuth-adjacent context, so false-positive 'oauth-broken' from benign
+  // "Unauthorized" lines is no longer the concern.
   if (mentionsOauthBroken) {
     return 'oauth-broken';
+  }
+
+  if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
+    return 'cascade';
   }
 
   if (timeoutKilled || mentionsReviewerTimeout) {

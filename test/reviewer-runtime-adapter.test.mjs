@@ -19,6 +19,7 @@ import {
   readRecoverableReviewerRunRecords,
   readReviewerRunRecord,
   pruneReviewerRunRecords,
+  removeReviewerRunArtifacts,
   removeReviewerRunRecord,
   reviewerRunSideChannelPaths,
   reviewerRunStatePath,
@@ -1060,25 +1061,54 @@ test('cli-direct writes reviewer stdout and stderr to side-channel files', async
   }
 });
 
-test('removing a reviewer run record also removes stdout and stderr side-channel files', () => {
+test('removeReviewerRunRecord deletes the JSON state file but preserves side-channel forensics', () => {
   const rootDir = makeRoot();
   try {
     writeReviewerRunRecord(rootDir, {
-      sessionUuid: 'remove-side-channel-session',
+      sessionUuid: 'remove-record-only-session',
       domain: 'code-pr',
       runtime: 'cli-direct',
       state: 'failed',
       spawnedAt: '2026-05-11T20:00:00.000Z',
       lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
-      reattachToken: 'remove-side-channel-session',
+      reattachToken: 'remove-record-only-session',
     });
-    const paths = reviewerRunSideChannelPaths(rootDir, 'remove-side-channel-session');
+    const paths = reviewerRunSideChannelPaths(rootDir, 'remove-record-only-session');
     writeFileSync(paths.stdoutPath, 'stdout\n', 'utf8');
     writeFileSync(paths.stderrPath, 'stderr\n', 'utf8');
 
-    removeReviewerRunRecord(rootDir, 'remove-side-channel-session');
+    removeReviewerRunRecord(rootDir, 'remove-record-only-session');
 
-    assert.equal(existsSync(reviewerRunStatePath(rootDir, 'remove-side-channel-session')), false);
+    assert.equal(existsSync(reviewerRunStatePath(rootDir, 'remove-record-only-session')), false);
+    // Side-channels are intentionally retained so post-incident triage can
+    // still read what the reviewer wrote. `removeReviewerRunArtifacts` is
+    // the call for the both-files semantics.
+    assert.equal(existsSync(paths.stdoutPath), true);
+    assert.equal(existsSync(paths.stderrPath), true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('removeReviewerRunArtifacts deletes the JSON state file AND side-channel files', () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'remove-artifacts-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'failed',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'remove-artifacts-session',
+    });
+    const paths = reviewerRunSideChannelPaths(rootDir, 'remove-artifacts-session');
+    writeFileSync(paths.stdoutPath, 'stdout\n', 'utf8');
+    writeFileSync(paths.stderrPath, 'stderr\n', 'utf8');
+
+    removeReviewerRunArtifacts(rootDir, 'remove-artifacts-session');
+
+    assert.equal(existsSync(reviewerRunStatePath(rootDir, 'remove-artifacts-session')), false);
     assert.equal(existsSync(paths.stdoutPath), false);
     assert.equal(existsSync(paths.stderrPath), false);
   } finally {
@@ -1107,7 +1137,7 @@ test('run-state pruning removes orphan stdout and stderr side-channel files', ()
   }
 });
 
-test('cli-direct reattach refuses and reaps an alive process group without identity verification', async () => {
+test('cli-direct reattach reaps an alive process group whose identity matches the record', async () => {
   const rootDir = makeRoot();
   const reviewerPath = join(rootDir, 'fixture-reviewer.mjs');
   writeFileSync(
@@ -1150,9 +1180,17 @@ test('cli-direct reattach refuses and reaps an alive process group without ident
       return current;
     });
 
+    // Inject a ps probe that returns an lstart matching the recorded
+    // spawnedAt within tolerance, simulating "live PGID is the original
+    // reviewer." The new adapter contract reaps in this branch. Derive
+    // the lstart from `record.spawnedAt` so the assertion is host-TZ
+    // independent: Date.toString round-trips through Date.parse to the
+    // same UTC instant.
+    const matchingLstart = new Date(record.spawnedAt).toString();
     const restartedAdapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
       preflightImpl: noopPreflight,
+      execFileImpl: async () => ({ stdout: `${matchingLstart}\n` }),
       reattachPollIntervalMs: 10,
       cancelGraceMs: 100,
       cancelPollIntervalMs: 10,
@@ -1163,7 +1201,7 @@ test('cli-direct reattach refuses and reaps an alive process group without ident
 
     assert.equal(reattached.ok, false);
     assert.equal(reattached.failureClass, 'daemon-bounce');
-    assert.match(reattached.stderrTail, /refuses to reattach live process group/);
+    assert.match(reattached.stderrTail, /reaping reviewer process group .*start-time matches spawnedAt/);
     assert.equal(original.ok, false);
     const finalRecord = readReviewerRunRecord(rootDir, 'alive-reattach-session');
     assert.equal(finalRecord.state, 'failed');
@@ -1172,7 +1210,7 @@ test('cli-direct reattach refuses and reaps an alive process group without ident
   }
 });
 
-test('cli-direct reattach refuses a recycled detached pgid', async () => {
+test('cli-direct reattach does NOT kill a recycled detached pgid (identity mismatch)', async () => {
   const rootDir = makeRoot();
   const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], {
     detached: true,
@@ -1180,6 +1218,10 @@ test('cli-direct reattach refuses a recycled detached pgid', async () => {
   });
 
   try {
+    // Record claims this pgid was spawned in 2026; sleeper actually started
+    // just now. ps -o lstart= will return a wall-clock time that does NOT
+    // parse to within 5s of the fake spawnedAt, so the identity probe must
+    // refuse to kill — protecting the bystander process from friendly fire.
     writeReviewerRunRecord(rootDir, {
       sessionUuid: 'recycled-pgid-session',
       domain: 'code-pr',
@@ -1205,17 +1247,64 @@ test('cli-direct reattach refuses a recycled detached pgid', async () => {
     assert.equal(result.ok, false);
     assert.equal(result.failureClass, 'daemon-bounce');
     assert.equal(result.pgid, sleeper.pid);
-    assert.match(result.stderrTail, /refuses to reattach live process group/);
+    assert.match(result.stderrTail, /PID has been recycled, NOT killing/);
     assert.equal(readReviewerRunRecord(rootDir, 'recycled-pgid-session').state, 'failed');
-    await waitFor(() => {
-      assert.throws(() => process.kill(-sleeper.pid, 0), /ESRCH/);
-    }, { timeoutMs: 1_000, intervalMs: 25 });
+    // Bystander must survive: identity probe rejected, so no SIGTERM/SIGKILL.
+    assert.doesNotThrow(() => process.kill(sleeper.pid, 0));
   } finally {
     try {
       process.kill(-sleeper.pid, 'SIGKILL');
     } catch (err) {
       if (err?.code !== 'ESRCH') throw err;
     }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct reattach refuses to kill when ps probe fails', async () => {
+  const rootDir = makeRoot();
+  let killCalls = 0;
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'ps-probe-failure-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      pgid: 5050,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'ps-probe-failure-session',
+    });
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      processKillImpl: (pid, signal) => {
+        if (signal === 0) return true;
+        killCalls += 1;
+        return true;
+      },
+      execFileImpl: async () => {
+        const err = new Error('ps unavailable');
+        err.code = 'ENOENT';
+        throw err;
+      },
+      sleepImpl: async () => {},
+      reattachPollIntervalMs: 10,
+      cancelGraceMs: 100,
+      cancelPollIntervalMs: 10,
+      now: () => '2026-05-11T20:01:00.000Z',
+    });
+    const record = readReviewerRunRecord(rootDir, 'ps-probe-failure-session');
+
+    const result = await adapter.reattach(record);
+
+    assert.equal(result.failureClass, 'daemon-bounce');
+    assert.match(result.stderrTail, /PID has been recycled, NOT killing/);
+    assert.match(result.stderrTail, /ps probe failed/);
+    // No SIGTERM/SIGKILL must fire when identity cannot be verified.
+    assert.equal(killCalls, 0);
+    assert.equal(readReviewerRunRecord(rootDir, 'ps-probe-failure-session').state, 'failed');
+  } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

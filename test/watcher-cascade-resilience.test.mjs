@@ -225,10 +225,14 @@ test('OAuth detection is anchored to auth context across the full stderr', () =>
   );
 });
 
-test('cascade still wins over an OAuth marker in a retry storm', () => {
+test('oauth-broken wins over cascade when both signals are present in a retry storm', () => {
+  // Cascade is often the symptom of OAuth failure (LiteLLM retries on 401,
+  // declares the pool exhausted). Bucketing as 'cascade' would silence the
+  // more actionable oauth-broken alert that prompts an operator to rotate
+  // the token. PR #89 finding #3 directed flipping the precedence.
   assert.equal(
     classifyReviewerFailure('OAuth token expired\nLiteLLM retry pool: all upstream attempts failed', 1),
-    'cascade'
+    'oauth-broken'
   );
 });
 

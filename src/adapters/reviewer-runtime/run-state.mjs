@@ -132,8 +132,21 @@ function readRecoverableReviewerRunRecords(rootDir) {
 }
 
 function removeReviewerRunRecord(rootDir, sessionUuid) {
-  const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
+  // Removes ONLY the .json state record. Side-channel `.stdout`/`.stderr`
+  // forensics are preserved so post-incident triage can read what the
+  // reviewer actually wrote. Callers that ALSO want to drop side channels
+  // (e.g., `pruneReviewerRunRecords` past TTL) should use
+  // `removeReviewerRunArtifacts` instead.
   rmSync(reviewerRunStatePath(rootDir, sessionUuid), { force: true });
+}
+
+function removeReviewerRunArtifacts(rootDir, sessionUuid) {
+  // Removes the .json record AND both side-channel files. Use for TTL-driven
+  // pruning where forensic retention isn't intended; do NOT use as a casual
+  // "delete by sessionUuid" because the .stdout/.stderr are the only on-disk
+  // record of what the reviewer wrote.
+  const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
+  removeReviewerRunRecord(rootDir, sessionUuid);
   rmSync(stdoutPath, { force: true });
   rmSync(stderrPath, { force: true });
 }
@@ -155,7 +168,7 @@ function pruneReviewerRunRecords(rootDir, {
       if (ACTIVE_RUN_STATES.has(record.state)) continue;
       const ageAnchor = Date.parse(record.lastHeartbeatAt || record.spawnedAt || '');
       if (!Number.isFinite(ageAnchor) || ageAnchor > cutoff) continue;
-      removeReviewerRunRecord(rootDir, record.sessionUuid);
+      removeReviewerRunArtifacts(rootDir, record.sessionUuid);
       records += 1;
     } catch {
       // Corrupt records are ignored here; startup recovery should stay
@@ -180,6 +193,7 @@ export {
   readActiveReviewerRunRecords,
   readRecoverableReviewerRunRecords,
   readReviewerRunRecord,
+  removeReviewerRunArtifacts,
   removeReviewerRunRecord,
   reviewerRunSideChannelPaths,
   reviewerRunStatePath,

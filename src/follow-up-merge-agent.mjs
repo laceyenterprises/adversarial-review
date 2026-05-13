@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -38,6 +38,61 @@ const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPEC
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+// Detect whether agent-os (the host OS that provides the `hq` worker-pool
+// CLI + the merge-agent adapter) is present on this machine. The
+// follow-up-merge-agent dispatch path is the only flow in adversarial-review
+// that requires agent-os; everything else (watcher, reviewer, remediation)
+// works standalone. So when agent-os is missing — OSS installs, fresh
+// clones, CI sandboxes — we cleanly skip the merge-agent dispatch instead
+// of blowing up on an ENOENT from `which hq`.
+//
+// Detection order:
+//   1. Explicit operator opt-out via `ADV_REVIEW_MERGE_AGENT_DISABLED=1`
+//      (lets the operator force OSS mode even on a machine that has hq).
+//   2. Explicit operator opt-in via `ADV_REVIEW_MERGE_AGENT_AGENT_OS=1`
+//      (escape hatch for environments where detection misfires).
+//   3. `HQ_BIN` env var points to an existing file.
+//   4. `hqPath` (defaults to `'hq'`) resolves on PATH.
+// We probe via `which` rather than spawning hq itself because hq can be
+// slow to cold-start and we run this on every watcher tick.
+function detectAgentOsPresence({
+  env = process.env,
+  hqPath = 'hq',
+  execFileSyncImpl = execFileSync,
+  fsImpl = { existsSync },
+} = {}) {
+  if (String(env.ADV_REVIEW_MERGE_AGENT_DISABLED ?? '').trim() === '1') {
+    return { present: false, source: 'operator-disabled' };
+  }
+  if (String(env.ADV_REVIEW_MERGE_AGENT_AGENT_OS ?? '').trim() === '1') {
+    return { present: true, source: 'operator-enabled' };
+  }
+  const hqBin = String(env.HQ_BIN ?? '').trim();
+  if (hqBin && fsImpl.existsSync(hqBin)) {
+    return { present: true, source: 'env:HQ_BIN', path: hqBin };
+  }
+  // Resolve via `which` rather than executing hq. `which` is a tiny
+  // POSIX builtin that returns the resolved path without spawning the
+  // target. On macOS+Linux both `which` and `command -v` are available;
+  // we use `which` for cross-platform consistency.
+  try {
+    const stdout = execFileSyncImpl('which', [hqPath], {
+      env,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+      maxBuffer: 16 * 1024,
+    });
+    const resolved = String(stdout || '').trim().split(/\r?\n/)[0];
+    if (resolved && fsImpl.existsSync(resolved)) {
+      return { present: true, source: 'which', path: resolved };
+    }
+  } catch {
+    // `which` returns non-zero when the binary is missing — that is
+    // the agent-os-absent signal, not an error.
+  }
+  return { present: false, source: 'not-found' };
 }
 
 function resolveMergeAgentParentSession(env = process.env) {
@@ -337,8 +392,18 @@ function pickNormalMergeAgentDispatchDetail({
   const remediationMaxRounds = Number(job?.remediationMaxRounds);
   if (!Number.isFinite(remediationCurrentRound) || !Number.isFinite(remediationMaxRounds) || remediationMaxRounds <= 0) {
     return { decision: 'skip-remediation-state-unknown', trigger: null };
-  } else if (remediationCurrentRound < remediationMaxRounds) {
-    // More remediation rounds available — let the loop continue.
+  } else if (remediationCurrentRound < remediationMaxRounds && normalizedVerdict === 'request-changes') {
+    // request-changes verdict with budget left → let the remediation
+    // loop continue. Merge-agent racing an in-flight remediation cycle
+    // would either fight the remediation worker or merge a state the
+    // reviewer asked to change.
+    //
+    // For a comment-only verdict we DO NOT wait for the round cap to
+    // exhaust. Clean verdict = nothing to remediate = the pipeline has
+    // reached its natural end and merge-agent should pick up now.
+    // Previously this gate fired regardless of verdict, which forced
+    // unnecessary review passes when round 1 was already clean and
+    // contributed to PR #90's stuck state.
     return { decision: 'skip-remediation-claimable', trigger: null };
   }
 
@@ -617,7 +682,23 @@ async function dispatchMergeAgentForPR({
   hqPath = 'hq',
   parentSession = resolveMergeAgentParentSession(),
   hqProject = resolveMergeAgentProject(),
+  agentOsDetectImpl = detectAgentOsPresence,
+  env = process.env,
 } = {}) {
+  // OSS guard. If agent-os (hq + merge-agent adapter) is not present on
+  // this host, skip merge-agent dispatch cleanly instead of failing with
+  // ENOENT from the hq invocation. Adversarial-review remains usable on
+  // OSS deployments — the watcher, reviewer, remediation, and verdict
+  // pipeline work without agent-os. Auto-merge becomes a manual operator
+  // step in that mode.
+  const agentOsState = agentOsDetectImpl({ env, hqPath });
+  if (!agentOsState.present) {
+    return {
+      decision: 'skip-no-agent-os',
+      agentOsDetectionSource: agentOsState.source,
+    };
+  }
+
   const job = {
     repo,
     prNumber,
@@ -816,6 +897,7 @@ export {
   buildMergeAgentPrompt,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
+  detectAgentOsPresence,
   dispatchMergeAgentForPR,
   extractOperatorNotes,
   extractReviewVerdict,

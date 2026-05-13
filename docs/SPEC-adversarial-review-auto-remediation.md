@@ -99,3 +99,51 @@ Carry-forward of ordinary persisted caps is intentionally removed: if the latest
 The migration guard is deliberately narrow. If the latest PR ledger cap is higher than the current risk-class tier, the reviewer carries that elevated value into the next job. That preserves legacy in-flight PRs and operator-raised escape hatches that would otherwise be silently truncated after they have already consumed more rounds than the new tier allows.
 
 The sanctioned operator override is `npm run retrigger-remediation` or the PR-side `retrigger-remediation` label. Both paths record an explicit operator mutation; hand-editing queue JSON is not the supported way to raise the cap.
+
+## Auto-Merge Convergence Loop
+
+The pipeline closes the loop on a PR by handing it to a merge-agent once the adversarial review converges. The merge-agent runs in the host agent-os worker-pool, not in adversarial-review itself; adversarial-review's responsibility is to (a) decide when to dispatch, (b) build the dispatch prompt, (c) record the dispatch, and (d) clean up consumed trigger labels.
+
+### Dispatch trigger
+
+`src/follow-up-merge-agent.mjs::pickMergeAgentDispatchDetail` dispatches the merge-agent for an open PR when **all** of the following hold:
+
+1. `prState === 'open'` and `merged === false`.
+2. No `do-not-merge`, `merge-agent-skip`, or `merge-agent-stuck` label is present.
+3. The PR's GitHub state is `mergeable === 'MERGEABLE'`.
+4. The latest checks rollup is `SUCCESS` (or `null` for diff shapes with no checks).
+5. The latest follow-up job is NOT `pending` or `in-progress` — no active remediation worker is racing.
+6. **And one of:**
+   - The latest verdict normalizes to `comment-only` (clean), OR
+   - The latest verdict normalizes to `request-changes` AND the round budget is exhausted AND `operator-approved` is scoped to the current head SHA, OR
+   - `merge-agent-requested` is scoped to the current head SHA and the operator has explicitly asked for a merge-agent pass.
+
+A clean (`comment-only`) verdict triggers the merge-agent immediately on the first review pass that returns clean — the dispatch path does NOT wait for the round budget to exhaust. Waiting for the budget cap on a clean verdict was the gate that left PR #90 stuck in May 2026 burning unused remediation rounds with nothing to remediate. Rounds-available remains a gate for `request-changes` verdicts so the merge-agent does not race an in-flight remediation cycle.
+
+### Convergence cycle
+
+Each merge-agent invocation either MERGES the PR or exits with `awaiting-rereview` to hand control back to adversarial-review. The cycle then iterates:
+
+1. Adversarial review pass returns a verdict.
+2. If `comment-only` → merge-agent dispatches.
+3. Merge-agent attempts the rebase / response / push flow.
+4. If the merge-agent makes substantive changes (non-trivial conflict resolution, comment-only-followup edits that change behavior), it exits `awaiting-rereview` and force-pushes the new head. The watcher's next tick sees a new head SHA, schedules a fresh review pass, and the cycle continues from step 1.
+5. If the merge-agent makes no substantive changes (clean rebase, no follow-up code edits) AND the PR's checks remain green for the rebased SHA, it merges via `gh pr merge --merge`.
+
+The cycle terminates when (a) the merge succeeds, (b) the operator applies a skip label, or (c) the merge-agent applies `merge-agent-stuck` after exhausting its retry policy. The round budget caps the adversarial review side; the merge-agent's own retry policy caps the merge side. Neither bounds the OTHER side, so a worst-case cycle is `rounds × merge-attempts` — operators should keep the budgets aligned.
+
+### OSS guard
+
+`src/follow-up-merge-agent.mjs::detectAgentOsPresence` runs before every dispatch. If `hq` is not on PATH and `HQ_BIN` is unset and the operator has not set `ADV_REVIEW_MERGE_AGENT_AGENT_OS=1`, the dispatch path returns `{ decision: 'skip-no-agent-os' }` without invoking hq. This keeps OSS deployments and CI sandboxes usable: the watcher, reviewer, remediation, and verdict pipeline continue working; auto-merge becomes a manual operator step.
+
+The operator can also force-disable merge-agent on a host that DOES have agent-os installed by setting `ADV_REVIEW_MERGE_AGENT_DISABLED=1`. This is the supported way to pause auto-merge during a release freeze without touching the source.
+
+### Trigger labels
+
+- `operator-approved` — operator override for a `request-changes` verdict. Scoped to the current head SHA via `buildScopedOperatorApproval`. Consumed (removed from the PR) after a successful dispatch.
+- `merge-agent-requested` — explicit operator request to fire a merge-agent pass even when the standard gate would skip. Scoped to the current head SHA via `buildScopedMergeAgentRequest`. Consumed after a successful dispatch.
+- `merge-agent-skip`, `merge-agent-stuck`, `do-not-merge` — hard skips that even an operator-approved label does not bypass.
+
+### Dispatch state
+
+Successful dispatches write a record under `data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`. Each record carries the dispatch timestamp, the trigger label (or null for the standard verdict path), the resulting `dispatchId` and `launchRequestId` from the hq invocation, and the label-removal attempt result. Pre-existing dispatches with the same `(repo, prNumber, headSha)` triple short-circuit a second dispatch via the `skip-already-dispatched` decision, and the consumed-label removal is retried best-effort each tick until the label is observed gone from the PR.

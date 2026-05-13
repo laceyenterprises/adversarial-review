@@ -46,6 +46,19 @@ uses PATH and per-user defaults.
   - Maintainer-local fallback `$HOME/.openclaw/tools/acpx/node_modules/.bin/acpx`
     is only selected by install tooling with `--prefer-local-acpx`.
 
+- `hq` CLI, optional Agent OS reviewer-runtime substrate
+  - Discovery: `HQ_BIN`, then `hq` on `PATH`.
+  - Runtime: only used by the `agent-os-hq` reviewer runtime adapter.
+  - Requires `HQ_ROOT` to point at an initialized Agent OS HQ root whose
+    `.hq/config.json.ownerUser` matches the watcher OS user, plus
+    `HQ_PARENT_SESSION` and `HQ_PROJECT` for dispatch attribution. The
+    adapter refuses cross-user dispatch instead of invoking `sudo -u`.
+  - Dispatch shape: `hq dispatch --ticket <ref> --worker-class <codex|claude-code>
+    --prompt <file> --completion-shape artifact --parent-session <session-ref>
+    --project <project> --token-budget <tokens>`.
+    The adapter also passes `--task-kind analysis` so reviewer runs use the
+    artifact/scratch-dir path rather than opening worker PRs.
+
 ## GitHub And Service Tokens
 
 - `GITHUB_TOKEN`
@@ -107,6 +120,20 @@ Claude runtime is supposed to use.
     or when `HQ_ROOT` is explicitly present in the environment.
   - Without HQ integration, remediation replies remain local under
     `data/replies/`.
+  - Required for `reviewerRuntime: "agent-os-hq"`. If absent, that runtime
+    fails loudly with guidance to set `HQ_ROOT` or use `cli-direct`/`acpx`.
+
+- `HQ_PARENT_SESSION`
+  - Agent OS HQ dispatch attribution parent session.
+  - Required for `reviewerRuntime: "agent-os-hq"`. If absent, that runtime
+    fails loudly with guidance to export `HQ_PARENT_SESSION` before invoking
+    the reviewer.
+
+- `HQ_PROJECT`
+  - Agent OS HQ dispatch attribution project name.
+  - Required for `reviewerRuntime: "agent-os-hq"`. If absent, that runtime
+    fails loudly with guidance to register/export `HQ_PROJECT` before
+    invoking the reviewer.
 
 - `CODEX_SOURCE_HOME`
   - Optional watcher override for the Codex OAuth source dir used when spawning

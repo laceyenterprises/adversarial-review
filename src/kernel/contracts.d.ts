@@ -251,11 +251,13 @@ export interface OperatorSurfaceAdapter extends OperatorControls, OperatorTriage
 export type ReviewerFailureClass =
   | 'cascade'
   | 'reviewer-timeout'
+  | 'reviewer-output'
   | 'rate-limit'
   | 'queue-back-pressure'
   | 'forbidden-fallback'
   | 'oauth-broken'
   | 'daemon-bounce'
+  | 'lease-expired'
   | 'launchctl-bootstrap'
   | 'bug'
   | 'unknown';
@@ -275,6 +277,7 @@ export interface ReviewerRunRequest {
   timeoutMs: number;
   sessionUuid: string;
   forbiddenFallbacks: readonly string[];
+  tokenBudget?: number | string | null;
 }
 
 export interface ReviewerRunResult {

@@ -394,6 +394,11 @@ const stmtMarkClosed = db.prepare(
 // subprocesses are admitted.
 async function reconcileOrphanedReviewing(octokit) {
   return reconcileReviewerSessions({ db, octokit });
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
 }
 
 function shouldReconcileStaleReviewerSession(row, now, {
@@ -427,6 +432,10 @@ function persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber, lo
     );
     return false;
   }
+<<<<<<< HEAD
+=======
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
 }
 
 // ── Author tag detection ─────────────────────────────────────────────────────
@@ -1304,7 +1313,24 @@ async function pollOnce(octokit) {
         maxRemediationRounds,
         reviewerSessionUuid,
         onReviewerPgid: ({ pgid }) => {
+<<<<<<< HEAD
           persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });
+=======
+<<<<<<< HEAD
+          try {
+            stmtMarkReviewerPgid.run(pgid, reviewerSessionUuid, repoPath, prNumber);
+            console.log(
+              `[watcher] reviewer_session_handle_persisted repo=${repoPath} pr=${prNumber} ` +
+              `session=${reviewerSessionUuid} pgid=${pgid}`
+            );
+          } catch (err) {
+            handlePollError(err, 'stmtMarkReviewerPgid');
+            throw err;
+          }
+=======
+          persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
         },
       });
 

@@ -36,8 +36,18 @@ function ensureReviewStateSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS reviewed_prs (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
+<<<<<<< HEAD
       repo              TEXT NOT NULL,
       pr_number         INTEGER NOT NULL,
+=======
+<<<<<<< HEAD
+      repo              TEXT,
+      pr_number         INTEGER,
+=======
+      repo              TEXT NOT NULL,
+      pr_number         INTEGER NOT NULL,
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
       domain_id         TEXT,
       subject_external_id TEXT,
       revision_ref      TEXT,
@@ -111,7 +121,19 @@ function ensureReviewStateSchema(db) {
   backfillReviewedPRSubjectIdentity(db);
 
   db.exec(`
+<<<<<<< HEAD
     DROP INDEX IF EXISTS reviewed_prs_identity_round_kind_unique;
+=======
+<<<<<<< HEAD
+    CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
+      ON reviewed_prs(domain_id, subject_external_id, revision_ref, review_attempts, review_status)
+      WHERE domain_id IS NOT NULL
+        AND subject_external_id IS NOT NULL
+        AND revision_ref IS NOT NULL;
+=======
+    DROP INDEX IF EXISTS reviewed_prs_identity_round_kind_unique;
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
 
     CREATE INDEX IF NOT EXISTS reviewed_prs_identity_lookup_idx
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);

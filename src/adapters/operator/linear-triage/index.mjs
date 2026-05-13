@@ -142,6 +142,11 @@ function createLinearTriageAdapter({
     done: stateNames.done || ['Done', 'Review Complete'],
     cancelled: stateNames.cancelled || 'Cancelled',
   };
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
   let linearClientPromise = null;
 
   function getLinearClient() {
@@ -150,12 +155,24 @@ function createLinearTriageAdapter({
     }
     return linearClientPromise;
   }
+<<<<<<< HEAD
+=======
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
 
   async function syncTriageStatus(subjectRef, status) {
     const ticketId = resolveLinearTicketId(subjectRef);
     const targetStateName = normalizeStatusName(status, resolvedStateNames);
     await setLinearState({
+<<<<<<< HEAD
       linearClientProvider: getLinearClient,
+=======
+<<<<<<< HEAD
+      linearClientProvider,
+=======
+      linearClientProvider: getLinearClient,
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
       logger,
       ticketId,
       targetStateName,
@@ -189,7 +206,15 @@ function createLinearTriageAdapter({
     await syncTriageStatus(subjectRef, 'done');
 
     if (!critical) return;
+<<<<<<< HEAD
     const linear = await getLinearClient();
+=======
+<<<<<<< HEAD
+    const linear = await linearClientProvider();
+=======
+    const linear = await getLinearClient();
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
     if (!linear) return;
     try {
       const issue = await linear.issue(ticketId);

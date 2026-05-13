@@ -95,6 +95,11 @@ test('reattaches when pgid is alive, head sha is unchanged, and no review is pos
   assert.match(log.lines.join('\n'), /session=session-70 pgid=9001/);
 });
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
 test('selective stale probing recovers only overdue reviewing rows during steady-state polls', async () => {
   const db = setupDb();
   seedReviewing(db, { prNumber: 70, startedAt: '2026-05-11T04:30:00.000Z', lastAttemptedAt: '2026-05-11T04:30:00.000Z' });
@@ -120,6 +125,10 @@ test('selective stale probing recovers only overdue reviewing rows during steady
   assert.match(log.lines.join('\n'), /reviewer_reattach_recovered/);
 });
 
+<<<<<<< HEAD
+=======
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
 test('invalidates an alive reviewer when the PR head sha changed', async () => {
   const db = setupDb();
   seedReviewing(db);

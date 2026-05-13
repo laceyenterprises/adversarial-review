@@ -1700,6 +1700,11 @@ test('consumeFollowUpJobsUntilCapacity continues filling capacity after one job 
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 1);
 });
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
 test('killDetachedWorkerProcessGroup terminates detached remediation workers by process group', async () => {
   const child = spawn('bash', ['-c', 'trap "" TERM; while :; do sleep 1; done'], {
     detached: true,
@@ -1713,6 +1718,10 @@ test('killDetachedWorkerProcessGroup terminates detached remediation workers by 
   assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
 });
 
+<<<<<<< HEAD
+=======
+>>>>>>> 300a5a9bfeca7a20c52f1f012bc469f95d3ba7c1
+>>>>>>> c5a3ac535212096835e70aa72c2c8d0f137a577b
 test('consumeFollowUpJobsUntilCapacity stops draining when shutdown flips mid-tick', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });

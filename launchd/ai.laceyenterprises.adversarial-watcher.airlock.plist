@@ -59,6 +59,8 @@
         <string>/bin/zsh</string>
         <key>HQ_ROOT</key>
         <string>/Users/airlock/agent-os-hq</string>
+        <key>ADV_SECRETS_ROOT</key>
+        <string>/Users/airlock/agent-os/agents/clio/credentials/local</string>
     </dict>
 
     <key>RunAtLoad</key>

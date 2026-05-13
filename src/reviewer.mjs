@@ -223,10 +223,11 @@ async function spawnClaude(args, options = {}) {
 }
 
 function resolveCodexAuthPath() {
-  // Codex OAuth credentials are stored under the placey user (who owns Codex),
-  // not necessarily under the current process HOME. CODEX_AUTH_PATH env var
-  // allows explicit override; otherwise default to placey's home.
-  return process.env.CODEX_AUTH_PATH || '/Users/placey/.codex/auth.json';
+  // CODEX_AUTH_PATH env var allows explicit override (e.g. when the running
+  // process HOME differs from the user that owns Codex auth.json — common in
+  // launchd-driven deployments where the service user is not the desktop
+  // user). Default to `$HOME/.codex/auth.json`.
+  return process.env.CODEX_AUTH_PATH || join(homedir(), '.codex', 'auth.json');
 }
 
 /**

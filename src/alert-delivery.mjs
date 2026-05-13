@@ -5,7 +5,6 @@ import http from 'node:http';
 import https from 'node:https';
 
 const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
-const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';
 const DEFAULT_OPENCLAW_AGENT_HOOKS_URL = 'http://127.0.0.1:18789/hooks/agent';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
@@ -22,11 +21,12 @@ function firstNonEmpty(...values) {
 }
 
 function resolveDefaultHooksTokenFile(fsImpl = { existsSync }) {
-  const defaultTokenFile = join(DEFAULT_SECRETS_ROOT, 'litellm-alert-bridge.token');
-  const legacyTokenFile = join(LEGACY_SECRETS_ROOT, 'litellm-alert-bridge.token');
-  if (fsImpl.existsSync(defaultTokenFile)) return defaultTokenFile;
-  if (fsImpl.existsSync(legacyTokenFile)) return legacyTokenFile;
-  return defaultTokenFile;
+  // Returns the conventional secrets path. Deployments that need a custom
+  // location should set ADV_SECRETS_ROOT, LITELLM_SECRETS_ROOT, or
+  // OPENCLAW_HOOKS_TOKEN_FILE in the launch environment — those env-driven
+  // resolutions in `resolveAlertDefaults` win over this default.
+  void fsImpl;
+  return join(DEFAULT_SECRETS_ROOT, 'litellm-alert-bridge.token');
 }
 
 function resolveAlertDefaults(env = process.env, { fsImpl = { existsSync } } = {}) {

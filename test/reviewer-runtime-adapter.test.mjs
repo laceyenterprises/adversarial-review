@@ -5,7 +5,6 @@ import Database from 'better-sqlite3';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { spawn } from 'node:child_process';
 
 import {
   CANONICAL_OAUTH_STRIP_ENV as ACPX_CANONICAL_OAUTH_STRIP_ENV,

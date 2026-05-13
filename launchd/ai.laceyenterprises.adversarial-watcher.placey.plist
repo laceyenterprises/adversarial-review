@@ -22,6 +22,8 @@
         <string>/Users/placey</string>
         <key>CODEX_AUTH_PATH</key>
         <string>/Users/placey/.codex/auth.json</string>
+        <key>ADV_SECRETS_ROOT</key>
+        <string>/Users/airlock/agent-os/agents/clio/credentials/local</string>
     </dict>
 
     <key>RunAtLoad</key>

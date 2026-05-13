@@ -94,6 +94,9 @@ function fenceUntrustedText(text) {
 //   < >          raw HTML, angle-bracket autolinks
 //   |            table cell separators
 //   !            image / alert-style admonitions at line start
+//   leading -/+   unordered lists and thematic breaks
+//   ordered list  leading `1.` / `1)` list markers
+//   indentation   four-space / tab-indented code blocks
 //   \            literal backslash (escaped FIRST so we don't double-
 //                escape the escapes we are about to introduce)
 //
@@ -106,20 +109,22 @@ function fenceUntrustedText(text) {
 //   #123         GitHub issue/PR autolinking runs independently of
 //                markdown. ZWSP after `#` when followed by digits
 //                breaks the autolinker.
-//
-// NOT neutralized:
-//   Bare URLs    GFM auto-links http(s):// URLs. Considered acceptable
-//                because the URL is visible and not hidden under
-//                display text. If you need to block bare-URL
-//                autolinking, do that at the redactor.
+//   URLs         ZWSP breaks `http://`, `https://`, and `www.` so GFM
+//                does not auto-link worker-controlled destinations.
 function defangUntrustedMarkdown(text) {
   const raw = String(text ?? '');
   if (!raw) return '';
-  return raw
+  return raw.split('\n').map((line) => line
     .replace(/\\/g, '\\\\')
+    .replace(/\b(https?):\/\//gi, '$1:​//')
+    .replace(/\bwww\./gi, 'www.​')
     .replace(/[*_`~#>[\]()<>|!]/g, (m) => `\\${m}`)
     .replace(/@(?=[A-Za-z0-9_-])/g, '@​')
-    .replace(/(\\#)(?=\d)/g, '$1​');
+    .replace(/(\\#)(?=\d)/g, '$1​')
+    .replace(/^([ \t]{4,})/, '​$1')
+    .replace(/^(\s*)([-+])(?=\s|$)/, '$1\\$2')
+    .replace(/^(\s*)(\d+)([.)])(?=\s)/, '$1$2\\$3')
+    .replace(/^(\s*)([-=]{3,})(\s*)$/, '$1\\$2$3')).join('\n');
 }
 
 // Render a worker-supplied bullet list with redaction + caps + markdown

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 
@@ -158,9 +161,51 @@ test('Codex reviewer auth path honors explicit env overrides before service fall
     assert.equal(resolveCodexAuthPath(), '/tmp/explicit/auth.json');
   });
 
-  withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: '/tmp/codex-home' }, () => {
-    assert.equal(resolveCodexAuthPath(), '/tmp/codex-home/auth.json');
-  });
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-home-'));
+  try {
+    const codexHome = join(root, '.codex');
+    const authPath = join(codexHome, 'auth.json');
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: { access_token: 'access', refresh_token: 'refresh' },
+      }),
+      'utf8'
+    );
+    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: codexHome }, () => {
+      assert.equal(resolveCodexAuthPath(), authPath);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Codex reviewer auth path ignores CODEX_HOME without usable OAuth credentials', () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-home-bad-'));
+  try {
+    const missingHome = join(root, 'missing');
+    const apiKeyHome = join(root, 'apikey');
+    mkdirSync(apiKeyHome, { recursive: true });
+    writeFileSync(
+      join(apiKeyHome, 'auth.json'),
+      JSON.stringify({
+        auth_mode: 'apikey',
+        tokens: { access_token: 'access', refresh_token: 'refresh' },
+      }),
+      { encoding: 'utf8', flag: 'w' }
+    );
+
+    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: missingHome }, () => {
+      assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+    });
+    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: apiKeyHome }, () => {
+      assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {

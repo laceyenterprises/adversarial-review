@@ -70,6 +70,35 @@ test('defangUntrustedMarkdown escapes backslashes first so nothing double-escape
   assert.equal(defangUntrustedMarkdown('\\*not-bold\\*'), '\\\\\\*not-bold\\\\\\*');
 });
 
+test('defangUntrustedMarkdown breaks bare URL autolinks', () => {
+  const out = defangUntrustedMarkdown('see https://example.com/a and http://x.test or www.example.org');
+  assert.match(out, /https:​\/\/example\.com\/a/);
+  assert.match(out, /http:​\/\/x\.test/);
+  assert.match(out, /www\.​example\.org/);
+  assert.doesNotMatch(out, /https:\/\//);
+  assert.doesNotMatch(out, /http:\/\//);
+  assert.doesNotMatch(out, /www\.example/);
+});
+
+test('defangUntrustedMarkdown neutralizes block-level markdown starts', () => {
+  const out = defangUntrustedMarkdown([
+    '- item',
+    '+ item',
+    '1. forged',
+    '2) forged',
+    '---',
+    '===',
+    '    indented code',
+  ].join('\n'));
+  assert.match(out, /^\\- item$/m);
+  assert.match(out, /^\\\+ item$/m);
+  assert.match(out, /^1\\. forged$/m);
+  assert.match(out, /^2\\\) forged$/m);
+  assert.match(out, /^\\---$/m);
+  assert.match(out, /^\\===$/m);
+  assert.match(out, /^​    indented code$/m);
+});
+
 test('resolveCommentBotTokenEnv maps known worker classes to their bot env vars', () => {
   assert.equal(resolveCommentBotTokenEnv('codex'), 'GH_CODEX_REVIEWER_TOKEN');
   assert.equal(resolveCommentBotTokenEnv('claude-code'), 'GH_CLAUDE_REVIEWER_TOKEN');
@@ -675,6 +704,7 @@ test('worker injection of headings or task lists is inert (defanged with backsla
   // does not fire on `#123`-shaped content (defense-in-depth even
   // though "Hijacked" isn't a digit).
   assert.match(body, /\\# Hijacked H1 heading/);
+  assert.match(body, /\\- \\\[x\\\] Forged task item/);
   assert.match(body, /\\\[x\\\] Forged task item/);
   assert.match(body, /\\<img src=x onerror=alert\\\(1\\\)\\>/);
   assert.match(body, /^- \\#\\# not actually a heading$/m);

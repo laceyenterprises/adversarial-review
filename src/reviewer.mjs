@@ -224,12 +224,29 @@ async function spawnClaude(args, options = {}) {
 
 function resolveCodexAuthPath() {
   // CODEX_AUTH_PATH env var allows explicit override. CODEX_HOME supports
-  // local/manual runs. The final fallback preserves the deployed split-user
-  // bridge where the watcher runs as airlock but Codex OAuth belongs to placey.
+  // local/manual runs only when it points at a usable OAuth auth.json. The
+  // final fallback preserves the deployed split-user bridge where the watcher
+  // runs as airlock but Codex OAuth belongs to placey.
+  if (process.env.CODEX_AUTH_PATH) return process.env.CODEX_AUTH_PATH;
+  if (process.env.CODEX_HOME) {
+    const codexHomeAuth = join(process.env.CODEX_HOME, 'auth.json');
+    if (isCodexOAuthAuthFile(codexHomeAuth)) return codexHomeAuth;
+  }
+  return '/Users/placey/.codex/auth.json';
+}
+
+function isCodexOAuthAuthFile(authPath) {
+  if (!existsSync(authPath)) return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(authPath, 'utf8'));
+  } catch {
+    return false;
+  }
   return (
-    process.env.CODEX_AUTH_PATH ||
-    (process.env.CODEX_HOME && join(process.env.CODEX_HOME, 'auth.json')) ||
-    '/Users/placey/.codex/auth.json'
+    (parsed?.auth_mode || '').toLowerCase() === 'chatgpt' &&
+    Boolean(parsed?.tokens?.access_token) &&
+    Boolean(parsed?.tokens?.refresh_token)
   );
 }
 
@@ -263,10 +280,6 @@ function assertCodexAuthReadable() {
 
   if (!parsed?.tokens?.access_token || !parsed?.tokens?.refresh_token) {
     throw new OAuthError('codex', `Codex auth.json missing required OAuth tokens: ${authPath}`);
-  }
-
-  if (!parsed?.tokens?.access_token || !parsed?.tokens?.refresh_token) {
-    throw new OAuthError('codex', `Codex auth file missing OAuth tokens: ${authPath}`);
   }
 
   return authPath;

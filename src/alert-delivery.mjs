@@ -29,6 +29,13 @@ function resolveDefaultHooksTokenFile(fsImpl = { existsSync }) {
   return defaultTokenFile;
 }
 
+function resolveHooksTokenFileFromRoot(root, fsImpl = { existsSync }) {
+  const trimmedRoot = typeof root === 'string' ? root.trim() : '';
+  if (!trimmedRoot) return null;
+  const candidateTokenFile = join(trimmedRoot, 'litellm-alert-bridge.token');
+  return fsImpl.existsSync(candidateTokenFile) ? candidateTokenFile : null;
+}
+
 function resolveAlertDefaults(env = process.env, { fsImpl = { existsSync } } = {}) {
   const alertTo = firstNonEmpty(env.ALERT_TO);
   if (!alertTo) {
@@ -39,8 +46,8 @@ function resolveAlertDefaults(env = process.env, { fsImpl = { existsSync } } = {
     hooksTokenFile:
       env.OPENCLAW_HOOKS_TOKEN_FILE ||
       env.HOOKS_TOKEN_FILE ||
-      (env.ADV_SECRETS_ROOT && join(env.ADV_SECRETS_ROOT, 'litellm-alert-bridge.token')) ||
-      (env.LITELLM_SECRETS_ROOT && join(env.LITELLM_SECRETS_ROOT, 'litellm-alert-bridge.token')) ||
+      resolveHooksTokenFileFromRoot(env.ADV_SECRETS_ROOT, fsImpl) ||
+      resolveHooksTokenFileFromRoot(env.LITELLM_SECRETS_ROOT, fsImpl) ||
       resolveDefaultHooksTokenFile(fsImpl),
     alertChannel: env.ALERT_CHANNEL || 'telegram',
     alertTo,

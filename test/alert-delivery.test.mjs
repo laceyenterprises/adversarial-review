@@ -76,6 +76,68 @@ test('watcher alert defaults use the operator Telegram route once ALERT_TO is co
   );
 });
 
+test('watcher alert defaults ignore a missing ADV_SECRETS_ROOT token file and keep falling through', () => {
+  const defaultTokenFile = join(
+    homedir(),
+    '.config',
+    'adversarial-review',
+    'secrets',
+    'litellm-alert-bridge.token'
+  );
+
+  assert.deepEqual(
+    resolveAlertDefaults(
+      {
+        ALERT_TO: '123456',
+        ADV_SECRETS_ROOT: '/Users/airlock/agent-os/agents/clio/credentials/local',
+      },
+      {
+        fsImpl: {
+          existsSync(filePath) {
+            return filePath === defaultTokenFile;
+          },
+        },
+      }
+    ),
+    {
+      openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
+      hooksTokenFile: defaultTokenFile,
+      alertChannel: 'telegram',
+      alertTo: '123456',
+      alertAgentId: 'main',
+      alertName: 'Adversarial Watcher Health',
+    }
+  );
+});
+
+test('watcher alert defaults still honor ADV_SECRETS_ROOT when its token file exists', () => {
+  const advTokenFile = '/tmp/override-secrets/litellm-alert-bridge.token';
+
+  assert.deepEqual(
+    resolveAlertDefaults(
+      {
+        ALERT_TO: '123456',
+        ADV_SECRETS_ROOT: '/tmp/override-secrets',
+      },
+      {
+        fsImpl: {
+          existsSync(filePath) {
+            return filePath === advTokenFile;
+          },
+        },
+      }
+    ),
+    {
+      openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
+      hooksTokenFile: advTokenFile,
+      alertChannel: 'telegram',
+      alertTo: '123456',
+      alertAgentId: 'main',
+      alertName: 'Adversarial Watcher Health',
+    }
+  );
+});
+
 test('watcher alert defaults fall back to the legacy secrets root when the new default token file is absent', () => {
   assert.deepEqual(
     resolveAlertDefaults(

@@ -18,7 +18,7 @@ rg -n "/Users/[^/]+|agent-os-hq|HQ_ROOT|agent-os/\\.agent-os|agent-os" .
 
 ## Load-Bearing Runtime Defaults
 
-- `src/alert-delivery.mjs` has `DEFAULT_SECRETS_ROOT = '<operator-home>/agent-os/agents/clio/credentials/local'`. This is a maintainer-local default for alert bridge credentials.
+- `src/alert-delivery.mjs` defaults alert bridge credentials to `<operator-home>/.config/adversarial-review/secrets` and still probes the legacy `<operator-home>/agent-os/agents/clio/credentials/local` token path when the new default token file is absent. Explicit secret-root env vars are treated as candidate roots only when their `litellm-alert-bridge.token` file exists.
 - `src/watcher.mjs` defaults reviewer subprocess `HOME` to `<operator-home>` when no environment override is present. This is a maintainer-local daemon default.
 - `src/reviewer.mjs` has `ACPX_CLI = '<operator-home>/.openclaw/tools/acpx/node_modules/.bin/acpx'`. This is a maintainer-local reviewer CLI path.
 - `src/follow-up-remediation.mjs` defaults reply storage to `<operator-home>/agent-os-hq` and supports `HQ_ROOT`. That path is part of the existing hosted remediation-worker contract for code PRs.

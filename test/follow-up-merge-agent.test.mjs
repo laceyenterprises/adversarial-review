@@ -850,6 +850,7 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
   assert.equal(result.dispatchId, 'disp_123');
   assert.equal(result.launchRequestId, 'lrq_456');
   assert.equal(listMergeAgentDispatches(rootDir).length, 1);
+  assert.equal(hqCalls[0].cmd, 'hq');
   assert.deepEqual(hqCalls[0].args.slice(0, 15), [
     'dispatch',
     '--worker-class', 'merge-agent',
@@ -1168,6 +1169,90 @@ test('dispatchMergeAgentForPR reconciles externally removed consumed labels on i
   assert.equal(recorded.labelRemoval.attempts[1].observedExternally, true);
 });
 
+test('dispatchMergeAgentForPR uses HQ_BIN as the dispatch executable when PATH lacks hq', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
+  const env = { HQ_BIN: '/opt/agent-os/bin/hq', PATH: '/does-not-contain-hq' };
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: (options) => detectAgentOsPresence({
+      ...options,
+      fsImpl: {
+        accessSync: (candidate) => {
+          if (candidate !== '/opt/agent-os/bin/hq') {
+            throw new Error(`unexpected executable probe: ${candidate}`);
+          }
+        },
+      },
+    }),
+    env,
+    rootDir,
+    ...makeJob(),
+    execFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args });
+      return { stdout: '{"dispatchId":"disp_hq_bin","lrq":"lrq_hq_bin"}\n' };
+    },
+    now: '2026-05-07T12:05:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.dispatchId, 'disp_hq_bin');
+  assert.equal(hqCalls.length, 1);
+  assert.equal(hqCalls[0].cmd, '/opt/agent-os/bin/hq');
+});
+
+test('dispatchMergeAgentForPR retries consumed-label cleanup even when agent-os is later disabled', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      lastVerdict: null,
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'CONFLICTING',
+      checksConclusion: 'PENDING',
+      remediationCurrentRound: 0,
+      remediationMaxRounds: 0,
+    }),
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"disp_requested","lrq":"lrq_requested"}\n',
+    }),
+    ghExecFileImpl: async () => {
+      throw new Error('rate limited');
+    },
+    now: '2026-05-07T12:00:00.000Z',
+  });
+
+  const ghCalls = [];
+  const second = await dispatchMergeAgentForPR({
+    env: { ADV_REVIEW_MERGE_AGENT_DISABLED: '1' },
+    rootDir,
+    ...makeJob({
+      lastVerdict: null,
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'CONFLICTING',
+      checksConclusion: 'PENDING',
+      remediationCurrentRound: 0,
+      remediationMaxRounds: 0,
+    }),
+    execFileImpl: async () => {
+      throw new Error('hq should not be called after idempotency hit');
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    now: '2026-05-07T12:02:00.000Z',
+  });
+
+  assert.equal(second.decision, 'skip-already-dispatched');
+  assert.equal(second.labelRemovalRetried, true);
+  assert.equal(second.mergeAgentRequestedLabelRemoved, true);
+  assert.equal(ghCalls.length, 1);
+  assert.equal(ghCalls[0].args.at(-1), 'merge-agent-requested');
+});
+
 test('fetchMergeAgentCandidate fetches operator label events in parallel', async () => {
   const eventResolvers = [];
   let eventFetchesStarted = 0;
@@ -1306,7 +1391,7 @@ test('dispatchMergeAgentForPR treats non-JSON hq stdout as a hard failure', asyn
 // and verdict pipeline work standalone — only the auto-merge step depends
 // on the agent-os worker-pool. When agent-os is absent (OSS install, fresh
 // clone, CI sandbox), the dispatch path must SKIP rather than crash on
-// ENOENT from `which hq`. Auto-merge becomes a manual operator step in OSS
+// ENOENT from `hq`. Auto-merge becomes a manual operator step in OSS
 // mode.
 
 test('dispatchMergeAgentForPR returns skip-no-agent-os when the detector reports agent-os absent', async () => {
@@ -1359,11 +1444,12 @@ test('detectAgentOsPresence: operator-disabled env var wins over everything else
   assert.deepEqual(state, { present: false, source: 'operator-disabled' });
 });
 
-test('detectAgentOsPresence: operator-enabled env var bypasses which/HQ_BIN detection', () => {
+test('detectAgentOsPresence: operator-enabled env var bypasses PATH/HQ_BIN detection', () => {
   const state = detectAgentOsPresence({
     env: { ADV_REVIEW_MERGE_AGENT_AGENT_OS: '1' },
-    fsImpl: { existsSync: () => false },
-    execFileSyncImpl: () => { throw new Error('which should not be called'); },
+    fsImpl: {
+      accessSync: () => { throw new Error('PATH should not be probed'); },
+    },
   });
   assert.deepEqual(state, { present: true, source: 'operator-enabled' });
 });
@@ -1371,45 +1457,51 @@ test('detectAgentOsPresence: operator-enabled env var bypasses which/HQ_BIN dete
 test('detectAgentOsPresence: HQ_BIN pointing to an existing file is detected as present', () => {
   const state = detectAgentOsPresence({
     env: { HQ_BIN: '/usr/local/bin/hq' },
-    fsImpl: { existsSync: (p) => p === '/usr/local/bin/hq' },
-    execFileSyncImpl: () => { throw new Error('which should not be called'); },
+    fsImpl: {
+      accessSync: (p) => {
+        if (p !== '/usr/local/bin/hq') throw new Error('not found');
+      },
+    },
   });
   assert.deepEqual(state, { present: true, source: 'env:HQ_BIN', path: '/usr/local/bin/hq' });
 });
 
-test('detectAgentOsPresence: which-resolved hq path is detected as present', () => {
+test('detectAgentOsPresence: PATH-resolved hq path is detected as present without external which', () => {
   const state = detectAgentOsPresence({
-    env: {},
-    fsImpl: { existsSync: (p) => p === '/Users/airlock/.local/bin/hq' },
-    execFileSyncImpl: () => '/Users/airlock/.local/bin/hq\n',
+    env: { PATH: '/bin:/Users/airlock/.local/bin' },
+    fsImpl: {
+      accessSync: (p) => {
+        if (p !== '/Users/airlock/.local/bin/hq') throw new Error('not found');
+      },
+    },
   });
-  assert.deepEqual(state, { present: true, source: 'which', path: '/Users/airlock/.local/bin/hq' });
+  assert.deepEqual(state, { present: true, source: 'path', path: '/Users/airlock/.local/bin/hq' });
 });
 
-test('detectAgentOsPresence: which command failure returns not-found', () => {
-  // OSS install: hq is not on PATH. which exits non-zero. The detector
-  // must NOT bubble that up as an exception — it is the canonical
-  // signal for "agent-os absent."
+test('detectAgentOsPresence: PATH miss returns not-found', () => {
+  // OSS install: hq is not on PATH. The detector must not bubble that
+  // up as an exception — it is the canonical signal for "agent-os absent."
   const state = detectAgentOsPresence({
-    env: {},
-    fsImpl: { existsSync: () => false },
-    execFileSyncImpl: () => {
-      const err = new Error('command failed');
-      err.status = 1;
-      throw err;
+    env: { PATH: '/bin:/usr/bin' },
+    fsImpl: {
+      accessSync: () => {
+        throw new Error('not found');
+      },
     },
   });
   assert.deepEqual(state, { present: false, source: 'not-found' });
 });
 
-test('detectAgentOsPresence: which-resolved path that no longer exists returns not-found', () => {
-  // Defensive: which can return a stale entry if PATH points at a
-  // directory whose hq binary was uninstalled. existsSync is the
-  // authoritative check.
+test('detectAgentOsPresence: non-executable resolved path returns not-found', () => {
+  // Defensive: PATH can point at a directory whose hq binary is missing
+  // or not executable. accessSync is the authoritative check.
   const state = detectAgentOsPresence({
-    env: {},
-    fsImpl: { existsSync: () => false },
-    execFileSyncImpl: () => '/usr/local/bin/hq\n',
+    env: { PATH: '/usr/local/bin' },
+    fsImpl: {
+      accessSync: () => {
+        throw new Error('not executable');
+      },
+    },
   });
   assert.deepEqual(state, { present: false, source: 'not-found' });
 });

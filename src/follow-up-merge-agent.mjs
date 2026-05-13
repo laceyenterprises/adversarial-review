@@ -1,6 +1,14 @@
-import { execFile, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import {
+  constants as fsConstants,
+  accessSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -46,7 +54,7 @@ function isoNow() {
 // that requires agent-os; everything else (watcher, reviewer, remediation)
 // works standalone. So when agent-os is missing — OSS installs, fresh
 // clones, CI sandboxes — we cleanly skip the merge-agent dispatch instead
-// of blowing up on an ENOENT from `which hq`.
+// of blowing up on an ENOENT from `hq`.
 //
 // Detection order:
 //   1. Explicit operator opt-out via `ADV_REVIEW_MERGE_AGENT_DISABLED=1`
@@ -55,13 +63,47 @@ function isoNow() {
 //      (escape hatch for environments where detection misfires).
 //   3. `HQ_BIN` env var points to an existing file.
 //   4. `hqPath` (defaults to `'hq'`) resolves on PATH.
-// We probe via `which` rather than spawning hq itself because hq can be
+// We resolve PATH in-process instead of spawning hq itself because hq can be
 // slow to cold-start and we run this on every watcher tick.
+function isExecutableFile(candidatePath, {
+  fsImpl = { accessSync, existsSync },
+} = {}) {
+  if (!candidatePath) return false;
+  if (typeof fsImpl.accessSync === 'function') {
+    try {
+      fsImpl.accessSync(candidatePath, fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return Boolean(fsImpl.existsSync?.(candidatePath));
+}
+
+function resolveExecutableOnPath(command, {
+  env = process.env,
+  fsImpl = { accessSync, existsSync },
+} = {}) {
+  const trimmed = String(command ?? '').trim();
+  if (!trimmed) return null;
+  if (trimmed.includes('/') || trimmed.includes('\\')) {
+    return isExecutableFile(trimmed, { fsImpl }) ? trimmed : null;
+  }
+  const pathEntries = String(env.PATH ?? '').split(delimiter);
+  for (const entry of pathEntries) {
+    if (!entry) continue;
+    const candidate = join(entry, trimmed);
+    if (isExecutableFile(candidate, { fsImpl })) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 function detectAgentOsPresence({
   env = process.env,
   hqPath = 'hq',
-  execFileSyncImpl = execFileSync,
-  fsImpl = { existsSync },
+  fsImpl = { accessSync, existsSync },
 } = {}) {
   if (String(env.ADV_REVIEW_MERGE_AGENT_DISABLED ?? '').trim() === '1') {
     return { present: false, source: 'operator-disabled' };
@@ -70,27 +112,12 @@ function detectAgentOsPresence({
     return { present: true, source: 'operator-enabled' };
   }
   const hqBin = String(env.HQ_BIN ?? '').trim();
-  if (hqBin && fsImpl.existsSync(hqBin)) {
+  if (hqBin && isExecutableFile(hqBin, { fsImpl })) {
     return { present: true, source: 'env:HQ_BIN', path: hqBin };
   }
-  // Resolve via `which` rather than executing hq. `which` is a tiny
-  // POSIX builtin that returns the resolved path without spawning the
-  // target. On macOS+Linux both `which` and `command -v` are available;
-  // we use `which` for cross-platform consistency.
-  try {
-    const stdout = execFileSyncImpl('which', [hqPath], {
-      env,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
-      maxBuffer: 16 * 1024,
-    });
-    const resolved = String(stdout || '').trim().split(/\r?\n/)[0];
-    if (resolved && fsImpl.existsSync(resolved)) {
-      return { present: true, source: 'which', path: resolved };
-    }
-  } catch {
-    // `which` returns non-zero when the binary is missing — that is
-    // the agent-os-absent signal, not an error.
+  const resolved = resolveExecutableOnPath(hqPath, { env, fsImpl });
+  if (resolved) {
+    return { present: true, source: 'path', path: resolved };
   }
   return { present: false, source: 'not-found' };
 }
@@ -685,20 +712,6 @@ async function dispatchMergeAgentForPR({
   agentOsDetectImpl = detectAgentOsPresence,
   env = process.env,
 } = {}) {
-  // OSS guard. If agent-os (hq + merge-agent adapter) is not present on
-  // this host, skip merge-agent dispatch cleanly instead of failing with
-  // ENOENT from the hq invocation. Adversarial-review remains usable on
-  // OSS deployments — the watcher, reviewer, remediation, and verdict
-  // pipeline work without agent-os. Auto-merge becomes a manual operator
-  // step in that mode.
-  const agentOsState = agentOsDetectImpl({ env, hqPath });
-  if (!agentOsState.present) {
-    return {
-      decision: 'skip-no-agent-os',
-      agentOsDetectionSource: agentOsState.source,
-    };
-  }
-
   const job = {
     repo,
     prNumber,
@@ -767,6 +780,20 @@ async function dispatchMergeAgentForPR({
     return { decision };
   }
 
+  // OSS guard. If agent-os (hq + merge-agent adapter) is not present on
+  // this host, skip only brand-new merge-agent launches. Existing dispatch
+  // records still flow through the idempotent label-reconciliation path
+  // above, so consumed trigger labels keep converging after a host mode
+  // change or temporary hq outage.
+  const agentOsState = agentOsDetectImpl({ env, hqPath });
+  if (!agentOsState.present) {
+    return {
+      decision: 'skip-no-agent-os',
+      agentOsDetectionSource: agentOsState.source,
+    };
+  }
+  const resolvedHqPath = agentOsState.path || hqPath;
+
   const prompt = buildMergeAgentPrompt(job);
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
 
@@ -781,7 +808,7 @@ async function dispatchMergeAgentForPR({
     '--project', hqProject,
     '--prompt', promptPath,
   ];
-  const { stdout } = await execFileImpl(hqPath, args, { maxBuffer: 5 * 1024 * 1024 });
+  const { stdout } = await execFileImpl(resolvedHqPath, args, { maxBuffer: 5 * 1024 * 1024 });
   const parsed = parseMergeAgentDispatchOutput(stdout);
 
   recordMergeAgentDispatch(rootDir, job, {

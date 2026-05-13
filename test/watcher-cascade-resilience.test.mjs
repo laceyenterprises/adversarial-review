@@ -176,6 +176,66 @@ test('cascade markers win over wrapped reviewer timeout stderr', () => {
   );
 });
 
+test('unauthorized traces do not mask cascade or become oauth-broken without OAuth context', () => {
+  assert.equal(
+    classifyReviewerFailure('HTTP 401 Unauthorized while fetching repository metadata', 1),
+    'unknown'
+  );
+  assert.equal(
+    classifyReviewerFailure('HTTP 401 Unauthorized\nLiteLLM retry pool: all upstream attempts failed', 1),
+    'cascade'
+  );
+});
+
+test('OAuth-adjacent reviewer failures classify as oauth-broken near stderr end', () => {
+  assert.equal(
+    classifyReviewerFailure('reviewer stderr\nOAuth expired', 1),
+    'oauth-broken'
+  );
+  assert.equal(
+    classifyReviewerFailure('reviewer stderr\nnot logged in', 1),
+    'oauth-broken'
+  );
+});
+
+test('OAuth detection is anchored to auth context across the full stderr', () => {
+  assert.equal(
+    classifyReviewerFailure(
+      [
+        'Not logged in',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+        'retrying reviewer startup',
+      ].join('\n'),
+      1
+    ),
+    'oauth-broken'
+  );
+  assert.equal(
+    classifyReviewerFailure('database authentication failed', 1),
+    'unknown'
+  );
+  assert.equal(
+    classifyReviewerFailure('ssh authorization failed', 1),
+    'unknown'
+  );
+});
+
+test('oauth-broken wins over cascade when both signals are present in a retry storm', () => {
+  // Cascade is often the symptom of OAuth failure (LiteLLM retries on 401,
+  // declares the pool exhausted). Bucketing as 'cascade' would silence the
+  // more actionable oauth-broken alert that prompts an operator to rotate
+  // the token. PR #89 finding #3 directed flipping the precedence.
+  assert.equal(
+    classifyReviewerFailure('OAuth token expired\nLiteLLM retry pool: all upstream attempts failed', 1),
+    'oauth-broken'
+  );
+});
+
 test('launchctl bootstrap errors get a distinct failure class', () => {
   assert.equal(
     classifyReviewerFailure(

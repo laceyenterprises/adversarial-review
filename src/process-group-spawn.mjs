@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { closeSync, openSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 
 import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
 
@@ -47,6 +47,38 @@ function formatCapturedFailureDetails({ stdout, stderr, maxBytes = DEFAULT_FAILU
   if (stdoutTail) sections.push(`stdout tail:\n${stdoutTail}`);
   if (stderrTail) sections.push(`stderr tail:\n${stderrTail}`);
   return sections.join('\n');
+}
+
+function readTailText(filePath, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
+  if (!filePath || maxBytes <= 0) return '';
+  let fd = null;
+  try {
+    const { size } = statSync(filePath);
+    if (size <= 0) return '';
+    const truncated = size > maxBytes;
+    const banner = `[truncated to last ${maxBytes} bytes]\n`;
+    if (truncated && Buffer.byteLength(banner, 'utf8') >= maxBytes) {
+      return banner.slice(0, maxBytes);
+    }
+    const payloadMaxBytes = truncated
+      ? maxBytes - Buffer.byteLength(banner, 'utf8')
+      : maxBytes;
+    const bytesToRead = Math.min(size, payloadMaxBytes);
+    const buffer = Buffer.alloc(bytesToRead);
+    fd = openSync(filePath, 'r');
+    readSync(fd, buffer, 0, bytesToRead, size - bytesToRead);
+    let start = 0;
+    while (start < buffer.length && (buffer[start] & 0xC0) === 0x80) {
+      start += 1;
+    }
+    const text = buffer.subarray(start).toString('utf8');
+    return truncated ? `${banner}${text}` : text;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return '';
+    throw err;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }
 
 function signalProcessGroup(child, signal) {
@@ -183,8 +215,14 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     };
 
     const readSideChannelOutput = () => {
-      if (stdoutPath) stdout = readFileSync(stdoutPath, 'utf8');
-      if (stderrPath) stderr = readFileSync(stderrPath, 'utf8');
+      if (stdoutPath) {
+        stdoutBytes = statSize(stdoutPath);
+        stdout = readTailText(stdoutPath, Math.min(maxBuffer, failureTailBytes));
+      }
+      if (stderrPath) {
+        stderrBytes = statSize(stderrPath);
+        stderr = readTailText(stderrPath, Math.min(maxBuffer, failureTailBytes));
+      }
     };
 
     const finishReject = (err) => {
@@ -228,12 +266,25 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }, timeout);
     }
     armProgressTimer();
-    if ((stdoutPath || stderrPath) && progressTimeout > 0) {
-      const intervalMs = Math.max(25, Math.min(1_000, Math.floor(progressTimeout / 4)));
+    // Only poll side-channel sizes when there's a reason to: either we need
+    // to re-arm the no-progress kill (progressTimeout > 0) or we need to
+    // enforce maxBuffer mid-flight (Number.isFinite(maxBuffer)). When both
+    // are disabled — agent-os-hq paths sometimes set progressTimeout=0 with
+    // maxBuffer=Infinity — the previous always-on timer was hot for no
+    // reason 99% of the time.
+    if ((stdoutPath || stderrPath) && (progressTimeout > 0 || Number.isFinite(maxBuffer))) {
+      const intervalMs = progressTimeout > 0
+        ? Math.max(25, Math.min(1_000, Math.floor(progressTimeout / 4)))
+        : 250;
       fileProgressTimer = setInterval(() => {
         if (settled) return;
         const stdoutSize = statSize(stdoutPath);
         const stderrSize = statSize(stderrPath);
+        if (stdoutSize > maxBuffer || stderrSize > maxBuffer) {
+          const exceeded = stdoutSize > maxBuffer ? stdoutSize : stderrSize;
+          requestKill(`maxBuffer exceeded (${maxBuffer} bytes; saw ${exceeded} bytes)`);
+          return;
+        }
         if (stdoutSize !== lastStdoutSize || stderrSize !== lastStderrSize) {
           lastStdoutSize = stdoutSize;
           lastStderrSize = stderrSize;
@@ -287,8 +338,6 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       settled = true;
       readSideChannelOutput();
       cleanup();
-      stdoutBytes = Buffer.byteLength(stdout, 'utf8');
-      stderrBytes = Buffer.byteLength(stderr, 'utf8');
       if (stdoutBytes > maxBuffer || stderrBytes > maxBuffer) {
         const exceeded = stdoutBytes > maxBuffer ? stdoutBytes : stderrBytes;
         const err = new Error(`Command failed: maxBuffer exceeded (${maxBuffer} bytes; saw ${exceeded} bytes)`);

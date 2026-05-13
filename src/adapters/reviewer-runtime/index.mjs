@@ -48,8 +48,13 @@ async function recoverReviewerRunRecords({
   ttlMs = 24 * 60 * 60 * 1000,
 } = {}) {
   const pruned = pruneReviewerRunRecords(rootDir, { now, ttlMs });
-  if (pruned > 0) {
-    log.log?.(`[watcher] reviewer_runtime_pruned_records count=${pruned}`);
+  const prunedTotal = typeof pruned === 'number' ? pruned : pruned.total;
+  if (prunedTotal > 0) {
+    const records = typeof pruned === 'number' ? pruned : pruned.records;
+    const orphanSideChannelFiles = typeof pruned === 'number' ? 0 : pruned.orphanSideChannelFiles;
+    log.log?.(
+      `[watcher] reviewer_runtime_pruned records=${records} orphan_side_channel_files=${orphanSideChannelFiles} total=${prunedTotal}`
+    );
   }
   const activeRecords = readRecoverableReviewerRunRecords(rootDir);
   let recovered = 0;
@@ -69,7 +74,7 @@ async function recoverReviewerRunRecords({
       `[watcher] reviewer_runtime_reattach session=${record.sessionUuid} runtime=${record.runtime} result=${result.failureClass || 'ok'}`
     );
   }
-  return { recovered, pruned };
+  return { recovered, pruned: prunedTotal };
 }
 
 export {

@@ -132,7 +132,23 @@ function readRecoverableReviewerRunRecords(rootDir) {
 }
 
 function removeReviewerRunRecord(rootDir, sessionUuid) {
+  // Removes ONLY the .json state record. Side-channel `.stdout`/`.stderr`
+  // forensics are preserved so post-incident triage can read what the
+  // reviewer actually wrote. Callers that ALSO want to drop side channels
+  // (e.g., `pruneReviewerRunRecords` past TTL) should use
+  // `removeReviewerRunArtifacts` instead.
   rmSync(reviewerRunStatePath(rootDir, sessionUuid), { force: true });
+}
+
+function removeReviewerRunArtifacts(rootDir, sessionUuid) {
+  // Removes the .json record AND both side-channel files. Use for TTL-driven
+  // pruning where forensic retention isn't intended; do NOT use as a casual
+  // "delete by sessionUuid" because the .stdout/.stderr are the only on-disk
+  // record of what the reviewer wrote.
+  const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
+  removeReviewerRunRecord(rootDir, sessionUuid);
+  rmSync(stdoutPath, { force: true });
+  rmSync(stderrPath, { force: true });
 }
 
 function pruneReviewerRunRecords(rootDir, {
@@ -140,10 +156,11 @@ function pruneReviewerRunRecords(rootDir, {
   ttlMs = 24 * 60 * 60 * 1000,
 } = {}) {
   const dir = reviewerRunStateDir(rootDir);
-  if (!existsSync(dir)) return 0;
+  if (!existsSync(dir)) return { records: 0, orphanSideChannelFiles: 0, total: 0 };
   const cutoff = now.getTime() - ttlMs;
-  if (!Number.isFinite(cutoff)) return 0;
-  let pruned = 0;
+  if (!Number.isFinite(cutoff)) return { records: 0, orphanSideChannelFiles: 0, total: 0 };
+  let records = 0;
+  let orphanSideChannelFiles = 0;
   for (const name of readdirSync(dir)) {
     if (!name.endsWith('.json')) continue;
     try {
@@ -151,14 +168,21 @@ function pruneReviewerRunRecords(rootDir, {
       if (ACTIVE_RUN_STATES.has(record.state)) continue;
       const ageAnchor = Date.parse(record.lastHeartbeatAt || record.spawnedAt || '');
       if (!Number.isFinite(ageAnchor) || ageAnchor > cutoff) continue;
-      removeReviewerRunRecord(rootDir, record.sessionUuid);
-      pruned += 1;
+      removeReviewerRunArtifacts(rootDir, record.sessionUuid);
+      records += 1;
     } catch {
       // Corrupt records are ignored here; startup recovery should stay
       // best-effort and avoid deleting files it could not parse.
     }
   }
-  return pruned;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.stdout') && !name.endsWith('.stderr')) continue;
+    const sessionUuid = name.replace(/\.(stdout|stderr)$/, '');
+    if (!sessionUuid || existsSync(join(dir, `${sessionUuid}.json`))) continue;
+    rmSync(join(dir, name), { force: true });
+    orphanSideChannelFiles += 1;
+  }
+  return { records, orphanSideChannelFiles, total: records + orphanSideChannelFiles };
 }
 
 export {
@@ -169,6 +193,7 @@ export {
   readActiveReviewerRunRecords,
   readRecoverableReviewerRunRecords,
   readReviewerRunRecord,
+  removeReviewerRunArtifacts,
   removeReviewerRunRecord,
   reviewerRunSideChannelPaths,
   reviewerRunStatePath,

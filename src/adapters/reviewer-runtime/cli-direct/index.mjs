@@ -1,8 +1,18 @@
-import { readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
+
+const execFileAsync = promisify(execFile);
+
+// Tolerance for matching a process's `ps lstart` (per-second resolution)
+// against the reviewer record's spawnedAt (millisecond resolution). 5s gives
+// the system slop without admitting unrelated processes that happened to
+// start near the reviewer.
+const PGID_IDENTITY_TOLERANCE_MS = 5_000;
 import {
   claimReviewerRunRecord,
   readReviewerRunRecord,
@@ -45,6 +55,43 @@ function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
     start += 1;
   }
   return buffer.subarray(start).toString('utf8');
+}
+
+function readTailFile(filePath, maxBytes = DEFAULT_TAIL_BYTES) {
+  // Mirrors the `[truncated to last N bytes]` banner in
+  // src/process-group-spawn.mjs:readTailText. Without the banner,
+  // operator triage off `daemon-bounce` failures would see a clean-looking
+  // small stderr and assume the reviewer barely ran, when in reality it
+  // logged megabytes of diagnostic that got tail-truncated. Both helpers
+  // should be unified into a shared module in a future cleanup.
+  let fd = null;
+  try {
+    const { size } = statSync(filePath);
+    if (size <= 0) return '';
+    const truncated = size > maxBytes;
+    const banner = `[truncated to last ${maxBytes} bytes]\n`;
+    if (truncated && Buffer.byteLength(banner, 'utf8') >= maxBytes) {
+      return banner.slice(0, maxBytes);
+    }
+    const payloadMaxBytes = truncated
+      ? maxBytes - Buffer.byteLength(banner, 'utf8')
+      : maxBytes;
+    const bytesToRead = Math.min(size, payloadMaxBytes);
+    const buffer = Buffer.alloc(bytesToRead);
+    fd = openSync(filePath, 'r');
+    readSync(fd, buffer, 0, bytesToRead, size - bytesToRead);
+    let start = 0;
+    while (start < buffer.length && (buffer[start] & 0xC0) === 0x80) {
+      start += 1;
+    }
+    const text = buffer.subarray(start).toString('utf8');
+    return truncated ? `${banner}${text}` : text;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return '';
+    throw err;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }
 
 function emptyResult({
@@ -177,6 +224,60 @@ function isPgidAlive(pgid, processKillImpl = process.kill) {
   }
 }
 
+/**
+ * Verify that the live PGID still represents the same process that was
+ * spawned at `expectedSpawnedAt`. Compares the kernel-reported process start
+ * time (via `ps -o lstart= -p <pgid>`) against the record's `spawnedAt`
+ * within PGID_IDENTITY_TOLERANCE_MS.
+ *
+ * Returns:
+ *   { match: true,  startedAt }   PGID is the original reviewer process
+ *   { match: false, startedAt, reason }  PGID has been recycled, or ps
+ *                                        could not resolve it, or the
+ *                                        record had no spawnedAt to compare
+ *
+ * NOT a true authentication probe — `ps lstart` is per-second resolution and
+ * an attacker controlling timing could conceivably collide. But for
+ * post-daemon-bounce PID recycling on a single host this is sound: the
+ * recycled PID would have to land on a process started within ±5s of the
+ * recorded reviewer spawn, which is improbable in practice.
+ *
+ * On any subprocess error we conservatively report match=false rather than
+ * fall through to a kill. Killing the wrong process is worse than skipping
+ * a kill we should have done — the alternative path just records the
+ * reviewer as 'failed' with `daemon-bounce` and moves on.
+ */
+async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
+  execFileImpl = execFileAsync,
+} = {}) {
+  if (!Number.isInteger(pgid) || pgid <= 0) {
+    return { match: false, reason: 'invalid pgid' };
+  }
+  if (!expectedSpawnedAt) {
+    return { match: false, reason: 'record has no spawnedAt to compare' };
+  }
+  let lstart = '';
+  try {
+    const { stdout } = await execFileImpl('ps', ['-o', 'lstart=', '-p', String(pgid)], { timeout: 5_000 });
+    lstart = String(stdout || '').trim();
+  } catch (err) {
+    return { match: false, reason: `ps probe failed: ${err?.message || err}` };
+  }
+  if (!lstart) {
+    return { match: false, reason: 'ps returned no start time (pgid may have just exited)' };
+  }
+  const actualMs = Date.parse(lstart);
+  const expectedMs = Date.parse(expectedSpawnedAt);
+  if (!Number.isFinite(actualMs) || !Number.isFinite(expectedMs)) {
+    return { match: false, reason: `unparseable timestamps actual=${lstart} expected=${expectedSpawnedAt}` };
+  }
+  const drift = Math.abs(actualMs - expectedMs);
+  if (drift <= PGID_IDENTITY_TOLERANCE_MS) {
+    return { match: true, startedAt: lstart };
+  }
+  return { match: false, startedAt: lstart, reason: `start-time drift ${drift}ms exceeds tolerance ${PGID_IDENTITY_TOLERANCE_MS}ms` };
+}
+
 async function waitForPgidExit(pgid, {
   timeoutMs,
   pollIntervalMs,
@@ -223,22 +324,21 @@ async function terminateProcessGroup(pgid, {
 
 function readSideChannelTails(rootDir, sessionUuid) {
   const { stdoutPath, stderrPath } = reviewerRunSideChannelPaths(rootDir, sessionUuid);
-  let stdout = '';
-  let stderr = '';
-  try {
-    stdout = readFileSync(stdoutPath, 'utf8');
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw err;
-  }
-  try {
-    stderr = readFileSync(stderrPath, 'utf8');
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw err;
-  }
   return {
-    stdoutTail: tailText(stdout),
-    stderrTail: tailText(stderr),
+    stdoutTail: readTailFile(stdoutPath),
+    stderrTail: readTailFile(stderrPath),
   };
+}
+
+function readSideChannelTailsBestEffort(rootDir, sessionUuid) {
+  try {
+    return readSideChannelTails(rootDir, sessionUuid);
+  } catch (err) {
+    return {
+      stdoutTail: '',
+      stderrTail: `unable to read reviewer side-channel tails: ${err?.message || err}`,
+    };
+  }
 }
 
 function createCliDirectReviewerRuntimeAdapter({
@@ -248,6 +348,7 @@ function createCliDirectReviewerRuntimeAdapter({
   preflightImpl = probeReviewerCliOAuth,
   processKillImpl = process.kill,
   sleepImpl = sleep,
+  execFileImpl = execFileAsync,
   cancelGraceMs = DEFAULT_CANCEL_GRACE_MS,
   cancelPollIntervalMs = DEFAULT_CANCEL_POLL_MS,
   reattachPollIntervalMs = DEFAULT_REATTACH_POLL_MS,
@@ -490,26 +591,32 @@ function createCliDirectReviewerRuntimeAdapter({
     const spawnedAt = normalized.spawnedAt || now();
     const pgid = Number.isInteger(normalized.pgid) ? normalized.pgid : null;
     if (normalized.sessionUuid && pgid && isPgidAlive(pgid, processKillImpl)) {
-      const completed = await waitForPgidExit(pgid, {
-        timeoutMs: resolveReviewerTimeoutMs(process.env),
-        pollIntervalMs: reattachPollIntervalMs,
-        processKillImpl,
-        sleepImpl,
-      });
-      const tails = readSideChannelTails(rootDir, normalized.sessionUuid);
-      if (completed) {
-        const completedRecord = updateReviewerRunRecord(rootDir, normalized, {
-          state: 'completed',
-          lastHeartbeatAt: now(),
-        });
-        return emptyResult({
-          ok: true,
-          spawnedAt: completedRecord.spawnedAt,
-          stdoutTail: tails.stdoutTail,
-          stderrTail: tails.stderrTail,
-          pgid,
-          reattachToken: completedRecord.reattachToken,
-        });
+      const tails = readSideChannelTailsBestEffort(rootDir, normalized.sessionUuid);
+      // Verify the live PGID's start time matches the record's spawnedAt
+      // before reaping. After a daemon bounce, macOS may have recycled the
+      // PID onto an unrelated process (a user shell, another launchd job,
+      // anything). SIGTERM/SIGKILL to that PGID would be a friendly-fire
+      // kill of bystander processes. Only kill when identity is confirmed;
+      // otherwise record as failed `daemon-bounce` without touching the
+      // live PGID.
+      const identity = await verifyPgidIdentity(pgid, normalized.spawnedAt, { execFileImpl });
+      let refusal;
+      let reaperFailure = null;
+      if (identity.match) {
+        refusal = `cli-direct reaping reviewer process group ${pgid} after daemon bounce (start-time matches spawnedAt)`;
+        try {
+          await terminateProcessGroup(pgid, {
+            processKillImpl,
+            sleepImpl,
+            graceMs: cancelGraceMs,
+            pollIntervalMs: cancelPollIntervalMs,
+          });
+        } catch (err) {
+          reaperFailure = `failed to terminate live reviewer process group ${pgid}: ${err?.message || err}`;
+        }
+      } else {
+        refusal = `cli-direct refuses to reap pgid ${pgid}: PID has been recycled, NOT killing (${identity.reason || 'identity probe failed'})`;
+        logger.log?.(`[cli-direct] ${refusal}`);
       }
       const failedRecord = updateReviewerRunRecord(rootDir, normalized, {
         state: 'failed',
@@ -518,21 +625,21 @@ function createCliDirectReviewerRuntimeAdapter({
       return emptyResult({
         ok: false,
         spawnedAt: failedRecord.spawnedAt,
-        failureClass: 'reviewer-timeout',
-        stderrTail: tails.stderrTail || `cli-direct reattach timed out waiting for reviewer process group ${pgid}`,
+        failureClass: 'daemon-bounce',
+        stderrTail: [refusal, reaperFailure, tails.stderrTail].filter(Boolean).join('\n'),
         stdoutTail: tails.stdoutTail,
         pgid,
         reattachToken: failedRecord.reattachToken,
-        error: `cli-direct reattach timed out waiting for reviewer process group ${pgid}`,
+        error: refusal,
       });
     }
+    const tails = normalized.sessionUuid ? readSideChannelTailsBestEffort(rootDir, normalized.sessionUuid) : {};
     if (normalized.sessionUuid) {
       updateReviewerRunRecord(rootDir, normalized, {
         state: 'failed',
         lastHeartbeatAt: now(),
       });
     }
-    const tails = normalized.sessionUuid ? readSideChannelTails(rootDir, normalized.sessionUuid) : {};
     return emptyResult({
       ok: false,
       spawnedAt,

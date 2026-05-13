@@ -97,6 +97,44 @@ test('maxBuffer enforces a byte ceiling for multibyte output', async () => {
   );
 });
 
+test('maxBuffer kills stdout side-channel writers before reading the full file', async () => {
+  const fixtureDir = mkdtempSync(path.join(tmpdir(), 'process-group-side-channel-'));
+  const stdoutPath = path.join(fixtureDir, 'reviewer.stdout');
+  const stderrPath = path.join(fixtureDir, 'reviewer.stderr');
+
+  try {
+    await assert.rejects(
+      () => spawnCapturedProcessGroup(
+        process.execPath,
+        [
+          '-e',
+          [
+            'const chunk = "x".repeat(4096);',
+            'setInterval(() => { process.stdout.write(chunk); }, 1);',
+            'setInterval(() => {}, 1000);',
+          ].join(''),
+        ],
+        {
+          stdoutPath,
+          stderrPath,
+          maxBuffer: 8 * 1024,
+          progressTimeout: 100,
+          killGraceMs: 100,
+        }
+      ),
+      (err) => {
+        assert.match(err.message, /maxBuffer exceeded \(8192 bytes; saw \d+ bytes\)/);
+        assert.equal(err.killed, true);
+        assert.ok(Buffer.byteLength(err.stdout || '', 'utf8') <= (8 * 1024));
+        assert.match(err.stdout || '', /^\[truncated to last 8192 bytes\]/);
+        return true;
+      }
+    );
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test('unsupported options fail loudly instead of being ignored', async () => {
   await assert.rejects(
     Promise.resolve().then(() => (

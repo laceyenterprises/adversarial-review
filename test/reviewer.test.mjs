@@ -10,10 +10,28 @@ const {
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
   queueFollowUpForPostedReview,
+  resolveCodexAuthPath,
   resolveReviewerTimeoutMs,
   spawnCodexReview,
   spawnClaude,
 } = __test__;
+
+function withEnv(overrides, fn) {
+  const previous = {};
+  for (const key of Object.keys(overrides)) {
+    previous[key] = process.env[key];
+    if (overrides[key] === undefined) delete process.env[key];
+    else process.env[key] = overrides[key];
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 function queueWithFakes(reviewText) {
   const created = [];
@@ -127,6 +145,22 @@ test('new follow-up jobs re-derive cap when the prior cap is not above the curre
     false,
     'fresh dispatch should let createFollowUpJob derive the current tier cap',
   );
+});
+
+test('Codex reviewer auth path preserves the split-user service fallback', () => {
+  withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined }, () => {
+    assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+  });
+});
+
+test('Codex reviewer auth path honors explicit env overrides before service fallback', () => {
+  withEnv({ CODEX_AUTH_PATH: '/tmp/explicit/auth.json', CODEX_HOME: '/tmp/codex-home' }, () => {
+    assert.equal(resolveCodexAuthPath(), '/tmp/explicit/auth.json');
+  });
+
+  withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: '/tmp/codex-home' }, () => {
+    assert.equal(resolveCodexAuthPath(), '/tmp/codex-home/auth.json');
+  });
 });
 
 test('parseGitHubBlobPath only accepts blob URLs for the expected repo', () => {

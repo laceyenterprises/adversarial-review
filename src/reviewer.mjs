@@ -223,11 +223,14 @@ async function spawnClaude(args, options = {}) {
 }
 
 function resolveCodexAuthPath() {
-  // CODEX_AUTH_PATH env var allows explicit override (e.g. when the running
-  // process HOME differs from the user that owns Codex auth.json — common in
-  // launchd-driven deployments where the service user is not the desktop
-  // user). Default to `$HOME/.codex/auth.json`.
-  return process.env.CODEX_AUTH_PATH || join(homedir(), '.codex', 'auth.json');
+  // CODEX_AUTH_PATH env var allows explicit override. CODEX_HOME supports
+  // local/manual runs. The final fallback preserves the deployed split-user
+  // bridge where the watcher runs as airlock but Codex OAuth belongs to placey.
+  return (
+    process.env.CODEX_AUTH_PATH ||
+    (process.env.CODEX_HOME && join(process.env.CODEX_HOME, 'auth.json')) ||
+    '/Users/placey/.codex/auth.json'
+  );
 }
 
 /**
@@ -1132,6 +1135,7 @@ const __test__ = {
   isLaunchctlSessionFailure,
   isClaudeLoggedOutStatus,
   resolveClaudeAuthProbeTimeoutMs,
+  resolveCodexAuthPath,
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
   spawnCaptured,

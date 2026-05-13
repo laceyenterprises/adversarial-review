@@ -84,7 +84,10 @@ uses PATH and per-user defaults.
     `HOOKS_TOKEN_FILE`, `GATEWAY_DELIVERY_TOKEN`, `OPENCLAW_GATEWAY_TOKEN`,
     `OPENCLAW_HOOKS_TOKEN`, `HOOKS_TOKEN`.
   - Secret root discovery: `ADV_SECRETS_ROOT`, then `LITELLM_SECRETS_ROOT`,
-    then `$HOME/.config/adversarial-review/secrets`.
+    then `$HOME/.config/adversarial-review/secrets`. If the new default token
+    file is absent, the watcher still probes the legacy
+    `/Users/airlock/agent-os/agents/clio/credentials/local` token location for
+    compatibility with deployments that have not migrated their alert secrets.
 
 ## Secret Sources
 

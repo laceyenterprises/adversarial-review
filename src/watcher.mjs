@@ -819,7 +819,15 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         subjectRefWithLinearTicket({
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
+<<<<<<< HEAD
           revisionRef: pr.head?.sha || null,
+=======
+<<<<<<< HEAD
+          revisionRef: pr.head?.sha || '',
+=======
+          revisionRef: pr.head?.sha || null,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
         }, linearTicketId),
         'finalized'
       );
@@ -831,7 +839,15 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         subjectRefWithLinearTicket({
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
+<<<<<<< HEAD
           revisionRef: pr.head?.sha || null,
+=======
+<<<<<<< HEAD
+          revisionRef: pr.head?.sha || '',
+=======
+          revisionRef: pr.head?.sha || null,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
         }, linearTicketId),
         'halted'
       );
@@ -867,9 +883,21 @@ async function handlePostedReviewRow({
       const controlSubjectRef = subjectRef || {
         domainId: 'code-pr',
         subjectExternalId: `${repoPath}#${prNumber}`,
+<<<<<<< HEAD
         revisionRef: currentRevisionRef || null,
       };
       const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
+=======
+<<<<<<< HEAD
+        revisionRef: currentRevisionRef || '',
+      };
+      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || '';
+=======
+        revisionRef: currentRevisionRef || null,
+      };
+      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
       const [operatorApproval, mergeAgentRequest] = await Promise.all([
         labelNames.includes(OPERATOR_APPROVED_LABEL)
           ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)

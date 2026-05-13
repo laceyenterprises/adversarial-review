@@ -250,22 +250,45 @@ async function postRetriggerAckComment({
     };
   }
   try {
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+    const subjectIdentity = buildCodePrSubjectIdentity({
+      repo,
+      prNumber,
+      revisionRef: revisionRef || 'unknown',
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
     const normalizedRevisionRef = requireRevisionRef(revisionRef, 'postRetriggerAckComment');
     const subjectIdentity = buildCodePrSubjectIdentity({
       repo,
       prNumber,
       revisionRef: normalizedRevisionRef,
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
     });
     const deliveryRound = Math.max(0, Number(requeueResult?.job?.remediationPlan?.currentRound || 0));
     const adapter = createGitHubPRCommentsAdapter({
       rootDir,
       execFileImpl,
       commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+      resolveGhToken: () => ({ tokenEnvName: 'GITHUB_TOKEN' }),
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
       resolveGhToken: () => ({
         tokenEnvName: 'GITHUB_TOKEN',
         fallbackTokenEnvNames: ['GH_TOKEN'],
         allowGhAuthFallback: true,
       }),
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
     });
     const receipt = await adapter.postOperatorNotice(
       {

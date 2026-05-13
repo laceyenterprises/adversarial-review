@@ -44,6 +44,11 @@ function routeSubject(subject) {
   };
 }
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 function extractLinearTicketId(title) {
   const match = String(title || '').match(/\b(LAC-\d+)\b/i);
   return match ? match[1].toUpperCase() : null;
@@ -65,6 +70,10 @@ function routePR(prTitle, subject = null) {
   };
 }
 
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 export {
   extractLinearTicketId,
   ROUTE_BY_BUILDER_CLASS,

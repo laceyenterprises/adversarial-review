@@ -1043,7 +1043,15 @@ async function main() {
     await linearTriage.recordReviewCompleted({
       domainId: 'code-pr',
       subjectExternalId: `${repo}#${prNumber}`,
+<<<<<<< HEAD
       revisionRef: reviewerHeadSha || null,
+=======
+<<<<<<< HEAD
+      revisionRef: '',
+=======
+      revisionRef: reviewerHeadSha || null,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
       linearTicketId,
     }, {
       critical,

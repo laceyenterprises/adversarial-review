@@ -7,6 +7,45 @@
  * @typedef {import('../../../kernel/contracts.d.ts').TriageStatus} TriageStatus
  */
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+import { builderClassFromTitle } from '../../subject/github-pr/title-tagging.mjs';
+import { normalizeBuilderClass, routeSubject } from '../../subject/github-pr/routing.mjs';
+
+const DEFAULT_CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
+
+function extractLinearTicketId(title) {
+  const match = String(title || '').match(/\b(LAC-\d+)\b/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+function routePR(prTitle, subject = null) {
+  const builderClass = normalizeBuilderClass(
+    subject?.builderClass || builderClassFromTitle(prTitle)
+  );
+  if (!builderClass) return null;
+  const route = routeSubject({ builderClass });
+  if (!route) return null;
+  return {
+    builderClass,
+    tag: route.tag,
+    reviewerModel: route.reviewerModel,
+    botTokenEnv: route.botTokenEnv,
+    linearTicketId: extractLinearTicketId(prTitle),
+  };
+}
+
+function resolveLinearTicketId(subjectRef) {
+  return (
+    subjectRef?.linearTicketId
+    || subjectRef?.linearTicket
+    || subjectRef?.triageRef
+    || subjectRef?.ticketId
+    || null
+  );
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 import {
   extractLinearTicketId,
   routePR,
@@ -30,11 +69,22 @@ function resolveLinearTicketId(subjectRef) {
 
 async function defaultLinearClientProvider() {
   if (!process.env.LINEAR_API_KEY) return null;
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+  const { LinearClient } = await import('@linear/sdk');
+  return new LinearClient({ apiKey: process.env.LINEAR_API_KEY });
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
   if (!defaultLinearClientProvider.clientPromise) {
     defaultLinearClientProvider.clientPromise = import('@linear/sdk')
       .then(({ LinearClient }) => new LinearClient({ apiKey: process.env.LINEAR_API_KEY }));
   }
   return defaultLinearClientProvider.clientPromise;
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 }
 
 function normalizeStatusName(status, stateNames) {
@@ -93,7 +143,15 @@ async function setLinearState({
     }
 
     await linear.updateIssue(issue.id, { stateId: targetState.id });
+<<<<<<< HEAD
     logger.log?.(`[linear-triage] Linear ${ticketId} -> "${targetState.name}"`);
+=======
+<<<<<<< HEAD
+    logger.log?.(`[linear-triage] Linear ${ticketId} -> "${targetStateName}"`);
+=======
+    logger.log?.(`[linear-triage] Linear ${ticketId} -> "${targetState.name}"`);
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
   } catch (err) {
     logger.error?.(
       `[linear-triage] Linear update failed for ${ticketId} (-> ${targetStateNames[0]}):`,

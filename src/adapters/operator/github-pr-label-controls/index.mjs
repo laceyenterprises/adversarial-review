@@ -9,7 +9,14 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { fetchLatestLabelEvent } from '../../../github-label-events.mjs';
+<<<<<<< HEAD
 import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
+=======
+<<<<<<< HEAD
+=======
+import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +45,24 @@ function normalizeEventId(event) {
   return event?.id || event?.nodeId || null;
 }
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+function parseSubjectExternalId(subjectExternalId) {
+  const raw = String(subjectExternalId || '').trim();
+  const match = /^([^#/]+\/[^#/]+)#(\d+)$/.exec(raw);
+  if (!match) {
+    throw new TypeError(`Invalid GitHub PR subjectExternalId: ${subjectExternalId}`);
+  }
+  return {
+    repo: match[1],
+    prNumber: Number(match[2]),
+  };
+}
+
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 function legacyLabelEventFromControlResult(result, label) {
   if (!result?.applied) return null;
   return {

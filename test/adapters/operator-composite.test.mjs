@@ -3,6 +3,19 @@ import assert from 'node:assert/strict';
 
 import { createCompositeOperatorSurface } from '../../src/adapters/operator/index.mjs';
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+test('composite operator surface exposes controls and triage sync methods', () => {
+  const surface = createCompositeOperatorSurface({
+    controls: {
+      fetchLatestLabelEventImpl: async () => null,
+      execFileImpl: async () => ({ stdout: '{}' }),
+    },
+    triage: {
+      linearClientProvider: async () => null,
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 test('composite operator surface forwards controls and triage calls through the right adapters', async () => {
   const labelCalls = [];
   const linearCalls = [];
@@ -41,10 +54,26 @@ test('composite operator surface forwards controls and triage calls through the 
           linearCalls.push({ type: 'createComment', payload });
         },
       }),
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
       logger: {},
     },
   });
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+  assert.equal(typeof surface.observeOverrides, 'function');
+  assert.equal(typeof surface.observeOperatorApproved, 'function');
+  assert.equal(typeof surface.observeMergeAgentOverride, 'function');
+  assert.equal(typeof surface.syncTriageStatus, 'function');
+  assert.equal(typeof surface.recordReviewerEngagement, 'function');
+  assert.equal(typeof surface.recordReviewCompleted, 'function');
+  assert.equal(typeof surface.routePR, 'function');
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
   const subjectRef = {
     domainId: 'code-pr',
     subjectExternalId: 'laceyenterprises/adversarial-review#486',
@@ -76,4 +105,8 @@ test('composite operator surface forwards controls and triage calls through the 
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
     linearTicketId: 'LAC-486',
   });
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 });

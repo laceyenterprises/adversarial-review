@@ -11,9 +11,18 @@
  */
 
 import { execFile } from 'node:child_process';
+<<<<<<< HEAD
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
+=======
+<<<<<<< HEAD
+=======
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 import { promisify } from 'node:util';
 
 import {
@@ -22,15 +31,31 @@ import {
   openReviewStateDb,
 } from '../../../review-state.mjs';
 import { CODE_PR_DOMAIN_ID } from '../../../identity-shapes.mjs';
+<<<<<<< HEAD
 import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
+=======
+<<<<<<< HEAD
+=======
+import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 import { parseCommentUrlFromStdout, resolveCommentBotTokenEnv } from './pr-comments.mjs';
 import { redactPublicSafeText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
 const COMMENT_DELIVERIES_SCHEMA_VERSION = 1;
+<<<<<<< HEAD
 const COMMENT_DELIVERY_CLAIM_STALE_MS = 5 * 60 * 1000;
 const COMMENT_DELIVERY_CLAIM_WAIT_MS = 35_000;
 const COMMENT_DELIVERY_CLAIM_POLL_MS = 200;
+=======
+<<<<<<< HEAD
+=======
+const COMMENT_DELIVERY_CLAIM_STALE_MS = 5 * 60 * 1000;
+const COMMENT_DELIVERY_CLAIM_WAIT_MS = 35_000;
+const COMMENT_DELIVERY_CLAIM_POLL_MS = 200;
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 
 function splitRepo(repoPath) {
   const [owner, repo] = String(repoPath || '').split('/');
@@ -40,6 +65,24 @@ function splitRepo(repoPath) {
   return { owner, repo };
 }
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+function parseSubjectExternalId(subjectExternalId) {
+  const raw = String(subjectExternalId || '').trim();
+  const match = /^([^#/]+\/[^#/]+)#(\d+)$/.exec(raw);
+  if (!match) {
+    throw new TypeError(`Invalid GitHub PR subjectExternalId: ${subjectExternalId}`);
+  }
+  return {
+    repo: match[1],
+    prNumber: Number(match[2]),
+  };
+}
+
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 function isoString(value) {
   if (value instanceof Date) return value.toISOString();
   return String(value || new Date().toISOString());
@@ -149,6 +192,17 @@ function legacyRowToDeliveryRecord(row, key) {
   };
 }
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+function buildAllowlistedGhEnv(env, token) {
+  return {
+    PATH: env?.PATH ?? '/usr/bin:/bin',
+    HOME: env?.HOME ?? '',
+    GH_TOKEN: token,
+  };
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 function buildAllowlistedGhEnv(env, {
   token = null,
   allowGhAuthFallback = false,
@@ -170,6 +224,10 @@ function buildAllowlistedGhEnv(env, {
     allowlisted.GITHUB_TOKEN = env.GITHUB_TOKEN;
   }
   return allowlisted;
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 }
 
 function resolveGhCommentAuth({
@@ -182,6 +240,18 @@ function resolveGhCommentAuth({
   const explicit = typeof resolveGhToken === 'function'
     ? resolveGhToken({ key, event })
     : null;
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+  const tokenEnvName = explicit?.tokenEnvName
+    || resolveCommentBotTokenEnv(explicit?.workerClass || workerClass);
+  if (!tokenEnvName) {
+    throw new Error(`No gh token routing configured for ${key.kind} delivery`);
+  }
+  const token = explicit?.token || env?.[tokenEnvName];
+  if (!token) {
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
   const fallbackTokenEnvNames = Array.isArray(explicit?.fallbackTokenEnvNames)
     ? explicit.fallbackTokenEnvNames.filter(Boolean)
     : [];
@@ -204,10 +274,23 @@ function resolveGhCommentAuth({
     || fallbackTokenEnvNames.map((name) => env?.[name]).find(Boolean)
     || null;
   if (!token && !allowGhAuthFallback) {
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
     throw new Error(`${tokenEnvName} not set in env`);
   }
   return {
     tokenEnvName,
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+    env: buildAllowlistedGhEnv(env, token),
+  };
+}
+
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
     env: buildAllowlistedGhEnv(env, { token, allowGhAuthFallback }),
   };
 }
@@ -274,6 +357,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 function insertDeliveryRecord(db, {
   key,
   deliveryExternalId,
@@ -436,6 +523,56 @@ function createGitHubPRCommentsAdapter({
   }
 
   async function postWithDedupe({ key, body, event = null }) {
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+    const existing = await lookupExistingDeliveries(key);
+    const deliveredExisting = existing.find((record) => record.delivered);
+    if (deliveredExisting) {
+      return {
+        key,
+        deliveryExternalId: deliveredExisting.deliveryExternalId,
+        deliveredAt: deliveredExisting.deliveredAt,
+      };
+    }
+
+    const attemptedAt = isoString(now());
+    let db = null;
+    try {
+      const posted = await postRawComment({ key, body, event });
+      const deliveredAt = isoString(now());
+      db = openDeliveryDb(rootDir);
+      if (db) {
+        insertDeliveryRecord(db, {
+          key,
+          deliveryExternalId: posted.deliveryExternalId,
+          attemptedAt,
+          deliveredAt,
+          delivered: true,
+        });
+      }
+      return {
+        key,
+        deliveryExternalId: posted.deliveryExternalId,
+        deliveredAt,
+      };
+    } catch (err) {
+      db = openDeliveryDb(rootDir);
+      if (db) {
+        insertDeliveryRecord(db, {
+          key,
+          deliveryExternalId: null,
+          attemptedAt,
+          deliveredAt: null,
+          delivered: false,
+          failureReason: err?.message || String(err),
+        });
+      }
+      throw err;
+    } finally {
+      db?.close();
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
     const deadline = Date.now() + COMMENT_DELIVERY_CLAIM_WAIT_MS;
 
     while (true) {
@@ -514,6 +651,10 @@ function createGitHubPRCommentsAdapter({
           releaseCommentDeliveryClaim(rootDir, key);
         }
       }
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
     }
   }
 

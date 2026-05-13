@@ -103,6 +103,11 @@ test('adapter dedupe suppresses a second post for the same typed key', async () 
   assert.equal(readDeliveries(rootDir).length, 1);
 });
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 test('adapter claim lock suppresses concurrent duplicate posts for the same typed key', async () => {
   const rootDir = makeRootDir();
   const calls = [];
@@ -135,6 +140,10 @@ test('adapter claim lock suppresses concurrent duplicate posts for the same type
   assert.equal(readDeliveries(rootDir).length, 1);
 });
 
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 test('adapter dedupe suppresses a legacy hit only when it matches the same head', async () => {
   const rootDir = makeRootDir();
   const db = openReviewStateDb(rootDir);
@@ -511,6 +520,10 @@ test('adapter gh fallback honors ambient GH_TOKEN when operator notices allow fa
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].options.env.GH_TOKEN, 'operator-fallback-token');
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 });
 
 test('adapter remediation-reply path fails closed until wired to the hardened renderer', async () => {

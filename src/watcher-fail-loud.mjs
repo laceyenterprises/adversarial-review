@@ -2,6 +2,12 @@ import { buildMalformedTitleFailureComment } from './watcher-title-guardrails.mj
 import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-comments/index.mjs';
 import { buildDeliveryKey } from './identity-shapes.mjs';
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+async function signalMalformedTitleFailure(octokit, { repoPath, owner, repo, prNumber, prTitle, revisionRef = 'unknown', rootDir = null }) {
+=======
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
 function requireRevisionRef(revisionRef, context) {
   const normalized = String(revisionRef || '').trim();
   if (!normalized) {
@@ -12,6 +18,10 @@ function requireRevisionRef(revisionRef, context) {
 
 async function signalMalformedTitleFailure(octokit, { repoPath, owner, repo, prNumber, prTitle, revisionRef, rootDir = null }) {
   const normalizedRevisionRef = requireRevisionRef(revisionRef, 'signalMalformedTitleFailure');
+<<<<<<< HEAD
+=======
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
   const structuredFailure = {
     repo: repoPath,
     prNumber,
@@ -24,7 +34,15 @@ async function signalMalformedTitleFailure(octokit, { repoPath, owner, repo, prN
   const deliveryKey = buildDeliveryKey({
     repo: repoPath,
     prNumber,
+<<<<<<< HEAD
     revisionRef: normalizedRevisionRef,
+=======
+<<<<<<< HEAD
+    revisionRef,
+=======
+    revisionRef: normalizedRevisionRef,
+>>>>>>> 986782eb62007568c81e2e2b6f40d86a55492f85
+>>>>>>> 1fc0304a213929e5aba65ec63b39fbf38a0d62aa
     round: 0,
     kind: 'operator-notice',
     noticeRef: 'malformed-title',

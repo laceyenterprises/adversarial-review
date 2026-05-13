@@ -1,6 +1,15 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  constants as fsConstants,
+  accessSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -16,6 +25,7 @@ const execFileAsync = promisify(execFile);
 
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
+const DEFAULT_HQ_PATH = 'hq';
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
 // "I approve merging this current PR head now; do not wait for the
@@ -38,6 +48,97 @@ const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPEC
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+// Detect whether agent-os (the host OS that provides the `hq` worker-pool
+// CLI + the merge-agent adapter) is present on this machine. The
+// follow-up-merge-agent dispatch path is the only flow in adversarial-review
+// that requires agent-os; everything else (watcher, reviewer, remediation)
+// works standalone. So when agent-os is missing — OSS installs, fresh
+// clones, CI sandboxes — we cleanly skip the merge-agent dispatch instead
+// of blowing up on an ENOENT from `hq`.
+//
+// Detection order:
+//   1. Explicit operator opt-out via `ADV_REVIEW_MERGE_AGENT_DISABLED=1`
+//      (lets the operator force OSS mode even on a machine that has hq).
+//   2. Explicit operator opt-in via `ADV_REVIEW_MERGE_AGENT_AGENT_OS=1`
+//      (escape hatch for environments where detection misfires).
+//   3. Explicit `hqPath` argument, when it is not the default `'hq'`.
+//   4. `HQ_BIN` env var points to an existing file.
+//   5. `hqPath` (defaults to `'hq'`) resolves on PATH.
+// We resolve PATH in-process instead of spawning hq itself because hq can be
+// slow to cold-start and we run this on every watcher tick.
+function isExecutableFile(candidatePath, {
+  fsImpl = { accessSync, existsSync, statSync },
+} = {}) {
+  if (!candidatePath) return false;
+  const stat = fsImpl.statSync;
+  if (typeof stat === 'function') {
+    try {
+      if (!stat(candidatePath).isFile()) return false;
+    } catch {
+      return false;
+    }
+  }
+  if (typeof fsImpl.accessSync === 'function') {
+    try {
+      fsImpl.accessSync(candidatePath, fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return Boolean(fsImpl.existsSync?.(candidatePath));
+}
+
+function resolveExecutableOnPath(command, {
+  env = process.env,
+  fsImpl = { accessSync, existsSync, statSync },
+} = {}) {
+  const trimmed = String(command ?? '').trim();
+  if (!trimmed) return null;
+  if (trimmed.includes('/') || trimmed.includes('\\')) {
+    return isExecutableFile(trimmed, { fsImpl }) ? trimmed : null;
+  }
+  const pathEntries = String(env.PATH ?? '').split(delimiter);
+  for (const entry of pathEntries) {
+    if (!entry) continue;
+    const candidate = join(entry, trimmed);
+    if (isExecutableFile(candidate, { fsImpl })) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function detectAgentOsPresence({
+  env = process.env,
+  hqPath = DEFAULT_HQ_PATH,
+  fsImpl = { accessSync, existsSync, statSync },
+} = {}) {
+  if (String(env.ADV_REVIEW_MERGE_AGENT_DISABLED ?? '').trim() === '1') {
+    return { present: false, source: 'operator-disabled' };
+  }
+  if (String(env.ADV_REVIEW_MERGE_AGENT_AGENT_OS ?? '').trim() === '1') {
+    return { present: true, source: 'operator-enabled' };
+  }
+  const trimmedHqPath = String(hqPath ?? '').trim();
+  if (trimmedHqPath && trimmedHqPath !== DEFAULT_HQ_PATH) {
+    const resolved = resolveExecutableOnPath(trimmedHqPath, { env, fsImpl });
+    if (resolved) {
+      return { present: true, source: 'arg:hqPath', path: resolved };
+    }
+    return { present: false, source: 'not-found' };
+  }
+  const hqBin = String(env.HQ_BIN ?? '').trim();
+  if (hqBin && isExecutableFile(hqBin, { fsImpl })) {
+    return { present: true, source: 'env:HQ_BIN', path: hqBin };
+  }
+  const resolved = resolveExecutableOnPath(trimmedHqPath || DEFAULT_HQ_PATH, { env, fsImpl });
+  if (resolved) {
+    return { present: true, source: 'path', path: resolved };
+  }
+  return { present: false, source: 'not-found' };
 }
 
 function resolveMergeAgentParentSession(env = process.env) {
@@ -117,6 +218,10 @@ function mergeAgentDispatchDir(rootDir) {
   return join(getFollowUpJobDir(rootDir, 'pending'), '..', 'merge-agent-dispatches');
 }
 
+function mergeAgentSkippedDispatchDir(rootDir) {
+  return join(getFollowUpJobDir(rootDir, 'pending'), '..', 'merge-agent-skips');
+}
+
 function mergeAgentPromptDir(rootDir) {
   return join(getFollowUpJobDir(rootDir, 'pending'), '..', 'merge-agent-prompts');
 }
@@ -134,8 +239,35 @@ function mergeAgentDispatchFilePath(rootDir, job) {
   );
 }
 
+function mergeAgentSkippedDispatchFilePath(rootDir, job) {
+  const safeRepo = sanitizeDispatchPathSegment(String(job?.repo ?? '').replace(/\//g, '__'));
+  const safeSha = sanitizeDispatchPathSegment(String(job?.headSha || 'no-sha'));
+  return join(
+    mergeAgentSkippedDispatchDir(rootDir),
+    `${safeRepo}-pr-${Number(job?.prNumber)}-${safeSha}.json`
+  );
+}
+
 function listMergeAgentDispatches(rootDir) {
   const dir = mergeAgentDispatchDir(rootDir);
+  try {
+    return readdirSync(dir)
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => {
+        try {
+          return JSON.parse(readFileSync(join(dir, name), 'utf8'));
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function listMergeAgentSkippedDispatches(rootDir) {
+  const dir = mergeAgentSkippedDispatchDir(rootDir);
   try {
     return readdirSync(dir)
       .filter((name) => name.endsWith('.json'))
@@ -337,8 +469,18 @@ function pickNormalMergeAgentDispatchDetail({
   const remediationMaxRounds = Number(job?.remediationMaxRounds);
   if (!Number.isFinite(remediationCurrentRound) || !Number.isFinite(remediationMaxRounds) || remediationMaxRounds <= 0) {
     return { decision: 'skip-remediation-state-unknown', trigger: null };
-  } else if (remediationCurrentRound < remediationMaxRounds) {
-    // More remediation rounds available — let the loop continue.
+  } else if (remediationCurrentRound < remediationMaxRounds && normalizedVerdict === 'request-changes') {
+    // request-changes verdict with budget left → let the remediation
+    // loop continue. Merge-agent racing an in-flight remediation cycle
+    // would either fight the remediation worker or merge a state the
+    // reviewer asked to change.
+    //
+    // For a comment-only verdict we DO NOT wait for the round cap to
+    // exhaust. Clean verdict = nothing to remediate = the pipeline has
+    // reached its natural end and merge-agent should pick up now.
+    // Previously this gate fired regardless of verdict, which forced
+    // unnecessary review passes when round 1 was already clean and
+    // contributed to PR #90's stuck state.
     return { decision: 'skip-remediation-claimable', trigger: null };
   }
 
@@ -456,6 +598,35 @@ function recordMergeAgentDispatch(rootDir, job, {
     dispatchId,
     launchRequestId,
     prompt,
+  };
+  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
+  return filePath;
+}
+
+function recordMergeAgentSkippedDispatch(rootDir, job, {
+  skippedAt = isoNow(),
+  decision,
+  trigger = null,
+  agentOsState = null,
+  labelRemoval = null,
+} = {}) {
+  const dir = mergeAgentSkippedDispatchDir(rootDir);
+  mkdirSync(dir, { recursive: true });
+  const filePath = mergeAgentSkippedDispatchFilePath(rootDir, job);
+  const doc = {
+    schemaVersion: MERGE_AGENT_DISPATCH_SCHEMA_VERSION,
+    repo: job.repo,
+    prNumber: Number(job.prNumber),
+    branch: job.branch,
+    baseBranch: job.baseBranch,
+    headSha: job.headSha || null,
+    operatorApproval: job.operatorApproval || null,
+    mergeAgentRequest: job.mergeAgentRequest || null,
+    trigger,
+    labelRemoval,
+    skippedAt,
+    decision,
+    agentOsDetectionSource: agentOsState?.source || null,
   };
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   return filePath;
@@ -614,10 +785,11 @@ async function dispatchMergeAgentForPR({
   execFileImpl = execFileAsync,
   ghExecFileImpl = execFileAsync,
   now = isoNow(),
-  hqPath = 'hq',
-  parentSession = resolveMergeAgentParentSession(),
-  hqProject = resolveMergeAgentProject(),
+  hqPath = DEFAULT_HQ_PATH,
+  agentOsDetectImpl = detectAgentOsPresence,
+  env = process.env,
 } = {}) {
+  const runtimeEnv = { ...process.env, ...env };
   const job = {
     repo,
     prNumber,
@@ -686,6 +858,42 @@ async function dispatchMergeAgentForPR({
     return { decision };
   }
 
+  // OSS guard. If agent-os (hq + merge-agent adapter) is not present on
+  // this host, skip only brand-new merge-agent launches. Existing dispatch
+  // records still flow through the idempotent label-reconciliation path
+  // above, so consumed trigger labels keep converging after a host mode
+  // change or temporary hq outage.
+  const agentOsState = agentOsDetectImpl({ env: runtimeEnv, hqPath });
+  if (!agentOsState.present) {
+    const labelRemoval = await removeConsumedTriggerLabel({
+      repo,
+      prNumber,
+      labels,
+      trigger,
+      ghExecFileImpl,
+      now,
+    });
+    const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
+      skippedAt: now,
+      decision: 'skip-no-agent-os',
+      trigger,
+      agentOsState,
+      labelRemoval: labelRemoval.labelRemovalAttempt || null,
+    });
+    return {
+      decision: 'skip-no-agent-os',
+      agentOsDetectionSource: agentOsState.source,
+      trigger,
+      skippedRecordPath,
+      operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
+      mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
+      labelRemovalErrors: labelRemoval.labelRemovalErrors,
+    };
+  }
+  const resolvedHqPath = agentOsState.path || hqPath;
+  const parentSession = resolveMergeAgentParentSession(runtimeEnv);
+  const hqProject = resolveMergeAgentProject(runtimeEnv);
+
   const prompt = buildMergeAgentPrompt(job);
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
 
@@ -700,7 +908,10 @@ async function dispatchMergeAgentForPR({
     '--project', hqProject,
     '--prompt', promptPath,
   ];
-  const { stdout } = await execFileImpl(hqPath, args, { maxBuffer: 5 * 1024 * 1024 });
+  const { stdout } = await execFileImpl(resolvedHqPath, args, {
+    env: runtimeEnv,
+    maxBuffer: 5 * 1024 * 1024,
+  });
   const parsed = parseMergeAgentDispatchOutput(stdout);
 
   recordMergeAgentDispatch(rootDir, job, {
@@ -816,6 +1027,7 @@ export {
   buildMergeAgentPrompt,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
+  detectAgentOsPresence,
   dispatchMergeAgentForPR,
   extractOperatorNotes,
   extractReviewVerdict,
@@ -824,6 +1036,7 @@ export {
   isScopedOperatorApproval,
   isScopedMergeAgentRequest,
   listMergeAgentDispatches,
+  listMergeAgentSkippedDispatches,
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,

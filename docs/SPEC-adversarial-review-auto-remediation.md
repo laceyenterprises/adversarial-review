@@ -106,17 +106,12 @@ The pipeline closes the loop on a PR by handing it to a merge-agent once the adv
 
 ### Dispatch trigger
 
-`src/follow-up-merge-agent.mjs::pickMergeAgentDispatchDetail` dispatches the merge-agent for an open PR when **all** of the following hold:
+`src/follow-up-merge-agent.mjs::pickMergeAgentDispatchDetail` evaluates dispatch in layers instead of applying one universal gate matrix to every trigger:
 
-1. `prState === 'open'` and `merged === false`.
-2. No `do-not-merge`, `merge-agent-skip`, or `merge-agent-stuck` label is present.
-3. The PR's GitHub state is `mergeable === 'MERGEABLE'`.
-4. The latest checks rollup is `SUCCESS` (or `null` for diff shapes with no checks).
-5. The latest follow-up job is NOT `pending` or `in-progress` — no active remediation worker is racing.
-6. **And one of:**
-   - The latest verdict normalizes to `comment-only` (clean), OR
-   - The latest verdict normalizes to `request-changes` AND the round budget is exhausted AND `operator-approved` is scoped to the current head SHA, OR
-   - `merge-agent-requested` is scoped to the current head SHA and the operator has explicitly asked for a merge-agent pass.
+1. **Universal hard gates:** every dispatch path first requires `prState === 'open'` and `merged === false`, and refuses dispatch when `do-not-merge`, `merge-agent-skip`, or `merge-agent-stuck` is present. Duplicate dispatches for the same `(repo, prNumber, headSha)` are also blocked.
+2. **`operator-approved` override:** a scoped `operator-approved` label is checked before the active-remediation gate. It can bypass review-verdict and remediation-round state for the current head, including a `request-changes` verdict or in-flight remediation, but it still requires `mergeable === 'MERGEABLE'` and a checks rollup of `SUCCESS`. Unknown, pending, or failed checks still block this path.
+3. **Normal verdict path:** without a live override label, the latest follow-up job must NOT be `pending` or `in-progress`. A clean `comment-only` verdict dispatches immediately. A `request-changes` verdict dispatches only when the remediation budget is exhausted; if more rounds are claimable, the merge-agent waits for remediation instead of racing it.
+4. **`merge-agent-requested` override:** a scoped `merge-agent-requested` label is the explicit "run the merge-agent now" escape hatch. It still respects the universal hard gates and the active-remediation guard, but it can bypass mergeability, checks, verdict parsing, and remediation-round exhaustion so the merge-agent can rebase or clean the branch on demand.
 
 A clean (`comment-only`) verdict triggers the merge-agent immediately on the first review pass that returns clean — the dispatch path does NOT wait for the round budget to exhaust. Waiting for the budget cap on a clean verdict was the gate that left PR #90 stuck in May 2026 burning unused remediation rounds with nothing to remediate. Rounds-available remains a gate for `request-changes` verdicts so the merge-agent does not race an in-flight remediation cycle.
 
@@ -140,8 +135,8 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 
 ### Trigger labels
 
-- `operator-approved` — operator override for a `request-changes` verdict. Scoped to the current head SHA via `buildScopedOperatorApproval`. Consumed (removed from the PR) after a successful dispatch.
-- `merge-agent-requested` — explicit operator request to fire a merge-agent pass even when the standard gate would skip. Scoped to the current head SHA via `buildScopedMergeAgentRequest`. Consumed after a successful dispatch.
+- `operator-approved` — scoped operator override for the current head SHA. It bypasses review/remediation-state gates, including an active remediation job, but does NOT bypass open-PR, hard-skip, mergeability, or green-check requirements. Consumed (removed from the PR) after a successful dispatch.
+- `merge-agent-requested` — explicit scoped request to fire a merge-agent pass for the current head SHA even when the standard verdict gate would skip. It still respects open-PR, hard-skip, active-remediation, and duplicate-dispatch guards, but it can bypass mergeability, checks, verdict parsing, and remediation-round exhaustion. Consumed after a successful dispatch.
 - `merge-agent-skip`, `merge-agent-stuck`, `do-not-merge` — hard skips that even an operator-approved label does not bypass.
 
 ### Dispatch state

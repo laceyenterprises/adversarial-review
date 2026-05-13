@@ -70,25 +70,73 @@ function buildSafeFenceWidth(content) {
 // Wrap a single sanitized string in a code fence. We use `text` as
 // the language hint — that disables syntax highlighting AND ensures
 // the renderer treats the inside as literal characters (no
-// `@mentions`, no autolinks, no GFM extensions).
+// `@mentions`, no autolinks, no GFM extensions). Reserve this for
+// content that is genuinely code-shaped (multi-line command output,
+// stack traces) — for plain prose, use `defangUntrustedMarkdown`
+// instead so the comment renders cleanly.
 function fenceUntrustedText(text) {
   const fence = '`'.repeat(buildSafeFenceWidth(text));
   return `${fence}text\n${text}\n${fence}`;
 }
 
+// Backslash-escape every character GitHub Flavored Markdown treats as
+// syntax so a worker-supplied prose string renders as literal text —
+// no `@mentions`, no autolinks, no headings, no task lists, no images,
+// no inline HTML — while still reading as prose (no fenced-code-block
+// visual noise). Used for the Summary, Validation, and per-finding
+// fields where the content is descriptive English, not code output.
+//
+// Neutralized (backslash-escape):
+//   * _ ` ~      emphasis / strikethrough
+//   # >          headings / blockquote at line start (also defensive
+//                inside lines; GFM is lenient about whitespace around #)
+//   [ ] ( )      links / images / footnote refs (! prefix handled too)
+//   < >          raw HTML, angle-bracket autolinks
+//   |            table cell separators
+//   !            image / alert-style admonitions at line start
+//   \            literal backslash (escaped FIRST so we don't double-
+//                escape the escapes we are about to introduce)
+//
+// Neutralized (special):
+//   @user        a U+200B (zero-width space) is inserted between `@`
+//                and the next char so GitHub's mention autolinker
+//                stops matching. Backslash-escape does NOT suppress
+//                GitHub mentions — the mention scanner runs
+//                independently of the markdown parser.
+//   #123         GitHub issue/PR autolinking runs independently of
+//                markdown. ZWSP after `#` when followed by digits
+//                breaks the autolinker.
+//
+// NOT neutralized:
+//   Bare URLs    GFM auto-links http(s):// URLs. Considered acceptable
+//                because the URL is visible and not hidden under
+//                display text. If you need to block bare-URL
+//                autolinking, do that at the redactor.
+function defangUntrustedMarkdown(text) {
+  const raw = String(text ?? '');
+  if (!raw) return '';
+  return raw
+    .replace(/\\/g, '\\\\')
+    .replace(/[*_`~#>[\]()<>|!]/g, (m) => `\\${m}`)
+    .replace(/@(?=[A-Za-z0-9_-])/g, '@​')
+    .replace(/(\\#)(?=\d)/g, '$1​');
+}
+
 // Render a worker-supplied bullet list with redaction + caps + markdown
-// neutralization. Each item lives inside its own fenced code block so
-// that worker-injected `@org/team` mentions, autolinks, and raw HTML
-// stay inert. Empty (after filtering) → returns the placeholder text.
+// neutralization. Each item is a single-line bullet whose untrusted
+// content has been defanged (markdown-meta chars backslash-escaped,
+// @mentions ZWSP-broken) — so worker-injected mentions, autolinks,
+// and raw HTML stay inert while the list reads as normal prose.
+// Empty (after filtering) → returns the placeholder text.
 function formatRedactedBulletList(items, emptyText = '_(none reported)_') {
   const safe = redactBulletList(items, {
     perItemLimit: BULLET_LIST_PER_ITEM_MAX_CHARS,
     maxItems: BULLET_LIST_MAX_ITEMS,
   });
   if (!safe.length) return emptyText;
-  // Use a sub-list with each item rendered as a fenced inline-style
-  // block so list structure remains visible but content is inert.
-  return safe.map((s) => `- ${fenceUntrustedText(s)}`).join('\n\n');
+  return safe
+    .map((s) => `- ${defangUntrustedMarkdown(s.replace(/\s*\n\s*/g, ' ').trim())}`)
+    .join('\n');
 }
 
 // Caps on the per-entry rendered output. Files line is generous enough
@@ -161,10 +209,22 @@ function sanitizePerFindingText(text) {
 // Render a fenced text block at `indentLevel` spaces of indent so the
 // fenced content nests under a markdown list item. The fence width
 // auto-grows to outrun any backtick run inside the content (same
-// guarantee as fenceUntrustedText).
+// guarantee as fenceUntrustedText). Kept available for callers that
+// genuinely need block-fenced rendering; the per-finding renderers
+// now use `indentedDefangedText` for clean prose under list items.
 function indentedFencedText(text, indentLevel = 3) {
   const prefix = ' '.repeat(indentLevel);
   return indentBlock(fenceUntrustedText(text), prefix);
+}
+
+// Render a paragraph of defanged prose at `indentLevel` spaces of
+// indent so it nests cleanly under a markdown list item. Each line of
+// the input is prefixed; blank lines stay blank (no trailing
+// whitespace). Used for the per-finding finding/action/reasoning
+// fields under the addressed/pushback/blockers numbered lists.
+function indentedDefangedText(text, indentLevel = 3) {
+  const prefix = ' '.repeat(indentLevel);
+  return indentBlock(defangUntrustedMarkdown(text), prefix);
 }
 
 // Render the worker's per-finding accountability list. Each entry of
@@ -221,11 +281,11 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
       const lines = [
         `${index + 1}. **${entry.title}**`,
         '',
-        indentedFencedText(entry.finding),
+        indentedDefangedText(entry.finding),
         '',
         '   **Action**',
         '',
-        indentedFencedText(entry.action),
+        indentedDefangedText(entry.action),
       ];
       if (entry.files.length) {
         let filesLine = `   **Files:** ${entry.files.join(', ')}`;
@@ -270,11 +330,11 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
       return [
         `${index + 1}. **${entry.title}**`,
         '',
-        indentedFencedText(entry.finding),
+        indentedDefangedText(entry.finding),
         '',
         '   **Reasoning**',
         '',
-        indentedFencedText(entry.reasoning),
+        indentedDefangedText(entry.reasoning),
       ].join('\n');
     })
     .join('\n\n');
@@ -327,19 +387,19 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
       const lines = [
         `${index + 1}. **${entry.title}**`,
         '',
-        indentedFencedText(entry.finding),
+        indentedDefangedText(entry.finding),
       ];
       if (entry.reasoning) {
         lines.push('');
         lines.push('   **Reasoning**');
         lines.push('');
-        lines.push(indentedFencedText(entry.reasoning));
+        lines.push(indentedDefangedText(entry.reasoning));
       }
       if (entry.needsHumanInput) {
         lines.push('');
         lines.push('   **Needs human input**');
         lines.push('');
-        lines.push(indentedFencedText(entry.needsHumanInput));
+        lines.push(indentedDefangedText(entry.needsHumanInput));
       }
       return lines.join('\n');
     })
@@ -350,15 +410,15 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
 // Summary section). Redacts sensitive substrings (tokens AND
 // host-local filesystem paths — workers run inside a checked-out
 // workspace and can echo `/Users/<operator>/...` from a log line into
-// `summary`), caps length, then wraps in a fenced code block so any
-// markdown the worker tried to inject (mentions, autolinks, headings,
-// task lists, HTML) renders as plaintext. Redaction is not
-// sanitization — markdown injection from an untrusted source is a
-// separate concern.
+// `summary`), caps length, then defangs markdown so any syntax the
+// worker tried to inject (mentions, autolinks, headings, task lists,
+// HTML) renders as literal characters. The output is normal-looking
+// prose, not a fenced code block; see `defangUntrustedMarkdown` for
+// the exact neutralization rules.
 function sanitizeFreeText(text, limit) {
   const redacted = redactPublicSafeText(String(text ?? '').trim(), limit);
   if (!redacted) return '';
-  return fenceUntrustedText(redacted);
+  return defangUntrustedMarkdown(redacted);
 }
 
 // Sanitize a free-text field for use INLINE (the rereview status
@@ -887,7 +947,9 @@ export {
   REMEDIATION_COMMENT_MARKER_PREFIX,
   buildRemediationOutcomeCommentBody,
   buildRemediationOutcomeCommentMarker,
+  defangUntrustedMarkdown,
   extractRemediationCommentMarker,
+  fenceUntrustedText,
   findExistingRemediationComment,
   parseCommentUrlFromStdout,
   postRemediationOutcomeComment,

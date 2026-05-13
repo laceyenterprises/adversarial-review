@@ -6,6 +6,7 @@ import {
   WORKER_CLASS_TO_BOT_TOKEN_ENV,
   buildRemediationOutcomeCommentBody,
   buildRemediationOutcomeCommentMarker,
+  defangUntrustedMarkdown,
   extractRemediationCommentMarker,
   findExistingRemediationComment,
   postRemediationOutcomeComment,
@@ -26,6 +27,48 @@ function makeJob(overrides = {}) {
     ...overrides,
   };
 }
+
+// ── defangUntrustedMarkdown unit tests ───────────────────────────────────
+// Direct coverage of the markdown-defang helper. The rendered-output
+// integration tests above exercise it through buildRemediationOutcomeCommentBody;
+// these tests pin the exact transform so the rules stay deterministic.
+
+test('defangUntrustedMarkdown returns empty string for nullish input', () => {
+  assert.equal(defangUntrustedMarkdown(null), '');
+  assert.equal(defangUntrustedMarkdown(undefined), '');
+  assert.equal(defangUntrustedMarkdown(''), '');
+});
+
+test('defangUntrustedMarkdown escapes markdown syntax chars', () => {
+  assert.equal(
+    defangUntrustedMarkdown('*bold* _ital_ `code` ~strike~ # h1 > q | t [a](b) <c> !d'),
+    '\\*bold\\* \\_ital\\_ \\`code\\` \\~strike\\~ \\# h1 \\> q \\| t \\[a\\]\\(b\\) \\<c\\> \\!d'
+  );
+});
+
+test('defangUntrustedMarkdown breaks @mention autolinking with ZWSP', () => {
+  // ZWSP between @ and the next char prevents GitHub's mention autolinker
+  // from matching while staying visually invisible.
+  const out = defangUntrustedMarkdown('cc @paul-lacey and @laceyenterprises/security');
+  assert.match(out, /@​paul-lacey/);
+  assert.match(out, /@​laceyenterprises\/security/);
+  // No raw @user (with no ZWSP) anywhere — otherwise the autolinker fires.
+  assert.doesNotMatch(out, /(?<!@​)@paul-lacey/);
+});
+
+test('defangUntrustedMarkdown does not escape ordinary alphanumerics or whitespace', () => {
+  assert.equal(
+    defangUntrustedMarkdown('Read prompt at path/to/file.md and patched it.'),
+    'Read prompt at path/to/file.md and patched it.'
+  );
+});
+
+test('defangUntrustedMarkdown escapes backslashes first so nothing double-escapes', () => {
+  // Input `\*` should not become `\\\*` (over-escaped) or `\*` (under-).
+  // Correct: the backslash is escaped (`\\`), the asterisk is escaped (`\*`),
+  // producing `\\\*` in source — which renders as `\*` in GFM (literal).
+  assert.equal(defangUntrustedMarkdown('\\*not-bold\\*'), '\\\\\\*not-bold\\\\\\*');
+});
 
 test('resolveCommentBotTokenEnv maps known worker classes to their bot env vars', () => {
   assert.equal(resolveCommentBotTokenEnv('codex'), 'GH_CODEX_REVIEWER_TOKEN');
@@ -51,6 +94,61 @@ test('WORKER_CLASS_TO_BOT_TOKEN_ENV covers every known remediation worker class'
   }
 });
 
+test('buildRemediationOutcomeCommentBody produces clean prose (no fenced code blocks around descriptive fields)', () => {
+  // Snapshot of the operator-facing output shape. This is the canonical
+  // demonstration that prose fields render as readable prose, not as
+  // walls of ```text fences. If this snapshot is intentionally updated,
+  // confirm the change in a rendered preview of a real PR comment
+  // (paste into https://github.com/ and view) before landing.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex', reviewerModel: 'claude' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'Restored alert-token compatibility for legacy deployments and documented the fallback contract.',
+      validation: [
+        'git fetch origin && git rebase origin/main completed cleanly before remediation.',
+        'npm test passed: 882 passed, 1 skipped.',
+      ],
+      addressed: [
+        {
+          title: 'Legacy alert token fallback removed',
+          finding: 'resolveDefaultHooksTokenFile stopped probing the historical secrets path.',
+          action: 'Restored the legacy token-file probe when the new default token file is absent.',
+          files: ['src/alert-delivery.mjs'],
+        },
+      ],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'fix verified locally' },
+  });
+
+  // No ```text fences anywhere in the rendered body — the defang
+  // approach replaced them with backslash-escaped prose.
+  assert.doesNotMatch(body, /```text/);
+  // Summary section is a plain paragraph, not a fenced block.
+  assert.match(
+    body,
+    /\*\*Summary\*\*\n\nRestored alert-token compatibility for legacy deployments and documented the fallback contract\./
+  );
+  // Validation list is one defanged bullet per item, no nested fences.
+  assert.match(body, /\*\*Validation run\*\*\n\n- git fetch origin && git rebase origin\/main completed cleanly/);
+  assert.match(body, /^- npm test passed: 882 passed, 1 skipped\.$/m);
+  // Addressed entries render with bold labels OUTSIDE and defanged prose
+  // INLINE under the numbered item — no fences.
+  assert.match(body, /1\. \*\*Legacy alert token fallback removed\*\*/);
+  assert.match(
+    body,
+    /resolveDefaultHooksTokenFile stopped probing the historical secrets path\./
+  );
+  assert.match(
+    body,
+    /\*\*Action\*\*\n\n   Restored the legacy token-file probe when the new default token file is absent\./
+  );
+  assert.match(body, /\*\*Files:\*\* `src\/alert-delivery\.mjs`/);
+});
+
 test('buildRemediationOutcomeCommentBody on completed includes summary, validation, and re-review queued', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'claude-code',
@@ -67,11 +165,13 @@ test('buildRemediationOutcomeCommentBody on completed includes summary, validati
   });
   assert.match(body, /Remediation Worker \(claude-code\) — round 2 of 6/);
   assert.match(body, /Outcome:.*completed.*re-review queued/);
-  // Worker-supplied summary/validation/blockers are now fenced (`text)
-  // so injected markdown / mentions / autolinks are inert.
+  // Worker-supplied summary/validation/blockers are defanged (markdown
+  // meta chars backslash-escaped, @mentions ZWSP-broken) so injected
+  // markdown / mentions / autolinks render as literal text — no fenced
+  // code blocks, just clean prose.
   assert.match(body, /Tightened null handling in the API layer/);
-  assert.match(body, /```text\nnpm test\n```/);
-  assert.match(body, /```text\nmanual smoke of \/v1\/users\n```/);
+  assert.match(body, /^- npm test$/m);
+  assert.match(body, /^- manual smoke of \/v1\/users$/m);
   // rereview.reason is rendered inline-safe (backtick-wrapped) so a
   // worker can't smuggle a mention or autolink into the status line.
   assert.match(body, /Re-review status:\*\*\s*queued — `Want adversarial confirmation\.`/);
@@ -363,7 +463,11 @@ test('worker summary masks absolute /Users/<user>/ paths', () => {
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
   assert.doesNotMatch(body, /\/Users\/airlock/);
-  assert.match(body, /<path-redacted>\/bar\.js:42/);
+  // Defanging escapes the `<>` in the redactor's placeholder so it renders
+  // as literal `<path-redacted>` regardless of how GFM treats raw `<word>`
+  // patterns. Source-form is `\<path-redacted\>`, rendered output is
+  // `<path-redacted>`.
+  assert.match(body, /\\<path-redacted\\>\/bar\.js:42/);
 });
 
 test('worker validation entries mask absolute paths', () => {
@@ -380,7 +484,7 @@ test('worker validation entries mask absolute paths', () => {
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
   assert.doesNotMatch(body, /\/Users\/airlock\/agent-os/);
-  assert.match(body, /<path-redacted>\/adversarial-review/);
+  assert.match(body, /\\<path-redacted\\>\/adversarial-review/);
 });
 
 test('worker blockers mask /private/var/folders/ temp paths', () => {
@@ -402,7 +506,7 @@ test('worker blockers mask /private/var/folders/ temp paths', () => {
     reReview: { requested: false },
   });
   assert.doesNotMatch(body, /\/private\/var\/folders/);
-  assert.match(body, /<path-redacted>\/data\.json/);
+  assert.match(body, /\\<path-redacted\\>\/data\.json/);
 });
 
 test('reReview.reason masks absolute paths in the inline status line', () => {
@@ -441,9 +545,12 @@ test('buildRemediationOutcomeCommentBody redacts tokens in the worker summary', 
   assert.doesNotMatch(body, /sk-test_abcdef1234567/);
   assert.doesNotMatch(body, /ghp_aaaabbbbccccdddd1234/);
   assert.doesNotMatch(body, /api_key=ZZZZZZZZZ/i);
-  assert.match(body, /\[REDACTED_OPENAI_TOKEN\]/);
-  assert.match(body, /\[REDACTED_GITHUB_TOKEN\]/);
-  assert.match(body, /api_key=\[REDACTED\]/);
+  // Block-context defang escapes the placeholder's `[`, `]`, and `_`
+  // so the source markdown has `\[REDACTED\_OPENAI\_TOKEN\]`. GFM
+  // renders that as literal `[REDACTED_OPENAI_TOKEN]` to the reader.
+  assert.match(body, /\\\[REDACTED\\_OPENAI\\_TOKEN\\\]/);
+  assert.match(body, /\\\[REDACTED\\_GITHUB\\_TOKEN\\\]/);
+  assert.match(body, /api\\_key=\\\[REDACTED\\\]/);
 });
 
 test('buildRemediationOutcomeCommentBody redacts tokens in validation and blockers entries', () => {
@@ -466,8 +573,8 @@ test('buildRemediationOutcomeCommentBody redacts tokens in validation and blocke
   });
   assert.doesNotMatch(body, /eyJhbGciOiJIUzI1NiJ9\.payload\.sig/);
   assert.doesNotMatch(body, /sk-ant-test_xxxxxxxxxxxxxxxxxxxx/);
-  assert.match(body, /Bearer \[REDACTED\]/);
-  assert.match(body, /\[REDACTED_ANTHROPIC_TOKEN\]/);
+  assert.match(body, /Bearer \\\[REDACTED\\\]/);
+  assert.match(body, /\\\[REDACTED\\_ANTHROPIC\\_TOKEN\\\]/);
 });
 
 test('buildRemediationOutcomeCommentBody caps a runaway summary at the configured length', () => {
@@ -495,12 +602,11 @@ test('buildRemediationOutcomeCommentBody caps the validation/blockers list size'
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
   // Cap is 25 entries; step-25 onwards must be truncated. Each entry
-  // is rendered as a fenced bullet so the literal step text appears
-  // inside `text` blocks.
-  assert.match(body, /```text\nstep-0\n```/);
-  assert.match(body, /```text\nstep-24\n```/);
-  assert.doesNotMatch(body, /```text\nstep-25\n```/);
-  assert.doesNotMatch(body, /```text\nstep-100\n```/);
+  // is rendered as a defanged plain bullet (one line per item).
+  assert.match(body, /^- step-0$/m);
+  assert.match(body, /^- step-24$/m);
+  assert.doesNotMatch(body, /^- step-25$/m);
+  assert.doesNotMatch(body, /^- step-100$/m);
 });
 
 test('buildRemediationOutcomeCommentBody redacts tokens in the rereview reason', () => {
@@ -525,7 +631,7 @@ test('buildRemediationOutcomeCommentBody redacts tokens in the rereview reason',
 
 // ── Markdown injection mitigations ────────────────────────────────────────
 
-test('worker @mentions inside summary do not render as live mentions (rendered inside fenced code block)', () => {
+test('worker @mentions inside summary do not render as live mentions (defanged with ZWSP)', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'completed',
@@ -538,14 +644,19 @@ test('worker @mentions inside summary do not render as live mentions (rendered i
     },
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
-  // The worker's literal text must be present (so the operator still
-  // sees what the worker tried to say) but inside a fenced block, so
-  // GitHub renders it as plaintext rather than firing notifications.
-  assert.match(body, /```text\nPinging @paul-lacey and @laceyenterprises\/security to follow up\.\n```/);
-  assert.match(body, /```text\nran @ci\/tests\n```/);
+  // Every `@` followed by [A-Za-z0-9_-] must have a U+200B (ZWSP)
+  // inserted after it so GitHub's mention autolinker stops matching.
+  // The literal text is preserved so the operator can still read what
+  // the worker tried to say.
+  assert.match(body, /Pinging @​paul-lacey and @​laceyenterprises\/security to follow up\./);
+  assert.match(body, /^- ran @​ci\/tests$/m);
+  // No raw `@user` (without ZWSP) anywhere in the rendered body —
+  // otherwise the autolinker would fire.
+  assert.doesNotMatch(body, /(?<![@​])@paul-lacey/);
+  assert.doesNotMatch(body, /(?<![@​])@laceyenterprises/);
 });
 
-test('worker injection of headings or task lists is inert (rendered inside fenced code block)', () => {
+test('worker injection of headings or task lists is inert (defanged with backslash-escape)', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'completed',
@@ -558,16 +669,25 @@ test('worker injection of headings or task lists is inert (rendered inside fence
     },
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
-  // Heading / list / HTML stays inert because it's inside the fence.
-  assert.match(body, /```text\n# Hijacked H1 heading\n- \[x\] Forged task item\n<img src=x onerror=alert\(1\)>\n```/);
-  assert.match(body, /```text\n## not actually a heading\n```/);
+  // Heading `#`, task-list `[ ]`, raw HTML `<` `>`, and the leading
+  // bullet `-` are all backslash-escaped so GFM renders them as literal
+  // characters. ZWSP after `\#` ensures GitHub's issue/PR autolinker
+  // does not fire on `#123`-shaped content (defense-in-depth even
+  // though "Hijacked" isn't a digit).
+  assert.match(body, /\\# Hijacked H1 heading/);
+  assert.match(body, /\\\[x\\\] Forged task item/);
+  assert.match(body, /\\<img src=x onerror=alert\\\(1\\\)\\>/);
+  assert.match(body, /^- \\#\\# not actually a heading$/m);
+  // No raw heading markers at start of line.
+  assert.doesNotMatch(body, /^# Hijacked H1 heading$/m);
+  assert.doesNotMatch(body, /^## not actually a heading$/m);
 });
 
-test('worker text containing backticks does not break out of the fence (auto-grown fence width)', () => {
-  // A worker that drops a "```" run inside its summary would terminate
-  // a 3-backtick fence early and re-enable rendering of subsequent
-  // content. The fence width must auto-grow to be longer than any
-  // backtick run in the content.
+test('worker text containing backticks does not render as inline code (defanged)', () => {
+  // A worker that drops a "```" run inside its summary previously had
+  // to be protected by a fenced block with auto-grown width. With the
+  // new defang behavior, each backtick is backslash-escaped to a
+  // literal backtick, so injected fences can never re-enable rendering.
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'completed',
@@ -580,9 +700,10 @@ test('worker text containing backticks does not break out of the fence (auto-gro
     },
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
-  // Fence must be at least 4 backticks (one more than the longest run
-  // inside the content).
-  assert.match(body, /````text\nRun ```bash\necho hi\n``` to see output\n````/);
+  // Every backtick is escaped — there is no run of three consecutive
+  // unescaped backticks in the body.
+  assert.doesNotMatch(body, /[^\\]```/);
+  assert.match(body, /Run \\`\\`\\`bash\necho hi\n\\`\\`\\` to see output/);
 });
 
 test('rereview.reason with worker-injected mention is wrapped inline-safe (no live mention)', () => {
@@ -687,7 +808,7 @@ test('summary redacts /Users/<user>/... paths echoed by the worker', () => {
   assert.doesNotMatch(body, /\/Users\/airlock/);
   assert.doesNotMatch(body, /agent-os\/tools\/adversarial-review/);
   // Basename survives so an operator can still recognize what was referenced.
-  assert.match(body, /<path-redacted>\/prompt\.md/);
+  assert.match(body, /\\<path-redacted\\>\/prompt\.md/);
 });
 
 test('validation entries redact /private/var/folders/... temp paths', () => {
@@ -706,7 +827,7 @@ test('validation entries redact /private/var/folders/... temp paths', () => {
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
   assert.doesNotMatch(body, /\/private\/var\/folders/);
-  assert.match(body, /<path-redacted>\/artifact\.json/);
+  assert.match(body, /\\<path-redacted\\>\/artifact\.json/);
 });
 
 test('blockers entries redact /home/<user>/... paths (Linux operator path)', () => {
@@ -730,7 +851,7 @@ test('blockers entries redact /home/<user>/... paths (Linux operator path)', () 
     },
   });
   assert.doesNotMatch(body, /\/home\/runner/);
-  assert.match(body, /<path-redacted>\/reviews\.db/);
+  assert.match(body, /\\<path-redacted\\>\/reviews\.db/);
 });
 
 test('reReview.reason redacts host-local paths inline (in the status line)', () => {
@@ -1107,7 +1228,8 @@ test('buildRemediationOutcomeCommentBody leaves redaction expansion room for per
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'redaction margin' },
   });
 
-  assert.match(body, /\[REDACTED_OPENAI_TOKEN\] tail/);
+  // Block-context defang escapes the placeholder's `[`, `]`, and `_`.
+  assert.match(body, /\\\[REDACTED\\_OPENAI\\_TOKEN\\\] tail/);
 });
 
 test('buildRemediationOutcomeCommentBody omits malformed per-finding sections instead of posting empty buckets', () => {
@@ -1412,12 +1534,14 @@ test('buildRemediationOutcomeCommentBody salvages worker response on invalid-rem
   // Soft human-intervention message — not the "did not produce a
   // usable remediation reply" line, since we DID recover content.
   assert.match(body, /failed strict schema validation.*recovered below/);
-  // Salvaged sections render below the failure header.
+  // Salvaged sections render below the failure header. Block-context
+  // defang escapes `_within_word` so `opened_at` appears in source as
+  // `opened\_at` and renders to the operator as `opened_at`.
   assert.match(body, /\*\*Summary\*\*/);
-  assert.match(body, /Preserved opened_at, made events idempotent/);
+  assert.match(body, /Preserved opened\\_at, made events idempotent/);
   assert.match(body, /\*\*Addressed findings\*\*/);
   assert.match(body, /1\. \*\*Turn attempts openedat preservation\*\*/);
-  assert.match(body, /turn_attempts upsert overwrites opened_at on partial updates\./);
+  assert.match(body, /turn\\_attempts upsert overwrites opened\\_at on partial updates\./);
   assert.match(body, /\*\*Files:\*\* `platform\/session-ledger\/src\/session_ledger\/db\.py`/);
 });
 

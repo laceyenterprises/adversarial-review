@@ -369,7 +369,13 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' for findings that genuinely cannot fit in this PR (multi-PR'
       + ' scope, conflicts with PR intent). Refuse to merge if any'
       + ' blocker-class finding remains (data corruption, secret leakage,'
-      + ' security regression, broken external contract).'
+      + ' security regression, broken external contract). For non-empty'
+      + ' `blockers_observed`, the refusal receipt/log summary must include'
+      + ' only the blocker count plus normalized blocker kinds. Keep detailed'
+      + ' blocker payloads exclusively in the workspace-local'
+      + ' `.adversarial-follow-up/followups-reply.json` artifact; never copy'
+      + ' blocker summaries, reasoning, quoted secrets, or sample payloads'
+      + ' into PR comments, stdout/stderr summaries, or merge receipts.'
     );
     lines.push(
       '2. Only proceed to rebase + merge after the triage step returns'
@@ -378,9 +384,13 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' `addressed`, force-push the updated head and exit'
       + ' `awaiting-rereview` so a fresh adversarial review pass evaluates'
       + ' the new changes before any merge. A non-empty'
-      + ' `suggestions_unable_to_apply` result must also exit'
-      + ' `awaiting-rereview` so the next review pass can evaluate the punt.'
-      + ' A non-empty `blockers_observed` result must hard-refuse the merge.'
+      + ' `suggestions_unable_to_apply` result may only ride that'
+      + ' `awaiting-rereview` path when triage also made and force-pushed'
+      + ' code/config edits, creating a new head SHA for review. If'
+      + ' `suggestions_unable_to_apply` is non-empty and triage made no'
+      + ' code/config edit, hard-refuse with `merge-rejected` / operator'
+      + ' handoff instead of requesting a same-head rereview. A non-empty'
+      + ' `blockers_observed` result must hard-refuse the merge.'
     );
     lines.push(
       '3. Treat this dispatch the same way you would treat an'

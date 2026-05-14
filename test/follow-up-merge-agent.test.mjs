@@ -6,17 +6,13 @@ import path from 'node:path';
 
 import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
 import {
-  FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
-  FINAL_PASS_ON_REQUEST_CHANGES_ENV,
   buildMergeAgentDispatchJob,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
-  isFinalPassOnRequestChangesEnabled,
   listMergeAgentDispatches,
   listMergeAgentSkippedDispatches,
   pickMergeAgentDispatch,
-  pickMergeAgentDispatchDetail,
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
@@ -85,109 +81,6 @@ test('pickMergeAgentDispatch blocks markdown-decorated Request changes verdicts'
     lastVerdict: '**Request changes** - operator review required.',
   }));
   assert.equal(decision, 'skip-request-changes');
-});
-
-test('pickMergeAgentDispatchDetail still skips Request changes when final-pass flag is off (default)', () => {
-  const detail = pickMergeAgentDispatchDetail(makeJob({
-    lastVerdict: 'Request changes',
-  }), {
-    recentDispatches: [],
-    finalPassOnRequestChangesEnabled: false,
-  });
-  assert.equal(detail.decision, 'skip-request-changes');
-  assert.equal(detail.trigger, null);
-});
-
-test('pickMergeAgentDispatchDetail dispatches with final-pass trigger when budget exhausted, verdict is Request changes, and flag is on', () => {
-  const detail = pickMergeAgentDispatchDetail(makeJob({
-    lastVerdict: 'Request changes',
-    // Default job has remediationCurrentRound:1, remediationMaxRounds:1
-    // (budget exhausted).
-  }), {
-    recentDispatches: [],
-    finalPassOnRequestChangesEnabled: true,
-  });
-  assert.equal(detail.decision, 'dispatch');
-  assert.equal(detail.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
-});
-
-test('pickMergeAgentDispatchDetail still skips Request changes when budget is NOT exhausted, even with final-pass flag on', () => {
-  // remediation can still progress → defer to the remediation loop instead
-  // of fighting it with merge-agent. This preserves the existing
-  // skip-remediation-claimable gate.
-  const detail = pickMergeAgentDispatchDetail(makeJob({
-    lastVerdict: 'Request changes',
-    remediationCurrentRound: 1,
-    remediationMaxRounds: 3,
-  }), {
-    recentDispatches: [],
-    finalPassOnRequestChangesEnabled: true,
-  });
-  assert.equal(detail.decision, 'skip-remediation-claimable');
-  assert.equal(detail.trigger, null);
-});
-
-test('pickMergeAgentDispatchDetail does NOT override operator-skip labels with final-pass flag', () => {
-  // Hard skip labels must still win, even with the flag on. This guards
-  // against the flag accidentally bypassing do-not-merge.
-  const detail = pickMergeAgentDispatchDetail(makeJob({
-    lastVerdict: 'Request changes',
-    labels: [{ name: 'do-not-merge' }],
-  }), {
-    recentDispatches: [],
-    finalPassOnRequestChangesEnabled: true,
-  });
-  assert.equal(detail.decision, 'skip-operator-skip');
-  assert.equal(detail.trigger, null);
-});
-
-test('pickMergeAgentDispatchDetail does NOT override failed checks with final-pass flag', () => {
-  // CI is a hard gate independent of the convergence loop.
-  const detail = pickMergeAgentDispatchDetail(makeJob({
-    lastVerdict: 'Request changes',
-    checksConclusion: 'FAILURE',
-  }), {
-    recentDispatches: [],
-    finalPassOnRequestChangesEnabled: true,
-  });
-  assert.equal(detail.decision, 'skip-checks-failed');
-  assert.equal(detail.trigger, null);
-});
-
-test('pickMergeAgentDispatchDetail does NOT override non-mergeable state with final-pass flag', () => {
-  const detail = pickMergeAgentDispatchDetail(makeJob({
-    lastVerdict: 'Request changes',
-    mergeable: 'CONFLICTING',
-  }), {
-    recentDispatches: [],
-    finalPassOnRequestChangesEnabled: true,
-  });
-  assert.equal(detail.decision, 'skip-not-mergeable');
-  assert.equal(detail.trigger, null);
-});
-
-test('isFinalPassOnRequestChangesEnabled reads the env flag', () => {
-  assert.equal(isFinalPassOnRequestChangesEnabled({ env: {} }), false);
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0' } }),
-    false,
-  );
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1' } }),
-    true,
-  );
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'true' } }),
-    true,
-  );
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'YES' } }),
-    true,
-  );
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'maybe' } }),
-    false,
-  );
 });
 
 test('pickMergeAgentDispatch fails closed on missing verdicts', () => {

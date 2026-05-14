@@ -1,0 +1,14 @@
+title = "adversarial-review gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deliberate fake JWT-shaped Bearer token fixture for PR-comment redaction tests"
+condition = "AND"
+paths = [
+  '''^test/pr-comments\.test\.mjs$''',
+]
+regexes = [
+  '''eyJhbGciOiJIUzI1NiJ9\.payload\.sig''',
+]

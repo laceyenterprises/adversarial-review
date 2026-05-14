@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+# Upstream default for laceyenterprises/adversarial-review. Fork operators
+# should replace these URLs with fork-local advisory, discussion, and
+# contribution endpoints before enabling GitHub Issues/Discussions.
+contact_links:
+  - name: 🔒 Security vulnerability
+    url: https://github.com/laceyenterprises/adversarial-review/security/advisories/new
+    about: Upstream security intake for laceyenterprises/adversarial-review. Fork operators should replace this with their own private reporting path. Do NOT file a public issue.
+  - name: 💬 Question or discussion
+    url: https://github.com/laceyenterprises/adversarial-review/discussions
+    about: Upstream discussions for laceyenterprises/adversarial-review. Fork operators should replace this with their own support/discussion channel.
+  - name: 📘 Read CONTRIBUTING.md first
+    url: https://github.com/laceyenterprises/adversarial-review/blob/main/CONTRIBUTING.md
+    about: Upstream contribution guide. Forks should point this at their fork-local contribution policy if it differs.

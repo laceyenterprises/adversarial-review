@@ -1,0 +1,77 @@
+# Dependabot configuration for adversarial-review.
+#
+# Two ecosystems are tracked:
+#
+#   1. npm        — runtime dependencies in package.json.
+#   2. github-actions — actions referenced in .github/workflows/.
+#
+# Both ecosystems are grouped, so updates arrive as one consolidated PR
+# per ecosystem per week rather than dozens of single-bump PRs. Security
+# updates (which Dependabot ships on its own urgency cadence regardless
+# of this file) are unaffected by the grouping — they still come through
+# as individual high-priority PRs.
+
+version: 2
+
+updates:
+  # ─── runtime dependencies ─────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    versioning-strategy: increase-if-necessary
+    commit-message:
+      # Standardize commit message shape so the adversarial-review pipeline's
+      # title-prefix validator skips the PR as outside-contributor (Dependabot
+      # is treated as outside the internal worker-class taxonomy).
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    labels:
+      - dependencies
+      - npm
+    groups:
+      # Linear and Octokit are first-party SDKs — group them so we get one PR
+      # per week with both refreshed together when there's anything to bump.
+      production-sdks:
+        applies-to: version-updates
+        patterns:
+          - "@linear/sdk"
+          - "@octokit/*"
+      # Native modules and tooling get their own group so we can review the
+      # binary rebuild surface (better-sqlite3) and TS-major moves separately
+      # from the SDK group.
+      tooling:
+        applies-to: version-updates
+        patterns:
+          - "better-sqlite3"
+          - "typescript"
+
+  # ─── GitHub Actions ───────────────────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      # All actions in one PR per week. The set is small (currently
+      # actions/checkout and actions/setup-node) and they tend to ship
+      # coordinated security updates.
+      actions:
+        applies-to: version-updates
+        patterns:
+          - "*"

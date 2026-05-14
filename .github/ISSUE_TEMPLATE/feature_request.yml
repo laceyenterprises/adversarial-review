@@ -1,0 +1,70 @@
+name: Feature request
+description: Propose a new domain, adapter, or kernel extension.
+title: "[feature] "
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing something.
+
+        The safest contribution shape is to add a new **domain** through
+        a new subject adapter, comms adapter, operator surface, prompt
+        set, and `domains/<id>.json` — leaving the kernel untouched. See
+        [`CONTRIBUTING.md`](https://github.com/laceyenterprises/adversarial-review/blob/main/CONTRIBUTING.md) for the worked
+        example.
+
+        Kernel changes are welcome but should be discussed here first.
+
+  - type: dropdown
+    id: shape
+    attributes:
+      label: What shape is this proposal?
+      options:
+        - "New domain (new adapters + prompts + config)"
+        - "Extension of an existing adapter"
+        - "New reviewer-runtime adapter"
+        - "Kernel extension"
+        - "Tooling / scripts / docs"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the underlying problem?
+      description: |
+        Don't lead with the solution. What's the user-visible gap or
+        failure mode that the proposal would address?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        What would change? Which kernel contract, adapter axis, or
+        config surface is affected?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        What did you consider and reject, and why? "I just wanted to ask"
+        is a valid answer here.
+
+  - type: textarea
+    id: kernel-impact
+    attributes:
+      label: Does this require a kernel change?
+      description: |
+        If yes — and it might genuinely — explain why an adapter or
+        new domain wiring isn't sufficient. The kernel is small on
+        purpose; we want the case before touching it.

@@ -15,6 +15,9 @@ body:
         instead. See [`SECURITY.md`](https://github.com/laceyenterprises/adversarial-review/blob/main/SECURITY.md) for the
         full policy.
 
+        Fork maintainers: replace the upstream vulnerability-reporting
+        link and security contact in your fork before enabling Issues.
+
   - type: input
     id: version
     attributes:

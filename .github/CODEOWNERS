@@ -5,6 +5,12 @@
 # the branch protection rule "require review from Code Owners" is ever
 # enabled (it currently is not — see branch protection on `main`).
 #
+# This file is intentionally upstream-specific for
+# laceyenterprises/adversarial-review. Fork operators MUST replace the
+# owners below with accounts or teams that have write access in their fork
+# before enabling "require review from Code Owners"; otherwise GitHub cannot
+# request a meaningful code-owner review.
+#
 # Patterns are evaluated last-match-wins. Keep the catch-all at the top.
 
 # Catch-all — every PR notifies the maintainer.

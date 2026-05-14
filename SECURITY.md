@@ -16,6 +16,12 @@ released as new tags. There is no LTS branch.
 
 **Please do not file public GitHub issues for security reports.**
 
+This is the upstream security policy for
+`laceyenterprises/adversarial-review`. If you operate a fork or a downstream
+deployment, replace this section with your own private advisory URL and
+security contact before enabling public Issues, Discussions, or security
+intake for that fork.
+
 Use GitHub's private vulnerability reporting form for this repo:
 
 👉 **https://github.com/laceyenterprises/adversarial-review/security/advisories/new**

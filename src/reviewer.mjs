@@ -621,6 +621,7 @@ function queueFollowUpForPostedReview({
   rootDir = ROOT,
   repo,
   prNumber,
+  baseBranch = 'main',
   reviewerModel,
   builderTag = null,
   linearTicketId = null,
@@ -648,6 +649,7 @@ function queueFollowUpForPostedReview({
     rootDir,
     repo,
     prNumber,
+    baseBranch,
     reviewerModel,
     builderTag: builderTag || null,
     linearTicketId,
@@ -675,7 +677,7 @@ async function fetchPRDiff(repo, prNumber) {
 async function fetchPRContext(repo, prNumber) {
   const { stdout } = await execFileAsync(
     'gh',
-    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'body,comments,headRefOid'],
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName,body,comments,headRefOid'],
     { maxBuffer: 10 * 1024 * 1024 }
   );
   return JSON.parse(stdout);
@@ -1095,11 +1097,21 @@ async function main() {
 
   const critical = isCritical(reviewText);
   const reviewPostedAt = new Date().toISOString();
+  let baseBranch = 'main';
+  try {
+    const prContext = await fetchPRContext(repo, prNumber);
+    if (prContext?.baseRefName) {
+      baseBranch = prContext.baseRefName;
+    }
+  } catch (err) {
+    console.error(`[reviewer] WARN: failed to fetch base branch for follow-up queueing: ${err.message}`);
+  }
   try {
     const queued = queueFollowUpForPostedReview({
       rootDir: ROOT,
       repo,
       prNumber,
+      baseBranch,
       reviewerModel: effectiveModel,
       builderTag,
       linearTicketId,

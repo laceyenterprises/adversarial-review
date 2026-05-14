@@ -42,6 +42,7 @@ function queueWithFakes(reviewText) {
     rootDir: '/tmp/adversarial-review-test',
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 57,
+    baseBranch: 'release/2026.05',
     reviewerModel: 'claude',
     builderTag: '[codex]',
     linearTicketId: null,
@@ -78,6 +79,7 @@ test('clean comment-only reviews still queue a durable follow-up verdict carrier
   assert.equal(result.queued, true);
   assert.equal(created.length, 1);
   assert.equal(created[0].reviewBody.includes('Comment only'), true);
+  assert.equal(created[0].baseBranch, 'release/2026.05');
   assert.equal(Object.hasOwn(created[0], 'maxRemediationRounds'), false);
   assert.equal(created[0].priorCompletedRounds, 1);
 });

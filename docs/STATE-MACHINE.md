@@ -155,8 +155,11 @@ in-progress
   ├─ reconcile sees missing/invalid artifacts
   │    └─ failed
   │
-  ├─ reconcile sees valid rereview request
+  ├─ reconcile sees valid rereview request and contamination audit passes
   │    └─ completed
+  │
+  ├─ reconcile sees valid rereview request but contamination audit fails
+  │    └─ failed (branch-contamination)
   │
   ├─ reconcile sees no durable rereview request
   │    └─ stopped (no-progress)
@@ -217,6 +220,8 @@ If that durable flag is absent or false:
 
 That conservatism is intentional.
 
+If the flag is true, reconcile still runs the branch-contamination gate before resetting `reviews.db` back to `pending`. A contaminated branch does **not** produce a synthetic stop; it moves to durable `failed/` with `failure.code = "branch-contamination"` so operators have an audit trail and a retryable terminal record after they clean the branch.
+
 ---
 
 ## Failure/stop codes worth remembering
@@ -235,6 +240,7 @@ That conservatism is intentional.
 |---|---|
 | launch failure | checkout/auth/workspace prep problem |
 | artifact failure | missing `codex-last-message.md` or invalid `remediation-reply.json` |
+| branch-contamination | rereview audit found patch-equivalent commits already on `origin/<baseBranch>` |
 | review failure | reviewer auth/path/token/runtime issue |
 | malformed title | PR missing required creation-time tag |
 

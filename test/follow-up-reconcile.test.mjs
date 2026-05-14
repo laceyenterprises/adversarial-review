@@ -135,6 +135,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
   createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -198,7 +199,10 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
 test('reconcileFollowUpJob refuses to request rereview when the workspace is contaminated with already-merged commits', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    baseBranch: 'release/2026.05',
+  });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -240,6 +244,7 @@ test('reconcileFollowUpJob refuses to request rereview when the workspace is con
 
   const auditCalls = [];
   const requestReviewCalls = [];
+  const postCommentCalls = [];
   const reconciled = await reconcileFollowUpJob({
     rootDir,
     jobPath: spawned.jobPath,
@@ -249,6 +254,9 @@ test('reconcileFollowUpJob refuses to request rereview when the workspace is con
     requestReviewRereviewImpl: (...args) => {
       requestReviewCalls.push(args);
       return { status: 'pending', triggered: true };
+    },
+    postCommentImpl: async (args) => {
+      postCommentCalls.push(args);
     },
     auditWorkspaceForContaminationImpl: async (opts) => {
       auditCalls.push(opts);
@@ -265,7 +273,7 @@ test('reconcileFollowUpJob refuses to request rereview when the workspace is con
   // The audit ran with the right inputs.
   assert.equal(auditCalls.length, 1);
   assert.equal(auditCalls[0].workspaceDir, workspaceDir);
-  assert.equal(auditCalls[0].baseBranch, 'main');
+  assert.equal(auditCalls[0].baseBranch, 'release/2026.05');
 
   // The rereview was NOT requested — the gate refused before it fired.
   assert.equal(requestReviewCalls.length, 0);
@@ -273,8 +281,13 @@ test('reconcileFollowUpJob refuses to request rereview when the workspace is con
   // The job transitioned to failed:branch-contamination, not completed.
   assert.equal(reconciled.reconciled, true);
   assert.equal(reconciled.outcome, 'failed');
+  assert.match(reconciled.jobPath, /data\/follow-up-jobs\/failed\/.+\.json$/);
   assert.equal(reconciled.job.rereview.requested, false);
+  assert.equal(reconciled.job.remediationReply.state, 'worker-wrote-reply');
   assert.equal(reconciled.job.completionMetadata.suspectCommits.length, 2);
+  assert.equal(postCommentCalls.length, 1);
+  assert.equal(postCommentCalls[0].repo, 'laceyenterprises/clio');
+  assert.equal(postCommentCalls[0].prNumber, 7);
   assert.equal(
     reconciled.job.completionMetadata.note,
     'PR branch contains patch-equivalent copies of commits already on the base branch; refused to request rereview to avoid confusing the next reviewer pass.',

@@ -17,10 +17,10 @@ Work mode:
 ## Rebase contract — read this carefully, the wrong shape corrupts the PR
 
 Main moves while this PR is open. You DO want to rebase onto a fresh
-`origin/main` so your remediation lands on the current trunk; what you
+`origin/${BASE_BRANCH}` so your remediation lands on the current trunk; what you
 do NOT want is to push a branch whose history contains re-applied
-copies of commits that already merged on `origin/main`. A naïve
-`git rebase` against a stale or partially-fetched `origin/main` quietly
+copies of commits that already merged on `origin/${BASE_BRANCH}`. A naïve
+`git rebase` against a stale or partially-fetched `origin/${BASE_BRANCH}` quietly
 produces exactly that, and the next reviewer pass then treats those
 already-merged commits as if they were the PR's own work.
 
@@ -35,12 +35,12 @@ git -C "$PR_WORKTREE" diff --quiet HEAD || {
 
 # 2. ALWAYS fetch first. Never rebase against a cached remote-tracking
 #    ref that may be minutes (or hours) behind. The fetch must succeed.
-git -C "$PR_WORKTREE" fetch --prune origin main || exit 78
+git -C "$PR_WORKTREE" fetch --prune origin "${BASE_BRANCH}" || exit 78
 
-# 3. Rebase onto the FETCHED ref — origin/main, not local main.
+# 3. Rebase onto the FETCHED ref — origin/${BASE_BRANCH}, not local ${BASE_BRANCH}.
 #    Git's default cherry-pick detection drops commits whose patch
 #    matches an upstream commit; we rely on that behavior here.
-git -C "$PR_WORKTREE" rebase origin/main || {
+git -C "$PR_WORKTREE" rebase "origin/${BASE_BRANCH}" || {
   # Conflicts: try to resolve them in this round. If you cannot, abort
   # the rebase and record a blocker — never `git rebase --skip` your
   # way past a conflict, that drops your own work.
@@ -53,12 +53,14 @@ git -C "$PR_WORKTREE" rebase origin/main || {
 #    rebase) can leak patch-id duplicates. This audit is the safety
 #    net — refuse to push if it fires.
 suspect=$(
-  git -C "$PR_WORKTREE" log --cherry-mark --left-right --no-merges \
-    --format='%H %s' origin/main...HEAD 2>/dev/null \
-  | awk '$2=="="{print substr($0, index($0,$3))}'
+  git -C "$PR_WORKTREE" cherry "origin/${BASE_BRANCH}" HEAD 2>/dev/null \
+  | awk '$1=="-"{print $2}' \
+  | while read -r sha; do
+      git -C "$PR_WORKTREE" show -s --format=%s "$sha"
+    done
 )
 if [ -n "$suspect" ]; then
-  echo "branch-contamination: commits on HEAD are patch-equivalent to commits already on origin/main; do NOT push" >&2
+  echo "branch-contamination: commits on HEAD are patch-equivalent to commits already on origin/${BASE_BRANCH}; do NOT push" >&2
   printf '%s\n' "$suspect" >&2
   exit 78
 fi

@@ -17,6 +17,7 @@ import {
   consumeNextFollowUpJob,
   digestWorkerFinalMessage,
   installWorkerProvenanceHook,
+  auditWorkspaceForContamination,
   killDetachedWorkerProcessGroup,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
@@ -210,6 +211,19 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /"kind": "adversarial-review-remediation-reply"/);
   assert.match(prompt, /"requested": false/);
   assert.match(prompt, /Handle token refresh before retrying/);
+  assert.match(prompt, /git cherry origin\/main HEAD/);
+});
+
+test('buildRemediationPrompt uses the job base branch in the rebase and contamination audit contract', () => {
+  const prompt = buildRemediationPrompt(makeJob({
+    baseBranch: 'release/2026.05',
+  }), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+
+  assert.match(prompt, /origin\/release\/2026\.05/);
+  assert.doesNotMatch(prompt, /git rebase origin\/main/);
 });
 
 test('buildRemediationPrompt authorizes spec / governance doc updates when reviewer findings ask for them (post-2026-05-06)', () => {
@@ -278,6 +292,42 @@ test('collectWorkspaceDocContext reads obvious repo docs from the workspace when
   assert.match(context, /### README\.md/);
   assert.match(context, /### SPEC\.md/);
   assert.match(context, /### docs\/STATE-MACHINE\.md/);
+});
+
+test('auditWorkspaceForContamination detects patch-equivalent commits in a real git repo', async () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-audit-'));
+  const originDir = path.join(workspaceDir, 'origin.git');
+  const seedDir = path.join(workspaceDir, 'seed');
+  mkdirSync(seedDir, { recursive: true });
+
+  execFileSync('git', ['init', '--quiet', '--bare', originDir], { stdio: 'ignore' });
+  execFileSync('git', ['init', '--quiet', '-b', 'main', seedDir], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'config', 'user.name', 'Test User'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'config', 'user.email', 'test@example.com'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'remote', 'add', 'origin', originDir], { stdio: 'ignore' });
+
+  writeFileSync(path.join(seedDir, 'README.md'), 'base\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'README.md'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'base'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', '-u', 'origin', 'main'], { stdio: 'ignore' });
+
+  execFileSync('git', ['-C', seedDir, 'checkout', '-b', 'feature'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'checkout', 'main'], { stdio: 'ignore' });
+  writeFileSync(path.join(seedDir, 'README.md'), 'base\nshared change\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'README.md'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'upstream change'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', 'origin', 'main'], { stdio: 'ignore' });
+
+  execFileSync('git', ['-C', seedDir, 'checkout', 'feature'], { stdio: 'ignore' });
+  writeFileSync(path.join(seedDir, 'README.md'), 'base\nshared change\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'README.md'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'duplicate change on feature'], { stdio: 'ignore' });
+
+  const audit = await auditWorkspaceForContamination({ workspaceDir: seedDir, baseBranch: 'main' });
+
+  assert.equal(audit.error, null);
+  assert.equal(audit.suspect.length, 1);
+  assert.equal(audit.suspect[0].subject, 'duplicate change on feature');
 });
 
 test('assertValidRepoSlug rejects malformed repo names', () => {

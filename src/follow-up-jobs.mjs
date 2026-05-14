@@ -1182,6 +1182,7 @@ function moveTerminalJobRecord({
 function buildFollowUpJob({
   repo,
   prNumber,
+  baseBranch = 'main',
   reviewerModel,
   builderTag = null,
   linearTicketId = null,
@@ -1232,6 +1233,7 @@ function buildFollowUpJob({
     },
     repo,
     prNumber,
+    baseBranch: String(baseBranch || 'main'),
     domainId: subjectIdentity.domainId,
     subjectExternalId: subjectIdentity.subjectExternalId,
     revisionRef: subjectIdentity.revisionRef,
@@ -1521,6 +1523,7 @@ function markFollowUpJobFailed({
   // terminal move and the post-move pre-stamp in
   // `recordInitialCommentDelivery`. Reviewer R5 blocking #1 fix.
   commentDelivery = null,
+  jobUpdates = null,
 }) {
   return moveTerminalJobRecord({
     rootDir,
@@ -1563,6 +1566,13 @@ function markFollowUpJobFailed({
 
       if (commentDelivery) {
         nextJob.commentDelivery = commentDelivery;
+      }
+
+      if (jobUpdates && typeof jobUpdates === 'object') {
+        nextJob = {
+          ...nextJob,
+          ...jobUpdates,
+        };
       }
 
       return nextJob;

@@ -946,10 +946,12 @@ function resetWorkspaceDir(workspaceDir) {
  * because it reviews the entire `origin/<base>...HEAD` diff.
  *
  * This audit runs `git fetch --prune origin <baseBranch>` to refresh the
- * upstream ref, then uses `git log --cherry-mark --left-right --no-merges`
- * to flag every commit on HEAD whose patch already lives upstream. Both
- * git invocations are best-effort; on any failure we degrade to "no
- * findings" so a flaky git environment does not block reconciliation.
+ * upstream ref, then uses `git cherry origin/<baseBranch> HEAD` to flag
+ * every commit on HEAD whose patch already lives upstream. `git cherry`
+ * emits only right-side commits and prefixes patch-equivalent ones with
+ * `-`, which makes it safe to parse directly. Both git invocations are
+ * best-effort; on any failure we degrade to "no findings" so a flaky git
+ * environment does not block reconciliation.
  *
  * Returns `{ suspect: [{ sha, subject }, ...], error: <message|null> }`.
  * Callers use a non-empty `suspect` list to refuse the rereview request
@@ -979,38 +981,53 @@ async function auditWorkspaceForContamination({
   try {
     const result = await execFileImpl('git', [
       '-C', workspaceDir,
-      'log',
-      '--cherry-mark',
-      '--left-right',
-      '--no-merges',
-      '--format=%H\x1f%s',
-      `origin/${baseBranch}...HEAD`,
+      'cherry',
+      `origin/${baseBranch}`,
+      'HEAD',
     ], { maxBuffer: 10 * 1024 * 1024 });
     stdout = String(result.stdout || '');
   } catch (err) {
-    return { suspect: [], error: `git log --cherry-mark failed: ${err.message}` };
+    return { suspect: [], error: `git cherry origin/${baseBranch} HEAD failed: ${err.message}` };
   }
 
-  const suspect = [];
+  const suspectShas = [];
   for (const rawLine of stdout.split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
-    // `--cherry-mark --left-right` prefixes each commit with `<` (only
-    // in left side i.e. origin/main), `>` (only in HEAD), or `=` (patch
-    // matches a commit on the other side). The space after the marker
-    // separates it from the format payload. We only care about `=`
-    // marks on the right side (HEAD) — those are the contamination.
-    const markerSep = line.indexOf(' ');
-    if (markerSep <= 0) continue;
-    const marker = line.slice(0, markerSep);
-    if (marker !== '=') continue;
-    const payload = line.slice(markerSep + 1);
-    const fieldSep = payload.indexOf('\x1f');
-    const sha = fieldSep > 0 ? payload.slice(0, fieldSep) : payload;
-    const subject = fieldSep > 0 ? payload.slice(fieldSep + 1) : '';
-    if (sha) suspect.push({ sha, subject });
+    const match = line.match(/^([+-])\s+([0-9a-f]{7,40})(?:\s|$)/i);
+    if (!match || match[1] !== '-') continue;
+    suspectShas.push(match[2]);
   }
-  return { suspect, error: null };
+  if (suspectShas.length === 0) {
+    return { suspect: [], error: null };
+  }
+
+  try {
+    const result = await execFileImpl('git', [
+      '-C', workspaceDir,
+      'show',
+      '--quiet',
+      '--format=%H\x1f%s',
+      ...suspectShas,
+    ], { maxBuffer: 10 * 1024 * 1024 });
+    const suspect = String(result.stdout || '')
+      .split('\n')
+      .map((rawLine) => rawLine.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const fieldSep = line.indexOf('\x1f');
+        const sha = fieldSep >= 0 ? line.slice(0, fieldSep) : line;
+        const subject = fieldSep >= 0 ? line.slice(fieldSep + 1) : '';
+        return sha ? { sha, subject } : null;
+      })
+      .filter(Boolean);
+    return { suspect, error: null };
+  } catch (err) {
+    return {
+      suspect: suspectShas.map((sha) => ({ sha, subject: '' })),
+      error: `git show subject lookup failed: ${err.message}`,
+    };
+  }
 }
 
 function buildRemediationPrompt(job, {
@@ -1034,6 +1051,7 @@ function buildRemediationPrompt(job, {
   const promptTemplate = template ?? loadFollowUpPromptTemplate(ROOT, { stage: remediatorPromptStage });
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
+  const baseBranch = String(job.baseBranch || 'main');
   // The contract example uses empty arrays for the per-finding lists
   // and a placeholder-free summary. Inline shape examples used to live
   // in this object, which made it dangerously easy for a worker to
@@ -1074,6 +1092,7 @@ function buildRemediationPrompt(job, {
     remediationReplyArtifact: remediationReplyPath,
   };
   const interpolatedTemplate = interpolatePromptTemplate(promptTemplate, {
+    BASE_BRANCH: baseBranch,
     REPLY_PATH: replyContext.replyPath,
     ADV_REPLY_DIR: replyContext.replyDir,
     HQ_ROOT: replyContext.hqRoot || '',
@@ -1096,12 +1115,12 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 ## Required Operating Rules
 - Work on the PR branch that is already checked out in this repository clone.
 - This is one bounded remediation round. Do not create an autonomous retry loop inside the worker.
-- Before making code changes, rebase the PR branch onto a freshly-fetched \`origin/main\` so the remediation lands on top of current trunk. Use **exactly** this sequence — improvised variants will silently re-introduce already-merged commits as duplicates and corrupt the PR diff for the next reviewer pass:
+- Before making code changes, rebase the PR branch onto a freshly-fetched \`origin/${baseBranch}\` so the remediation lands on top of current trunk. Use **exactly** this sequence — improvised variants will silently re-introduce already-merged commits as duplicates and corrupt the PR diff for the next reviewer pass:
   1. Refuse to operate on dirty state: \`git diff --quiet HEAD\` must succeed.
-  2. Force-fetch first (never rebase against a cached remote-tracking ref): \`git fetch --prune origin main\`. The fetch must succeed; if it fails, surface as a \`blockers[]\` entry and do not rebase.
-  3. Rebase onto the freshly-fetched ref (NOT local \`main\`): \`git rebase origin/main\`. Git's built-in cherry-pick detection drops commits whose patch matches upstream; do not pass any flag that disables it.
+  2. Force-fetch first (never rebase against a cached remote-tracking ref): \`git fetch --prune origin ${baseBranch}\`. The fetch must succeed; if it fails, surface as a \`blockers[]\` entry and do not rebase.
+  3. Rebase onto the freshly-fetched ref (NOT local \`${baseBranch}\`): \`git rebase origin/${baseBranch}\`. Git's built-in cherry-pick detection drops commits whose patch matches upstream; do not pass any flag that disables it.
   4. If the rebase produces conflicts, resolve them in-band — that is part of the remediation. Never \`git rebase --skip\` past a conflict; that drops your own work. If a conflict requires a design decision you cannot make on your own, abort the rebase and record a \`blockers[]\` entry.
-  5. **Mandatory audit** before commit-and-push: run \`git log --cherry-mark --left-right --no-merges origin/main...HEAD\` and inspect any commit whose marker is \`=\` (patch-equivalent to a commit already on origin/main). If even one such commit appears, the branch is contaminated — do NOT push. Record a \`blockers[]\` entry titled \`branch-contamination\` listing the offending commit subjects verbatim, and exit. The dispatcher runs the same audit server-side; pushing anyway just produces a \`failed:branch-contamination\` reconciliation.
+  5. **Mandatory audit** before commit-and-push: run \`git cherry origin/${baseBranch} HEAD\` and inspect any commit whose marker is \`-\` (patch-equivalent to a commit already on \`origin/${baseBranch}\`). If even one such commit appears, the branch is contaminated — do NOT push. Record a \`blockers[]\` entry titled \`branch-contamination\` listing the offending commit subjects verbatim, and exit. The dispatcher runs the same audit server-side; pushing anyway just produces a durable \`failed:branch-contamination\` reconciliation.
   6. After the rebase succeeds and the audit passes, re-run the relevant tests so the rebase outcome is validated alongside the original fix.
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
@@ -2231,9 +2250,6 @@ async function reconcileFollowUpJob({
           execFileImpl,
         });
         if (contaminationAudit.suspect && contaminationAudit.suspect.length > 0) {
-          const formattedSuspect = contaminationAudit.suspect
-            .map((entry) => `${(entry.sha || '').slice(0, 12)} ${entry.subject || ''}`.trim())
-            .join('\n');
           rereview = buildRereviewResult({
             requested: false,
             reason: null,
@@ -2243,11 +2259,39 @@ async function reconcileFollowUpJob({
               suspectCommits: contaminationAudit.suspect,
             },
           });
-          return {
+          const contaminationFailure = {
+            code: 'branch-contamination',
+            message: [
+              `Branch contamination detected: HEAD contains commits that are patch-equivalent to commits already on origin/${job?.baseBranch || 'main'}.`,
+              ...contaminationAudit.suspect.map((entry) => `- ${((entry.sha || '').slice(0, 12) + ' ' + (entry.subject || '')).trim()}`),
+              'Clean the PR branch before requesting another adversarial pass.',
+            ].join('\n'),
+          };
+          const { commentDelivery: contaminationDelivery } = buildReconcileCommentDelivery({
+            job,
+            worker,
             action: 'failed',
-            reason: 'branch-contamination',
-            job: {
-              ...job,
+            reply: parsedReply,
+            failure: contaminationFailure,
+            now,
+          });
+          const failed = markFollowUpJobFailed({
+            rootDir,
+            jobPath,
+            failedAt: completedAt,
+            failureCode: 'branch-contamination',
+            error: new Error(contaminationFailure.message),
+            remediationWorker: {
+              ...workerState,
+              state: 'failed',
+            },
+            failure: {
+              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+              suspectCommits: contaminationAudit.suspect,
+              auditError: contaminationAudit.error || null,
+            },
+            commentDelivery: contaminationDelivery,
+            jobUpdates: {
               completedAt,
               remediationReply,
               completionMetadata: {
@@ -2259,21 +2303,27 @@ async function reconcileFollowUpJob({
               parsedReply,
               rereview,
             },
-            jobPath,
-            comment: {
-              kind: 'branch-contamination',
-              body: [
-                '⚠️ Branch contamination detected — refused to request adversarial re-review.',
-                '',
-                'The remediation worker pushed commits that are patch-equivalent to commits already on the base branch:',
-                '',
-                '```',
-                formattedSuspect,
-                '```',
-                '',
-                'A reviewer pass on this state would treat already-merged work as PR scope and surface spurious findings. The operator needs to clean the branch (e.g. hard-reset to `origin/<base>` and cherry-pick only this PR\'s real commits) before re-review is rescheduled.',
-              ].join('\n'),
-            },
+          });
+
+          await postReconcileOutcomeCommentSafe({
+            rootDir,
+            jobPath: failed.jobPath,
+            job: failed.job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: contaminationFailure,
+            postCommentImpl,
+            alreadyTerminal: failed.alreadyTerminal,
+            now,
+            log,
+          });
+
+          return {
+            action: 'failed',
+            reason: 'branch-contamination',
+            job: failed.job,
+            jobPath: failed.jobPath,
           };
         }
 

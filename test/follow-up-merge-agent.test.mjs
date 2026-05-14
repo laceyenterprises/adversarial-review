@@ -9,6 +9,7 @@ import {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
   buildMergeAgentDispatchJob,
+  buildMergeAgentPrompt,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
@@ -972,6 +973,115 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
     '--parent-session', 'session:test:merge-watcher',
     '--project', 'merge-project',
   ]);
+});
+
+test('buildMergeAgentPrompt omits trigger header when no trigger is passed', () => {
+  const prompt = buildMergeAgentPrompt(makeJob());
+  assert.ok(!prompt.includes('Dispatch trigger:'));
+  assert.ok(!prompt.includes('final-pass-on-budget-exhausted'));
+  assert.ok(!prompt.includes('## Mode: final-pass-on-budget-exhausted'));
+});
+
+test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trigger is final-pass-on-budget-exhausted', () => {
+  const prompt = buildMergeAgentPrompt(makeJob(), {
+    trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
+  });
+  assert.ok(prompt.includes(`Dispatch trigger: ${FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER}`));
+  assert.ok(prompt.includes('## Mode: final-pass-on-budget-exhausted'));
+  assert.ok(prompt.includes('comment_only_followups.py'));
+  assert.ok(prompt.includes('blocker-class'));
+  assert.ok(prompt.includes('deferred-non-trivial'));
+});
+
+test('buildMergeAgentPrompt records non-final-pass triggers without injecting the final-pass contract block', () => {
+  // operator-approved / merge-agent-requested triggers are surfaced for
+  // audit but must not get the budget-exhausted triage contract.
+  const prompt = buildMergeAgentPrompt(makeJob(), { trigger: 'operator-approved' });
+  assert.ok(prompt.includes('Dispatch trigger: operator-approved'));
+  assert.ok(!prompt.includes('## Mode: final-pass-on-budget-exhausted'));
+  assert.ok(!prompt.includes('comment_only_followups.py'));
+});
+
+test('dispatchMergeAgentForPR honors MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES from the per-call env', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  // process.env does NOT have the flag, but the per-call env does. This is
+  // the codex-reviewer-flagged regression: previously the helper read
+  // process.env directly and ignored the merged runtime env. With the fix,
+  // the per-call env enables the path and we dispatch.
+  const hqCalls = [];
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      lastVerdict: 'Request changes',
+      // Default makeJob() has remediationCurrentRound:1, remediationMaxRounds:1
+      // (budget exhausted) so the new path is eligible if the flag is on.
+    }),
+    env: {
+      MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+      MERGE_AGENT_HQ_PROJECT: 'merge-project',
+      [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1',
+    },
+    execFileImpl: async (cmd, args, opts) => {
+      hqCalls.push({ cmd, args, env: opts?.env });
+      return {
+        stdout: '{"dispatchId":"disp_final","lrq":"lrq_final"}\n',
+      };
+    },
+    now: '2026-05-14T05:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+  // Machine-readable signal in the subprocess env
+  assert.equal(
+    hqCalls[0].env?.MERGE_AGENT_DISPATCH_TRIGGER,
+    FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
+  );
+});
+
+test('dispatchMergeAgentForPR does NOT enable final-pass when the per-call env does not opt in', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      lastVerdict: 'Request changes',
+      // Budget exhausted by default; without the flag the request-changes
+      // verdict should still halt the pipeline.
+    }),
+    env: {
+      MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+      MERGE_AGENT_HQ_PROJECT: 'merge-project',
+      // flag intentionally absent
+    },
+    execFileImpl: async () => {
+      throw new Error('execFileImpl should not be reached when verdict halts');
+    },
+    now: '2026-05-14T05:01:00.000Z',
+  });
+
+  assert.equal(result.decision, 'skip-request-changes');
+});
+
+test('dispatchMergeAgentForPR omits MERGE_AGENT_DISPATCH_TRIGGER from worker env when trigger is null', async () => {
+  // Sanity: comment-only verdict dispatches with no trigger; the worker env
+  // should NOT carry an empty/null trigger value that downstream code might
+  // misread.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob(),
+    env: { MERGE_AGENT_PARENT_SESSION: 's', MERGE_AGENT_HQ_PROJECT: 'p' },
+    execFileImpl: async (cmd, args, opts) => {
+      calls.push(opts?.env);
+      return { stdout: '{"dispatchId":"d","lrq":"l"}\n' };
+    },
+    now: '2026-05-14T05:02:00.000Z',
+  });
+  assert.ok(!('MERGE_AGENT_DISPATCH_TRIGGER' in (calls[0] || {})));
 });
 
 test('merge-agent dispatch attribution defaults are stable for launchd', () => {

@@ -336,7 +336,7 @@ function findLatestFollowUpJobForPR(rootDir, { repo, prNumber }) {
   return latest;
 }
 
-function buildMergeAgentPrompt(job) {
+function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   const lines = [
     '# Merge-Agent Dispatch',
     '',
@@ -347,6 +347,40 @@ function buildMergeAgentPrompt(job) {
   ];
   if (job.headSha) {
     lines.push(`- Head SHA: ${job.headSha}`);
+  }
+  if (trigger) {
+    lines.push(`- Dispatch trigger: ${trigger}`);
+  }
+  if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+    lines.push('');
+    lines.push('## Mode: final-pass-on-budget-exhausted');
+    lines.push('');
+    lines.push(
+      'The adversarial-review round budget for this PR is consumed and the'
+      + ' latest reviewer verdict is still `Request changes`. You are the'
+      + ' final automated pass before operator escalation.'
+    );
+    lines.push('');
+    lines.push('Required behavior:');
+    lines.push(
+      '1. Run `comment_only_followups.py` (your existing sub-worker triage'
+      + ' step) against the latest review body. Apply trivial adjustments'
+      + ' inline; defer non-trivial suggestions; refuse to merge if any'
+      + ' blocker-class finding remains (data corruption, secret leakage,'
+      + ' security regression, broken external contract).'
+    );
+    lines.push(
+      '2. Only proceed to rebase + merge after the triage step returns'
+      + ' `addressed` or `no-followups-needed`. A `deferred-non-trivial`'
+      + ' result must not merge — record the deferral and exit with the'
+      + ' standard operator-handoff payload.'
+    );
+    lines.push(
+      '3. Treat this dispatch the same way you would treat an'
+      + ' `operator-approved` dispatch for review/remediation state, EXCEPT'
+      + ' that the safety floor (no blocker-class merges) is stricter:'
+      + ' the operator did not personally vouch for this head.'
+    );
   }
   if (job.operatorNotes) {
     lines.push('- Operator notes from PR body:');
@@ -872,6 +906,11 @@ async function dispatchMergeAgentForPR({
   const recordedDispatch = getRecordedMergeAgentDispatch(rootDir, job);
   const dispatchDecision = pickMergeAgentDispatchDetail(job, {
     recentDispatches: recordedDispatch ? [recordedDispatch] : [],
+    // Honor the merged runtime env so callers can opt-in per-invocation
+    // without mutating process.env globally. This keeps the flag consistent
+    // with the rest of dispatchMergeAgentForPR (agent-os detection, parent
+    // session, project) which already routes through runtimeEnv.
+    finalPassOnRequestChangesEnabled: isFinalPassOnRequestChangesEnabled({ env: runtimeEnv }),
   });
   const { decision, trigger } = dispatchDecision;
   if (decision !== 'dispatch') {
@@ -952,7 +991,7 @@ async function dispatchMergeAgentForPR({
   const parentSession = resolveMergeAgentParentSession(runtimeEnv);
   const hqProject = resolveMergeAgentProject(runtimeEnv);
 
-  const prompt = buildMergeAgentPrompt(job);
+  const prompt = buildMergeAgentPrompt(job, { trigger });
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
 
   const args = [
@@ -966,8 +1005,14 @@ async function dispatchMergeAgentForPR({
     '--project', hqProject,
     '--prompt', promptPath,
   ];
+  // Machine-readable trigger for the worker. The prompt also carries it
+  // for human/agent readability, but adapters that branch on dispatch mode
+  // should read the env var rather than parsing markdown.
+  const dispatchEnv = trigger
+    ? { ...runtimeEnv, MERGE_AGENT_DISPATCH_TRIGGER: trigger }
+    : runtimeEnv;
   const { stdout } = await execFileImpl(resolvedHqPath, args, {
-    env: runtimeEnv,
+    env: dispatchEnv,
     maxBuffer: 5 * 1024 * 1024,
   });
   const parsed = parseMergeAgentDispatchOutput(stdout);

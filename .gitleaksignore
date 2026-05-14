@@ -1,0 +1,31 @@
+# gitleaks allowlist
+# ─────────────────────────────────────────────────────────────────────
+# Each line is a fingerprint reported by gitleaks, intentionally
+# allowed because the matched string is a deliberate test fixture used
+# to verify the redaction code path — not a real secret.
+#
+# When you add a fingerprint here, leave a comment explaining what the
+# fixture is for and why redacting it would defeat the test.
+#
+# To regenerate after a real find: run `gitleaks git` and `gitleaks dir`
+# and add the new fingerprint only after triaging it as a confirmed
+# false positive.
+
+# ── Fake JWT-shaped Bearer token in PR-comment redaction test ──
+# test/pr-comments.test.mjs lines 726 (HEAD) / 306 (historical commit)
+# carry the string `Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig` — a literal
+# placeholder used as input to `redactSensitiveText`. The very next
+# assertion (`assert.doesNotMatch(body, /eyJhbGciOiJIUzI1NiJ9\.payload\.sig/)`)
+# verifies the redactor scrubs it. Redacting or removing this fixture
+# would defeat the test.
+#
+# `eyJhbGciOiJIUzI1NiJ9` is the base64 encoding of `{"alg":"HS256"}`
+# — a JWT header. The rest of the string is the literal text
+# `payload.sig`, not encoded data, not a real signature.
+
+# Historical commit on main where the fixture was introduced (PR #18,
+# 2026-05-02, redaction tests added).
+279c6806a2f4c83f7f399113a3567d58be86c8ec:test/pr-comments.test.mjs:curl-auth-header:306
+
+# Current HEAD line of the same fixture.
+test/pr-comments.test.mjs:curl-auth-header:726

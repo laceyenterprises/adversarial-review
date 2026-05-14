@@ -4,8 +4,6 @@
   daemon. Rendered by tools/adversarial-review/install.sh with the same
   placeholder set as adversarial-watcher.plist.template.
 
-  Rendered filename: ai.${WATCHER_USER_LABEL}.adversarial-follow-up.plist
-
   KeepAlive=SuccessfulExit=false matches the long-lived `while true; sleep`
   loop the rendered tick script runs: launchd respawns on crash but not
   on clean exit, which is what we want for an internally-looping daemon.

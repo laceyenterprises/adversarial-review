@@ -274,6 +274,12 @@ else
   mark_fail "Codex reviewer runtime check failed for $EFFECTIVE_CODEX_AUTH_PATH: ${output//$'\n'/ }"
 fi
 
+if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" probe-runtime-readiness 2>&1)"; then
+  mark_ok "runtime dependency probe loaded node_modules, better-sqlite3, and @octokit/rest"
+else
+  mark_fail "runtime dependency probe failed: ${output//$'\n'/ }"
+fi
+
 # git status --porcelain — warn only.
 if command -v git >/dev/null 2>&1; then
   if [[ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]]; then

@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module';
+import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertClaudeOAuth, assertCodexOAuth } from '../../../src/reviewer.mjs';
@@ -36,6 +38,16 @@ async function probeCodexRuntime(options = {}) {
   }
 }
 
+async function assertRuntimeReadiness({ repoRoot = process.cwd() } = {}) {
+  await access(join(repoRoot, 'node_modules'));
+
+  const require = createRequire(import.meta.url);
+  const Database = require('better-sqlite3');
+  new Database(':memory:').close();
+
+  await import('@octokit/rest');
+}
+
 async function main(argv = process.argv.slice(2)) {
   const [command, operatorHome = '', reviewerAuthRoot = ''] = argv;
   switch (command) {
@@ -55,6 +67,9 @@ async function main(argv = process.argv.slice(2)) {
       }
       return;
     }
+    case 'probe-runtime-readiness':
+      await assertRuntimeReadiness();
+      return;
     default:
       throw new Error(`unknown command: ${command || '<empty>'}`);
   }
@@ -65,6 +80,7 @@ export {
   missingRequiredReviewerBotTokens,
   probeClaudeRuntime,
   probeCodexRuntime,
+  assertRuntimeReadiness,
   resolveRenderedCodexAuthPath,
 };
 

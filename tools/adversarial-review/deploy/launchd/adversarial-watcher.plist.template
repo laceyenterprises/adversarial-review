@@ -2,17 +2,10 @@
 <!--
   Parameterized LaunchAgent template for the adversarial-review watcher.
   Rendered by tools/adversarial-review/install.sh into the operator's
-  ~/Library/LaunchAgents/ directory with these placeholders substituted:
+  ~/Library/LaunchAgents/ directory with repo/home/log/label bindings
+  substituted into plist string nodes.
 
-    ${REPO_ROOT}            absolute path to this checkout
-    ${OPERATOR_HOME}        running operator's $HOME
-    ${LOG_ROOT}             where stdout/stderr go
-    ${WATCHER_USER_LABEL}   distinguishes per-operator instances on a
-                            shared host (e.g. "local", "airlock")
-
-  Rendered filename: ai.${WATCHER_USER_LABEL}.adversarial-watcher.plist
-
-  The Label includes ${WATCHER_USER_LABEL} so two operators on the same
+  The rendered filename uses the operator label so two operators on the same
   Mac do not collide. KeepAlive=true plus ThrottleInterval=30 gives the
   same crash-loop suppression the maintainer-local plists use; see
   KNOWN-SHARP-EDGES.md §2 for the popup-storm history that motivated it.

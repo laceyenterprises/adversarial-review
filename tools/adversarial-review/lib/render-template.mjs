@@ -26,13 +26,23 @@ function literalReplace(text, needle, replacement) {
   return text.split(needle).join(replacement);
 }
 
-export function renderTemplate(text, bindings) {
+function escapeXmlText(value) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+export function renderTemplate(text, bindings, options = {}) {
   if (typeof text !== 'string') {
     throw new TypeError('renderTemplate: text must be a string');
   }
   if (!bindings || typeof bindings !== 'object') {
     throw new TypeError('renderTemplate: bindings must be an object');
   }
+  const format = options.format || 'plain';
   let out = text;
   for (const name of PLACEHOLDERS) {
     if (!(name in bindings)) {
@@ -42,7 +52,8 @@ export function renderTemplate(text, bindings) {
     if (typeof value !== 'string') {
       throw new TypeError(`renderTemplate: binding for ${name} must be a string`);
     }
-    out = literalReplace(out, '${' + name + '}', value);
+    const renderedValue = format === 'xml' ? escapeXmlText(value) : value;
+    out = literalReplace(out, '${' + name + '}', renderedValue);
   }
   return out;
 }
@@ -70,17 +81,19 @@ export function buildHeaderComment({ format, sourceTemplate, renderedAt, binding
     `Rendered by tools/adversarial-review/install.sh`,
     `Source template: ${sourceTemplate}`,
     `Rendered at:     ${renderedAt}`,
-    `Bindings:`,
   ];
-  for (const name of PLACEHOLDERS) {
-    lines.push(`  ${name} = ${bindings[name] ?? ''}`);
-  }
-  lines.push('Edit the template and re-run install.sh; do not edit this rendered file directly.');
 
   if (format === 'shell') {
+    lines.push(`Bindings:`);
+    for (const name of PLACEHOLDERS) {
+      lines.push(`  ${name} = ${bindings[name] ?? ''}`);
+    }
+    lines.push('Edit the template and re-run install.sh; do not edit this rendered file directly.');
     return lines.map((line) => '# ' + line).join('\n') + '\n';
   }
   if (format === 'xml') {
+    lines.push('Bindings omitted here so XML comments stay valid for any supported input value.');
+    lines.push('Edit the template and re-run install.sh; do not edit this rendered file directly.');
     return '<!--\n' + lines.map((line) => '  ' + line).join('\n') + '\n-->\n';
   }
   throw new Error(`buildHeaderComment: unknown format ${format}`);
@@ -149,7 +162,7 @@ function parseCliVars(args) {
 async function main() {
   const { input, output, format, bindings } = parseCliVars(process.argv.slice(2));
   const text = await readFile(input, 'utf8');
-  const rendered = renderTemplate(text, bindings);
+  const rendered = renderTemplate(text, bindings, { format });
   const leftover = unresolvedPlaceholders(rendered);
   if (leftover.length > 0) {
     throw new Error(`render-template: unresolved placeholders after render: ${leftover.join(', ')}`);

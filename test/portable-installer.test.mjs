@@ -57,6 +57,19 @@ test('renderTemplate substitutes only the well-known placeholder set, leaving sh
   assert.match(out, /OTHER=\$\{SOMETHING_ELSE\}/);
 });
 
+test('renderTemplate XML-escapes substituted values for plist string nodes', () => {
+  const out = renderTemplate(
+    '<string>${REPO_ROOT}</string>',
+    makeBindings({ REPO_ROOT: '/tmp/with&and<xml>"quotes"\'' }),
+    { format: 'xml' },
+  );
+
+  assert.equal(
+    out,
+    '<string>/tmp/with&amp;and&lt;xml&gt;&quot;quotes&quot;&apos;</string>',
+  );
+});
+
 test('renderTemplate throws on missing binding', () => {
   assert.throws(() => renderTemplate('${REPO_ROOT}', {}), /missing binding for \$\{REPO_ROOT\}/);
 });
@@ -82,6 +95,21 @@ test('buildHeaderComment includes source template, time, and every binding', () 
   assert.match(header, /Edit the template and re-run install\.sh/);
 });
 
+test('buildHeaderComment omits raw binding values for XML output', () => {
+  const header = buildHeaderComment({
+    format: 'xml',
+    sourceTemplate: 'tools/adversarial-review/deploy/launchd/adversarial-watcher.plist.template',
+    renderedAt: '2026-05-14T00:00:00.000Z',
+    bindings: makeBindings({
+      REPO_ROOT: '/tmp/with&and<xml>',
+      WATCHER_USER_LABEL: 'foo--bar',
+    }),
+  });
+  assert.doesNotMatch(header, /foo--bar/);
+  assert.doesNotMatch(header, /with&and<xml>/);
+  assert.match(header, /Bindings omitted here so XML comments stay valid/);
+});
+
 test('withHeader inserts the header just after a shebang or XML declaration', () => {
   const header = '# rendered\n';
   assert.equal(
@@ -105,7 +133,11 @@ test('the four shipped templates render with sample bindings and leave no placeh
   ];
   for (const name of templates) {
     const text = readFileSync(path.join(templateDir, name), 'utf8');
-    const rendered = renderTemplate(text, bindings);
+    const rendered = renderTemplate(
+      text,
+      bindings,
+      { format: name.endsWith('.plist.template') ? 'xml' : 'plain' },
+    );
     assert.deepEqual(
       unresolvedPlaceholders(rendered),
       [],
@@ -191,16 +223,21 @@ test('install postflight helper probes Claude and Codex using the rendered singl
 });
 
 test('rendered plists parse as XML and survive plutil -lint when plutil is available', async () => {
-  const bindings = makeBindings({ WATCHER_USER_LABEL: 'alice' });
+  const bindings = makeBindings({
+    REPO_ROOT: '/Users/operator/repo&support<team>',
+    OPERATOR_HOME: '/Users/operator&co',
+    LOG_ROOT: '/Users/operator/Library/Logs/adversarial-review<&>',
+    WATCHER_USER_LABEL: 'foo--bar',
+  });
   const outDir = mkdtempSync(path.join(tmpdir(), 'portable-installer-plist-'));
 
   for (const file of ['adversarial-watcher.plist.template', 'adversarial-follow-up.plist.template']) {
     const text = readFileSync(path.join(templateDir, file), 'utf8');
-    const rendered = renderTemplate(text, bindings);
+    const rendered = renderTemplate(text, bindings, { format: 'xml' });
     // Substituted strings show up where the placeholders were.
-    assert.match(rendered, new RegExp(`<string>ai\\.alice\\.adversarial-`));
-    assert.match(rendered, new RegExp(bindings.REPO_ROOT.replace(/\//g, '\\/')));
-    assert.match(rendered, new RegExp(bindings.LOG_ROOT.replace(/\//g, '\\/')));
+    assert.match(rendered, new RegExp(`<string>ai\\.${bindings.WATCHER_USER_LABEL}\\.adversarial-`));
+    assert.match(rendered, /&amp;/);
+    assert.match(rendered, /&lt;/);
     const outPath = path.join(outDir, file.replace('.template', ''));
     writeFileSync(outPath, rendered);
     if (process.platform === 'darwin') {
@@ -257,7 +294,7 @@ test('install.sh --dry-run renders all four files into a temp output dir without
   for (const plist of plistFiles) {
     const body = readFileSync(path.join(launchAgentsDir, plist), 'utf8');
     assert.match(body, /Rendered by tools\/adversarial-review\/install\.sh/);
-    assert.match(body, /WATCHER_USER_LABEL = testlabel/);
+    assert.match(body, /ai\.testlabel\.adversarial-/);
     assert.equal(unresolvedPlaceholders(body).length, 0);
   }
 

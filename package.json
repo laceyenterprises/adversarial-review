@@ -26,11 +26,9 @@
     "typecheck:contracts": "node ./node_modules/typescript/bin/tsc -p tsconfig.contracts.json"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "@linear/sdk": "^27.0.0",
-    "@octokit/rest": "^21.1.1",
-    "better-sqlite3": "^11.9.1",
-    "openai": "^4.98.0"
+    "@linear/sdk": "^84.0.0",
+    "@octokit/rest": "^22.0.1",
+    "better-sqlite3": "^11.9.1"
   },
   "devDependencies": {
     "typescript": "5.9.3"

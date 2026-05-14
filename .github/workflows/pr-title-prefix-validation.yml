@@ -1,5 +1,31 @@
 name: PR Title Prefix Validation
 
+# Background
+# ----------
+# This repository is the live operating substrate for an internal cross-model
+# code review pipeline (see README.md → "The production pipeline"). Inside the
+# maintainer's deployment, every PR is opened by one of three worker classes —
+# `[codex]`, `[claude-code]`, or `[clio-agent]` — and the watcher routes
+# reviewer selection off the title prefix at creation time. A missing or
+# wrong prefix becomes a hard, terminal failure that does not retroactively
+# trigger on retitle, so the prefix has to be right the first time.
+#
+# Why this check exists
+# ---------------------
+# Internal worker-class PRs are validated here so a malformed title fails
+# loud, in front of the operator, before the watcher's fail-loud guardrail
+# fires asynchronously and clutters the PR with a terminal failure record.
+#
+# Outside contributors
+# --------------------
+# Outside contributors should NOT have to participate in the internal
+# worker-class taxonomy. The README and CONTRIBUTING.md both promise this.
+# This workflow honors that promise by checking GitHub's
+# `author_association` field: only PRs from `OWNER`, `MEMBER`, or
+# `COLLABORATOR` accounts are subject to the prefix requirement. Everyone
+# else (`CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `NONE`) is
+# explicitly skipped with a friendly status message.
+
 on:
   pull_request_target:
     types:
@@ -18,27 +44,63 @@ jobs:
       - name: Validate adversarial-review title prefix (trusted workflow logic)
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
           REQUIRED_PREFIXES: '[codex],[claude-code],[clio-agent]'
+          # Author associations that ARE subject to the internal worker-class
+          # prefix requirement. Anything not in this set is treated as an
+          # outside contribution and skipped.
+          ENFORCED_ASSOCIATIONS: 'OWNER,MEMBER,COLLABORATOR'
         run: |
           node <<'NODE'
-          const requiredPrefixes = process.env.REQUIRED_PREFIXES.split(',').map((value) => value.trim()).filter(Boolean);
-          const title = (process.env.PR_TITLE || '').trim();
-          const normalizedTitle = title.toLowerCase();
+          const requiredPrefixes = process.env.REQUIRED_PREFIXES
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean);
+          const enforcedAssociations = new Set(
+            process.env.ENFORCED_ASSOCIATIONS.split(',').map((value) => value.trim()).filter(Boolean),
+          );
 
-          const hasKnownPrefix = requiredPrefixes.some((prefix) => normalizedTitle.startsWith(prefix));
+          const title = (process.env.PR_TITLE || '').trim();
+          const association = (process.env.PR_AUTHOR_ASSOCIATION || '').trim().toUpperCase();
+          const login = process.env.PR_AUTHOR_LOGIN || 'unknown';
+
+          // Outside-contributor short-circuit. The internal worker-class
+          // taxonomy is irrelevant to anyone outside the maintainer's
+          // operating substrate, so we report a friendly skip and pass.
+          if (!enforcedAssociations.has(association)) {
+            console.log(
+              `Skipping internal worker-class prefix validation for outside contributor "${login}" ` +
+              `(author_association="${association}"). Welcome — and thanks for the PR!`,
+            );
+            console.log(
+              'If you are a maintainer and this skip looks wrong, your GitHub author_association is probably ' +
+              'below COLLABORATOR. Add yourself as a collaborator on the repository to opt back into enforcement.',
+            );
+            process.exit(0);
+          }
+
+          const normalizedTitle = title.toLowerCase();
           const matchedPrefix = requiredPrefixes.find((prefix) => normalizedTitle.startsWith(prefix));
+          const hasKnownPrefix = Boolean(matchedPrefix);
           const remainder = matchedPrefix ? title.slice(matchedPrefix.length).trim() : '';
           const hasStackedPrefix = requiredPrefixes.some((prefix) => remainder.toLowerCase().startsWith(prefix));
           const valid = title.length > 0 && hasKnownPrefix && remainder.length > 0 && !hasStackedPrefix;
 
           if (!valid) {
-            console.error(`Invalid PR title: "${title || '(empty title)'}"`);
+            console.error(`Invalid PR title for internal author "${login}": "${title || '(empty title)'}"`);
             console.error(`Allowed adversarial-review prefixes: ${requiredPrefixes.join(', ')}`);
             console.error('Canonical format: "[tag] <title>" with exactly one known tag prefix and non-empty title text.');
-            console.error('Why this check exists: reviewer routing depends on creation-time tag correctness.');
-            console.error('To fix this check: edit the PR title to a canonical tagged form.');
+            console.error('Why this check exists: the watcher\'s reviewer-routing decision is made at PR-creation time');
+            console.error('off the title prefix and is NOT re-evaluated on retitle. A wrong prefix here becomes a');
+            console.error('terminal failure record on the PR.');
+            console.error('To fix this check: edit the PR title to a canonical tagged form, then re-open or push a new');
+            console.error('commit to retrigger the workflow.');
             process.exit(1);
           }
 
-          console.log(`PR title prefix is valid. Allowed prefixes: ${requiredPrefixes.join(', ')}`);
+          console.log(
+            `Internal worker-class PR title is valid for "${login}" (association="${association}", ` +
+            `prefix="${matchedPrefix}"). Allowed prefixes: ${requiredPrefixes.join(', ')}.`,
+          );
           NODE

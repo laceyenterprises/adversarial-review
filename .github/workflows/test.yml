@@ -1,0 +1,77 @@
+name: Test
+
+# Runs the kernel + adapter test suite on every pull request and every push
+# to main. The test suite is fixture-driven and does not require network
+# access, a real GitHub bot token, or a Linear API key — see
+# `demo/research-finding-walkthrough.sh` for the offline-runnable end-to-end
+# path that mirrors the same byte-stable contracts the CI here exercises.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+# Cancel superseded runs on the same branch so a fast-follow push doesn't
+# burn CI minutes on an already-stale commit. Manual reruns from the UI
+# are unaffected.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: npm test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Run the suite against every Node major the package.json `engines`
+      # range advertises support for. If a version starts failing here, the
+      # right fix is either a code change or a deliberate `engines` bump in
+      # package.json — not silent removal from this matrix.
+      fail-fast: false
+      matrix:
+        node:
+          - '20'
+          - '22'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        # `npm ci` is preferred over `npm install` so the lockfile is honored
+        # exactly and an out-of-date lockfile fails CI loudly rather than
+        # silently drifting.
+        run: npm ci
+
+      - name: Run kernel + adapter test suite
+        # `npm test` invokes `node --test test/*.test.mjs test/adapters/*.test.mjs`.
+        # The suite includes byte-equivalence assertions on JSONL transcripts,
+        # which catch accidental delivery-key drift, timestamp instability,
+        # and unordered JSON.
+        run: npm test
+
+      - name: Typecheck contracts
+        # The `src/kernel/contracts.d.ts` declarations are the public adapter
+        # contract. They're typechecked separately so a contract drift fails
+        # CI even when the runtime `.mjs` modules still parse.
+        run: npm run typecheck:contracts
+
+      - name: Run offline end-to-end demo
+        # The demo proves the documented five-minute new-contributor path
+        # actually works against the same kernel/adapter contracts the unit
+        # tests exercise. It builds a temporary fixture, drives the markdown
+        # subject through reviewer → verdict parser → remediation reply
+        # parser → JSONL transcript → re-review → convergence, and exits
+        # non-zero on any invariant violation.
+        run: bash demo/research-finding-walkthrough.sh

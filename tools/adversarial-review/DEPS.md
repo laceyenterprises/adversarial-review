@@ -98,6 +98,40 @@ uses PATH and per-user defaults.
 - All injection paths scrub OAuth fallback env vars before reviewer/worker
   spawn.
 
+### `OP_SERVICE_ACCOUNT_TOKEN` resolution
+
+The 1Password service-account token is resolved by
+`src/secret-source/op.mjs::resolveOpToken()` (exposed to shell wrappers as
+`src/secret-source/resolve-op-token-cli.mjs`) using the following
+**declared precedence** (first match wins):
+
+| # | Source | Notes |
+|---|---|---|
+| 1 | `OP_SERVICE_ACCOUNT_TOKEN` in process env | Used directly, no file IO. |
+| 2 | `ADV_OP_TOKEN_FILE` | Path to a file containing the token. File content is trimmed. |
+| 3 | `ADV_OP_TOKEN_ENV_FILE` | Path to a shell-style `KEY=VALUE` env file. The token is read from `OP_SERVICE_ACCOUNT_TOKEN` inside that file. |
+| 4 | `$ADV_SECRETS_ROOT/op-service-account.token` | Used when `ADV_SECRETS_ROOT` is set. |
+| 5 | `$HOME/.config/adversarial-review/secrets/op-service-account.token` | Default token-file path. |
+
+If every source above fails, the resolver emits a **single detailed
+diagnostic** listing every source it checked, why each failed, and concrete
+remediation for the most-recommended source, then exits with code `78`
+(`EX_CONFIG`). The wrapper scripts sleep 3600 seconds before exit so
+launchd `KeepAlive=true` + `ThrottleInterval=30` does not produce a respawn
+storm — the same fail-once shape used by the `better-sqlite3` ABI gate.
+
+`resolve-op-token-cli.mjs` prints the resolved token to stdout (exit 0)
+or the diagnostic to stderr (exit 78). Wrappers shape:
+
+```sh
+OP_SERVICE_ACCOUNT_TOKEN=$(node "$REPO_ROOT/src/secret-source/resolve-op-token-cli.mjs") || {
+  echo "[wrapper] sleeping 3600s to suppress launchd respawn storm" >&2
+  sleep 3600
+  exit 78
+}
+export OP_SERVICE_ACCOUNT_TOKEN
+```
+
 OAuth-only strip list:
 
 - `ANTHROPIC_API_KEY`

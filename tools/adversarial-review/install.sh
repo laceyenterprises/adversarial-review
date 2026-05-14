@@ -138,6 +138,14 @@ fi
 [[ -n "$CODEX_BIN" ]] && mark_ok "codex CLI found at $CODEX_BIN" || mark_fail "codex CLI missing; install Codex CLI or set CODEX_CLI_PATH"
 [[ -n "$GH_BIN" ]] && mark_ok "gh CLI found at $GH_BIN" || mark_fail "gh CLI missing; install GitHub CLI or set GH_CLI_PATH"
 [[ -n "$OP_BIN" ]] && mark_ok "op CLI found at $OP_BIN" || mark_warn "optional op CLI missing; 1Password secret-source mode will be unavailable"
+
+if [[ -n "$OP_BIN" ]]; then
+  if node "$REPO_ROOT/src/secret-source/resolve-op-token-cli.mjs" >/dev/null 2>/dev/null; then
+    mark_ok "OP_SERVICE_ACCOUNT_TOKEN resolvable via canonical contract"
+  else
+    mark_warn "OP_SERVICE_ACCOUNT_TOKEN not resolvable via canonical contract; see tools/adversarial-review/DEPS.md §'OP_SERVICE_ACCOUNT_TOKEN resolution'"
+  fi
+fi
 [[ -n "$ACPX_BIN" ]] && mark_ok "optional acpx CLI found at $ACPX_BIN" || mark_warn "optional acpx CLI missing; native codex path remains available"
 
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then

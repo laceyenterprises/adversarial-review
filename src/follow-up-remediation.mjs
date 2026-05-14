@@ -933,6 +933,86 @@ function resetWorkspaceDir(workspaceDir) {
   rmSync(workspaceDir, { recursive: true, force: true });
 }
 
+/**
+ * Audit a remediation workspace for branch contamination — commits on HEAD
+ * that are patch-equivalent to commits already on `origin/<baseBranch>`.
+ *
+ * A remediation worker is supposed to rebase against a freshly-fetched
+ * `origin/<base>` before remediating; git's cherry-pick detection drops
+ * commits whose patch matches upstream. Workers that rebase against a
+ * stale local ref, skip the fetch, or apply commits manually can produce
+ * a branch whose log shows already-merged commits as if they were the
+ * PR's own work — which then confuses the next adversarial reviewer pass
+ * because it reviews the entire `origin/<base>...HEAD` diff.
+ *
+ * This audit runs `git fetch --prune origin <baseBranch>` to refresh the
+ * upstream ref, then uses `git log --cherry-mark --left-right --no-merges`
+ * to flag every commit on HEAD whose patch already lives upstream. Both
+ * git invocations are best-effort; on any failure we degrade to "no
+ * findings" so a flaky git environment does not block reconciliation.
+ *
+ * Returns `{ suspect: [{ sha, subject }, ...], error: <message|null> }`.
+ * Callers use a non-empty `suspect` list to refuse the rereview request
+ * and surface a `branch-contamination` failure to the operator.
+ */
+async function auditWorkspaceForContamination({
+  workspaceDir,
+  baseBranch = 'main',
+  execFileImpl = execFileAsync,
+}) {
+  if (!workspaceDir || typeof workspaceDir !== 'string') {
+    return { suspect: [], error: 'no workspaceDir provided' };
+  }
+  if (!existsSync(join(workspaceDir, '.git'))) {
+    return { suspect: [], error: 'workspace has no .git' };
+  }
+
+  try {
+    await execFileImpl('git', ['-C', workspaceDir, 'fetch', '--prune', 'origin', baseBranch], {
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch (err) {
+    return { suspect: [], error: `git fetch origin ${baseBranch} failed: ${err.message}` };
+  }
+
+  let stdout = '';
+  try {
+    const result = await execFileImpl('git', [
+      '-C', workspaceDir,
+      'log',
+      '--cherry-mark',
+      '--left-right',
+      '--no-merges',
+      '--format=%H\x1f%s',
+      `origin/${baseBranch}...HEAD`,
+    ], { maxBuffer: 10 * 1024 * 1024 });
+    stdout = String(result.stdout || '');
+  } catch (err) {
+    return { suspect: [], error: `git log --cherry-mark failed: ${err.message}` };
+  }
+
+  const suspect = [];
+  for (const rawLine of stdout.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    // `--cherry-mark --left-right` prefixes each commit with `<` (only
+    // in left side i.e. origin/main), `>` (only in HEAD), or `=` (patch
+    // matches a commit on the other side). The space after the marker
+    // separates it from the format payload. We only care about `=`
+    // marks on the right side (HEAD) — those are the contamination.
+    const markerSep = line.indexOf(' ');
+    if (markerSep <= 0) continue;
+    const marker = line.slice(0, markerSep);
+    if (marker !== '=') continue;
+    const payload = line.slice(markerSep + 1);
+    const fieldSep = payload.indexOf('\x1f');
+    const sha = fieldSep > 0 ? payload.slice(0, fieldSep) : payload;
+    const subject = fieldSep > 0 ? payload.slice(fieldSep + 1) : '';
+    if (sha) suspect.push({ sha, subject });
+  }
+  return { suspect, error: null };
+}
+
 function buildRemediationPrompt(job, {
   template,
   remediationReplyPath = job?.remediationReply?.path || null,
@@ -1016,7 +1096,13 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 ## Required Operating Rules
 - Work on the PR branch that is already checked out in this repository clone.
 - This is one bounded remediation round. Do not create an autonomous retry loop inside the worker.
-- Before making code changes, rebase the PR branch onto the upstream \`main\` branch (\`git fetch origin && git rebase origin/main\`) so the remediation lands on top of current trunk. If the rebase produces conflicts, resolve them as part of this round — it is remediation work, not a blocker, unless resolving the conflict requires a design decision you cannot make on your own (in which case record it under \`blockers[]\`). After resolving conflicts, re-run the relevant tests so the rebase outcome is validated alongside the original fix.
+- Before making code changes, rebase the PR branch onto a freshly-fetched \`origin/main\` so the remediation lands on top of current trunk. Use **exactly** this sequence — improvised variants will silently re-introduce already-merged commits as duplicates and corrupt the PR diff for the next reviewer pass:
+  1. Refuse to operate on dirty state: \`git diff --quiet HEAD\` must succeed.
+  2. Force-fetch first (never rebase against a cached remote-tracking ref): \`git fetch --prune origin main\`. The fetch must succeed; if it fails, surface as a \`blockers[]\` entry and do not rebase.
+  3. Rebase onto the freshly-fetched ref (NOT local \`main\`): \`git rebase origin/main\`. Git's built-in cherry-pick detection drops commits whose patch matches upstream; do not pass any flag that disables it.
+  4. If the rebase produces conflicts, resolve them in-band — that is part of the remediation. Never \`git rebase --skip\` past a conflict; that drops your own work. If a conflict requires a design decision you cannot make on your own, abort the rebase and record a \`blockers[]\` entry.
+  5. **Mandatory audit** before commit-and-push: run \`git log --cherry-mark --left-right --no-merges origin/main...HEAD\` and inspect any commit whose marker is \`=\` (patch-equivalent to a commit already on origin/main). If even one such commit appears, the branch is contaminated — do NOT push. Record a \`blockers[]\` entry titled \`branch-contamination\` listing the offending commit subjects verbatim, and exit. The dispatcher runs the same audit server-side; pushing anyway just produces a \`failed:branch-contamination\` reconciliation.
+  6. After the rebase succeeds and the audit passes, re-run the relevant tests so the rebase outcome is validated alongside the original fix.
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
 - If a reviewer finding explicitly asks for a spec / governance / runbook update (e.g. "update SPEC.md to match the new behavior", "the runbook should document the new failure mode"), make that update as part of THIS remediation round. Do not refuse the doc edit on the grounds that it is "out of scope" — when the reviewer flags spec drift, closing the drift IS the remediation. Treat the governing doc as a load-bearing artifact equal in weight to the code change. If the reviewer's finding is ambiguous about whether a doc update is required, prefer to update the doc; an over-conservative read leaves the spec stale and the next reviewer round will repeat the finding.
@@ -1827,6 +1913,7 @@ async function reconcileFollowUpJob({
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
   resolvePRLifecycleImpl = resolvePRLifecycle,
+  auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   execFileImpl = execFileAsync,
   log = console,
 } = {}) {
@@ -2128,6 +2215,68 @@ async function reconcileFollowUpJob({
       parsedReply = reply;
 
       if (reply.reReview.requested) {
+        // Pre-rereview branch-contamination gate. Even though the
+        // remediator prompt forbids pushing patch-id duplicates of
+        // upstream commits, workers can ignore the contract or run a
+        // git command that bypasses the worker-side audit. If the
+        // remediation workspace has commits on HEAD that are
+        // patch-equivalent to commits already on `origin/<baseBranch>`,
+        // the next reviewer pass will treat them as PR scope and
+        // generate spurious findings. Refuse to request the rereview
+        // and emit a `failed:branch-contamination` outcome instead.
+        const workspaceDir = join(getFollowUpJobDir(rootDir, 'workspaces'), job.jobId);
+        const contaminationAudit = await auditWorkspaceForContaminationImpl({
+          workspaceDir,
+          baseBranch: job?.baseBranch || 'main',
+          execFileImpl,
+        });
+        if (contaminationAudit.suspect && contaminationAudit.suspect.length > 0) {
+          const formattedSuspect = contaminationAudit.suspect
+            .map((entry) => `${(entry.sha || '').slice(0, 12)} ${entry.subject || ''}`.trim())
+            .join('\n');
+          rereview = buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: {
+              status: 'refused',
+              reason: 'branch-contamination',
+              suspectCommits: contaminationAudit.suspect,
+            },
+          });
+          return {
+            action: 'failed',
+            reason: 'branch-contamination',
+            job: {
+              ...job,
+              completedAt,
+              remediationReply,
+              completionMetadata: {
+                source: 'reconcile:branch-contamination',
+                note: 'PR branch contains patch-equivalent copies of commits already on the base branch; refused to request rereview to avoid confusing the next reviewer pass.',
+                suspectCommits: contaminationAudit.suspect,
+                auditError: contaminationAudit.error || null,
+              },
+              parsedReply,
+              rereview,
+            },
+            jobPath,
+            comment: {
+              kind: 'branch-contamination',
+              body: [
+                '⚠️ Branch contamination detected — refused to request adversarial re-review.',
+                '',
+                'The remediation worker pushed commits that are patch-equivalent to commits already on the base branch:',
+                '',
+                '```',
+                formattedSuspect,
+                '```',
+                '',
+                'A reviewer pass on this state would treat already-merged work as PR scope and surface spurious findings. The operator needs to clean the branch (e.g. hard-reset to `origin/<base>` and cherry-pick only this PR\'s real commits) before re-review is rescheduled.',
+              ].join('\n'),
+            },
+          };
+        }
+
         const requestedAt = completedAt;
         const rereviewOutcome = requestReviewRereviewImpl({
           rootDir,
@@ -2995,6 +3144,7 @@ export {
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   WORKER_PROVENANCE_HOOK_SRC,
   installWorkerProvenanceHook,
+  auditWorkspaceForContamination,
   OAuthError,
   StartupContractError,
   assertCodexOAuth,

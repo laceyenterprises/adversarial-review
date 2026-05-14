@@ -39,10 +39,15 @@ test('defangUntrustedMarkdown returns empty string for nullish input', () => {
   assert.equal(defangUntrustedMarkdown(''), '');
 });
 
-test('defangUntrustedMarkdown escapes markdown syntax chars', () => {
+test('defangUntrustedMarkdown escapes markdown syntax chars (single/double backticks pass through as inline-code)', () => {
+  // Single and double backticks form safe inline-code spans (GFM does not
+  // process autolinks/@mentions/HTML inside them), so we deliberately let
+  // them through unescaped. Only triple-backticks (fence-opening) are
+  // neutralized, and they get a ZWSP wedged between the second and third
+  // backtick so the run cannot open a fenced code block.
   assert.equal(
     defangUntrustedMarkdown('*bold* _ital_ `code` ~strike~ # h1 > q | t [a](b) <c> !d'),
-    '\\*bold\\* \\_ital\\_ \\`code\\` \\~strike\\~ \\# h1 \\> q \\| t \\[a\\]\\(b\\) \\<c\\> \\!d'
+    '\\*bold\\* \\_ital\\_ `code` \\~strike\\~ \\# h1 \\> q \\| t \\[a\\]\\(b\\) \\<c\\> \\!d'
   );
 });
 
@@ -317,7 +322,7 @@ test('buildRemediationOutcomeCommentBody on stopped (worker chose blocked) flags
   assert.match(body, /worker reported blockers it could not resolve/);
 });
 
-test('buildRemediationOutcomeCommentBody on failed surfaces the failure code and message', () => {
+test('buildRemediationOutcomeCommentBody on failed with a short reason uses inline-code (single tight line)', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'failed',
@@ -325,8 +330,79 @@ test('buildRemediationOutcomeCommentBody on failed surfaces the failure code and
     failure: { code: 'invalid-remediation-reply', message: 'Remediation reply summary is required' },
   });
   assert.match(body, /Outcome:.*failed/);
+  // Short reasons stay on one line in inline-code — exactly how the
+  // legacy format rendered them.
   assert.match(body, /Reason: `Remediation reply summary is required`/);
   assert.match(body, /Human intervention required/);
+});
+
+test('buildRemediationOutcomeCommentBody on failed with a long reason switches to a blockquoted multi-line paragraph', () => {
+  // The legacy single-`<inline-code>` rendering produced a ~400-char
+  // monospace line that overflowed the right edge of every GitHub PR
+  // view. Long reasons now render as a blockquote so they wrap inside
+  // the PR-comment column.
+  const longMessage = 'Failed to read remediation reply artifact at /Users/airlock/agent-os/.../followups-reply.json for job laceyenterprises__agent-os-pr-400 (laceyenterprises/agent-os#400): Remediation reply does not account for every blocking finding: review has 1 blocking issue(s), reply records 3.';
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'failed',
+    job: makeJob(),
+    failure: { code: 'invalid-remediation-reply', message: longMessage },
+  });
+  // Header line is present but the message is NOT wrapped in inline-code.
+  assert.match(body, /^Reason:\s*$/m);
+  // The reason body appears as a blockquote (`> `-prefixed line).
+  assert.match(body, /^> Failed to read remediation reply artifact/m);
+  // Host-local paths still get masked by sanitizeFailureText before render.
+  assert.match(body, /<path-redacted>\/followups-reply\.json/);
+  // No long backtick-wrapped Reason line remains anywhere in the body.
+  assert.doesNotMatch(body, /Reason: `Failed to read remediation/);
+});
+
+test('buildRemediationOutcomeCommentBody suppresses the Validation run section when all entries are empty', () => {
+  // Workers occasionally submit `validation: ['', '\t', '   ']` (log
+  // harness lost stdout, redaction stripped to nothing, etc.). The
+  // section header alone with an `_(none reported)_` placeholder reads
+  // as garbage in the rendered PR comment; the renderer should drop the
+  // whole section instead.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed it.',
+      validation: ['', '   ', '\t'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.doesNotMatch(body, /Validation run/);
+  assert.doesNotMatch(body, /none reported/);
+});
+
+test('buildRemediationOutcomeCommentBody summary with single backticks renders as inline-code (no \\` clutter)', () => {
+  // The polish: workers routinely write `git fetch` or `pytest` in their
+  // summary using single backticks. Previously every backtick got
+  // backslash-escaped which produced literal "\`git fetch\`" in rendered
+  // prose. Single and double backticks are now passed through unescaped
+  // so they form the safe inline-code spans the worker intended.
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'Ran `pytest tests/migrations/` after `alembic upgrade head` and confirmed.',
+      validation: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  // The backticks are preserved verbatim — no escaping of single-backtick
+  // inline-code spans.
+  assert.match(body, /Ran `pytest tests\/migrations\/` after `alembic upgrade head`/);
+  // No backslash-escaped backticks anywhere in the summary span.
+  assert.doesNotMatch(body, /Ran \\`/);
 });
 
 test('postRemediationOutcomeComment posts via gh pr comment with the bot token in env', async () => {
@@ -713,11 +789,13 @@ test('worker injection of headings or task lists is inert (defanged with backsla
   assert.doesNotMatch(body, /^## not actually a heading$/m);
 });
 
-test('worker text containing backticks does not render as inline code (defanged)', () => {
-  // A worker that drops a "```" run inside its summary previously had
-  // to be protected by a fenced block with auto-grown width. With the
-  // new defang behavior, each backtick is backslash-escaped to a
-  // literal backtick, so injected fences can never re-enable rendering.
+test('worker text containing triple-backticks cannot open a fenced code block', () => {
+  // A worker that drops a "```" run inside its summary used to be
+  // protected by wrapping everything in a `text fence; that produced
+  // ugly walls of monospace prose. The current defang policy: single
+  // and double backticks pass through (they form safe inline-code
+  // spans), but any run of 3+ backticks gets a U+200B (zero-width
+  // space) wedged in so it cannot open a fenced code block.
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'completed',
@@ -730,10 +808,14 @@ test('worker text containing backticks does not render as inline code (defanged)
     },
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
-  // Every backtick is escaped — there is no run of three consecutive
-  // unescaped backticks in the body.
-  assert.doesNotMatch(body, /[^\\]```/);
-  assert.match(body, /Run \\`\\`\\`bash\necho hi\n\\`\\`\\` to see output/);
+  // No run of three consecutive backticks remains anywhere in the body
+  // (every fence-opening run was broken with a ZWSP between the second
+  // and third backtick).
+  assert.doesNotMatch(body, /```/);
+  // And the worker's intended single backticks are preserved as text:
+  // a fenced block never opens, the worker's prose remains visible.
+  // Verify the ZWSP-broken form is present and that no live fence opens.
+  assert.match(body, /Run ``​`bash\necho hi\n``​` to see output/);
 });
 
 test('rereview.reason with worker-injected mention is wrapped inline-safe (no live mention)', () => {

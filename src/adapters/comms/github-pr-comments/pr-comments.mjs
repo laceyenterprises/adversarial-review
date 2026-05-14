@@ -31,6 +31,12 @@ const execFileAsync = promisify(execFile);
 const SUMMARY_MAX_CHARS = 2000;
 const REREVIEW_REASON_MAX_CHARS = 400;
 const BULLET_LIST_PER_ITEM_MAX_CHARS = 400;
+// Threshold for switching the failed-comment Reason rendering from an inline
+// `\`<msg>\`` (single tight monospace line) to a blockquoted multi-line
+// paragraph. 120 ≈ where GitHub's default PR-comment column starts
+// horizontally scrolling, so anything shorter renders fine inline and
+// anything longer benefits from prose wrapping.
+const REASON_INLINE_MAX_CHARS = 120;
 const BULLET_LIST_MAX_ITEMS = 25;
 
 // Worker class → bot-token env var. Add an entry here when a new
@@ -118,7 +124,20 @@ function defangUntrustedMarkdown(text) {
     .replace(/\\/g, '\\\\')
     .replace(/\b(https?):\/\//gi, '$1:​//')
     .replace(/\bwww\./gi, 'www.​')
-    .replace(/[*_`~#>[\]()<>|!]/g, (m) => `\\${m}`)
+    // Triple-backticks open a fenced code block — neutralize them by
+    // breaking the run with a ZWSP between the second and third backtick.
+    // Done BEFORE the generic backtick-escape so we don't double-handle.
+    // Workers' single- and double-backtick inline-code spans pass through
+    // unchanged below; only fence-opening runs of 3+ backticks are
+    // neutralized.
+    .replace(/`{3,}/g, (m) => `\`\`​${m.slice(2)}`)
+    // Generic markdown-meta defang. Backticks are intentionally NOT in
+    // this character class: single and double backticks form inline-code
+    // spans which are safe (GFM does not process autolinks, @mentions,
+    // or HTML inside inline-code), and escaping them produces literal
+    // `\\\`` in rendered prose which workers and operators read as
+    // visual noise. Triple-backticks are already broken above.
+    .replace(/[*_~#>[\]()<>|!]/g, (m) => `\\${m}`)
     .replace(/@(?=[A-Za-z0-9_-])/g, '@​')
     .replace(/(\\#)(?=\d)/g, '$1​')
     .replace(/^([ \t]{4,})/, '​$1')
@@ -598,14 +617,38 @@ function buildRemediationOutcomeCommentBody({
     // They cross a trust boundary into a public PR comment, so
     // we redact tokens AND mask host-local filesystem paths
     // before publishing. R3 review #3.
-    if (failure?.message) {
-      const safeMessage = sanitizeFailureText(failure.message);
-      lines.push(`Reason: \`${safeMessage}\``);
-    } else if (failure?.code) {
-      const safeCode = sanitizeFailureText(failure.code);
-      lines.push(`Reason: \`${safeCode}\``);
-    } else {
+    //
+    // Rendering choice: for short messages (≤ REASON_INLINE_MAX_CHARS
+    // and no embedded punctuation that wraps badly), keep the original
+    // `Reason: \`<msg>\`` inline-code shape — it reads as one tight
+    // line on a PR. For longer messages we drop the wrapping inline
+    // backticks and emit the message as a blockquoted defanged
+    // paragraph that wraps cleanly inside GitHub's PR-comment width.
+    // The prior unconditional inline-code rendering produced a single
+    // ~400-char monospace line that overflowed the right edge of every
+    // GitHub PR view; the polish keeps short reasons compact while
+    // letting long reasons breathe.
+    const reasonText = failure?.message
+      ? sanitizeFailureText(failure.message)
+      : failure?.code
+        ? sanitizeFailureText(failure.code)
+        : '';
+    if (!reasonText) {
       lines.push('Reason: unknown — check the daemon logs.');
+    } else if (reasonText.length <= REASON_INLINE_MAX_CHARS) {
+      lines.push(`Reason: \`${reasonText}\``);
+    } else {
+      lines.push('Reason:');
+      lines.push('');
+      // The failure message is internal-trust text from our own code
+      // (sanitizeFailureText has already stripped tokens and masked
+      // host-local paths). It is NOT worker-supplied prose, so we do
+      // not run it through the markdown defang — that would escape
+      // brackets/parens/underscores in already-clean internal text and
+      // turn `<path-redacted>` into `\<path-redacted\>` etc.
+      reasonText
+        .split('\n')
+        .forEach((line) => lines.push(line.length ? `> ${line}` : '>'));
     }
     lines.push('');
     // Salvage path: when the failure code is invalid-remediation-reply
@@ -648,10 +691,18 @@ function buildRemediationOutcomeCommentBody({
   }
 
   if (reply?.validation?.length) {
-    lines.push('');
-    lines.push('**Validation run**');
-    lines.push('');
-    lines.push(formatRedactedBulletList(reply.validation));
+    // Match the addressed/pushback/blockers pattern: pass empty default and
+    // skip the section header entirely when nothing renders. Workers that
+    // submit `validation: ['', '\t']` (e.g. a log harness that lost stdout)
+    // would otherwise produce an empty "**Validation run**\n\n_(none reported)_"
+    // header which reads as garbage in the PR.
+    const validation = formatRedactedBulletList(reply.validation, '');
+    if (validation) {
+      lines.push('');
+      lines.push('**Validation run**');
+      lines.push('');
+      lines.push(validation);
+    }
   }
 
   // Per-finding accountability surfaces from the new

@@ -1,0 +1,101 @@
+name: Bug report
+description: Something in the kernel, an adapter, the watcher, or the docs isn't behaving as documented.
+title: "[bug] "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report.
+
+        **Security issue?** Please don't file it here — use the
+        [private vulnerability reporting form](https://github.com/laceyenterprises/adversarial-review/security/advisories/new)
+        instead. See [`SECURITY.md`](../blob/main/SECURITY.md) for the
+        full policy.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit SHA
+      description: Output of `git rev-parse HEAD` from your clone, or the tag if you're on a release.
+      placeholder: "ab12cd34..."
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: Output of `node --version`. The supported range is `>=20 <26`.
+      placeholder: "v22.x.y"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface is affected?
+      multiple: true
+      options:
+        - "Kernel (verdict / remediation-reply / prompt-stage)"
+        - "Subject adapter"
+        - "Comms adapter"
+        - "Operator surface adapter"
+        - "Reviewer runtime adapter"
+        - "Watcher / first-pass review"
+        - "Follow-up remediation queue"
+        - "PR comment / redaction"
+        - "Demo (research-finding-walkthrough)"
+        - "Docs"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, with enough detail that a maintainer can tell the difference between this and a known sharp edge.
+      placeholder: "Walked through ... and observed ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-expected
+    attributes:
+      label: What you expected
+      description: What the docs, kernel contract, or adapter README led you to expect instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: |
+        A command sequence, fixture, or short snippet that reproduces the issue from a fresh clone.
+        Bonus points for a failing test added to `test/`.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Any relevant log output. Redact tokens and identifiers before pasting — and double-check, since this is a public repo.
+      render: text
+
+  - type: checkboxes
+    id: pre-flight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked [`KNOWN-SHARP-EDGES.md`](../blob/main/KNOWN-SHARP-EDGES.md) and this isn't already listed.
+          required: true
+        - label: I redacted secrets, tokens, and PII from logs and code samples above.
+          required: true
+        - label: I am not filing a security vulnerability here.
+          required: true

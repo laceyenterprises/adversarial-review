@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Security vulnerability
+    url: https://github.com/laceyenterprises/adversarial-review/security/advisories/new
+    about: Please report security issues through GitHub's private vulnerability reporting form. Do NOT file a public issue. See SECURITY.md for the full policy.
+  - name: 💬 Question or discussion
+    url: https://github.com/laceyenterprises/adversarial-review/discussions
+    about: How do I do X with adversarial-review? Should I do Y? Discussions is the right place for open-ended chat that isn't a bug or a feature.
+  - name: 📘 Read CONTRIBUTING.md first
+    url: https://github.com/laceyenterprises/adversarial-review/blob/main/CONTRIBUTING.md
+    about: For "how do I add a domain / adapter / prompt set?" — the worked example in CONTRIBUTING.md walks through it file by file.

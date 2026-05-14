@@ -3,8 +3,10 @@
 
   Outside contributors: please ignore the [codex] / [claude-code] /
   [clio-agent] title prefix machinery — those are for the maintainer's
-  internal worker fleet and the PR title validator explicitly skips PRs
-  from outside the org. Just give your PR a normal, descriptive title.
+  internal worker fleet and the PR title validator only enforces on
+  `OWNER`, `MEMBER`, and `COLLABORATOR` associations. Outside
+  contributors and first-time contributors are skipped, so just give
+  your PR a normal, descriptive title.
 
   Maintainer worker PRs: use the canonical helper
   `npm run pr:create:tagged -- --tag <codex|claude-code|clio-agent>
@@ -47,4 +49,4 @@
 ---
 
 By submitting this contribution you affirm that you have the right to
-submit the code under [Apache-2.0](../LICENSE). No CLA required.
+submit the code under [Apache-2.0](https://github.com/laceyenterprises/adversarial-review/blob/main/LICENSE). No CLA required.

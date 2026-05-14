@@ -34,7 +34,8 @@ If for some reason the form is unavailable, you may instead email
 ## What we treat as in scope
 
 - Vulnerabilities in code under [`src/`](src/), [`tools/`](tools/),
-  [`scripts/`](scripts/), [`hooks/`](hooks/), and
+  runtime-relevant repository scripts (excluding the maintainer-local
+  launch wrappers under [`scripts/`](scripts/)), [`hooks/`](hooks/), and
   [`.github/workflows/`](.github/workflows/) that would let an unauthenticated
   or unprivileged actor:
   - read or modify another reviewer's or operator's secrets, OAuth

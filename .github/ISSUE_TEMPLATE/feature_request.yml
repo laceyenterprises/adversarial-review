@@ -13,7 +13,7 @@ body:
         The safest contribution shape is to add a new **domain** through
         a new subject adapter, comms adapter, operator surface, prompt
         set, and `domains/<id>.json` — leaving the kernel untouched. See
-        [`CONTRIBUTING.md`](../blob/main/CONTRIBUTING.md) for the worked
+        [`CONTRIBUTING.md`](https://github.com/laceyenterprises/adversarial-review/blob/main/CONTRIBUTING.md) for the worked
         example.
 
         Kernel changes are welcome but should be discussed here first.

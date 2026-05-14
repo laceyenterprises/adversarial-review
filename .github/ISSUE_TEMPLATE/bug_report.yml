@@ -12,7 +12,7 @@ body:
 
         **Security issue?** Please don't file it here — use the
         [private vulnerability reporting form](https://github.com/laceyenterprises/adversarial-review/security/advisories/new)
-        instead. See [`SECURITY.md`](../blob/main/SECURITY.md) for the
+        instead. See [`SECURITY.md`](https://github.com/laceyenterprises/adversarial-review/blob/main/SECURITY.md) for the
         full policy.
 
   - type: input
@@ -93,7 +93,7 @@ body:
     attributes:
       label: Before submitting
       options:
-        - label: I checked [`KNOWN-SHARP-EDGES.md`](../blob/main/KNOWN-SHARP-EDGES.md) and this isn't already listed.
+        - label: I checked [`KNOWN-SHARP-EDGES.md`](https://github.com/laceyenterprises/adversarial-review/blob/main/KNOWN-SHARP-EDGES.md) and this isn't already listed.
           required: true
         - label: I redacted secrets, tokens, and PII from logs and code samples above.
           required: true

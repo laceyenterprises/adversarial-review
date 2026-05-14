@@ -93,6 +93,55 @@ test('resolveOpToken parses ADV_OP_TOKEN_ENV_FILE shell-style env file', () => {
   assert.equal(result.source, 'ADV_OP_TOKEN_ENV_FILE');
 });
 
+test('resolveOpToken accepts export syntax in ADV_OP_TOKEN_ENV_FILE', () => {
+  const fileMap = {
+    '/etc/adv/op.env': 'export OP_SERVICE_ACCOUNT_TOKEN=ops_eyJexported\n',
+  };
+  const result = resolveOpToken({
+    env: { ADV_OP_TOKEN_ENV_FILE: '/etc/adv/op.env' },
+    readFileSyncImpl: makeFsStub(fileMap),
+    homedirImpl: () => '/home/test',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.token, 'ops_eyJexported');
+  assert.equal(result.source, 'ADV_OP_TOKEN_ENV_FILE');
+});
+
+test('resolveOpToken falls back to legacy op-service-account.env under $HOME/agent-os', () => {
+  const home = '/home/operator';
+  const legacyPath = `${home}/agent-os/agents/clio/credentials/local/op-service-account.env`;
+  const fileMap = {
+    [legacyPath]: 'export OP_SERVICE_ACCOUNT_TOKEN=ops_eyJlegacy\n',
+  };
+  const result = resolveOpToken({
+    env: { HOME: home },
+    readFileSyncImpl: makeFsStub(fileMap),
+    homedirImpl: () => home,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.token, 'ops_eyJlegacy');
+  assert.equal(result.source, 'legacy-env-file');
+  assert.equal(result.path, legacyPath);
+});
+
+test('resolveOpToken prefers $AGENT_OS_ROOT legacy env file when set', () => {
+  const home = '/home/operator';
+  const agentOsRoot = '/srv/agent-os';
+  const legacyPath = `${agentOsRoot}/agents/clio/credentials/local/op-service-account.env`;
+  const fileMap = {
+    [legacyPath]: 'OP_SERVICE_ACCOUNT_TOKEN=ops_eyJagentroot\n',
+  };
+  const result = resolveOpToken({
+    env: { HOME: home, AGENT_OS_ROOT: agentOsRoot },
+    readFileSyncImpl: makeFsStub(fileMap),
+    homedirImpl: () => home,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.token, 'ops_eyJagentroot');
+  assert.equal(result.source, 'legacy-env-file');
+  assert.equal(result.path, legacyPath);
+});
+
 test('resolveOpToken falls back to ADV_SECRETS_ROOT default path', () => {
   const fileMap = { '/var/secrets/op-service-account.token': 'ops_eyJfromroot\n' };
   const result = resolveOpToken({
@@ -186,6 +235,7 @@ test('resolveOpToken returns ok=false with full source list when every rung fail
   assert.ok(sources.some((s) => s.startsWith('env:OP_SERVICE_ACCOUNT_TOKEN')));
   assert.ok(sources.some((s) => s.startsWith('ADV_OP_TOKEN_FILE=')));
   assert.ok(sources.some((s) => s.startsWith('ADV_OP_TOKEN_ENV_FILE=')));
+  assert.ok(sources.some((s) => s.startsWith('legacy env file')));
   assert.ok(sources.some((s) => s.startsWith('default token file')));
   for (const entry of result.checked) {
     if (entry.source === 'env:OP_SERVICE_ACCOUNT_TOKEN') {
@@ -208,9 +258,11 @@ test('formatResolveOpTokenDiagnostic includes sources, recommendations, and defa
   assert.match(text, /env:OP_SERVICE_ACCOUNT_TOKEN/);
   assert.match(text, /env:ADV_OP_TOKEN_FILE/);
   assert.match(text, /env:ADV_OP_TOKEN_ENV_FILE/);
+  assert.match(text, /legacy env file/);
   assert.match(text, /default token file/);
   assert.match(text, /Recommended fix/);
   assert.match(text, /export ADV_OP_TOKEN_FILE=/);
+  assert.match(text, /\$HOME\/agent-os\/agents\/clio\/credentials\/local\/op-service-account\.env/);
   assert.match(text, /\/home\/test\/\.config\/adversarial-review\/secrets\/op-service-account\.token/);
   assert.match(text, /tools\/adversarial-review\/DEPS\.md/);
 });
@@ -225,5 +277,15 @@ EMPTY=
     GITHUB_TOKEN: 'gh-token',
     ALERT_TO: '123456',
     EMPTY: '',
+  });
+});
+
+test('parseDotenv accepts export-prefixed shell assignments', () => {
+  assert.deepEqual(parseDotenv(`
+export OP_SERVICE_ACCOUNT_TOKEN=ops_eyJshell
+ export OTHER_VALUE="two"
+`), {
+    OP_SERVICE_ACCOUNT_TOKEN: 'ops_eyJshell',
+    OTHER_VALUE: 'two',
   });
 });

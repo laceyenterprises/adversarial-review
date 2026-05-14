@@ -35,9 +35,10 @@ fi
 
 # Load 1Password service account token via the canonical secret-source
 # contract (tools/adversarial-review/DEPS.md §"OP_SERVICE_ACCOUNT_TOKEN
-# resolution"). See the airlock wrapper for the full rationale. Fail-once
-# shape: a single detailed diagnostic from the resolver, then sleep 3600
-# to absorb the launchd respawn storm.
+# resolution"), including the legacy agents/clio/credentials/local
+# op-service-account.env compatibility file. See the airlock wrapper for
+# the full rationale. Fail-once shape: a single detailed diagnostic from
+# the resolver, then sleep 3600 to absorb the launchd respawn storm.
 ADV_OP_TOKEN_TAG="adversarial-watcher" \
   OP_SERVICE_ACCOUNT_TOKEN=$(/opt/homebrew/bin/node "$WATCHER_DIR/src/secret-source/resolve-op-token-cli.mjs") || {
     echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source above and bootout the agent to recover sooner." >&2

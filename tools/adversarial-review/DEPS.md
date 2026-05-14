@@ -109,9 +109,10 @@ The 1Password service-account token is resolved by
 |---|---|---|
 | 1 | `OP_SERVICE_ACCOUNT_TOKEN` in process env | Used directly, no file IO. |
 | 2 | `ADV_OP_TOKEN_FILE` | Path to a file containing the token. File content is trimmed. |
-| 3 | `ADV_OP_TOKEN_ENV_FILE` | Path to a shell-style `KEY=VALUE` env file. The token is read from `OP_SERVICE_ACCOUNT_TOKEN` inside that file. |
-| 4 | `$ADV_SECRETS_ROOT/op-service-account.token` | Used when `ADV_SECRETS_ROOT` is set. |
-| 5 | `$HOME/.config/adversarial-review/secrets/op-service-account.token` | Default token-file path. |
+| 3 | `ADV_OP_TOKEN_ENV_FILE` | Path to a shell-style env file. The parser accepts `OP_SERVICE_ACCOUNT_TOKEN=...` and `export OP_SERVICE_ACCOUNT_TOKEN=...`. |
+| 4 | Legacy compatibility env file | Checks `$AGENT_OS_ROOT/agents/clio/credentials/local/op-service-account.env` first when `AGENT_OS_ROOT` is set, then `$HOME/agent-os/agents/clio/credentials/local/op-service-account.env`. |
+| 5 | `$ADV_SECRETS_ROOT/op-service-account.token` | Used when `ADV_SECRETS_ROOT` is set. |
+| 6 | `$HOME/.config/adversarial-review/secrets/op-service-account.token` | Default token-file path. |
 
 If every source above fails, the resolver emits a **single detailed
 diagnostic** listing every source it checked, why each failed, and concrete

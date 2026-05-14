@@ -334,10 +334,13 @@ canonical resolution order is, in declared precedence (first match wins):
 
 1. `OP_SERVICE_ACCOUNT_TOKEN` already in the process environment.
 2. `ADV_OP_TOKEN_FILE` — path to a file containing the trimmed token.
-3. `ADV_OP_TOKEN_ENV_FILE` — path to a `KEY=VALUE` env file (the token
-   is read from the `OP_SERVICE_ACCOUNT_TOKEN` key inside).
-4. `$ADV_SECRETS_ROOT/op-service-account.token`.
-5. `$HOME/.config/adversarial-review/secrets/op-service-account.token`.
+3. `ADV_OP_TOKEN_ENV_FILE` — path to a shell-style env file with
+   `OP_SERVICE_ACCOUNT_TOKEN=...` or `export OP_SERVICE_ACCOUNT_TOKEN=...`.
+4. Legacy compatibility file:
+   `$AGENT_OS_ROOT/agents/clio/credentials/local/op-service-account.env`
+   or `$HOME/agent-os/agents/clio/credentials/local/op-service-account.env`.
+5. `$ADV_SECRETS_ROOT/op-service-account.token`.
+6. `$HOME/.config/adversarial-review/secrets/op-service-account.token`.
 
 The full table — including what each source means, how the fail-once
 diagnostic is shaped, and why the wrappers sleep before exit — is in

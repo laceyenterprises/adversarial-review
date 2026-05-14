@@ -76,6 +76,33 @@ test('resolve-op-token CLI honors env-file precedence (KEY=VALUE form)', () => {
   }
 });
 
+test('resolve-op-token CLI accepts export syntax in ADV_OP_TOKEN_ENV_FILE', () => {
+  const dir = mkTmp();
+  try {
+    const envFile = join(dir, 'op-service-account.env');
+    writeFileSync(envFile, 'export OP_SERVICE_ACCOUNT_TOKEN=ops_eyJexportcli\n');
+    const result = runCli({ env: { ADV_OP_TOKEN_ENV_FILE: envFile, HOME: dir } });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, 'ops_eyJexportcli');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolve-op-token CLI falls back to the legacy op-service-account.env path', () => {
+  const dir = mkTmp();
+  try {
+    const legacyDir = join(dir, 'agent-os', 'agents', 'clio', 'credentials', 'local');
+    mkdirSync(legacyDir, { recursive: true });
+    writeFileSync(join(legacyDir, 'op-service-account.env'), 'export OP_SERVICE_ACCOUNT_TOKEN=ops_eyJlegacycli\n');
+    const result = runCli({ env: { HOME: dir } });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, 'ops_eyJlegacycli');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('resolve-op-token CLI resolves $ADV_SECRETS_ROOT/op-service-account.token', () => {
   const dir = mkTmp();
   try {

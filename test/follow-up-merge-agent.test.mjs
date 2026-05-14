@@ -990,7 +990,11 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('## Mode: final-pass-on-budget-exhausted'));
   assert.ok(prompt.includes('comment_only_followups.py'));
   assert.ok(prompt.includes('blocker-class'));
-  assert.ok(prompt.includes('deferred-non-trivial'));
+  assert.ok(prompt.includes('Apply every actionable in-scope finding inline'));
+  assert.ok(prompt.includes('suggestions_unable_to_apply'));
+  assert.ok(prompt.includes('blockers_observed'));
+  assert.ok(!prompt.includes('deferred-non-trivial'));
+  assert.ok(!prompt.includes('defer non-trivial suggestions'));
 });
 
 test('buildMergeAgentPrompt records non-final-pass triggers without injecting the final-pass contract block', () => {

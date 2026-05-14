@@ -364,16 +364,20 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     lines.push('Required behavior:');
     lines.push(
       '1. Run `comment_only_followups.py` (your existing sub-worker triage'
-      + ' step) against the latest review body. Apply trivial adjustments'
-      + ' inline; defer non-trivial suggestions; refuse to merge if any'
+      + ' step) against the latest review body. Apply every actionable'
+      + ' in-scope finding inline. Use `suggestions_unable_to_apply` only'
+      + ' for findings that genuinely cannot fit in this PR (multi-PR'
+      + ' scope, conflicts with PR intent). Refuse to merge if any'
       + ' blocker-class finding remains (data corruption, secret leakage,'
       + ' security regression, broken external contract).'
     );
     lines.push(
       '2. Only proceed to rebase + merge after the triage step returns'
-      + ' `addressed` or `no-followups-needed`. A `deferred-non-trivial`'
-      + ' result must not merge — record the deferral and exit with the'
-      + ' standard operator-handoff payload.'
+      + ' `addressed` or `no-followups-needed`. A non-empty'
+      + ' `suggestions_unable_to_apply` result must not merge — record the'
+      + ' operator handoff and exit so the next review pass can evaluate'
+      + ' the punt. A non-empty `blockers_observed` result must hard-refuse'
+      + ' the merge.'
     );
     lines.push(
       '3. Treat this dispatch the same way you would treat an'

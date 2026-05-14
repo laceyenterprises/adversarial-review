@@ -9,7 +9,7 @@ import {
 
 test('resolveGateStatusContext returns the default when no env override is set', () => {
   assert.equal(resolveGateStatusContext({}), DEFAULT_ADVERSARIAL_GATE_CONTEXT);
-  assert.equal(DEFAULT_ADVERSARIAL_GATE_CONTEXT, 'adversarial-review/gate');
+  assert.equal(DEFAULT_ADVERSARIAL_GATE_CONTEXT, 'agent-os/adversarial-gate');
 });
 
 test('resolveGateStatusContext honors a non-empty env override', () => {
@@ -45,5 +45,12 @@ test('resolveGateStatusContext refuses CR or LF in the override', () => {
   assert.throws(
     () => resolveGateStatusContext({ [ADVERSARIAL_GATE_CONTEXT_ENV_VAR]: 'a\r\nb' }),
     /must not contain CR or LF/
+  );
+});
+
+test('resolveGateStatusContext refuses other control characters in a non-empty override', () => {
+  assert.throws(
+    () => resolveGateStatusContext({ [ADVERSARIAL_GATE_CONTEXT_ENV_VAR]: 'galileo\tgate' }),
+    /must not contain control characters/
   );
 });

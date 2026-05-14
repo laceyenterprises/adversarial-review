@@ -18,11 +18,13 @@ the runtime-bound JSDoc consumers in sync.
 
 ## Adversarial Gate Commit Status
 
-The watcher projects the durable adversarial-review ledger onto the PR head SHA as a GitHub commit status with context `agent-os/adversarial-gate`.
+The watcher projects the durable adversarial-review ledger onto the PR head SHA as a GitHub commit status with context `agent-os/adversarial-gate` by default.
 
-Operators must require `agent-os/adversarial-gate` in branch protection before relying on GitHub-native merge or auto-merge for adversarial-review-gated branches. Without the required context, GitHub can merge while review, remediation, or operator handling is still pending.
+Operators must require `agent-os/adversarial-gate` in branch protection before relying on GitHub-native merge or auto-merge for adversarial-review-gated branches. Without the required context, GitHub can merge while review, remediation, or operator handling is still pending. Deployments may opt into a different context with `ADV_GATE_STATUS_CONTEXT`, but that override must be applied consistently anywhere the watcher posts or probes the gate.
 
-The watcher verifies that policy in process: on a cached interval it checks watched repositories' branch protection and logs `branch-protection-warning` when `agent-os/adversarial-gate` is missing or the protection endpoint cannot be read. Operators can run the same probe with `npm run check-branch-protection`.
+The watcher verifies that policy in process: on a cached interval it checks watched repositories' branch protection and logs `branch-protection-warning` when the configured gate context is missing, when the protection endpoint cannot be read, or when `ADV_GATE_STATUS_CONTEXT` is invalid. Operators can run the same probe with `npm run check-branch-protection`.
+
+Status-context migrations are explicit operator work, not an in-place default flip: update branch protection to require the new context and roll the same `ADV_GATE_STATUS_CONTEXT` override to every watcher and branch-protection probe before depending on the renamed check.
 
 State mapping:
 

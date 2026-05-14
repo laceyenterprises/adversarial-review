@@ -54,6 +54,28 @@ test('fetchAdversarialGateBranchProtection succeeds when required context is pre
   assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH']);
 });
 
+test('fetchAdversarialGateBranchProtection returns a structured failure for invalid status-context config', async () => {
+  let called = false;
+  const result = await fetchAdversarialGateBranchProtection({
+    repoPath: 'laceyenterprises/adversarial-review',
+    baseBranch: 'main',
+    env: {
+      GITHUB_TOKEN: 'token-123',
+      ADV_GATE_STATUS_CONTEXT: 'bad\ncontext',
+    },
+    execFileImpl: async () => {
+      called = true;
+      throw new Error('should not run gh api');
+    },
+  });
+
+  assert.equal(called, false);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'invalid-status-context-config');
+  assert.equal(result.context, 'invalid-status-context-config');
+  assert.match(result.error, /ADV_GATE_STATUS_CONTEXT must not contain CR or LF/);
+});
+
 test('warnForMissingAdversarialGateBranchProtection logs structured warnings for missing context', async () => {
   const warnings = [];
   const result = await warnForMissingAdversarialGateBranchProtection(
@@ -78,7 +100,7 @@ test('warnForMissingAdversarialGateBranchProtection logs structured warnings for
   assert.equal(result.length, 1);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /branch-protection-warning/);
-  assert.match(warnings[0], /context=adversarial-review\/gate/);
+  assert.match(warnings[0], /context=agent-os\/adversarial-gate/);
   assert.match(warnings[0], /reason=required-context-missing/);
 });
 

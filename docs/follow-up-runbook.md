@@ -10,7 +10,7 @@ Use this when a review has already been posted to GitHub and you need to inspect
 
 - This is a **bounded loop** with operator override. It is not an unbounded autonomous retry daemon.
 - The **watcher owns review posting**. Follow-up remediation does not post GitHub reviews directly.
-- The watcher also projects the durable adversarial-review state onto the PR head SHA as the commit status context `agent-os/adversarial-gate`. Do not rely on GitHub-native merge or auto-merge until that context is required in branch protection for the target branch.
+- The watcher also projects the durable adversarial-review state onto the PR head SHA as the commit status context `agent-os/adversarial-gate` by default. Do not rely on GitHub-native merge or auto-merge until that context is required in branch protection for the target branch. Deployments may opt into a different context with `ADV_GATE_STATUS_CONTEXT`, but the override must be applied consistently to every watcher and branch-protection probe.
 - The remediation worker works on the **existing PR branch**, commits changes, and pushes that branch.
 - The remediation worker does **not** open a new PR and does **not** merge the PR.
 - Until `LAC-358` is explicitly reverted, **all auto-remediation routes through the codex worker class regardless of the original PR's `builderTag`**. The durable `builderTag` is still preserved on the job ledger for downstream queue/audit purposes, but worker-class selection is intentionally hard-switched to codex per `feedback_prefer_codex_for_heavy_work.md` while claude-code remains unsuitable for unattended heavy remediation. Commit trailers on remediation commits therefore stamp `Worker-Class: codex`, and reconcile-time public PR comments also post under the codex bot identity when the worker model falls back to the hard-switched class (including `never-spawned` reconcile paths).
@@ -81,9 +81,9 @@ The old table (`low/medium=1`, `high/critical=3`) no longer applies to new jobs:
 
 ## Operator merge-agent labels
 
-Before enabling GitHub-native merge or auto-merge for this repo, require `agent-os/adversarial-gate` in branch protection. That status is the GitHub-facing projection of the adversarial-review ledger; without making it required, GitHub can merge a PR even when the durable review/remediation loop is still pending or blocked.
+Before enabling GitHub-native merge or auto-merge for this repo, require `agent-os/adversarial-gate` in branch protection. That status is the GitHub-facing projection of the adversarial-review ledger; without making it required, GitHub can merge a PR even when the durable review/remediation loop is still pending or blocked. If you intentionally rename the gate with `ADV_GATE_STATUS_CONTEXT`, update branch protection and every watcher/probe deployment to the same override before trusting the new check.
 
-The watcher now checks that protection on a cached interval and logs `branch-protection-warning` for any watched repo/base branch where the required context is absent or unreadable. Run `npm run check-branch-protection` for an operator-side audit; pass `-- --repo <owner/repo>` or `-- --base <branch>` to narrow the probe.
+The watcher now checks that protection on a cached interval and logs `branch-protection-warning` for any watched repo/base branch where the required context is absent, unreadable, or configured with an invalid `ADV_GATE_STATUS_CONTEXT`. Run `npm run check-branch-protection` for an operator-side audit; pass `-- --repo <owner/repo>` or `-- --base <branch>` to narrow the probe.
 
 `operator-approved` is the operator's current-head merge approval. It is accepted only from an attributable GitHub `labeled` event that appears in the PR timeline after the code event for the current head SHA; GitHub issue comments, review posts, and other non-code PR updates do not make that approval stale. A PR author cannot approve their own PR with this label. When scoped, it bypasses review/remediation state gates so the operator can merge during a pending review or stuck remediation loop. It still requires an open, mergeable PR with known successful checks and no explicit skip label.
 

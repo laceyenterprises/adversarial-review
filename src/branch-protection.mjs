@@ -51,7 +51,20 @@ async function fetchAdversarialGateBranchProtection({
 } = {}) {
   const { owner, repo } = parseRepoSlug(repoPath);
   const branch = String(baseBranch || DEFAULT_BASE_BRANCH);
-  const context = resolveGateStatusContext(env);
+  let context;
+  try {
+    context = resolveGateStatusContext(env);
+  } catch (err) {
+    return {
+      repo: repoPath,
+      baseBranch: branch,
+      context: 'invalid-status-context-config',
+      ok: false,
+      reason: 'invalid-status-context-config',
+      requiredContexts: [],
+      error: String(err?.message || err),
+    };
+  }
   let stdout;
   try {
     ({ stdout } = await execFileImpl(

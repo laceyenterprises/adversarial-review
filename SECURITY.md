@@ -34,8 +34,7 @@ If for some reason the form is unavailable, you may instead email
 ## What we treat as in scope
 
 - Vulnerabilities in code under [`src/`](src/), [`tools/`](tools/),
-  runtime-relevant repository scripts (excluding the maintainer-local
-  launch wrappers under [`scripts/`](scripts/)), [`hooks/`](hooks/), and
+  runtime-relevant repository scripts, [`hooks/`](hooks/), and
   [`.github/workflows/`](.github/workflows/) that would let an unauthenticated
   or unprivileged actor:
   - read or modify another reviewer's or operator's secrets, OAuth
@@ -54,15 +53,24 @@ If for some reason the form is unavailable, you may instead email
 - Vulnerabilities in the documented public adapter contracts in
   [`src/kernel/contracts.d.ts`](src/kernel/contracts.d.ts) that would
   let an adapter author silently violate a kernel invariant.
+- Executable daemon and operational scripts remain in scope. That
+  includes runtime `.mjs` code such as
+  [`scripts/adversarial-follow-up-daemon.mjs`](scripts/adversarial-follow-up-daemon.mjs)
+  when it participates in the live watcher/remediation path described
+  in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## What we treat as out of scope
 
 - Issues in code under [`docs/internal/`](docs/internal/) —
   historical specs preserved for context, not running code.
-- Maintainer-local launch wrappers under [`launchd/`](launchd/) and
-  [`scripts/`](scripts/) (paths and account names are documented in
-  [`DEPLOYMENT.md`](DEPLOYMENT.md) as examples of one specific
-  deployment topology, not as a portable shape).
+- Maintainer-local launch wrappers and supervisor templates that embed
+  host-specific paths or account names, specifically:
+  [`scripts/adversarial-watcher-start.sh`](scripts/adversarial-watcher-start.sh),
+  [`scripts/adversarial-watcher-start-placey.sh`](scripts/adversarial-watcher-start-placey.sh),
+  [`scripts/adversarial-follow-up-tick.sh`](scripts/adversarial-follow-up-tick.sh),
+  and the templates under [`launchd/`](launchd/). As documented in
+  [`DEPLOYMENT.md`](DEPLOYMENT.md), those files describe one specific
+  deployment topology rather than a portable runtime contract.
 - Reports that rely on the operator already having full local
   filesystem write access to the watcher's host (the threat model
   assumes the operator's host is trusted; if you have local write,

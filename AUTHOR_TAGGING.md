@@ -13,16 +13,17 @@ title prefix at PR-creation time. Because that routing decision is made
 once and is not re-evaluated on retitle, the prefix has to be right the
 first time — hence the strict validation.
 
-> Some terms below (Clio, prlt) are internal-system names. See
-> [GLOSSARY.md](GLOSSARY.md) for definitions. The taxonomy is generalizable:
-> if you stand up your own deployment with different builder agents, you'd
-> define your own tag set and update the watcher's routing table to match.
+> Some terms below (Clio, the worker-class names) are internal-system
+> names. See [GLOSSARY.md](GLOSSARY.md) for definitions. The taxonomy is
+> generalizable: if you stand up your own deployment with different
+> builder agents, you'd define your own tag set and update the watcher's
+> routing table to match.
 
 ## Tags
 
 | Agent | PR Title Tag | Commit Author |
 |---|---|---|
-| Claude Code (prlt fleet) | `[claude-code]` | email contains `claude` or `clio@laceyenterprises.com` |
+| Claude Code | `[claude-code]` | email contains `claude` or `clio@laceyenterprises.com` |
 | Codex (Clio-delegated) | `[codex]` | email contains `codex` |
 | Clio sub-agent | `[clio-agent]` | `clio@laceyenterprises.com` |
 
@@ -41,25 +42,30 @@ Tag goes at the **start** of the PR title:
 The prefix requirement is defended in four places, on purpose. Each layer
 catches a different class of mistake:
 
-- **prlt workflow** (build-time): prlt's `commit` and `pr create` commands
-  prepend the correct tag automatically so a human operator never has to
-  think about it.
-- **Clio coding-agent dispatches** (prompt-time): Clio includes the tag
-  instruction in every agent task prompt so any dispatched worker knows
-  the convention even when prlt isn't in the loop.
-- **Canonical helper path** (CLI-time): operators and ad-hoc scripts open
-  PRs through
-  `npm run pr:create:tagged -- --tag <codex|claude-code|clio-agent> --title "<unprefixed title>" -- <gh args...>`,
-  which enforces the prefix locally before the PR exists.
-- **Watcher guardrail** (post-creation, internal): if a tag is missing or
-  malformed after the PR is open, the watcher fails loud — posting a
-  comment, writing a terminal failure record, and refusing to start
-  adversarial review. It does NOT retrigger on retitle, so the failure is
-  durable until an operator intervenes.
-- **Repo-side validation check** (post-creation, GitHub-side): the GitHub
-  Action `PR Title Prefix Validation` fails the PR check when an internal
-  author opens a PR without a known prefix, and explains the creation-time
-  recovery path in the failure log. Outside-contributor PRs are skipped.
+- **Canonical helper path** (build-time / CLI-time): the canonical way
+  to open an internal worker-class PR is
+  `npm run pr:create:tagged -- --tag <codex|claude-code|clio-agent> --title "<unprefixed title>" -- <gh args...>`.
+  The helper lives in [`src/pr-create-tagged.mjs`](src/pr-create-tagged.mjs)
+  and enforces the prefix locally before the PR exists, so human
+  operators and dispatched workers never need to remember the tag by
+  hand. If you wrap this helper in your own automation, the wrapper
+  inherits the guarantee.
+- **Coding-agent dispatch prompt** (prompt-time): when a higher-level
+  agent (e.g. Clio) dispatches a coding worker, the dispatch prompt
+  includes the tag instruction (see the
+  [Clio Agent Prompt Template](#clio-agent-prompt-template) below) so
+  the worker is reminded of the convention even when it is opening a
+  PR through plain `gh` rather than the canonical helper.
+- **Watcher guardrail** (post-creation, internal): if a tag is missing
+  or malformed after the PR is open, the watcher fails loud — posting
+  a comment, writing a terminal failure record, and refusing to start
+  adversarial review. It does NOT retrigger on retitle, so the failure
+  is durable until an operator intervenes.
+- **Repo-side validation check** (post-creation, GitHub-side): the
+  GitHub Action `PR Title Prefix Validation` fails the PR check when
+  an internal author opens a PR without a known prefix, and explains
+  the creation-time recovery path in the failure log.
+  Outside-contributor PRs are explicitly skipped.
 
 ## Reviewer Routing
 

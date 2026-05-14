@@ -30,7 +30,7 @@ For spec-driven projects, require PR authors to link the governing specs/runbook
 
 | Builder | Reviewer |  
 |---|---|  
-| Claude Code (prlt fleet) | Codex |  
+| Claude Code | Codex |  
 | Codex (one-off / Clio-delegated) | Claude Code |  
 | Clio sub-agent (Claude) | Codex |
 
@@ -46,7 +46,7 @@ Reviewer routing is determined by the PR author identity. Convention:
 - PRs opened by Codex → commit author email contains `codex` or PR title tagged `[codex]`  
 - PRs opened by Clio sub-agents → commit author is `clio@laceyenterprises.com`
 
-Agent author tagging is the responsibility of the build workflow (prlt or Clio's coding-agent skill).
+Agent author tagging is the responsibility of the build workflow — in this repo, the canonical helper is `npm run pr:create:tagged` (see `src/pr-create-tagged.mjs`), which prepends the worker-class prefix before opening the PR. Higher-level dispatchers (e.g. Clio's coding-agent skill) wrap that helper or include the tag instruction in the worker prompt.
 
 ---
 
@@ -140,8 +140,8 @@ GitHub PR opened
 
 ### 3. Author Tagging Convention  
 - All agent-built PRs must include author tag in PR title or commit message  
-- prlt workflow responsible for Claude Code tagging  
-- Clio's coding-agent skill responsible for Codex tagging  
+- Canonical helper (`npm run pr:create:tagged`, source in `src/pr-create-tagged.mjs`) is the owned, in-repo build-time path for tagging  
+- Clio's coding-agent skill ensures dispatched workers include the tag instruction in the prompt, so workers opening PRs via plain `gh` still tag correctly  
 - Format: `[claude-code]`, `[codex]`, `[clio-agent]`
 
 ### 4. Linear Integration  
@@ -294,7 +294,6 @@ This is true whether the substrate is direct CLI, ACPX, or another sessionful ru
 ## Repos in Scope (Initial)
 
 - `laceyenterprises/clio` — this repo  
-- prlt (Proletariat) fleet repos — https://github.com/chrismcdermut/proletariat (TBD when prlt is live)  
 - Any repo where Clio delegates a coding agent task
 
 ---
@@ -345,8 +344,8 @@ See also: `docs/POSTMORTEM-codex-cross-user-invocation-2026-04-21.md` and `docs/
 
 ## Open Questions
 
-1. **Webhook vs polling?** Webhook is more responsive but requires a public endpoint (or ngrok/Tailscale tunnel). Polling is simpler for now — revisit when prlt is live.  
-2. **What repos does the watcher cover?** Start with `laceyenterprises/clio` only, expand to prlt repos when ready.  
+1. **Webhook vs polling?** Webhook is more responsive but requires a public endpoint (or ngrok/Tailscale tunnel). Polling is simpler for now.  
+2. **What repos does the watcher cover?** Start with `laceyenterprises/clio` only, expand to the broader agent-built repo fleet as it grows.  
 3. **Codex API access** — confirm Codex is accessible via OpenAI API for spawned reviewer agents (it is, via litellm-local).  
 4. **Max concurrent reviews** — respect the 2–3 parallel agent limit from WORKING_INSTRUCTIONS.md.
 
@@ -358,7 +357,7 @@ See also: `docs/POSTMORTEM-codex-cross-user-invocation-2026-04-21.md` and `docs/
 - Codex reviewer path available locally (current working implementation uses native Codex CLI / ACPX execution, not just a generic model alias)  
 - Claude Code available via `litellm-local/claude-sonnet-4-6`  
 - Linear API configured (`\~/clio/credentials/local/linear.env`)  
-- prlt (Proletariat, https://github.com/chrismcdermut/proletariat) — future dependency, not required for v1
+- In-repo `npm run pr:create:tagged` helper (source: `src/pr-create-tagged.mjs`) — the owned build-time path for worker-class title prefixing; replaces any prior reliance on external build-time tooling
 
 ### Codex reviewer auth contract
 For Codex-backed review workers, OAuth identity selection must be treated as part of the runtime contract.

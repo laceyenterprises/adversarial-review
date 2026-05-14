@@ -333,7 +333,7 @@ above and stick to the five-minute path at the top of this file.
 
 ## A note on internal vocabulary
 
-A few terms in the docs and prompts (Clio, prlt, the `[claude-code]` /
+A few terms in the docs and prompts (Clio, the `[claude-code]` /
 `[codex]` / `[clio-agent]` worker classes) are names from the
 maintainer's operating substrate. None of them are required to use this
 project. If you see one and wonder what it means, the decoder ring is

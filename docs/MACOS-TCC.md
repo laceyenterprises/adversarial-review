@@ -1,12 +1,10 @@
----
-delegation: full
-confidence: 0.9
-last_verified: 2026-05-02
-influence_weight: medium
-tags: [adversarial-review, macos, tcc, install, runbook, security]
-staleness_window: 60d
----
 # macOS TCC: handling worker-spawn popups (and the security tradeoff)
+
+> **Scope:** this runbook applies only to operators running the live PR-review
+> watcher on a macOS host. It is irrelevant for outside contributors running
+> the offline demo or the test suite.
+
+
 
 When the adversarial-review stack runs on a fresh Mac (or after Homebrew bumps `node` or `claude`, or after fnm reinstalls Codex), macOS will start prompting "X would like to access data from other apps" / "X would like to access files in <user>'s home folder" every time a reviewer or remediation worker spawns. This document explains **what's actually being protected, why blanket Full Disk Access is a security tradeoff, and how to handle it correctly** — including the recommended posture (isolation) and the documented break-glass workaround (FDA), with authoritative path resolution for both.
 

@@ -93,7 +93,7 @@ function fenceUntrustedText(text) {
 // fields where the content is descriptive English, not code output.
 //
 // Neutralized (backslash-escape):
-//   * _ ` ~      emphasis / strikethrough
+//   * _ ` ~      emphasis / inline code / strikethrough
 //   # >          headings / blockquote at line start (also defensive
 //                inside lines; GFM is lenient about whitespace around #)
 //   [ ] ( )      links / images / footnote refs (! prefix handled too)
@@ -124,20 +124,11 @@ function defangUntrustedMarkdown(text) {
     .replace(/\\/g, '\\\\')
     .replace(/\b(https?):\/\//gi, '$1:​//')
     .replace(/\bwww\./gi, 'www.​')
-    // Triple-backticks open a fenced code block — neutralize them by
-    // breaking the run with a ZWSP between the second and third backtick.
-    // Done BEFORE the generic backtick-escape so we don't double-handle.
-    // Workers' single- and double-backtick inline-code spans pass through
-    // unchanged below; only fence-opening runs of 3+ backticks are
-    // neutralized.
-    .replace(/`{3,}/g, (m) => `\`\`​${m.slice(2)}`)
-    // Generic markdown-meta defang. Backticks are intentionally NOT in
-    // this character class: single and double backticks form inline-code
-    // spans which are safe (GFM does not process autolinks, @mentions,
-    // or HTML inside inline-code), and escaping them produces literal
-    // `\\\`` in rendered prose which workers and operators read as
-    // visual noise. Triple-backticks are already broken above.
-    .replace(/[*_~#>[\]()<>|!]/g, (m) => `\\${m}`)
+    // Generic markdown-meta defang. Escape every backtick run, including
+    // single- and double-backtick inline-code delimiters. If worker prose
+    // leaves one unmatched, GitHub can otherwise consume later trusted
+    // template text into an inline-code span.
+    .replace(/[*_`~#>[\]()<>|!]/g, (m) => `\\${m}`)
     .replace(/@(?=[A-Za-z0-9_-])/g, '@​')
     .replace(/(\\#)(?=\d)/g, '$1​')
     .replace(/^([ \t]{4,})/, '​$1')
@@ -636,19 +627,21 @@ function buildRemediationOutcomeCommentBody({
     if (!reasonText) {
       lines.push('Reason: unknown — check the daemon logs.');
     } else if (reasonText.length <= REASON_INLINE_MAX_CHARS) {
-      lines.push(`Reason: \`${reasonText}\``);
+      const inlineReason = safeInlineCode(reasonText);
+      lines.push(inlineReason ? `Reason: ${inlineReason}` : 'Reason: unknown — check the daemon logs.');
     } else {
       lines.push('Reason:');
       lines.push('');
-      // The failure message is internal-trust text from our own code
-      // (sanitizeFailureText has already stripped tokens and masked
-      // host-local paths). It is NOT worker-supplied prose, so we do
-      // not run it through the markdown defang — that would escape
-      // brackets/parens/underscores in already-clean internal text and
-      // turn `<path-redacted>` into `\<path-redacted\>` etc.
+      // Failure messages are usually produced by our own code, but the
+      // stored value can include arbitrary err.message text from parse or
+      // runtime failures. Redact first, then defang before publishing so
+      // mentions, issue refs, URLs, HTML, and delimiter backticks stay inert.
       reasonText
         .split('\n')
-        .forEach((line) => lines.push(line.length ? `> ${line}` : '>'));
+        .forEach((line) => {
+          const safeLine = defangUntrustedMarkdown(line);
+          lines.push(safeLine.length ? `> ${safeLine}` : '>');
+        });
     }
     lines.push('');
     // Salvage path: when the failure code is invalid-remediation-reply

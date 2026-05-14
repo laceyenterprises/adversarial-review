@@ -39,15 +39,13 @@ test('defangUntrustedMarkdown returns empty string for nullish input', () => {
   assert.equal(defangUntrustedMarkdown(''), '');
 });
 
-test('defangUntrustedMarkdown escapes markdown syntax chars (single/double backticks pass through as inline-code)', () => {
-  // Single and double backticks form safe inline-code spans (GFM does not
-  // process autolinks/@mentions/HTML inside them), so we deliberately let
-  // them through unescaped. Only triple-backticks (fence-opening) are
-  // neutralized, and they get a ZWSP wedged between the second and third
-  // backtick so the run cannot open a fenced code block.
+test('defangUntrustedMarkdown escapes markdown syntax chars including backticks', () => {
+  // Backticks are delimiter syntax too. Even single/double runs must be
+  // escaped because an unmatched worker-controlled run can consume later
+  // trusted template sections into inline code.
   assert.equal(
     defangUntrustedMarkdown('*bold* _ital_ `code` ~strike~ # h1 > q | t [a](b) <c> !d'),
-    '\\*bold\\* \\_ital\\_ `code` \\~strike\\~ \\# h1 \\> q \\| t \\[a\\]\\(b\\) \\<c\\> \\!d'
+    '\\*bold\\* \\_ital\\_ \\`code\\` \\~strike\\~ \\# h1 \\> q \\| t \\[a\\]\\(b\\) \\<c\\> \\!d'
   );
 });
 
@@ -353,9 +351,38 @@ test('buildRemediationOutcomeCommentBody on failed with a long reason switches t
   // The reason body appears as a blockquote (`> `-prefixed line).
   assert.match(body, /^> Failed to read remediation reply artifact/m);
   // Host-local paths still get masked by sanitizeFailureText before render.
-  assert.match(body, /<path-redacted>\/followups-reply\.json/);
+  assert.match(body, /\\<path-redacted\\>\/followups-reply\.json/);
   // No long backtick-wrapped Reason line remains anywhere in the body.
   assert.doesNotMatch(body, /Reason: `Failed to read remediation/);
+});
+
+test('long failure.message markdown is defanged inside the blockquote', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'failed',
+    job: makeJob(),
+    failure: {
+      code: 'runtime-error',
+      message: [
+        'Runtime parser exploded after receiving adversarial text from an exception:',
+        '@laceyenterprises/security should not notify, #123 should not autolink,',
+        'https://example.com should not link, <tag> should not render, and `unterminated ``` fence text follows.',
+      ].join(' '),
+    },
+  });
+
+  assert.match(body, /^Reason:\s*$/m);
+  assert.match(body, /^> Runtime parser exploded/m);
+  assert.match(body, /@​laceyenterprises\/security/);
+  assert.match(body, /\\#​123/);
+  assert.match(body, /https:​\/\/example\.com/);
+  assert.match(body, /\\<tag\\>/);
+  assert.match(body, /\\`unterminated \\`\\`\\` fence text follows/);
+  assert.doesNotMatch(body, /@laceyenterprises\/security/);
+  assert.doesNotMatch(body, /#123/);
+  assert.doesNotMatch(body, /https:\/\//);
+  assert.doesNotMatch(body, /<tag>/);
+  assert.doesNotMatch(body, /```/);
 });
 
 test('buildRemediationOutcomeCommentBody suppresses the Validation run section when all entries are empty', () => {
@@ -380,12 +407,10 @@ test('buildRemediationOutcomeCommentBody suppresses the Validation run section w
   assert.doesNotMatch(body, /none reported/);
 });
 
-test('buildRemediationOutcomeCommentBody summary with single backticks renders as inline-code (no \\` clutter)', () => {
-  // The polish: workers routinely write `git fetch` or `pytest` in their
-  // summary using single backticks. Previously every backtick got
-  // backslash-escaped which produced literal "\`git fetch\`" in rendered
-  // prose. Single and double backticks are now passed through unescaped
-  // so they form the safe inline-code spans the worker intended.
+test('buildRemediationOutcomeCommentBody summary with single backticks escapes delimiter syntax', () => {
+  // Workers routinely write `git fetch` or `pytest` in summary prose, but the
+  // source is still untrusted. Escape the delimiter so an unmatched backtick
+  // cannot swallow later trusted sections such as Validation run.
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'completed',
@@ -398,11 +423,43 @@ test('buildRemediationOutcomeCommentBody summary with single backticks renders a
     },
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
-  // The backticks are preserved verbatim — no escaping of single-backtick
-  // inline-code spans.
-  assert.match(body, /Ran `pytest tests\/migrations\/` after `alembic upgrade head`/);
-  // No backslash-escaped backticks anywhere in the summary span.
-  assert.doesNotMatch(body, /Ran \\`/);
+  assert.match(body, /Ran \\`pytest tests\/migrations\/\\` after \\`alembic upgrade head\\`/);
+  assert.doesNotMatch(body, /Ran `pytest/);
+});
+
+test('summary with unmatched single backtick cannot consume trusted sections', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'opens here `',
+      validation: ['npm test still renders under the trusted header'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.match(body, /\*\*Summary\*\*\n\nopens here \\`/);
+  assert.match(body, /\*\*Validation run\*\*\n\n- npm test still renders under the trusted header/);
+});
+
+test('validation with unmatched double backticks cannot consume trusted footer', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob({ builderTag: 'codex' }),
+    reply: {
+      outcome: 'completed',
+      summary: 'ok',
+      validation: ['bad ``'],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending' },
+  });
+  assert.match(body, /^- bad \\`\\`$/m);
+  assert.match(body, /\*\*Re-review status:\*\* queued/);
+  assert.match(body, /_Posted automatically by the adversarial-review remediation pipeline/);
 });
 
 test('postRemediationOutcomeComment posts via gh pr comment with the bot token in env', async () => {
@@ -792,10 +849,8 @@ test('worker injection of headings or task lists is inert (defanged with backsla
 test('worker text containing triple-backticks cannot open a fenced code block', () => {
   // A worker that drops a "```" run inside its summary used to be
   // protected by wrapping everything in a `text fence; that produced
-  // ugly walls of monospace prose. The current defang policy: single
-  // and double backticks pass through (they form safe inline-code
-  // spans), but any run of 3+ backticks gets a U+200B (zero-width
-  // space) wedged in so it cannot open a fenced code block.
+  // ugly walls of monospace prose. The current defang policy escapes every
+  // backtick delimiter, so neither inline code nor fenced code can open.
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'completed',
@@ -809,13 +864,9 @@ test('worker text containing triple-backticks cannot open a fenced code block', 
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
   // No run of three consecutive backticks remains anywhere in the body
-  // (every fence-opening run was broken with a ZWSP between the second
-  // and third backtick).
+  // because each delimiter is backslash-escaped.
   assert.doesNotMatch(body, /```/);
-  // And the worker's intended single backticks are preserved as text:
-  // a fenced block never opens, the worker's prose remains visible.
-  // Verify the ZWSP-broken form is present and that no live fence opens.
-  assert.match(body, /Run ``​`bash\necho hi\n``​` to see output/);
+  assert.match(body, /Run \\`\\`\\`bash\necho hi\n\\`\\`\\` to see output/);
 });
 
 test('rereview.reason with worker-injected mention is wrapped inline-safe (no live mention)', () => {

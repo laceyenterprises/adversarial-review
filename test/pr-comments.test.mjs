@@ -159,24 +159,24 @@ test('buildRemediationOutcomeCommentBody produces clean prose (no fenced code bl
   // No ```text fences anywhere in the rendered body — the defang
   // approach replaced them with backslash-escaped prose.
   assert.doesNotMatch(body, /```text/);
-  // Summary section is a plain paragraph, not a fenced block.
+  // Summary section is an H2 with a plain paragraph beneath.
   assert.match(
     body,
-    /\*\*Summary\*\*\n\nRestored alert-token compatibility for legacy deployments and documented the fallback contract\./
+    /## Summary\n\nRestored alert-token compatibility for legacy deployments and documented the fallback contract\./
   );
-  // Validation list is one defanged bullet per item, no nested fences.
-  assert.match(body, /\*\*Validation run\*\*\n\n- git fetch origin && git rebase origin\/main completed cleanly/);
+  // Validation list is one defanged bullet per item under its H2.
+  assert.match(body, /## Validation run\n\n- git fetch origin && git rebase origin\/main completed cleanly/);
   assert.match(body, /^- npm test passed: 882 passed, 1 skipped\.$/m);
-  // Addressed entries render with bold labels OUTSIDE and defanged prose
-  // INLINE under the numbered item — no fences.
-  assert.match(body, /1\. \*\*Legacy alert token fallback removed\*\*/);
+  // Each addressed entry gets its own H3 title + bold-labelled
+  // **Finding:** / **Action:** / **Files:** paragraphs.
+  assert.match(body, /### Legacy alert token fallback removed/);
   assert.match(
     body,
-    /resolveDefaultHooksTokenFile stopped probing the historical secrets path\./
+    /\*\*Finding:\*\*\n\nresolveDefaultHooksTokenFile stopped probing the historical secrets path\./
   );
   assert.match(
     body,
-    /\*\*Action\*\*\n\n   Restored the legacy token-file probe when the new default token file is absent\./
+    /\*\*Action:\*\*\n\nRestored the legacy token-file probe when the new default token file is absent\./
   );
   assert.match(body, /\*\*Files:\*\* `src\/alert-delivery\.mjs`/);
 });
@@ -288,9 +288,9 @@ test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) flags h
   // so the next human can map the hard-exit back to the originating
   // review finding. New format: bold labels outside fenced blocks,
   // untrusted content inside.
-  assert.match(body, /\*\*Finding\*\*/);
+  assert.match(body, /\*\*Finding:\*\*/);
   assert.match(body, /Reviewer asks for a destructive schema migration\./);
-  assert.match(body, /\*\*Reasoning\*\*/);
+  assert.match(body, /\*\*Reasoning:\*\*/);
   assert.match(body, /Schema migration requires DBA review\./);
   // No re-review requested in this state.
   assert.match(body, /Re-review requested:\*\*\s*no/);
@@ -440,8 +440,8 @@ test('summary with unmatched single backtick cannot consume trusted sections', (
     },
     reReview: { requested: true, triggered: true, status: 'pending' },
   });
-  assert.match(body, /\*\*Summary\*\*\n\nopens here \\`/);
-  assert.match(body, /\*\*Validation run\*\*\n\n- npm test still renders under the trusted header/);
+  assert.match(body, /## Summary\n\nopens here \\`/);
+  assert.match(body, /## Validation run\n\n- npm test still renders under the trusted header/);
 });
 
 test('validation with unmatched double backticks cannot consume trusted footer', () => {
@@ -1240,14 +1240,14 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'two fixed; ready' },
   });
 
-  assert.match(body, /\*\*Addressed findings\*\*/);
-  // New format: numbered list with bold labels outside fenced blocks.
-  // Untrusted finding/action text stays inside fences, files render
-  // as inline-coded paths so a worker-supplied path can't break out
-  // of the inline-code wrapper.
-  assert.match(body, /1\. \*\*Retry double-submit race\*\*/);
+  assert.match(body, /## Addressed findings/);
+  // New format: per-entry ### H3 heading with bold-labelled
+  // **Finding:** / **Action:** paragraphs. Files paths render as
+  // inline-coded so a worker-supplied path can't break out of the
+  // inline-code wrapper.
+  assert.match(body, /### Retry double-submit race/);
   assert.match(body, /Race in retry path can double-submit\./);
-  assert.match(body, /\*\*Action\*\*/);
+  assert.match(body, /\*\*Action:\*\*/);
   assert.match(body, /Added an idempotency token \+ dedupe check\./);
   assert.match(body, /\*\*Files:\*\* `src\/worker\.mjs`, `test\/worker\.test\.mjs`/);
   // Second entry has no Files: line — verify it doesn't appear
@@ -1255,8 +1255,8 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   // already, so check that **Files:** appears exactly once.
   const filesLines = body.match(/\*\*Files:\*\*/g) || [];
   assert.equal(filesLines.length, 1, 'Files: line only on entries that supply it');
-  // Both entries should be numbered.
-  assert.match(body, /2\. \*\*Auth header null guard\*\*/);
+  // Both entries should have H3 headings.
+  assert.match(body, /### Auth header null guard/);
 });
 
 test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', () => {
@@ -1281,9 +1281,11 @@ test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', 
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'title sanitized' },
   });
 
-  assert.match(body, /1\. \*\*Foo Injected heading body\*\*/);
-  assert.doesNotMatch(body, /\n## Injected heading/);
-  assert.doesNotMatch(body, /1\. \*\*Foo\n/);
+  assert.match(body, /### Foo Injected heading body/);
+  // A worker-injected `## Injected heading` should be collapsed into the
+  // title text (above) rather than escaping as a real H2 between entries.
+  assert.doesNotMatch(body, /\n## Injected heading\n/);
+  assert.doesNotMatch(body, /### Foo\n/);
 });
 
 test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls back for empty titles', () => {
@@ -1313,8 +1315,8 @@ test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls 
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'title controls sanitized' },
   });
 
-  assert.match(body, /1\. \*\*Retry double-submit\*\*/);
-  assert.match(body, /2\. \*\*Finding\*\*/);
+  assert.match(body, /### Retry double-submit/);
+  assert.match(body, /### Finding/);
   assert.match(body, /Invisible-only titles should use the fallback heading\./);
   assert.doesNotMatch(body, /[\u001B\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u);
 });
@@ -1335,10 +1337,10 @@ test('buildRemediationOutcomeCommentBody renders validator-accepted untitled per
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'untitled entries render' },
   });
 
-  assert.match(body, /\*\*Addressed findings\*\*/);
-  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
-  assert.match(body, /\*\*Blockers\*\*/);
-  assert.match(body, /1\. \*\*Finding\*\*/);
+  assert.match(body, /## Addressed findings/);
+  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /## Blockers/);
+  assert.match(body, /### Finding/);
   assert.match(body, /Untitled addressed finding\./);
   assert.match(body, /Untitled pushback finding\./);
   assert.match(body, /Untitled blocker finding\./);
@@ -1451,10 +1453,10 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'pushback recorded' },
   });
 
-  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
-  assert.match(body, /1\. \*\*Over-broad dispatch refactor\*\*/);
+  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /### Over-broad dispatch refactor/);
   assert.match(body, /Reviewer asked to refactor the entire dispatch module\./);
-  assert.match(body, /\*\*Reasoning\*\*/);
+  assert.match(body, /\*\*Reasoning:\*\*/);
   assert.match(body, /Out of scope for this PR; tracked as separate ticket LAC-99\./);
 });
 
@@ -1531,8 +1533,8 @@ test('buildRemediationOutcomeCommentBody redacts host-local paths smuggled into 
   assert.doesNotMatch(body, /\/private\/var\/folders\/zz/);
   // Sanity: section headers still render so the operator can tell the
   // sections existed even after redaction.
-  assert.match(body, /\*\*Addressed findings\*\*/);
-  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
+  assert.match(body, /## Addressed findings/);
+  assert.match(body, /## Pushback \(deliberately not changed\)/);
 });
 
 test('buildRemediationOutcomeCommentBody renders all four sections (summary, addressed, pushback, blockers) when populated', () => {
@@ -1568,16 +1570,16 @@ test('buildRemediationOutcomeCommentBody renders all four sections (summary, add
     reReview: { requested: false },
   });
 
-  assert.match(body, /\*\*Summary\*\*/);
-  assert.match(body, /\*\*Addressed findings\*\*/);
-  assert.match(body, /\*\*Pushback \(deliberately not changed\)\*\*/);
-  assert.match(body, /\*\*Blockers\*\*/);
+  assert.match(body, /## Summary/);
+  assert.match(body, /## Addressed findings/);
+  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /## Blockers/);
   // Structured blocker carries the originating review finding and a
   // needsHumanInput line so the human reviewer can see exactly which
   // finding was deferred and what input is needed.
   assert.match(body, /Reviewer asks for the schema migration\./);
   assert.match(body, /Schema migration requires DBA review\./);
-  assert.match(body, /\*\*Needs human input\*\*/);
+  assert.match(body, /\*\*Needs human input:\*\*/);
   assert.match(body, /DBA approval \+ maintenance window/);
   // Order matters for readability — the reader should see what was
   // done before what wasn't.
@@ -1700,10 +1702,10 @@ test('buildRemediationOutcomeCommentBody salvages worker response on invalid-rem
   // Salvaged sections render below the failure header. Block-context
   // defang escapes `_within_word` so `opened_at` appears in source as
   // `opened\_at` and renders to the operator as `opened_at`.
-  assert.match(body, /\*\*Summary\*\*/);
+  assert.match(body, /## Summary/);
   assert.match(body, /Preserved opened\\_at, made events idempotent/);
-  assert.match(body, /\*\*Addressed findings\*\*/);
-  assert.match(body, /1\. \*\*Turn attempts openedat preservation\*\*/);
+  assert.match(body, /## Addressed findings/);
+  assert.match(body, /### Turn attempts openedat preservation/);
   assert.match(body, /turn\\_attempts upsert overwrites opened\\_at on partial updates\./);
   assert.match(body, /\*\*Files:\*\* `platform\/session-ledger\/src\/session_ledger\/db\.py`/);
 });

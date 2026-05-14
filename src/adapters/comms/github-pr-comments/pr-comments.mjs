@@ -243,27 +243,27 @@ function indentedDefangedText(text, indentLevel = 3) {
 }
 
 // Render the worker's per-finding accountability list. Each entry of
-// `addressed[]` produces a numbered point-by-point block:
+// `addressed[]` produces an H3-headed block of bold-labelled paragraphs:
 //
-//   1. **Finding**
+//   ### Title
 //
-//      ```text
-//      <quoted summary of the review's blocking issue>
-//      ```
+//   **Finding:**
 //
-//      **Action**
+//   <defanged summary of the review's blocking issue>
 //
-//      ```text
-//      <what the worker did to address it>
-//      ```
+//   **Action:**
 //
-//      **Files:** `a.js`, `b.js`   ← only when entry.files is non-empty
+//   <defanged description of what the worker did to address it>
 //
-// The structure puts bold labels OUTSIDE fenced blocks so they render
-// as markdown, while untrusted finding/action text stays INSIDE fences
-// and remains inert (no @mentions / autolinks / GFM extensions reach
-// the PR thread). Files are inline-coded paths with backticks stripped
-// so a worker-injected ` cannot break out of the inline-code wrapper.
+//   **Files:** `a.js`, `b.js`   ← only when entry.files is non-empty
+//
+// Promoting the title to a heading (and the field labels to bold-prefix
+// paragraphs) gives each finding its own scannable card under the
+// section's `## Addressed findings` H2 — matches the reviewer's pop and
+// hierarchy. Untrusted finding/action text is defanged (markdown-meta
+// chars escaped, autolinks/mentions zero-width-broken) so worker output
+// stays inert; Files paths are inline-coded with backticks stripped so
+// a worker-injected ` cannot break out of the inline-code wrapper.
 function formatAddressedList(items, emptyText = '_(none reported)_') {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
   const entries = items
@@ -292,18 +292,20 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
   if (!entries.length) return emptyText;
 
   return entries
-    .map((entry, index) => {
+    .map((entry) => {
       const lines = [
-        `${index + 1}. **${entry.title}**`,
+        `### ${entry.title}`,
         '',
-        indentedDefangedText(entry.finding),
+        '**Finding:**',
         '',
-        '   **Action**',
+        defangUntrustedMarkdown(entry.finding),
         '',
-        indentedDefangedText(entry.action),
+        '**Action:**',
+        '',
+        defangUntrustedMarkdown(entry.action),
       ];
       if (entry.files.length) {
-        let filesLine = `   **Files:** ${entry.files.join(', ')}`;
+        let filesLine = `**Files:** ${entry.files.join(', ')}`;
         if (filesLine.length > ADDRESSED_FILES_MAX_CHARS) {
           filesLine = `${filesLine.slice(0, ADDRESSED_FILES_MAX_CHARS - 1)}…`;
         }
@@ -318,8 +320,8 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
 // Render the worker's pushback list. `pushback[]` is for findings the
 // worker read, deliberately decided NOT to change the code on, and
 // wants to record the reasoning. Distinct from `blockers[]` (hard
-// exit) and `addressed[]` (fix applied). Same numbered point-by-point
-// shape as addressed entries, with **Reasoning** in place of **Action**.
+// exit) and `addressed[]` (fix applied). Same H3-headed bold-labelled
+// shape as addressed entries, with **Reasoning:** in place of **Action:**.
 function formatPushbackList(items, emptyText = '_(none reported)_') {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
   const entries = items
@@ -341,15 +343,17 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
   if (!entries.length) return emptyText;
 
   return entries
-    .map((entry, index) => {
+    .map((entry) => {
       return [
-        `${index + 1}. **${entry.title}**`,
+        `### ${entry.title}`,
         '',
-        indentedDefangedText(entry.finding),
+        '**Finding:**',
         '',
-        '   **Reasoning**',
+        defangUntrustedMarkdown(entry.finding),
         '',
-        indentedDefangedText(entry.reasoning),
+        '**Reasoning:**',
+        '',
+        defangUntrustedMarkdown(entry.reasoning),
       ].join('\n');
     })
     .join('\n\n');
@@ -398,23 +402,25 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
   if (!entries.length) return emptyText;
 
   return entries
-    .map((entry, index) => {
+    .map((entry) => {
       const lines = [
-        `${index + 1}. **${entry.title}**`,
+        `### ${entry.title}`,
         '',
-        indentedDefangedText(entry.finding),
+        '**Finding:**',
+        '',
+        defangUntrustedMarkdown(entry.finding),
       ];
       if (entry.reasoning) {
         lines.push('');
-        lines.push('   **Reasoning**');
+        lines.push('**Reasoning:**');
         lines.push('');
-        lines.push(indentedDefangedText(entry.reasoning));
+        lines.push(defangUntrustedMarkdown(entry.reasoning));
       }
       if (entry.needsHumanInput) {
         lines.push('');
-        lines.push('   **Needs human input**');
+        lines.push('**Needs human input:**');
         lines.push('');
-        lines.push(indentedDefangedText(entry.needsHumanInput));
+        lines.push(defangUntrustedMarkdown(entry.needsHumanInput));
       }
       return lines.join('\n');
     })
@@ -539,7 +545,7 @@ function buildRemediationOutcomeCommentBody({
   // span at the top of the body. HTML comments don't render in
   // GitHub markdown so this is invisible to PR readers.
   lines.push(`<!-- ${marker} -->`);
-  lines.push(`### Remediation Worker (${headerClass}) — round ${roundLabel}`);
+  lines.push(`## Remediation Worker (${headerClass}) — round ${roundLabel}`);
   lines.push('');
 
   if (action === 'completed') {
@@ -678,7 +684,7 @@ function buildRemediationOutcomeCommentBody({
   // would otherwise be republished verbatim to the public comment.
   if (reply?.summary) {
     lines.push('');
-    lines.push('**Summary**');
+    lines.push('## Summary');
     lines.push('');
     lines.push(sanitizeFreeText(reply.summary, SUMMARY_MAX_CHARS));
   }
@@ -692,7 +698,7 @@ function buildRemediationOutcomeCommentBody({
     const validation = formatRedactedBulletList(reply.validation, '');
     if (validation) {
       lines.push('');
-      lines.push('**Validation run**');
+      lines.push('## Validation run');
       lines.push('');
       lines.push(validation);
     }
@@ -708,7 +714,7 @@ function buildRemediationOutcomeCommentBody({
     const addressed = formatAddressedList(reply.addressed, '');
     if (addressed) {
       lines.push('');
-      lines.push('**Addressed findings**');
+      lines.push('## Addressed findings');
       lines.push('');
       lines.push(addressed);
     }
@@ -718,7 +724,7 @@ function buildRemediationOutcomeCommentBody({
     const pushback = formatPushbackList(reply.pushback, '');
     if (pushback) {
       lines.push('');
-      lines.push('**Pushback (deliberately not changed)**');
+      lines.push('## Pushback (deliberately not changed)');
       lines.push('');
       lines.push(pushback);
     }
@@ -728,7 +734,7 @@ function buildRemediationOutcomeCommentBody({
     const blockers = formatBlockersList(reply.blockers, '');
     if (blockers) {
       lines.push('');
-      lines.push('**Blockers**');
+      lines.push('## Blockers');
       lines.push('');
       lines.push(blockers);
     }

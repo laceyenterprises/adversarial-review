@@ -122,7 +122,13 @@ function createBranchProtectionChecker({
   return async function checkAdversarialGateBranchProtection(options = {}) {
     const repoPath = options.repoPath;
     const baseBranch = options.baseBranch || defaults.baseBranch || DEFAULT_BASE_BRANCH;
-    const key = `${repoPath}#${baseBranch}`;
+    let context;
+    try {
+      context = resolveGateStatusContext(options.env ?? defaults.env);
+    } catch {
+      context = 'invalid-status-context-config';
+    }
+    const key = `${repoPath}#${baseBranch}#${context}`;
     const now = nowMs();
     const cached = cache.get(key);
     if (cached && now - cached.checkedAtMs < ttlMs) {

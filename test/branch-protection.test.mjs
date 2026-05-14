@@ -130,6 +130,46 @@ test('createBranchProtectionChecker caches protection probes by repo and base br
   assert.equal(calls, 2);
 });
 
+test('createBranchProtectionChecker does not reuse cached results across status-context overrides', async () => {
+  let calls = 0;
+  const checker = createBranchProtectionChecker({
+    ttlMs: 10_000,
+    fetchImpl: async ({ repoPath, baseBranch, env }) => {
+      calls += 1;
+      const context = env?.ADV_GATE_STATUS_CONTEXT ?? ADVERSARIAL_GATE_CONTEXT;
+      return {
+        repo: repoPath,
+        baseBranch,
+        context,
+        ok: true,
+        reason: 'required-context-present',
+        requiredContexts: [context],
+      };
+    },
+  });
+
+  const first = await checker({
+    repoPath: 'laceyenterprises/adversarial-review',
+    env: {
+      GITHUB_TOKEN: 'token-123',
+      ADV_GATE_STATUS_CONTEXT: 'agent-os/adversarial-gate',
+    },
+  });
+  const second = await checker({
+    repoPath: 'laceyenterprises/adversarial-review',
+    env: {
+      GITHUB_TOKEN: 'token-123',
+      ADV_GATE_STATUS_CONTEXT: 'galileo/adversarial-gate',
+    },
+  });
+
+  assert.equal(first.cached, false);
+  assert.equal(second.cached, false);
+  assert.equal(first.context, 'agent-os/adversarial-gate');
+  assert.equal(second.context, 'galileo/adversarial-gate');
+  assert.equal(calls, 2);
+});
+
 test('resolveBaseBranchForRepo honors full slug, repo name, and default fallback', () => {
   assert.equal(
     resolveBaseBranchForRepo('laceyenterprises/adversarial-review', {

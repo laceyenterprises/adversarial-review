@@ -70,12 +70,13 @@ paths use neutral defaults instead.
 - **`src/adversarial-gate-status.mjs`** and
   **`src/check-branch-protection.mjs`** post a GitHub commit-status
   context for the adversarial-review gate. The default is
-  `adversarial-review/gate` (a generic, project-scoped name with no
-  maintainer identity in it). Outside operators who want a different
+  `agent-os/adversarial-gate`. Outside operators who want a different
   name in their org's branch protection and CI logs can set the
   `ADV_GATE_STATUS_CONTEXT` environment variable on both the watcher
   and `npm run check-branch-protection` processes; non-empty values
-  win over the default. Whitespace is trimmed; CR/LF are rejected.
+  win over the default, and the override must be applied consistently
+  anywhere the watcher posts or probes the gate. Whitespace is
+  trimmed; CR/LF are rejected.
 - **`src/follow-up-merge-agent.mjs`**, **`src/follow-up-retrigger-label.mjs`**,
   **`src/retrigger-review.mjs`**, **`src/retrigger-remediation.mjs`**,
   and **`src/reset-pr.mjs`** contain `hq.*` verbs or `hq` CLI

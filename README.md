@@ -323,6 +323,7 @@ reproducing it), the operator docs are:
 - [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-adversarial-review-auto-remediation.md) — the living contract
 - [`docs/STATE-MACHINE.md`](docs/STATE-MACHINE.md) — the two durable state machines
 - [`docs/MACOS-TCC.md`](docs/MACOS-TCC.md) — TCC popup handling on macOS hosts
+- [`tools/adversarial-review/DEPLOYMENT-FROM-FRESH-MAC.md`](tools/adversarial-review/DEPLOYMENT-FROM-FRESH-MAC.md) — five-step path to a running watcher on a clean macOS host
 - [`DEPLOYMENT.md`](DEPLOYMENT.md) — audit of maintainer-local paths still in source
 - [`tools/adversarial-review/DEPS.md`](tools/adversarial-review/DEPS.md) — full dependency contract
 

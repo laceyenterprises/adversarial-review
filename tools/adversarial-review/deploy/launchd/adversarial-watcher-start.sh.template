@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# adversarial-watcher-start.sh
+#
+# Rendered LaunchAgent wrapper for the adversarial-review watcher.
+# Source template: tools/adversarial-review/deploy/launchd/adversarial-watcher-start.sh.template
+#
+# This is the portable replacement for the maintainer-local
+# scripts/adversarial-watcher-start.sh and -placey.sh. It:
+#
+#   1. Sanity-checks the native better-sqlite3 module before any
+#      secret resolution (so a Node ABI mismatch produces zero
+#      1Password popups; see KNOWN-SHARP-EDGES.md).
+#   2. Sources REPO_RENDER_SECRETS_ROOT/adversarial-review.env if
+#      present so operators can drop GITHUB_TOKEN / reviewer PATs /
+#      LINEAR_API_KEY / OP_SERVICE_ACCOUNT_TOKEN into a single file
+#      (mode 0600 inside a 0700 secrets root).
+#   3. Falls back to `gh auth token` for GITHUB_TOKEN if the env
+#      file did not provide it.
+#   4. Scrubs the OAuth-fallback env strip list before exec.
+#   5. execs node into src/watcher.mjs.
+#
+# Values baked in at render time:
+#   REPO_RENDER_REPO_ROOT      = ${REPO_ROOT}
+#   REPO_RENDER_SECRETS_ROOT   = ${SECRETS_ROOT}
+#   REPO_RENDER_LOG_ROOT       = ${LOG_ROOT}
+#   REPO_RENDER_REVIEWER_AUTH  = ${REVIEWER_AUTH_ROOT}
+#
+# Re-render via tools/adversarial-review/install.sh to change them.
+
+set -euo pipefail
+
+REPO_RENDER_REPO_ROOT="${REPO_ROOT}"
+REPO_RENDER_SECRETS_ROOT="${SECRETS_ROOT}"
+REPO_RENDER_LOG_ROOT="${LOG_ROOT}"
+REPO_RENDER_REVIEWER_AUTH="${REVIEWER_AUTH_ROOT}"
+
+mkdir -p "$REPO_RENDER_LOG_ROOT"
+
+# 1. Native module gate.
+NATIVE_CHECK_ERR="$REPO_RENDER_LOG_ROOT/adversarial-watcher-native-check.err"
+NODE_BIN="$(command -v node || true)"
+if [ -z "$NODE_BIN" ]; then
+  echo "[adversarial-watcher] ERROR: node not found on PATH" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm" >&2
+  sleep 3600
+  exit 1
+fi
+if ! ( cd "$REPO_RENDER_REPO_ROOT" && "$NODE_BIN" -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$NATIVE_CHECK_ERR" 2>&1; then
+  echo "[adversarial-watcher] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
+  echo "[adversarial-watcher] details:" >&2
+  sed 's/^/  /' "$NATIVE_CHECK_ERR" >&2
+  echo "[adversarial-watcher] fix: cd $REPO_RENDER_REPO_ROOT && npm rebuild better-sqlite3" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; bootout the agent and rebuild to recover sooner." >&2
+  sleep 3600
+  exit 1
+fi
+
+# 2. Operator dotenv (optional).
+OPERATOR_ENV_FILE="$REPO_RENDER_SECRETS_ROOT/adversarial-review.env"
+if [ -r "$OPERATOR_ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$OPERATOR_ENV_FILE"
+  set +a
+else
+  echo "[adversarial-watcher] WARN: $OPERATOR_ENV_FILE not found; relying on inherited env for tokens" >&2
+fi
+
+# 3. GitHub token.
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  if command -v gh >/dev/null 2>&1; then
+    GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+    export GITHUB_TOKEN
+  fi
+fi
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  echo "[adversarial-watcher] ERROR: GITHUB_TOKEN not set and gh auth token returned nothing" >&2
+  exit 1
+fi
+
+# 4. Optional Codex auth relocation.
+if [ -n "$REPO_RENDER_REVIEWER_AUTH" ]; then
+  export CODEX_AUTH_PATH="$REPO_RENDER_REVIEWER_AUTH/codex/auth.json"
+fi
+
+# 5. Scrub OAuth fallbacks.
+unset ANTHROPIC_API_KEY
+unset ANTHROPIC_BASE_URL
+unset OPENAI_API_KEY
+unset GOOGLE_API_KEY
+unset GEMINI_API_KEY
+unset CLAUDE_CODE_USE_BEDROCK
+unset CLAUDE_CODE_USE_VERTEX
+unset AWS_BEARER_TOKEN_BEDROCK
+
+cd "$REPO_RENDER_REPO_ROOT"
+
+if command -v setsid >/dev/null 2>&1; then
+  exec setsid "$NODE_BIN" "$REPO_RENDER_REPO_ROOT/src/watcher.mjs"
+fi
+exec "$NODE_BIN" "$REPO_RENDER_REPO_ROOT/src/watcher.mjs"

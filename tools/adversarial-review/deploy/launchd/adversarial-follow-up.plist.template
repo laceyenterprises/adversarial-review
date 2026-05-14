@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Parameterized LaunchAgent template for the adversarial-review follow-up
+  daemon. Rendered by tools/adversarial-review/install.sh with the same
+  placeholder set as adversarial-watcher.plist.template.
+
+  Rendered filename: ai.${WATCHER_USER_LABEL}.adversarial-follow-up.plist
+
+  KeepAlive=SuccessfulExit=false matches the long-lived `while true; sleep`
+  loop the rendered tick script runs: launchd respawns on crash but not
+  on clean exit, which is what we want for an internally-looping daemon.
+  See launchd/ai.laceyenterprises.adversarial-follow-up.placey.plist for
+  the original incident notes that motivated this shape.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.${WATCHER_USER_LABEL}.adversarial-follow-up</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${REPO_ROOT}/scripts/render/adversarial-follow-up-tick.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${REPO_ROOT}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>${OPERATOR_HOME}</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>${LOG_ROOT}/adversarial-follow-up.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>${LOG_ROOT}/adversarial-follow-up.log</string>
+</dict>
+</plist>

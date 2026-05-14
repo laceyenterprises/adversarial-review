@@ -39,6 +39,16 @@
         <string>/bin/zsh</string>
         <key>HQ_ROOT</key>
         <string>/Users/airlock/agent-os-hq</string>
+        <!-- Enables the final-pass-on-budget-exhausted dispatch lane in
+             follow-up-merge-agent.mjs. When the round budget is exhausted
+             and the verdict is still `Request changes`, dispatch the
+             merge-agent with that trigger so its sub-worker can apply the
+             reviewer's findings inline and trigger a fresh review pass.
+             See docs/SPEC-adversarial-review-auto-remediation.md for the
+             full contract (universal hard gates + blocker-class refusal
+             still apply). -->
+        <key>MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES</key>
+        <string>1</string>
     </dict>
 
     <key>RunAtLoad</key>

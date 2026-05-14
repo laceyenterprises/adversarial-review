@@ -61,6 +61,14 @@
              script derives every other user-relative path from it. -->
         <key>HOME</key>
         <string>/Users/placey</string>
+        <!-- Enables the final-pass-on-budget-exhausted dispatch lane in
+             follow-up-merge-agent.mjs. Kept on the deprecated `.placey`
+             plist so a future revival (or operator-bounce that loads this
+             plist for diagnosis) gets the same dispatch behavior as the
+             live `.airlock` daemon. See
+             docs/SPEC-adversarial-review-auto-remediation.md. -->
+        <key>MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES</key>
+        <string>1</string>
     </dict>
 
     <!-- Long-lived: the script runs an internal `while true; sleep 120`

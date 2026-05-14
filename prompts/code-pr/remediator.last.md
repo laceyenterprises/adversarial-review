@@ -150,6 +150,12 @@ you addressed vs disagreed with vs deferred. Per-entry accountability
 is the difference between "the worker did something" and "the worker
 explained itself to the next human in the loop."
 
+## Spec-vs-code divergence: default to updating the spec
+
+This is the final remediation round. When a reviewer flags that the code has diverged from the documented spec, runbook, or prompt contract, the **default remediation is to update the doc to match the code, not to revert the code.** Reverting is the right response only when the code change introduces a real regression (data corruption, data loss, secret leakage, security regression, broken external contract), conflicts with an explicit operator decision encoded in the doc, lacks `## Operator-confirmed intent` on an operator-gated surface (auth/secrets/prod/billing/security), or the reviewer explicitly identifies an architectural conflict — not just a wording mismatch.
+
+On the final round in particular: do not panic-revert because you have no rounds left. If the right move is to update the spec, do that — even if the operator has to look at the rebased docs in the morning, that is dramatically cheaper than losing the code change and having to redispatch the original work. If you genuinely believe the code should be reverted, that is a `pushback[]` entry with explicit reasoning, NOT a silent revert in `addressed[]`. See `remediator.first.md` for the full rationale.
+
 ## Convergence rule (load-bearing)
 
 The PR currently carries an adversarial review with verdict `Request changes`. That verdict is what blocks the worker-pool automerge gate. The only way to clear it is to trigger a fresh adversarial review pass that posts a new verdict — typically `Comment only` once the findings are addressed.

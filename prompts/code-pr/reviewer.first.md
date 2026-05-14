@@ -49,7 +49,7 @@ Spec coverage check:
   - new or altered SQL migrations in `platform/session-ledger/src/session_ledger/migrations/*.sql`
   - new or altered `hq` CLI subcommands or flags in `modules/worker-pool/bin/hq` or `modules/worker-pool/lib/hq-*.sh`
 - Use this blocking-issue message template when the rule triggers:
-  - `Contract changed without spec update. The diff modifies {thing} in {path}, but {specPath} was not touched. Either update the governing spec to match, or revert the contract change. Spec-as-source-of-truth is load-bearing; silent drift is the dominant maintenance risk from the 2026-05-04 operator retrospective.`
+  - `Contract changed without spec update. The diff modifies {thing} in {path}, but {specPath} was not touched. The default remediation is to update the governing spec to match the new behavior; revert the contract change only if it introduces a real regression (data corruption / data loss / secret leakage / security regression / broken external contract) or conflicts with an explicit operator decision encoded in the doc. Spec-as-source-of-truth is load-bearing; silent drift is the dominant maintenance risk from the 2026-05-04 operator retrospective, and silent reverts are the 2026-05-14 follow-on.`
 - Do NOT trigger this rule for private or internal implementation changes that do not alter a public contract.
 - Do NOT trigger this rule when the mapped governing SPEC is touched in the same PR.
 

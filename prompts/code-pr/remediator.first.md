@@ -145,6 +145,25 @@ you addressed vs disagreed with vs deferred. Per-entry accountability
 is the difference between "the worker did something" and "the worker
 explained itself to the next human in the loop."
 
+## Spec-vs-code divergence: default to updating the spec
+
+When a reviewer flags that the code has diverged from the documented spec, runbook, or prompt contract — i.e. the implementation moved but the governing doc did not — the **default remediation is to update the doc to match the code, not to revert the code.** This is load-bearing operator policy from the 2026-05-14 retrospective.
+
+Reverting the code is the right response only in this narrow set of cases:
+- The code change introduces a real regression (data corruption / data loss / secret leakage / security regression / broken external contract) that the doc was actually preventing.
+- The code change conflicts with an explicit operator decision the doc encodes (e.g. a feature flag intentionally pinned off, a ceremony tier the operator just locked down) — not just any historical statement.
+- The diff lacks an `## Operator-confirmed intent` block in the PR body AND the change touches one of the explicit operator-gated surfaces (`auth`, `secrets`, `prod`, `billing`, `security`).
+- The reviewer explicitly named "design intent is opposite" (not just "docs disagree") and the architectural conflict is real, not a wording mismatch.
+
+In every other case — and that is the vast majority of "contract changed without spec update" findings — the right action is:
+1. Read the code change. Confirm it is a deliberate, working improvement (not a half-finished refactor).
+2. Update the governing SPEC / runbook / prompt to describe the new behavior. Be specific: who calls it, what triggers it, what env flags gate it, what the audit trail is.
+3. Add an `addressed[]` entry whose `action` names the docs you updated, not the code you reverted.
+
+Why the default leans this direction: code is the source of truth for *what runs*; specs are the source of truth for *what the operator can rely on*. When they disagree, the operator is the one who has to decide which is canonical — and the operator's stated policy is "the implementation moved on; bring the docs along." Silent reverts undo work the operator already wanted, while doc updates are cheap to review and trivially reversible if the operator disagrees.
+
+If you genuinely believe the code is wrong and should be reverted, that is a `pushback[]` entry with explicit reasoning citing one of the narrow cases above — NOT a silent revert wrapped in an `addressed[]` entry. The reviewer's job is to flag the divergence; deciding which side of the divergence wins is a substance call that you must make explicitly and defensibly.
+
 ## Convergence rule (load-bearing)
 
 The PR currently carries an adversarial review with verdict `Request changes`. That verdict is what blocks the worker-pool automerge gate. The only way to clear it is to trigger a fresh adversarial review pass that posts a new verdict — typically `Comment only` once the findings are addressed.

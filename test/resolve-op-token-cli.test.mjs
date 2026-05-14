@@ -103,6 +103,26 @@ test('resolve-op-token CLI falls back to the legacy op-service-account.env path'
   }
 });
 
+test('resolve-op-token CLI honors AGENT_OS_ROOT for placey-style launcher env', () => {
+  const dir = mkTmp();
+  try {
+    const agentOsRoot = join(dir, 'airlock-agent-os');
+    const legacyDir = join(agentOsRoot, 'agents', 'clio', 'credentials', 'local');
+    mkdirSync(legacyDir, { recursive: true });
+    writeFileSync(join(legacyDir, 'op-service-account.env'), 'export OP_SERVICE_ACCOUNT_TOKEN=ops_eyJplaceyroot\n');
+    const result = runCli({
+      env: {
+        AGENT_OS_ROOT: agentOsRoot,
+        HOME: '/Users/placey',
+      },
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, 'ops_eyJplaceyroot');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('resolve-op-token CLI resolves $ADV_SECRETS_ROOT/op-service-account.token', () => {
   const dir = mkTmp();
   try {

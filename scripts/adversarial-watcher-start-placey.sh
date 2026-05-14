@@ -12,6 +12,7 @@ set -euo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export HOME="/Users/placey"
+export AGENT_OS_ROOT="/Users/airlock/agent-os"
 export CODEX_AUTH_PATH="/Users/placey/.codex/auth.json"
 
 # Sanity gate: better-sqlite3 is a native module and breaks across Node ABI
@@ -39,8 +40,7 @@ fi
 # op-service-account.env compatibility file. See the airlock wrapper for
 # the full rationale. Fail-once shape: a single detailed diagnostic from
 # the resolver, then sleep 3600 to absorb the launchd respawn storm.
-ADV_OP_TOKEN_TAG="adversarial-watcher" \
-  OP_SERVICE_ACCOUNT_TOKEN=$(/opt/homebrew/bin/node "$WATCHER_DIR/src/secret-source/resolve-op-token-cli.mjs") || {
+OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="adversarial-watcher" /opt/homebrew/bin/node "$WATCHER_DIR/src/secret-source/resolve-op-token-cli.mjs") || {
     echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source above and bootout the agent to recover sooner." >&2
     sleep 3600
     exit 78

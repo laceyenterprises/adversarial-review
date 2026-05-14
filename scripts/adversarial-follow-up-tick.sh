@@ -85,8 +85,7 @@ fi
 # remediation, and exits non-zero. We then sleep 3600 to absorb the
 # launchd KeepAlive+ThrottleInterval=30 respawn storm — same fail-once
 # shape as the better-sqlite3 ABI gate above.
-ADV_OP_TOKEN_TAG="follow-up-tick" \
-  OP_SERVICE_ACCOUNT_TOKEN=$(/opt/homebrew/bin/node "$WATCHER_DIR/src/secret-source/resolve-op-token-cli.mjs") || {
+OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="follow-up-tick" /opt/homebrew/bin/node "$WATCHER_DIR/src/secret-source/resolve-op-token-cli.mjs") || {
     echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix the secret-source above and bootout the agent to recover sooner." >&2
     sleep 3600
     exit 78

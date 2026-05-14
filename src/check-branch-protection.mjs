@@ -20,7 +20,9 @@ const USAGE = `\
 Usage:
   node src/check-branch-protection.mjs [--repo <owner/repo>] [--base <branch>] [--config <path>]
 
-Checks whether watched repositories require agent-os/adversarial-gate in branch protection.
+Checks whether watched repositories require the adversarial-review gate status
+context in branch protection. Defaults to "adversarial-review/gate"; override
+with the ADV_GATE_STATUS_CONTEXT environment variable.
 `;
 
 function readConfig(configPath) {

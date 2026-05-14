@@ -229,9 +229,11 @@ daemons on the maintainer's host:
 When a remediation pass converges (reviewer flips to `Comment only`,
 or the round budget exhausts), the loop terminates and the PR returns
 to the operator for the final merge decision. The watcher projects the
-durable adversarial-review state onto the PR head SHA as the commit
-status context `agent-os/adversarial-gate`, which can be required in
-branch protection if you want merge to depend on a passing verdict.
+durable adversarial-review state onto the PR head SHA as a GitHub
+commit-status context — `adversarial-review/gate` by default,
+overridable per deployment via `ADV_GATE_STATUS_CONTEXT` — which can
+be required in branch protection if you want merge to depend on a
+passing verdict.
 
 Operator surface, when something needs intervention:
 
@@ -315,6 +317,13 @@ deliberate one.
 ---
 
 ## Operating in the maintainer's deployment
+
+To rename the GitHub status context that gets required in branch
+protection (for instance, when you don't want `adversarial-review/gate`
+appearing in your org's governance language), set the
+`ADV_GATE_STATUS_CONTEXT` environment variable on the watcher and on
+`npm run check-branch-protection`; non-empty values win over the
+default, whitespace is trimmed, and CR/LF are rejected.
 
 If you're running this against the maintainer's hosted environment (or
 reproducing it), the operator docs are:

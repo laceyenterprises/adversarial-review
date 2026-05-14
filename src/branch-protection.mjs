@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { ADVERSARIAL_GATE_CONTEXT } from './adversarial-gate-status.mjs';
+import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_BASE_BRANCH = 'main';
@@ -51,6 +51,7 @@ async function fetchAdversarialGateBranchProtection({
 } = {}) {
   const { owner, repo } = parseRepoSlug(repoPath);
   const branch = String(baseBranch || DEFAULT_BASE_BRANCH);
+  const context = resolveGateStatusContext(env);
   let stdout;
   try {
     ({ stdout } = await execFileImpl(
@@ -65,7 +66,7 @@ async function fetchAdversarialGateBranchProtection({
     return {
       repo: repoPath,
       baseBranch: branch,
-      context: ADVERSARIAL_GATE_CONTEXT,
+      context,
       ok: false,
       reason: classifyGhProtectionError(err),
       requiredContexts: [],
@@ -79,7 +80,7 @@ async function fetchAdversarialGateBranchProtection({
     return {
       repo: repoPath,
       baseBranch: branch,
-      context: ADVERSARIAL_GATE_CONTEXT,
+      context,
       ok: false,
       reason: 'branch-protection-json-invalid',
       requiredContexts: [],
@@ -87,11 +88,11 @@ async function fetchAdversarialGateBranchProtection({
   }
 
   const requiredContexts = normalizeRequiredContexts(protection);
-  const ok = requiredContexts.includes(ADVERSARIAL_GATE_CONTEXT);
+  const ok = requiredContexts.includes(context);
   return {
     repo: repoPath,
     baseBranch: branch,
-    context: ADVERSARIAL_GATE_CONTEXT,
+    context,
     ok,
     reason: ok ? 'required-context-present' : 'required-context-missing',
     requiredContexts,

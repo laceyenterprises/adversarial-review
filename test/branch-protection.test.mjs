@@ -1,9 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-  ADVERSARIAL_GATE_CONTEXT,
-} from '../src/adversarial-gate-status.mjs';
+import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
 import {
   createBranchProtectionChecker,
   fetchAdversarialGateBranchProtection,
@@ -12,6 +10,8 @@ import {
   resolveBaseBranchForRepo,
   warnForMissingAdversarialGateBranchProtection,
 } from '../src/branch-protection.mjs';
+
+const ADVERSARIAL_GATE_CONTEXT = DEFAULT_ADVERSARIAL_GATE_CONTEXT;
 
 test('normalizeRequiredContexts includes classic contexts and check contexts', () => {
   assert.deepEqual(
@@ -78,7 +78,7 @@ test('warnForMissingAdversarialGateBranchProtection logs structured warnings for
   assert.equal(result.length, 1);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /branch-protection-warning/);
-  assert.match(warnings[0], /context=agent-os\/adversarial-gate/);
+  assert.match(warnings[0], /context=adversarial-review\/gate/);
   assert.match(warnings[0], /reason=required-context-missing/);
 });
 

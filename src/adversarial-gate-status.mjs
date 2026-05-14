@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import {
   buildScopedOperatorApproval,
   extractReviewVerdict,
@@ -21,7 +22,6 @@ import { classifyReviewerFailure } from './adapters/reviewer-runtime/cli-direct/
 
 const execFileAsync = promisify(execFile);
 
-const ADVERSARIAL_GATE_CONTEXT = 'agent-os/adversarial-gate';
 const ADVERSARIAL_GATE_RECORD_DIR = ['data', 'adversarial-gate-status'];
 const DESCRIPTION_MAX_CHARS = 140;
 
@@ -57,7 +57,7 @@ function readGateRecord(rootDir, { repo, prNumber, headSha }, readRecordImpl = r
 function matchesPublishedDecision(record, decision) {
   if (!record || !decision) return false;
   return (
-    record.context === ADVERSARIAL_GATE_CONTEXT &&
+    record.context === decision.context &&
     record.state === decision.state &&
     record.description === decision.description &&
     record.reason === decision.reason &&
@@ -137,9 +137,9 @@ function truncateDescription(description) {
   return `${text.slice(0, DESCRIPTION_MAX_CHARS - 1).trimEnd()}…`;
 }
 
-function makeDecision(state, description, reason) {
+function makeDecision(state, description, reason, context) {
   return {
-    context: ADVERSARIAL_GATE_CONTEXT,
+    context,
     state,
     description: truncateDescription(description),
     reason,
@@ -181,9 +181,14 @@ function pickAdversarialGateStatus({
   operatorApproval = null,
   labels = [],
   headSha = null,
+  env = process.env,
 } = {}) {
+  const context = resolveGateStatusContext(env);
+  const decide = (state, description, reason) =>
+    makeDecision(state, description, reason, context);
+
   if (normalizeLabelNames(labels).some((label) => OPERATOR_SKIP_LABELS.has(label))) {
-    return makeDecision(
+    return decide(
       'failure',
       'Explicit operator skip label blocks adversarial gate.',
       'operator-skip-label'
@@ -191,7 +196,7 @@ function pickAdversarialGateStatus({
   }
 
   if (hasMinimumOperatorApprovalFields(operatorApproval, headSha)) {
-    return makeDecision(
+    return decide(
       'success',
       'Scoped operator override approves the current head.',
       'operator-approved'
@@ -199,7 +204,7 @@ function pickAdversarialGateStatus({
   }
 
   if (!reviewRow) {
-    return makeDecision('pending', 'Adversarial review has not posted yet.', 'review-not-posted');
+    return decide('pending', 'Adversarial review has not posted yet.', 'review-not-posted');
   }
 
   const reviewStatus = normalizeReviewStatus(reviewRow.review_status);
@@ -207,28 +212,28 @@ function pickAdversarialGateStatus({
 
   if (reviewStatus === 'pending') {
     if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
-      return makeDecision('pending', 'Queued re-review has not posted yet.', 'rereview-queued');
+      return decide('pending', 'Queued re-review has not posted yet.', 'rereview-queued');
     }
-    return makeDecision('pending', 'Adversarial review is queued.', 'review-queued');
+    return decide('pending', 'Adversarial review is queued.', 'review-queued');
   }
   if (reviewStatus === 'reviewing') {
-    return makeDecision('pending', 'Adversarial review is in progress.', 'review-in-progress');
+    return decide('pending', 'Adversarial review is in progress.', 'review-in-progress');
   }
   if (reviewStatus === 'pending-upstream') {
     const failureClass = reviewerFailureClass(reviewRow);
     if (failureClass === 'reviewer-timeout') {
-      return makeDecision('pending', 'Adversarial reviewer timed out; retry is pending.', 'reviewer-timeout-retry-pending');
+      return decide('pending', 'Adversarial reviewer timed out; retry is pending.', 'reviewer-timeout-retry-pending');
     }
     if (failureClass === 'launchctl-bootstrap') {
-      return makeDecision('pending', 'Claude reviewer bootstrap failed; retry is pending.', 'reviewer-bootstrap-retry-pending');
+      return decide('pending', 'Claude reviewer bootstrap failed; retry is pending.', 'reviewer-bootstrap-retry-pending');
     }
     if (failureClass === 'cascade') {
-      return makeDecision('pending', 'Adversarial reviewer hit an upstream cascade; retry is pending.', 'reviewer-cascade-retry-pending');
+      return decide('pending', 'Adversarial reviewer hit an upstream cascade; retry is pending.', 'reviewer-cascade-retry-pending');
     }
-    return makeDecision('pending', 'Adversarial review retry is pending.', 'review-retry-pending');
+    return decide('pending', 'Adversarial review retry is pending.', 'review-retry-pending');
   }
   if (reviewStatus === 'malformed') {
-    return makeDecision('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
+    return decide('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }
   if (reviewStatus === 'failed') {
     // Infrastructure failures (reviewer crashed before posting any verdict)
@@ -241,21 +246,21 @@ function pickAdversarialGateStatus({
     // still post `failure`.
     const failureClass = reviewerFailureClass(reviewRow);
     if (failureClass === 'reviewer-timeout') {
-      return makeDecision('success', 'Adversarial reviewer timed out before posting; operator decides.', 'reviewer-timeout');
+      return decide('success', 'Adversarial reviewer timed out before posting; operator decides.', 'reviewer-timeout');
     }
     if (failureClass === 'launchctl-bootstrap') {
-      return makeDecision('success', 'Claude reviewer bootstrap failed before posting; operator decides.', 'reviewer-launchctl-bootstrap');
+      return decide('success', 'Claude reviewer bootstrap failed before posting; operator decides.', 'reviewer-launchctl-bootstrap');
     }
     if (failureClass === 'cascade') {
-      return makeDecision('success', 'Adversarial reviewer hit an upstream cascade before posting; operator decides.', 'reviewer-cascade');
+      return decide('success', 'Adversarial reviewer hit an upstream cascade before posting; operator decides.', 'reviewer-cascade');
     }
-    return makeDecision('success', 'Adversarial review failed before posting; operator decides.', 'review-failed');
+    return decide('success', 'Adversarial review failed before posting; operator decides.', 'review-failed');
   }
   if (reviewStatus === 'failed-orphan') {
-    return makeDecision('success', 'Adversarial review needs operator verification (orphaned reviewer).', 'review-failed-orphan');
+    return decide('success', 'Adversarial review needs operator verification (orphaned reviewer).', 'review-failed-orphan');
   }
   if (reviewStatus !== 'posted') {
-    return makeDecision(
+    return decide(
       'failure',
       `Unexpected adversarial review state: ${reviewStatus || 'missing'}.`,
       'review-state-unknown'
@@ -267,31 +272,31 @@ function pickAdversarialGateStatus({
     if (typeof reviewBody === 'string' && reviewBody.trim()) {
       const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(reviewBody));
       if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
-        return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
+        return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
       }
       if (normalizedVerdict === 'request-changes') {
-        return makeDecision('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
+        return decide('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
       }
     }
-    return makeDecision('pending', 'Posted review is waiting for follow-up ledger reconciliation.', 'awaiting-ledger');
+    return decide('pending', 'Posted review is waiting for follow-up ledger reconciliation.', 'awaiting-ledger');
   }
 
   if (latestJobStatus === 'pending') {
-    return makeDecision('pending', 'Remediation is queued.', 'remediation-queued');
+    return decide('pending', 'Remediation is queued.', 'remediation-queued');
   }
   if (latestJobStatus === 'in-progress') {
-    return makeDecision('pending', 'Remediation is in progress.', 'remediation-in-progress');
+    return decide('pending', 'Remediation is in progress.', 'remediation-in-progress');
   }
   const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(latestJob.reviewBody));
   if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
-    return makeDecision('success', 'Non-blocking adversarial review is settled.', 'review-settled');
+    return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
   }
   if (latestJobStatus === 'failed') {
     // Pipeline gave up (remediation worker died / infra issue) — don't block
     // operator's merge button. Real adversarial findings still surface in
     // the PR review comment thread; the operator decides without needing
     // admin override on mobile. See note in the `failed` branch above.
-    return makeDecision('success', 'Remediation failed; operator decides (see review thread).', 'remediation-failed');
+    return decide('success', 'Remediation failed; operator decides (see review thread).', 'remediation-failed');
   }
   if (latestJobStatus === 'stopped') {
     // Round budget exhausted. Last verdict may genuinely be Request-changes,
@@ -300,19 +305,19 @@ function pickAdversarialGateStatus({
     // really request-changes after a settled remediation" case. The
     // `stopped` state itself is a pipeline-give-up signal, not an
     // adversarial signal — don't block the merge button on infra giving up.
-    return makeDecision('success', 'Remediation stopped; operator decides (see review thread).', 'remediation-stopped');
+    return decide('success', 'Remediation stopped; operator decides (see review thread).', 'remediation-stopped');
   }
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
-    return makeDecision('pending', 'Queued re-review has not posted yet.', 'rereview-queued');
+    return decide('pending', 'Queued re-review has not posted yet.', 'rereview-queued');
   }
 
   if (normalizedVerdict === 'request-changes') {
-    return makeDecision('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
+    return decide('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
   }
   if (normalizedVerdict === null) {
-    return makeDecision('failure', 'Posted review is missing a verdict in the ledger.', 'missing-verdict');
+    return decide('failure', 'Posted review is missing a verdict in the ledger.', 'missing-verdict');
   }
-  return makeDecision('failure', 'Posted review verdict is malformed.', 'unknown-verdict');
+  return decide('failure', 'Posted review verdict is malformed.', 'unknown-verdict');
 }
 
 async function readReviewRowForGate(rootDir, { repo, prNumber }) {
@@ -383,13 +388,14 @@ async function publishAdversarialGateStatus(rootDir, {
     return { posted: false, reason: 'missing-input' };
   }
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  const context = decision.context || resolveGateStatusContext(env);
 
   const existingRecord = readGateRecord(
     rootDir,
     { repo, prNumber: normalizedPrNumber, headSha },
     readRecordImpl
   );
-  if (matchesPublishedDecision(existingRecord, decision)) {
+  if (matchesPublishedDecision(existingRecord, { ...decision, context })) {
     return { posted: false, reason: 'unchanged', record: existingRecord };
   }
 
@@ -419,7 +425,7 @@ async function publishAdversarialGateStatus(rootDir, {
       '-f',
       `state=${decision.state}`,
       '-f',
-      `context=${ADVERSARIAL_GATE_CONTEXT}`,
+      `context=${context}`,
       '-f',
       `description=${decision.description}`,
     ],
@@ -431,7 +437,7 @@ async function publishAdversarialGateStatus(rootDir, {
 
   mkdirImpl(gateRecordDir(rootDir), { recursive: true });
   const record = {
-    context: ADVERSARIAL_GATE_CONTEXT,
+    context,
     repo,
     prNumber: normalizedPrNumber,
     headSha,
@@ -474,7 +480,7 @@ async function projectAdversarialGateStatus(rootDir, {
     fetchLatestLabelEventImpl,
     operatorApprovalEvent,
   });
-  const decision = pickAdversarialGateStatus(snapshot);
+  const decision = pickAdversarialGateStatus({ ...snapshot, env });
   const publish = await publishAdversarialGateStatus(rootDir, {
     repo,
     prNumber,
@@ -487,7 +493,6 @@ async function projectAdversarialGateStatus(rootDir, {
 }
 
 export {
-  ADVERSARIAL_GATE_CONTEXT,
   buildAdversarialGateSnapshot,
   deleteGateRecordsForPR,
   pickAdversarialGateStatus,

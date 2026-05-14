@@ -993,8 +993,12 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('Apply every actionable in-scope finding inline'));
   assert.ok(prompt.includes('suggestions_unable_to_apply'));
   assert.ok(prompt.includes('blockers_observed'));
+  assert.ok(prompt.includes('If triage returns `addressed`, force-push the updated head and exit `awaiting-rereview`'));
+  assert.ok(prompt.includes('Only proceed to rebase + merge after the triage step returns `no-followups-needed`'));
+  assert.ok(prompt.includes('`suggestions_unable_to_apply` result must also exit `awaiting-rereview`'));
   assert.ok(!prompt.includes('deferred-non-trivial'));
   assert.ok(!prompt.includes('defer non-trivial suggestions'));
+  assert.ok(!prompt.includes('operator handoff'));
 });
 
 test('buildMergeAgentPrompt records non-final-pass triggers without injecting the final-pass contract block', () => {

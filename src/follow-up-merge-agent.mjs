@@ -373,11 +373,14 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     );
     lines.push(
       '2. Only proceed to rebase + merge after the triage step returns'
-      + ' `addressed` or `no-followups-needed`. A non-empty'
-      + ' `suggestions_unable_to_apply` result must not merge — record the'
-      + ' operator handoff and exit so the next review pass can evaluate'
-      + ' the punt. A non-empty `blockers_observed` result must hard-refuse'
-      + ' the merge.'
+      + ' `no-followups-needed`, meaning triage made no substantive code or'
+      + ' config edits and left no unresolved follow-ups. If triage returns'
+      + ' `addressed`, force-push the updated head and exit'
+      + ' `awaiting-rereview` so a fresh adversarial review pass evaluates'
+      + ' the new changes before any merge. A non-empty'
+      + ' `suggestions_unable_to_apply` result must also exit'
+      + ' `awaiting-rereview` so the next review pass can evaluate the punt.'
+      + ' A non-empty `blockers_observed` result must hard-refuse the merge.'
     );
     lines.push(
       '3. Treat this dispatch the same way you would treat an'

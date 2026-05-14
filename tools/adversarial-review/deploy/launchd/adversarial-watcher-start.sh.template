@@ -78,9 +78,12 @@ if [ -z "${GITHUB_TOKEN:-}" ]; then
   exit 1
 fi
 
-# 4. Optional Codex auth relocation.
+# 4. Codex auth path. Single-user installs default to $HOME/.codex/auth.json;
+# explicit REVIEWER_AUTH_ROOT preserves split-user/service layouts.
 if [ -n "$REPO_RENDER_REVIEWER_AUTH" ]; then
   export CODEX_AUTH_PATH="$REPO_RENDER_REVIEWER_AUTH/codex/auth.json"
+else
+  export CODEX_AUTH_PATH="$HOME/.codex/auth.json"
 fi
 
 # 5. Scrub OAuth fallbacks.

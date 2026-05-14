@@ -204,8 +204,9 @@ The installer accepts `REPO_ROOT`, `OPERATOR_HOME`, `SECRETS_ROOT`,
 environment variables or interactive prompts, substitutes them into the
 templates, writes the rendered plists into `~/Library/LaunchAgents/`
 and the rendered wrappers into `<repo>/scripts/render/`, then runs a
-postflight validator (Node engines range, `gh auth status`, working tree
-clean, secret-source token discovery, optional reviewer-auth readability).
+postflight validator (Node engines range, `gh auth status`, reviewer CLI
+and OAuth probes, required reviewer-bot PAT presence, working tree clean,
+secret-source token discovery, optional reviewer-auth readability).
 `--dry-run` renders to a temp directory and skips postflight.
 
 Legacy Linux systemd template (single-file, env-file driven):

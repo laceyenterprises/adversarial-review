@@ -30,6 +30,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="$SCRIPT_DIR/deploy/launchd"
 RENDER_LIB="$SCRIPT_DIR/lib/render-template.mjs"
+POSTFLIGHT_LIB="$SCRIPT_DIR/lib/install-postflight.mjs"
 
 DRY_RUN=0
 OUTPUT_DIR_OVERRIDE=""
@@ -256,6 +257,23 @@ else
   mark_fail "gh CLI not found on PATH; install GitHub CLI"
 fi
 
+# Reviewer CLIs and OAuth state.
+if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" probe-claude 2>&1)"; then
+  mark_ok "Claude reviewer CLI and OAuth state validated"
+else
+  mark_fail "Claude reviewer runtime check failed: ${output//$'\n'/ }"
+fi
+
+EFFECTIVE_CODEX_AUTH_PATH="$OPERATOR_HOME/.codex/auth.json"
+if [[ -n "$REVIEWER_AUTH_ROOT" ]]; then
+  EFFECTIVE_CODEX_AUTH_PATH="$REVIEWER_AUTH_ROOT/codex/auth.json"
+fi
+if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" probe-codex "$OPERATOR_HOME" "$REVIEWER_AUTH_ROOT" 2>&1)"; then
+  mark_ok "Codex reviewer CLI and OAuth state validated at $EFFECTIVE_CODEX_AUTH_PATH"
+else
+  mark_fail "Codex reviewer runtime check failed for $EFFECTIVE_CODEX_AUTH_PATH: ${output//$'\n'/ }"
+fi
+
 # git status --porcelain — warn only.
 if command -v git >/dev/null 2>&1; then
   if [[ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]]; then
@@ -278,8 +296,19 @@ else
 fi
 if [[ -r "$SECRETS_ROOT/adversarial-review.env" ]]; then
   mark_ok "operator dotenv present at $SECRETS_ROOT/adversarial-review.env"
+  set -a
+  # shellcheck disable=SC1090
+  . "$SECRETS_ROOT/adversarial-review.env"
+  set +a
 else
   mark_warn "operator dotenv not present at $SECRETS_ROOT/adversarial-review.env — wrapper will rely on inherited GITHUB_TOKEN / gh auth token"
+fi
+
+if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" missing-bot-tokens 2>&1)"; then
+  mark_ok "reviewer bot tokens present for GitHub review/comment posting"
+else
+  missing_tokens="${output//$'\n'/, }"
+  mark_fail "missing required reviewer bot tokens: $missing_tokens"
 fi
 
 # Optional REVIEWER_AUTH_ROOT readability.

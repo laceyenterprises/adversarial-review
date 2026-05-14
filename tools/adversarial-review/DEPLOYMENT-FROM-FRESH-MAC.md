@@ -57,7 +57,7 @@ explicitly if you want a non-default layout:
 | `OPERATOR_HOME`        | `$HOME`                                                  | Running operator's `$HOME`.                             |
 | `SECRETS_ROOT`         | `$OPERATOR_HOME/.config/adversarial-review/secrets`      | Created mode `0700`. Holds `adversarial-review.env`.    |
 | `LOG_ROOT`             | `$OPERATOR_HOME/Library/Logs/adversarial-review`         | Created mode `0755`. Holds `*.log` files.               |
-| `REVIEWER_AUTH_ROOT`   | empty                                                    | Optional. If set, the rendered wrappers point Codex's OAuth state at `$REVIEWER_AUTH_ROOT/codex/auth.json` instead of `$HOME/.codex/auth.json`. |
+| `REVIEWER_AUTH_ROOT`   | empty                                                    | Optional. If set, the rendered wrappers point Codex's OAuth state at `$REVIEWER_AUTH_ROOT/codex/auth.json`; otherwise they default to `$HOME/.codex/auth.json`. |
 | `WATCHER_USER_LABEL`   | `local`                                                  | Namespaces the rendered plist filenames so two operators on one Mac can install side-by-side: `ai.<label>.adversarial-watcher.plist`. |
 
 You can also preview the render without writing anything:
@@ -90,11 +90,15 @@ After rendering, the installer runs a postflight validator that checks:
 
 - Node satisfies `package.json` `engines.node` (>=20 <26).
 - `gh auth status` succeeds.
+- `claude` and `codex` are installed and their runtime auth checks pass.
 - The working tree is clean (this is a warning, not a blocker).
 - The secret-source dotenv at `$SECRETS_ROOT/adversarial-review.env` is
   readable (warning if missing; the wrapper still falls back to
   `gh auth token` for `GITHUB_TOKEN`).
-- The optional `$REVIEWER_AUTH_ROOT` is readable when set.
+- The required reviewer bot PATs (`GH_CLAUDE_REVIEWER_TOKEN`,
+  `GH_CODEX_REVIEWER_TOKEN`) are present in the install environment.
+- The optional `$REVIEWER_AUTH_ROOT` is readable when set; when it is
+  blank, Codex auth is validated at `$HOME/.codex/auth.json`.
 
 Any failure prints the actionable remediation and exits non-zero.
 
@@ -137,9 +141,9 @@ Minimum useful contents on a single-operator host:
 # when GITHUB_TOKEN is unset.
 GITHUB_TOKEN=ghp_...
 
-# Reviewer-bot PATs used by the comment poster. Missing values defer
-# comment posts to retry (see src/follow-up-remediation.mjs); they do
-# not block the consume/reconcile path.
+# Reviewer-bot PATs used by first-pass review posting and remediation
+# comment delivery. The installer treats both as required so a fresh host
+# cannot come up "green" and then fail its first live PR.
 GH_CLAUDE_REVIEWER_TOKEN=ghp_...
 GH_CODEX_REVIEWER_TOKEN=ghp_...
 
@@ -176,6 +180,19 @@ gh auth login
 
 Re-run `bash tools/adversarial-review/install.sh` afterwards so the
 postflight catches the green state.
+
+### `claude` / `codex` CLI or OAuth validation failed
+
+- Install the missing CLI (`brew install --cask claude-code`, `brew install codex`,
+  or whichever path you use locally).
+- Run the CLI's OAuth login flow for the current operator.
+- If you left `REVIEWER_AUTH_ROOT` blank, make sure Codex OAuth lives at
+  `$HOME/.codex/auth.json`; if you use a split-user layout, point
+  `REVIEWER_AUTH_ROOT` at the root that contains `codex/auth.json`.
+- Add both reviewer bot PATs to `$SECRETS_ROOT/adversarial-review.env`.
+
+Re-run `bash tools/adversarial-review/install.sh` afterwards so the
+postflight catches the fixed runtime contract before launchd is bootstrapped.
 
 ### Node outside the engines range
 

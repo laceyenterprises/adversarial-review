@@ -14,12 +14,17 @@ import {
   buildHeaderComment,
   withHeader,
 } from '../tools/adversarial-review/lib/render-template.mjs';
+import {
+  missingRequiredReviewerBotTokens,
+  resolveRenderedCodexAuthPath,
+} from '../tools/adversarial-review/lib/install-postflight.mjs';
 
 const execFileAsync = promisify(execFile);
 const thisFile = fileURLToPath(import.meta.url);
 const repoRoot = path.resolve(path.dirname(thisFile), '..');
 const templateDir = path.join(repoRoot, 'tools/adversarial-review/deploy/launchd');
 const installScript = path.join(repoRoot, 'tools/adversarial-review/install.sh');
+const postflightHelper = path.join(repoRoot, 'tools/adversarial-review/lib/install-postflight.mjs');
 
 function makeBindings(overrides = {}) {
   return {
@@ -108,7 +113,81 @@ test('the four shipped templates render with sample bindings and leave no placeh
     );
     // Sanity: substituted values do appear in the rendered output.
     assert.ok(rendered.includes(bindings.REPO_ROOT), `${name} did not bake REPO_ROOT`);
+    if (name === 'adversarial-watcher-start.sh.template') {
+      assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
+    }
   }
+});
+
+test('resolveRenderedCodexAuthPath matches the installer contract for default and override layouts', () => {
+  assert.equal(
+    resolveRenderedCodexAuthPath({ operatorHome: '/Users/operator', reviewerAuthRoot: '' }),
+    '/Users/operator/.codex/auth.json',
+  );
+  assert.equal(
+    resolveRenderedCodexAuthPath({ operatorHome: '/Users/operator', reviewerAuthRoot: '/srv/reviewer-auth' }),
+    '/srv/reviewer-auth/codex/auth.json',
+  );
+});
+
+test('missingRequiredReviewerBotTokens reports exactly the missing reviewer PAT env vars', () => {
+  assert.deepEqual(
+    missingRequiredReviewerBotTokens({ GH_CLAUDE_REVIEWER_TOKEN: 'claude-pat' }),
+    ['GH_CODEX_REVIEWER_TOKEN'],
+  );
+  assert.deepEqual(
+    missingRequiredReviewerBotTokens({
+      GH_CLAUDE_REVIEWER_TOKEN: 'claude-pat',
+      GH_CODEX_REVIEWER_TOKEN: 'codex-pat',
+    }),
+    [],
+  );
+});
+
+test('install postflight helper probes Claude and Codex using the rendered single-user auth path', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'portable-installer-postflight-'));
+  const fakeBin = path.join(root, 'bin');
+  const fakeHome = path.join(root, 'home');
+  const codexDir = path.join(fakeHome, '.codex');
+  mkdirSync(fakeBin, { recursive: true });
+  mkdirSync(codexDir, { recursive: true });
+  writeFileSync(
+    path.join(codexDir, 'auth.json'),
+    JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: { access_token: 'access', refresh_token: 'refresh' },
+    }),
+    'utf8',
+  );
+  writeFileSync(
+    path.join(fakeBin, 'claude'),
+    '#!/bin/bash\nif [[ \"$1\" == \"auth\" && \"$2\" == \"status\" ]]; then\n  echo \"loggedIn: true\"\n  exit 0\nfi\nexit 0\n',
+    'utf8',
+  );
+  writeFileSync(path.join(fakeBin, 'codex'), '#!/bin/bash\nexit 0\n', 'utf8');
+  for (const file of ['claude', 'codex']) {
+    statSync(path.join(fakeBin, file));
+  }
+  await execFileAsync('/bin/chmod', ['+x', path.join(fakeBin, 'claude'), path.join(fakeBin, 'codex')]);
+
+  const env = {
+    ...process.env,
+    HOME: fakeHome,
+    PATH: `${fakeBin}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+  };
+
+  const { stdout: codexStdout } = await execFileAsync(
+    process.execPath,
+    [postflightHelper, 'probe-codex', fakeHome, ''],
+    { cwd: repoRoot, env },
+  );
+  assert.equal(codexStdout.trim(), path.join(fakeHome, '.codex', 'auth.json'));
+
+  await execFileAsync(
+    process.execPath,
+    [postflightHelper, 'probe-claude'],
+    { cwd: repoRoot, env },
+  );
 });
 
 test('rendered plists parse as XML and survive plutil -lint when plutil is available', async () => {

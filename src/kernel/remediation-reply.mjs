@@ -248,31 +248,34 @@ function validateBlockersField(items, options = {}) {
 
 // Parse the `## Blocking Issues` section into structured findings. The
 // review contract (`prompts/code-pr/reviewer.*.md`) requires:
-//   - one finding card per issue, headed by `### <Title>` with the
-//     fields rendered as bold-labeled paragraphs (`**File:**`,
-//     `**Lines:**`, `**Problem:**`, `**Why it matters:**`,
-//     `**Recommended fix:**`)
+//   - one finding card per issue, currently headed by a top-level
+//     `- **<Title>**` bullet with the fields rendered as nested
+//     bold-labeled sub-bullets (`**File:**`, `**Lines:**`,
+//     `**Problem:**`, `**Why it matters:**`, `**Recommended fix:**`)
 //   - the literal sentinel `- None.` when the section is empty
 // Four render shapes are supported (newest first):
-//   1. card-style: `### <Title>` heading per finding, with fields as
+//   1. nested-bullet card-style: `- **<Title>**` per finding, with
+//      `  - **File:** value` / `  - **Lines:** value` /
+//      `  - **Problem:** value` sub-bullets. The parser accepts
+//      harmless trailing text after the closing bold span so minor
+//      markdown drift does not silently drop titles.
+//   2. card-style: `### <Title>` heading per finding, with fields as
 //      `**File:** value` / `**Lines:** value` / `**Problem:** value`
-//      bold-labeled paragraphs. This is the format mandated by the
-//      current reviewer prompt and mirrors the remediator's accountability
-//      cards on PR comments.
-//   2. one top-level `- Title:` bullet per finding, with the rest of
+//      bold-labeled paragraphs (stored-review back-compat).
+//   3. one top-level `- Title:` bullet per finding, with the rest of
 //      the fields as 2-space-indented continuation lines (legacy)
-//   3. one top-level `- File:` bullet per finding, with the rest of
+//   4. one top-level `- File:` bullet per finding, with the rest of
 //      the fields as 2-space-indented continuation lines (legacy back-compat)
-//   4. top-level bullets per field (`- Title:`, `- File:`, `- Lines:`,
+//   5. top-level bullets per field (`- Title:`, `- File:`, `- Lines:`,
 //      `- Problem:`, `- Why it matters:`, `- Recommended fix:`)
-// The finding boundary is a `### <Title>` that introduces a complete
-// card body for the card shape; stray H3 subheadings inside a card body
-// are ignored. For the legacy bullet shapes it is a top-level
-// `- Title:` field when present, otherwise a top-level dash-prefixed
-// `- File:` field. A dashless `File:` continuation after `- Title:`
-// attaches only when the current finding has no file yet, so prose that
-// happens to begin with `File:` cannot split a finding into a phantom
-// boundary.
+// The finding boundary is either a top-level `- **<Title>**` bullet or
+// a `### <Title>` heading that introduces a complete card body; stray
+// bold field bullets / H3 subheadings inside a card body are ignored.
+// For the legacy bullet shapes it is a top-level `- Title:` field when
+// present, otherwise a top-level dash-prefixed `- File:` field. A
+// dashless `File:` continuation after `- Title:` attaches only when the
+// current finding has no file yet, so prose that happens to begin with
+// `File:` cannot split a finding into a phantom boundary.
 //
 // Returns `null` when the section is absent (caller opts out of
 // coverage enforcement). Returns `[]` when the section exists but is
@@ -315,9 +318,22 @@ function parseBlockingFindingsSection(reviewBody) {
     return { field: fields[key], value: match[2].trim() };
   };
 
+  const parseBulletBoldTitle = (raw) => {
+    const match = raw.match(/^[ \t]*-[ \t]+\*\*(.+?)\*\*(.*)$/);
+    if (!match) return null;
+    const title = match[1].trim();
+    const normalized = title
+      .replace(/[ \t]*:[ \t]*$/u, '')
+      .toLocaleLowerCase('en-US');
+    if (['file', 'lines', 'problem', 'why it matters', 'recommended fix'].includes(normalized)) {
+      return null;
+    }
+    return title;
+  };
+
   const isFindingBoundary = (raw) => {
     return /^[ \t]*###[ \t]+.+?[ \t]*$/.test(raw)
-      || /^[ \t]*-[ \t]+\*\*(.+?)\*\*[ \t]*$/.test(raw);
+      || Boolean(parseBulletBoldTitle(raw));
   };
 
   const cardHasRequiredFields = (startIndex) => {
@@ -350,10 +366,10 @@ function parseBlockingFindingsSection(reviewBody) {
     // lookahead guard as the H3 shape so an incidental `- **note**`
     // inside one card doesn't inflate the expected blocking-issue
     // count.
-    const bulletBoldTitleMatch = raw.match(/^[ \t]*-[ \t]+\*\*(.+?)\*\*[ \t]*$/);
-    if (bulletBoldTitleMatch && cardHasRequiredFields(index)) {
+    const bulletBoldTitle = parseBulletBoldTitle(raw);
+    if (bulletBoldTitle && cardHasRequiredFields(index)) {
       if (current) findings.push(current);
-      current = { title: bulletBoldTitleMatch[1].trim() };
+      current = { title: bulletBoldTitle };
       continue;
     }
     // Card shape: bold-labeled inline fields. Each label only fills
@@ -517,13 +533,13 @@ function validateBlockingCoverage(reply, expectedJob) {
       if (typeof untitled.entry === 'string') {
         throw new Error(
           `Remediation reply blockers[${untitled.index}] is a string; when the adversarial review ` +
-            `supplies a title for every blocking finding via H3 headings or legacy Title fields, ` +
+            `supplies a title for every blocking finding via bold bullet titles, H3 headings, or legacy Title fields, ` +
             `blockers entries must be objects with a non-empty title`
         );
       }
       throw new Error(
         `Remediation reply ${untitled.field}[${untitled.index}].title is required because ` +
-          `the adversarial review supplied titles via H3 headings or legacy Title fields`
+          `the adversarial review supplied titles via bold bullet titles, H3 headings, or legacy Title fields`
       );
     }
   }
@@ -543,7 +559,7 @@ function validateBlockingCoverage(reply, expectedJob) {
   }
   if (missing.length || extra.length) {
     throw new Error(
-      `Remediation reply titles must match the blocking review H3 headings or legacy Title fields exactly. ` +
+      `Remediation reply titles must match the blocking review bold bullet titles, H3 headings, or legacy Title fields exactly. ` +
         `Missing: ${missing.length ? missing.join('; ') : 'none'}. ` +
         `Unexpected: ${extra.length ? extra.join('; ') : 'none'}.`
     );

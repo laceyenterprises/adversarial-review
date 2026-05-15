@@ -96,12 +96,11 @@ lists in the reply JSON — they are not redundant, they encode
 
 - `addressed[]` → you fixed it. One entry per finding, with:
   - `title`: copy the review finding's title exactly. In current reviews,
-    the title is the H3 card heading (`### <Title>`); for legacy reviews,
-    use the `Title:` field. This is required when the review supplied a
-    title, and becomes the public PR comment title for that entry. The
-    GitHub remediation comment renders each entry as a top-level bullet
-    `- **<Title>**` with nested `**Finding:**`, `**Action:**`, and
-    optional `**Files:**` sub-bullets under the section heading.
+    the title is the top-level bold bullet label
+    (`- **<Title>**`); for older review bodies, use the H3 card heading
+    (`### <Title>`) or legacy `Title:` field. This is required when the
+    review supplied a title, and becomes the public PR comment title
+    for that entry.
   - `finding`: a short quote / paraphrase identifying which review
     finding this entry corresponds to (so a human reading the PR
     comment can match it back to the review without guessing).
@@ -122,9 +121,8 @@ lists in the reply JSON — they are not redundant, they encode
   change the code, and want to record the reasoning. Use this when the
   reviewer is wrong, the finding is out of scope for this PR, or the
   fix would cost more than the bug. Each entry needs:
-  - `title`: copy the review finding's H3 card heading or legacy `Title:`
-    value exactly when supplied. The remediation comment renders it as
-    the bold title line of that entry's nested-bullet card.
+  - `title`: copy the review finding's top-level bold bullet label, H3
+    card heading, or legacy `Title:` value exactly when supplied.
   - `finding`: the finding you are pushing back on.
   - `reasoning`: why you disagreed (one sentence, sharp).
 
@@ -143,9 +141,8 @@ lists in the reply JSON — they are not redundant, they encode
   (missing secrets, design decision required, architectural
   disagreement large enough that you should not unilaterally resolve
   it). Each entry needs:
-  - `title`: copy the review finding's H3 card heading or legacy `Title:`
-    value exactly when supplied. The remediation comment renders it as
-    the bold title line of that entry's nested-bullet card.
+  - `title`: copy the review finding's top-level bold bullet label, H3
+    card heading, or legacy `Title:` value exactly when supplied.
   - `finding`: the review finding you are blocking on (so the next
     human can identify which item is unresolved).
   - `reasoning` and/or `needsHumanInput`: why this is a hard exit and
@@ -181,8 +178,9 @@ reply with `outcome: "blocked"` and an empty `blockers` list, a
 reply with `outcome: "completed"` and a non-empty `blockers` list,
 a reply that does not record exactly one entry per blocking finding
 across `addressed[]`, `pushback[]`, and `blockers[]`, or a reply that
-does not copy the review finding titles (H3 headings or legacy `Title:`
-fields) into those entries. Do not try to fight the contract; the
+does not copy the review finding titles (top-level bold bullet labels,
+H3 headings, or legacy `Title:` fields) into those entries. Do not try
+to fight the contract; the
 constraints exist so the public PR comment never claims contradictory
 things about the same round.
 

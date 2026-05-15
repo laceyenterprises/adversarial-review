@@ -487,6 +487,36 @@ test('parseBlockingFindingsSection extracts findings from nested-bullet `- **Tit
   assert.equal(findings[1].problem, 'has_drain_history is true whenever any field is non-null.');
 });
 
+test('parseBlockingFindingsSection keeps nested-bullet titles when harmless trailing text is present', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '- **Reviewer-remediator contract split**.',
+    '  - **File:** `prompts/code-pr/remediator.first.md`',
+    '  - **Lines:** 98-176',
+    '  - **Problem:** Prompt contract still points workers at the wrong title source.',
+    '  - **Why it matters:** Workers can submit replies that fail validation.',
+    '  - **Recommended fix:** Update the remediator prompts to mirror the reviewer format.',
+    '- **Fragile bullet-title boundary regex** - parser only matched exact-line titles',
+    '  - **File:** `src/kernel/remediation-reply.mjs`',
+    '  - **Lines:** 318-355',
+    '  - **Problem:** Minor punctuation drift drops the parsed title.',
+    '  - **Why it matters:** Coverage checks weaken silently.',
+    '  - **Recommended fix:** Parse the leading bold span and tolerate trailing text.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.equal(findings.length, 2);
+  assert.equal(findings[0].title, 'Reviewer-remediator contract split');
+  assert.equal(findings[1].title, 'Fragile bullet-title boundary regex');
+});
+
 test('parseBlockingFindingsSection ignores incidental `- **note**` bullets without required fields', () => {
   // An incidental bold-bullet that isn't a real finding card (no File /
   // Lines / Problem fields beneath it) must not inflate the count.
@@ -512,4 +542,83 @@ test('parseBlockingFindingsSection ignores incidental `- **note**` bullets witho
 
   assert.equal(findings.length, 1);
   assert.equal(findings[0].title, 'Real finding with full fields');
+});
+
+test('validateRemediationReply enforces exact nested-bullet review titles', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '- **Reviewer-remediator contract split**',
+    '  - **File:** `prompts/code-pr/remediator.first.md`',
+    '  - **Lines:** 98-176',
+    '  - **Problem:** Remediator prompts still point at the old title source.',
+    '  - **Why it matters:** The producer and consumer disagree on the wire format.',
+    '  - **Recommended fix:** Update the remediator prompts in the same PR.',
+    '- **Fragile bullet-title boundary regex**.',
+    '  - **File:** `src/kernel/remediation-reply.mjs`',
+    '  - **Lines:** 318-355',
+    '  - **Problem:** Exact-line matching drops titles on punctuation drift.',
+    '  - **Why it matters:** Missing titles weaken accountability enforcement.',
+    '  - **Recommended fix:** Parse the leading bold title span instead.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = {
+    jobId: 'laceyenterprises__adversarial-review-pr-112-2026-05-15T15-50-58-107Z',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 112,
+    reviewBody,
+  };
+
+  const mismatched = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'laceyenterprises__adversarial-review-pr-112-2026-05-15T15-50-58-107Z',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 112,
+    outcome: 'completed',
+    summary: 'Patched the prompt contract and parser.',
+    validation: ['node --test test/kernel-parsers.test.mjs'],
+    addressed: [
+      {
+        title: 'Reviewer/remediator contract split',
+        finding: 'Remediator prompts still described the old title source.',
+        action: 'Updated the worker prompts to mirror the nested-bullet reviewer output.',
+      },
+      {
+        title: 'Fragile bullet-title boundary regex',
+        finding: 'Exact-line matching dropped titles on punctuation drift.',
+        action: 'Parsed the leading bold title span and ignored harmless trailing punctuation.',
+      },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  assert.throws(
+    () => validateRemediationReply(mismatched, { expectedJob }),
+    /Remediation reply titles must match the blocking review bold bullet titles, H3 headings, or legacy Title fields exactly/
+  );
+
+  const exact = {
+    ...mismatched,
+    addressed: [
+      {
+        title: 'Reviewer-remediator contract split',
+        finding: 'Remediator prompts still described the old title source.',
+        action: 'Updated the worker prompts to mirror the nested-bullet reviewer output.',
+      },
+      {
+        title: 'Fragile bullet-title boundary regex',
+        finding: 'Exact-line matching dropped titles on punctuation drift.',
+        action: 'Parsed the leading bold title span and ignored harmless trailing punctuation.',
+      },
+    ],
+  };
+
+  assert.deepEqual(validateRemediationReply(exact, { expectedJob }), exact);
 });

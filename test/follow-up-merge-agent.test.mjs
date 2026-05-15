@@ -993,12 +993,13 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('Apply every actionable in-scope finding inline'));
   assert.ok(prompt.includes('suggestions_unable_to_apply'));
   assert.ok(prompt.includes('blockers_observed'));
-  assert.ok(prompt.includes('If triage returns `addressed`, force-push the updated head and exit `awaiting-rereview`'));
-  assert.ok(prompt.includes('Only proceed to rebase + merge after the triage step returns `no-followups-needed`'));
-  assert.ok(prompt.includes('`suggestions_unable_to_apply` result may only ride that'));
-  assert.ok(prompt.includes('creating a new head SHA for review'));
-  assert.ok(prompt.includes('hard-refuse with `merge-rejected` / operator'));
-  assert.ok(prompt.includes('instead of requesting a same-head rereview'));
+  assert.ok(prompt.includes('light-to-medium code/config fixes'));
+  assert.ok(prompt.includes('wait for the required checks'));
+  assert.ok(prompt.includes('then merge; do not request another review'));
+  assert.ok(prompt.includes('Exit `awaiting-rereview` only when the in-PR fix is a major'));
+  assert.ok(prompt.includes('file a Linear ticket before'));
+  assert.ok(prompt.includes('do not leave the work only as prose in a PR comment'));
+  assert.ok(prompt.includes('file the Linear tickets described above and proceed with this'));
   assert.ok(prompt.includes('refusal receipt/log summary must include'));
   assert.ok(prompt.includes('only the blocker count plus normalized blocker kinds'));
   assert.ok(prompt.includes('workspace-local'));
@@ -1007,8 +1008,10 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('quoted secrets'));
   assert.ok(!prompt.includes('deferred-non-trivial'));
   assert.ok(!prompt.includes('defer non-trivial suggestions'));
+  assert.ok(!prompt.includes('If triage returns `addressed`, force-push the updated head and exit `awaiting-rereview`'));
   assert.ok(!prompt.includes('`suggestions_unable_to_apply` result must also exit `awaiting-rereview`'));
   assert.ok(!prompt.includes('the next review pass can evaluate the punt'));
+  assert.ok(!prompt.includes('operator handoff instead of requesting a same-head rereview'));
 });
 
 test('buildMergeAgentPrompt records non-final-pass triggers without injecting the final-pass contract block', () => {

@@ -196,7 +196,7 @@ function normalizeEntryTitleText(text) {
     .replace(ANSI_ESCAPE_PATTERN, '')
     .replace(TITLE_FORMAT_CHARS_PATTERN, '')
     .replace(TITLE_CONTROL_CHARS_PATTERN, ' ')
-    .replace(/[`*_#[\]<>]/g, '')
+    .replace(/[\\`*_#[\]<>]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

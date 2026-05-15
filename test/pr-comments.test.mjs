@@ -1303,6 +1303,32 @@ test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', 
   assert.doesNotMatch(body, /^- \*\*Foo\*\*$/m);
 });
 
+test('buildRemediationOutcomeCommentBody strips trailing backslashes from per-finding titles', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed one finding.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: 'Foo\\',
+          finding: 'Trailing backslashes can escape the closing bold delimiter.',
+          action: 'Removed inline-strong escape characters from titles.',
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'backslash sanitized' },
+  });
+
+  assert.match(body, /^- \*\*Foo\*\*$/m);
+  assert.doesNotMatch(body, /^- \*\*Foo\\\*\*$/m);
+});
+
 test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls back for empty titles', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
@@ -1475,6 +1501,86 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
   assert.match(body, /^- \*\*Over-broad dispatch refactor\*\*$/m);
   assert.match(body, /^ {2}- \*\*Finding:\*\* Reviewer asked to refactor the entire dispatch module\.$/m);
   assert.match(body, /^ {2}- \*\*Reasoning:\*\* Out of scope for this PR; tracked as separate ticket LAC-99\.$/m);
+});
+
+test('buildRemediationOutcomeCommentBody indents multiline nested-bullet content for addressed, pushback, and blockers', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'partial',
+      summary: 'Handled multiline accountability text.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: 'Addressed multiline finding',
+          finding: 'First finding line.\nSecond finding line.',
+          action: 'First action paragraph.\n\nSecond action paragraph.',
+        },
+      ],
+      pushback: [
+        {
+          title: 'Pushback multiline finding',
+          finding: 'First pushback line.\nSecond pushback line.',
+          reasoning: 'First reasoning paragraph.\n\nSecond reasoning paragraph.',
+        },
+      ],
+      blockers: [
+        {
+          title: 'Blocked multiline finding',
+          finding: 'First blocker line.\nSecond blocker line.',
+          reasoning: 'First blocker reasoning.\n\nSecond blocker reasoning.',
+          needsHumanInput: 'First human input line.\nSecond human input line.',
+        },
+      ],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'multiline rendering covered' },
+  });
+
+  const addressedSection = body
+    .match(/## Addressed findings\n\n([\s\S]*?)\n\n## Pushback \(deliberately not changed\)/)?.[1];
+  assert.equal(
+    addressedSection,
+    [
+      '- **Addressed multiline finding**',
+      '  - **Finding:** First finding line.',
+      '    Second finding line.',
+      '  - **Action:** First action paragraph.',
+      '',
+      '    Second action paragraph.',
+    ].join('\n'),
+  );
+
+  const pushbackSection = body
+    .match(/## Pushback \(deliberately not changed\)\n\n([\s\S]*?)\n\n## Blockers/)?.[1];
+  assert.equal(
+    pushbackSection,
+    [
+      '- **Pushback multiline finding**',
+      '  - **Finding:** First pushback line.',
+      '    Second pushback line.',
+      '  - **Reasoning:** First reasoning paragraph.',
+      '',
+      '    Second reasoning paragraph.',
+    ].join('\n'),
+  );
+
+  const blockersSection = body
+    .match(/## Blockers\n\n([\s\S]*?)\n\n\*\*Re-review status:/)?.[1];
+  assert.equal(
+    blockersSection,
+    [
+      '- **Blocked multiline finding**',
+      '  - **Finding:** First blocker line.',
+      '    Second blocker line.',
+      '  - **Reasoning:** First blocker reasoning.',
+      '',
+      '    Second blocker reasoning.',
+      '  - **Needs human input:** First human input line.',
+      '    Second human input line.',
+    ].join('\n'),
+  );
 });
 
 test('buildRemediationOutcomeCommentBody omits addressed/pushback sections when empty or absent', () => {

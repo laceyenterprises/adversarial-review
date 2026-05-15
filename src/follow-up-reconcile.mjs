@@ -50,6 +50,7 @@ async function reconcileFollowUpJob({
   postCommentImpl,
   requestReviewRereviewImpl,
   resolvePRLifecycleImpl,
+  auditWorkspaceForContaminationImpl,
   execFileImpl,
 }) {
   const entry = listFollowUpJobsInDir(rootDir, 'inProgress').find((item) => item.jobPath === jobPath);
@@ -66,6 +67,7 @@ async function reconcileFollowUpJob({
     postCommentImpl,
     requestReviewRereviewImpl,
     resolvePRLifecycleImpl,
+    auditWorkspaceForContaminationImpl,
     execFileImpl,
   });
 

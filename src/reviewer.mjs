@@ -621,6 +621,7 @@ function queueFollowUpForPostedReview({
   rootDir = ROOT,
   repo,
   prNumber,
+  baseBranch,
   reviewerModel,
   builderTag = null,
   linearTicketId = null,
@@ -632,6 +633,9 @@ function queueFollowUpForPostedReview({
 }) {
   if (!shouldQueueFollowUpForReview(reviewText)) {
     return { queued: false, reason: 'empty-review-body' };
+  }
+  if (typeof baseBranch !== 'string' || baseBranch.trim() === '') {
+    throw new Error('baseBranch is required to queue a follow-up handoff');
   }
 
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
@@ -648,6 +652,7 @@ function queueFollowUpForPostedReview({
     rootDir,
     repo,
     prNumber,
+    baseBranch: baseBranch.trim(),
     reviewerModel,
     builderTag: builderTag || null,
     linearTicketId,
@@ -675,7 +680,7 @@ async function fetchPRDiff(repo, prNumber) {
 async function fetchPRContext(repo, prNumber) {
   const { stdout } = await execFileAsync(
     'gh',
-    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'body,comments,headRefOid'],
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName,body,comments,headRefOid'],
     { maxBuffer: 10 * 1024 * 1024 }
   );
   return JSON.parse(stdout);
@@ -1010,8 +1015,17 @@ async function main() {
   }
 
   let extraContext = buildObviousDocsGuidance();
+  let prContext;
+  try {
+    prContext = await fetchPRContext(repo, prNumber);
+  } catch (err) {
+    console.error(`[reviewer] Failed to fetch required PR context for ${repo}#${prNumber}: ${err.message}`);
+    process.exit(1);
+  }
+
   try {
     const linkedContext = await fetchLinkedSpecContents(repo, prNumber, {
+      prContext,
       fetchPRContextImpl: fetchPRContext,
       execFileImpl: execFileAsync,
     });
@@ -1096,10 +1110,12 @@ async function main() {
   const critical = isCritical(reviewText);
   const reviewPostedAt = new Date().toISOString();
   try {
+    const baseBranch = typeof prContext?.baseRefName === 'string' ? prContext.baseRefName.trim() : '';
     const queued = queueFollowUpForPostedReview({
       rootDir: ROOT,
       repo,
       prNumber,
+      baseBranch,
       reviewerModel: effectiveModel,
       builderTag,
       linearTicketId,

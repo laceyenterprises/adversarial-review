@@ -72,13 +72,16 @@ export function extractLinkedRepoDocs(text, repo) {
 }
 
 export async function fetchLinkedSpecContents(repo, prNumber, {
+  prContext = null,
   fetchPRContextImpl,
   execFileImpl,
 } = {}) {
-  if (!fetchPRContextImpl) throw new Error('fetchPRContextImpl is required');
   if (!execFileImpl) throw new Error('execFileImpl is required');
 
-  const pr = await fetchPRContextImpl(repo, prNumber);
+  const pr = prContext || await (() => {
+    if (!fetchPRContextImpl) throw new Error('fetchPRContextImpl is required');
+    return fetchPRContextImpl(repo, prNumber);
+  })();
   const combinedText = [pr.body || '', ...(pr.comments || []).map((c) => c.body || '')].join('\n\n');
   const linked = extractLinkedRepoDocs(combinedText, repo).slice(0, 12);
   if (!linked.length) return '';

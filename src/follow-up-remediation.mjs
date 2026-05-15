@@ -54,6 +54,66 @@ const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', 
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const VALID_REPLY_STORAGE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 
+function normalizeBaseBranch(baseBranch) {
+  if (typeof baseBranch !== 'string') return null;
+  const trimmed = baseBranch.trim();
+  return trimmed || null;
+}
+
+async function fetchPRBaseBranch({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const { stdout } = await execFileImpl(
+    'gh',
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName'],
+    { maxBuffer: 1 * 1024 * 1024 }
+  );
+  const parsed = JSON.parse(String(stdout || '{}'));
+  const baseBranch = normalizeBaseBranch(parsed.baseRefName);
+  if (!baseBranch) {
+    throw new Error(`Could not resolve baseRefName for ${repo}#${prNumber}`);
+  }
+  return baseBranch;
+}
+
+async function ensureJobBaseBranch({
+  job,
+  jobPath,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const existing = normalizeBaseBranch(job?.baseBranch);
+  if (existing) {
+    return { job: { ...job, baseBranch: existing }, baseBranch: existing, hydrated: false };
+  }
+
+  let baseBranch;
+  try {
+    baseBranch = await fetchPRBaseBranch({
+      repo: job?.repo,
+      prNumber: job?.prNumber,
+      execFileImpl,
+    });
+  } catch (err) {
+    err.isBaseBranchResolutionError = true;
+    throw err;
+  }
+  const nextJob = { ...job, baseBranch };
+  if (jobPath) {
+    writeFollowUpJob(jobPath, nextJob);
+  }
+  return { job: nextJob, baseBranch, hydrated: true };
+}
+
+function requireJobBaseBranch(job) {
+  const baseBranch = normalizeBaseBranch(job?.baseBranch);
+  if (!baseBranch) {
+    throw new Error(`baseBranch is required for ${job?.repo || 'unknown'}#${job?.prNumber || 'unknown'} follow-up job`);
+  }
+  return baseBranch;
+}
+
 // Default identity each remediation-worker class commits under. Without
 // these, the workspace inherits the operator's global git config and every
 // remediation commit looks like the human operator wrote it. The defaults
@@ -933,6 +993,106 @@ function resetWorkspaceDir(workspaceDir) {
   rmSync(workspaceDir, { recursive: true, force: true });
 }
 
+/**
+ * Audit a remediation workspace for branch contamination — commits on HEAD
+ * that are patch-equivalent to commits already on `origin/<baseBranch>`.
+ *
+ * A remediation worker is supposed to rebase against a freshly-fetched
+ * `origin/<base>` before remediating; git's cherry-pick detection drops
+ * commits whose patch matches upstream. Workers that rebase against a
+ * stale local ref, skip the fetch, or apply commits manually can produce
+ * a branch whose log shows already-merged commits as if they were the
+ * PR's own work — which then confuses the next adversarial reviewer pass
+ * because it reviews the entire `origin/<base>...HEAD` diff.
+ *
+ * This audit runs `git fetch --prune origin <baseBranch>` to refresh the
+ * upstream ref, then uses `git cherry origin/<baseBranch> HEAD` to flag
+ * every commit on HEAD whose patch already lives upstream. `git cherry`
+ * emits only right-side commits and prefixes patch-equivalent ones with
+ * `-`, which makes it safe to parse directly. This audit is load-bearing:
+ * reconcile must fail closed when fetch/cherry cannot prove cleanliness.
+ *
+ * Returns `{ suspect: [{ sha, subject }, ...], error: <message|null> }`.
+ * Callers use either a non-empty `suspect` list or a non-null `error` to
+ * refuse the rereview request and surface a durable failure to the operator.
+ */
+async function auditWorkspaceForContamination({
+  workspaceDir,
+  baseBranch,
+  execFileImpl = execFileAsync,
+}) {
+  const resolvedBaseBranch = normalizeBaseBranch(baseBranch);
+  if (!workspaceDir || typeof workspaceDir !== 'string') {
+    return { suspect: [], error: 'no workspaceDir provided' };
+  }
+  if (!resolvedBaseBranch) {
+    return { suspect: [], error: 'baseBranch is required for branch-contamination audit' };
+  }
+  if (!existsSync(join(workspaceDir, '.git'))) {
+    return { suspect: [], error: 'workspace has no .git' };
+  }
+
+  try {
+    await execFileImpl('git', ['-C', workspaceDir, 'fetch', '--prune', 'origin', resolvedBaseBranch], {
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch (err) {
+    return { suspect: [], error: `git fetch origin ${resolvedBaseBranch} failed: ${err.message}` };
+  }
+
+  let stdout = '';
+  try {
+    const result = await execFileImpl('git', [
+      '-C', workspaceDir,
+      'cherry',
+      `origin/${resolvedBaseBranch}`,
+      'HEAD',
+    ], { maxBuffer: 10 * 1024 * 1024 });
+    stdout = String(result.stdout || '');
+  } catch (err) {
+    return { suspect: [], error: `git cherry origin/${resolvedBaseBranch} HEAD failed: ${err.message}` };
+  }
+
+  const suspectShas = [];
+  for (const rawLine of stdout.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const match = line.match(/^([+-])\s+([0-9a-f]{7,40})(?:\s|$)/i);
+    if (!match || match[1] !== '-') continue;
+    suspectShas.push(match[2]);
+  }
+  if (suspectShas.length === 0) {
+    return { suspect: [], error: null };
+  }
+
+  try {
+    const result = await execFileImpl('git', [
+      '-C', workspaceDir,
+      'show',
+      '--quiet',
+      '--format=%H\x1f%s',
+      ...suspectShas,
+    ], { maxBuffer: 10 * 1024 * 1024 });
+    const suspect = String(result.stdout || '')
+      .split('\n')
+      .map((rawLine) => rawLine.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const fieldSep = line.indexOf('\x1f');
+        const sha = fieldSep >= 0 ? line.slice(0, fieldSep) : line;
+        const subject = fieldSep >= 0 ? line.slice(fieldSep + 1) : '';
+        return sha ? { sha, subject } : null;
+      })
+      .filter(Boolean);
+    return { suspect, error: null };
+  } catch (err) {
+    return {
+      suspect: suspectShas.map((sha) => ({ sha, subject: '' })),
+      error: `git show subject lookup failed: ${err.message}`,
+    };
+  }
+}
+
 function buildRemediationPrompt(job, {
   template,
   remediationReplyPath = job?.remediationReply?.path || null,
@@ -954,6 +1114,7 @@ function buildRemediationPrompt(job, {
   const promptTemplate = template ?? loadFollowUpPromptTemplate(ROOT, { stage: remediatorPromptStage });
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
+  const baseBranch = requireJobBaseBranch(job);
   // The contract example uses empty arrays for the per-finding lists
   // and a placeholder-free summary. Inline shape examples used to live
   // in this object, which made it dangerously easy for a worker to
@@ -994,6 +1155,7 @@ function buildRemediationPrompt(job, {
     remediationReplyArtifact: remediationReplyPath,
   };
   const interpolatedTemplate = interpolatePromptTemplate(promptTemplate, {
+    BASE_BRANCH: baseBranch,
     REPLY_PATH: replyContext.replyPath,
     ADV_REPLY_DIR: replyContext.replyDir,
     HQ_ROOT: replyContext.hqRoot || '',
@@ -1016,7 +1178,13 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 ## Required Operating Rules
 - Work on the PR branch that is already checked out in this repository clone.
 - This is one bounded remediation round. Do not create an autonomous retry loop inside the worker.
-- Before making code changes, rebase the PR branch onto the upstream \`main\` branch (\`git fetch origin && git rebase origin/main\`) so the remediation lands on top of current trunk. If the rebase produces conflicts, resolve them as part of this round — it is remediation work, not a blocker, unless resolving the conflict requires a design decision you cannot make on your own (in which case record it under \`blockers[]\`). After resolving conflicts, re-run the relevant tests so the rebase outcome is validated alongside the original fix.
+- Before making code changes, rebase the PR branch onto a freshly-fetched \`origin/${baseBranch}\` so the remediation lands on top of current trunk. Use **exactly** this sequence — improvised variants will silently re-introduce already-merged commits as duplicates and corrupt the PR diff for the next reviewer pass:
+  1. Refuse to operate on dirty state: \`git status --porcelain --untracked-files=all\` must print nothing.
+  2. Force-fetch first (never rebase against a cached remote-tracking ref): \`git fetch --prune origin ${baseBranch}\`. The fetch must succeed; if it fails, surface as a \`blockers[]\` entry and do not rebase.
+  3. Rebase onto the freshly-fetched ref (NOT local \`${baseBranch}\`): \`git rebase origin/${baseBranch}\`. Git's built-in cherry-pick detection drops commits whose patch matches upstream; do not pass any flag that disables it.
+  4. If the rebase produces conflicts, resolve them in-band — that is part of the remediation. Never \`git rebase --skip\` past a conflict; that drops your own work. If a conflict requires a design decision you cannot make on your own, abort the rebase and record a \`blockers[]\` entry.
+  5. **Mandatory audit** before commit-and-push: run \`git cherry origin/${baseBranch} HEAD\` and inspect any commit whose marker is \`-\` (patch-equivalent to a commit already on \`origin/${baseBranch}\`). If even one such commit appears, the branch is contaminated — do NOT push. Record a \`blockers[]\` entry titled \`branch-contamination\` listing the offending commit subjects verbatim, and exit. The dispatcher runs the same audit server-side; pushing anyway just produces a durable \`failed:branch-contamination\` reconciliation.
+  6. After the rebase succeeds and the audit passes, re-run the relevant tests so the rebase outcome is validated alongside the original fix.
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
 - If a reviewer finding explicitly asks for a spec / governance / runbook update (e.g. "update SPEC.md to match the new behavior", "the runbook should document the new failure mode"), make that update as part of THIS remediation round. Do not refuse the doc edit on the grounds that it is "out of scope" — when the reviewer flags spec drift, closing the drift IS the remediation. Treat the governing doc as a load-bearing artifact equal in weight to the code change. If the reviewer's finding is ambiguous about whether a doc update is required, prefer to update the doc; an over-conservative read leaves the spec stale and the next reviewer round will repeat the finding.
@@ -1827,6 +1995,7 @@ async function reconcileFollowUpJob({
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
   resolvePRLifecycleImpl = resolvePRLifecycle,
+  auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   execFileImpl = execFileAsync,
   log = console,
 } = {}) {
@@ -2128,6 +2297,254 @@ async function reconcileFollowUpJob({
       parsedReply = reply;
 
       if (reply.reReview.requested) {
+        // Pre-rereview branch-contamination gate. Even though the
+        // remediator prompt forbids pushing patch-id duplicates of
+        // upstream commits, workers can ignore the contract or run a
+        // git command that bypasses the worker-side audit. If the
+        // remediation workspace has commits on HEAD that are
+        // patch-equivalent to commits already on `origin/<baseBranch>`,
+        // the next reviewer pass will treat them as PR scope and
+        // generate spurious findings. Refuse to request the rereview
+        // and emit a `failed:branch-contamination` outcome instead.
+        let baseBranch;
+        try {
+          const hydrated = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
+          job = hydrated.job;
+          baseBranch = hydrated.baseBranch;
+        } catch (err) {
+          rereview = buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: {
+              status: 'refused',
+              reason: 'base-branch-resolution-failed',
+              error: err.message,
+            },
+          });
+          const baseBranchFailure = {
+            code: 'base-branch-resolution-failed',
+            message: [
+              `Could not prove the PR base branch for ${job?.repo}#${job?.prNumber}; refused to request rereview.`,
+              err.message,
+              'Resolve the PR base branch and retry remediation before any rebase or branch-contamination audit.',
+            ].join('\n'),
+          };
+          const { commentDelivery: baseBranchFailureDelivery } = buildReconcileCommentDelivery({
+            job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: baseBranchFailure,
+            now,
+          });
+          const failed = markFollowUpJobFailed({
+            rootDir,
+            jobPath,
+            failedAt: completedAt,
+            failureCode: 'base-branch-resolution-failed',
+            error: new Error(baseBranchFailure.message),
+            remediationWorker: {
+              ...workerState,
+              state: 'failed',
+            },
+            failure: {
+              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+              error: err.message,
+            },
+            commentDelivery: baseBranchFailureDelivery,
+            jobUpdates: {
+              completedAt,
+              remediationReply,
+              completionMetadata: {
+                source: 'reconcile:base-branch-resolution-failed',
+                note: 'PR base branch could not be proven; refused rereview rather than defaulting to main.',
+                error: err.message,
+              },
+              parsedReply,
+              rereview,
+            },
+          });
+
+          await postReconcileOutcomeCommentSafe({
+            rootDir,
+            jobPath: failed.jobPath,
+            job: failed.job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: baseBranchFailure,
+            postCommentImpl,
+            alreadyTerminal: failed.alreadyTerminal,
+            now,
+            log,
+          });
+
+          return {
+            action: 'failed',
+            reason: 'base-branch-resolution-failed',
+            job: failed.job,
+            jobPath: failed.jobPath,
+          };
+        }
+        const workspaceDir = join(getFollowUpJobDir(rootDir, 'workspaces'), job.jobId);
+        const contaminationAudit = await auditWorkspaceForContaminationImpl({
+          workspaceDir,
+          baseBranch,
+          execFileImpl,
+        });
+        if (contaminationAudit.error) {
+          rereview = buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: {
+              status: 'refused',
+              reason: 'branch-contamination-audit-error',
+              auditError: contaminationAudit.error,
+            },
+          });
+          const auditFailure = {
+            code: 'branch-contamination-audit-error',
+            message: [
+              `Branch cleanliness audit failed before rereview could be requested for origin/${baseBranch}.`,
+              contaminationAudit.error,
+              'Fix the workspace git state or upstream ref lookup, then retry remediation.',
+            ].join('\n'),
+          };
+          const { commentDelivery: auditFailureDelivery } = buildReconcileCommentDelivery({
+            job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: auditFailure,
+            now,
+          });
+          const failed = markFollowUpJobFailed({
+            rootDir,
+            jobPath,
+            failedAt: completedAt,
+            failureCode: 'branch-contamination-audit-error',
+            error: new Error(auditFailure.message),
+            remediationWorker: {
+              ...workerState,
+              state: 'failed',
+            },
+            failure: {
+              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+              auditError: contaminationAudit.error,
+            },
+            commentDelivery: auditFailureDelivery,
+            jobUpdates: {
+              completedAt,
+              remediationReply,
+              completionMetadata: {
+                source: 'reconcile:branch-contamination-audit-error',
+                note: 'PR branch cleanliness could not be proven because the server-side git fetch/cherry audit failed; refused to request rereview.',
+                auditError: contaminationAudit.error,
+              },
+              parsedReply,
+              rereview,
+            },
+          });
+
+          await postReconcileOutcomeCommentSafe({
+            rootDir,
+            jobPath: failed.jobPath,
+            job: failed.job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: auditFailure,
+            postCommentImpl,
+            alreadyTerminal: failed.alreadyTerminal,
+            now,
+            log,
+          });
+
+          return {
+            action: 'failed',
+            reason: 'branch-contamination-audit-error',
+            job: failed.job,
+            jobPath: failed.jobPath,
+          };
+        }
+        if (contaminationAudit.suspect && contaminationAudit.suspect.length > 0) {
+          rereview = buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: {
+              status: 'refused',
+              reason: 'branch-contamination',
+              suspectCommits: contaminationAudit.suspect,
+            },
+          });
+          const contaminationFailure = {
+            code: 'branch-contamination',
+            message: [
+              `Branch contamination detected: HEAD contains commits that are patch-equivalent to commits already on origin/${baseBranch}.`,
+              ...contaminationAudit.suspect.map((entry) => `- ${((entry.sha || '').slice(0, 12) + ' ' + (entry.subject || '')).trim()}`),
+              'Clean the PR branch before requesting another adversarial pass.',
+            ].join('\n'),
+          };
+          const { commentDelivery: contaminationDelivery } = buildReconcileCommentDelivery({
+            job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: contaminationFailure,
+            now,
+          });
+          const failed = markFollowUpJobFailed({
+            rootDir,
+            jobPath,
+            failedAt: completedAt,
+            failureCode: 'branch-contamination',
+            error: new Error(contaminationFailure.message),
+            remediationWorker: {
+              ...workerState,
+              state: 'failed',
+            },
+            failure: {
+              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+              suspectCommits: contaminationAudit.suspect,
+              auditError: contaminationAudit.error || null,
+            },
+            commentDelivery: contaminationDelivery,
+            jobUpdates: {
+              completedAt,
+              remediationReply,
+              completionMetadata: {
+                source: 'reconcile:branch-contamination',
+                note: 'PR branch contains patch-equivalent copies of commits already on the base branch; refused to request rereview to avoid confusing the next reviewer pass.',
+                suspectCommits: contaminationAudit.suspect,
+                auditError: contaminationAudit.error || null,
+              },
+              parsedReply,
+              rereview,
+            },
+          });
+
+          await postReconcileOutcomeCommentSafe({
+            rootDir,
+            jobPath: failed.jobPath,
+            job: failed.job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: contaminationFailure,
+            postCommentImpl,
+            alreadyTerminal: failed.alreadyTerminal,
+            now,
+            log,
+          });
+
+          return {
+            action: 'failed',
+            reason: 'branch-contamination',
+            job: failed.job,
+            jobPath: failed.jobPath,
+          };
+        }
+
         const requestedAt = completedAt;
         const rereviewOutcome = requestReviewRereviewImpl({
           rootDir,
@@ -2570,6 +2987,13 @@ async function consumeNextFollowUpJob({
   let spawnedWorker = null;
 
   try {
+    const baseReadyJob = await ensureJobBaseBranch({
+      job: claimed.job,
+      jobPath: claimed.jobPath,
+      execFileImpl,
+    });
+    claimed.job = baseReadyJob.job;
+
     // Round-budget check first (cheap, short-circuits before any
     // OAuth/work). The pr-merge-orchestration spec's risk-tiered
     // budget enforces "stop the remediation loop when the PR has
@@ -2715,6 +3139,15 @@ async function consumeNextFollowUpJob({
       failure = {
         oauthError: {
           model: err.model || workerClass,
+          reason: err.message,
+        },
+      };
+    } else if (err.isBaseBranchResolutionError) {
+      failureCode = 'base-branch-resolution-failed';
+      failure = {
+        baseBranchResolution: {
+          repo: claimed.job?.repo || null,
+          prNumber: claimed.job?.prNumber || null,
           reason: err.message,
         },
       };
@@ -2995,6 +3428,7 @@ export {
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   WORKER_PROVENANCE_HOOK_SRC,
   installWorkerProvenanceHook,
+  auditWorkspaceForContamination,
   OAuthError,
   StartupContractError,
   assertCodexOAuth,

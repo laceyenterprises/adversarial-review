@@ -22,7 +22,7 @@ Use this when a review has already been posted to GitHub and you need to inspect
 - The normal success path to a fresh adversarial review pass is the worker's **durable machine-readable rereview request** (`reReview.requested = true` in `remediation-reply.json`). Once a completed remediation round requests rereview, the watcher queues the new pass even if that round consumed the PR's final remediation budget; the cap only stops the next worker spawn.
 - Bounding: `DEFAULT_MAX_REMEDIATION_ROUNDS = 2` in `src/follow-up-jobs.mjs` because `medium` is the default risk class; new jobs use risk-class caps of `low=1`, `medium=2`, `high=3`, and `critical=4` (was `3` before 2026-05-06 and `6` before 2026-05-02). The cap is enforced **PR-wide**, not per-job. The watcher reads the PR's prior remediation-round count from the durable follow-up-jobs ledger (`summarizePRRemediationLedger`) and seeds each new follow-up job's `currentRound` with that count. Fresh jobs normally re-derive the cap from the current risk class; if the latest PR ledger cap is higher than the current tier, the watcher carries that elevated cap forward so legacy in-flight PRs and operator-raised budgets do not silently lose budget mid-deploy. After the cap is consumed, the next review still runs and uses the lenient final-round verdict-categorization addendum embedded in `prompts/code-pr/reviewer.last.md`; that addendum relaxes the *categorization* bar (style / nits / future-proofing concerns become non-blocking) but does **not** relax the automated merge gate — the verdict stays `Request changes` whenever any finding remains unless a current scoped `operator-approved` label deliberately overrides review/remediation state for that head. `requestReviewRereview` in `src/review-state.mjs` does **not** implement a cooldown — it refuses the reset only on hard guardrails (review row missing, malformed-title terminal, PR not open, already pending). The PR-wide round cap is the only re-arm bound. (An earlier doc claim about a per-PR rereview cooldown was inaccurate.)
 - Stage-keyed prompts are part of the shipped loop contract. Reviewer runs select `prompts/code-pr/reviewer.first.md`, `reviewer.middle.md`, or `reviewer.last.md` via `pickReviewerStage(reviewAttemptNumber, completedRemediationRounds, maxRemediationRounds)`. Missing or invalid reviewer context falls back to the `first` prompt; `middle` is used only when the run is provably a re-review after at least one completed remediation round; `last` is used once the completed-round count reaches the stored cap. Remediation workers similarly select `prompts/code-pr/remediator.{first,middle,last}.md` via `pickRemediatorStage(remediationRound, maxRemediationRounds)`, with bad or missing round context falling back to `first` instead of silently framing the worker as mid-cycle.
-- Every remediator prompt stage tells the worker to `git fetch origin && git rebase origin/main` before code changes. That is a real head-rewrite, not a cosmetic sync step: the worker's eventual push updates the PR head SHA, and any head-scoped operator label event (`operator-approved`, `merge-agent-requested`) that was attached to the pre-rebase head is stale for the rebased head until an operator reapplies it. The watcher already evaluates those labels against the current head SHA, so a remediation rebase can legitimately make an earlier operator label stop authorizing merge-agent or override behavior on the next tick.
+- Every remediator prompt stage tells the worker to refuse any dirty worktree (tracked or untracked) via `git status --porcelain --untracked-files=all`, fetch and rebase onto `origin/<baseBranch>` before code changes, then run a mandatory `git cherry origin/<baseBranch> HEAD` contamination audit before commit-and-push. Legacy jobs that predate `baseBranch` persistence are lazily hydrated from GitHub before spawn/reconcile; if the real PR base cannot be proven, the job fails instead of guessing `main`. That is a real head-rewrite, not a cosmetic sync step: the worker's eventual push updates the PR head SHA, and any head-scoped operator label event (`operator-approved`, `merge-agent-requested`) that was attached to the pre-rebase head is stale for the rebased head until an operator reapplies it. The watcher already evaluates those labels against the current head SHA, so a remediation rebase can legitimately make an earlier operator label stop authorizing merge-agent or override behavior on the next tick.
 - Reviewer-bot tokens (`GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`) are best-effort: a missing token at startup is logged as a warning, the daemon still runs consume/reconcile, and the comment poster records `token-env-missing` for later retry once the token is restored. A 1Password outage at boot does not block remediation.
 
 Operator levers (still available, override the daemon):
@@ -177,8 +177,11 @@ in-progress
   ├─ worker exits, final artifact missing/invalid
   │    └─ failed
   │
-  ├─ worker exits, valid reply, rereview requested=true
+  ├─ worker exits, valid reply, rereview requested=true, contamination audit clean
   │    └─ completed
+  │
+  ├─ worker exits, valid reply, rereview requested=true, contamination audit finds patch-equivalent commits already on origin/<baseBranch>
+  │    └─ failed (code=branch-contamination)
   │
   ├─ worker exits, no durable rereview request
   │    └─ stopped (code=no-progress)
@@ -433,7 +436,8 @@ Possible outcomes:
 - worker PID gone, `remediation-reply.json` exists but is malformed / fails schema validation / does not match the job: job moves to `failed/` with code `invalid-remediation-reply` (this path is taken regardless of whether stdout is empty — the invalid reply is the load-bearing signal, not a missing narrative)
 - worker PID gone, final message artifact missing or empty, AND no valid reply artifact: job moves to `failed/`
 - worker PID gone, final message artifact present (non-empty stdout):
-  - if a valid reply requested re-review, job moves to `completed/`
+  - if a valid reply requested re-review and the `git cherry origin/<baseBranch> HEAD` audit is clean, job moves to `completed/`
+  - if a valid reply requested re-review but the contamination audit finds patch-equivalent commits already merged on the base branch, job moves to `failed/` with code `branch-contamination`, records the suspect commits in the failed ledger entry, and still runs the normal reconcile-time PR comment delivery path
   - if no durable re-review request was recorded, job moves to `stopped/`
 - worker PID gone, final message artifact missing or empty, BUT a valid reply artifact exists (e.g. a tool-only `claude-code` worker that pushed code + wrote `remediation-reply.json` but emitted no stdout narrative): the validated reply is the durable success signal — `reReview.requested` (per SPEC.md §5.1.2), NOT `outcome`, decides the terminal state. Routes to `completed/` if rereview was requested, otherwise to `stopped/` with code `no-progress`.
 
@@ -442,6 +446,8 @@ Reconciliation never starts another remediation round on its own.
 ### 5. Re-review trigger
 
 If the worker wrote a valid reply JSON with `reReview.requested = true`, reconciliation tries to reset the matching watcher row in `data/reviews.db` back to `review_status = 'pending'`.
+
+Before it does that reset, reconcile fetches `origin/<baseBranch>` and runs the same `git cherry origin/<baseBranch> HEAD` audit the prompt requires from the worker. A `-` marker means the PR branch still contains a patch-equivalent copy of a commit already on the base branch. If either the fetch or cherry step fails, reconcile now fails closed with a distinct `failed:branch-contamination-audit-error` record instead of assuming the branch is clean. In either case the round refuses to fabricate another review pass, because the next reviewer would otherwise run against an unproven or wrong branch state.
 
 That is the shipped re-review trigger. The queue does not directly post another review.
 

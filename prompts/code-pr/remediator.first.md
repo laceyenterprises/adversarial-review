@@ -9,10 +9,71 @@ Work mode:
 - Update tests and docs when the code change warrants it.
 - Avoid speculative refactors that are not needed to resolve the review findings.
 
-Before you start changing code:
-- Rebase the PR branch onto the upstream `main` branch (`git fetch origin && git rebase origin/main`) so your remediation lands on top of the current trunk and does not collide with merges that happened during review.
-- If the rebase produces conflicts, resolve them in this round — that is part of getting the PR back into good shape. Treat it as remediation work, not a blocker, unless the conflict requires a design decision you cannot make on your own (in which case use `blockers[]`).
-- After resolving conflicts, re-run the relevant tests so the rebase outcome is validated, not just the original fix.
+## Rebase contract — read this carefully, the wrong shape corrupts the PR
+
+Main moves while this PR is open. You DO want to rebase onto a fresh
+`origin/${BASE_BRANCH}` so your remediation lands on the current trunk; what you
+do NOT want is to push a branch whose history contains re-applied
+copies of commits that already merged on `origin/${BASE_BRANCH}`. A naïve
+`git rebase` against a stale or partially-fetched `origin/${BASE_BRANCH}` quietly
+produces exactly that, and the next reviewer pass then treats those
+already-merged commits as if they were the PR's own work.
+
+Use this exact sequence — do not improvise:
+
+```bash
+# 1. Refuse to operate on dirty state, including untracked leftovers.
+#    If anything prints here, something earlier in the dispatch went
+#    wrong; surface as blocker.
+test -z "$(git -C "$PR_WORKTREE" status --porcelain --untracked-files=all)" || {
+  echo "remediator: worktree dirty before rebase; aborting" >&2; exit 78;
+}
+
+# 2. ALWAYS fetch first. Never rebase against a cached remote-tracking
+#    ref that may be minutes (or hours) behind. The fetch must succeed.
+git -C "$PR_WORKTREE" fetch --prune origin "${BASE_BRANCH}" || exit 78
+
+# 3. Rebase onto the FETCHED ref — origin/${BASE_BRANCH}, not local ${BASE_BRANCH}.
+#    Git's default cherry-pick detection drops commits whose patch
+#    matches an upstream commit; we rely on that behavior here.
+git -C "$PR_WORKTREE" rebase "origin/${BASE_BRANCH}" || {
+  # Conflicts: try to resolve them in this round. If you cannot, abort
+  # the rebase and record a blocker — never `git rebase --skip` your
+  # way past a conflict, that drops your own work.
+  echo "remediator: rebase conflict; resolve in-band or surface as blocker" >&2
+  git -C "$PR_WORKTREE" rebase --abort 2>/dev/null || true
+  exit 78
+}
+
+# 4. MANDATORY audit. Even with the right sequence above, races and
+#    edge cases (e.g. a PR that merged between the fetch and the
+#    rebase) can leak patch-id duplicates. This audit is the safety
+#    net — refuse to push if it fires.
+suspect=$(
+  git -C "$PR_WORKTREE" cherry "origin/${BASE_BRANCH}" HEAD 2>/dev/null \
+  | awk '$1=="-"{print $2}' \
+  | while read -r sha; do
+      git -C "$PR_WORKTREE" show -s --format=%s "$sha"
+    done
+)
+if [ -n "$suspect" ]; then
+  echo "branch-contamination: commits on HEAD are patch-equivalent to commits already on origin/${BASE_BRANCH}; do NOT push" >&2
+  printf '%s\n' "$suspect" >&2
+  exit 78
+fi
+```
+
+The audit is the load-bearing step. If it ever fires, **stop**. Do not
+try to fix the contamination yourself — distinguishing your real
+remediation commits from rebase artifacts is the operator's call. Add
+a `blockers[]` entry with `title: "branch-contamination"`, list the
+offending commit subjects verbatim from the audit output, and exit
+without pushing.
+
+After the rebase succeeds and the audit passes, re-run the relevant
+tests so the rebase outcome is validated, not just the original fix.
+If the rebase produced no conflicts and no audit hits, treat the
+rebase as routine and move on to the actual remediation work.
 
 When you finish:
 - Summarize what you changed.

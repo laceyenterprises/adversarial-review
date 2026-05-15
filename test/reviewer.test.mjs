@@ -42,6 +42,7 @@ function queueWithFakes(reviewText) {
     rootDir: '/tmp/adversarial-review-test',
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 57,
+    baseBranch: 'release/2026.05',
     reviewerModel: 'claude',
     builderTag: '[codex]',
     linearTicketId: null,
@@ -78,6 +79,7 @@ test('clean comment-only reviews still queue a durable follow-up verdict carrier
   assert.equal(result.queued, true);
   assert.equal(created.length, 1);
   assert.equal(created[0].reviewBody.includes('Comment only'), true);
+  assert.equal(created[0].baseBranch, 'release/2026.05');
   assert.equal(Object.hasOwn(created[0], 'maxRemediationRounds'), false);
   assert.equal(created[0].priorCompletedRounds, 1);
 });
@@ -92,12 +94,33 @@ test('request-changes and malformed verdicts still queue durable follow-up hando
   assert.equal(malformed.created.length, 1);
 });
 
+test('follow-up handoff refuses to queue when baseBranch is unknown', () => {
+  assert.throws(() => {
+    queueFollowUpForPostedReview({
+      rootDir: '/tmp/adversarial-review-test',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 57,
+      baseBranch: '',
+      reviewerModel: 'claude',
+      reviewText: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
+      summarizePRRemediationLedgerImpl: () => ({
+        completedRoundsForPR: 0,
+        latestMaxRounds: 2,
+      }),
+      createFollowUpJobImpl: () => {
+        throw new Error('should not be called');
+      },
+    });
+  }, /baseBranch is required/);
+});
+
 test('new follow-up jobs preserve an elevated prior cap to avoid truncating an active PR cycle', () => {
   const created = [];
   queueFollowUpForPostedReview({
     rootDir: '/tmp/adversarial-review-test',
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 58,
+    baseBranch: 'release/2026.05',
     reviewerModel: 'claude',
     builderTag: '[codex]',
     linearTicketId: 'LAC-466',
@@ -125,6 +148,7 @@ test('new follow-up jobs re-derive cap when the prior cap is not above the curre
     rootDir: '/tmp/adversarial-review-test',
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 58,
+    baseBranch: 'release/2026.05',
     reviewerModel: 'claude',
     builderTag: '[codex]',
     linearTicketId: 'LAC-466',
@@ -289,6 +313,28 @@ test('fetchLinkedSpecContents fetches linked specs concurrently and preserves li
   assert.deepEqual(starts, ['docs/ARCHITECTURE.md', 'tools/PLAYBOOK.md']);
   assert.match(result, /### docs\/ARCHITECTURE.md/);
   assert.match(result, /### tools\/PLAYBOOK.md/);
+});
+
+test('fetchLinkedSpecContents reuses already-fetched PR context when provided', async () => {
+  let fetchCalls = 0;
+  const result = await fetchLinkedSpecContents('laceyenterprises/adversarial-review', 6, {
+    prContext: {
+      body: 'docs/ARCHITECTURE.md',
+      comments: [],
+      headRefOid: 'abc123',
+    },
+    fetchPRContextImpl: async () => {
+      fetchCalls += 1;
+      throw new Error('should not be called');
+    },
+    execFileImpl: async () => ({
+      stdout: Buffer.from('# docs/ARCHITECTURE.md\n').toString('base64'),
+      stderr: '',
+    }),
+  });
+
+  assert.equal(fetchCalls, 0);
+  assert.match(result, /### docs\/ARCHITECTURE.md/);
 });
 
 test('buildObviousDocsGuidance tells workers to inspect obvious repo docs before guessing', () => {

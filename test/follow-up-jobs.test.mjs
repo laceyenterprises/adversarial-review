@@ -174,6 +174,7 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   writePlanMappingFixture(rootDir, { linearTicketId: 'LAC-207', riskClass: 'high' });
   const { job, jobPath } = createFollowUpJob({
     ...makeJobInput(rootDir),
+    baseBranch: 'release/2026.05',
     linearTicketId: 'LAC-207',
   });
 
@@ -181,6 +182,7 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
 
   const persisted = JSON.parse(readFileSync(jobPath, 'utf8'));
   assert.deepEqual(persisted, job);
+  assert.equal(persisted.baseBranch, 'release/2026.05');
   assert.equal(persisted.recommendedFollowUpAction.priority, 'high');
   assert.equal(persisted.riskClass, 'high');
   // High risk = 3 rounds (more iterations before halting for operator).

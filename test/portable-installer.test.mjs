@@ -70,6 +70,24 @@ test('renderTemplate XML-escapes substituted values for plist string nodes', () 
   );
 });
 
+test('renderTemplate shell-escapes values used inside double-quoted assignments', () => {
+  const out = renderTemplate(
+    'REPO_RENDER_REPO_ROOT="${REPO_ROOT}"\n'
+      + 'REPO_RENDER_LOG_ROOT="${LOG_ROOT}"\n',
+    makeBindings({
+      REPO_ROOT: '/tmp/with space/"quote"/`tick`/$(touch pwn)/$HOME/\\slash',
+      LOG_ROOT: '/tmp/logs\nnext',
+    }),
+    { format: 'shell' },
+  );
+
+  assert.equal(
+    out,
+    'REPO_RENDER_REPO_ROOT="/tmp/with space/\\"quote\\"/\\`tick\\`/\\$(touch pwn)/\\$HOME/\\\\slash"\n'
+      + 'REPO_RENDER_LOG_ROOT="/tmp/logs\\nnext"\n',
+  );
+});
+
 test('renderTemplate throws on missing binding', () => {
   assert.throws(() => renderTemplate('${REPO_ROOT}', {}), /missing binding for \$\{REPO_ROOT\}/);
 });
@@ -136,7 +154,7 @@ test('the four shipped templates render with sample bindings and leave no placeh
     const rendered = renderTemplate(
       text,
       bindings,
-      { format: name.endsWith('.plist.template') ? 'xml' : 'plain' },
+      { format: name.endsWith('.plist.template') ? 'xml' : 'shell' },
     );
     assert.deepEqual(
       unresolvedPlaceholders(rendered),

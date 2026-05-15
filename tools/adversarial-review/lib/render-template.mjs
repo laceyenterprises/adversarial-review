@@ -35,6 +35,16 @@ function escapeXmlText(value) {
     .replaceAll("'", '&apos;');
 }
 
+function escapeShellDoubleQuotedText(value) {
+  return value
+    .replaceAll('\\', '\\\\')
+    .replaceAll('$', '\\$')
+    .replaceAll('`', '\\`')
+    .replaceAll('"', '\\"')
+    .replaceAll('\r', '\\r')
+    .replaceAll('\n', '\\n');
+}
+
 export function renderTemplate(text, bindings, options = {}) {
   if (typeof text !== 'string') {
     throw new TypeError('renderTemplate: text must be a string');
@@ -52,7 +62,11 @@ export function renderTemplate(text, bindings, options = {}) {
     if (typeof value !== 'string') {
       throw new TypeError(`renderTemplate: binding for ${name} must be a string`);
     }
-    const renderedValue = format === 'xml' ? escapeXmlText(value) : value;
+    const renderedValue = format === 'xml'
+      ? escapeXmlText(value)
+      : format === 'shell'
+        ? escapeShellDoubleQuotedText(value)
+        : value;
     out = literalReplace(out, '${' + name + '}', renderedValue);
   }
   return out;

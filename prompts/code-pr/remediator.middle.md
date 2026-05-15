@@ -30,7 +30,7 @@ Use this exact sequence — do not improvise:
 ```bash
 # 1. Refuse to operate on dirty state, including untracked leftovers.
 #    If anything prints here, something earlier in the dispatch went
-#    wrong; surface as blocker.
+#    wrong; surface as an operationalBlockers[] entry.
 test -z "$(git -C "$PR_WORKTREE" status --porcelain --untracked-files=all)" || {
   echo "remediator: worktree dirty before rebase; aborting" >&2; exit 78;
 }
@@ -44,9 +44,9 @@ git -C "$PR_WORKTREE" fetch --prune origin "${BASE_BRANCH}" || exit 78
 #    matches an upstream commit; we rely on that behavior here.
 git -C "$PR_WORKTREE" rebase "origin/${BASE_BRANCH}" || {
   # Conflicts: try to resolve them in this round. If you cannot, abort
-  # the rebase and record a blocker — never `git rebase --skip` your
+  # the rebase and record an operationalBlockers[] entry — never `git rebase --skip` your
   # way past a conflict, that drops your own work.
-  echo "remediator: rebase conflict; resolve in-band or surface as blocker" >&2
+  echo "remediator: rebase conflict; resolve in-band or surface as an operationalBlockers[] entry" >&2
   git -C "$PR_WORKTREE" rebase --abort 2>/dev/null || true
   exit 78
 }

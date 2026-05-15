@@ -13,6 +13,8 @@ const OPERATIONAL_BLOCKER_TITLES = new Set([
   'push-lease-rejected',
   'fetch-failed',
   'rebase-conflict',
+  'missing-auth',
+  'auth-failure',
 ]);
 
 // prefix patterns (`/^Replace (this )?with\b/i`, `/^Optional list of
@@ -310,10 +312,15 @@ function isOperationalBlockerEntry(entry) {
   return OPERATIONAL_BLOCKER_TITLES.has(title);
 }
 
-function normalizeOperationalBlockers(reply) {
+function normalizeOperationalBlockers(reply, { expectedJob = null } = {}) {
   if (!Array.isArray(reply.blockers)) return reply;
   if (reply.operationalBlockers !== undefined && !Array.isArray(reply.operationalBlockers)) return reply;
 
+  const expectedFindingTitleKeys = new Set(
+    (parseBlockingFindingsSection(expectedJob?.reviewBody) || [])
+      .map((finding) => normalizeCoverageTitle(finding?.title))
+      .filter(Boolean)
+  );
   const blockers = reply.blockers;
   const operational = Array.isArray(reply.operationalBlockers)
     ? [...reply.operationalBlockers]
@@ -321,8 +328,16 @@ function normalizeOperationalBlockers(reply) {
   const keptBlockers = [];
   let moved = false;
 
-  for (const blocker of blockers) {
+  for (const [index, blocker] of blockers.entries()) {
     if (isOperationalBlockerEntry(blocker)) {
+      const titleKey = normalizeCoverageTitle(blocker.title);
+      if (titleKey && expectedFindingTitleKeys.has(titleKey)) {
+        throw new Error(
+          `Remediation reply blockers[${index}].title matches both a known operational blocker title and ` +
+            `a blocking review finding title. Keep it in blockers[] or move it to operationalBlockers[] ` +
+            `explicitly so validation does not silently relocate it.`
+        );
+      }
       operational.push(blocker);
       moved = true;
     } else {
@@ -528,7 +543,11 @@ function normalizeCoverageTitle(title) {
 
 function usesPerFindingReplyContract(reply) {
   if (!reply || typeof reply !== 'object') return false;
-  if (reply.addressed !== undefined || reply.pushback !== undefined) {
+  if (
+    reply.addressed !== undefined
+    || reply.pushback !== undefined
+    || reply.operationalBlockers !== undefined
+  ) {
     return true;
   }
 
@@ -575,6 +594,18 @@ function validateBlockingCoverage(reply, expectedJob) {
   const addressed = Array.isArray(reply.addressed) ? reply.addressed : [];
   const pushback = Array.isArray(reply.pushback) ? reply.pushback : [];
   const blockers = Array.isArray(reply.blockers) ? reply.blockers : [];
+  const operationalBlockers = Array.isArray(reply.operationalBlockers)
+    ? reply.operationalBlockers
+    : [];
+
+  if (
+    operationalBlockers.length > 0
+    && addressed.length === 0
+    && pushback.length === 0
+    && blockers.length === 0
+  ) {
+    return;
+  }
   const total = addressed.length + pushback.length + blockers.length;
 
   if (total !== expected) {
@@ -674,7 +705,7 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
   if (reply.schemaVersion !== REMEDIATION_REPLY_SCHEMA_VERSION) {
     throw new Error(`Unsupported remediation reply schemaVersion: ${reply.schemaVersion}`);
   }
-  reply = normalizeOperationalBlockers(reply);
+  reply = normalizeOperationalBlockers(reply, { expectedJob });
 
   if (typeof reply.jobId !== 'string' || !reply.jobId.trim()) {
     throw new Error('Remediation reply jobId is required');
@@ -738,14 +769,14 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
   const operationalBlockersPopulated = Array.isArray(reply.operationalBlockers)
     && reply.operationalBlockers.length > 0;
 
-  if ((blockersPopulated || operationalBlockersPopulated) && reply.reReview.requested) {
+  if (usesNewSchema && (blockersPopulated || operationalBlockersPopulated) && reply.reReview.requested) {
     throw new Error(
       'Remediation reply contradicts itself: blockers are populated but reReview.requested is true. ' +
         'A populated blockers or operationalBlockers list is a hard exit; set reReview.requested = false.'
     );
   }
 
-  if (reply.outcome === 'blocked') {
+  if (usesNewSchema && reply.outcome === 'blocked') {
     if (!blockersPopulated && !operationalBlockersPopulated) {
       throw new Error(
         'Remediation reply outcome is "blocked" but blockers and operationalBlockers are empty. ' +
@@ -760,7 +791,7 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
     }
   }
 
-  if (reply.outcome === 'completed' && (blockersPopulated || operationalBlockersPopulated)) {
+  if (usesNewSchema && reply.outcome === 'completed' && (blockersPopulated || operationalBlockersPopulated)) {
     throw new Error(
       'Remediation reply outcome is "completed" but blockers or operationalBlockers is non-empty. ' +
         'Use outcome "partial" or "blocked" when unresolved blockers remain.'

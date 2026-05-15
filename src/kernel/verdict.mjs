@@ -28,11 +28,18 @@ function titleCaseWords(value) {
  * @returns {Verdict['body']}
  */
 function sanitizeCodexReviewPayload(reviewText) {
+  // Promote any heading level whose text matches one of the canonical
+  // section names (`Summary` / `Blocking issues` / `Non-blocking issues`
+  // / `Suggested fixes` / `Verdict`) to `## `. The earlier "collapse all
+  // `### ` / `#### ` to `## `" rule was too aggressive: it shattered the
+  // per-finding H3 cards the reviewer prompt now emits under the
+  // Blocking/Non-blocking sections. Non-canonical `### ` / `#### `
+  // headings are preserved so the card layout survives.
   let text = normalizeWhitespace(reviewText)
-    .replace(/^#\s+/gm, '## ')
-    .replace(/^###\s+/gm, '## ')
-    .replace(/^####\s+/gm, '## ')
-    .replace(/^##\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim, (_, heading) => `## ${titleCaseWords(heading)}`);
+    .replace(
+      /^#{1,4}\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim,
+      (_, heading) => `## ${titleCaseWords(heading)}`,
+    );
 
   const sectionRegex = /^##\s+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)\s*$/gim;
   const matches = [...text.matchAll(sectionRegex)];

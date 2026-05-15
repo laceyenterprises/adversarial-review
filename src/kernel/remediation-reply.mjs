@@ -248,22 +248,29 @@ function validateBlockersField(items, options = {}) {
 
 // Parse the `## Blocking Issues` section into structured findings. The
 // review contract (`prompts/code-pr/reviewer.*.md`) requires:
-//   - one bullet item per finding, each with `Title:` / `File:` /
-//     `Lines:` / `Problem:` / `Why it matters:` / `Recommended fix:`
-//     fields
+//   - one finding card per issue, headed by `### <Title>` with the
+//     fields rendered as bold-labeled paragraphs (`**File:**`,
+//     `**Lines:**`, `**Problem:**`, `**Why it matters:**`,
+//     `**Recommended fix:**`)
 //   - the literal sentinel `- None.` when the section is empty
-// Three render shapes are supported:
-//   1. one top-level `- Title:` bullet per finding, with the rest of
-//      the fields as 2-space-indented continuation lines (no marker)
-//   2. one top-level `- File:` bullet per finding, with the rest of
-//      the fields as 2-space-indented continuation lines (back-compat)
-//   3. top-level bullets per field (`- Title:`, `- File:`, `- Lines:`,
+// Four render shapes are supported (newest first):
+//   1. card-style: `### <Title>` heading per finding, with fields as
+//      `**File:** value` / `**Lines:** value` / `**Problem:** value`
+//      bold-labeled paragraphs. This is the format mandated by the
+//      current reviewer prompt and mirrors the remediator's accountability
+//      cards on PR comments.
+//   2. one top-level `- Title:` bullet per finding, with the rest of
+//      the fields as 2-space-indented continuation lines (legacy)
+//   3. one top-level `- File:` bullet per finding, with the rest of
+//      the fields as 2-space-indented continuation lines (legacy back-compat)
+//   4. top-level bullets per field (`- Title:`, `- File:`, `- Lines:`,
 //      `- Problem:`, `- Why it matters:`, `- Recommended fix:`)
-// The finding boundary is a top-level `- Title:` field when present,
-// otherwise a top-level dash-prefixed `- File:` field for legacy
-// reviews. A dashless `File:` continuation after `- Title:` attaches
-// only when the current finding has no file yet, so prose that happens
-// to begin with `File:` cannot split a finding into a phantom boundary.
+// The finding boundary is `### <Title>` for the card shape; for the
+// legacy bullet shapes it is a top-level `- Title:` field when present,
+// otherwise a top-level dash-prefixed `- File:` field. A dashless
+// `File:` continuation after `- Title:` attaches only when the current
+// finding has no file yet, so prose that happens to begin with `File:`
+// cannot split a finding into a phantom boundary.
 //
 // Returns `null` when the section is absent (caller opts out of
 // coverage enforcement). Returns `[]` when the section exists but is
@@ -290,6 +297,37 @@ function parseBlockingFindingsSection(reviewBody) {
   const findings = [];
   let current = null;
   for (const raw of lines) {
+    // Card shape: `### <Title>` heading starts a new finding. Take
+    // priority over the legacy `- Title:` boundary so card-styled
+    // reviews are read first.
+    const h3Match = raw.match(/^[ \t]*###[ \t]+(.+?)[ \t]*$/);
+    if (h3Match) {
+      if (current) findings.push(current);
+      current = { title: h3Match[1].trim() };
+      continue;
+    }
+    // Card shape: bold-labeled inline fields. Each label only fills
+    // the field once; later bold mentions of the same label fall
+    // through, mirroring the legacy first-wins behavior for File /
+    // Lines / Problem continuation lines. The bold marker may render
+    // as `**File:**` (canonical, colon inside the bold span) or
+    // `**File**:` (colon outside); both are accepted.
+    const boldFileMatch = raw.match(/^[ \t]*\*\*File(?::\*\*|\*\*[ \t]*:)[ \t]*(.+?)[ \t]*$/i);
+    if (boldFileMatch && current && current.file === undefined) {
+      current.file = boldFileMatch[1].trim();
+      continue;
+    }
+    const boldLinesMatch = raw.match(/^[ \t]*\*\*Lines(?::\*\*|\*\*[ \t]*:)[ \t]*(.+?)[ \t]*$/i);
+    if (boldLinesMatch && current && current.lines === undefined) {
+      current.lines = boldLinesMatch[1].trim();
+      continue;
+    }
+    const boldProblemMatch = raw.match(/^[ \t]*\*\*Problem(?::\*\*|\*\*[ \t]*:)[ \t]*(.+?)[ \t]*$/i);
+    if (boldProblemMatch && current && current.problem === undefined) {
+      current.problem = boldProblemMatch[1].trim();
+      continue;
+    }
+    // Legacy bullet shapes (kept for back-compat with stored review bodies).
     const titleMatch = raw.match(/^[ \t]*-[ \t]+Title[ \t]*:[ \t]*(.*)$/i);
     if (titleMatch) {
       if (current) findings.push(current);

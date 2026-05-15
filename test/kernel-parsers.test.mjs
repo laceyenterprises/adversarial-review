@@ -285,10 +285,117 @@ test('parseBlockingFindingsSection extracts findings from H3 + bold-label cards'
   assert.equal(findings[0].file, '`modules/worker-pool/lib/python/cwp_dispatch/plan_walk.py`');
   assert.equal(findings[0].lines, '`79-102`');
   assert.equal(findings[0].problem, 'The new rule rejects valid prefixed PR titles.');
+  assert.equal(findings[0].whyItMatters, 'Downstream tickets stay blocked.');
+  assert.equal(findings[0].recommendedFix, 'Restore boundary-based matching for Linear ids.');
   assert.equal(findings[1].title, 'Unsandboxed Claude worker escalation');
   assert.equal(findings[1].file, '`modules/worker-pool/lib/adapters/claude-code.sh`');
   assert.equal(findings[1].lines, '`645-664`');
   assert.equal(findings[1].problem, 'The adapter now runs Claude with bypassPermissions.');
+  assert.equal(findings[1].whyItMatters, 'Removes the only remaining in-tool gate.');
+  assert.equal(findings[1].recommendedFix, 'Do not ship bypassPermissions as the default.');
+});
+
+test('parseBlockingFindingsSection ignores incidental H3 subheadings inside H3 cards', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker with supporting detail.',
+    '',
+    '## Blocking Issues',
+    '',
+    '### Reviewer/remediator contract split',
+    '',
+    '**File:** `prompts/code-pr/remediator.first.md`',
+    '',
+    '**Lines:** `98-176`',
+    '',
+    '**Problem:** The reviewer emits H3 card titles but the remediator still looks for Title fields.',
+    '',
+    '### Reproduction',
+    '',
+    'A prompt-following remediator can omit the title because no literal Title field exists.',
+    '',
+    '**Why it matters:** Valid remediation replies can be rejected.',
+    '',
+    '**Recommended fix:** Treat the H3 heading as the title source, with legacy Title fallback.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].title, 'Reviewer/remediator contract split');
+  assert.equal(findings[0].recommendedFix, 'Treat the H3 heading as the title source, with legacy Title fallback.');
+});
+
+test('validateRemediationReply accepts matching H3-card review titles', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '',
+    '### Reviewer/remediator contract split',
+    '',
+    '**File:** `prompts/code-pr/remediator.first.md`',
+    '',
+    '**Lines:** `98-176`',
+    '',
+    '**Problem:** The reviewer emits H3 card titles but the remediator still looks for Title fields.',
+    '',
+    '**Why it matters:** Valid remediation replies can be rejected.',
+    '',
+    '**Recommended fix:** Treat the H3 heading as the title source.',
+    '',
+    '### Phantom H3 finding boundaries',
+    '',
+    '**File:** `src/kernel/remediation-reply.mjs`',
+    '',
+    '**Lines:** `297-325`',
+    '',
+    '**Problem:** Incidental H3 headings inside a card can be counted as findings.',
+    '',
+    '**Why it matters:** Coverage validation can force fake accountability entries.',
+    '',
+    '**Recommended fix:** Only split on H3 headings that introduce real cards.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = {
+    jobId: 'laceyenterprises__adversarial-review-pr-110-2026-05-15T03-19-26Z',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 110,
+    reviewBody,
+  };
+  const reply = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'laceyenterprises__adversarial-review-pr-110-2026-05-15T03-19-26Z',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 110,
+    outcome: 'completed',
+    summary: 'Aligned the H3 card review/remediation contract.',
+    validation: ['node --test test/kernel-parsers.test.mjs'],
+    addressed: [
+      {
+        title: 'Reviewer/remediator contract split',
+        finding: 'Remediator prompts and validation still pointed at legacy Title fields.',
+        action: 'Updated the title source contract to H3 headings with legacy Title fallback.',
+      },
+      {
+        title: 'Phantom H3 finding boundaries',
+        finding: 'Incidental H3 headings inside cards could inflate the finding count.',
+        action: 'Made H3 parsing require a real card body before starting a new finding.',
+      },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob }), reply);
 });
 
 test('parseBlockingFindingsSection honors `- None.` sentinel in the H3-card era', () => {

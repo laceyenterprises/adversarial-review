@@ -242,28 +242,45 @@ function indentedDefangedText(text, indentLevel = 3) {
   return indentBlock(defangUntrustedMarkdown(text), prefix);
 }
 
+// Indent continuation lines of a defanged content paragraph so the
+// paragraph stays attached to a nested bullet rather than escaping
+// back to the section. Each finding card renders as:
+//
+//   - **Title**
+//     - **Finding:** <content>
+//     - **Action:** <content>
+//
+// The nested bullet's content starts at column 4 (after `  - `). When
+// `<content>` is multi-line, continuation lines must align to that
+// column to remain part of the bullet under GFM's list parsing rules.
+// Single-line content is returned unchanged.
+function indentNestedBulletContent(text) {
+  const raw = String(text ?? '');
+  if (!raw.includes('\n')) return raw;
+  return raw
+    .split('\n')
+    .map((line, i) => (i === 0 ? line : line ? `    ${line}` : ''))
+    .join('\n');
+}
+
 // Render the worker's per-finding accountability list. Each entry of
-// `addressed[]` produces an H3-headed block of bold-labelled paragraphs:
+// `addressed[]` produces a nested-bullet card:
 //
-//   ### Title
+//   - **Title**
+//     - **Finding:** <defanged summary of the review's blocking issue>
+//     - **Action:** <defanged description of what the worker did>
+//     - **Files:** `a.js`, `b.js`   ← only when entry.files is non-empty
 //
-//   **Finding:**
-//
-//   <defanged summary of the review's blocking issue>
-//
-//   **Action:**
-//
-//   <defanged description of what the worker did to address it>
-//
-//   **Files:** `a.js`, `b.js`   ← only when entry.files is non-empty
-//
-// Promoting the title to a heading (and the field labels to bold-prefix
-// paragraphs) gives each finding its own scannable card under the
-// section's `## Addressed findings` H2 — matches the reviewer's pop and
-// hierarchy. Untrusted finding/action text is defanged (markdown-meta
-// chars escaped, autolinks/mentions zero-width-broken) so worker output
-// stays inert; Files paths are inline-coded with backticks stripped so
-// a worker-injected ` cannot break out of the inline-code wrapper.
+// The bold-title top bullet + indented bold-label nested bullets give
+// each finding its own compact card under the section's
+// `## Addressed findings` H2, with `bullets for nesting` providing the
+// visual hierarchy instead of large H3 + label-block paragraphs. The
+// tight nested form is far more scannable when the worker addresses
+// many findings in one pass. Untrusted finding/action text is defanged
+// (markdown-meta chars escaped, autolinks/mentions zero-width-broken)
+// so worker output stays inert; Files paths are inline-coded with
+// backticks stripped so a worker-injected ` cannot break out of the
+// inline-code wrapper.
 function formatAddressedList(items, emptyText = '_(none reported)_') {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
   const entries = items
@@ -294,33 +311,26 @@ function formatAddressedList(items, emptyText = '_(none reported)_') {
   return entries
     .map((entry) => {
       const lines = [
-        `### ${entry.title}`,
-        '',
-        '**Finding:**',
-        '',
-        defangUntrustedMarkdown(entry.finding),
-        '',
-        '**Action:**',
-        '',
-        defangUntrustedMarkdown(entry.action),
+        `- **${entry.title}**`,
+        `  - **Finding:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.finding))}`,
+        `  - **Action:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.action))}`,
       ];
       if (entry.files.length) {
-        let filesLine = `**Files:** ${entry.files.join(', ')}`;
+        let filesLine = `  - **Files:** ${entry.files.join(', ')}`;
         if (filesLine.length > ADDRESSED_FILES_MAX_CHARS) {
           filesLine = `${filesLine.slice(0, ADDRESSED_FILES_MAX_CHARS - 1)}…`;
         }
-        lines.push('');
         lines.push(filesLine);
       }
       return lines.join('\n');
     })
-    .join('\n\n');
+    .join('\n');
 }
 
 // Render the worker's pushback list. `pushback[]` is for findings the
 // worker read, deliberately decided NOT to change the code on, and
 // wants to record the reasoning. Distinct from `blockers[]` (hard
-// exit) and `addressed[]` (fix applied). Same H3-headed bold-labelled
+// exit) and `addressed[]` (fix applied). Same nested-bullet card
 // shape as addressed entries, with **Reasoning:** in place of **Action:**.
 function formatPushbackList(items, emptyText = '_(none reported)_') {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
@@ -345,18 +355,12 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
   return entries
     .map((entry) => {
       return [
-        `### ${entry.title}`,
-        '',
-        '**Finding:**',
-        '',
-        defangUntrustedMarkdown(entry.finding),
-        '',
-        '**Reasoning:**',
-        '',
-        defangUntrustedMarkdown(entry.reasoning),
+        `- **${entry.title}**`,
+        `  - **Finding:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.finding))}`,
+        `  - **Reasoning:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.reasoning))}`,
       ].join('\n');
     })
-    .join('\n\n');
+    .join('\n');
 }
 
 // Render the worker's blockers list. `blockers[]` is the hard-exit
@@ -404,27 +408,18 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
   return entries
     .map((entry) => {
       const lines = [
-        `### ${entry.title}`,
-        '',
-        '**Finding:**',
-        '',
-        defangUntrustedMarkdown(entry.finding),
+        `- **${entry.title}**`,
+        `  - **Finding:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.finding))}`,
       ];
       if (entry.reasoning) {
-        lines.push('');
-        lines.push('**Reasoning:**');
-        lines.push('');
-        lines.push(defangUntrustedMarkdown(entry.reasoning));
+        lines.push(`  - **Reasoning:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.reasoning))}`);
       }
       if (entry.needsHumanInput) {
-        lines.push('');
-        lines.push('**Needs human input:**');
-        lines.push('');
-        lines.push(defangUntrustedMarkdown(entry.needsHumanInput));
+        lines.push(`  - **Needs human input:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.needsHumanInput))}`);
       }
       return lines.join('\n');
     })
-    .join('\n\n');
+    .join('\n');
 }
 
 // Sanitize a free-text field for use in a BLOCK context (the

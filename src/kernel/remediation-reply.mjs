@@ -319,7 +319,7 @@ function parseBlockingFindingsSection(reviewBody) {
   };
 
   const parseBulletBoldTitle = (raw) => {
-    const match = raw.match(/^[ \t]*-[ \t]+\*\*(.+?)\*\*(.*)$/);
+    const match = raw.match(/^-[ \t]+\*\*(.+?)\*\*(.*)$/);
     if (!match) return null;
     const title = match[1].trim();
     const normalized = title

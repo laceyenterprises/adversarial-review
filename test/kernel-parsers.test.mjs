@@ -544,6 +544,34 @@ test('parseBlockingFindingsSection ignores incidental `- **note**` bullets witho
   assert.equal(findings[0].title, 'Real finding with full fields');
 });
 
+test('parseBlockingFindingsSection treats nested bold bullets as finding body content', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker with extra context before its required fields.',
+    '',
+    '## Blocking Issues',
+    '- **Nested bullet boundary collision**',
+    '  - **Context** A nested bold body bullet appears before the field bullets.',
+    '  - **Reproduction** Run the parser against this review body.',
+    '  - **File:** `src/kernel/remediation-reply.mjs`',
+    '  - **Lines:** 318-370',
+    '  - **Problem:** Nested bold body bullets were treated as finding boundaries.',
+    '  - **Why it matters:** The real finding could disappear before validation.',
+    '  - **Recommended fix:** Only top-level bold bullets can start finding cards.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].title, 'Nested bullet boundary collision');
+  assert.equal(findings[0].file, '`src/kernel/remediation-reply.mjs`');
+  assert.equal(findings[0].lines, '318-370');
+  assert.equal(findings[0].problem, 'Nested bold body bullets were treated as finding boundaries.');
+});
+
 test('validateRemediationReply enforces exact nested-bullet review titles', () => {
   const reviewBody = [
     '## Summary',

@@ -1256,6 +1256,20 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   assert.equal(filesLines.length, 1, 'Files: sub-bullet only on entries that supply it');
   // Both entries should have bold-title top bullets.
   assert.match(body, /^- \*\*Auth header null guard\*\*$/m);
+  const addressedSection = body
+    .match(/## Addressed findings\n\n([\s\S]*?)\n\n\*\*Re-review status:/)?.[1];
+  assert.equal(
+    addressedSection,
+    [
+      '- **Retry double-submit race**',
+      '  - **Finding:** Race in retry path can double-submit.',
+      '  - **Action:** Added an idempotency token + dedupe check.',
+      '  - **Files:** `src/worker.mjs`, `test/worker.test.mjs`',
+      '- **Auth header null guard**',
+      '  - **Finding:** Missing null check on auth header.',
+      '  - **Action:** Added explicit guard + regression test.',
+    ].join('\n'),
+  );
 });
 
 test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', () => {

@@ -98,7 +98,10 @@ lists in the reply JSON — they are not redundant, they encode
   - `title`: copy the review finding's title exactly. In current reviews,
     the title is the H3 card heading (`### <Title>`); for legacy reviews,
     use the `Title:` field. This is required when the review supplied a
-    title, and becomes the public PR comment heading for that entry.
+    title, and becomes the public PR comment title for that entry. The
+    GitHub remediation comment renders each entry as a top-level bullet
+    `- **<Title>**` with nested `**Finding:**`, `**Action:**`, and
+    optional `**Files:**` sub-bullets under the section heading.
   - `finding`: a short quote / paraphrase identifying which review
     finding this entry corresponds to (so a human reading the PR
     comment can match it back to the review without guessing).
@@ -120,7 +123,8 @@ lists in the reply JSON — they are not redundant, they encode
   reviewer is wrong, the finding is out of scope for this PR, or the
   fix would cost more than the bug. Each entry needs:
   - `title`: copy the review finding's H3 card heading or legacy `Title:`
-    value exactly when supplied.
+    value exactly when supplied. The remediation comment renders it as
+    the bold title line of that entry's nested-bullet card.
   - `finding`: the finding you are pushing back on.
   - `reasoning`: why you disagreed (one sentence, sharp).
 
@@ -140,7 +144,8 @@ lists in the reply JSON — they are not redundant, they encode
   disagreement large enough that you should not unilaterally resolve
   it). Each entry needs:
   - `title`: copy the review finding's H3 card heading or legacy `Title:`
-    value exactly when supplied.
+    value exactly when supplied. The remediation comment renders it as
+    the bold title line of that entry's nested-bullet card.
   - `finding`: the review finding you are blocking on (so the next
     human can identify which item is unresolved).
   - `reasoning` and/or `needsHumanInput`: why this is a hard exit and

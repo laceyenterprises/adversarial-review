@@ -9,6 +9,7 @@ import {
   sanitizeCodexReviewPayload,
 } from '../src/kernel/verdict.mjs';
 import {
+  parseBlockingFindingsSection,
   parseRemediationReply,
   validateRemediationReply,
 } from '../src/kernel/remediation-reply.mjs';
@@ -186,4 +187,260 @@ test('kernel sanitizer rejects payloads missing required Summary/Verdict section
     () => sanitizeCodexReviewPayload('not a review at all'),
     /did not contain recognizable review sections/
   );
+});
+
+test('kernel sanitizer preserves H3 finding cards under canonical section headings', () => {
+  // The reviewer prompt now mandates `### <Title>` finding cards with
+  // bold-labeled `**File:**` / `**Lines:**` / `**Problem:**` fields,
+  // mirroring the remediator's accountability comments. Older sanitizer
+  // builds blanket-collapsed every `### ` to `## `, which would shatter
+  // each finding into a phantom top-level section and break verdict
+  // extraction. The current sanitizer must promote H1/H3/H4 to H2 only
+  // when the heading text matches a canonical section name, leaving
+  // non-canonical H3 cards intact.
+  const cardReview = [
+    '## Summary',
+    'One blocker.',
+    '',
+    '## Blocking Issues',
+    '',
+    '### Lead-position title regression',
+    '',
+    '**File:** `modules/worker-pool/lib/python/cwp_dispatch/plan_walk.py`',
+    '',
+    '**Lines:** `79-102`',
+    '',
+    '**Problem:** The new rule rejects legitimately merged PR titles.',
+    '',
+    '**Why it matters:** Downstream tickets stay blocked when evidence is missed.',
+    '',
+    '**Recommended fix:** Restore boundary-based matching for Linear ids.',
+    '',
+    '## Non-blocking Issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const sanitized = sanitizeCodexReviewPayload(cardReview);
+
+  // The H3 finding heading must survive — it is not a canonical section
+  // name and the section walker must not see it as a phantom section.
+  assert.match(sanitized, /^### Lead-position title regression$/m);
+  // The canonical sections still resolve to H2.
+  assert.match(sanitized, /^## Summary$/m);
+  assert.match(sanitized, /^## Blocking Issues$/m);
+  assert.match(sanitized, /^## Non-blocking Issues$/m);
+  assert.match(sanitized, /^## Verdict$/m);
+  assert.equal(extractReviewVerdict(sanitized), 'Request changes');
+  // Idempotency must still hold on already-clean H3-card output.
+  assert.equal(sanitizeCodexReviewPayload(sanitized), sanitized);
+});
+
+test('parseBlockingFindingsSection extracts findings from H3 + bold-label cards', () => {
+  // The current reviewer prompt emits one `### <Title>` heading per
+  // blocking finding, followed by bold-labeled `**File:**` /
+  // `**Lines:**` / `**Problem:**` paragraphs. The coverage parser must
+  // recognize this shape so per-finding accountability stays enforced.
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '',
+    '### Lead-position title regression',
+    '',
+    '**File:** `modules/worker-pool/lib/python/cwp_dispatch/plan_walk.py`',
+    '',
+    '**Lines:** `79-102`',
+    '',
+    '**Problem:** The new rule rejects valid prefixed PR titles.',
+    '',
+    '**Why it matters:** Downstream tickets stay blocked.',
+    '',
+    '**Recommended fix:** Restore boundary-based matching for Linear ids.',
+    '',
+    '### Unsandboxed Claude worker escalation',
+    '',
+    '**File:** `modules/worker-pool/lib/adapters/claude-code.sh`',
+    '',
+    '**Lines:** `645-664`',
+    '',
+    '**Problem:** The adapter now runs Claude with bypassPermissions.',
+    '',
+    '**Why it matters:** Removes the only remaining in-tool gate.',
+    '',
+    '**Recommended fix:** Do not ship bypassPermissions as the default.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.ok(Array.isArray(findings));
+  assert.equal(findings.length, 2);
+  assert.equal(findings[0].title, 'Lead-position title regression');
+  assert.equal(findings[0].file, '`modules/worker-pool/lib/python/cwp_dispatch/plan_walk.py`');
+  assert.equal(findings[0].lines, '`79-102`');
+  assert.equal(findings[0].problem, 'The new rule rejects valid prefixed PR titles.');
+  assert.equal(findings[0].whyItMatters, 'Downstream tickets stay blocked.');
+  assert.equal(findings[0].recommendedFix, 'Restore boundary-based matching for Linear ids.');
+  assert.equal(findings[1].title, 'Unsandboxed Claude worker escalation');
+  assert.equal(findings[1].file, '`modules/worker-pool/lib/adapters/claude-code.sh`');
+  assert.equal(findings[1].lines, '`645-664`');
+  assert.equal(findings[1].problem, 'The adapter now runs Claude with bypassPermissions.');
+  assert.equal(findings[1].whyItMatters, 'Removes the only remaining in-tool gate.');
+  assert.equal(findings[1].recommendedFix, 'Do not ship bypassPermissions as the default.');
+});
+
+test('parseBlockingFindingsSection ignores incidental H3 subheadings inside H3 cards', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker with supporting detail.',
+    '',
+    '## Blocking Issues',
+    '',
+    '### Reviewer/remediator contract split',
+    '',
+    '**File:** `prompts/code-pr/remediator.first.md`',
+    '',
+    '**Lines:** `98-176`',
+    '',
+    '**Problem:** The reviewer emits H3 card titles but the remediator still looks for Title fields.',
+    '',
+    '### Reproduction',
+    '',
+    'A prompt-following remediator can omit the title because no literal Title field exists.',
+    '',
+    '**Why it matters:** Valid remediation replies can be rejected.',
+    '',
+    '**Recommended fix:** Treat the H3 heading as the title source, with legacy Title fallback.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].title, 'Reviewer/remediator contract split');
+  assert.equal(findings[0].recommendedFix, 'Treat the H3 heading as the title source, with legacy Title fallback.');
+});
+
+test('validateRemediationReply accepts matching H3-card review titles', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '',
+    '### Reviewer/remediator contract split',
+    '',
+    '**File:** `prompts/code-pr/remediator.first.md`',
+    '',
+    '**Lines:** `98-176`',
+    '',
+    '**Problem:** The reviewer emits H3 card titles but the remediator still looks for Title fields.',
+    '',
+    '**Why it matters:** Valid remediation replies can be rejected.',
+    '',
+    '**Recommended fix:** Treat the H3 heading as the title source.',
+    '',
+    '### Phantom H3 finding boundaries',
+    '',
+    '**File:** `src/kernel/remediation-reply.mjs`',
+    '',
+    '**Lines:** `297-325`',
+    '',
+    '**Problem:** Incidental H3 headings inside a card can be counted as findings.',
+    '',
+    '**Why it matters:** Coverage validation can force fake accountability entries.',
+    '',
+    '**Recommended fix:** Only split on H3 headings that introduce real cards.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = {
+    jobId: 'laceyenterprises__adversarial-review-pr-110-2026-05-15T03-19-26Z',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 110,
+    reviewBody,
+  };
+  const reply = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'laceyenterprises__adversarial-review-pr-110-2026-05-15T03-19-26Z',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 110,
+    outcome: 'completed',
+    summary: 'Aligned the H3 card review/remediation contract.',
+    validation: ['node --test test/kernel-parsers.test.mjs'],
+    addressed: [
+      {
+        title: 'Reviewer/remediator contract split',
+        finding: 'Remediator prompts and validation still pointed at legacy Title fields.',
+        action: 'Updated the title source contract to H3 headings with legacy Title fallback.',
+      },
+      {
+        title: 'Phantom H3 finding boundaries',
+        finding: 'Incidental H3 headings inside cards could inflate the finding count.',
+        action: 'Made H3 parsing require a real card body before starting a new finding.',
+      },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'ready' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob }), reply);
+});
+
+test('parseBlockingFindingsSection honors `- None.` sentinel in the H3-card era', () => {
+  const reviewBody = [
+    '## Summary',
+    'Clean.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  assert.deepEqual(parseBlockingFindingsSection(reviewBody), []);
+});
+
+test('parseBlockingFindingsSection still handles legacy `- Title:` bullet findings', () => {
+  // Back-compat: older review bodies (still present in stored job
+  // artifacts) used the bullet shape. The parser must continue to
+  // extract them so coverage checks against historical fixtures keep
+  // passing after the H3 card migration.
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '- Title: Retry path can double-submit',
+    '  File: src/a.mjs',
+    '  Lines: 1-5',
+    '  Problem: First problem.',
+    '- Title: Missing auth guard',
+    '  File: src/b.mjs',
+    '  Lines: 10-20',
+    '  Problem: Second problem.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.equal(findings.length, 2);
+  assert.equal(findings[0].title, 'Retry path can double-submit');
+  assert.equal(findings[0].file, 'src/a.mjs');
+  assert.equal(findings[1].title, 'Missing auth guard');
+  assert.equal(findings[1].file, 'src/b.mjs');
 });

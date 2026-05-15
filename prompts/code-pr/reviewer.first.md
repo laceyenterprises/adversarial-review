@@ -19,15 +19,14 @@ Output requirements:
   3. ## Non-blocking issues
   4. ## Suggested fixes
   5. ## Verdict
-- Under issue sections, use bullets
-- For each real issue, include:
-  - Title: (preferred during transition; omit only when the reviewer path cannot supply one)
-  - File:
-  - Lines:
-  - Problem:
-  - Why it matters:
-  - Recommended fix:
-- When present, `Title:` must be a short, stable noun phrase (roughly 3-8 words) that uniquely names the issue. Do not use generic titles like "Finding", "Issue", or "Problem".
+- Under issue sections, render each finding as its own card so a reader can scan blockers without parsing prose. The shape is:
+  - `### <Title>` — H3 heading naming the issue. The title must be a short, stable noun phrase (roughly 3-8 words) that uniquely names the issue. Do not use generic titles like "Finding", "Issue", or "Problem".
+  - `**File:** \`<path>\`` — bold label, inline value, on its own paragraph.
+  - `**Lines:** \`<range>\`` — bold label, inline value, on its own paragraph.
+  - `**Problem:** <one paragraph>` — bold label, inline value, on its own paragraph. Keep the value on the same line as the label.
+  - `**Why it matters:** <one paragraph>` — same shape.
+  - `**Recommended fix:** <one paragraph>` — same shape.
+- Separate each finding card (and each bold-labeled paragraph inside a card) with a blank line so GitHub renders them as distinct paragraphs.
 - If a section has no items, write exactly: - None.
 - In ## Verdict, end with exactly one of:
   - Request changes

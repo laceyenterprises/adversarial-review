@@ -68,11 +68,16 @@ paths use neutral defaults instead.
   `<repo>/data/replies` otherwise. The HQ-rooted path is part of the
   existing hosted remediation-worker contract for code PRs.
 - **`src/adversarial-gate-status.mjs`** and
-  **`src/check-branch-protection.mjs`** use the GitHub status context
-  `agent-os/adversarial-gate`. That string is an external status-
-  context name, not a filesystem path — but it does encode the
-  maintainer's project name. Renaming it is a one-line change for
-  outside operators.
+  **`src/check-branch-protection.mjs`** post a GitHub commit-status
+  context for the adversarial-review gate. The default is
+  `agent-os/adversarial-gate`. Outside operators who want a different
+  name in their org's branch protection and CI logs can set the
+  `ADV_GATE_STATUS_CONTEXT` environment variable on both the watcher
+  and `npm run check-branch-protection` processes; non-empty values
+  win over the default, and the override must be applied consistently
+  anywhere the watcher posts or probes the gate. Whitespace is
+  trimmed; values must match `[A-Za-z0-9._/-]+` and be at most
+  100 characters so logfmt-style diagnostics remain unambiguous.
 - **`src/follow-up-merge-agent.mjs`**, **`src/follow-up-retrigger-label.mjs`**,
   **`src/retrigger-review.mjs`**, **`src/retrigger-remediation.mjs`**,
   and **`src/reset-pr.mjs`** contain `hq.*` verbs or `hq` CLI

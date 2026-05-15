@@ -197,9 +197,9 @@ GitHub PR opened
 - Manual or scripted requeue is acceptable in this slice; a fully autonomous multi-round loop is intentionally deferred
 
 ### 5.1.1.1 Adversarial gate commit status
-- The watcher projects the durable adversarial-review ledger onto the PR head SHA as the GitHub commit status context `agent-os/adversarial-gate`
-- Branch protection must require `agent-os/adversarial-gate` before operators rely on GitHub-native merge or auto-merge for adversarial-review-gated branches. Without that required context, GitHub can merge while the durable review/remediation loop is still pending or blocked.
-- The watcher checks watched repositories' branch protection for the required `agent-os/adversarial-gate` context on a cached interval and emits `branch-protection-warning` when the context is absent or the protection endpoint cannot be read. Operators can run `npm run check-branch-protection` for the same check outside the watcher.
+- The watcher projects the durable adversarial-review ledger onto the PR head SHA as the GitHub commit status context `agent-os/adversarial-gate` by default
+- Branch protection must require `agent-os/adversarial-gate` before operators rely on GitHub-native merge or auto-merge for adversarial-review-gated branches. Without that required context, GitHub can merge while the durable review/remediation loop is still pending or blocked. Deployments may opt into a different context with `ADV_GATE_STATUS_CONTEXT`, but the override must match `[A-Za-z0-9._/-]+`, be at most 100 characters, and be applied consistently to every watcher and branch-protection probe.
+- The watcher checks watched repositories' branch protection for the configured required gate context on a cached interval and emits `branch-protection-warning` when the context is absent, when the protection endpoint cannot be read, or when `ADV_GATE_STATUS_CONTEXT` is invalid. Operators can run `npm run check-branch-protection` for the same check outside the watcher.
 - Gate state mapping:
 - `pending`: no review has posted, a review is queued/in progress, remediation is queued/in progress, or a requested re-review has not posted yet
 - `success`: the latest posted review settled as `Comment only` or `Approved` in its durable follow-up verdict carrier, or a current scoped `operator-approved` label accepts the PR head regardless of review/remediation state

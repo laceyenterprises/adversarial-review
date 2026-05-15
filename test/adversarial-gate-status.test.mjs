@@ -5,12 +5,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
-  ADVERSARIAL_GATE_CONTEXT,
   pickAdversarialGateStatus,
   projectAdversarialGateStatus,
   pruneGateRecordsForPR,
   publishAdversarialGateStatus,
 } from '../src/adversarial-gate-status.mjs';
+import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
+
+const ADVERSARIAL_GATE_CONTEXT = DEFAULT_ADVERSARIAL_GATE_CONTEXT;
 import {
   claimNextFollowUpJob,
   createFollowUpJob,
@@ -617,6 +619,49 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
     assert.ok(ghCalls[0].args.includes(`repos/laceyenterprises/adversarial-review/statuses/${headSha}`));
     assert.ok(ghCalls[0].args.includes('state=success'));
     assert.ok(ghCalls[0].args.includes(`context=${ADVERSARIAL_GATE_CONTEXT}`));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('projectAdversarialGateStatus posts the env-override context when ADV_GATE_STATUS_CONTEXT is set', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-override-'));
+  try {
+    const repo = 'galileo/example';
+    const prNumber = 77;
+    const headSha = 'overrideheadsha';
+    const reviewRow = makeReviewRow({
+      repo,
+      pr_number: prNumber,
+      review_body: '## Summary\nClean.\n## Verdict\nComment only',
+    });
+
+    const ghCalls = [];
+    const execFileImpl = async (command, args, options) => {
+      ghCalls.push({ command, args, options });
+      return { stdout: '{}', stderr: '' };
+    };
+
+    const result = await projectAdversarialGateStatus(rootDir, {
+      repo,
+      prNumber,
+      headSha,
+      reviewRow,
+      execFileImpl,
+      env: {
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+        GITHUB_TOKEN: 'token-123',
+        ADV_GATE_STATUS_CONTEXT: 'galileo/adversarial-gate',
+      },
+    });
+
+    assert.equal(ghCalls.length, 1);
+    assert.ok(ghCalls[0].args.includes('context=galileo/adversarial-gate'));
+    assert.ok(!ghCalls[0].args.some((arg) => arg === `context=${DEFAULT_ADVERSARIAL_GATE_CONTEXT}`));
+    assert.equal(result.decision.context, 'galileo/adversarial-gate');
+    assert.equal(result.publish.posted, true);
+    assert.equal(result.publish.record.context, 'galileo/adversarial-gate');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

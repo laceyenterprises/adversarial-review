@@ -326,6 +326,27 @@ reproducing it), the operator docs are:
 - [`DEPLOYMENT.md`](DEPLOYMENT.md) — audit of maintainer-local paths still in source
 - [`tools/adversarial-review/DEPS.md`](tools/adversarial-review/DEPS.md) — full dependency contract
 
+### Secret-source contract
+
+If your wrapper exits at startup with
+`[secret-source] FATAL: could not resolve OP_SERVICE_ACCOUNT_TOKEN`, the
+canonical resolution order is, in declared precedence (first match wins):
+
+1. `OP_SERVICE_ACCOUNT_TOKEN` already in the process environment.
+2. `ADV_OP_TOKEN_FILE` — path to a file containing the trimmed token.
+3. `ADV_OP_TOKEN_ENV_FILE` — path to a shell-style env file with
+   `OP_SERVICE_ACCOUNT_TOKEN=...` or `export OP_SERVICE_ACCOUNT_TOKEN=...`.
+4. Legacy compatibility file:
+   `$AGENT_OS_ROOT/agents/clio/credentials/local/op-service-account.env`
+   or `$HOME/agent-os/agents/clio/credentials/local/op-service-account.env`.
+5. `$ADV_SECRETS_ROOT/op-service-account.token`.
+6. `$HOME/.config/adversarial-review/secrets/op-service-account.token`.
+
+The full table — including what each source means, how the fail-once
+diagnostic is shaped, and why the wrappers sleep before exit — is in
+[`tools/adversarial-review/DEPS.md`](tools/adversarial-review/DEPS.md)
+under "OP_SERVICE_ACCOUNT_TOKEN resolution."
+
 If you're not running the live deployment, you can ignore all of the
 above and stick to the five-minute path at the top of this file.
 

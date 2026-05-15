@@ -12,6 +12,7 @@ set -euo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export HOME="/Users/placey"
+export AGENT_OS_ROOT="/Users/airlock/agent-os"
 export CODEX_AUTH_PATH="/Users/placey/.codex/auth.json"
 
 # Sanity gate: better-sqlite3 is a native module and breaks across Node ABI
@@ -33,13 +34,18 @@ if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('b
   exit 1
 fi
 
-# Load 1Password service account token
-source /Users/airlock/agent-os/agents/clio/credentials/local/op-service-account.env
-export OP_SERVICE_ACCOUNT_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
-if [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: OP_SERVICE_ACCOUNT_TOKEN not loaded" >&2
-  exit 1
-fi
+# Load 1Password service account token via the canonical secret-source
+# contract (tools/adversarial-review/DEPS.md §"OP_SERVICE_ACCOUNT_TOKEN
+# resolution"), including the legacy agents/clio/credentials/local
+# op-service-account.env compatibility file. See the airlock wrapper for
+# the full rationale. Fail-once shape: a single detailed diagnostic from
+# the resolver, then sleep 3600 to absorb the launchd respawn storm.
+OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="adversarial-watcher" /opt/homebrew/bin/node "$WATCHER_DIR/src/secret-source/resolve-op-token-cli.mjs") || {
+    echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source above and bootout the agent to recover sooner." >&2
+    sleep 3600
+    exit 78
+  }
+export OP_SERVICE_ACCOUNT_TOKEN
 
 # Resolve GitHub token from gh CLI keychain
 export GITHUB_TOKEN=$(/opt/homebrew/bin/gh auth token 2>/dev/null)

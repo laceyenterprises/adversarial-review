@@ -74,13 +74,23 @@ if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('b
   exit 1
 fi
 
-# Load 1Password service account token (not in LaunchAgent env by default).
-source "$AGENT_OS_ROOT/agents/clio/credentials/local/op-service-account.env"
-export OP_SERVICE_ACCOUNT_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
-if [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
-  echo "[follow-up-tick] ERROR: OP_SERVICE_ACCOUNT_TOKEN not loaded" >&2
-  exit 1
-fi
+# Load 1Password service account token via the canonical secret-source
+# contract (tools/adversarial-review/DEPS.md §"OP_SERVICE_ACCOUNT_TOKEN
+# resolution"). The resolver checks, in order: process env, ADV_OP_TOKEN_FILE,
+# ADV_OP_TOKEN_ENV_FILE, the legacy agents/clio/credentials/local
+# op-service-account.env compatibility file, $ADV_SECRETS_ROOT/
+# op-service-account.token, then $HOME/.config/adversarial-review/
+# secrets/op-service-account.token. On failure it prints a single
+# detailed diagnostic with every source it checked plus concrete
+# remediation, and exits non-zero. We then sleep 3600 to absorb the
+# launchd KeepAlive+ThrottleInterval=30 respawn storm — same fail-once
+# shape as the better-sqlite3 ABI gate above.
+OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="follow-up-tick" /opt/homebrew/bin/node "$WATCHER_DIR/src/secret-source/resolve-op-token-cli.mjs") || {
+    echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix the secret-source above and bootout the agent to recover sooner." >&2
+    sleep 3600
+    exit 78
+  }
+export OP_SERVICE_ACCOUNT_TOKEN
 
 # Operator gh token for repo clone / pr checkout / pr metadata. The
 # remediation worker uses this to clone the PR's repo, switch to its

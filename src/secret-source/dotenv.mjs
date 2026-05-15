@@ -7,7 +7,7 @@ function parseDotenv(text) {
   for (const rawLine of String(text || '').split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
-    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
     if (!match) continue;
     const [, key, rawValue] = match;
     let value = rawValue.trim();

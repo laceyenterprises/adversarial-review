@@ -323,8 +323,8 @@ function parseBlockingFindingsSection(reviewBody) {
     if (!match) return null;
     const title = match[1].trim();
     const normalized = title
-      .replace(/[ \t]*:[ \t]*$/u, '')
-      .toLocaleLowerCase('en-US');
+      .toLocaleLowerCase('en-US')
+      .replace(/[ \t]*:[ \t]*$/u, '');
     if (['file', 'lines', 'problem', 'why it matters', 'recommended fix'].includes(normalized)) {
       return null;
     }

@@ -622,3 +622,53 @@ test('validateRemediationReply enforces exact nested-bullet review titles', () =
 
   assert.deepEqual(validateRemediationReply(exact, { expectedJob }), exact);
 });
+
+test('validateRemediationReply accepts an exact nested-bullet title that ends with a colon', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker.',
+    '',
+    '## Blocking Issues',
+    '- **Trailing-colon title corruption:**',
+    '  - **File:** `src/kernel/remediation-reply.mjs`',
+    '  - **Lines:** 321-327',
+    '  - **Problem:** The parser strips a trailing colon from the bold title before validation.',
+    '  - **Why it matters:** A worker can copy the visible title exactly and still fail validation.',
+    '  - **Recommended fix:** Preserve the title bytes exactly and rely on field-name exclusion for `**File:**` bullets.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = {
+    jobId: 'laceyenterprises__adversarial-review-pr-112-2026-05-15T16-11-08-731Z',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 112,
+    reviewBody,
+  };
+  const reply = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'laceyenterprises__adversarial-review-pr-112-2026-05-15T16-11-08-731Z',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 112,
+    outcome: 'completed',
+    summary: 'Preserved exact nested-bullet titles with trailing colons.',
+    validation: ['node --test test/kernel-parsers.test.mjs'],
+    addressed: [
+      {
+        title: 'Trailing-colon title corruption:',
+        finding: 'The parser dropped a trailing colon from the nested-bullet finding title.',
+        action: 'Preserved the bold title exactly as written so validation accepts the copied title bytes.',
+        files: ['src/kernel/remediation-reply.mjs', 'test/kernel-parsers.test.mjs'],
+      },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'The trailing-colon nested-bullet title is now preserved and validates exactly.',
+    },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob }), reply);
+});

@@ -320,6 +320,7 @@ function buildRemediationReply({
   summary,
   validation = [],
   blockers = [],
+  operationalBlockers = [],
   // Per-finding accountability fields. Both default to [] for backward
   // compatibility — older worker replies that predate this schema
   // simply omit them, and the renderer treats an empty array as "no
@@ -351,6 +352,7 @@ function buildRemediationReply({
     addressed,
     pushback,
     blockers,
+    operationalBlockers,
     reReview: {
       requested: Boolean(reReviewRequested),
       reason: reReviewRequested
@@ -385,22 +387,22 @@ function validateRemediationReply(reply, { expectedJob = null } = {}) {
     throw new Error('Remediation reply prNumber must be a positive integer');
   }
 
-  validateKernelRemediationReply(reply, {
+  const validated = validateKernelRemediationReply(reply, {
     expectedJob,
     publicCommentLabel: 'public P' + 'R comment',
   });
 
   if (expectedJob) {
-    if (reply.repo !== expectedJob.repo) {
-      throw new Error(`Remediation reply repo mismatch: expected ${expectedJob.repo}, got ${reply.repo}`);
+    if (validated.repo !== expectedJob.repo) {
+      throw new Error(`Remediation reply repo mismatch: expected ${expectedJob.repo}, got ${validated.repo}`);
     }
 
-    if (reply.prNumber !== expectedJob.prNumber) {
-      throw new Error(`Remediation reply prNumber mismatch: expected ${expectedJob.prNumber}, got ${reply.prNumber}`);
+    if (validated.prNumber !== expectedJob.prNumber) {
+      throw new Error(`Remediation reply prNumber mismatch: expected ${expectedJob.prNumber}, got ${validated.prNumber}`);
     }
   }
 
-  return reply;
+  return validated;
 }
 
 function readRemediationReplyArtifact(replyPath, { expectedJob = null } = {}) {
@@ -473,6 +475,14 @@ function salvagePartialRemediationReply(replyPath) {
       return isStr(e.finding);
     });
     if (b.length) partial.blockers = b;
+  }
+
+  if (Array.isArray(raw.operationalBlockers)) {
+    const o = raw.operationalBlockers.filter((e) => {
+      if (!e || typeof e !== 'object' || Array.isArray(e)) return false;
+      return isStr(e.finding);
+    });
+    if (o.length) partial.operationalBlockers = o;
   }
 
   return Object.keys(partial).length ? partial : null;

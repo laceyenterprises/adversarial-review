@@ -1265,6 +1265,161 @@ test('validateRemediationReply accepts structured blockers with finding+reasonin
   assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
 });
 
+test('validateRemediationReply accepts operational blockers outside per-finding coverage', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '- Title: First finding',
+    '  File: src/a.mjs',
+    '  Lines: 1-5',
+    '  Problem: First problem.',
+    '- Title: Second finding',
+    '  File: src/b.mjs',
+    '  Lines: 10-20',
+    '  Problem: Second problem.',
+  ].join('\n');
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 62,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T15:01:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'partial',
+    summary: 'Fixed the review findings but stopped on branch state.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'First finding', finding: 'First problem.', action: 'Fixed.' },
+      { title: 'Second finding', finding: 'Second problem.', action: 'Fixed.' },
+    ],
+    pushback: [],
+    blockers: [],
+    operationalBlockers: [
+      {
+        title: 'branch-contamination',
+        finding: 'Patch-equivalent commits are present on the branch.',
+        reasoning: 'The orchestrator must replay the patch on a clean head.',
+      },
+    ],
+    reReview: { requested: false, reason: null },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply repairs known operational blockers misplaced in blockers[]', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '- Title: First finding',
+    '  File: src/a.mjs',
+    '  Lines: 1-5',
+    '  Problem: First problem.',
+    '- Title: Second finding',
+    '  File: src/b.mjs',
+    '  Lines: 10-20',
+    '  Problem: Second problem.',
+  ].join('\n');
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 63,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T15:02:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'partial',
+    summary: 'Fixed the review findings but stopped on branch state.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'First finding', finding: 'First problem.', action: 'Fixed.' },
+      { title: 'Second finding', finding: 'Second problem.', action: 'Fixed.' },
+    ],
+    pushback: [],
+    blockers: [
+      {
+        title: 'branch-contamination',
+        finding: 'Patch-equivalent commits are present on the branch.',
+        reasoning: 'The orchestrator must replay the patch on a clean head.',
+      },
+    ],
+    reReview: { requested: false, reason: null },
+  };
+
+  const validated = validateRemediationReply(reply, { expectedJob: job });
+  assert.deepEqual(validated.blockers, []);
+  assert.equal(validated.operationalBlockers.length, 1);
+  assert.equal(validated.operationalBlockers[0].title, 'branch-contamination');
+});
+
+test('validateRemediationReply does not mask malformed blocker containers while normalizing operational blockers', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 6301,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T15:02:30.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'partial',
+      summary: 'Malformed blocker container should still fail.',
+      validation: ['npm test'],
+      blockers: 'branch-contamination',
+      operationalBlockers: [
+        { title: 'stale-pr-head', finding: 'Remote PR head moved.', reasoning: 'Replay is required.' },
+      ],
+      reReview: { requested: false, reason: null },
+    }, { expectedJob: job }),
+    /blockers must be an array/
+  );
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'partial',
+      summary: 'Malformed operationalBlockers container should still fail.',
+      validation: ['npm test'],
+      blockers: [
+        { title: 'branch-contamination', finding: 'Branch contains replayed commits.', reasoning: 'Replay is required.' },
+      ],
+      operationalBlockers: 'stale-pr-head',
+      reReview: { requested: false, reason: null },
+    }, { expectedJob: job }),
+    /operationalBlockers must be an array/
+  );
+});
+
 test('validateRemediationReply rejects malformed blockers[] entries', () => {
   const job = buildFollowUpJob({
     repo: 'laceyenterprises/clio',
@@ -1871,6 +2026,36 @@ test('validateRemediationReply rejects populated blockers + reReview.requested =
   );
 });
 
+test('validateRemediationReply rejects populated operationalBlockers + reReview.requested = true', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 7101,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T16:00:30.000Z',
+    critical: false,
+  });
+
+  assert.throws(
+    () => validateRemediationReply({
+      kind: REMEDIATION_REPLY_KIND,
+      schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+      jobId: job.jobId,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      outcome: 'partial',
+      summary: 'Asking for re-review while also marking an operational hard exit.',
+      validation: ['npm test'],
+      blockers: [],
+      operationalBlockers: [
+        { title: 'stale-pr-head', finding: 'Remote PR head moved.', reasoning: 'Patch must be replayed.' },
+      ],
+      reReview: { requested: true, reason: 'wants confirmation' },
+    }, { expectedJob: job }),
+    /blockers are populated but reReview\.requested is true/
+  );
+});
+
 test('validateRemediationReply rejects outcome=blocked with empty blockers', () => {
   const job = buildFollowUpJob({
     repo: 'laceyenterprises/clio',
@@ -1894,7 +2079,7 @@ test('validateRemediationReply rejects outcome=blocked with empty blockers', () 
       blockers: [],
       reReview: { requested: false, reason: null },
     }, { expectedJob: job }),
-    /outcome is "blocked" but blockers is empty/
+    /outcome is "blocked" but blockers and operationalBlockers are empty/
   );
 });
 
@@ -1954,7 +2139,7 @@ test('validateRemediationReply rejects outcome=completed with non-empty blockers
       ],
       reReview: { requested: false, reason: null },
     }, { expectedJob: job }),
-    /outcome is "completed" but blockers is non-empty/
+    /outcome is "completed" but blockers or operationalBlockers is non-empty/
   );
 });
 
@@ -1981,6 +2166,39 @@ test('validateRemediationReply accepts outcome=blocked with reReview.requested =
       {
         finding: 'Reviewer asks for a destructive schema change.',
         reasoning: 'Worker has no authority to schedule a DBA window.',
+      },
+    ],
+    reReview: { requested: false, reason: null },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply accepts outcome=blocked with only operationalBlockers populated', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 7501,
+    reviewerModel: 'codex',
+    reviewBody: '## Summary\nx',
+    reviewPostedAt: '2026-05-02T16:04:30.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'blocked',
+    summary: 'Stopped on stale PR head before requesting re-review.',
+    validation: ['npm test'],
+    blockers: [],
+    operationalBlockers: [
+      {
+        title: 'stale-pr-head',
+        finding: 'Remote PR head moved while the worker was running.',
+        reasoning: 'The patch needs to be replayed on the fresh PR head.',
       },
     ],
     reReview: { requested: false, reason: null },

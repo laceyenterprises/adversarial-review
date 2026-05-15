@@ -5,6 +5,15 @@
 const REMEDIATION_REPLY_SCHEMA_VERSION = 1;
 const REMEDIATION_REPLY_KIND = 'adversarial-review-remediation-reply';
 const PUBLIC_REPLY_MAX_CHARS = 1200;
+const OPERATIONAL_BLOCKER_TITLES = new Set([
+  'branch-contamination',
+  'branch-contamination-audit-error',
+  'base-branch-resolution-failed',
+  'stale-pr-head',
+  'push-lease-rejected',
+  'fetch-failed',
+  'rebase-conflict',
+]);
 
 // prefix patterns (`/^Replace (this )?with\b/i`, `/^Optional list of
 // files\b/i`) that produced false positives on legitimate review
@@ -64,6 +73,13 @@ function validateOptionalTitle(entry, fieldName) {
     throw new Error(`Remediation reply ${fieldName}.title must be a non-empty string when provided`);
   }
   assertNoPlaceholderText(entry.title, `${fieldName}.title`);
+}
+
+function normalizeOperationalBlockerTitle(value) {
+  return String(value ?? '')
+    .trim()
+    .toLocaleLowerCase('en-US')
+    .replace(/[\s_]+/g, '-');
 }
 
 const PUBLIC_REPLY_NOISE_SIGNALS = Object.freeze([
@@ -244,6 +260,82 @@ function validateBlockersField(items, options = {}) {
       assertPublicReplyTextQuality(entry.needsHumanInput, `blockers[${index}].needsHumanInput`, options);
     }
   });
+}
+
+function validateOperationalBlockersField(items, options = {}) {
+  if (!Array.isArray(items)) {
+    throw new Error('Remediation reply operationalBlockers must be an array');
+  }
+  items.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Remediation reply operationalBlockers[${index}] must be an object`);
+    }
+    if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
+      throw new Error(`Remediation reply operationalBlockers[${index}].finding must be a non-empty string`);
+    }
+    validateOptionalTitle(entry, `operationalBlockers[${index}]`);
+    const hasReasoning = typeof entry.reasoning === 'string' && entry.reasoning.trim();
+    const hasNeedsHumanInput = typeof entry.needsHumanInput === 'string' && entry.needsHumanInput.trim();
+    if (!hasReasoning && !hasNeedsHumanInput) {
+      throw new Error(
+        `Remediation reply operationalBlockers[${index}] must include a non-empty reasoning or needsHumanInput field`
+      );
+    }
+    if (entry.reasoning !== undefined && !hasReasoning) {
+      throw new Error(
+        `Remediation reply operationalBlockers[${index}].reasoning must be a non-empty string when provided`
+      );
+    }
+    if (entry.needsHumanInput !== undefined && !hasNeedsHumanInput) {
+      throw new Error(
+        `Remediation reply operationalBlockers[${index}].needsHumanInput must be a non-empty string when provided`
+      );
+    }
+    assertNoPlaceholderText(entry.finding, `operationalBlockers[${index}].finding`);
+    assertPublicReplyTextQuality(entry.finding, `operationalBlockers[${index}].finding`, options);
+    if (hasReasoning) {
+      assertNoPlaceholderText(entry.reasoning, `operationalBlockers[${index}].reasoning`);
+      assertPublicReplyTextQuality(entry.reasoning, `operationalBlockers[${index}].reasoning`, options);
+    }
+    if (hasNeedsHumanInput) {
+      assertNoPlaceholderText(entry.needsHumanInput, `operationalBlockers[${index}].needsHumanInput`);
+      assertPublicReplyTextQuality(entry.needsHumanInput, `operationalBlockers[${index}].needsHumanInput`, options);
+    }
+  });
+}
+
+function isOperationalBlockerEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  const title = normalizeOperationalBlockerTitle(entry.title);
+  return OPERATIONAL_BLOCKER_TITLES.has(title);
+}
+
+function normalizeOperationalBlockers(reply) {
+  if (!Array.isArray(reply.blockers)) return reply;
+  if (reply.operationalBlockers !== undefined && !Array.isArray(reply.operationalBlockers)) return reply;
+
+  const blockers = reply.blockers;
+  const operational = Array.isArray(reply.operationalBlockers)
+    ? [...reply.operationalBlockers]
+    : [];
+  const keptBlockers = [];
+  let moved = false;
+
+  for (const blocker of blockers) {
+    if (isOperationalBlockerEntry(blocker)) {
+      operational.push(blocker);
+      moved = true;
+    } else {
+      keptBlockers.push(blocker);
+    }
+  }
+
+  if (!moved) return reply;
+  return {
+    ...reply,
+    blockers: keptBlockers,
+    operationalBlockers: operational,
+  };
 }
 
 // Parse the `## Blocking Issues` section into structured findings. The
@@ -582,6 +674,7 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
   if (reply.schemaVersion !== REMEDIATION_REPLY_SCHEMA_VERSION) {
     throw new Error(`Unsupported remediation reply schemaVersion: ${reply.schemaVersion}`);
   }
+  reply = normalizeOperationalBlockers(reply);
 
   if (typeof reply.jobId !== 'string' || !reply.jobId.trim()) {
     throw new Error('Remediation reply jobId is required');
@@ -601,6 +694,9 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
   const publicReplyOptions = { publicCommentLabel };
 
   validateBlockersField(reply.blockers, publicReplyOptions);
+  if (reply.operationalBlockers !== undefined) {
+    validateOperationalBlockersField(reply.operationalBlockers, publicReplyOptions);
+  }
 
   // addressed[] / pushback[] are additive — replies that omit them
   // entirely are still valid (legacy worker output, jobs created before
@@ -639,22 +735,24 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
   // "re-review queued" for the same unresolved state).
   const usesNewSchema = usesPerFindingReplyContract(reply);
   const blockersPopulated = reply.blockers.length > 0;
+  const operationalBlockersPopulated = Array.isArray(reply.operationalBlockers)
+    && reply.operationalBlockers.length > 0;
 
-  if (usesNewSchema && blockersPopulated && reply.reReview.requested) {
+  if ((blockersPopulated || operationalBlockersPopulated) && reply.reReview.requested) {
     throw new Error(
       'Remediation reply contradicts itself: blockers are populated but reReview.requested is true. ' +
-        'A populated blockers list is a hard exit; set reReview.requested = false.'
+        'A populated blockers or operationalBlockers list is a hard exit; set reReview.requested = false.'
     );
   }
 
   if (reply.outcome === 'blocked') {
-    if (!blockersPopulated) {
+    if (!blockersPopulated && !operationalBlockersPopulated) {
       throw new Error(
-        'Remediation reply outcome is "blocked" but blockers is empty. ' +
+        'Remediation reply outcome is "blocked" but blockers and operationalBlockers are empty. ' +
           'A blocked outcome must list the unresolved blockers.'
       );
     }
-    if (usesNewSchema && reply.reReview.requested) {
+    if (reply.reReview.requested) {
       throw new Error(
         'Remediation reply outcome is "blocked" but reReview.requested is true. ' +
           'A blocked outcome must set reReview.requested = false.'
@@ -662,9 +760,9 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
     }
   }
 
-  if (usesNewSchema && reply.outcome === 'completed' && blockersPopulated) {
+  if (reply.outcome === 'completed' && (blockersPopulated || operationalBlockersPopulated)) {
     throw new Error(
-      'Remediation reply outcome is "completed" but blockers is non-empty. ' +
+      'Remediation reply outcome is "completed" but blockers or operationalBlockers is non-empty. ' +
         'Use outcome "partial" or "blocked" when unresolved blockers remain.'
     );
   }

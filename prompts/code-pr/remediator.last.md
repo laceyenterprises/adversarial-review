@@ -71,7 +71,7 @@ fi
 The audit is the load-bearing step. If it ever fires, **stop**. Do not
 try to fix the contamination yourself — distinguishing your real
 remediation commits from rebase artifacts is the operator's call. Add
-a `blockers[]` entry with `title: "branch-contamination"`, list the
+an `operationalBlockers[]` entry with `title: "branch-contamination"`, list the
 offending commit subjects verbatim from the audit output, and exit
 without pushing.
 
@@ -168,8 +168,17 @@ lists in the reply JSON — they are not redundant, they encode
   - set `outcome = "blocked"` (or `"partial"` if you also addressed
     other findings)
 
+- `operationalBlockers[]` → hard exit caused by git/process state, not
+  an adversarial-review finding (for example branch contamination,
+  stale PR head, push lease rejection, missing auth, or a fetch/rebase
+  failure that is not a review-design decision). These entries do NOT
+  count toward the one-entry-per-review-finding contract. Each entry
+  needs `title`, `finding`, and either `reasoning` or `needsHumanInput`.
+  When you populate `operationalBlockers`, set `reReview.requested = false`
+  and use `outcome = "blocked"` or `"partial"`.
+
 A round that addresses every finding produces an `addressed[]` of
-length N and empty `pushback[]` / `blockers[]`. A round that fixed 4
+length N and empty `pushback[]` / `blockers[]` / `operationalBlockers[]`. A round that fixed 4
 of 5 findings and pushed back on the 5th produces `addressed[]` of
 length 4 and `pushback[]` of length 1, with `reReview.requested = true`.
 A round that hits a hard exit on finding 3 produces partial entries in
@@ -178,9 +187,10 @@ with `reReview.requested = false` and `outcome = "blocked"` (or
 `"partial"`).
 
 The validator enforces these invariants — it will reject a reply that
-sets `reReview.requested = true` while `blockers` is non-empty, a
-reply with `outcome: "blocked"` and an empty `blockers` list, a
-reply with `outcome: "completed"` and a non-empty `blockers` list,
+sets `reReview.requested = true` while `blockers` or
+`operationalBlockers` is non-empty, a reply with `outcome: "blocked"`
+and empty `blockers` / `operationalBlockers` lists, a reply with
+`outcome: "completed"` and a non-empty blocker list,
 a reply that does not record exactly one entry per blocking finding
 across `addressed[]`, `pushback[]`, and `blockers[]`, or a reply that
 does not copy the review finding titles (top-level bold bullet labels,

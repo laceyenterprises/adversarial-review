@@ -167,18 +167,18 @@ test('buildRemediationOutcomeCommentBody produces clean prose (no fenced code bl
   // Validation list is one defanged bullet per item under its H2.
   assert.match(body, /## Validation run\n\n- git fetch origin && git rebase origin\/main completed cleanly/);
   assert.match(body, /^- npm test passed: 882 passed, 1 skipped\.$/m);
-  // Each addressed entry gets its own H3 title + bold-labelled
-  // **Finding:** / **Action:** / **Files:** paragraphs.
-  assert.match(body, /### Legacy alert token fallback removed/);
+  // Each addressed entry renders as a bold-title top-level bullet
+  // with nested `**Finding:** / **Action:** / **Files:**` sub-bullets.
+  assert.match(body, /^- \*\*Legacy alert token fallback removed\*\*$/m);
   assert.match(
     body,
-    /\*\*Finding:\*\*\n\nresolveDefaultHooksTokenFile stopped probing the historical secrets path\./
+    /^ {2}- \*\*Finding:\*\* resolveDefaultHooksTokenFile stopped probing the historical secrets path\.$/m,
   );
   assert.match(
     body,
-    /\*\*Action:\*\*\n\nRestored the legacy token-file probe when the new default token file is absent\./
+    /^ {2}- \*\*Action:\*\* Restored the legacy token-file probe when the new default token file is absent\.$/m,
   );
-  assert.match(body, /\*\*Files:\*\* `src\/alert-delivery\.mjs`/);
+  assert.match(body, /^ {2}- \*\*Files:\*\* `src\/alert-delivery\.mjs`$/m);
 });
 
 test('buildRemediationOutcomeCommentBody on completed includes summary, validation, and re-review queued', () => {
@@ -1241,22 +1241,35 @@ test('buildRemediationOutcomeCommentBody renders addressed[] entries with findin
   });
 
   assert.match(body, /## Addressed findings/);
-  // New format: per-entry ### H3 heading with bold-labelled
-  // **Finding:** / **Action:** paragraphs. Files paths render as
-  // inline-coded so a worker-supplied path can't break out of the
-  // inline-code wrapper.
-  assert.match(body, /### Retry double-submit race/);
-  assert.match(body, /Race in retry path can double-submit\./);
-  assert.match(body, /\*\*Action:\*\*/);
-  assert.match(body, /Added an idempotency token \+ dedupe check\./);
-  assert.match(body, /\*\*Files:\*\* `src\/worker\.mjs`, `test\/worker\.test\.mjs`/);
+  // New format: bold-title top bullet with nested
+  // **Finding:** / **Action:** / **Files:** sub-bullets. Files paths
+  // render as inline-coded so a worker-supplied path can't break out
+  // of the inline-code wrapper.
+  assert.match(body, /^- \*\*Retry double-submit race\*\*$/m);
+  assert.match(body, /^ {2}- \*\*Finding:\*\* Race in retry path can double-submit\.$/m);
+  assert.match(body, /^ {2}- \*\*Action:\*\* Added an idempotency token \+ dedupe check\.$/m);
+  assert.match(body, /^ {2}- \*\*Files:\*\* `src\/worker\.mjs`, `test\/worker\.test\.mjs`$/m);
   // Second entry has no Files: line — verify it doesn't appear
-  // for that block. The full body may have **Files:** from entry 1
-  // already, so check that **Files:** appears exactly once.
-  const filesLines = body.match(/\*\*Files:\*\*/g) || [];
-  assert.equal(filesLines.length, 1, 'Files: line only on entries that supply it');
-  // Both entries should have H3 headings.
-  assert.match(body, /### Auth header null guard/);
+  // for that block. The full body may have `- **Files:**` from entry 1
+  // already, so check that the nested files sub-bullet appears exactly once.
+  const filesLines = body.match(/^ {2}- \*\*Files:\*\*/gm) || [];
+  assert.equal(filesLines.length, 1, 'Files: sub-bullet only on entries that supply it');
+  // Both entries should have bold-title top bullets.
+  assert.match(body, /^- \*\*Auth header null guard\*\*$/m);
+  const addressedSection = body
+    .match(/## Addressed findings\n\n([\s\S]*?)\n\n\*\*Re-review status:/)?.[1];
+  assert.equal(
+    addressedSection,
+    [
+      '- **Retry double-submit race**',
+      '  - **Finding:** Race in retry path can double-submit.',
+      '  - **Action:** Added an idempotency token + dedupe check.',
+      '  - **Files:** `src/worker.mjs`, `test/worker.test.mjs`',
+      '- **Auth header null guard**',
+      '  - **Finding:** Missing null check on auth header.',
+      '  - **Action:** Added explicit guard + regression test.',
+    ].join('\n'),
+  );
 });
 
 test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', () => {
@@ -1281,11 +1294,39 @@ test('buildRemediationOutcomeCommentBody keeps per-finding titles inline-safe', 
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'title sanitized' },
   });
 
-  assert.match(body, /### Foo Injected heading body/);
+  assert.match(body, /^- \*\*Foo Injected heading body\*\*$/m);
   // A worker-injected `## Injected heading` should be collapsed into the
-  // title text (above) rather than escaping as a real H2 between entries.
+  // bullet title text (above) rather than escaping as a real H2 between
+  // entries, and the title bullet should not split on the embedded `Foo`
+  // prefix alone.
   assert.doesNotMatch(body, /\n## Injected heading\n/);
-  assert.doesNotMatch(body, /### Foo\n/);
+  assert.doesNotMatch(body, /^- \*\*Foo\*\*$/m);
+});
+
+test('buildRemediationOutcomeCommentBody strips trailing backslashes from per-finding titles', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed one finding.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: 'Foo\\',
+          finding: 'Trailing backslashes can escape the closing bold delimiter.',
+          action: 'Removed inline-strong escape characters from titles.',
+        },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'backslash sanitized' },
+  });
+
+  assert.match(body, /^- \*\*Foo\*\*$/m);
+  assert.doesNotMatch(body, /^- \*\*Foo\\\*\*$/m);
 });
 
 test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls back for empty titles', () => {
@@ -1315,8 +1356,8 @@ test('buildRemediationOutcomeCommentBody strips unsafe title controls and falls 
     reReview: { requested: true, triggered: true, status: 'pending', reason: 'title controls sanitized' },
   });
 
-  assert.match(body, /### Retry double-submit/);
-  assert.match(body, /### Finding/);
+  assert.match(body, /^- \*\*Retry double-submit\*\*$/m);
+  assert.match(body, /^- \*\*Finding\*\*$/m);
   assert.match(body, /Invisible-only titles should use the fallback heading\./);
   assert.doesNotMatch(body, /[\u001B\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u);
 });
@@ -1340,7 +1381,10 @@ test('buildRemediationOutcomeCommentBody renders validator-accepted untitled per
   assert.match(body, /## Addressed findings/);
   assert.match(body, /## Pushback \(deliberately not changed\)/);
   assert.match(body, /## Blockers/);
-  assert.match(body, /### Finding/);
+  // Three untitled entries all fall back to the bold-title `**Finding**`
+  // top bullet.
+  const findingTitleBullets = body.match(/^- \*\*Finding\*\*$/gm) || [];
+  assert.equal(findingTitleBullets.length, 3);
   assert.match(body, /Untitled addressed finding\./);
   assert.match(body, /Untitled pushback finding\./);
   assert.match(body, /Untitled blocker finding\./);
@@ -1454,10 +1498,89 @@ test('buildRemediationOutcomeCommentBody renders pushback[] entries with finding
   });
 
   assert.match(body, /## Pushback \(deliberately not changed\)/);
-  assert.match(body, /### Over-broad dispatch refactor/);
-  assert.match(body, /Reviewer asked to refactor the entire dispatch module\./);
-  assert.match(body, /\*\*Reasoning:\*\*/);
-  assert.match(body, /Out of scope for this PR; tracked as separate ticket LAC-99\./);
+  assert.match(body, /^- \*\*Over-broad dispatch refactor\*\*$/m);
+  assert.match(body, /^ {2}- \*\*Finding:\*\* Reviewer asked to refactor the entire dispatch module\.$/m);
+  assert.match(body, /^ {2}- \*\*Reasoning:\*\* Out of scope for this PR; tracked as separate ticket LAC-99\.$/m);
+});
+
+test('buildRemediationOutcomeCommentBody indents multiline nested-bullet content for addressed, pushback, and blockers', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'partial',
+      summary: 'Handled multiline accountability text.',
+      validation: ['npm test'],
+      addressed: [
+        {
+          title: 'Addressed multiline finding',
+          finding: 'First finding line.\nSecond finding line.',
+          action: 'First action paragraph.\n\nSecond action paragraph.',
+        },
+      ],
+      pushback: [
+        {
+          title: 'Pushback multiline finding',
+          finding: 'First pushback line.\nSecond pushback line.',
+          reasoning: 'First reasoning paragraph.\n\nSecond reasoning paragraph.',
+        },
+      ],
+      blockers: [
+        {
+          title: 'Blocked multiline finding',
+          finding: 'First blocker line.\nSecond blocker line.',
+          reasoning: 'First blocker reasoning.\n\nSecond blocker reasoning.',
+          needsHumanInput: 'First human input line.\nSecond human input line.',
+        },
+      ],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'multiline rendering covered' },
+  });
+
+  const addressedSection = body
+    .match(/## Addressed findings\n\n([\s\S]*?)\n\n## Pushback \(deliberately not changed\)/)?.[1];
+  assert.equal(
+    addressedSection,
+    [
+      '- **Addressed multiline finding**',
+      '  - **Finding:** First finding line.',
+      '    Second finding line.',
+      '  - **Action:** First action paragraph.',
+      '',
+      '    Second action paragraph.',
+    ].join('\n'),
+  );
+
+  const pushbackSection = body
+    .match(/## Pushback \(deliberately not changed\)\n\n([\s\S]*?)\n\n## Blockers/)?.[1];
+  assert.equal(
+    pushbackSection,
+    [
+      '- **Pushback multiline finding**',
+      '  - **Finding:** First pushback line.',
+      '    Second pushback line.',
+      '  - **Reasoning:** First reasoning paragraph.',
+      '',
+      '    Second reasoning paragraph.',
+    ].join('\n'),
+  );
+
+  const blockersSection = body
+    .match(/## Blockers\n\n([\s\S]*?)\n\n\*\*Re-review status:/)?.[1];
+  assert.equal(
+    blockersSection,
+    [
+      '- **Blocked multiline finding**',
+      '  - **Finding:** First blocker line.',
+      '    Second blocker line.',
+      '  - **Reasoning:** First blocker reasoning.',
+      '',
+      '    Second blocker reasoning.',
+      '  - **Needs human input:** First human input line.',
+      '    Second human input line.',
+    ].join('\n'),
+  );
 });
 
 test('buildRemediationOutcomeCommentBody omits addressed/pushback sections when empty or absent', () => {
@@ -1705,9 +1828,9 @@ test('buildRemediationOutcomeCommentBody salvages worker response on invalid-rem
   assert.match(body, /## Summary/);
   assert.match(body, /Preserved opened\\_at, made events idempotent/);
   assert.match(body, /## Addressed findings/);
-  assert.match(body, /### Turn attempts openedat preservation/);
+  assert.match(body, /^- \*\*Turn attempts openedat preservation\*\*$/m);
   assert.match(body, /turn\\_attempts upsert overwrites opened\\_at on partial updates\./);
-  assert.match(body, /\*\*Files:\*\* `platform\/session-ledger\/src\/session_ledger\/db\.py`/);
+  assert.match(body, /^ {2}- \*\*Files:\*\* `platform\/session-ledger\/src\/session_ledger\/db\.py`$/m);
 });
 
 test('buildRemediationOutcomeCommentBody on invalid-remediation-reply with no salvageable content keeps the original failure message', () => {

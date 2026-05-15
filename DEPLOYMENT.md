@@ -76,7 +76,8 @@ paths use neutral defaults instead.
   and `npm run check-branch-protection` processes; non-empty values
   win over the default, and the override must be applied consistently
   anywhere the watcher posts or probes the gate. Whitespace is
-  trimmed; CR/LF are rejected.
+  trimmed; values must match `[A-Za-z0-9._/-]+` and be at most
+  100 characters so logfmt-style diagnostics remain unambiguous.
 - **`src/follow-up-merge-agent.mjs`**, **`src/follow-up-retrigger-label.mjs`**,
   **`src/retrigger-review.mjs`**, **`src/retrigger-remediation.mjs`**,
   and **`src/reset-pr.mjs`** contain `hq.*` verbs or `hq` CLI

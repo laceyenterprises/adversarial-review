@@ -20,7 +20,7 @@ the runtime-bound JSDoc consumers in sync.
 
 The watcher projects the durable adversarial-review ledger onto the PR head SHA as a GitHub commit status with context `agent-os/adversarial-gate` by default.
 
-Operators must require `agent-os/adversarial-gate` in branch protection before relying on GitHub-native merge or auto-merge for adversarial-review-gated branches. Without the required context, GitHub can merge while review, remediation, or operator handling is still pending. Deployments may opt into a different context with `ADV_GATE_STATUS_CONTEXT`, but that override must be applied consistently anywhere the watcher posts or probes the gate.
+Operators must require `agent-os/adversarial-gate` in branch protection before relying on GitHub-native merge or auto-merge for adversarial-review-gated branches. Without the required context, GitHub can merge while review, remediation, or operator handling is still pending. Deployments may opt into a different context with `ADV_GATE_STATUS_CONTEXT`, but that override must be applied consistently anywhere the watcher posts or probes the gate. Overrides must match `[A-Za-z0-9._/-]+` and be at most 100 characters so structured diagnostics remain log-safe.
 
 The watcher verifies that policy in process: on a cached interval it checks watched repositories' branch protection and logs `branch-protection-warning` when the configured gate context is missing, when the protection endpoint cannot be read, or when `ADV_GATE_STATUS_CONTEXT` is invalid. Operators can run the same probe with `npm run check-branch-protection`.
 

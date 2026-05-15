@@ -81,7 +81,7 @@ The old table (`low/medium=1`, `high/critical=3`) no longer applies to new jobs:
 
 ## Operator merge-agent labels
 
-Before enabling GitHub-native merge or auto-merge for this repo, require `agent-os/adversarial-gate` in branch protection. That status is the GitHub-facing projection of the adversarial-review ledger; without making it required, GitHub can merge a PR even when the durable review/remediation loop is still pending or blocked. If you intentionally rename the gate with `ADV_GATE_STATUS_CONTEXT`, update branch protection and every watcher/probe deployment to the same override before trusting the new check.
+Before enabling GitHub-native merge or auto-merge for this repo, require `agent-os/adversarial-gate` in branch protection. That status is the GitHub-facing projection of the adversarial-review ledger; without making it required, GitHub can merge a PR even when the durable review/remediation loop is still pending or blocked. If you intentionally rename the gate with `ADV_GATE_STATUS_CONTEXT`, use a value matching `[A-Za-z0-9._/-]+` with a 100-character maximum, then update branch protection and every watcher/probe deployment to the same override before trusting the new check.
 
 The watcher now checks that protection on a cached interval and logs `branch-protection-warning` for any watched repo/base branch where the required context is absent, unreadable, or configured with an invalid `ADV_GATE_STATUS_CONTEXT`. Run `npm run check-branch-protection` for an operator-side audit; pass `-- --repo <owner/repo>` or `-- --base <branch>` to narrow the probe.
 

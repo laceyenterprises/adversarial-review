@@ -233,7 +233,8 @@ durable adversarial-review state onto the PR head SHA as a GitHub
 commit-status context — `agent-os/adversarial-gate` by default,
 overridable per deployment via `ADV_GATE_STATUS_CONTEXT` — which can
 be required in branch protection if you want merge to depend on a
-passing verdict.
+passing verdict. Overrides are restricted to log-safe context names
+matching `[A-Za-z0-9._/-]+` with a 100-character maximum.
 
 Operator surface, when something needs intervention:
 
@@ -323,7 +324,9 @@ protection (for instance, when you don't want `agent-os/adversarial-gate`
 appearing in your org's governance language), set the
 `ADV_GATE_STATUS_CONTEXT` environment variable on the watcher and on
 `npm run check-branch-protection`; non-empty values win over the
-default, whitespace is trimmed, and control characters are rejected.
+default, whitespace is trimmed, and values must match
+`[A-Za-z0-9._/-]+` with a 100-character maximum so logfmt-style
+diagnostics remain unambiguous.
 Treat a rename as an explicit migration: update branch protection and
 every watcher/probe deployment to the same override before relying on
 the new context.

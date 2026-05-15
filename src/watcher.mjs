@@ -60,6 +60,7 @@ import {
   deleteGateRecordsForPR,
   projectAdversarialGateStatus,
 } from './adversarial-gate-status.mjs';
+import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
   retryPendingRetriggerAckComments,
@@ -77,6 +78,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
 const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
+// Fail fast during watcher bootstrap; a bad gate-context override should not
+// leave reviews running while commit-status publication silently stops later.
+resolveGateStatusContext(process.env);
 const reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
   rootDir: ROOT,
   domainId: 'code-pr',

@@ -444,3 +444,72 @@ test('parseBlockingFindingsSection still handles legacy `- Title:` bullet findin
   assert.equal(findings[1].title, 'Missing auth guard');
   assert.equal(findings[1].file, 'src/b.mjs');
 });
+
+test('parseBlockingFindingsSection extracts findings from nested-bullet `- **Title**` cards', () => {
+  // The current reviewer prompt emits each blocking finding as a
+  // bold-title top-level bullet with `**File:** / **Lines:** /
+  // **Problem:**` rendered as nested sub-bullets. The coverage parser
+  // must recognize this shape so per-finding accountability stays
+  // enforced alongside the legacy bullet and H3-card shapes.
+  const reviewBody = [
+    '## Summary',
+    'Two blockers.',
+    '',
+    '## Blocking Issues',
+    '- **Drain-status JSON contract changed without spec update**',
+    '  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/drain_state.py`',
+    '  - **Lines:** 59-96',
+    '  - **Problem:** SPEC.md §6.3 documents the exact JSON shape.',
+    '  - **Why it matters:** Silent contract drift is the dominant maintenance risk.',
+    '  - **Recommended fix:** Update SPEC.md §6.3 in the same PR.',
+    '- **lastDrain semantics overlap with activeDrain**',
+    '  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/drain_state.py`',
+    '  - **Lines:** 65-84',
+    '  - **Problem:** has_drain_history is true whenever any field is non-null.',
+    '  - **Why it matters:** A consumer that wants the previous drain may get the active drain.',
+    '  - **Recommended fix:** Pick one semantic and document it.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.ok(Array.isArray(findings));
+  assert.equal(findings.length, 2);
+  assert.equal(findings[0].title, 'Drain-status JSON contract changed without spec update');
+  assert.equal(findings[0].file, '`modules/worker-pool/lib/python/cwp_dispatch/drain_state.py`');
+  assert.equal(findings[0].lines, '59-96');
+  assert.equal(findings[0].problem, 'SPEC.md §6.3 documents the exact JSON shape.');
+  assert.equal(findings[1].title, 'lastDrain semantics overlap with activeDrain');
+  assert.equal(findings[1].file, '`modules/worker-pool/lib/python/cwp_dispatch/drain_state.py`');
+  assert.equal(findings[1].lines, '65-84');
+  assert.equal(findings[1].problem, 'has_drain_history is true whenever any field is non-null.');
+});
+
+test('parseBlockingFindingsSection ignores incidental `- **note**` bullets without required fields', () => {
+  // An incidental bold-bullet that isn't a real finding card (no File /
+  // Lines / Problem fields beneath it) must not inflate the count.
+  const reviewBody = [
+    '## Summary',
+    'One real blocker plus an aside.',
+    '',
+    '## Blocking Issues',
+    '- **Real finding with full fields**',
+    '  - **File:** `src/a.mjs`',
+    '  - **Lines:** 10-20',
+    '  - **Problem:** The real issue.',
+    '  - **Why it matters:** Production risk.',
+    '  - **Recommended fix:** Patch it.',
+    '',
+    '  Note: also see `- **Related context**` below for background, but it has no fields of its own.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].title, 'Real finding with full fields');
+});

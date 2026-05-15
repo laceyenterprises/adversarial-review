@@ -297,8 +297,11 @@ function parseBlockingFindingsSection(reviewBody) {
   if (isSentinelOnly) return [];
 
   const parseBoldLabel = (raw) => {
+    // Allows an optional `-[ \t]+` bullet prefix so nested-bullet card
+    // sub-bullets like `  - **File:** path` match as well as flat
+    // `**File:** path` paragraphs.
     const match = raw.match(
-      /^[ \t]*\*\*(File|Lines|Problem|Why it matters|Recommended fix)(?::\*\*|\*\*[ \t]*:)[ \t]*(.+?)[ \t]*$/i
+      /^[ \t]*(?:-[ \t]+)?\*\*(File|Lines|Problem|Why it matters|Recommended fix)(?::\*\*|\*\*[ \t]*:)[ \t]*(.+?)[ \t]*$/i
     );
     if (!match) return null;
     const key = match[1].toLocaleLowerCase('en-US');
@@ -312,11 +315,16 @@ function parseBlockingFindingsSection(reviewBody) {
     return { field: fields[key], value: match[2].trim() };
   };
 
-  const h3CardHasRequiredFields = (startIndex) => {
+  const isFindingBoundary = (raw) => {
+    return /^[ \t]*###[ \t]+.+?[ \t]*$/.test(raw)
+      || /^[ \t]*-[ \t]+\*\*(.+?)\*\*[ \t]*$/.test(raw);
+  };
+
+  const cardHasRequiredFields = (startIndex) => {
     const seen = new Set();
     for (let index = startIndex + 1; index < lines.length; index += 1) {
       const raw = lines[index];
-      if (/^[ \t]*###[ \t]+.+?[ \t]*$/.test(raw)) break;
+      if (isFindingBoundary(raw)) break;
       const parsed = parseBoldLabel(raw);
       if (parsed) seen.add(parsed.field);
     }
@@ -332,9 +340,20 @@ function parseBlockingFindingsSection(reviewBody) {
     // H3 like `### Reproduction` inside one card from inflating the
     // expected blocking-issue count.
     const h3Match = raw.match(/^[ \t]*###[ \t]+(.+?)[ \t]*$/);
-    if (h3Match && h3CardHasRequiredFields(index)) {
+    if (h3Match && cardHasRequiredFields(index)) {
       if (current) findings.push(current);
       current = { title: h3Match[1].trim() };
+      continue;
+    }
+    // Nested-bullet card shape: `- **<Title>**` boundary, with
+    // `  - **File:** value` etc. as nested sub-bullets. Same
+    // lookahead guard as the H3 shape so an incidental `- **note**`
+    // inside one card doesn't inflate the expected blocking-issue
+    // count.
+    const bulletBoldTitleMatch = raw.match(/^[ \t]*-[ \t]+\*\*(.+?)\*\*[ \t]*$/);
+    if (bulletBoldTitleMatch && cardHasRequiredFields(index)) {
+      if (current) findings.push(current);
+      current = { title: bulletBoldTitleMatch[1].trim() };
       continue;
     }
     // Card shape: bold-labeled inline fields. Each label only fills

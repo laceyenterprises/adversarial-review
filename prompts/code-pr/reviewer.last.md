@@ -19,14 +19,14 @@ Output requirements:
   3. ## Non-blocking issues
   4. ## Suggested fixes
   5. ## Verdict
-- Under issue sections, render each finding as its own card so a reader can scan blockers without parsing prose. The shape is:
-  - `### <Title>` — H3 heading naming the issue. The title must be a short, stable noun phrase (roughly 3-8 words) that uniquely names the issue. Do not use generic titles like "Finding", "Issue", or "Problem".
-  - `**File:** \`<path>\`` — bold label, inline value, on its own paragraph.
-  - `**Lines:** \`<range>\`` — bold label, inline value, on its own paragraph.
-  - `**Problem:** <one paragraph>` — bold label, inline value, on its own paragraph. Keep the value on the same line as the label.
-  - `**Why it matters:** <one paragraph>` — same shape.
-  - `**Recommended fix:** <one paragraph>` — same shape.
-- Separate each finding card (and each bold-labeled paragraph inside a card) with a blank line so GitHub renders them as distinct paragraphs.
+- Under issue sections, render each finding as a nested-bullet card so a reader can scan blockers without parsing prose. The shape is:
+  - `- **<Title>**` — top-level bullet whose entire label is bold and names the issue. The title must be a short, stable noun phrase (roughly 3-8 words) that uniquely names the issue. Do not use generic titles like "Finding", "Issue", or "Problem". Do not write a `Title:` prefix; the bold span itself is the title.
+  - `  - **File:** \`<path>\`` — nested sub-bullet (2-space indent), bold label with inline value.
+  - `  - **Lines:** \`<range>\`` — nested sub-bullet, bold label with inline value.
+  - `  - **Problem:** <one paragraph>` — nested sub-bullet, bold label with inline value on the same line.
+  - `  - **Why it matters:** <one paragraph>` — same shape.
+  - `  - **Recommended fix:** <one paragraph>` — same shape.
+- Do not put blank lines between top-level finding bullets — adjacent bullets render as a compact (tight) list. Do not put blank lines between a finding's title bullet and its nested sub-bullets.
 - If a section has no items, write exactly: - None.
 - In ## Verdict, end with exactly one of:
   - Request changes
@@ -70,7 +70,7 @@ When triaging each issue you find, only escalate to `## Blocking issues` for:
 - **Broken external contract** — e.g. a public API method's signature changes in a way that will break downstream consumers, a published wire format changes incompatibly, a documented behavior is silently removed
 - **Tracked contract change without canonical spec update** — the base prompt's spec-touch rule still stays blocking on the final round when a tracked public contract changed and no matching SPEC/RUNBOOK doc moved with it
 
-Everything else (style, naming, formatting, doc tone; edge cases not exercised in production paths; performance issues without user-visible impact; future-proofing concerns; speculative refactors; test gaps without a known bug; internal implementation choices) goes under `## Non-blocking issues`. Use the same `### <Title>` + bold-labeled `**File:**` / `**Lines:**` / `**Problem:**` / `**Why it matters:**` / `**Recommended fix:**` card shape so a human follow-up reviewer can act on them without re-reading the diff.
+Everything else (style, naming, formatting, doc tone; edge cases not exercised in production paths; performance issues without user-visible impact; future-proofing concerns; speculative refactors; test gaps without a known bug; internal implementation choices) goes under `## Non-blocking issues`. Use the same `- **<Title>**` top-level bullet + nested `**File:**` / `**Lines:**` / `**Problem:**` / `**Why it matters:**` / `**Recommended fix:**` sub-bullets so a human follow-up reviewer can act on them without re-reading the diff.
 
 ## Verdict policy (do NOT downgrade to `Comment only` to force convergence)
 

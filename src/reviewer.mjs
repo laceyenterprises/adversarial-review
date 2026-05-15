@@ -1015,9 +1015,15 @@ async function main() {
   }
 
   let extraContext = buildObviousDocsGuidance();
-  let prContext = null;
+  let prContext;
   try {
     prContext = await fetchPRContext(repo, prNumber);
+  } catch (err) {
+    console.error(`[reviewer] Failed to fetch required PR context for ${repo}#${prNumber}: ${err.message}`);
+    process.exit(1);
+  }
+
+  try {
     const linkedContext = await fetchLinkedSpecContents(repo, prNumber, {
       prContext,
       fetchPRContextImpl: fetchPRContext,

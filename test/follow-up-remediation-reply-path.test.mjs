@@ -24,6 +24,7 @@ function makeJob(overrides = {}) {
     jobId: 'laceyenterprises__agent-os-pr-428-2026-05-04T08-00-00-000Z',
     repo: 'laceyenterprises/agent-os',
     prNumber: 428,
+    baseBranch: 'main',
     reviewerModel: 'claude',
     linearTicketId: 'LAC-428',
     reviewSummary: 'Stop committing remediation replies from the worktree.',

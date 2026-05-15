@@ -62,6 +62,7 @@ function makeJob(overrides = {}) {
     jobId: 'laceyenterprises__clio-pr-7-2026-04-21T08-00-00-000Z',
     repo: 'laceyenterprises/clio',
     prNumber: 7,
+    baseBranch: 'main',
     linearTicketId: 'LAC-207',
     reviewerModel: 'claude',
     critical: true,
@@ -76,6 +77,10 @@ function makeJob(overrides = {}) {
     },
     ...overrides,
   };
+}
+
+async function cleanContaminationAudit() {
+  return { suspect: [], error: null };
 }
 
 async function withOAuthTestEnv(workDir, run) {
@@ -212,6 +217,7 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /"requested": false/);
   assert.match(prompt, /Handle token refresh before retrying/);
   assert.match(prompt, /git cherry origin\/main HEAD/);
+  assert.match(prompt, /git status --porcelain --untracked-files=all/);
 });
 
 test('buildRemediationPrompt uses the job base branch in the rebase and contamination audit contract', () => {
@@ -224,6 +230,18 @@ test('buildRemediationPrompt uses the job base branch in the rebase and contamin
 
   assert.match(prompt, /origin\/release\/2026\.05/);
   assert.doesNotMatch(prompt, /git rebase origin\/main/);
+});
+
+test('remediator stage prompt snippets abort on unresolved rebase conflicts', () => {
+  for (const file of [
+    'prompts/code-pr/remediator.first.md',
+    'prompts/code-pr/remediator.middle.md',
+    'prompts/code-pr/remediator.last.md',
+  ]) {
+    const prompt = readFileSync(path.resolve(file), 'utf8');
+    assert.match(prompt, /git -C "\$PR_WORKTREE" rebase --abort 2>\/dev\/null \|\| true\n  exit 78/);
+    assert.doesNotMatch(prompt, /resolve here, then git rebase --continue/);
+  }
 });
 
 test('buildRemediationPrompt authorizes spec / governance doc updates when reviewer findings ask for them (post-2026-05-06)', () => {
@@ -328,6 +346,16 @@ test('auditWorkspaceForContamination detects patch-equivalent commits in a real 
   assert.equal(audit.error, null);
   assert.equal(audit.suspect.length, 1);
   assert.equal(audit.suspect[0].subject, 'duplicate change on feature');
+});
+
+test('auditWorkspaceForContamination refuses to guess a missing base branch', async () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-audit-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+
+  const audit = await auditWorkspaceForContamination({ workspaceDir });
+
+  assert.equal(audit.suspect.length, 0);
+  assert.match(audit.error, /baseBranch is required/);
 });
 
 test('assertValidRepoSlug rejects malformed repo names', () => {
@@ -1607,6 +1635,34 @@ test('consumeFollowUpJobsUntilCapacity with max concurrency 1 preserves one-job 
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 1);
 });
 
+test('consumeNextFollowUpJob hydrates legacy jobs without baseBranch before spawning', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createPendingRemediationJob(rootDir, { prNumber: 91 });
+  const rawJob = JSON.parse(readFileSync(created.jobPath, 'utf8'));
+  delete rawJob.baseBranch;
+  writeFileSync(created.jobPath, `${JSON.stringify(rawJob, null, 2)}\n`, 'utf8');
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob(
+    drainerTestOptions(rootDir, spawnCalls, {
+      execFileImpl: async (command, args) => {
+        if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+          return { stdout: JSON.stringify({ baseRefName: 'release/2026.05' }), stderr: '' };
+        }
+        if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+          mkdirSync(path.join(args[3], '.git'), { recursive: true });
+        }
+        return { stdout: '', stderr: '' };
+      },
+    })
+  ));
+
+  assert.equal(result.consumed, true);
+  assert.equal(result.job.baseBranch, 'release/2026.05');
+  const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
+  assert.match(prompt, /origin\/release\/2026\.05/);
+});
+
 test('consumeFollowUpJobsUntilCapacity with max concurrency 2 spawns different PRs in one tick', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
@@ -2504,6 +2560,7 @@ test('reconcileFollowUpJob reads remediation replies from HQ storage before any 
         reason: 'review-status-reset',
         reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
       }),
+      auditWorkspaceForContaminationImpl: cleanContaminationAudit,
       log: { warn: (msg) => warnings.push(msg), error: () => {} },
     });
 
@@ -3306,6 +3363,7 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
       reason: 'review-status-reset',
       reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
     }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
     postCommentImpl: async (args) => {
       commentCalls.push(args);
       return { posted: true };
@@ -3501,6 +3559,7 @@ test('reconcile routes blocked rereview (review-row-missing) to stopped, NOT com
       status: 'blocked',
       reason: 'review-row-missing',
     }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   }));
 
@@ -3535,6 +3594,7 @@ test('reconcile routes blocked rereview (pr-not-open) to stopped with the closed
       reason: 'pr-not-open',
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 61, pr_state: 'closed' },
     }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   }));
 
@@ -3562,6 +3622,7 @@ test('reconcile routes blocked rereview (malformed-title-terminal) to stopped', 
       reason: 'malformed-title-terminal',
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 62, review_status: 'malformed' },
     }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   }));
 
@@ -3593,6 +3654,7 @@ test('reconcile treats already-pending as a benign success (still completed, com
       reason: 'review-already-pending',
       reviewRow: { repo: 'laceyenterprises/clio', pr_number: 63, review_status: 'pending' },
     }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
     postCommentImpl: async (args) => { commentCalls.push(args); return { posted: true }; },
   }));
 

@@ -46,7 +46,8 @@ git -C "$PR_WORKTREE" rebase "origin/${BASE_BRANCH}" || {
   # the rebase and record a blocker — never `git rebase --skip` your
   # way past a conflict, that drops your own work.
   echo "remediator: rebase conflict; resolve in-band or surface as blocker" >&2
-  : "resolve here, then git rebase --continue"
+  git -C "$PR_WORKTREE" rebase --abort 2>/dev/null || true
+  exit 78
 }
 
 # 4. MANDATORY audit. Even with the right sequence above, races and

@@ -277,6 +277,7 @@ test('reconcileFollowUpJob prefers the HQ reply path and rejects the legacy fall
         reason: 'review-status-reset',
         reviewRow: { repo: claimed.job.repo, pr_number: claimed.job.prNumber, pr_state: 'open', review_status: 'pending' },
       }),
+      auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
       log: { warn: () => {}, error: () => {} },
     });
 

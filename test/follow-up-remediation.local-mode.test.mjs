@@ -130,6 +130,7 @@ test('local-mode consume, prompt build, and reconcile agree on the same reply pa
           review_status: 'pending',
         },
       }),
+      auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
       log: { warn: () => {}, error: () => {} },
     });
 

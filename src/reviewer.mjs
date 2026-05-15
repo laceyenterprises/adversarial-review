@@ -224,13 +224,18 @@ async function spawnClaude(args, options = {}) {
 
 function resolveCodexAuthPath() {
   // CODEX_AUTH_PATH env var allows explicit override. CODEX_HOME supports
-  // local/manual runs only when it points at a usable OAuth auth.json. The
-  // final fallback preserves the deployed split-user bridge where the watcher
-  // runs as airlock but Codex OAuth belongs to placey.
+  // local/manual runs only when it points at a usable OAuth auth.json.
+  // Prefer the current operator's default auth location before falling back
+  // to the legacy split-user bridge where the watcher runs as airlock but
+  // Codex OAuth belongs to placey.
   if (process.env.CODEX_AUTH_PATH) return process.env.CODEX_AUTH_PATH;
   if (process.env.CODEX_HOME) {
     const codexHomeAuth = join(process.env.CODEX_HOME, 'auth.json');
     if (isCodexOAuthAuthFile(codexHomeAuth)) return codexHomeAuth;
+  }
+  if (process.env.HOME) {
+    const homeAuth = join(process.env.HOME, '.codex', 'auth.json');
+    if (existsSync(homeAuth) || !existsSync('/Users/placey/.codex/auth.json')) return homeAuth;
   }
   return '/Users/placey/.codex/auth.json';
 }
@@ -1160,6 +1165,8 @@ const __test__ = {
 export {
   CLAUDE_CLI,
   CODEX_CLI,
+  assertClaudeOAuth,
+  assertCodexOAuth,
   sanitizeCodexReviewPayload,
   buildReviewerPromptPrefix,
   spawnCaptured,

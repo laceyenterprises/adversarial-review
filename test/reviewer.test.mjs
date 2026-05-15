@@ -151,9 +151,31 @@ test('new follow-up jobs re-derive cap when the prior cap is not above the curre
 });
 
 test('Codex reviewer auth path preserves the split-user service fallback', () => {
-  withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined }, () => {
+  withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: undefined }, () => {
     assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
   });
+});
+
+test('Codex reviewer auth path prefers the current HOME default when present', () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-home-default-'));
+  try {
+    const homeDir = join(root, 'operator-home');
+    const authPath = join(homeDir, '.codex', 'auth.json');
+    mkdirSync(join(homeDir, '.codex'), { recursive: true });
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: { access_token: 'access', refresh_token: 'refresh' },
+      }),
+      'utf8'
+    );
+    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: homeDir }, () => {
+      assert.equal(resolveCodexAuthPath(), authPath);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('Codex reviewer auth path honors explicit env overrides before service fallback', () => {
@@ -198,10 +220,10 @@ test('Codex reviewer auth path ignores CODEX_HOME without usable OAuth credentia
     );
 
     withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: missingHome }, () => {
-      assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+      assert.equal(resolveCodexAuthPath(), join(process.env.HOME, '.codex', 'auth.json'));
     });
     withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: apiKeyHome }, () => {
-      assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+      assert.equal(resolveCodexAuthPath(), join(process.env.HOME, '.codex', 'auth.json'));
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

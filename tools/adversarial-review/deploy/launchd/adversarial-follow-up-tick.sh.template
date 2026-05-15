@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# adversarial-follow-up-tick.sh
+#
+# Rendered LaunchAgent wrapper for the adversarial-review follow-up
+# remediation daemon. Source template:
+# tools/adversarial-review/deploy/launchd/adversarial-follow-up-tick.sh.template
+#
+# Mirrors adversarial-watcher-start.sh, but execs scripts/adversarial-follow-up-daemon.mjs
+# (which owns the internal tick loop) instead of src/watcher.mjs.
+#
+# Values baked in at render time:
+#   REPO_RENDER_REPO_ROOT      = ${REPO_ROOT}
+#   REPO_RENDER_SECRETS_ROOT   = ${SECRETS_ROOT}
+#   REPO_RENDER_LOG_ROOT       = ${LOG_ROOT}
+#   REPO_RENDER_REVIEWER_AUTH  = ${REVIEWER_AUTH_ROOT}
+
+set -euo pipefail
+
+REPO_RENDER_REPO_ROOT="${REPO_ROOT}"
+REPO_RENDER_SECRETS_ROOT="${SECRETS_ROOT}"
+REPO_RENDER_LOG_ROOT="${LOG_ROOT}"
+REPO_RENDER_REVIEWER_AUTH="${REVIEWER_AUTH_ROOT}"
+
+mkdir -p "$REPO_RENDER_LOG_ROOT"
+
+NATIVE_CHECK_ERR="$REPO_RENDER_LOG_ROOT/adversarial-follow-up-native-check.err"
+NODE_BIN="$(command -v node || true)"
+if [ -z "$NODE_BIN" ]; then
+  echo "[follow-up-tick] ERROR: node not found on PATH" >&2
+  echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm" >&2
+  sleep 3600
+  exit 1
+fi
+if ! ( cd "$REPO_RENDER_REPO_ROOT" && "$NODE_BIN" -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$NATIVE_CHECK_ERR" 2>&1; then
+  echo "[follow-up-tick] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
+  echo "[follow-up-tick] details:" >&2
+  sed 's/^/  /' "$NATIVE_CHECK_ERR" >&2
+  echo "[follow-up-tick] fix: cd $REPO_RENDER_REPO_ROOT && npm rebuild better-sqlite3" >&2
+  echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; bootout the agent and rebuild to recover sooner." >&2
+  sleep 3600
+  exit 1
+fi
+
+OPERATOR_ENV_FILE="$REPO_RENDER_SECRETS_ROOT/adversarial-review.env"
+if [ -r "$OPERATOR_ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$OPERATOR_ENV_FILE"
+  set +a
+else
+  echo "[follow-up-tick] WARN: $OPERATOR_ENV_FILE not found; relying on inherited env for tokens" >&2
+fi
+
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  if command -v gh >/dev/null 2>&1; then
+    GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+    export GITHUB_TOKEN
+  fi
+fi
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  echo "[follow-up-tick] ERROR: GITHUB_TOKEN not set and gh auth token returned nothing" >&2
+  exit 1
+fi
+
+# Reviewer-bot PATs are best-effort. Missing values defer comment posts
+# to retry but do not block the consume/reconcile path.
+if [ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]; then
+  echo "[follow-up-tick] WARN: GH_CLAUDE_REVIEWER_TOKEN not set — claude-code comment posts will defer to retry" >&2
+fi
+if [ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]; then
+  echo "[follow-up-tick] WARN: GH_CODEX_REVIEWER_TOKEN not set — codex comment posts will defer to retry" >&2
+fi
+
+if [ -n "$REPO_RENDER_REVIEWER_AUTH" ]; then
+  export CODEX_AUTH_PATH="$REPO_RENDER_REVIEWER_AUTH/codex/auth.json"
+else
+  export CODEX_AUTH_PATH="${CODEX_AUTH_PATH:-$HOME/.codex/auth.json}"
+fi
+
+unset ANTHROPIC_API_KEY
+unset ANTHROPIC_BASE_URL
+unset OPENAI_API_KEY
+unset GOOGLE_API_KEY
+unset GEMINI_API_KEY
+unset CLAUDE_CODE_USE_BEDROCK
+unset CLAUDE_CODE_USE_VERTEX
+unset AWS_BEARER_TOKEN_BEDROCK
+
+cd "$REPO_RENDER_REPO_ROOT"
+exec "$NODE_BIN" "$REPO_RENDER_REPO_ROOT/scripts/adversarial-follow-up-daemon.mjs"

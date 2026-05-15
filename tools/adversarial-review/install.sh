@@ -1,33 +1,64 @@
 #!/usr/bin/env bash
+# tools/adversarial-review/install.sh
+#
+# Portable macOS installer for the adversarial-review watcher + follow-up
+# daemon. Renders the templates under deploy/launchd/ into the running
+# operator's ~/Library/LaunchAgents/ and $REPO_ROOT/scripts/render/, then
+# runs a postflight validator that surfaces the most likely first-run
+# failures.
+#
+# Contract: see tools/adversarial-review/DEPLOYMENT-FROM-FRESH-MAC.md.
+# Inputs (env wins over prompt, prompt only fires for an unset variable
+# in an interactive terminal):
+#
+#   REPO_ROOT            (default: git rev-parse --show-toplevel)
+#   OPERATOR_HOME        (default: $HOME)
+#   SECRETS_ROOT         (default: $OPERATOR_HOME/.config/adversarial-review/secrets)
+#   LOG_ROOT             (default: $OPERATOR_HOME/Library/Logs/adversarial-review)
+#   REVIEWER_AUTH_ROOT   (default: empty — operator may set explicitly)
+#   WATCHER_USER_LABEL   (default: "local")
+#
+# Flags:
+#   --dry-run            Render to a temp dir, skip postflight, print the
+#                        rendered file list. Never touches
+#                        ~/Library/LaunchAgents.
+#   --output-dir PATH    Override the launchd-agents output directory.
+#                        Combined with --dry-run by the test harness.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ENV_FILE="$SCRIPT_DIR/adversarial-review.env"
-PREFER_LOCAL_ACPX=0
-WITH_HQ_INTEGRATION=0
+TEMPLATE_DIR="$SCRIPT_DIR/deploy/launchd"
+RENDER_LIB="$SCRIPT_DIR/lib/render-template.mjs"
+POSTFLIGHT_LIB="$SCRIPT_DIR/lib/install-postflight.mjs"
+
+DRY_RUN=0
+OUTPUT_DIR_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --env-file)
-      ENV_FILE="${2:?--env-file requires a path}"
-      shift 2
-      ;;
-    --prefer-local-acpx)
-      PREFER_LOCAL_ACPX=1
+    --dry-run)
+      DRY_RUN=1
       shift
       ;;
-    --with-hq-integration)
-      WITH_HQ_INTEGRATION=1
+    --output-dir)
+      OUTPUT_DIR_OVERRIDE="${2:?--output-dir requires a path}"
+      shift 2
+      ;;
+    --output-dir=*)
+      OUTPUT_DIR_OVERRIDE="${1#--output-dir=}"
       shift
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: tools/adversarial-review/install.sh [--env-file PATH] [--with-hq-integration] [--prefer-local-acpx]
+Usage: tools/adversarial-review/install.sh [--dry-run] [--output-dir PATH]
 
-Checks the local host for the adversarial-review production runtime contract,
-materializes an EnvironmentFile, runs npm ci, rebuilds better-sqlite3, verifies
-the native ABI, and runs npm test.
+Renders the parameterized launchd templates under
+tools/adversarial-review/deploy/launchd/ into the running operator's
+LaunchAgents directory and the repo's scripts/render/ directory, then
+runs a postflight validator.
+
+Read DEPLOYMENT-FROM-FRESH-MAC.md for the full five-step path.
 USAGE
       exit 0
       ;;
@@ -38,179 +69,295 @@ USAGE
   esac
 done
 
+# ── Helpers ────────────────────────────────────────────────────────────
+
 failures=()
 warnings=()
 
-mark_ok() {
-  printf '✓ %s\n' "$1"
-}
+mark_ok()   { printf '  ✓ %s\n' "$1"; }
+mark_fail() { printf '  ✗ %s\n' "$1"; failures+=("$1"); }
+mark_warn() { printf '  ! %s\n' "$1"; warnings+=("$1"); }
 
-mark_fail() {
-  printf '✗ %s\n' "$1"
-  failures+=("$1")
-}
-
-mark_warn() {
-  printf '! %s\n' "$1"
-  warnings+=("$1")
-}
-
-resolve_bin() {
-  local override="$1"
-  local name="$2"
-  if [[ -n "$override" && -x "$override" ]]; then
-    printf '%s\n' "$override"
+prompt_with_default() {
+  local var_name="$1"
+  local default="$2"
+  local prompt_label="$3"
+  local current
+  current="${!var_name:-}"
+  if [[ -n "$current" ]]; then
+    printf '%s' "$current"
     return 0
   fi
-  command -v "$name" 2>/dev/null || true
-}
-
-run_step() {
-  local label="$1"
-  shift
-  if "$@"; then
-    mark_ok "$label"
+  if [[ ! -t 0 ]]; then
+    # No TTY — non-interactive run, take the default.
+    printf '%s' "$default"
+    return 0
+  fi
+  local entered
+  printf '%s [%s]: ' "$prompt_label" "$default" >&2
+  IFS= read -r entered || entered=""
+  if [[ -z "$entered" ]]; then
+    printf '%s' "$default"
   else
-    mark_fail "$label"
+    printf '%s' "$entered"
   fi
 }
 
-check_node_range() {
-  node -e "
+# ── Resolve bindings ───────────────────────────────────────────────────
+
+cd "$SCRIPT_DIR"
+
+DEFAULT_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$DEFAULT_REPO_ROOT" ]]; then
+  DEFAULT_REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
+
+REPO_ROOT="$(prompt_with_default REPO_ROOT "$DEFAULT_REPO_ROOT" "REPO_ROOT")"
+OPERATOR_HOME="$(prompt_with_default OPERATOR_HOME "${HOME:-/root}" "OPERATOR_HOME")"
+SECRETS_ROOT="$(prompt_with_default SECRETS_ROOT "$OPERATOR_HOME/.config/adversarial-review/secrets" "SECRETS_ROOT")"
+LOG_ROOT="$(prompt_with_default LOG_ROOT "$OPERATOR_HOME/Library/Logs/adversarial-review" "LOG_ROOT")"
+REVIEWER_AUTH_ROOT="$(prompt_with_default REVIEWER_AUTH_ROOT "" "REVIEWER_AUTH_ROOT (optional, blank to skip)")"
+WATCHER_USER_LABEL="$(prompt_with_default WATCHER_USER_LABEL "local" "WATCHER_USER_LABEL")"
+
+case "$WATCHER_USER_LABEL" in
+  *[!A-Za-z0-9._-]*)
+    echo "WATCHER_USER_LABEL must match [A-Za-z0-9._-]+ (got: $WATCHER_USER_LABEL)" >&2
+    exit 2
+    ;;
+esac
+
+# ── Pick output paths ──────────────────────────────────────────────────
+
+DEFAULT_LAUNCH_AGENTS_DIR="$OPERATOR_HOME/Library/LaunchAgents"
+if [[ $DRY_RUN -eq 1 && -z "$OUTPUT_DIR_OVERRIDE" ]]; then
+  OUTPUT_DIR_OVERRIDE="$(mktemp -d -t adversarial-review-dry-run.XXXXXX)/LaunchAgents"
+fi
+LAUNCH_AGENTS_DIR="${OUTPUT_DIR_OVERRIDE:-$DEFAULT_LAUNCH_AGENTS_DIR}"
+RENDER_SCRIPTS_DIR="$REPO_ROOT/scripts/render"
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  RENDER_SCRIPTS_DIR="$(dirname "$LAUNCH_AGENTS_DIR")/scripts-render"
+fi
+
+WATCHER_PLIST="$LAUNCH_AGENTS_DIR/ai.${WATCHER_USER_LABEL}.adversarial-watcher.plist"
+FOLLOW_UP_PLIST="$LAUNCH_AGENTS_DIR/ai.${WATCHER_USER_LABEL}.adversarial-follow-up.plist"
+WATCHER_SCRIPT="$RENDER_SCRIPTS_DIR/adversarial-watcher-start.sh"
+FOLLOW_UP_SCRIPT="$RENDER_SCRIPTS_DIR/adversarial-follow-up-tick.sh"
+
+# ── Render ─────────────────────────────────────────────────────────────
+
+echo "adversarial-review installer"
+echo
+echo "Bindings:"
+printf '  %-22s %s\n' "REPO_ROOT"           "$REPO_ROOT"
+printf '  %-22s %s\n' "OPERATOR_HOME"       "$OPERATOR_HOME"
+printf '  %-22s %s\n' "SECRETS_ROOT"        "$SECRETS_ROOT"
+printf '  %-22s %s\n' "LOG_ROOT"            "$LOG_ROOT"
+printf '  %-22s %s\n' "REVIEWER_AUTH_ROOT"  "${REVIEWER_AUTH_ROOT:-(unset)}"
+printf '  %-22s %s\n' "WATCHER_USER_LABEL"  "$WATCHER_USER_LABEL"
+echo
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  echo "Mode: --dry-run (no files written to ~/Library/LaunchAgents)"
+else
+  echo "Mode: install"
+fi
+echo
+
+render_one() {
+  local in_path="$1"
+  local out_path="$2"
+  mkdir -p "$(dirname "$out_path")"
+  node "$RENDER_LIB" \
+    --in "$in_path" \
+    --out "$out_path" \
+    --var "REPO_ROOT=$REPO_ROOT" \
+    --var "OPERATOR_HOME=$OPERATOR_HOME" \
+    --var "SECRETS_ROOT=$SECRETS_ROOT" \
+    --var "LOG_ROOT=$LOG_ROOT" \
+    --var "REVIEWER_AUTH_ROOT=$REVIEWER_AUTH_ROOT" \
+    --var "WATCHER_USER_LABEL=$WATCHER_USER_LABEL"
+}
+
+if [[ $DRY_RUN -ne 1 ]]; then
+  mkdir -p "$LOG_ROOT"
+  chmod 0755 "$LOG_ROOT" 2>/dev/null || true
+  if [[ ! -d "$SECRETS_ROOT" ]]; then
+    mkdir -p "$SECRETS_ROOT"
+    chmod 0700 "$SECRETS_ROOT" 2>/dev/null || true
+  fi
+fi
+
+echo "Rendering templates:"
+render_one "$TEMPLATE_DIR/adversarial-watcher.plist.template" "$WATCHER_PLIST"
+mark_ok "wrote $WATCHER_PLIST"
+render_one "$TEMPLATE_DIR/adversarial-follow-up.plist.template" "$FOLLOW_UP_PLIST"
+mark_ok "wrote $FOLLOW_UP_PLIST"
+render_one "$TEMPLATE_DIR/adversarial-watcher-start.sh.template" "$WATCHER_SCRIPT"
+chmod +x "$WATCHER_SCRIPT"
+mark_ok "wrote $WATCHER_SCRIPT"
+render_one "$TEMPLATE_DIR/adversarial-follow-up-tick.sh.template" "$FOLLOW_UP_SCRIPT"
+chmod +x "$FOLLOW_UP_SCRIPT"
+mark_ok "wrote $FOLLOW_UP_SCRIPT"
+echo
+
+# Best-effort plist lint when plutil is present.
+if command -v plutil >/dev/null 2>&1; then
+  if plutil -lint "$WATCHER_PLIST" >/dev/null && plutil -lint "$FOLLOW_UP_PLIST" >/dev/null; then
+    mark_ok "plutil -lint accepted both rendered plists"
+  else
+    mark_fail "plutil -lint rejected a rendered plist; check the template"
+  fi
+fi
+
+# ── Postflight ─────────────────────────────────────────────────────────
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  echo
+  echo "Dry-run complete. Files were written under:"
+  echo "  $LAUNCH_AGENTS_DIR"
+  echo "  $RENDER_SCRIPTS_DIR"
+  echo
+  echo "Remove the dry-run flag to install for real."
+  exit 0
+fi
+
+echo
+echo "Postflight:"
+
+# Node engines range check.
+if command -v node >/dev/null 2>&1; then
+  if (cd "$REPO_ROOT" && node -e "
 const fs = require('fs');
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-const range = pkg.engines && pkg.engines.node;
+const range = (pkg.engines && pkg.engines.node) || '';
 const major = Number(process.versions.node.split('.')[0]);
-if (!range) {
-  console.error('package.json is missing engines.node');
-  process.exit(1);
-}
+if (!range) { console.error('package.json missing engines.node'); process.exit(1); }
 if (!(major >= 20 && major < 26)) {
   console.error('Node ' + process.version + ' does not satisfy ' + range);
   process.exit(1);
 }
-"
-}
-
-cd "$REPO_ROOT"
-echo "adversarial-review install check"
-echo "repo: $REPO_ROOT"
-echo
-
-if command -v node >/dev/null 2>&1; then
-  run_step "Node $(node --version) satisfies package engines" check_node_range
-else
-  mark_fail "node is not installed or not on PATH"
-fi
-
-if command -v npm >/dev/null 2>&1; then
-  mark_ok "npm $(npm --version) found"
-else
-  mark_fail "npm is not installed or not on PATH"
-fi
-
-if [[ -f package-lock.json ]]; then
-  run_step "npm ci completed" npm ci
-else
-  mark_fail "package-lock.json missing; npm ci cannot run"
-fi
-
-if [[ -d node_modules ]]; then
-  run_step "better-sqlite3 rebuilt for this Node ABI" npm rebuild better-sqlite3
-  run_step "better-sqlite3 in-memory ABI probe passed" node -e "new (require('better-sqlite3'))(':memory:').close()"
-else
-  mark_fail "node_modules missing; cannot rebuild or ABI-probe better-sqlite3"
-fi
-
-CLAUDE_BIN="$(resolve_bin "${CLAUDE_CLI_PATH:-${CLAUDE_CLI:-}}" claude)"
-CODEX_BIN="$(resolve_bin "${CODEX_CLI_PATH:-${CODEX_CLI:-}}" codex)"
-GH_BIN="$(resolve_bin "${GH_CLI_PATH:-${GH_CLI:-}}" gh)"
-OP_BIN="$(resolve_bin "${OP_CLI_PATH:-${OP_CLI:-}}" op)"
-ACPX_BIN="$(resolve_bin "${ACPX_CLI_PATH:-${ACPX_CLI:-}}" acpx)"
-if [[ -z "$ACPX_BIN" && "$PREFER_LOCAL_ACPX" == "1" ]]; then
-  candidate="$HOME/.openclaw/tools/acpx/node_modules/.bin/acpx"
-  if [[ -x "$candidate" ]]; then
-    ACPX_BIN="$candidate"
-  fi
-fi
-
-[[ -n "$CLAUDE_BIN" ]] && mark_ok "claude CLI found at $CLAUDE_BIN" || mark_fail "claude CLI missing; install Claude Code or set CLAUDE_CLI_PATH"
-[[ -n "$CODEX_BIN" ]] && mark_ok "codex CLI found at $CODEX_BIN" || mark_fail "codex CLI missing; install Codex CLI or set CODEX_CLI_PATH"
-[[ -n "$GH_BIN" ]] && mark_ok "gh CLI found at $GH_BIN" || mark_fail "gh CLI missing; install GitHub CLI or set GH_CLI_PATH"
-[[ -n "$OP_BIN" ]] && mark_ok "op CLI found at $OP_BIN" || mark_warn "optional op CLI missing; 1Password secret-source mode will be unavailable"
-
-if [[ -n "$OP_BIN" ]]; then
-  if node "$REPO_ROOT/src/secret-source/resolve-op-token-cli.mjs" >/dev/null 2>/dev/null; then
-    mark_ok "OP_SERVICE_ACCOUNT_TOKEN resolvable via canonical contract"
+"); then
+    mark_ok "Node $(node --version) satisfies package.json engines"
   else
-    mark_warn "OP_SERVICE_ACCOUNT_TOKEN not resolvable via canonical contract; see tools/adversarial-review/DEPS.md §'OP_SERVICE_ACCOUNT_TOKEN resolution'"
+    mark_fail "Node $(node --version) does not satisfy package.json engines (>=20 <26)"
   fi
-fi
-[[ -n "$ACPX_BIN" ]] && mark_ok "optional acpx CLI found at $ACPX_BIN" || mark_warn "optional acpx CLI missing; native codex path remains available"
-
-if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-  mark_ok "GITHUB_TOKEN present"
-elif [[ -n "$GH_BIN" ]] && "$GH_BIN" auth token >/dev/null 2>&1; then
-  mark_ok "GITHUB_TOKEN can be resolved from gh auth token"
 else
-  mark_fail "GITHUB_TOKEN missing and gh auth token is unavailable"
+  mark_fail "node not found on PATH; install Node 20+ before bootstrapping the agents"
 fi
 
-[[ -n "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]] && mark_ok "GH_CLAUDE_REVIEWER_TOKEN present" || mark_fail "GH_CLAUDE_REVIEWER_TOKEN missing"
-[[ -n "${GH_CODEX_REVIEWER_TOKEN:-}" ]] && mark_ok "GH_CODEX_REVIEWER_TOKEN present" || mark_fail "GH_CODEX_REVIEWER_TOKEN missing"
-[[ -n "${LINEAR_API_KEY:-}" ]] && mark_ok "optional LINEAR_API_KEY present" || mark_warn "optional LINEAR_API_KEY missing; Linear updates will be skipped"
-
-if [[ -n "${ALERT_TO:-}" || -n "${TELEGRAM_BOT_TOKEN:-}" || -n "${OPENCLAW_HOOKS_TOKEN:-}" || -n "${HOOKS_TOKEN:-}" ]]; then
-  mark_ok "optional alert environment has at least one configured value"
+# gh auth status.
+if command -v gh >/dev/null 2>&1; then
+  if gh auth status >/dev/null 2>&1; then
+    mark_ok "gh auth status succeeded"
+  else
+    mark_fail "gh auth status failed; run 'gh auth login' and retry"
+  fi
 else
-  mark_warn "optional Telegram/OpenClaw alert vars missing"
+  mark_fail "gh CLI not found on PATH; install GitHub CLI"
 fi
 
-CODEX_AUTH="${CODEX_AUTH_PATH:-${CODEX_HOME:-$HOME/.codex}/auth.json}"
-if [[ -r "$CODEX_AUTH" ]]; then
-  mark_ok "Codex OAuth auth.json readable at $CODEX_AUTH"
+# Reviewer CLIs and OAuth state.
+if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" probe-claude 2>&1)"; then
+  mark_ok "Claude reviewer CLI and OAuth state validated"
 else
-  mark_fail "Codex OAuth auth.json unreadable at $CODEX_AUTH; run codex login"
+  mark_fail "Claude reviewer runtime check failed: ${output//$'\n'/ }"
 fi
 
-mkdir -p "$(dirname "$ENV_FILE")"
-cat > "$ENV_FILE" <<EOF
-# Generated by tools/adversarial-review/install.sh
-ADV_REPO_ROOT=$REPO_ROOT
-ADV_SECRETS_ROOT=${ADV_SECRETS_ROOT:-$HOME/.config/adversarial-review/secrets}
-ADV_REPLIES_ROOT=${ADV_REPLIES_ROOT:-$REPO_ROOT/data/replies}
-ADV_WITH_HQ_INTEGRATION=$WITH_HQ_INTEGRATION
-PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}
-CLAUDE_CLI_PATH=$CLAUDE_BIN
-CODEX_CLI_PATH=$CODEX_BIN
-GH_CLI_PATH=$GH_BIN
-OP_CLI_PATH=$OP_BIN
-ACPX_CLI_PATH=$ACPX_BIN
-CODEX_AUTH_PATH=$CODEX_AUTH
-EOF
-mark_ok "EnvironmentFile materialized at $ENV_FILE"
-
-if [[ -d node_modules ]]; then
-  run_step "npm test passed" npm test
+EFFECTIVE_CODEX_AUTH_PATH="$OPERATOR_HOME/.codex/auth.json"
+if [[ -n "$REVIEWER_AUTH_ROOT" ]]; then
+  EFFECTIVE_CODEX_AUTH_PATH="$REVIEWER_AUTH_ROOT/codex/auth.json"
+fi
+if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" probe-codex "$OPERATOR_HOME" "$REVIEWER_AUTH_ROOT" 2>&1)"; then
+  mark_ok "Codex reviewer CLI and OAuth state validated at $EFFECTIVE_CODEX_AUTH_PATH"
 else
-  mark_fail "npm test skipped because node_modules is missing"
+  mark_fail "Codex reviewer runtime check failed for $EFFECTIVE_CODEX_AUTH_PATH: ${output//$'\n'/ }"
+fi
+
+if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" probe-runtime-readiness 2>&1)"; then
+  mark_ok "runtime dependency probe loaded node_modules, better-sqlite3, and @octokit/rest"
+else
+  mark_fail "runtime dependency probe failed: ${output//$'\n'/ }"
+fi
+
+# git status --porcelain — warn only.
+if command -v git >/dev/null 2>&1; then
+  if [[ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]]; then
+    mark_ok "git working tree clean at $REPO_ROOT"
+  else
+    mark_warn "git working tree at $REPO_ROOT has uncommitted changes (warning, not blocker)"
+  fi
+else
+  mark_warn "git not on PATH; could not verify working tree state"
+fi
+
+# Secret-source token discovery. LAC-597 introduces a formal helper; until
+# it lands we degrade by probing $SECRETS_ROOT/adversarial-review.env and
+# the legacy op-service-account.env path.
+SECRET_SOURCE_HELPER="$REPO_ROOT/src/secret-source/op.mjs"
+if [[ -f "$SECRET_SOURCE_HELPER" ]]; then
+  mark_ok "secret-source helper present at $SECRET_SOURCE_HELPER"
+else
+  mark_warn "secret-source helper not found at $SECRET_SOURCE_HELPER (expected after LAC-597 lands)"
+fi
+if [[ -r "$SECRETS_ROOT/adversarial-review.env" ]]; then
+  mark_ok "operator dotenv present at $SECRETS_ROOT/adversarial-review.env"
+  set -a
+  # shellcheck disable=SC1090
+  . "$SECRETS_ROOT/adversarial-review.env"
+  set +a
+else
+  mark_warn "operator dotenv not present at $SECRETS_ROOT/adversarial-review.env — wrapper will rely on inherited GITHUB_TOKEN / gh auth token"
+fi
+
+if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" missing-bot-tokens 2>&1)"; then
+  mark_ok "reviewer bot tokens present for GitHub review/comment posting"
+else
+  missing_tokens="${output//$'\n'/, }"
+  mark_fail "missing required reviewer bot tokens: $missing_tokens"
+fi
+
+# Optional REVIEWER_AUTH_ROOT readability.
+if [[ -n "$REVIEWER_AUTH_ROOT" ]]; then
+  if [[ -r "$REVIEWER_AUTH_ROOT" ]]; then
+    mark_ok "REVIEWER_AUTH_ROOT readable at $REVIEWER_AUTH_ROOT"
+  else
+    mark_fail "REVIEWER_AUTH_ROOT set to $REVIEWER_AUTH_ROOT but not readable"
+  fi
 fi
 
 echo
+
 if (( ${#warnings[@]} > 0 )); then
-  echo "Optional follow-ups:"
-  for item in "${warnings[@]}"; do
-    printf '  - %s\n' "$item"
-  done
+  echo "Warnings (not blockers):"
+  for item in "${warnings[@]}"; do printf '  - %s\n' "$item"; done
   echo
 fi
 
 if (( ${#failures[@]} > 0 )); then
-  echo "You still need:"
-  for item in "${failures[@]}"; do
-    printf '  - %s\n' "$item"
-  done
+  echo "Postflight failed — resolve the items below before bootstrapping:"
+  for item in "${failures[@]}"; do printf '  - %s\n' "$item"; done
   exit 1
 fi
 
-echo "All required checks are green."
+# ── Next steps ─────────────────────────────────────────────────────────
+
+cat <<EOF
+## Next steps
+
+Bootstrap the watcher:
+  launchctl bootstrap gui/\$(id -u) "$WATCHER_PLIST"
+  launchctl bootstrap gui/\$(id -u) "$FOLLOW_UP_PLIST"
+
+Verify it loaded:
+  launchctl print "gui/\$(id -u)/ai.${WATCHER_USER_LABEL}.adversarial-watcher"
+
+Routine ops:
+  launchctl bootout   "gui/\$(id -u)" "$WATCHER_PLIST"
+  launchctl bootstrap "gui/\$(id -u)" "$WATCHER_PLIST"
+  launchctl kickstart -k "gui/\$(id -u)/ai.${WATCHER_USER_LABEL}.adversarial-watcher"
+
+Logs:
+  tail -f "$LOG_ROOT/adversarial-watcher.log"
+  tail -f "$LOG_ROOT/adversarial-follow-up.log"
+EOF

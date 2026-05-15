@@ -4,6 +4,10 @@ tools/adversarial-review/adversarial-review.env
 data/
 *.log
 /reviews.db
+# Rendered LaunchAgent wrappers produced by
+# tools/adversarial-review/install.sh. They are deterministic functions
+# of the operator's bindings; re-render rather than committing them.
+/scripts/render/
 # Per-job remediation runtime artifacts (worker prompt, last-message,
 # reply JSON, logs). These are generated each round and must never be
 # committed; a stale snapshot leaks PR-specific state into the repo

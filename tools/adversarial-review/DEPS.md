@@ -44,7 +44,8 @@ uses PATH and per-user defaults.
 - `acpx` CLI, optional
   - Discovery: `ACPX_CLI_PATH`, `ACPX_CLI`, then `acpx` on `PATH`.
   - Maintainer-local fallback `$HOME/.openclaw/tools/acpx/node_modules/.bin/acpx`
-    is only selected by install tooling with `--prefer-local-acpx`.
+    is used by some maintainer-local wrappers but is not part of the
+    portable installer's render path.
 
 - `hq` CLI, optional Agent OS reviewer-runtime substrate
   - Discovery: `HQ_BIN`, then `hq` on `PATH`.
@@ -185,17 +186,39 @@ Claude runtime is supposed to use.
 
 ## Supervisor Contracts
 
-- macOS launchd template:
-  `tools/adversarial-review/deploy/launchd/ai.laceyenterprises.adversarial-review.plist.template`
-- Linux systemd template:
-  `tools/adversarial-review/deploy/systemd/adversarial-review.service.template`
-- Generated env file:
-  `tools/adversarial-review/adversarial-review.env`
-- Bounce helper:
-  `tools/adversarial-review/bounce.sh`
+Portable macOS install path (the supported on-ramp for outside operators):
 
-Use `bounce.sh` for operator restarts. It stops the supervisor, waits for
-recorded reviewer process groups to drain, then starts the supervisor again.
-If the drain times out, the helper still restarts the supervisor, exits
-non-zero, and removes `data/watcher-drain.json` on exit so a manual
-recovery does not leave the watcher idling behind a stale drain marker.
+- Installer: `tools/adversarial-review/install.sh`
+- Runbook: `tools/adversarial-review/DEPLOYMENT-FROM-FRESH-MAC.md`
+- LaunchAgent plist templates:
+  - `tools/adversarial-review/deploy/launchd/adversarial-watcher.plist.template`
+  - `tools/adversarial-review/deploy/launchd/adversarial-follow-up.plist.template`
+- Wrapper script templates rendered alongside the plists:
+  - `tools/adversarial-review/deploy/launchd/adversarial-watcher-start.sh.template`
+  - `tools/adversarial-review/deploy/launchd/adversarial-follow-up-tick.sh.template`
+- Render helper used by the installer and tests:
+  `tools/adversarial-review/lib/render-template.mjs`
+
+The installer accepts `REPO_ROOT`, `OPERATOR_HOME`, `SECRETS_ROOT`,
+`LOG_ROOT`, `REVIEWER_AUTH_ROOT`, and `WATCHER_USER_LABEL` as either
+environment variables or interactive prompts, substitutes them into the
+templates, writes the rendered plists into `~/Library/LaunchAgents/`
+and the rendered wrappers into `<repo>/scripts/render/`, then runs a
+postflight validator (Node engines range, `gh auth status`, reviewer CLI
+and OAuth probes, required reviewer-bot PAT presence, working tree clean,
+secret-source token discovery, optional reviewer-auth readability).
+`--dry-run` renders to a temp directory and skips postflight.
+
+Legacy Linux systemd template (single-file, env-file driven):
+
+- `tools/adversarial-review/deploy/systemd/adversarial-review.service.template`
+
+Bounce helper for operator restarts:
+
+- `tools/adversarial-review/bounce.sh`
+
+`bounce.sh` stops the supervisor, waits for recorded reviewer process
+groups to drain, then starts the supervisor again. If the drain times
+out, the helper still restarts the supervisor, exits non-zero, and
+removes `data/watcher-drain.json` on exit so a manual recovery does
+not leave the watcher idling behind a stale drain marker.

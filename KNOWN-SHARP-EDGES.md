@@ -162,15 +162,47 @@ are caught at production rollout time, not in CI.
 ## 8. `tools/adversarial-review/` is a deploy template
 
 The nested `tools/adversarial-review/` directory in this repo contains
-launchd / systemd templates and a `bounce.sh` operator helper. The name
-collision with the repo name itself is confusing on first read. It exists
-because this code is also vendored as a submodule under the parent
-project's `tools/adversarial-review/` path, and the deploy assets were
-co-located with the submodule to keep operator surface area in one place.
+launchd / systemd templates, a parameterized installer
+(`install.sh`), the operator runbook
+(`DEPLOYMENT-FROM-FRESH-MAC.md`), and a `bounce.sh` operator helper.
+The name collision with the repo name itself is confusing on first
+read. It exists because this code is also vendored as a submodule under
+the parent project's `tools/adversarial-review/` path, and the deploy
+assets were co-located with the submodule to keep operator surface
+area in one place.
 
-Outside operators can use the templates as-is or ignore them in favor of
-their own supervisor of choice. The name will probably be renamed
-(`deploy/templates/` is the obvious target) in a future cleanup.
+Outside operators should use `install.sh` (see the runbook). The
+maintainer-local plists under `launchd/` and wrapper scripts under
+`scripts/adversarial-*` are kept as a worked example of a two-operator
+topology — `install.sh` deliberately does not render against them.
+
+The name will probably be renamed (`deploy/templates/` is the obvious
+target) in a future cleanup.
+
+## 9. Portable installer is iteration 1 of a multi-PR effort
+
+`tools/adversarial-review/install.sh` ships a single-operator render
+path: one `WATCHER_USER_LABEL`, one `~/Library/LaunchAgents/` per host.
+The maintainer's production topology runs two operators on a shared
+Mac (`placey` for OAuth-bound subprocesses, `airlock` for HQ dispatch),
+which is **not** what the templates currently bake in.
+
+What works today: outside operators on a single-user Mac get a
+deterministic render-and-bootstrap path from a fresh clone, including
+plutil-linted plists and a postflight validator.
+
+What needs to happen next:
+
+- Multi-operator render (two `WATCHER_USER_LABEL` values side-by-side
+  on one host), so a future contributor can reproduce the maintainer's
+  topology from the templates instead of from the legacy plists.
+- LAC-597 lands a formal secret-source contract; the installer's
+  postflight check currently degrades cleanly when that helper is
+  absent, and should call into it directly once it merges.
+- Linux systemd templates rendered against the same placeholder
+  surface as the launchd ones.
+- Packaging (`brew tap` or `npm install -g`) so the on-ramp is one
+  command instead of "clone, npm ci, install.sh."
 
 ---
 

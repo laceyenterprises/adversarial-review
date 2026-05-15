@@ -621,7 +621,7 @@ function queueFollowUpForPostedReview({
   rootDir = ROOT,
   repo,
   prNumber,
-  baseBranch = 'main',
+  baseBranch,
   reviewerModel,
   builderTag = null,
   linearTicketId = null,
@@ -633,6 +633,9 @@ function queueFollowUpForPostedReview({
 }) {
   if (!shouldQueueFollowUpForReview(reviewText)) {
     return { queued: false, reason: 'empty-review-body' };
+  }
+  if (typeof baseBranch !== 'string' || baseBranch.trim() === '') {
+    throw new Error('baseBranch is required to queue a follow-up handoff');
   }
 
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
@@ -649,7 +652,7 @@ function queueFollowUpForPostedReview({
     rootDir,
     repo,
     prNumber,
-    baseBranch,
+    baseBranch: baseBranch.trim(),
     reviewerModel,
     builderTag: builderTag || null,
     linearTicketId,
@@ -1012,8 +1015,11 @@ async function main() {
   }
 
   let extraContext = buildObviousDocsGuidance();
+  let prContext = null;
   try {
+    prContext = await fetchPRContext(repo, prNumber);
     const linkedContext = await fetchLinkedSpecContents(repo, prNumber, {
+      prContext,
       fetchPRContextImpl: fetchPRContext,
       execFileImpl: execFileAsync,
     });
@@ -1097,16 +1103,8 @@ async function main() {
 
   const critical = isCritical(reviewText);
   const reviewPostedAt = new Date().toISOString();
-  let baseBranch = 'main';
   try {
-    const prContext = await fetchPRContext(repo, prNumber);
-    if (prContext?.baseRefName) {
-      baseBranch = prContext.baseRefName;
-    }
-  } catch (err) {
-    console.error(`[reviewer] WARN: failed to fetch base branch for follow-up queueing: ${err.message}`);
-  }
-  try {
+    const baseBranch = typeof prContext?.baseRefName === 'string' ? prContext.baseRefName.trim() : '';
     const queued = queueFollowUpForPostedReview({
       rootDir: ROOT,
       repo,

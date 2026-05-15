@@ -96,6 +96,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
 
@@ -117,6 +118,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -140,6 +142,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
   const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
@@ -178,6 +181,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -300,6 +304,90 @@ test('reconcileFollowUpJob refuses to request rereview when the workspace is con
   assert.equal(reviewRow.review_status, 'posted');
 });
 
+test('reconcileFollowUpJob fails closed when the server-side contamination audit cannot prove cleanliness', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    baseBranch: 'release/2026.05',
+  });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = hqReplyPathForJob(claimed.job);
+  writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Applied the remediation changes.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Remediation landed and is ready for another adversarial pass.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8123,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath,
+    },
+  });
+
+  const requestReviewCalls = [];
+  const postCommentCalls = [];
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:05:00.000Z',
+    isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
+    requestReviewRereviewImpl: (...args) => {
+      requestReviewCalls.push(args);
+      return { status: 'pending', triggered: true };
+    },
+    postCommentImpl: async (args) => {
+      postCommentCalls.push(args);
+    },
+    auditWorkspaceForContaminationImpl: async () => ({
+      suspect: [],
+      error: 'git fetch origin release/2026.05 failed: remote ref disappeared',
+    }),
+  });
+
+  assert.equal(requestReviewCalls.length, 0);
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'failed');
+  assert.match(reconciled.jobPath, /data\/follow-up-jobs\/failed\/.+\.json$/);
+  assert.equal(reconciled.job.failure.code, 'branch-contamination-audit-error');
+  assert.equal(reconciled.job.rereview.requested, false);
+  assert.equal(
+    reconciled.job.completionMetadata.note,
+    'PR branch cleanliness could not be proven because the server-side git fetch/cherry audit failed; refused to request rereview.',
+  );
+  assert.equal(
+    reconciled.job.completionMetadata.auditError,
+    'git fetch origin release/2026.05 failed: remote ref disappeared',
+  );
+  assert.equal(postCommentCalls.length, 1);
+
+  const reviewRow = readReviewRow(rootDir);
+  assert.equal(reviewRow.review_status, 'posted');
+});
+
 test('reconcileFollowUpJob records a blocked re-review request when the watcher row is terminal malformed', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir, {
@@ -349,6 +437,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -463,6 +552,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
   const replyPath = hqReplyPathForJob(claimed.job);
   // Empty stdout — exactly what claude-code --print produces on a
@@ -504,6 +594,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -531,6 +622,7 @@ test('reconcileFollowUpJob honors a valid LEGACY-shape reply (no addressed[]) as
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
   const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, '', 'utf8');
@@ -570,6 +662,7 @@ test('reconcileFollowUpJob honors a valid LEGACY-shape reply (no addressed[]) as
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -597,6 +690,7 @@ test('reconcileFollowUpJob completes when stdout is empty and reply has reReview
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
   const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, '', 'utf8');
@@ -636,6 +730,7 @@ test('reconcileFollowUpJob completes when stdout is empty and reply has reReview
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   const reviewRow = readReviewRow(rootDir);
@@ -666,6 +761,7 @@ test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is emp
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
   const outputPath = path.join(artifactDir, 'codex-last-message.md');
   const replyPath = hqReplyPathForJob(claimed.job);
   writeFileSync(outputPath, '', 'utf8');
@@ -691,6 +787,7 @@ test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is emp
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -736,6 +833,7 @@ test('reconcileFollowUpJob still fails when stdout is empty AND no reply.json ex
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -815,6 +913,7 @@ test('reconcileFollowUpJob rejects a replyPath that lexically escapes the worksp
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -883,6 +982,7 @@ test('reconcileFollowUpJob rejects a replyPath that resolves through a symlink t
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   assert.equal(reconciled.reconciled, true);
@@ -947,6 +1047,7 @@ test('reconcileFollowUpJob completes when codex-last-message.md is missing entir
     now: () => '2026-05-02T13:05:00.000Z',
     isProcessAliveImpl: () => false,
     resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
   });
 
   const reviewRow = readReviewRow(rootDir);

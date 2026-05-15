@@ -161,6 +161,9 @@ in-progress
   ├─ reconcile sees valid rereview request but contamination audit fails
   │    └─ failed (branch-contamination)
   │
+  ├─ reconcile cannot complete contamination audit (fetch/cherry error)
+  │    └─ failed (branch-contamination-audit-error)
+  │
   ├─ reconcile sees no durable rereview request
   │    └─ stopped (no-progress)
   │

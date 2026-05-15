@@ -28,9 +28,10 @@ already-merged commits as if they were the PR's own work.
 Use this exact sequence — do not improvise:
 
 ```bash
-# 1. Refuse to operate on dirty state. If the worktree is dirty here,
-#    something earlier in the dispatch went wrong; surface as blocker.
-git -C "$PR_WORKTREE" diff --quiet HEAD || {
+# 1. Refuse to operate on dirty state, including untracked leftovers.
+#    If anything prints here, something earlier in the dispatch went
+#    wrong; surface as blocker.
+test -z "$(git -C "$PR_WORKTREE" status --porcelain --untracked-files=all)" || {
   echo "remediator: worktree dirty before rebase; aborting" >&2; exit 78;
 }
 

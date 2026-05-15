@@ -949,13 +949,12 @@ function resetWorkspaceDir(workspaceDir) {
  * upstream ref, then uses `git cherry origin/<baseBranch> HEAD` to flag
  * every commit on HEAD whose patch already lives upstream. `git cherry`
  * emits only right-side commits and prefixes patch-equivalent ones with
- * `-`, which makes it safe to parse directly. Both git invocations are
- * best-effort; on any failure we degrade to "no findings" so a flaky git
- * environment does not block reconciliation.
+ * `-`, which makes it safe to parse directly. This audit is load-bearing:
+ * reconcile must fail closed when fetch/cherry cannot prove cleanliness.
  *
  * Returns `{ suspect: [{ sha, subject }, ...], error: <message|null> }`.
- * Callers use a non-empty `suspect` list to refuse the rereview request
- * and surface a `branch-contamination` failure to the operator.
+ * Callers use either a non-empty `suspect` list or a non-null `error` to
+ * refuse the rereview request and surface a durable failure to the operator.
  */
 async function auditWorkspaceForContamination({
   workspaceDir,
@@ -1116,7 +1115,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Work on the PR branch that is already checked out in this repository clone.
 - This is one bounded remediation round. Do not create an autonomous retry loop inside the worker.
 - Before making code changes, rebase the PR branch onto a freshly-fetched \`origin/${baseBranch}\` so the remediation lands on top of current trunk. Use **exactly** this sequence — improvised variants will silently re-introduce already-merged commits as duplicates and corrupt the PR diff for the next reviewer pass:
-  1. Refuse to operate on dirty state: \`git diff --quiet HEAD\` must succeed.
+  1. Refuse to operate on dirty state: \`git status --porcelain --untracked-files=all\` must print nothing.
   2. Force-fetch first (never rebase against a cached remote-tracking ref): \`git fetch --prune origin ${baseBranch}\`. The fetch must succeed; if it fails, surface as a \`blockers[]\` entry and do not rebase.
   3. Rebase onto the freshly-fetched ref (NOT local \`${baseBranch}\`): \`git rebase origin/${baseBranch}\`. Git's built-in cherry-pick detection drops commits whose patch matches upstream; do not pass any flag that disables it.
   4. If the rebase produces conflicts, resolve them in-band — that is part of the remediation. Never \`git rebase --skip\` past a conflict; that drops your own work. If a conflict requires a design decision you cannot make on your own, abort the rebase and record a \`blockers[]\` entry.
@@ -2249,6 +2248,81 @@ async function reconcileFollowUpJob({
           baseBranch: job?.baseBranch || 'main',
           execFileImpl,
         });
+        if (contaminationAudit.error) {
+          rereview = buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: {
+              status: 'refused',
+              reason: 'branch-contamination-audit-error',
+              auditError: contaminationAudit.error,
+            },
+          });
+          const auditFailure = {
+            code: 'branch-contamination-audit-error',
+            message: [
+              `Branch cleanliness audit failed before rereview could be requested for origin/${job?.baseBranch || 'main'}.`,
+              contaminationAudit.error,
+              'Fix the workspace git state or upstream ref lookup, then retry remediation.',
+            ].join('\n'),
+          };
+          const { commentDelivery: auditFailureDelivery } = buildReconcileCommentDelivery({
+            job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: auditFailure,
+            now,
+          });
+          const failed = markFollowUpJobFailed({
+            rootDir,
+            jobPath,
+            failedAt: completedAt,
+            failureCode: 'branch-contamination-audit-error',
+            error: new Error(auditFailure.message),
+            remediationWorker: {
+              ...workerState,
+              state: 'failed',
+            },
+            failure: {
+              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+              auditError: contaminationAudit.error,
+            },
+            commentDelivery: auditFailureDelivery,
+            jobUpdates: {
+              completedAt,
+              remediationReply,
+              completionMetadata: {
+                source: 'reconcile:branch-contamination-audit-error',
+                note: 'PR branch cleanliness could not be proven because the server-side git fetch/cherry audit failed; refused to request rereview.',
+                auditError: contaminationAudit.error,
+              },
+              parsedReply,
+              rereview,
+            },
+          });
+
+          await postReconcileOutcomeCommentSafe({
+            rootDir,
+            jobPath: failed.jobPath,
+            job: failed.job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: auditFailure,
+            postCommentImpl,
+            alreadyTerminal: failed.alreadyTerminal,
+            now,
+            log,
+          });
+
+          return {
+            action: 'failed',
+            reason: 'branch-contamination-audit-error',
+            job: failed.job,
+            jobPath: failed.jobPath,
+          };
+        }
         if (contaminationAudit.suspect && contaminationAudit.suspect.length > 0) {
           rereview = buildRereviewResult({
             requested: false,

@@ -71,6 +71,12 @@ import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
+import {
+  insertReviewerPassStarted,
+  normalizeReviewerClass,
+  readTokenUsageFromSessionLedger,
+  updateReviewerPassCompleted,
+} from './reviewer-passes.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1293,6 +1299,29 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
       const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
         ? latestMaxRounds
         : roundBudget.roundBudget;
+      const passKind = reviewAttemptNumber > 1 ? 'rereview' : 'first-pass';
+
+      try {
+        insertReviewerPassStarted(db, {
+          repo: repoPath,
+          prNumber,
+          attemptNumber: reviewAttemptNumber,
+          reviewerClass: normalizeReviewerClass(route.reviewerModel),
+          passKind,
+          workspacePath: ROOT,
+          startedAt: attemptAt,
+          metadata: {
+            reviewerSessionUuid,
+            adapterSessionKey: reviewerSessionUuid,
+            reviewerModel: route.reviewerModel,
+            reviewerHeadSha,
+            builderTag: route.tag,
+            linearTicketId,
+          },
+        });
+      } catch (err) {
+        console.warn(`[watcher] reviewer_pass_start_write_failed ${repoPath}#${prNumber}: ${err?.message || err}`);
+      }
 
       const result = await spawnReviewer({
         repo: repoPath,
@@ -1311,6 +1340,35 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
       });
       if (result.ok) {
         healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
+      }
+
+      const endedAt = new Date().toISOString();
+      try {
+        const tokenResult = readTokenUsageFromSessionLedger({
+          rootDir: ROOT,
+          adapterSessionKeys: [reviewerSessionUuid, result.reattachToken].filter(Boolean),
+          workerRunId: result.reattachToken || null,
+          workspacePath: ROOT,
+          startedAt: attemptAt,
+          endedAt,
+        });
+        updateReviewerPassCompleted(db, {
+          repo: repoPath,
+          prNumber,
+          attemptNumber: reviewAttemptNumber,
+          passKind,
+          endedAt,
+          status: result.ok ? 'completed' : 'failed',
+          tokenUsage: tokenResult.tokenUsage,
+          metadataPatch: {
+            reattachToken: result.reattachToken || null,
+            tokenLookupReason: tokenResult.reason || null,
+            tokenLedgerDbPath: tokenResult.dbPath || null,
+            tokenRuntimeSessionIds: tokenResult.sessionIds || [],
+          },
+        });
+      } catch (err) {
+        console.warn(`[watcher] reviewer_pass_finish_write_failed ${repoPath}#${prNumber}: ${err?.message || err}`);
       }
 
       settleReviewerAttempt({

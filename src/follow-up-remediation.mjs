@@ -31,11 +31,17 @@ import {
 } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { redactSensitiveText } from './adapters/comms/github-pr-comments/redaction.mjs';
-import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
+import { openReviewStateDb, resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
 import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
 import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
+import {
+  insertReviewerPassStarted,
+  normalizeReviewerClass,
+  readTokenUsageFromSessionLedger,
+  upsertReviewerPass,
+} from './reviewer-passes.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -58,6 +64,97 @@ function normalizeBaseBranch(baseBranch) {
   if (typeof baseBranch !== 'string') return null;
   const trimmed = baseBranch.trim();
   return trimmed || null;
+}
+
+function remediationAttemptNumber(job) {
+  const currentRound = Number(job?.remediationPlan?.currentRound || 0);
+  return Number.isInteger(currentRound) && currentRound > 0 ? currentRound : 1;
+}
+
+function resolveWorkerRunId(job, worker = job?.remediationWorker) {
+  return worker?.workerRunId
+    || worker?.runId
+    || worker?.launchRequestId
+    || job?.workerRunId
+    || job?.launchRequestId
+    || null;
+}
+
+function resolveWorkerWorkspacePath(rootDir, worker = {}) {
+  const workspaceDir = worker?.workspaceDir;
+  if (!workspaceDir) return null;
+  return isAbsolute(workspaceDir) ? workspaceDir : resolve(rootDir, workspaceDir);
+}
+
+function recordRemediationReviewerPassStarted({ rootDir, job, worker, startedAt, log = console }) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    insertReviewerPassStarted(db, {
+      repo: job.repo,
+      prNumber: job.prNumber,
+      attemptNumber: remediationAttemptNumber(job),
+      reviewerClass: normalizeReviewerClass(worker?.model || worker?.workerClass || 'codex'),
+      passKind: 'remediation',
+      workerRunId: resolveWorkerRunId(job, worker),
+      workspacePath: resolveWorkerWorkspacePath(rootDir, worker),
+      startedAt,
+      metadata: {
+        jobId: job.jobId || null,
+        replyStorageKey: job.replyStorageKey || null,
+        launchRequestId: job.launchRequestId || null,
+      },
+    });
+  } catch (err) {
+    log.warn?.(`[follow-up-remediation] reviewer_pass_start_write_failed ${job?.repo}#${job?.prNumber}: ${err?.message || err}`);
+  } finally {
+    db.close();
+  }
+}
+
+function recordRemediationReviewerPassTerminal({ rootDir, job, action, now = () => new Date().toISOString(), log = console }) {
+  if (!['completed', 'failed', 'stopped'].includes(action)) return;
+  const worker = job?.remediationWorker || {};
+  if (worker.state === 'never-spawned') return;
+  const workerRunId = resolveWorkerRunId(job, worker);
+  const workspacePath = resolveWorkerWorkspacePath(rootDir, worker);
+  const startedAt = worker.spawnedAt || job.claimedAt || job.createdAt || now();
+  const endedAt = job.completedAt || job.failedAt || job.stoppedAt || worker.reconciledAt || now();
+  const tokenResult = readTokenUsageFromSessionLedger({
+    rootDir,
+    workerRunId,
+    adapterSessionKeys: [workerRunId, job.replyStorageKey, job.jobId].filter(Boolean),
+    workspacePath,
+    startedAt,
+    endedAt,
+  });
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    upsertReviewerPass(db, {
+      repo: job.repo,
+      prNumber: job.prNumber,
+      attemptNumber: remediationAttemptNumber(job),
+      reviewerClass: normalizeReviewerClass(worker.model || worker.workerClass || 'codex'),
+      passKind: 'remediation',
+      workerRunId,
+      workspacePath,
+      startedAt,
+      endedAt,
+      status: action === 'completed' ? 'completed' : (action === 'stopped' ? 'cancelled' : 'failed'),
+      tokenUsage: tokenResult.tokenUsage,
+      metadata: {
+        jobId: job.jobId || null,
+        jobStatus: job.status || null,
+        tokenLookupReason: tokenResult.reason || null,
+        tokenLedgerDbPath: tokenResult.dbPath || null,
+        tokenRuntimeSessionIds: tokenResult.sessionIds || [],
+      },
+    });
+  } catch (err) {
+    log.warn?.(`[follow-up-remediation] reviewer_pass_terminal_write_failed ${job?.repo}#${job?.prNumber}: ${err?.message || err}`);
+  } finally {
+    db.close();
+  }
 }
 
 async function fetchPRBaseBranch({
@@ -2843,6 +2940,13 @@ async function reconcileInProgressFollowUpJobs({
       execFileImpl,
       log,
     });
+    recordRemediationReviewerPassTerminal({
+      rootDir,
+      job: result.job,
+      action: result.action,
+      now,
+      log,
+    });
     results.push(result);
     /* eslint-enable no-await-in-loop */
   }
@@ -3124,6 +3228,13 @@ async function consumeNextFollowUpJob({
       },
     });
     spawnAttempted = true;
+    recordRemediationReviewerPassStarted({
+      rootDir,
+      job: updated.job,
+      worker: updated.job.remediationWorker,
+      startedAt: updated.job.remediationWorker?.spawnedAt || now(),
+      log,
+    });
 
     return {
       consumed: true,

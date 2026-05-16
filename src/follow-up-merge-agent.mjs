@@ -208,8 +208,11 @@ function extractOperatorNotes(prBody) {
 }
 
 function summarizeChecksConclusion(statusCheckRollup) {
-  if (!Array.isArray(statusCheckRollup) || statusCheckRollup.length === 0) {
+  if (!Array.isArray(statusCheckRollup)) {
     return null;
+  }
+  if (statusCheckRollup.length === 0) {
+    return 'SUCCESS';
   }
 
   let sawPending = false;
@@ -542,10 +545,13 @@ function pickNormalMergeAgentDispatchDetail({
   const checksConclusion = job?.checksConclusion == null
     ? null
     : String(job.checksConclusion).trim().toUpperCase();
+  if (checksConclusion === null) {
+    return { decision: 'skip-checks-unknown', trigger: null };
+  }
   if (checksConclusion === 'PENDING') {
     return { decision: 'skip-checks-pending', trigger: null };
   }
-  if (checksConclusion !== null && checksConclusion !== 'SUCCESS') {
+  if (checksConclusion !== 'SUCCESS') {
     return { decision: 'skip-checks-failed', trigger: null };
   }
 
@@ -553,7 +559,10 @@ function pickNormalMergeAgentDispatchDetail({
   const remediationMaxRounds = Number(job?.remediationMaxRounds);
   if (!Number.isFinite(remediationCurrentRound) || !Number.isFinite(remediationMaxRounds) || remediationMaxRounds <= 0) {
     return { decision: 'skip-remediation-state-unknown', trigger: null };
-  } else if (remediationCurrentRound < remediationMaxRounds && normalizedVerdict === 'request-changes') {
+  } else if (
+    remediationCurrentRound < remediationMaxRounds
+    && normalizedVerdict === 'request-changes'
+  ) {
     // request-changes verdict with budget left → let the remediation
     // loop continue. Merge-agent racing an in-flight remediation cycle
     // would either fight the remediation worker or merge a state the

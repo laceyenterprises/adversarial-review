@@ -21,6 +21,7 @@ import {
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
+  summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
 
 // Existing dispatchMergeAgentForPR tests assume agent-os (the hq CLI
@@ -443,6 +444,19 @@ test('operator-approved does NOT bypass unknown CI checks', () => {
   assert.equal(decision, 'skip-checks-unknown');
 });
 
+test('pickMergeAgentDispatch fails closed on unknown CI checks in the normal path', () => {
+  const decision = pickMergeAgentDispatch(makeJob({
+    checksConclusion: null,
+  }));
+  assert.equal(decision, 'skip-checks-unknown');
+});
+
+test('summarizeChecksConclusion distinguishes missing and empty status check rollups', () => {
+  assert.equal(summarizeChecksConclusion(undefined), null);
+  assert.equal(summarizeChecksConclusion({}), null);
+  assert.equal(summarizeChecksConclusion([]), 'SUCCESS');
+});
+
 test('operator-approved does NOT bypass closed/merged PRs', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
@@ -784,6 +798,15 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
   assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
   assert.equal(dispatchJob.operatorApproval.codeScopedAt, '2026-05-02T10:04:00.000Z');
+});
+
+test('pickMergeAgentDispatch can dispatch zero-check PRs from an explicit empty rollup', () => {
+  const dispatchJob = makeJob({
+    checksConclusion: summarizeChecksConclusion([]),
+  });
+
+  assert.equal(dispatchJob.checksConclusion, 'SUCCESS');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
 });
 
 test('operator-approved remains scoped when review posts update the PR after labeling', () => {
@@ -1653,6 +1676,7 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
   }
 
   const candidate = await candidatePromise;
+  assert.equal(candidate.checksConclusion, 'SUCCESS');
   assert.equal(candidate.operatorApprovalEvent.label, 'operator-approved');
   assert.equal(candidate.mergeAgentRequestEvent.label, 'merge-agent-requested');
 });

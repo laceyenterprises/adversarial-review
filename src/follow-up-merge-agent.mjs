@@ -208,8 +208,11 @@ function extractOperatorNotes(prBody) {
 }
 
 function summarizeChecksConclusion(statusCheckRollup) {
-  if (!Array.isArray(statusCheckRollup) || statusCheckRollup.length === 0) {
+  if (!Array.isArray(statusCheckRollup)) {
     return null;
+  }
+  if (statusCheckRollup.length === 0) {
+    return 'SUCCESS';
   }
 
   let sawPending = false;

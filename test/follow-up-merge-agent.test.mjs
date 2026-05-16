@@ -184,49 +184,78 @@ test('pickMergeAgentDispatchDetail does NOT override non-mergeable state with fi
   assert.equal(detail.trigger, null);
 });
 
-test('isFinalPassOnRequestChangesEnabled defaults ON and supports an explicit off-switch', () => {
-  // Default ON: env unset, missing, or empty value -> true. The legacy
-  // halt-at-max-rounds-reached behavior stranded every PR at the
-  // operator's desk; the merge-agent's own comment_only_followups
-  // sub-worker is the right place for the final substance triage.
-  assert.equal(isFinalPassOnRequestChangesEnabled({ env: {} }), true);
+test('isFinalPassOnRequestChangesEnabled defaults ON for unset/empty, off for explicit disable, fail-CLOSED on unknown', () => {
+  // Silent stub so the warn() call on unknown values doesn't noise up
+  // the test output.
+  const silentLogger = { warn: () => {} };
+
+  // Default ON: env unset OR empty.
+  assert.equal(isFinalPassOnRequestChangesEnabled({ env: {}, logger: silentLogger }), true);
   assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '' } }),
+    isFinalPassOnRequestChangesEnabled({
+      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '' },
+      logger: silentLogger,
+    }),
     true,
   );
   // Explicit off-switch values: 0 / false / no (case-insensitive).
   assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0' } }),
+    isFinalPassOnRequestChangesEnabled({
+      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0' },
+      logger: silentLogger,
+    }),
     false,
   );
   assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'false' } }),
+    isFinalPassOnRequestChangesEnabled({
+      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'false' },
+      logger: silentLogger,
+    }),
     false,
   );
   assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'NO' } }),
+    isFinalPassOnRequestChangesEnabled({
+      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'NO' },
+      logger: silentLogger,
+    }),
     false,
   );
-  // Explicit on (redundant with default but supported for clarity).
+  // Explicit on values (redundant with default but supported).
   assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1' } }),
+    isFinalPassOnRequestChangesEnabled({
+      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1' },
+      logger: silentLogger,
+    }),
     true,
   );
   assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'true' } }),
+    isFinalPassOnRequestChangesEnabled({
+      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'true' },
+      logger: silentLogger,
+    }),
     true,
   );
   assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'YES' } }),
+    isFinalPassOnRequestChangesEnabled({
+      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'YES' },
+      logger: silentLogger,
+    }),
     true,
   );
-  // Unknown value: fail-safe to default ON. A typo'd env should not
-  // silently disable the pipeline — easier to notice a missing
-  // disable than a missing PR merge.
+  // Unknown value: fail-CLOSED and log a warning. A typo'd env must NOT
+  // silently broaden merge authority.
+  const warnings = [];
+  const captureLogger = { warn: (msg) => warnings.push(msg) };
   assert.equal(
-    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'maybe' } }),
-    true,
+    isFinalPassOnRequestChangesEnabled({
+      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'maybe' },
+      logger: captureLogger,
+    }),
+    false,
   );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /maybe/);
+  assert.match(warnings[0], /falling back to OFF/);
 });
 
 test('pickMergeAgentDispatch fails closed on missing verdicts', () => {
@@ -354,22 +383,21 @@ test('pickMergeAgentDispatch dispatches a Request-changes PR when the operator-a
   assert.equal(decision, 'dispatch');
 });
 
-test('operator-approved must be scoped to the current head SHA', () => {
-  // Stale operator-approved scope means `operatorApproved` resolves to
-  // false, so under the default-ON final-pass flag the merge-agent is
-  // dispatched in triage mode rather than halting. The legacy
-  // `skip-operator-approval-stale` decision is preserved only behind an
-  // explicit `finalPassOnRequestChangesEnabled: false` opt-out (covered
-  // in a separate test); operator-approval scope enforcement now lives
-  // in the merge-agent triage, not in the dispatch gate.
+test('operator-approved must be scoped to the current head SHA (stale label hard-stops, even under default-ON final-pass)', () => {
+  // The `operator-approved` label is an explicit operator signal that
+  // this PR needed manual attention. A label scoped to an old head
+  // means the operator's approval is stale; the system must not
+  // override that with automation just because the budget is
+  // exhausted. This invariant is independent of the final-pass flag.
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
       labels: [{ name: 'operator-approved' }],
       operatorApproval: makeOperatorApproval({ headSha: 'old-sha' }),
     })),
-    'dispatch'
+    'skip-operator-approval-stale'
   );
+  // Explicit-off also surfaces the same stale-label diagnostic.
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
@@ -415,12 +443,13 @@ test('stale operator-approved label does not block a green normal dispatch', () 
   );
 });
 
-test('operator-approved fails closed when no attributed labeled event was fetched (legacy halt path explicitly disabled)', () => {
-  // Under the default-ON final-pass flag, an unattributed operator-approved
-  // label falls through to final-pass triage (the merge-agent itself owns
-  // any operator-approval scope verification at that point). The
-  // `skip-operator-approval-stale` decision is preserved as the
-  // explicit-disable behavior.
+test('operator-approved fails closed when no attributed labeled event was fetched (provenance gap hard-stops under any flag)', () => {
+  // Provenance failures (no attribution event, unknown actor) are
+  // unsafe states for an operator-approved label. The system must NOT
+  // expand merge authority into those degraded states regardless of
+  // the final-pass flag. A transient GitHub timeline fetch failure or
+  // malformed label event becoming an auto-merge trigger is a real
+  // control-plane regression — keep it hard-stop.
   const noAttribution = {
     lastVerdict: 'Request changes',
     labels: [{ name: 'operator-approved' }],
@@ -431,11 +460,12 @@ test('operator-approved fails closed when no attributed labeled event was fetche
     operatorApproval: makeOperatorApproval({ actor: 'unknown' }),
   };
 
-  // Default ON: dispatch with final-pass trigger (no halt at the dispatch gate).
-  assert.equal(pickMergeAgentDispatch(makeJob(noAttribution)), 'dispatch');
-  assert.equal(pickMergeAgentDispatch(makeJob(unknownActor)), 'dispatch');
+  // Default ON: still skip-operator-approval-stale (provenance gap is
+  // upstream of the final-pass branch).
+  assert.equal(pickMergeAgentDispatch(makeJob(noAttribution)), 'skip-operator-approval-stale');
+  assert.equal(pickMergeAgentDispatch(makeJob(unknownActor)), 'skip-operator-approval-stale');
 
-  // Explicit opt-out: legacy halt path preserved.
+  // Explicit opt-out: same behavior.
   const explicitOff = { recentDispatches: [], finalPassOnRequestChangesEnabled: false };
   assert.equal(
     pickMergeAgentDispatch(makeJob(noAttribution), explicitOff),

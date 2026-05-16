@@ -74,20 +74,32 @@ const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPEC
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 
-function isFinalPassOnRequestChangesEnabled({ env = process.env } = {}) {
+function isFinalPassOnRequestChangesEnabled({
+  env = process.env,
+  logger = console,
+} = {}) {
   const raw = env?.[FINAL_PASS_ON_REQUEST_CHANGES_ENV];
-  if (raw == null) return true; // default ON
+  if (raw == null) return true; // unset → default ON
   const normalized = String(raw).trim().toLowerCase();
-  if (normalized === '') return true; // explicit empty = use default
+  if (normalized === '') return true; // empty → default ON
   if (normalized === '0' || normalized === 'false' || normalized === 'no') {
     return false;
   }
   if (normalized === '1' || normalized === 'true' || normalized === 'yes') {
     return true;
   }
-  // Unknown value: fall back to default ON rather than silently
-  // disabling — easier to spot a typo than to chase a stranded PR.
-  return true;
+  // Unknown value: fail-CLOSED. A typo'd env should not silently broaden
+  // merge authority. Operators see a hard-log line they can grep for
+  // when triaging unexpected halt behavior.
+  if (logger && typeof logger.warn === 'function') {
+    logger.warn(
+      `[merge-agent] ${FINAL_PASS_ON_REQUEST_CHANGES_ENV}=${JSON.stringify(raw)} `
+      + 'is not a recognized boolean (use 1/true/yes or 0/false/no); '
+      + 'falling back to OFF (legacy halt-at-max-rounds-reached behavior). '
+      + 'Unset the env var to use the default-ON behavior.'
+    );
+  }
+  return false;
 }
 
 function isoNow() {
@@ -613,6 +625,22 @@ function pickNormalMergeAgentDispatchDetail({
   // defer if non-trivial) and refuse to merge when a blocker-class issue
   // is still standing. The trigger value lets the dispatch record and the
   // merge-agent prompt distinguish this from an operator-approved override.
+  // Stale or unverifiable operator-approved label always hard-stops,
+  // BEFORE the final-pass branch can fire. The label's presence is an
+  // operator signal that this PR needed manual review; we will not
+  // override that with automation just because the budget is
+  // exhausted. The label must be removed/reapplied with valid
+  // current-head scope to clear this state. Distinct from
+  // skip-request-changes (no label at all) so operators can tell the
+  // two failure modes apart in logs.
+  if (
+    normalizedVerdict === 'request-changes'
+    && !operatorApproved
+    && hasOperatorApprovedLabel
+  ) {
+    return { decision: 'skip-operator-approval-stale', trigger: null };
+  }
+
   if (
     normalizedVerdict === 'request-changes'
     && !operatorApproved
@@ -626,7 +654,7 @@ function pickNormalMergeAgentDispatchDetail({
 
   if (normalizedVerdict === 'request-changes' && !operatorApproved) {
     return {
-      decision: hasOperatorApprovedLabel ? 'skip-operator-approval-stale' : 'skip-request-changes',
+      decision: 'skip-request-changes',
       trigger: null,
     };
   }

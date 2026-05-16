@@ -589,7 +589,7 @@ function buildRemediationOutcomeCommentBody({
       lines.push(
         `> **Human intervention required.** This PR exhausted its \`${riskClass}\` risk-class remediation budget (${roundBudget} round${roundBudget === 1 ? '' : 's'}; completed: ${currentRound}). Review the prior rounds and either accept the PR as-is or reopen the linked spec to justify a higher \`riskClass\` before requesting more remediation.`
       );
-    } else if (reply && reply.outcome === 'blocked') {
+    } else if (reply && (reply.outcome === 'blocked' || reply.operationalBlockers?.length)) {
       lines.push('');
       lines.push(
         '> **Human intervention required.** The worker reported blockers it could not resolve in this round. See the blockers list below.'
@@ -658,7 +658,8 @@ function buildRemediationOutcomeCommentBody({
           || reply.validation?.length
           || reply.addressed?.length
           || reply.pushback?.length
-          || reply.blockers?.length)
+          || reply.blockers?.length
+          || reply.operationalBlockers?.length)
     );
     if (hasSalvagedContent && failure?.code === 'invalid-remediation-reply') {
       lines.push(
@@ -730,6 +731,16 @@ function buildRemediationOutcomeCommentBody({
     if (blockers) {
       lines.push('');
       lines.push('## Blockers');
+      lines.push('');
+      lines.push(blockers);
+    }
+  }
+
+  if (reply?.operationalBlockers?.length) {
+    const blockers = formatBlockersList(reply.operationalBlockers, '');
+    if (blockers) {
+      lines.push('');
+      lines.push('## Operational blockers');
       lines.push('');
       lines.push(blockers);
     }

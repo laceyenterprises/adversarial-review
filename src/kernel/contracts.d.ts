@@ -47,6 +47,13 @@ export interface RemediationReplyBlocker {
   needsHumanInput?: string;
 }
 
+export interface RemediationReplyOperationalBlocker {
+  title?: string;
+  finding: string;
+  reasoning?: string;
+  needsHumanInput?: string;
+}
+
 export interface RemediationReply {
   kind: 'adversarial-review-remediation-reply';
   schemaVersion: 1;
@@ -60,6 +67,10 @@ export interface RemediationReply {
   // persisted replies still parse during reconciliation. New producer
   // code should prefer structured RemediationReplyBlocker objects.
   blockers: readonly (string | RemediationReplyBlocker)[];
+  // Operational blockers describe git/process failures (for example
+  // branch contamination or stale PR head), not adversarial-review
+  // findings. They do not count toward per-finding coverage.
+  operationalBlockers?: readonly RemediationReplyOperationalBlocker[];
   reReview: {
     requested: boolean;
     reason?: string | null;

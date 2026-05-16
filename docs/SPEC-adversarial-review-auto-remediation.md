@@ -16,6 +16,40 @@ boundary, those modules should bind to these interfaces rather than fork new
 shapes. Until then, updates to the declaration file must keep the fixture and
 the runtime-bound JSDoc consumers in sync.
 
+## Remediation Reply Contract
+
+The durable remediation reply schema is the public contract between the worker,
+the validator, reconciliation, and the PR-comment renderer. `schemaVersion: 1`
+supports four accountability lanes:
+
+- `addressed[]` for blocking review findings that were fixed.
+- `pushback[]` for blocking review findings the worker deliberately left unchanged.
+- `blockers[]` for blocking review findings that hard-stop on required human input.
+- `operationalBlockers[]` for git/process failures that are not themselves review
+  findings, such as `branch-contamination`, `stale-pr-head`,
+  `push-lease-rejected`, `missing-auth`, `fetch-failed`, or `rebase-conflict`.
+
+`operationalBlockers[]` does not count toward per-finding coverage. A worker may
+therefore emit `addressed=[]`, `pushback=[]`, `blockers=[]`, and a non-empty
+`operationalBlockers[]` when the round stops before any remediation work begins,
+for example when the mandatory branch-contamination audit fails immediately after
+rebase. That early-exit shape must validate cleanly and render as an operational
+stop, not as a missing-per-finding-accountability error.
+
+Validation keeps three invariants load-bearing:
+
+- Per-finding coverage is enforced only across actual review findings
+  (`addressed[]`, `pushback[]`, `blockers[]`), with operational-only early exits
+  exempt because no review finding was processed yet.
+- Cross-field contradictions (`reReview.requested=true` while blockers remain,
+  `outcome="blocked"` without blockers, `outcome="completed"` with blockers)
+  apply only to structured-schema replies so legacy persisted string-blocker
+  artifacts remain readable under `schemaVersion: 1`.
+- Known operational blocker titles misplaced in `blockers[]` are normalized into
+  `operationalBlockers[]` as a worker-safety hatch, but title collisions with an
+  actual blocking review finding must fail loudly instead of being silently
+  relocated.
+
 ## Adversarial Gate Commit Status
 
 The watcher projects the durable adversarial-review ledger onto the PR head SHA as a GitHub commit status with context `agent-os/adversarial-gate` by default.

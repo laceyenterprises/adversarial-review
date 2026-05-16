@@ -1660,7 +1660,7 @@ test('buildRemediationOutcomeCommentBody redacts host-local paths smuggled into 
   assert.match(body, /## Pushback \(deliberately not changed\)/);
 });
 
-test('buildRemediationOutcomeCommentBody renders all four sections (summary, addressed, pushback, blockers) when populated', () => {
+test('buildRemediationOutcomeCommentBody renders all accountability and operational sections when populated', () => {
   // Stopped + worker-blocked: addressed[] documents partial work,
   // pushback[] documents deliberate disagreement on a separate finding,
   // blockers[] documents the hard exit. All three coexist.
@@ -1689,6 +1689,13 @@ test('buildRemediationOutcomeCommentBody renders all four sections (summary, add
           needsHumanInput: 'DBA approval + maintenance window',
         },
       ],
+      operationalBlockers: [
+        {
+          title: 'stale-pr-head',
+          finding: 'Remote PR head moved before push.',
+          reasoning: 'The orchestrator must replay the patch.',
+        },
+      ],
     },
     reReview: { requested: false },
   });
@@ -1697,6 +1704,7 @@ test('buildRemediationOutcomeCommentBody renders all four sections (summary, add
   assert.match(body, /## Addressed findings/);
   assert.match(body, /## Pushback \(deliberately not changed\)/);
   assert.match(body, /## Blockers/);
+  assert.match(body, /## Operational blockers/);
   // Structured blocker carries the originating review finding and a
   // needsHumanInput line so the human reviewer can see exactly which
   // finding was deferred and what input is needed.
@@ -1709,8 +1717,10 @@ test('buildRemediationOutcomeCommentBody renders all four sections (summary, add
   const idxAddressed = body.indexOf('Addressed findings');
   const idxPushback = body.indexOf('Pushback');
   const idxBlockers = body.indexOf('Blockers');
+  const idxOperational = body.indexOf('Operational blockers');
   assert.ok(idxAddressed < idxPushback, 'addressed renders before pushback');
   assert.ok(idxPushback < idxBlockers, 'pushback renders before blockers');
+  assert.ok(idxBlockers < idxOperational, 'review blockers render before operational blockers');
 });
 
 test('buildRemediationOutcomeCommentBody truncates an absurdly long Files: line on an addressed entry', () => {

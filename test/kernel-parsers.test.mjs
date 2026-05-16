@@ -71,7 +71,7 @@ test('kernel remediation-reply validator rejects blocked outcome with empty bloc
 
   assert.throws(
     () => validateRemediationReply(invalid, { expectedJob: remediationJob }),
-    /outcome is "blocked" but blockers is empty/
+    /outcome is "blocked" but blockers and operationalBlockers are empty/
   );
 });
 

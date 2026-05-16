@@ -57,17 +57,49 @@ const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPEC
 // (apply if trivial, defer if non-trivial, refuse to merge if a
 // blocker-class issue is still standing).
 //
-// This is a behavioral change to the merge pipeline, so it is gated
-// off by default. Operators flip MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=1
-// to enable it.
+// DEFAULT: ON. The legacy "halt at max-rounds-reached + Request changes"
+// behavior strands every PR at the operator's desk and grinds the
+// pipeline to a halt — see operator reports on PRs #426 (2026-05-14) and
+// #504 (2026-05-16). The remediation worker's job is to remediate, not
+// to be the gate that decides whether a PR can merge; the merge-agent +
+// comment_only_followups sub-worker are the right place for the final
+// substance triage, with the universal hard gates (failing CI,
+// non-mergeable state, blocker-class findings, hard-skip labels) still
+// applying as the safety floor.
+//
+// The env var stays as an explicit off-switch for operators who want
+// the legacy halt behavior (e.g., OSS deployments without a configured
+// merge-agent backend). Set MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=0
+// to disable.
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 
-function isFinalPassOnRequestChangesEnabled({ env = process.env } = {}) {
+function isFinalPassOnRequestChangesEnabled({
+  env = process.env,
+  logger = console,
+} = {}) {
   const raw = env?.[FINAL_PASS_ON_REQUEST_CHANGES_ENV];
-  if (raw == null) return false;
+  if (raw == null) return true; // unset → default ON
   const normalized = String(raw).trim().toLowerCase();
-  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+  if (normalized === '') return true; // empty → default ON
+  if (normalized === '0' || normalized === 'false' || normalized === 'no') {
+    return false;
+  }
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes') {
+    return true;
+  }
+  // Unknown value: fail-CLOSED. A typo'd env should not silently broaden
+  // merge authority. Operators see a hard-log line they can grep for
+  // when triaging unexpected halt behavior.
+  if (logger && typeof logger.warn === 'function') {
+    logger.warn(
+      `[merge-agent] ${FINAL_PASS_ON_REQUEST_CHANGES_ENV}=${JSON.stringify(raw)} `
+      + 'is not a recognized boolean (use 1/true/yes or 0/false/no); '
+      + 'falling back to OFF (legacy halt-at-max-rounds-reached behavior). '
+      + 'Unset the env var to use the default-ON behavior.'
+    );
+  }
+  return false;
 }
 
 function isoNow() {
@@ -593,6 +625,22 @@ function pickNormalMergeAgentDispatchDetail({
   // defer if non-trivial) and refuse to merge when a blocker-class issue
   // is still standing. The trigger value lets the dispatch record and the
   // merge-agent prompt distinguish this from an operator-approved override.
+  // Stale or unverifiable operator-approved label always hard-stops,
+  // BEFORE the final-pass branch can fire. The label's presence is an
+  // operator signal that this PR needed manual review; we will not
+  // override that with automation just because the budget is
+  // exhausted. The label must be removed/reapplied with valid
+  // current-head scope to clear this state. Distinct from
+  // skip-request-changes (no label at all) so operators can tell the
+  // two failure modes apart in logs.
+  if (
+    normalizedVerdict === 'request-changes'
+    && !operatorApproved
+    && hasOperatorApprovedLabel
+  ) {
+    return { decision: 'skip-operator-approval-stale', trigger: null };
+  }
+
   if (
     normalizedVerdict === 'request-changes'
     && !operatorApproved
@@ -606,7 +654,7 @@ function pickNormalMergeAgentDispatchDetail({
 
   if (normalizedVerdict === 'request-changes' && !operatorApproved) {
     return {
-      decision: hasOperatorApprovedLabel ? 'skip-operator-approval-stale' : 'skip-request-changes',
+      decision: 'skip-request-changes',
       trigger: null,
     };
   }

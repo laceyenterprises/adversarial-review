@@ -8,7 +8,6 @@ import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
 import {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
-  REMEDIATOR_DECLARED_CONVERGENCE_TRIGGER,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
   detectAgentOsPresence,
@@ -292,48 +291,33 @@ test('pickMergeAgentDispatch dispatches a clean comment-only verdict even with r
   assert.equal(decision, 'dispatch');
 });
 
-test('pickMergeAgentDispatch dispatches when remediator declared convergence (reReview.requested=false) even with old request-changes verdict', () => {
-  // PR #484 was the trigger: the remediator pushed fixes for every blocker
-  // and set reReview.requested=false in the remediation-reply. The PR's
-  // GitHub review body still shows the PRE-remediation 'Request changes'
-  // verdict (no re-review was posted by definition). Without honoring the
-  // convergence signal, the gate would skip merge-agent until the round
-  // budget exhausted — defeating the early-termination contract.
+test('pickMergeAgentDispatch keeps failed remediation outcomes fail-closed while request-changes remains claimable', () => {
   const detail = pickMergeAgentDispatchDetail(makeJob({
     lastVerdict: 'Request changes',
+    latestFollowUpJobStatus: 'failed',
     remediationCurrentRound: 1,
     remediationMaxRounds: 2,
-    latestReReviewRequested: false,
   }));
-  assert.equal(detail.decision, 'dispatch');
-  assert.equal(detail.trigger, REMEDIATOR_DECLARED_CONVERGENCE_TRIGGER);
+  assert.equal(detail.decision, 'skip-remediation-claimable');
+  assert.equal(detail.trigger, null);
 });
 
-test('pickMergeAgentDispatch dispatches with remediator-convergence trigger even when budget is already exhausted', () => {
-  // The convergence signal must dominate the budget-exhausted final-pass
-  // path too: if the remediator already declared the loop closed, we want
-  // the merge-agent prompt to know that (different trigger string =
-  // different prompt mode), not to fall through to the
-  // final-pass-on-budget-exhausted path even though both would dispatch.
+test('pickMergeAgentDispatch keeps stopped remediation outcomes fail-closed while request-changes remains claimable', () => {
   const detail = pickMergeAgentDispatchDetail(makeJob({
     lastVerdict: 'Request changes',
-    remediationCurrentRound: 2,
+    latestFollowUpJobStatus: 'stopped',
+    remediationCurrentRound: 1,
     remediationMaxRounds: 2,
-    latestReReviewRequested: false,
-  }), { finalPassOnRequestChangesEnabled: true });
-  assert.equal(detail.decision, 'dispatch');
-  assert.equal(detail.trigger, REMEDIATOR_DECLARED_CONVERGENCE_TRIGGER);
+  }));
+  assert.equal(detail.decision, 'skip-remediation-claimable');
+  assert.equal(detail.trigger, null);
 });
 
-test('pickMergeAgentDispatch still skips when remediator requested another review (reReview.requested=true)', () => {
-  // Symmetric guardrail: when the remediator DID request a re-review, the
-  // gate must continue to honor the rounds-claimable rule and wait for the
-  // remediation loop instead of merging mid-cycle.
+test('pickMergeAgentDispatch does not treat rereview metadata as a merge trigger', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     lastVerdict: 'Request changes',
     remediationCurrentRound: 1,
     remediationMaxRounds: 2,
-    latestReReviewRequested: true,
   }));
   assert.equal(decision, 'skip-remediation-claimable');
 });

@@ -1087,10 +1087,38 @@ async function dispatchMergeAgentForPR({
   const dispatchEnv = trigger
     ? { ...runtimeEnv, MERGE_AGENT_DISPATCH_TRIGGER: trigger }
     : runtimeEnv;
-  const { stdout } = await execFileImpl(resolvedHqPath, args, {
-    env: dispatchEnv,
-    maxBuffer: 5 * 1024 * 1024,
-  });
+  // Capture stderr + stdout on failure so callers can surface the
+  // actionable diagnostic in their log. Without this, watcher.mjs's
+  // catch block only sees `err.message = "Command failed: hq dispatch …"`
+  // and the real cause (e.g. `auto-tear-down of 'codex-lac-611'
+  // reported success but branch is still held`) is invisible until an
+  // operator manually re-runs the dispatch. Observed 2026-05-16T23:31Z
+  // for PR #552 — 4 dispatch failures all looked identical from the
+  // watcher's log; only by running hq dispatch by hand did the real
+  // error surface.
+  let execResult;
+  try {
+    execResult = await execFileImpl(resolvedHqPath, args, {
+      env: dispatchEnv,
+      maxBuffer: 5 * 1024 * 1024,
+    });
+  } catch (err) {
+    const stderrText = String(err?.stderr ?? '').trim();
+    const stdoutText = String(err?.stdout ?? '').trim();
+    const augmented = new Error(
+      `hq dispatch failed (exit code ${err?.code ?? 'unknown'}): ${err?.message || 'no message'}` +
+      (stderrText ? `\n  stderr:\n${stderrText.split('\n').map(l => `    ${l}`).join('\n')}` : '') +
+      (stdoutText ? `\n  stdout:\n${stdoutText.split('\n').map(l => `    ${l}`).join('\n')}` : '')
+    );
+    // Preserve the underlying error metadata so callers can branch on
+    // `err.code` / `err.stderr` if they need machine-readable handling.
+    augmented.code = err?.code;
+    augmented.stderr = err?.stderr;
+    augmented.stdout = err?.stdout;
+    augmented.cause = err;
+    throw augmented;
+  }
+  const { stdout } = execResult;
   const parsed = parseMergeAgentDispatchOutput(stdout);
 
   recordMergeAgentDispatch(rootDir, job, {

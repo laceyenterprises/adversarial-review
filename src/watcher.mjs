@@ -948,9 +948,25 @@ async function handlePostedReviewRow({
       `[watcher] merge-agent decision for ${repoPath}#${prNumber}: ${dispatched.decision}`
     );
   } catch (err) {
+    // The augmented error from `dispatchMergeAgentForPR` already
+    // inlines stderr+stdout into `err.message`, so just dumping
+    // `err.message` here surfaces the full diagnostic chain (rather
+    // than the bare "Command failed: hq dispatch …" the watcher used
+    // to log). For non-augmented errors (anything throwing from the
+    // outer try block that doesn't pass through the augment shim),
+    // also try `.stderr` / `.stdout` as a defense-in-depth fallback.
+    const errMessage = err?.message || String(err);
+    const errStderr = err?.stderr ? String(err.stderr).trim() : '';
+    const errStdout = err?.stdout ? String(err.stdout).trim() : '';
+    let detail = errMessage;
+    if (errStderr && !errMessage.includes('stderr:')) {
+      detail += `\n  stderr:\n${errStderr.split('\n').map(l => `    ${l}`).join('\n')}`;
+    }
+    if (errStdout && !errMessage.includes('stdout:')) {
+      detail += `\n  stdout:\n${errStdout.split('\n').map(l => `    ${l}`).join('\n')}`;
+    }
     logger.error(
-      `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:`,
-      err?.message || err
+      `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:\n${detail}`
     );
   }
 }

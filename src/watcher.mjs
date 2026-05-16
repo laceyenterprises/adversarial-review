@@ -903,7 +903,22 @@ async function handlePostedReviewRow({
   }
 }
 
-async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
+/**
+ * Poll for reviewable subjects once.
+ *
+ * `afterClaim` is a test-only observer used by the watcher claim-loop
+ * regression test to inspect the durable row immediately after a successful
+ * compare-and-swap claim. Production callers should leave it unset; observer
+ * failures are logged and ignored so a mistaken callback cannot suppress
+ * operator sync or reviewer spawn.
+ */
+async function pollOnce(
+  octokit,
+  {
+    healthProbe = watcherHealthProbe,
+    afterClaim = null,
+  } = {}
+) {
   const healthTick = healthProbe?.beginTick?.();
   try {
   const operatorSurface = createWatcherOperatorSurface();
@@ -1257,6 +1272,21 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
           `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
         );
         continue;
+      }
+      if (afterClaim) {
+        try {
+          await afterClaim({
+            repoPath,
+            prNumber,
+            reviewerHeadSha,
+            reviewerSessionUuid,
+          });
+        } catch (err) {
+          console.warn(
+            `[watcher] afterClaim observer failed for ${repoPath}#${prNumber}; continuing reviewer spawn:`,
+            err?.message || err
+          );
+        }
       }
       await operatorSurface.syncTriageStatus(
         subjectRefWithLinearTicket(subject.ref, linearTicketId),

@@ -244,6 +244,45 @@ test('remediator stage prompt snippets abort on unresolved rebase conflicts', ()
   }
 });
 
+test('buildRemediationPrompt keeps one stale-head policy across the shipped remediator prompt', () => {
+  for (const [currentRound, stage] of [
+    [0, 'first'],
+    [1, 'middle'],
+    [2, 'last'],
+  ]) {
+    const prompt = buildRemediationPrompt(makeJob({
+      remediationPlan: {
+        mode: 'bounded-manual-rounds',
+        maxRounds: 2,
+        currentRound,
+        rounds: [],
+      },
+    }), {
+      ...testReplyContext(),
+    });
+    assert.match(
+      prompt,
+      /If the remote PR branch changed while you were working, do not rebase onto it\./,
+      `full ${stage} prompt must stop on moved PR head`,
+    );
+    assert.match(
+      prompt,
+      /operationalBlockers\[\]` entry titled `stale-pr-head`/,
+      `full ${stage} prompt must keep stale-pr-head as the stop signal`,
+    );
+    assert.doesNotMatch(
+      prompt,
+      /git rebase origin\/<this-pr-branch>/,
+      `full ${stage} prompt must not tell workers to rebase onto the PR branch`,
+    );
+    assert.doesNotMatch(
+      prompt,
+      /do NOT bail to a human just because the head moved/,
+      `full ${stage} prompt must not carry the obsolete auto-replay wording`,
+    );
+  }
+});
+
 test('buildRemediationPrompt authorizes spec / governance doc updates when reviewer findings ask for them (post-2026-05-06)', () => {
   // The 2026-05-06 PR #267 review surfaced a feedback pattern: when
   // the reviewer asks for a SPEC.md / RUNBOOK update, the remediator

@@ -26,7 +26,7 @@ import {
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } from './watcher-poll-guard.mjs';
-import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import { ensureReviewStateSchema, openReviewStateDb, requestReviewRereview } from './review-state.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
   CASCADE_FAILURE_CAP,
@@ -1214,6 +1214,61 @@ async function pollOnce(
         } catch (err) {
           console.error(
             `[watcher] retrigger-review label processing failed for ${repoPath}#${prNumber}:`,
+            err?.message || err
+          );
+        }
+      }
+
+      // Auto-refresh stale posted reviews when the PR HEAD has moved.
+      //
+      // Without this, a `posted` review row sits forever even when the
+      // PR has been updated — D3 (downstream gate) sees the posted
+      // review is on an older head SHA and reports `stale review`,
+      // which blocks D4 from reaching `ready_to_merge`. Before this
+      // change the only recovery was operator-applied `retrigger-review`
+      // label, which doesn't scale to a backlog of PRs after a deploy.
+      //
+      // Confirmed root cause of the 20/23 D4 pending records observed
+      // at 2026-05-16T22:37Z that cited "stale review(s) on prior
+      // commits": 4 of 9 sampled PRs had `posted` rows with
+      // `reviewer_head_sha` != current PR head. The CAS in
+      // `stmtMarkAttemptStarted` reclaims only
+      // `pending | failed | pending-upstream`, never `posted` — so
+      // those rows stay stale until manual `retrigger-review`.
+      //
+      // This auto-refresh calls `requestReviewRereview`, whose own CAS
+      // refuses to flip `reviewing` (the watcher already has an active
+      // reviewer) — so a head change mid-tick can't race a duplicate
+      // spawn. The retrigger only fires when `reviewer_head_sha` is
+      // strictly different from the current `subject.headSha` and the
+      // PR is non-terminal, so we don't thrash a PR whose head matches.
+      if (
+        existing?.review_status === 'posted' &&
+        existing.reviewer_head_sha &&
+        subject.headSha &&
+        existing.reviewer_head_sha !== subject.headSha &&
+        !subject.terminal
+      ) {
+        try {
+          const refreshResult = requestReviewRereview({
+            rootDir: ROOT,
+            repo: repoPath,
+            prNumber,
+            reason: `auto-refresh: posted review on stale head ${existing.reviewer_head_sha.slice(0, 12)}; current head is ${subject.headSha.slice(0, 12)}`,
+          });
+          if (refreshResult.triggered) {
+            console.log(
+              `[watcher] auto-refresh stale posted review for ${repoPath}#${prNumber}: ` +
+                `${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)}`
+            );
+            // Re-read the row so the rest of the iteration sees the
+            // reset state; fall through to the spawn path below
+            // (status is now 'pending' and the CAS will claim it).
+            existing = stmtGetReviewRow.get(repoPath, prNumber);
+          }
+        } catch (err) {
+          console.error(
+            `[watcher] auto-refresh for ${repoPath}#${prNumber} failed:`,
             err?.message || err
           );
         }

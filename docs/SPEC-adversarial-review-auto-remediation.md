@@ -29,6 +29,12 @@ supports four accountability lanes:
   findings, such as `branch-contamination`, `stale-pr-head`,
   `push-lease-rejected`, `missing-auth`, `fetch-failed`, or `rebase-conflict`.
 
+`stale-pr-head` specifically means the remote PR branch moved while the worker
+was running and the patch must be replayed on that fresh PR head by the
+orchestrator/operator. The worker must not auto-rebase onto `origin/<pr-branch>`
+because a rewritten or force-pushed PR head can resurrect commits another writer
+intentionally removed.
+
 `operationalBlockers[]` does not count toward per-finding coverage. A worker may
 therefore emit `addressed=[]`, `pushback=[]`, `blockers=[]`, and a non-empty
 `operationalBlockers[]` when the round stops before any remediation work begins,

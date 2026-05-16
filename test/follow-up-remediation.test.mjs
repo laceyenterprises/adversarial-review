@@ -244,39 +244,43 @@ test('remediator stage prompt snippets abort on unresolved rebase conflicts', ()
   }
 });
 
-test('buildRemediationPrompt instructs workers to rebase onto a moved PR head, not bail (post-2026-05-16 ABC-3 incident)', () => {
-  // ABC-3 / PR #541 had a clean remediation patch (bb16ac62) that was
-  // refused at push time because the remote PR head had moved during
-  // the round. The prior prompt told workers "do not rebase onto the
-  // moved head; stop". That converted a routine concurrent-write into
-  // a human-required exit, and the operator complained that "stale PR
-  // head needs to never block these workers". The fix: encourage
-  // `git rebase origin/<pr-branch>` as the cheap correct recovery,
-  // reserving `stale-pr-head` for actual rebase-conflict cases.
-  const prompt = buildRemediationPrompt(makeJob(), {
-    template: 'You are a remediation worker.',
-    ...testReplyContext(),
-  });
-  assert.match(
-    prompt,
-    /do NOT bail to a human just because the head moved/,
-    'prompt must direct the worker to recover from moved head rather than bail',
-  );
-  assert.match(
-    prompt,
-    /git rebase origin\/<this-pr-branch>/,
-    'prompt must instruct an explicit rebase onto the moved PR head',
-  );
-  assert.match(
-    prompt,
-    /--force-with-lease/,
-    'prompt must require --force-with-lease so a further race aborts the push instead of overwriting',
-  );
-  assert.match(
-    prompt,
-    /stale-pr-head\` is reserved for actual rebase-conflict cases/,
-    'prompt must scope the stale-pr-head blocker title to the conflict-only case',
-  );
+test('buildRemediationPrompt keeps one stale-head policy across the shipped remediator prompt', () => {
+  for (const [currentRound, stage] of [
+    [0, 'first'],
+    [1, 'middle'],
+    [2, 'last'],
+  ]) {
+    const prompt = buildRemediationPrompt(makeJob({
+      remediationPlan: {
+        mode: 'bounded-manual-rounds',
+        maxRounds: 2,
+        currentRound,
+        rounds: [],
+      },
+    }), {
+      ...testReplyContext(),
+    });
+    assert.match(
+      prompt,
+      /If the remote PR branch changed while you were working, do not rebase onto it\./,
+      `full ${stage} prompt must stop on moved PR head`,
+    );
+    assert.match(
+      prompt,
+      /operationalBlockers\[\]` entry titled `stale-pr-head`/,
+      `full ${stage} prompt must keep stale-pr-head as the stop signal`,
+    );
+    assert.doesNotMatch(
+      prompt,
+      /git rebase origin\/<this-pr-branch>/,
+      `full ${stage} prompt must not tell workers to rebase onto the PR branch`,
+    );
+    assert.doesNotMatch(
+      prompt,
+      /do NOT bail to a human just because the head moved/,
+      `full ${stage} prompt must not carry the obsolete auto-replay wording`,
+    );
+  }
 });
 
 test('buildRemediationPrompt authorizes spec / governance doc updates when reviewer findings ask for them (post-2026-05-06)', () => {

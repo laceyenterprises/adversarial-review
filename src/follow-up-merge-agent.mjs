@@ -61,6 +61,7 @@ const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPEC
 // off by default. Operators flip MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=1
 // to enable it.
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
+const REMEDIATOR_DECLARED_CONVERGENCE_TRIGGER = 'remediator-declared-convergence';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 
 function isFinalPassOnRequestChangesEnabled({ env = process.env } = {}) {
@@ -351,6 +352,41 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   if (trigger) {
     lines.push(`- Dispatch trigger: ${trigger}`);
   }
+  if (trigger === REMEDIATOR_DECLARED_CONVERGENCE_TRIGGER) {
+    lines.push('');
+    lines.push('## Mode: remediator-declared-convergence');
+    lines.push('');
+    lines.push(
+      'The latest remediation worker on this PR set'
+      + ' `reReview.requested=false` in its reply, declaring that every'
+      + ' blocker was addressed and no further adversarial-review pass is'
+      + ' needed. The stale review verdict on GitHub still reads'
+      + ' `Request changes` only because no re-review was posted (by'
+      + ' definition — the remediator declared convergence). Treat this as'
+      + ' the pipeline\'s natural end.'
+    );
+    lines.push('');
+    lines.push('Required behavior:');
+    lines.push(
+      '1. Re-run your standard pre-merge safety checks (rebase against'
+      + ' base, verify required checks SUCCESS on the current head). Run'
+      + ' `comment_only_followups.py` against the latest review body so any'
+      + ' findings that the remediator did NOT touch get triaged. If triage'
+      + ' surfaces an actionable in-scope finding, apply it inline and'
+      + ' force-push; otherwise proceed to merge.'
+    );
+    lines.push(
+      '2. Hard-refuse the merge if any blocker-class finding surfaces'
+      + ' (data corruption, secret leakage, security regression, broken'
+      + ' external contract). The remediator\'s convergence claim does not'
+      + ' override your own blocker check.'
+    );
+    lines.push(
+      '3. Do not request another adversarial review. The remediator'
+      + ' already declared the loop closed; another pass would be pure'
+      + ' churn.'
+    );
+  }
   if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
     lines.push('');
     lines.push('## Mode: final-pass-on-budget-exhausted');
@@ -551,9 +587,30 @@ function pickNormalMergeAgentDispatchDetail({
 
   const remediationCurrentRound = Number(job?.remediationCurrentRound);
   const remediationMaxRounds = Number(job?.remediationMaxRounds);
+  // Remediator-declared convergence short-circuit: when the latest
+  // remediation reply set reReview.requested=false, the remediator is
+  // explicitly telling the pipeline "I addressed every blocker; no further
+  // review pass is needed." That is the pipeline's natural end regardless
+  // of the GitHub review body's verdict (which is the PRE-remediation
+  // verdict text, since no re-review was posted by definition) or of how
+  // many rounds remain in the budget. PR #484 was the live trigger: 5
+  // addressed / 0 blockers / no re-review, but the gate below saw the old
+  // 'request-changes' verdict + rounds-left and skipped merge-agent
+  // dispatch ('skip-remediation-claimable'). Dispatch unconditionally
+  // here with a dedicated trigger so the merge-agent prompt knows the
+  // remediator already vouched for the convergence.
+  if (job?.latestReReviewRequested === false) {
+    return {
+      decision: 'dispatch',
+      trigger: REMEDIATOR_DECLARED_CONVERGENCE_TRIGGER,
+    };
+  }
   if (!Number.isFinite(remediationCurrentRound) || !Number.isFinite(remediationMaxRounds) || remediationMaxRounds <= 0) {
     return { decision: 'skip-remediation-state-unknown', trigger: null };
-  } else if (remediationCurrentRound < remediationMaxRounds && normalizedVerdict === 'request-changes') {
+  } else if (
+    remediationCurrentRound < remediationMaxRounds
+    && normalizedVerdict === 'request-changes'
+  ) {
     // request-changes verdict with budget left → let the remediation
     // loop continue. Merge-agent racing an in-flight remediation cycle
     // would either fight the remediation worker or merge a state the
@@ -890,6 +947,7 @@ async function dispatchMergeAgentForPR({
   latestFollowUpJobStatus = null,
   remediationCurrentRound = null,
   remediationMaxRounds = null,
+  latestReReviewRequested = null,
   prUpdatedAt = null,
   operatorApproval = null,
   mergeAgentRequest = null,
@@ -918,6 +976,7 @@ async function dispatchMergeAgentForPR({
     latestFollowUpJobStatus,
     remediationCurrentRound,
     remediationMaxRounds,
+    latestReReviewRequested,
     prUpdatedAt,
     operatorApproval,
     mergeAgentRequest,
@@ -1130,12 +1189,27 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
   });
+  // PR #484 trigger: when the remediator's reply set reReview.requested=false
+  // (i.e., declared convergence: blockers addressed, no further review pass
+  // needed), the merge-agent gate must respect that signal. Without this,
+  // the gate only sees the PRE-remediation verdict text (still 'Request
+  // changes') and waits for budget to exhaust before dispatching merge-agent.
+  // Surface the boolean here so pickNormalMergeAgentDispatchDetail can
+  // short-circuit the verdict gate. Default to null when no remediation
+  // has run yet (first-pass-only PRs) — distinct from explicit false.
+  const reReview = latestJob?.reReview;
+  const latestReReviewRequested = reReview && typeof reReview === 'object'
+    ? (reReview.requested === false ? false
+        : reReview.requested === true ? true
+        : null)
+    : null;
   return {
     ...candidate,
     lastVerdict: extractReviewVerdict(latestJob?.reviewBody),
     latestFollowUpJobStatus: latestJob?.status || null,
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
+    latestReReviewRequested,
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),
     mergeAgentRequest: buildScopedMergeAgentRequest(candidate),
   };
@@ -1144,6 +1218,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
 export {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
+  REMEDIATOR_DECLARED_CONVERGENCE_TRIGGER,
   OPERATOR_APPROVED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_SKIP_LABELS,

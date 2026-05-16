@@ -95,6 +95,10 @@ const watcherHealthProbe = createWatcherHealthProbe();
 const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 
+function getWatcherTestHooks() {
+  return globalThis.__ADVERSARIAL_WATCHER_TEST_HOOKS__ || null;
+}
+
 function readWatcherDrainState({
   drainFile = WATCHER_DRAIN_FILE,
   now = new Date(),
@@ -1256,6 +1260,16 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
         console.log(
           `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
         );
+        continue;
+      }
+      const watcherTestHooks = getWatcherTestHooks();
+      watcherTestHooks?.onClaim?.({
+        repoPath,
+        prNumber,
+        reviewerHeadSha,
+        reviewerSessionUuid,
+      });
+      if (watcherTestHooks?.skipReviewerSpawnAfterClaim) {
         continue;
       }
       await operatorSurface.syncTriageStatus(

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run ESLint on staged .mjs/.js files in src/.
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^src/.*\.(mjs|js)$' || true)
+if [[ -n "$staged" ]]; then
+  npx eslint $staged || exit 1
+fi

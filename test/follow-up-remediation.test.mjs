@@ -244,6 +244,41 @@ test('remediator stage prompt snippets abort on unresolved rebase conflicts', ()
   }
 });
 
+test('buildRemediationPrompt instructs workers to rebase onto a moved PR head, not bail (post-2026-05-16 ABC-3 incident)', () => {
+  // ABC-3 / PR #541 had a clean remediation patch (bb16ac62) that was
+  // refused at push time because the remote PR head had moved during
+  // the round. The prior prompt told workers "do not rebase onto the
+  // moved head; stop". That converted a routine concurrent-write into
+  // a human-required exit, and the operator complained that "stale PR
+  // head needs to never block these workers". The fix: encourage
+  // `git rebase origin/<pr-branch>` as the cheap correct recovery,
+  // reserving `stale-pr-head` for actual rebase-conflict cases.
+  const prompt = buildRemediationPrompt(makeJob(), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+  assert.match(
+    prompt,
+    /do NOT bail to a human just because the head moved/,
+    'prompt must direct the worker to recover from moved head rather than bail',
+  );
+  assert.match(
+    prompt,
+    /git rebase origin\/<this-pr-branch>/,
+    'prompt must instruct an explicit rebase onto the moved PR head',
+  );
+  assert.match(
+    prompt,
+    /--force-with-lease/,
+    'prompt must require --force-with-lease so a further race aborts the push instead of overwriting',
+  );
+  assert.match(
+    prompt,
+    /stale-pr-head\` is reserved for actual rebase-conflict cases/,
+    'prompt must scope the stale-pr-head blocker title to the conflict-only case',
+  );
+});
+
 test('buildRemediationPrompt authorizes spec / governance doc updates when reviewer findings ask for them (post-2026-05-06)', () => {
   // The 2026-05-06 PR #267 review surfaced a feedback pattern: when
   // the reviewer asks for a SPEC.md / RUNBOOK update, the remediator

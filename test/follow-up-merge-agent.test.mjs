@@ -82,14 +82,30 @@ test('pickMergeAgentDispatch returns dispatch for green open PRs after remediati
   assert.equal(decision, 'dispatch');
 });
 
-test('pickMergeAgentDispatch blocks markdown-decorated Request changes verdicts', () => {
-  const decision = pickMergeAgentDispatch(makeJob({
+test('pickMergeAgentDispatch normalizes markdown-decorated Request changes verdicts (default ON dispatches with final-pass trigger)', () => {
+  // Verdict normalization must still strip markdown decoration. Under
+  // the default-ON flag the normalized verdict feeds the final-pass
+  // path; the legacy explicit-disable path keeps surfacing
+  // `skip-request-changes`.
+  const detailWithFlag = pickMergeAgentDispatchDetail(makeJob({
     lastVerdict: '**Request changes** - operator review required.',
   }));
-  assert.equal(decision, 'skip-request-changes');
+  assert.equal(detailWithFlag.decision, 'dispatch');
+  assert.equal(detailWithFlag.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+
+  const detailWithoutFlag = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: '**Request changes** - operator review required.',
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+  });
+  assert.equal(detailWithoutFlag.decision, 'skip-request-changes');
 });
 
-test('pickMergeAgentDispatchDetail still skips Request changes when final-pass flag is off (default)', () => {
+test('pickMergeAgentDispatchDetail skips Request changes when final-pass flag is explicitly disabled', () => {
+  // After 2026-05-16, the default for finalPassOnRequestChangesEnabled is
+  // ON — leaving the legacy halt behavior reachable only by explicit
+  // opt-out (env=0). This test pins the explicit-disable path.
   const detail = pickMergeAgentDispatchDetail(makeJob({
     lastVerdict: 'Request changes',
   }), {
@@ -168,12 +184,30 @@ test('pickMergeAgentDispatchDetail does NOT override non-mergeable state with fi
   assert.equal(detail.trigger, null);
 });
 
-test('isFinalPassOnRequestChangesEnabled reads the env flag', () => {
-  assert.equal(isFinalPassOnRequestChangesEnabled({ env: {} }), false);
+test('isFinalPassOnRequestChangesEnabled defaults ON and supports an explicit off-switch', () => {
+  // Default ON: env unset, missing, or empty value -> true. The legacy
+  // halt-at-max-rounds-reached behavior stranded every PR at the
+  // operator's desk; the merge-agent's own comment_only_followups
+  // sub-worker is the right place for the final substance triage.
+  assert.equal(isFinalPassOnRequestChangesEnabled({ env: {} }), true);
+  assert.equal(
+    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '' } }),
+    true,
+  );
+  // Explicit off-switch values: 0 / false / no (case-insensitive).
   assert.equal(
     isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0' } }),
     false,
   );
+  assert.equal(
+    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'false' } }),
+    false,
+  );
+  assert.equal(
+    isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'NO' } }),
+    false,
+  );
+  // Explicit on (redundant with default but supported for clarity).
   assert.equal(
     isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1' } }),
     true,
@@ -186,9 +220,12 @@ test('isFinalPassOnRequestChangesEnabled reads the env flag', () => {
     isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'YES' } }),
     true,
   );
+  // Unknown value: fail-safe to default ON. A typo'd env should not
+  // silently disable the pipeline — easier to notice a missing
+  // disable than a missing PR merge.
   assert.equal(
     isFinalPassOnRequestChangesEnabled({ env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'maybe' } }),
-    false,
+    true,
   );
 });
 
@@ -318,12 +355,30 @@ test('pickMergeAgentDispatch dispatches a Request-changes PR when the operator-a
 });
 
 test('operator-approved must be scoped to the current head SHA', () => {
+  // Stale operator-approved scope means `operatorApproved` resolves to
+  // false, so under the default-ON final-pass flag the merge-agent is
+  // dispatched in triage mode rather than halting. The legacy
+  // `skip-operator-approval-stale` decision is preserved only behind an
+  // explicit `finalPassOnRequestChangesEnabled: false` opt-out (covered
+  // in a separate test); operator-approval scope enforcement now lives
+  // in the merge-agent triage, not in the dispatch gate.
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
       labels: [{ name: 'operator-approved' }],
       operatorApproval: makeOperatorApproval({ headSha: 'old-sha' }),
     })),
+    'dispatch'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      labels: [{ name: 'operator-approved' }],
+      operatorApproval: makeOperatorApproval({ headSha: 'old-sha' }),
+    }), {
+      recentDispatches: [],
+      finalPassOnRequestChangesEnabled: false,
+    }),
     'skip-operator-approval-stale'
   );
 });
@@ -360,20 +415,34 @@ test('stale operator-approved label does not block a green normal dispatch', () 
   );
 });
 
-test('operator-approved fails closed when no attributed labeled event was fetched', () => {
+test('operator-approved fails closed when no attributed labeled event was fetched (legacy halt path explicitly disabled)', () => {
+  // Under the default-ON final-pass flag, an unattributed operator-approved
+  // label falls through to final-pass triage (the merge-agent itself owns
+  // any operator-approval scope verification at that point). The
+  // `skip-operator-approval-stale` decision is preserved as the
+  // explicit-disable behavior.
+  const noAttribution = {
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+  };
+  const unknownActor = {
+    lastVerdict: 'Request changes',
+    labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval({ actor: 'unknown' }),
+  };
+
+  // Default ON: dispatch with final-pass trigger (no halt at the dispatch gate).
+  assert.equal(pickMergeAgentDispatch(makeJob(noAttribution)), 'dispatch');
+  assert.equal(pickMergeAgentDispatch(makeJob(unknownActor)), 'dispatch');
+
+  // Explicit opt-out: legacy halt path preserved.
+  const explicitOff = { recentDispatches: [], finalPassOnRequestChangesEnabled: false };
   assert.equal(
-    pickMergeAgentDispatch(makeJob({
-      lastVerdict: 'Request changes',
-      labels: [{ name: 'operator-approved' }],
-    })),
+    pickMergeAgentDispatch(makeJob(noAttribution), explicitOff),
     'skip-operator-approval-stale'
   );
   assert.equal(
-    pickMergeAgentDispatch(makeJob({
-      lastVerdict: 'Request changes',
-      labels: [{ name: 'operator-approved' }],
-      operatorApproval: makeOperatorApproval({ actor: 'unknown' }),
-    })),
+    pickMergeAgentDispatch(makeJob(unknownActor), explicitOff),
     'skip-operator-approval-stale'
   );
 });
@@ -728,6 +797,10 @@ test('pickMergeAgentDispatch keeps state diagnostics ahead of idempotency skips'
     }),
     'skip-checks-failed'
   );
+  // Under default-ON final-pass, a stale operator-approved label routes
+  // through the final-pass dispatch path rather than surfacing
+  // `skip-operator-approval-stale`. The legacy halt code is still
+  // reachable via explicit flag-disable (asserted below).
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
@@ -735,6 +808,7 @@ test('pickMergeAgentDispatch keeps state diagnostics ahead of idempotency skips'
       operatorApproval: makeOperatorApproval({ headSha: 'old-sha' }),
     }), {
       recentDispatches: [recorded],
+      finalPassOnRequestChangesEnabled: false,
     }),
     'skip-operator-approval-stale'
   );
@@ -1084,25 +1158,57 @@ test('dispatchMergeAgentForPR honors MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES f
   );
 });
 
-test('dispatchMergeAgentForPR does NOT enable final-pass when the per-call env does not opt in', async () => {
+test('dispatchMergeAgentForPR defaults final-pass ON when env unset (no halt at budget-exhausted)', async () => {
+  // After 2026-05-16: the env default is ON. With env unset, a
+  // budget-exhausted Request-changes PR should still dispatch with the
+  // final-pass trigger rather than halting at the operator's desk.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      lastVerdict: 'Request changes',
+    }),
+    env: {
+      MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+      MERGE_AGENT_HQ_PROJECT: 'merge-project',
+      // flag intentionally absent — defaults to ON
+    },
+    execFileImpl: async (cmd, args, opts) => {
+      hqCalls.push({ cmd, args, env: opts?.env });
+      return { stdout: '{"dispatchId":"disp_default_on","lrq":"lrq_default_on"}\n' };
+    },
+    now: '2026-05-14T05:01:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+  assert.equal(
+    hqCalls[0].env?.MERGE_AGENT_DISPATCH_TRIGGER,
+    FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
+  );
+});
+
+test('dispatchMergeAgentForPR explicit opt-out preserves the legacy halt path', async () => {
+  // Operators who want the legacy halt-at-max-rounds-reached behavior can
+  // set MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=0 explicitly.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const result = await dispatchMergeAgentForPR({
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({
       lastVerdict: 'Request changes',
-      // Budget exhausted by default; without the flag the request-changes
-      // verdict should still halt the pipeline.
     }),
     env: {
       MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
       MERGE_AGENT_HQ_PROJECT: 'merge-project',
-      // flag intentionally absent
+      [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0',
     },
     execFileImpl: async () => {
-      throw new Error('execFileImpl should not be reached when verdict halts');
+      throw new Error('execFileImpl should not be reached when explicit opt-out halts');
     },
-    now: '2026-05-14T05:01:00.000Z',
+    now: '2026-05-14T05:02:00.000Z',
   });
 
   assert.equal(result.decision, 'skip-request-changes');

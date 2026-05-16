@@ -21,6 +21,7 @@ import {
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
+  summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
 
 // Existing dispatchMergeAgentForPR tests assume agent-os (the hq CLI
@@ -441,6 +442,17 @@ test('operator-approved does NOT bypass unknown CI checks', () => {
     checksConclusion: null,
   }));
   assert.equal(decision, 'skip-checks-unknown');
+});
+
+test('pickMergeAgentDispatch fails closed on unknown CI checks in the normal path', () => {
+  const decision = pickMergeAgentDispatch(makeJob({
+    checksConclusion: null,
+  }));
+  assert.equal(decision, 'skip-checks-unknown');
+});
+
+test('summarizeChecksConclusion returns null for an empty status check rollup', () => {
+  assert.equal(summarizeChecksConclusion([]), null);
 });
 
 test('operator-approved does NOT bypass closed/merged PRs', () => {
@@ -1653,6 +1665,7 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
   }
 
   const candidate = await candidatePromise;
+  assert.equal(candidate.checksConclusion, null);
   assert.equal(candidate.operatorApprovalEvent.label, 'operator-approved');
   assert.equal(candidate.mergeAgentRequestEvent.label, 'merge-agent-requested');
 });

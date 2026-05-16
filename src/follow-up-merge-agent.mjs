@@ -542,10 +542,13 @@ function pickNormalMergeAgentDispatchDetail({
   const checksConclusion = job?.checksConclusion == null
     ? null
     : String(job.checksConclusion).trim().toUpperCase();
+  if (checksConclusion === null) {
+    return { decision: 'skip-checks-unknown', trigger: null };
+  }
   if (checksConclusion === 'PENDING') {
     return { decision: 'skip-checks-pending', trigger: null };
   }
-  if (checksConclusion !== null && checksConclusion !== 'SUCCESS') {
+  if (checksConclusion !== 'SUCCESS') {
     return { decision: 'skip-checks-failed', trigger: null };
   }
 

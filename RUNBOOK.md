@@ -9,10 +9,15 @@ Any change touching the per-subject loop in `src/watcher.mjs` or reviewer follow
 Before merging watcher-loop changes, run the regression verification against the historical buggy commit:
 
 ```bash
+test -z "$(git status --porcelain --untracked-files=all)" || {
+  echo "working tree is dirty; stash or commit changes before running the regression check" >&2
+  exit 1
+}
 git fetch origin
-git checkout e664a4e
-git checkout <your-branch> -- test/watcher-claim-loop.test.mjs
-node --test test/watcher-claim-loop.test.mjs
+git worktree add ../watcher-claim-loop-regression e664a4e
+cp test/watcher-claim-loop.test.mjs ../watcher-claim-loop-regression/test/watcher-claim-loop.test.mjs
+(cd ../watcher-claim-loop-regression && node --test test/watcher-claim-loop.test.mjs)
+git worktree remove ../watcher-claim-loop-regression
 ```
 
 The historical case is documented in `docs/POSTMORTEM-adversarial-pipeline-down-2026-05-11.md` in the parent `agent-os` repository. The expected failure mode on `e664a4e` is `ReferenceError: pr is not defined`; the expected result on current code is a passing claim-loop test.

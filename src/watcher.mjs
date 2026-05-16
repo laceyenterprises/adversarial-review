@@ -95,10 +95,6 @@ const watcherHealthProbe = createWatcherHealthProbe();
 const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 
-function getWatcherTestHooks() {
-  return globalThis.__ADVERSARIAL_WATCHER_TEST_HOOKS__ || null;
-}
-
 function readWatcherDrainState({
   drainFile = WATCHER_DRAIN_FILE,
   now = new Date(),
@@ -907,7 +903,13 @@ async function handlePostedReviewRow({
   }
 }
 
-async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
+async function pollOnce(
+  octokit,
+  {
+    healthProbe = watcherHealthProbe,
+    afterClaim = null,
+  } = {}
+) {
   const healthTick = healthProbe?.beginTick?.();
   try {
   const operatorSurface = createWatcherOperatorSurface();
@@ -1262,16 +1264,12 @@ async function pollOnce(octokit, { healthProbe = watcherHealthProbe } = {}) {
         );
         continue;
       }
-      const watcherTestHooks = getWatcherTestHooks();
-      watcherTestHooks?.onClaim?.({
+      await afterClaim?.({
         repoPath,
         prNumber,
         reviewerHeadSha,
         reviewerSessionUuid,
       });
-      if (watcherTestHooks?.skipReviewerSpawnAfterClaim) {
-        continue;
-      }
       await operatorSurface.syncTriageStatus(
         subjectRefWithLinearTicket(subject.ref, linearTicketId),
         'in-review'

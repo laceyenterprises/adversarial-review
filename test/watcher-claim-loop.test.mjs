@@ -224,18 +224,11 @@ import assert from 'node:assert/strict';
 const githubCalls = [];
 const githubWrites = [];
 const fetchCalls = [];
+const claims = [];
 globalThis.fetch = async (...args) => {
   fetchCalls.push(args.map(String));
   throw new Error('unexpected fetch call from watcher claim-loop test');
 };
-globalThis.__ADVERSARIAL_WATCHER_TEST_HOOKS__ = {
-  skipReviewerSpawnAfterClaim: true,
-  claims: [],
-  onClaim(payload) {
-    this.claims.push(payload);
-  },
-};
-
 function readRows(db) {
   const rows = db.prepare(
     'SELECT repo, pr_number, review_status, reviewer_head_sha FROM reviewed_prs ORDER BY pr_number'
@@ -316,11 +309,14 @@ try {
       recordSpawn() {},
       async finishTick() {},
     },
+    afterClaim(payload) {
+      claims.push(payload);
+    },
   });
 
   console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
     rows: readRows(db),
-    claims: globalThis.__ADVERSARIAL_WATCHER_TEST_HOOKS__.claims,
+    claims,
     githubCalls,
     githubWrites,
     fetchCalls,
@@ -334,7 +330,7 @@ try {
 `;
 }
 
-test('watcher pollOnce claim loop handles subject-state head SHAs without external writes', () => {
+test('watcher pollOnce claim loop records subject-state head SHAs and drives the happy path', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
   const loaderPath = path.join(tmp, 'fixture-loader.mjs');
   const runnerPath = path.join(tmp, 'fixture-runner.mjs');
@@ -363,9 +359,9 @@ test('watcher pollOnce claim loop handles subject-state head SHAs without extern
     assert.ok(summaryLine, output);
     const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
 
-    assert.equal(summary.rows['101'].review_status, 'reviewing');
+    assert.equal(summary.rows['101'].review_status, 'posted');
     assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-happy-101');
-    assert.equal(summary.rows['102'].review_status, 'reviewing');
+    assert.equal(summary.rows['102'].review_status, 'posted');
     assert.equal(summary.rows['102'].reviewer_head_sha, null);
     assert.deepEqual(
       summary.claims.map((claim) => [claim.prNumber, claim.reviewerHeadSha]),
@@ -380,8 +376,19 @@ test('watcher pollOnce claim loop handles subject-state head SHAs without extern
     );
     assert.deepEqual(summary.githubWrites, []);
     assert.deepEqual(summary.fetchCalls, []);
-    assert.deepEqual(summary.operatorWrites, []);
-    assert.deepEqual(summary.reviewerSpawns, []);
+    assert.equal(summary.operatorWrites.length, 2);
+    assert.deepEqual(
+      summary.operatorWrites.map(([subjectRef, status]) => [subjectRef.subjectExternalId, status]),
+      [
+        ['laceyenterprises/adversarial-review#101', 'in-review'],
+        ['laceyenterprises/adversarial-review#102', 'in-review'],
+      ]
+    );
+    assert.equal(summary.reviewerSpawns.length, 2);
+    assert.ok(
+      summary.reviewerSpawns.every(Boolean),
+      'happy-path subjects should spawn reviewer work after the claim'
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

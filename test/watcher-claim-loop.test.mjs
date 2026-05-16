@@ -216,6 +216,14 @@ export async function load(url, context, nextLoad) {
 `;
 }
 
+function buildRegisterSource(loaderPath) {
+  return `
+import { register } from 'node:module';
+
+register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
+`;
+}
+
 function buildRunnerSource() {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
@@ -333,14 +341,16 @@ try {
 test('watcher pollOnce claim loop records subject-state head SHAs and drives the happy path', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
   const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
   const runnerPath = path.join(tmp, 'fixture-runner.mjs');
   try {
     writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource());
 
     const result = spawnSync(
       process.execPath,
-      ['--no-warnings', '--loader', pathToFileURL(loaderPath).href, runnerPath],
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',

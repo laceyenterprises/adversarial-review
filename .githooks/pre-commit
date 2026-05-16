@@ -16,16 +16,33 @@ if [[ ${#staged_files[@]} -eq 0 ]]; then
 fi
 
 stash_ref_before="$(git rev-parse -q --verify refs/stash || true)"
+stash_ref_after=""
 stash_name="pre-commit-eslint-keep-index"
 restore_stash=0
 
 restore_worktree() {
+  local status=$?
+  trap - EXIT INT TERM
   if [[ "$restore_stash" -eq 1 ]]; then
-    git stash pop -q --index >/dev/null
+    if ! git stash pop -q --index >/dev/null; then
+      cat >&2 <<EOF
+ERROR: pre-commit hook could not restore unstaged work from stash.
+Your edits are still recoverable from the stash entry created by this hook:
+  ${stash_ref_after:-refs/stash} (${stash_name})
+
+Inspect with:
+  git stash list --date=local
+
+Restore with:
+  git stash pop --index ${stash_ref_after:-refs/stash}
+EOF
+      status=1
+    fi
   fi
+  exit "$status"
 }
 
-trap restore_worktree EXIT
+trap restore_worktree EXIT INT TERM
 
 git stash push --keep-index --include-untracked -q -m "$stash_name" >/dev/null || true
 stash_ref_after="$(git rev-parse -q --verify refs/stash || true)"
@@ -33,4 +50,4 @@ if [[ "$stash_ref_after" != "$stash_ref_before" ]]; then
   restore_stash=1
 fi
 
-npx eslint "${staged_files[@]}"
+npx --no-install eslint "${staged_files[@]}"

@@ -66,6 +66,11 @@ import {
   retryPendingRetriggerAckComments,
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
+import {
+  RETRIGGER_REVIEW_LABEL,
+  retryPendingRetriggerReviewAckComments,
+  tryRetriggerReviewFromLabel,
+} from './follow-up-retrigger-review-label.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
@@ -959,6 +964,20 @@ async function pollOnce(
     console.error('[watcher] retrigger-remediation ack retry failed:', err?.message || err);
   }
 
+  try {
+    const reviewAckRetry = await retryPendingRetriggerReviewAckComments({
+      rootDir: ROOT,
+      execFileImpl: execFileAsync,
+    });
+    if (reviewAckRetry.attempted > 0) {
+      console.log(
+        `[watcher] retrigger-review ack retry: attempted=${reviewAckRetry.attempted} posted=${reviewAckRetry.posted}`
+      );
+    }
+  } catch (err) {
+    console.error('[watcher] retrigger-review ack retry failed:', err?.message || err);
+  }
+
   const watcherDrain = readWatcherDrainState();
   if (watcherDrain.active) {
     console.log(
@@ -1101,6 +1120,53 @@ async function pollOnce(
         } catch (err) {
           console.error(
             `[watcher] retrigger-remediation label processing failed for ${repoPath}#${prNumber}:`,
+            err?.message || err
+          );
+        }
+      }
+
+      // PR-side `retrigger-review` label (post-2026-05-16 refactor):
+      // any actor with PR-label permission (operator, merge-agent,
+      // codex/claude-code worker) can request a one-shot fresh
+      // adversarial review on the current HEAD by applying the label.
+      // The watcher resets the review row to 'pending' (so the next
+      // tick re-reviews), removes the label, and posts an ack comment.
+      // No remediation budget bump; no follow-up-job requeue. The
+      // fresh review verdict drives the downstream merge-agent vs
+      // remediation decision normally.
+      //
+      // Before this refactor, `retrigger-review` was a write-only marker
+      // applied by merge-agent.sh with no consumer — the label add was
+      // a noop and the merge-agent's `apply_retrigger_review_label`
+      // failing silently caused the 10-min poll_checks_green hang
+      // bug observed 2026-05-16T18Z.
+      if (prLabelNames.includes(RETRIGGER_REVIEW_LABEL)) {
+        try {
+          const labelControl = await operatorSurface.observeLabelControl(
+            subject.ref,
+            subject.ref.revisionRef,
+            RETRIGGER_REVIEW_LABEL
+          );
+          const labelEvent = legacyLabelEventFromControlResult(
+            labelControl,
+            RETRIGGER_REVIEW_LABEL
+          );
+          const result = await tryRetriggerReviewFromLabel({
+            rootDir: ROOT,
+            repo: repoPath,
+            prNumber,
+            labelActor: labelEvent?.actor || 'unknown',
+            labelEvent,
+            revisionRef: subject.ref.revisionRef,
+            execFileImpl: execFileAsync,
+          });
+          console.log(
+            `[watcher] retrigger-review label on ${repoPath}#${prNumber}: ${result.outcome}` +
+              (result.detail ? ` (${result.detail})` : '')
+          );
+        } catch (err) {
+          console.error(
+            `[watcher] retrigger-review label processing failed for ${repoPath}#${prNumber}:`,
             err?.message || err
           );
         }

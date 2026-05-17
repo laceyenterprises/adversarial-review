@@ -9,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -26,7 +27,18 @@ const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 const DEFAULT_HQ_PATH = 'hq';
-const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
+const ACTIVE_WORKER_RUN_STATUSES = new Set([
+  'pending',
+  'queued',
+  'requested',
+  'expected',
+  'leased',
+  'starting',
+  'running',
+  'in_progress',
+  'waiting_approval',
+  'waiting_input',
+]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
 // "I approve merging this current PR head now; do not wait for the
@@ -121,25 +133,79 @@ function deriveOriginalWorkerIdFromBranch(branch) {
   return workerId || null;
 }
 
-function readJsonFile(filePath) {
+function readJsonFileDetailed(filePath) {
   try {
-    return JSON.parse(readFileSync(filePath, 'utf8'));
+    return { ok: true, value: JSON.parse(readFileSync(filePath, 'utf8')) };
+  } catch (err) {
+    return { ok: false, error: err };
+  }
+}
+
+function resolveHqRoot(env = {}) {
+  const root = String(env.HQ_ROOT || '').trim();
+  return root || null;
+}
+
+function resolveHqOwner(hqRoot) {
+  if (!hqRoot) return null;
+  const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
+  return config.ok ? String(config.value?.ownerUser || '').trim() || null : null;
+}
+
+function currentUser(env = process.env) {
+  const explicit = String(env.USER || env.LOGNAME || '').trim();
+  if (explicit) return explicit;
+  try {
+    return userInfo().username;
   } catch {
     return null;
   }
 }
 
-function resolveHqRoot(env = {}) {
-  return String(env.HQ_ROOT || DEFAULT_HQ_ROOT);
+function isTerminalWorkerRunStatus(status) {
+  const normalized = normalizeWorkerRunStatus(status);
+  return Boolean(normalized) && !ACTIVE_WORKER_RUN_STATUSES.has(normalized);
+}
+
+function formatExecFailure(command, err) {
+  const stderrText = String(err?.stderr ?? '').trim();
+  const stdoutText = String(err?.stdout ?? '').trim();
+  const augmented = new Error(
+    `${command} failed (exit code ${err?.code ?? 'unknown'}): ${err?.message || 'no message'}` +
+    (stderrText ? `\n  stderr:\n${stderrText.split('\n').map(l => `    ${l}`).join('\n')}` : '') +
+    (stdoutText ? `\n  stdout:\n${stdoutText.split('\n').map(l => `    ${l}`).join('\n')}` : '')
+  );
+  augmented.code = err?.code;
+  augmented.stderr = err?.stderr;
+  augmented.stdout = err?.stdout;
+  augmented.cause = err;
+  return augmented;
+}
+
+function readWorkerWorkspace(workerDir) {
+  const workspacePath = join(workerDir, 'workspace.json');
+  const workspace = readJsonFileDetailed(workspacePath);
+  if (workspace.ok) {
+    return { found: true, workspace: workspace.value };
+  }
+  if (workspace.error?.code === 'ENOENT') {
+    return { found: false, reason: 'workspace-missing' };
+  }
+  return {
+    found: false,
+    reason: 'workspace-read-failed',
+    detail: workspace.error?.message || String(workspace.error),
+    code: workspace.error?.code || null,
+  };
 }
 
 function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
   if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
     return String(env.AGENT_OS_SESSION_LEDGER_DB_PATH);
   }
-  const config = readJsonFile(join(hqRoot, '.hq', 'config.json'));
-  if (config?.ledgerDbPath) {
-    return String(config.ledgerDbPath);
+  const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
+  if (config.ok && config.value?.ledgerDbPath) {
+    return String(config.value.ledgerDbPath);
   }
   return null;
 }
@@ -158,11 +224,12 @@ async function lookupOriginalWorkerRunStatus({
   hqRoot,
   env,
 } = {}) {
-  const workspace = readJsonFile(join(workerDir, 'workspace.json'));
-  const run = readJsonFile(join(workerDir, 'run.json'));
+  const workspace = readWorkerWorkspace(workerDir).workspace || null;
+  const run = readJsonFileDetailed(join(workerDir, 'run.json'));
+  const runRecord = run.ok ? run.value : null;
   const launchRequestId = workspace?.launchRequestId || workspace?.dispatchId
-    || run?.launchRequestId || run?.dispatchId || null;
-  const runId = run?.runId || null;
+    || runRecord?.launchRequestId || runRecord?.dispatchId || null;
+  const runId = runRecord?.runId || null;
   if (!launchRequestId && !runId) {
     return { found: false, reason: 'missing-launch-request-id' };
   }
@@ -242,16 +309,46 @@ async function prepareOriginalWorkerForMergeAgent({
   }
 
   const hqRoot = resolveHqRoot(env);
+  if (!hqRoot) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: 'hq-root-unset',
+      at: now,
+    });
+    return {
+      decision: 'ready',
+      reason: 'hq-root-unset',
+      originalWorkerId,
+      hqRoot: null,
+    };
+  }
   const workerDir = join(hqRoot, 'workers', originalWorkerId);
-  const workspace = readJsonFile(join(workerDir, 'workspace.json'));
+  const workspaceState = readWorkerWorkspace(workerDir);
+  const workspace = workspaceState.workspace || null;
   const workspacePath = workspace?.workspacePath || workspace?.worktreePath || null;
 
-  if (!existsSync(workerDir) || !workspace || (workspacePath && !existsSync(workspacePath))) {
+  if (!existsSync(workerDir) || workspaceState.reason === 'workspace-missing' || (workspacePath && !existsSync(workspacePath))) {
     return {
       decision: 'ready',
       reason: 'original-worker-already-torn-down',
       originalWorkerId,
       hqRoot,
+    };
+  }
+  if (!workspaceState.found) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.workspace_read_failed', {
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: workspaceState.reason || 'workspace-read-failed',
+      detail: workspaceState.detail || null,
+      code: workspaceState.code || null,
+      at: now,
+    });
+    return {
+      decision: 'deferred',
+      reason: workspaceState.reason || 'workspace-read-failed',
+      originalWorkerId,
     };
   }
 
@@ -265,7 +362,7 @@ async function prepareOriginalWorkerForMergeAgent({
       launchRequestId: runStatus.launchRequestId || null,
     };
   }
-  const mayTearDown = runStatus.found && runStatus.status === 'succeeded';
+  const mayTearDown = runStatus.found && isTerminalWorkerRunStatus(runStatus.status);
   const prStateOverride = prStateAllowsOriginalWorkerTeardown(job);
 
   if (!mayTearDown && !prStateOverride) {
@@ -289,9 +386,45 @@ async function prepareOriginalWorkerForMergeAgent({
     };
   }
 
+  const ownerUser = resolveHqOwner(hqRoot);
+  const runtimeUser = currentUser(env);
+  if (ownerUser && runtimeUser && ownerUser !== runtimeUser) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: 'hq-owner-mismatch',
+      hq_root: hqRoot,
+      hq_owner_user: ownerUser,
+      runtime_user: runtimeUser,
+      at: now,
+    });
+    return {
+      decision: 'deferred',
+      reason: 'hq-owner-mismatch',
+      originalWorkerId,
+      workerStatus: runStatus.status || null,
+      launchRequestId: runStatus.launchRequestId || null,
+    };
+  }
+
   const args = ['worker', 'tear-down', originalWorkerId, '--force', '--root', hqRoot];
-  await execFileImpl(hqPath, args, { env, maxBuffer: 5 * 1024 * 1024 });
-  mergeAgentLifecycleLog(logger, 'merge_agent.original_worker_tornDown', {
+  try {
+    await execFileImpl(hqPath, args, { env, maxBuffer: 5 * 1024 * 1024 });
+  } catch (err) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_failed', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: 'tear-down-command-failed',
+      worker_status: runStatus.status || null,
+      stderr: String(err?.stderr ?? '').trim() || null,
+      stdout: String(err?.stdout ?? '').trim() || null,
+      at: now,
+    });
+    throw formatExecFailure('hq worker tear-down', err);
+  }
+  mergeAgentLifecycleLog(logger, 'merge_agent.original_worker_torn_down', {
     lrq: runStatus.launchRequestId || null,
     original_worker_id: originalWorkerId,
     pr_number: job?.prNumber ?? null,
@@ -1323,20 +1456,7 @@ async function dispatchMergeAgentForPR({
       maxBuffer: 5 * 1024 * 1024,
     });
   } catch (err) {
-    const stderrText = String(err?.stderr ?? '').trim();
-    const stdoutText = String(err?.stdout ?? '').trim();
-    const augmented = new Error(
-      `hq dispatch failed (exit code ${err?.code ?? 'unknown'}): ${err?.message || 'no message'}` +
-      (stderrText ? `\n  stderr:\n${stderrText.split('\n').map(l => `    ${l}`).join('\n')}` : '') +
-      (stdoutText ? `\n  stdout:\n${stdoutText.split('\n').map(l => `    ${l}`).join('\n')}` : '')
-    );
-    // Preserve the underlying error metadata so callers can branch on
-    // `err.code` / `err.stderr` if they need machine-readable handling.
-    augmented.code = err?.code;
-    augmented.stderr = err?.stderr;
-    augmented.stdout = err?.stdout;
-    augmented.cause = err;
-    throw augmented;
+    throw formatExecFailure('hq dispatch', err);
   }
   const { stdout } = execResult;
   const parsed = parseMergeAgentDispatchOutput(stdout);
@@ -1470,6 +1590,7 @@ export {
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
+  lookupOriginalWorkerRunStatus,
   prepareOriginalWorkerForMergeAgent,
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,

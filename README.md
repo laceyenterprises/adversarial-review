@@ -240,13 +240,18 @@ On Agent OS hosts, a successful gate can also hand the PR to the
 `merge-agent` worker class. Before invoking `hq dispatch --worker-class
 merge-agent`, the watcher derives the original worker id from the PR head
 branch prefix (for example `codex-lac-660/...` -> `codex-lac-660`) and
-tears down that original worker only if its `worker_runs` row is
-`succeeded`, or the PR lifecycle is already terminal. This frees the PR
-branch for the merge-agent worktree without using `git worktree add
---force`. If the original worker is still active, the watcher logs a
-structured `merge_agent.dispatch_deferred` event and skips that tick; the
-next watcher tick retries. Successful cleanup logs
-`merge_agent.original_worker_tornDown` with the PR number, original worker
+tears down that original worker only when `HQ_ROOT` is set, the watcher
+already owns that HQ root, and the worker's `worker_runs.status` is no
+longer active (`running` / `pending` / `leased` / similar), or the PR
+lifecycle is already terminal. This frees the PR branch for the
+merge-agent worktree without using `git worktree add --force`. If
+`HQ_ROOT` is unset, the HQ owner differs from the watcher runtime user,
+or the original worker is still active, the watcher logs a structured
+skip/defer event and leaves the existing dispatch path to retry or fail
+with its own diagnostics. Active original workers specifically emit
+`merge_agent.dispatch_deferred` and skip that tick; the next watcher tick
+retries. Successful cleanup logs
+`merge_agent.original_worker_torn_down` with the PR number, original worker
 id, and launch request id.
 
 Operator surface, when something needs intervention:

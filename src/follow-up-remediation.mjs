@@ -2028,10 +2028,26 @@ async function resolveJobPRLifecycleSafe({
 //     because requestReviewRereview refuses pr_state != 'open' anyway,
 //     but a separate code so operator reporting can distinguish "we
 //     shipped this" from "we abandoned this".
-function lifecycleStopDecision(lifecycle, { repo, prNumber, site }) {
+//   - stale-review-head — the follow-up job was created from a review
+//     of an older PR head. A newer head means another remediation worker
+//     already moved the branch, so this stale job must not spawn and race
+//     the current state.
+function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) {
   if (!lifecycle) return null;
   const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber, site });
   if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') {
+    const jobRevisionRef = typeof job?.revisionRef === 'string' ? job.revisionRef.trim() : '';
+    const currentHeadSha = typeof lifecycle.headSha === 'string' ? lifecycle.headSha.trim() : '';
+    if (jobRevisionRef && currentHeadSha && jobRevisionRef !== currentHeadSha) {
+      const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
+      return {
+        stopCode: 'stale-review-head',
+        actionReason: 'stale-review-head',
+        workerState: site === 'consume' ? 'never-spawned' : 'completed-stale-review-head',
+        stopReason: `Review follow-up for ${repo}#${prNumber} was created for head ${jobRevisionRef}` +
+          ` but the current PR head is ${currentHeadSha}${sourceTag}; stopping instead of racing a stale remediation job.`,
+      };
+    }
     return staleDriftStop;
   }
 
@@ -2119,6 +2135,7 @@ async function reconcileFollowUpJob({
     repo: job.repo,
     prNumber: job.prNumber,
     site: 'reconcile',
+    job,
   });
   if (lifecycleStop) {
     const lifecycleStoppedAt = now();
@@ -3010,6 +3027,7 @@ async function consumeNextFollowUpJob({
     repo: claimed.job.repo,
     prNumber: claimed.job.prNumber,
     site: 'consume',
+    job: claimed.job,
   });
   if (lifecycleStop) {
     if (lifecycleStop.logMessage) {
@@ -3017,7 +3035,7 @@ async function consumeNextFollowUpJob({
     }
     const stoppedAt = now();
     let stopped;
-    if (lifecycleStop.stopCode === 'stale-drift') {
+    if (lifecycleStop.stopCode === 'stale-drift' || lifecycleStop.stopCode === 'stale-review-head') {
       stopped = await markFollowUpJobStopped({
         rootDir,
         jobPath: claimed.jobPath,

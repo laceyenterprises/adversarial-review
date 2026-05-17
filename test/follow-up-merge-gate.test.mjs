@@ -285,6 +285,52 @@ test('consumeNextFollowUpJob stops stale-drift without posting a PR comment', as
   assert.equal(stopped.json.remediationWorker.state, 'never-spawned');
 });
 
+test('consumeNextFollowUpJob stops stale review-head jobs without spawning or posting a PR comment', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = setupPendingJob(rootDir, { prNumber: 105, revisionRef: 'old-head-sha' });
+
+  let postCommentFired = false;
+  let cloneFired = false;
+  const result = await consumeNextFollowUpJob({
+    rootDir,
+    promptTemplate: 'unused',
+    execFileImpl: async (command, args) => {
+      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        cloneFired = true;
+      }
+      return { stdout: '', stderr: '' };
+    },
+    spawnImpl: () => {
+      throw new Error('worker should not spawn');
+    },
+    postCommentImpl: async () => {
+      postCommentFired = true;
+      return { posted: true };
+    },
+    now: () => '2026-05-02T11:00:00.000Z',
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergedAt: null,
+      closedAt: null,
+      labels: [],
+      headSha: 'new-head-sha',
+    }),
+  });
+
+  assert.equal(result.consumed, false);
+  assert.equal(result.reason, 'stale-review-head');
+  assert.equal(postCommentFired, false);
+  assert.equal(cloneFired, false);
+
+  const stopped = findStoppedJobOnDisk(rootDir, created.job.jobId);
+  assert.ok(stopped);
+  assert.equal(stopped.json.remediationPlan.stop.code, 'stale-review-head');
+  assert.match(stopped.json.remediationPlan.stop.reason, /old-head-sha/);
+  assert.match(stopped.json.remediationPlan.stop.reason, /new-head-sha/);
+  assert.equal(stopped.json.remediationWorker.state, 'never-spawned');
+});
+
 // ── reconcile path ───────────────────────────────────────────────────────────
 
 function spawnedJobFixture(rootDir, prNumber) {
@@ -572,14 +618,19 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
   const lifecycle = await fetchLivePRLifecycle({
     repo: 'laceyenterprises/clio',
     prNumber: 1,
-    execFileImpl: async () => ({
-      stdout: JSON.stringify({
-        state: 'MERGED',
-        mergedAt: '2026-05-02T10:30:00.000Z',
-        closedAt: null,
-        labels: [{ name: 'stale-drift' }],
-      }),
-    }),
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      assert.ok(args.includes('state,mergedAt,closedAt,labels,headRefOid'));
+      return {
+        stdout: JSON.stringify({
+          state: 'MERGED',
+          mergedAt: '2026-05-02T10:30:00.000Z',
+          closedAt: null,
+          labels: [{ name: 'stale-drift' }],
+          headRefOid: 'merged-head-sha',
+        }),
+      };
+    },
   });
   assert.deepEqual(lifecycle, {
     source: 'live',
@@ -587,6 +638,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
     mergedAt: '2026-05-02T10:30:00.000Z',
     closedAt: null,
     labels: [{ name: 'stale-drift' }],
+    headSha: 'merged-head-sha',
   });
 });
 
@@ -600,6 +652,7 @@ test('fetchLivePRLifecycle parses CLOSED state from gh pr view JSON', async () =
         mergedAt: null,
         closedAt: '2026-05-02T10:45:00.000Z',
         labels: [],
+        headRefOid: 'closed-head-sha',
       }),
     }),
   });
@@ -609,6 +662,7 @@ test('fetchLivePRLifecycle parses CLOSED state from gh pr view JSON', async () =
     mergedAt: null,
     closedAt: '2026-05-02T10:45:00.000Z',
     labels: [],
+    headSha: 'closed-head-sha',
   });
 });
 

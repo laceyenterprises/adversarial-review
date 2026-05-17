@@ -263,8 +263,9 @@ function normalizeGhPrState(rawState) {
 // even if reviews.db still says `open`.
 //
 // Returns:
-//   - { source: 'live', prState, mergedAt, closedAt } on a successful
-//     lookup (mergedAt/closedAt may be null if GitHub returns empty)
+//   - { source: 'live', prState, mergedAt, closedAt, headSha } on a
+//     successful lookup (mergedAt/closedAt/headSha may be null if
+//     GitHub returns empty)
 //   - null on any failure (gh missing, auth fail, network blip, weird
 //     state value). Callers must treat null as "live lookup unavailable"
 //     and fall back to the mirror — the gate degrades to its previous
@@ -287,7 +288,7 @@ async function fetchLivePRLifecycle({
         '--repo',
         repo,
         '--json',
-        'state,mergedAt,closedAt,labels',
+        'state,mergedAt,closedAt,labels,headRefOid',
       ],
       {
         maxBuffer: 1 * 1024 * 1024,
@@ -315,6 +316,7 @@ async function fetchLivePRLifecycle({
     mergedAt: parsed.mergedAt || null,
     closedAt: parsed.closedAt || null,
     labels: Array.isArray(parsed.labels) ? parsed.labels : [],
+    headSha: parsed.headRefOid || null,
   };
 }
 

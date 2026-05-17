@@ -245,9 +245,36 @@ function readWorkerWorkspace(workerDir) {
   };
 }
 
-function workerWorkspaceMatchesDerivedWorker(workspace, originalWorkerId) {
+function workerWorkspaceMatchesDerivedWorker(workspace, originalWorkerId, jobBranch) {
+  // Defense-in-depth against destructive teardown of an unrelated worker
+  // when a branch prefix collides with an existing worker slot. The
+  // workspace.json contract (see projects/worker-pool/SPEC.md) says
+  // consumers MUST validate workspace.workerId before using a branch
+  // prefix as an id. Previous version returned true when workspaceWorkerId
+  // was empty — a fail-open that let teardown proceed against any
+  // workspace.json lacking the field.
   const workspaceWorkerId = String(workspace?.workerId || '').trim();
-  return !workspaceWorkerId || workspaceWorkerId === originalWorkerId;
+  if (!workspaceWorkerId) {
+    // Absent workerId is treated as MISMATCH, not match. The SPEC requires
+    // this field; missing it is a contract violation we must not paper over.
+    return false;
+  }
+  if (workspaceWorkerId !== originalWorkerId) {
+    return false;
+  }
+  // Secondary guard (reviewer-recommended): if BOTH jobBranch AND
+  // workspace.branch are set, require them to match. Catches the case
+  // where a real worker's id matches but its branch is different from
+  // the PR's. We don't fail when workspace.branch is absent — workerId
+  // match is the primary defense and the SPEC doesn't (yet) require
+  // workspace.branch — but when present it must agree.
+  if (jobBranch) {
+    const workspaceBranch = String(workspace?.branch || '').trim();
+    if (workspaceBranch && workspaceBranch !== jobBranch) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
@@ -408,17 +435,19 @@ async function prepareOriginalWorkerForMergeAgent({
         originalWorkerId,
       };
     }
-  } else if (!workerWorkspaceMatchesDerivedWorker(workspace, originalWorkerId)) {
+  } else if (!workerWorkspaceMatchesDerivedWorker(workspace, originalWorkerId, job?.branch)) {
     mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
       original_worker_id: originalWorkerId,
       workspace_worker_id: workspace?.workerId || null,
+      workspace_branch: workspace?.branch || null,
+      pr_branch: job?.branch || null,
       pr_number: job?.prNumber ?? null,
-      reason: 'branch-prefix-not-worker-owned',
+      reason: 'workspace-worker-id-mismatch',
       at: now,
     });
     return {
       decision: 'ready',
-      reason: 'branch-prefix-not-worker-owned',
+      reason: 'workspace-worker-id-mismatch',
       originalWorkerId,
       hqRoot,
     };

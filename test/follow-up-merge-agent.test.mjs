@@ -1557,7 +1557,7 @@ test('prepareOriginalWorkerForMergeAgent skips teardown when branch prefix does 
   });
 
   assert.equal(result.decision, 'ready');
-  assert.equal(result.reason, 'branch-prefix-not-worker-owned');
+  assert.equal(result.reason, 'workspace-worker-id-mismatch');
   assert.equal(execCalled, false);
   assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
   assert.equal(logs[0].workspace_worker_id, 'codex-lac-other');

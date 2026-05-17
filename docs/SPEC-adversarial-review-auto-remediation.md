@@ -29,11 +29,23 @@ supports four accountability lanes:
   findings, such as `branch-contamination`, `stale-pr-head`,
   `push-lease-rejected`, `missing-auth`, `fetch-failed`, or `rebase-conflict`.
 
-`stale-pr-head` specifically means the remote PR branch moved while the worker
-was running and the patch must be replayed on that fresh PR head by the
-orchestrator/operator. The worker must not auto-rebase onto `origin/<pr-branch>`
-because a rewritten or force-pushed PR head can resurrect commits another writer
-intentionally removed.
+Remote PR-head movement is an optimistic-concurrency event, not an immediate
+hard stop. A remediation worker must capture the clean post-base-rebase head
+before editing, commit its remediation, then publish with `--force-with-lease`
+against the freshly observed PR head. If that lease fails or Git reports a
+non-fast-forward push, the worker must replay only its own remediation patch
+onto the fresh PR head, re-run the contamination audit and relevant validation,
+and retry the lease-guarded push with a fresh expected SHA. This replay is
+bounded to three stale-head attempts.
+
+`stale-pr-head` specifically means that bounded replay was exhausted or became
+unsafe: unresolved `git am --3way` conflicts, ambiguous force-rewritten PR
+history where the worker cannot identify its own patch, repeated lease misses
+after three fresh-head replays, or post-replay validation/audit failure. The
+worker still must not blindly rebase the entire in-progress worktree onto
+`origin/<pr-branch>` because that can resurrect commits another writer
+intentionally removed; safe recovery replays only the worker's patch series onto
+the newly fetched PR head.
 
 `operationalBlockers[]` does not count toward per-finding coverage. A worker may
 therefore emit `addressed=[]`, `pushback=[]`, `blockers=[]`, and a non-empty

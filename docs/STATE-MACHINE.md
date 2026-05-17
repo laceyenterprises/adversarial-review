@@ -241,6 +241,7 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 | `operator-stop` | human explicitly stopped the job |
 | `no-progress` | worker did not leave a durable rereview request |
 | `max-rounds-reached` | bounded loop cap hit |
+| `stale-review-head` | consume-time stale-job guard: the PR head moved before this worker spawned |
 
 ### Common failure classes
 
@@ -267,8 +268,8 @@ jq '.' data/follow-up-jobs/in-progress/<jobId>.json
 ### Workspace artifacts
 
 ```bash
-ls -la data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/
-jq '.' data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/remediation-reply.json
+ls -la "$HQ_ROOT/adversarial-review/follow-up-workspaces/<jobId>/.adversarial-follow-up/"
+jq '.' "$HQ_ROOT/dispatch/remediation-replies/<storage-key>/remediation-reply.json"
 ```
 
 ### Watcher row

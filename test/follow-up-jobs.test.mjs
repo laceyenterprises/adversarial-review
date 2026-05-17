@@ -143,6 +143,7 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   const job = buildFollowUpJob({
     repo: 'laceyenterprises/clio',
     prNumber: 42,
+    revisionRef: 'review-head-sha',
     reviewerModel: 'codex',
     linearTicketId: 'LAC-42',
     reviewBody: '## Summary\nTighten null handling.\n\n## Verdict\nRequest changes',
@@ -155,6 +156,7 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.equal(job.trigger.type, 'github-review-posted');
   assert.equal(job.repo, 'laceyenterprises/clio');
   assert.equal(job.prNumber, 42);
+  assert.equal(job.revisionRef, 'review-head-sha');
   assert.equal(job.reviewSummary, 'Tighten null handling.');
   assert.equal(job.sessionHandoff.resumePreferred, true);
   assert.equal(job.sessionHandoff.resumeAvailable, false);

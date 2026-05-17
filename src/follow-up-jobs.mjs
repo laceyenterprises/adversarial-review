@@ -1193,6 +1193,7 @@ function buildFollowUpJob({
   repo,
   prNumber,
   baseBranch = 'main',
+  revisionRef = null,
   reviewerModel,
   builderTag = null,
   linearTicketId = null,
@@ -1217,7 +1218,7 @@ function buildFollowUpJob({
 }) {
   const createdAt = reviewPostedAt || new Date().toISOString();
   const jobId = `${sanitizeRepo(repo)}-pr-${prNumber}-${sanitizeTimestamp(createdAt)}`;
-  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber });
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef });
   const basePlan = buildRemediationRoundPlan(maxRemediationRounds);
   const seededRounds = Number.isFinite(Number(priorCompletedRounds)) && priorCompletedRounds > 0
     ? Math.floor(Number(priorCompletedRounds))

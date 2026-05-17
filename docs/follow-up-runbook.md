@@ -61,6 +61,15 @@ ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS=2
 
 The value is read at daemon startup. Invalid, missing, or non-positive values fall back to `1`, preserving the historical one-job behavior. Values above `8` are clamped to `8`, and the daemon logs the clamp in its startup line so operators can spot a typo before the next tick fans out too far. Raising it lets a tick claim and spawn multiple pending jobs until `in-progress/` plus newly spawned jobs reaches the cap. Pending jobs for a PR that already has an in-progress remediation worker are left pending for a later tick; other PRs can still fill the remaining capacity.
 
+Workspace root:
+
+```bash
+HQ_ROOT=/Users/airlock/agent-os-hq
+ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT=/optional/explicit/workspace-root
+```
+
+When `HQ_ROOT` is set, remediation workers clone PR branches under `HQ_ROOT/adversarial-review/follow-up-workspaces/` instead of under the deployed adversarial-review checkout. `ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT` can override that location, but it must not point inside the deploy checkout. If the daemon is running from `/Users/airlock/agent-os` without either setting, it refuses to spawn mutable worker clones.
+
 ## Auth-context troubleshooting
 
 Claude Code OAuth is stored in the macOS Keychain (`Claude Code-credentials`), not in a file like Codex's `~/.codex/auth.json`. When `reviewer.mjs` is launched from a LaunchAgent, direct subprocess execs of the Claude CLI can miss the user's Aqua/keychain context even though they run as the same uid. The reviewer now routes all Claude probe and review calls through `/bin/launchctl asuser $UID /opt/homebrew/bin/claude ...` on Darwin so launchd-spawned reviews inherit the correct login/keychain context. If Claude auth starts failing again from automation, verify that wrapped command succeeds before debugging higher-level retry behavior.
@@ -189,6 +198,9 @@ in-progress
   ├─ worker exits, no durable rereview request
   │    └─ stopped (code=no-progress)
   │
+  ├─ pending job was reviewed on an older PR head
+  │    └─ stopped (code=stale-review-head)
+  │
   ├─ operator merged the PR before remediation completed
   │    └─ stopped (code=operator-merged-pr)
   │
@@ -296,9 +308,9 @@ What this does:
 - moves it to `data/follow-up-jobs/in-progress/`
 - increments `remediationPlan.currentRound`
 - appends a round entry to `remediationPlan.rounds[]`
-- prepares a workspace at `data/follow-up-jobs/workspaces/<jobId>/`
+- prepares a workspace under `HQ_ROOT/adversarial-review/follow-up-workspaces/<jobId>/` when `HQ_ROOT` is set
 - checks out the existing PR branch there with `gh pr checkout`
-- writes worker artifacts under `data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/`
+- writes worker artifacts under `<workspace>/.adversarial-follow-up/`
 - spawns a detached Codex remediation worker
 
 Launch artifacts written into the job record include:
@@ -470,10 +482,13 @@ The loop is intentionally capped and explicit. A job moves to `data/follow-up-jo
 - `operator-stop`
 - `no-progress`
 - `max-rounds-reached`
+- `stale-review-head`
 
 `no-progress` means the latest remediation round finished without a durable re-review request. This is deliberate: the system stops instead of silently pretending forward progress exists.
 
 `max-rounds-reached` means another round would exceed the stored `remediationPlan.maxRounds` cap.
+
+`stale-review-head` means the follow-up job was created for an older reviewed head SHA and the consume-time lifecycle lookup already sees a newer PR head. This is a stale-job/race guard before worker spawn, not a reconcile-time failure mode: once a remediation worker pushes commits, the PR head is expected to differ from `job.revisionRef`, and that success path must continue to the rereview request.
 
 `operator-merged-pr` means the PR was merged before remediation could complete. The lifecycle gate prefers a live `gh pr view` lookup over the SQLite mirror so it doesn't depend on the watcher's `syncPRLifecycle` poll cadence — when GitHub says merged, the gate stops cleanly even if `reviews.db.pr_state` is still stale. On a `gh` outage the gate falls back to the mirror so it degrades gracefully rather than disappearing. Fires from both the consume path (gate before worker spawn) and the reconcile path (gate after worker exit, before rereview reset). The terminal record carries the merged-at timestamp under `remediationPlan.stop.reason`, plus a `source=live|mirror` tag so operators can tell which path supplied the answer.
 
@@ -504,7 +519,7 @@ The state directories are the queue:
 - `completed/`: worker finished and requested re-review; reconciliation recorded terminal success for that round
 - `failed/`: launch or reconciliation failure
 - `stopped/`: bounded-loop terminal stop
-- `workspaces/`: per-job repo checkout and worker artifacts
+- `workspaces/`: legacy/local per-job repo checkout location. Production launches with `HQ_ROOT` set keep mutable worker clones under `HQ_ROOT/adversarial-review/follow-up-workspaces/` so remediators do not operate inside the live deploy checkout.
 - `delivery-retry-index/`: pointer files for terminal jobs whose PR-comment delivery still owes a retry (`<jobId>.json` → `{ "jobPath": "..." }`). The retry tick reads only this directory; pointers are added on delivery failure and removed on success or terminal cap. Operators should not edit these by hand — to clear a stuck pointer, fix the underlying `commentDelivery.posted` state on the terminal record (or delete the record entirely if recovery is hopeless), and the next tick will prune the dangling pointer automatically.
 
 ### Start the next round
@@ -606,10 +621,10 @@ Round-level records in `remediationPlan.rounds[]` are especially important. They
 For a spawned or terminalized round, inspect:
 
 ```text
-data/follow-up-jobs/workspaces/<jobId>/
-data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/prompt.md
-data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/codex-last-message.md
-data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/codex-worker.log
+HQ_ROOT/adversarial-review/follow-up-workspaces/<jobId>/
+HQ_ROOT/adversarial-review/follow-up-workspaces/<jobId>/.adversarial-follow-up/prompt.md
+HQ_ROOT/adversarial-review/follow-up-workspaces/<jobId>/.adversarial-follow-up/codex-last-message.md
+HQ_ROOT/adversarial-review/follow-up-workspaces/<jobId>/.adversarial-follow-up/codex-worker.log
 ~/agent-os-hq/dispatch/remediation-replies/<storage-key>/remediation-reply.json
 ```
 

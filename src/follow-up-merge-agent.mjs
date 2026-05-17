@@ -218,6 +218,11 @@ function readWorkerWorkspace(workerDir) {
   };
 }
 
+function workerWorkspaceMatchesDerivedWorker(workspace, originalWorkerId) {
+  const workspaceWorkerId = String(workspace?.workerId || '').trim();
+  return !workspaceWorkerId || workspaceWorkerId === originalWorkerId;
+}
+
 function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
   if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
     return String(env.AGENT_OS_SESSION_LEDGER_DB_PATH);
@@ -246,7 +251,8 @@ async function lookupOriginalWorkerRunStatus({
   const workspace = readWorkerWorkspace(workerDir).workspace || null;
   const run = readJsonFileDetailed(join(workerDir, 'run.json'));
   const runRecord = run.ok ? run.value : null;
-  const launchRequestId = workspace?.launchRequestId || runRecord?.launchRequestId || null;
+  const launchRequestId = workspace?.launchRequestId || workspace?.lrq
+    || runRecord?.launchRequestId || runRecord?.lrq || null;
   const runId = runRecord?.runId || null;
   if (!launchRequestId) {
     return { found: false, reason: 'missing-launch-request-id' };
@@ -367,6 +373,20 @@ async function prepareOriginalWorkerForMergeAgent({
         originalWorkerId,
       };
     }
+  } else if (!workerWorkspaceMatchesDerivedWorker(workspace, originalWorkerId)) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      original_worker_id: originalWorkerId,
+      workspace_worker_id: workspace?.workerId || null,
+      pr_number: job?.prNumber ?? null,
+      reason: 'branch-prefix-not-worker-owned',
+      at: now,
+    });
+    return {
+      decision: 'ready',
+      reason: 'branch-prefix-not-worker-owned',
+      originalWorkerId,
+      hqRoot,
+    };
   }
 
   const runStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });

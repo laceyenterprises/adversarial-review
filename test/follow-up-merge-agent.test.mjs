@@ -1493,6 +1493,48 @@ test('prepareOriginalWorkerForMergeAgent fails closed when HQ owner cannot be re
   assert.equal(logs[0].reason, 'hq-owner-unknown');
 });
 
+test('prepareOriginalWorkerForMergeAgent skips teardown when branch prefix does not own the worker workspace', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const originalWorkerId = 'codex-lac-664b';
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ownerUser: 'placey' }));
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-lac-other',
+    workspacePath: worktreePath,
+    worktreePath,
+    launchRequestId: 'lrq_wrong_worker',
+  }));
+  const logs = [];
+  let execCalled = false;
+
+  const result = await prepareOriginalWorkerForMergeAgent({
+    job: makeJob({ branch: `${originalWorkerId}/LAC-664b-wrong-worker` }),
+    hqPath: 'hq',
+    env: { HQ_ROOT: hqRoot, USER: 'placey' },
+    logger: { info: (line) => logs.push(JSON.parse(line)) },
+    lookupRunStatusImpl: async () => ({
+      found: true,
+      status: 'failed',
+      launchRequestId: 'lrq_wrong_worker',
+      runId: 'run_wrong_worker',
+    }),
+    execFileImpl: async () => {
+      execCalled = true;
+      throw new Error('execFileImpl must not run when worker ids differ');
+    },
+    now: '2026-05-17T14:33:45.000Z',
+  });
+
+  assert.equal(result.decision, 'ready');
+  assert.equal(result.reason, 'branch-prefix-not-worker-owned');
+  assert.equal(execCalled, false);
+  assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
+  assert.equal(logs[0].workspace_worker_id, 'codex-lac-other');
+});
+
 test('prepareOriginalWorkerForMergeAgent surfaces tear-down stderr/stdout and logs failure details', async () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const originalWorkerId = 'codex-lac-665';
@@ -1612,6 +1654,43 @@ test('lookupOriginalWorkerRunStatus requires launchRequestId and ignores unrelat
   assert.equal(result.status, 'running');
   assert.equal(result.launchRequestId, 'lrq_lookup_target');
   assert.equal(result.runId, 'run_lookup_shared');
+});
+
+test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', async () => {
+  const { default: Database } = await import('better-sqlite3');
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666alias');
+  const ledgerDbPath = path.join(hqRoot, 'session-ledger.sqlite');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
+    ownerUser: 'placey',
+    ledgerDbPath,
+  }));
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-lac-666alias',
+    lrq: 'lrq_alias',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_alias',
+  }));
+
+  const db = new Database(ledgerDbPath);
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
+    .run('run_alias', 'lrq_alias', 'failed');
+  db.close();
+
+  const result = await lookupOriginalWorkerRunStatus({
+    workerDir,
+    hqRoot,
+    env: {},
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.launchRequestId, 'lrq_alias');
+  assert.equal(result.runId, 'run_alias');
 });
 
 test('lookupOriginalWorkerRunStatus defers when launchRequestId is missing even if run.json has a runId', async () => {

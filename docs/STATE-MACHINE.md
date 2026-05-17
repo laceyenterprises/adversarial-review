@@ -241,6 +241,7 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 | `operator-stop` | human explicitly stopped the job |
 | `no-progress` | worker did not leave a durable rereview request |
 | `max-rounds-reached` | bounded loop cap hit |
+| `stale-review-head` | consume-time stale-job guard: the PR head moved before this worker spawned |
 
 ### Common failure classes
 

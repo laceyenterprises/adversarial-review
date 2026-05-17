@@ -198,6 +198,9 @@ in-progress
   ├─ worker exits, no durable rereview request
   │    └─ stopped (code=no-progress)
   │
+  ├─ pending job was reviewed on an older PR head
+  │    └─ stopped (code=stale-review-head)
+  │
   ├─ operator merged the PR before remediation completed
   │    └─ stopped (code=operator-merged-pr)
   │
@@ -479,10 +482,13 @@ The loop is intentionally capped and explicit. A job moves to `data/follow-up-jo
 - `operator-stop`
 - `no-progress`
 - `max-rounds-reached`
+- `stale-review-head`
 
 `no-progress` means the latest remediation round finished without a durable re-review request. This is deliberate: the system stops instead of silently pretending forward progress exists.
 
 `max-rounds-reached` means another round would exceed the stored `remediationPlan.maxRounds` cap.
+
+`stale-review-head` means the follow-up job was created for an older reviewed head SHA and the consume-time lifecycle lookup already sees a newer PR head. This is a stale-job/race guard before worker spawn, not a reconcile-time failure mode: once a remediation worker pushes commits, the PR head is expected to differ from `job.revisionRef`, and that success path must continue to the rereview request.
 
 `operator-merged-pr` means the PR was merged before remediation could complete. The lifecycle gate prefers a live `gh pr view` lookup over the SQLite mirror so it doesn't depend on the watcher's `syncPRLifecycle` poll cadence — when GitHub says merged, the gate stops cleanly even if `reviews.db.pr_state` is still stale. On a `gh` outage the gate falls back to the mirror so it degrades gracefully rather than disappearing. Fires from both the consume path (gate before worker spawn) and the reconcile path (gate after worker exit, before rereview reset). The terminal record carries the merged-at timestamp under `remediationPlan.stop.reason`, plus a `source=live|mirror` tag so operators can tell which path supplied the answer.
 

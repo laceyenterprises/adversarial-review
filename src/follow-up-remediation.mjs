@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -1039,6 +1039,67 @@ function resolveRemediationWorkspaceRoot({
   return workspaceRoot;
 }
 
+function hasPathSuffixSegments(candidatePath, segments) {
+  const parts = resolve(candidatePath).split('/').filter(Boolean);
+  if (parts.length < segments.length) {
+    return false;
+  }
+  return segments.every((segment, index) => parts[parts.length - segments.length + index] === segment);
+}
+
+function remediationWorkspaceRootCandidates(rootDir, env = process.env) {
+  const candidates = new Set([
+    resolve(getFollowUpJobDir(rootDir, 'workspaces')),
+  ]);
+
+  const configuredRoot = String(env[REMEDIATION_WORKSPACE_ROOT_ENV] || '').trim();
+  if (configuredRoot) {
+    candidates.add(resolve(configuredRoot));
+  }
+
+  const hqRoot = String(env.HQ_ROOT || '').trim();
+  if (hqRoot) {
+    candidates.add(resolve(hqRoot, ...HQ_REMEDIATION_WORKSPACE_SEGMENTS));
+  }
+
+  return [...candidates];
+}
+
+function isLegitimateStoredWorkspaceRoot(rootDir, absolutePath, env = process.env) {
+  const allowedRoots = remediationWorkspaceRootCandidates(rootDir, env);
+  if (allowedRoots.some((candidate) => isPathInsideOrEqual(candidate, absolutePath))) {
+    return true;
+  }
+  return hasPathSuffixSegments(absolutePath, HQ_REMEDIATION_WORKSPACE_SEGMENTS);
+}
+
+function runtimeUsername(env = process.env) {
+  const envUser = String(env.LOGNAME || env.USER || '').trim();
+  if (envUser) return envUser;
+  try {
+    return userInfo().username;
+  } catch {
+    return 'unknown';
+  }
+}
+
+function ensureWorkspaceRootDir(workspaceRootDir, env = process.env) {
+  try {
+    mkdirSync(workspaceRootDir, { recursive: true });
+  } catch (err) {
+    if (err?.code === 'EACCES' || err?.code === 'EPERM') {
+      const hqRoot = String(env.HQ_ROOT || '').trim() || '(unset)';
+      const runtimeUser = runtimeUsername(env);
+      throw new Error(
+        `Could not create remediation workspace root ${workspaceRootDir}: ` +
+        `${err.code} while running as ${runtimeUser} with HQ_ROOT=${hqRoot}. ` +
+        `Provision the HQ remediation directories with a writable ownership/mode for the runtime user before retrying.`
+      );
+    }
+    throw err;
+  }
+}
+
 function serializeWorkerPath(rootDir, absolutePath) {
   const resolvedPath = resolve(absolutePath);
   const rel = relative(rootDir, resolvedPath);
@@ -1269,7 +1330,7 @@ async function prepareWorkspaceForJob({
   const repo = assertValidRepoSlug(job.repo);
   const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env });
   const workspaceDir = join(workspaceRootDir, job.jobId);
-  mkdirSync(workspaceRootDir, { recursive: true });
+  ensureWorkspaceRootDir(workspaceRootDir, env);
   const workspaceState = await inspectWorkspaceState({
     workspaceDir,
     expectedRepo: repo,
@@ -1584,7 +1645,11 @@ function resolveWorkerStoredPath(rootDir, storedPath, {
   return absolutePath;
 }
 
-function resolveStoredWorkspaceRoot(rootDir, storedPath, { allowMissing = true } = {}) {
+function resolveStoredWorkspaceRoot(rootDir, storedPath, {
+  allowMissing = true,
+  env = process.env,
+  log = console,
+} = {}) {
   if (!storedPath) {
     return null;
   }
@@ -1593,6 +1658,12 @@ function resolveStoredWorkspaceRoot(rootDir, storedPath, { allowMissing = true }
   const absolutePath = isAbsolute(value)
     ? resolve(value)
     : resolveJobRelativePath(rootDir, value, { label: 'workspaceRoot', allowMissing });
+  if (!isLegitimateStoredWorkspaceRoot(rootDir, absolutePath, env)) {
+    log.warn?.(
+      `[follow-up-remediation] Ignoring persisted workspaceRoot outside allowed remediation roots: ${absolutePath}`
+    );
+    return null;
+  }
   if (!allowMissing && !existsSync(absolutePath)) {
     throw new Error('Invalid workspaceRoot: path does not exist');
   }
@@ -2057,17 +2128,19 @@ async function resolveJobPRLifecycleSafe({
 //     because requestReviewRereview refuses pr_state != 'open' anyway,
 //     but a separate code so operator reporting can distinguish "we
 //     shipped this" from "we abandoned this".
-//   - stale-review-head — the follow-up job was created from a review
-//     of an older PR head. A newer head means another remediation worker
-//     already moved the branch, so this stale job must not spawn and race
-//     the current state.
+//   - stale-review-head — consume-only guard for a follow-up job that was
+//     created from an older PR head. A newer head means another remediation
+//     worker already moved the branch, so this stale job must not spawn and
+//     race the current state. Reconcile intentionally ignores this condition
+//     because a successful remediation push is expected to move HEAD away
+//     from job.revisionRef before rereview is requested.
 function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) {
   if (!lifecycle) return null;
   const staleDriftStop = staleDriftStopDecision(lifecycle, { prNumber, site });
   if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') {
     const jobRevisionRef = typeof job?.revisionRef === 'string' ? job.revisionRef.trim() : '';
     const currentHeadSha = typeof lifecycle.headSha === 'string' ? lifecycle.headSha.trim() : '';
-    if (jobRevisionRef && currentHeadSha && jobRevisionRef !== currentHeadSha) {
+    if (site === 'consume' && jobRevisionRef && currentHeadSha && jobRevisionRef !== currentHeadSha) {
       const sourceTag = lifecycle.source ? ` source=${lifecycle.source}` : '';
       return {
         stopCode: 'stale-review-head',
@@ -3586,6 +3659,7 @@ export {
   resolveRemediationWorkspaceRoot,
   shouldUseHqIntegration,
   resolveJobRelativePath,
+  resolveStoredWorkspaceRoot,
   resolveWorkerStoredPath,
   resolveReplyStorageKey,
   resolveRemediationMaxConcurrentJobs,

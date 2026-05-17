@@ -1,7 +1,7 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -34,6 +34,7 @@ import {
   resetOAuthPreflightCache,
   resolveClaudeCodeCliPath,
   resolveJobRelativePath,
+  resolveStoredWorkspaceRoot,
   resolveWorkerStoredPath,
   resolveReplyStorageKey,
   resolveRemediationMaxConcurrentJobs,
@@ -592,6 +593,37 @@ test('prepareWorkspaceForJob hydrates production workspaces under HQ_ROOT', asyn
   assert.equal(calls[3].options.cwd, result.workspaceDir);
 });
 
+test('prepareWorkspaceForJob surfaces HQ_ROOT and runtime user on workspace-root permission errors', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const lockedParent = mkdtempSync(path.join(tmpdir(), 'adversarial-review-locked-'));
+  const hqRoot = path.join(lockedParent, 'hq-root');
+  const runtimeUser = process.env.USER || process.env.LOGNAME || 'unknown';
+  mkdirSync(lockedParent, { recursive: true });
+  chmodSync(lockedParent, 0o500);
+
+  try {
+    await assert.rejects(
+      () => prepareWorkspaceForJob({
+        rootDir,
+        job: makeJob(),
+        env: {
+          HQ_ROOT: hqRoot,
+          USER: runtimeUser,
+        },
+        execFileImpl: async () => ({ stdout: '', stderr: '' }),
+      }),
+      (err) => {
+        assert.match(err.message, /Could not create remediation workspace root/);
+        assert.match(err.message, new RegExp(`HQ_ROOT=${hqRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+        assert.match(err.message, new RegExp(`running as ${runtimeUser.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+        return true;
+      },
+    );
+  } finally {
+    chmodSync(lockedParent, 0o700);
+  }
+});
+
 test('resolveWorkerStoredPath validates absolute paths against the stored workspace root', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const originalHqRoot = path.join(rootDir, 'agent-os-hq-a');
@@ -609,6 +641,20 @@ test('resolveWorkerStoredPath validates absolute paths against the stored worksp
       workspaceDir,
     );
   });
+});
+
+test('resolveStoredWorkspaceRoot ignores persisted roots outside the allowed workspace trees', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const warnings = [];
+  const resolved = resolveStoredWorkspaceRoot(rootDir, '/tmp/not-a-remediation-workspace', {
+    log: {
+      warn: (line) => warnings.push(line),
+    },
+  });
+
+  assert.equal(resolved, null);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Ignoring persisted workspaceRoot outside allowed remediation roots/);
 });
 
 test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remote', async () => {
@@ -3529,6 +3575,87 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
   assert.equal(commentCalls[0].workerClass, 'codex');
   assert.match(commentCalls[0].body, /re-review queued/);
   assert.match(commentCalls[0].body, /Want adversarial confirmation of the fixes\./);
+});
+
+test('reconcileFollowUpJob does not stop stale-review-head after this worker pushes a new head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, {
+    prNumber: 53,
+    revisionRef: 'reviewed-head-sha',
+  });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
+  writeFileSync(outputPath, 'Worker pushed remediation commits.\n', 'utf8');
+  writeFileSync(replyPath, JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Addressed the blocking finding.',
+    validation: ['node --test test/follow-up-remediation.test.mjs'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Worker moved the head by pushing the remediation commit.',
+    },
+  }), 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      processId: 9504,
+      state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      replyPath,
+    },
+  });
+
+  let rereviewCalls = 0;
+  const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:30:00.000Z',
+    isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergedAt: null,
+      closedAt: null,
+      labels: [],
+      headSha: 'worker-pushed-head-sha',
+    }),
+    requestReviewRereviewImpl: () => {
+      rereviewCalls += 1;
+      return {
+        triggered: true,
+        status: 'pending',
+        reason: 'review-status-reset',
+        reviewRow: {
+          repo: claimed.job.repo,
+          pr_number: claimed.job.prNumber,
+          pr_state: 'open',
+          review_status: 'pending',
+        },
+      };
+    },
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+    postCommentImpl: async () => ({ posted: true }),
+  }));
+
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.status, 'completed');
+  assert.equal(result.job.remediationPlan.stop, null);
+  assert.equal(rereviewCalls, 1);
 });
 
 test('reconcileFollowUpJob posts a public PR comment on missing-final-message failure', async () => {

@@ -331,6 +331,26 @@ test('consumeNextFollowUpJob stops stale review-head jobs without spawning or po
   assert.equal(stopped.json.remediationWorker.state, 'never-spawned');
 });
 
+test('lifecycleStopDecision ignores stale review-head mismatches during reconcile', () => {
+  assert.equal(
+    lifecycleStopDecision(
+      {
+        source: 'live',
+        prState: 'open',
+        labels: [],
+        headSha: 'worker-pushed-head',
+      },
+      {
+        repo: 'laceyenterprises/clio',
+        prNumber: 106,
+        site: 'reconcile',
+        job: { revisionRef: 'reviewed-head' },
+      }
+    ),
+    null,
+  );
+});
+
 // ── reconcile path ───────────────────────────────────────────────────────────
 
 function spawnedJobFixture(rootDir, prNumber) {

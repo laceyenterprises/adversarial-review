@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import {
   constants as fsConstants,
   accessSync,
@@ -27,6 +27,7 @@ const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 const DEFAULT_HQ_PATH = 'hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
+const WORKER_BRANCH_PREFIX_RE = /^(codex|claude-code|clio-agent)-[a-z0-9][a-z0-9-]*$/;
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
 // "I approve merging this current PR head now; do not wait for the
@@ -118,14 +119,22 @@ function deriveOriginalWorkerIdFromBranch(branch) {
   const normalized = String(branch || '').trim();
   if (!normalized.includes('/')) return null;
   const [workerId] = normalized.split('/');
-  return workerId || null;
+  if (!workerId || !WORKER_BRANCH_PREFIX_RE.test(workerId)) return null;
+  return workerId;
 }
 
 function readJsonFile(filePath) {
+  return readJsonFileDetailed(filePath).value;
+}
+
+function readJsonFileDetailed(filePath) {
   try {
-    return JSON.parse(readFileSync(filePath, 'utf8'));
-  } catch {
-    return null;
+    return {
+      value: JSON.parse(readFileSync(filePath, 'utf8')),
+      error: null,
+    };
+  } catch (error) {
+    return { value: null, error };
   }
 }
 
@@ -176,13 +185,13 @@ async function lookupOriginalWorkerRunStatus({
   try {
     Database = (await import('better-sqlite3')).default;
   } catch (err) {
-    return {
-      found: false,
-      reason: 'better-sqlite3-unavailable',
-      detail: err?.message || String(err),
-      launchRequestId,
-      runId,
-    };
+    const error = new Error(
+      `better-sqlite3 is required to inspect worker_runs for merge-agent original-worker preparation: ${err?.message || String(err)}`
+    );
+    error.code = 'better-sqlite3-unavailable';
+    error.launchRequestId = launchRequestId;
+    error.runId = runId;
+    throw error;
   }
 
   let db;
@@ -227,6 +236,26 @@ async function lookupOriginalWorkerRunStatus({
   }
 }
 
+function getCurrentUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function getUsernameForUid(uid) {
+  const stdout = execFileSync('id', ['-nu', String(uid)], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return String(stdout || '').trim() || null;
+}
+
+function getHqRootOwner(hqRoot) {
+  const uid = statSync(hqRoot).uid;
+  return {
+    uid,
+    username: getUsernameForUid(uid),
+  };
+}
+
 async function prepareOriginalWorkerForMergeAgent({
   job,
   hqPath,
@@ -235,15 +264,39 @@ async function prepareOriginalWorkerForMergeAgent({
   now = isoNow(),
   logger = console,
   lookupRunStatusImpl = lookupOriginalWorkerRunStatus,
+  getHqRootOwnerImpl = getHqRootOwner,
+  getCurrentUidImpl = getCurrentUid,
 } = {}) {
   const originalWorkerId = deriveOriginalWorkerIdFromBranch(job?.branch);
   if (!originalWorkerId) {
+    if (String(job?.branch || '').includes('/')) {
+      mergeAgentLifecycleLog(logger, 'merge_agent.branch_not_worker_authored', {
+        branch: job?.branch || null,
+        pr_number: job?.prNumber ?? null,
+        at: now,
+      });
+    }
     return { decision: 'ready', reason: 'no-derived-worker-id' };
   }
 
   const hqRoot = resolveHqRoot(env);
   const workerDir = join(hqRoot, 'workers', originalWorkerId);
-  const workspace = readJsonFile(join(workerDir, 'workspace.json'));
+  const workspaceRead = readJsonFileDetailed(join(workerDir, 'workspace.json'));
+  if (workspaceRead.error && workspaceRead.error?.code !== 'ENOENT') {
+    mergeAgentLifecycleLog(logger, 'merge_agent.workspace_read_failed', {
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: workspaceRead.error?.code || 'workspace-read-failed',
+      detail: workspaceRead.error?.message || String(workspaceRead.error),
+      at: now,
+    });
+    return {
+      decision: 'deferred',
+      reason: `workspace-read-${workspaceRead.error?.code || 'failed'}`,
+      originalWorkerId,
+    };
+  }
+  const workspace = workspaceRead.value;
   const workspacePath = workspace?.workspacePath || workspace?.worktreePath || null;
 
   if (!existsSync(workerDir) || !workspace || (workspacePath && !existsSync(workspacePath))) {
@@ -258,8 +311,8 @@ async function prepareOriginalWorkerForMergeAgent({
   const runStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
   if (!runStatus.found && runStatus.reason === 'missing-worker-run-row') {
     return {
-      decision: 'ready',
-      reason: 'original-worker-run-row-missing',
+      decision: 'deferred',
+      reason: 'original-worker-run-row-missing-but-worktree-present',
       originalWorkerId,
       hqRoot,
       launchRequestId: runStatus.launchRequestId || null,
@@ -289,8 +342,46 @@ async function prepareOriginalWorkerForMergeAgent({
     };
   }
 
-  const args = ['worker', 'tear-down', originalWorkerId, '--force', '--root', hqRoot];
-  await execFileImpl(hqPath, args, { env, maxBuffer: 5 * 1024 * 1024 });
+  if (mayTearDown && !prStateOverride) {
+    const recheckedRunStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
+    if (!recheckedRunStatus.found || recheckedRunStatus.status !== 'succeeded') {
+      const reason = recheckedRunStatus.found
+        ? `worker-run-status-${recheckedRunStatus.status || 'unknown'}`
+        : recheckedRunStatus.reason || 'worker-run-status-unknown';
+      mergeAgentLifecycleLog(logger, 'merge_agent.dispatch_deferred', {
+        lrq: recheckedRunStatus.launchRequestId || runStatus.launchRequestId || null,
+        original_worker_id: originalWorkerId,
+        pr_number: job?.prNumber ?? null,
+        reason,
+        worker_status: recheckedRunStatus.status || null,
+        at: now,
+      });
+      return {
+        decision: 'deferred',
+        reason,
+        originalWorkerId,
+        workerStatus: recheckedRunStatus.status || null,
+        launchRequestId: recheckedRunStatus.launchRequestId || runStatus.launchRequestId || null,
+      };
+    }
+  }
+
+  const hqRootOwner = getHqRootOwnerImpl(hqRoot);
+  const currentUid = getCurrentUidImpl();
+  const isCrossUser = currentUid != null && hqRootOwner?.uid != null && currentUid !== hqRootOwner.uid;
+  if (isCrossUser && !hqRootOwner?.username) {
+    const error = new Error(`Unable to resolve owner username for HQ_ROOT=${hqRoot} (uid ${hqRootOwner.uid})`);
+    error.code = 'hq-root-owner-unresolved';
+    throw error;
+  }
+  const command = isCrossUser ? 'sudo' : hqPath;
+  const args = isCrossUser
+    ? ['-A', '-u', hqRootOwner.username, 'env', `HQ_ROOT=${hqRoot}`, hqPath, 'worker', 'tear-down', originalWorkerId]
+    : ['worker', 'tear-down', originalWorkerId];
+  await execFileImpl(command, args, {
+    env: { ...env, HQ_ROOT: hqRoot },
+    maxBuffer: 5 * 1024 * 1024,
+  });
   mergeAgentLifecycleLog(logger, 'merge_agent.original_worker_tornDown', {
     lrq: runStatus.launchRequestId || null,
     original_worker_id: originalWorkerId,
@@ -1467,6 +1558,7 @@ export {
   isScopedMergeAgentRequest,
   listMergeAgentDispatches,
   listMergeAgentSkippedDispatches,
+  lookupOriginalWorkerRunStatus,
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,

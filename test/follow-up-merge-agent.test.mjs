@@ -16,6 +16,7 @@ import {
   isFinalPassOnRequestChangesEnabled,
   listMergeAgentDispatches,
   listMergeAgentSkippedDispatches,
+  lookupOriginalWorkerRunStatus,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
   prepareOriginalWorkerForMergeAgent,
@@ -1157,6 +1158,55 @@ test('dispatchMergeAgentForPR tears down terminal original worker before merge-a
   assert.equal(logs[0].lrq, 'lrq_original');
 });
 
+test('prepareOriginalWorkerForMergeAgent uses sudo for cross-user teardown', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const originalWorkerId = 'codex-lac-777';
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    launchRequestId: 'lrq_sudo',
+  }));
+  const calls = [];
+
+  const result = await prepareOriginalWorkerForMergeAgent({
+    job: makeJob({ branch: `${originalWorkerId}/LAC-777-cross-user` }),
+    hqPath: '/opt/agent-os/bin/hq',
+    env: { HQ_ROOT: hqRoot },
+    lookupRunStatusImpl: async () => ({
+      found: true,
+      status: 'succeeded',
+      launchRequestId: 'lrq_sudo',
+      runId: 'run_sudo',
+    }),
+    getHqRootOwnerImpl: () => ({ uid: 501, username: 'airlock' }),
+    getCurrentUidImpl: () => 502,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args: [...args] });
+      return { stdout: '', stderr: '' };
+    },
+    logger: { info() {} },
+  });
+
+  assert.equal(result.decision, 'torn-down');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'sudo');
+  assert.deepEqual(calls[0].args, [
+    '-A',
+    '-u',
+    'airlock',
+    'env',
+    `HQ_ROOT=${hqRoot}`,
+    '/opt/agent-os/bin/hq',
+    'worker',
+    'tear-down',
+    originalWorkerId,
+  ]);
+});
+
 test('dispatchMergeAgentForPR defers merge-agent dispatch while original worker is running', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -1205,6 +1255,45 @@ test('dispatchMergeAgentForPR defers merge-agent dispatch while original worker 
   assert.equal(logs[0].reason, 'worker-run-status-running');
 });
 
+test('dispatchMergeAgentForPR defers when original worker worktree exists but worker_runs row is missing', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const originalWorkerId = 'codex-lac-778';
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    launchRequestId: 'lrq_missing_row',
+  }));
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({ branch: `${originalWorkerId}/LAC-778-missing-row` }),
+    env: { HQ_ROOT: hqRoot },
+    prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
+      ...opts,
+      lookupRunStatusImpl: async () => ({
+        found: false,
+        reason: 'missing-worker-run-row',
+        launchRequestId: 'lrq_missing_row',
+        runId: null,
+      }),
+    }),
+    execFileImpl: async () => {
+      throw new Error('hq must not dispatch while the original worktree is still attached');
+    },
+  });
+
+  assert.equal(result.decision, 'dispatch-deferred');
+  assert.equal(result.reason, 'original-worker-run-row-missing-but-worktree-present');
+  assert.equal(result.originalWorkerId, originalWorkerId);
+  assert.equal(existsSync(worktreePath), true);
+});
+
 test('dispatchMergeAgentForPR is idempotent when original worker is already torn down', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -1227,6 +1316,86 @@ test('dispatchMergeAgentForPR is idempotent when original worker is already torn
   assert.equal(result.dispatchId, 'disp_idempotent');
   assert.equal(hqCalls.length, 1);
   assert.deepEqual(hqCalls[0].args.slice(0, 3), ['dispatch', '--worker-class', 'merge-agent']);
+});
+
+test('dispatchMergeAgentForPR fails loud when worker status lookup dependency is unavailable', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const originalWorkerId = 'codex-lac-779';
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    launchRequestId: 'lrq_dependency',
+  }));
+
+  await assert.rejects(
+    () => dispatchMergeAgentForPR({
+      agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+      rootDir,
+      ...makeJob({ branch: `${originalWorkerId}/LAC-779-better-sqlite3` }),
+      env: { HQ_ROOT: hqRoot },
+      prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
+        ...opts,
+        lookupRunStatusImpl: async () => {
+          const error = new Error('native module missing');
+          error.code = 'better-sqlite3-unavailable';
+          throw error;
+        },
+      }),
+      execFileImpl: async () => {
+        throw new Error('dispatch must not run when status lookup crashed');
+      },
+    }),
+    /native module missing/
+  );
+});
+
+test('lookupOriginalWorkerRunStatus reads worker_runs from a real SQLite ledger', async () => {
+  const { default: Database } = await import('better-sqlite3');
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-lac-780');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  mkdirSync(workerDir, { recursive: true });
+  const dbPath = path.join(hqRoot, 'session-ledger.db');
+  const db = new Database(dbPath);
+  db.exec(`
+    CREATE TABLE worker_runs (
+      run_id TEXT,
+      launch_request_id TEXT,
+      status TEXT
+    );
+  `);
+  db.prepare(`
+    INSERT INTO worker_runs (run_id, launch_request_id, status)
+    VALUES (?, ?, ?)
+  `).run('run_real', 'lrq_real', 'SUCCEEDED');
+  db.close();
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
+    ledgerDbPath: dbPath,
+  }));
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    launchRequestId: 'lrq_real',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_real',
+  }));
+
+  const status = await lookupOriginalWorkerRunStatus({
+    workerDir,
+    hqRoot,
+    env: {},
+  });
+
+  assert.deepEqual(status, {
+    found: true,
+    status: 'succeeded',
+    launchRequestId: 'lrq_real',
+    runId: 'run_real',
+  });
 });
 
 test('buildMergeAgentPrompt omits trigger header when no trigger is passed', () => {

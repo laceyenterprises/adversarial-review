@@ -267,8 +267,8 @@ jq '.' data/follow-up-jobs/in-progress/<jobId>.json
 ### Workspace artifacts
 
 ```bash
-ls -la data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/
-jq '.' data/follow-up-jobs/workspaces/<jobId>/.adversarial-follow-up/remediation-reply.json
+ls -la "$HQ_ROOT/adversarial-review/follow-up-workspaces/<jobId>/.adversarial-follow-up/"
+jq '.' "$HQ_ROOT/dispatch/remediation-replies/<storage-key>/remediation-reply.json"
 ```
 
 ### Watcher row

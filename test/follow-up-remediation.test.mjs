@@ -29,10 +29,12 @@ import {
   resolveHqRoot,
   resolveLocalRepliesRoot,
   resolveRemediationReplyTarget,
+  resolveRemediationWorkspaceRoot,
   remediationWorkerGitIdentity,
   resetOAuthPreflightCache,
   resolveClaudeCodeCliPath,
   resolveJobRelativePath,
+  resolveWorkerStoredPath,
   resolveReplyStorageKey,
   resolveRemediationMaxConcurrentJobs,
   spawnClaudeCodeRemediationWorker,
@@ -471,6 +473,61 @@ test('resolveHqRoot defaults under the current home directory and can require an
   );
 });
 
+test('resolveRemediationWorkspaceRoot uses HQ runtime state outside the deploy checkout', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'adversarial-review-workspace-root-'));
+  const deployRoot = path.join(tmp, 'agent-os');
+  const rootDir = path.join(deployRoot, 'tools', 'adversarial-review');
+  const hqRoot = path.join(tmp, 'agent-os-hq');
+  mkdirSync(rootDir, { recursive: true });
+  mkdirSync(hqRoot, { recursive: true });
+
+  assert.equal(
+    resolveRemediationWorkspaceRoot({
+      rootDir,
+      env: {
+        AGENT_OS_DEPLOY_CHECKOUT: deployRoot,
+        HQ_ROOT: hqRoot,
+      },
+    }),
+    path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces'),
+  );
+});
+
+test('resolveRemediationWorkspaceRoot refuses deploy-checkout workspaces without HQ state', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'adversarial-review-workspace-root-'));
+  const deployRoot = path.join(tmp, 'agent-os');
+  const rootDir = path.join(deployRoot, 'tools', 'adversarial-review');
+  mkdirSync(rootDir, { recursive: true });
+
+  assert.throws(
+    () => resolveRemediationWorkspaceRoot({
+      rootDir,
+      env: {
+        AGENT_OS_DEPLOY_CHECKOUT: deployRoot,
+      },
+    }),
+    /HQ_ROOT must be set|must be set before spawning remediation workers/,
+  );
+});
+
+test('resolveWorkerStoredPath allows absolute worker artifacts only under the workspace root', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const workspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', makeJob().jobId);
+  mkdirSync(workspaceDir, { recursive: true });
+
+  await withHqRootEnv(hqRoot, async () => {
+    assert.equal(
+      resolveWorkerStoredPath(rootDir, workspaceDir, { label: 'workspaceDir' }),
+      workspaceDir,
+    );
+    assert.throws(
+      () => resolveWorkerStoredPath(rootDir, path.join(rootDir, 'outside-workspace'), { label: 'workspaceDir' }),
+      /absolute path escapes remediation workspace root/,
+    );
+  });
+});
+
 test('prepareWorkspaceForJob clones missing repos and checks out the PR branch', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const calls = [];
@@ -478,6 +535,7 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   const result = await prepareWorkspaceForJob({
     rootDir,
     job: makeJob(),
+    env: {},
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
       if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
@@ -500,6 +558,39 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   assert.equal(calls[3].options.cwd, result.workspaceDir);
 });
 
+test('prepareWorkspaceForJob hydrates production workspaces under HQ_ROOT', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const deployRoot = path.join(tmp, 'agent-os');
+  const rootDir = path.join(deployRoot, 'tools', 'adversarial-review');
+  const hqRoot = path.join(tmp, 'agent-os-hq');
+  mkdirSync(rootDir, { recursive: true });
+  mkdirSync(hqRoot, { recursive: true });
+  const calls = [];
+
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {
+      AGENT_OS_DEPLOY_CHECKOUT: deployRoot,
+      HQ_ROOT: hqRoot,
+    },
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(
+    result.workspaceDir,
+    path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', makeJob().jobId),
+  );
+  assert.ok(!result.workspaceDir.startsWith(rootDir));
+  assert.equal(calls[3].options.cwd, result.workspaceDir);
+});
+
 test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remote', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', makeJob().jobId);
@@ -509,6 +600,7 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
   const result = await prepareWorkspaceForJob({
     rootDir,
     job: makeJob(),
+    env: {},
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
       if (command === 'git' && args[0] === 'config') {
@@ -564,6 +656,7 @@ test('prepareWorkspaceForJob uses the claude-code identity when workerClass="cla
     rootDir,
     job: makeJob(),
     workerClass: 'claude-code',
+    env: {},
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args });
       if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
@@ -717,6 +810,7 @@ test('prepareWorkspaceForJob installs the worker-provenance hook in the workspac
   const result = await prepareWorkspaceForJob({
     rootDir,
     job: makeJob(),
+    env: {},
     execFileImpl: async (command, args, options = {}) => {
       if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
         mkdirSync(path.join(args[3], '.git'), { recursive: true });
@@ -739,6 +833,7 @@ test('prepareWorkspaceForJob does not pre-create remediation-reply.json in the w
   const result = await prepareWorkspaceForJob({
     rootDir,
     job: makeJob(),
+    env: {},
     execFileImpl: async (command, args) => {
       if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
         mkdirSync(path.join(args[3], '.git'), { recursive: true });

@@ -138,8 +138,11 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 // `prepareWorkspaceForJob` / `spawnCodexRemediationWorker`.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
+const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
+const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';
+const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
 // The Worker-Class trailer this pipeline stamps on commits via the
 // commit-msg hook. Different from the worker-model class — encodes
@@ -993,6 +996,58 @@ function resetWorkspaceDir(workspaceDir) {
   rmSync(workspaceDir, { recursive: true, force: true });
 }
 
+function isPathInsideOrEqual(rootPath, candidatePath) {
+  if (!rootPath || !candidatePath) return false;
+  const root = resolveRealPath(resolve(rootPath));
+  const candidate = resolveRealPath(resolve(candidatePath));
+  const rel = relative(root, candidate);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function resolveDeployCheckout(env = process.env) {
+  return resolve(env.AGENT_OS_DEPLOY_CHECKOUT || DEFAULT_DEPLOY_CHECKOUT);
+}
+
+function resolveRemediationWorkspaceRoot({
+  rootDir = ROOT,
+  env = process.env,
+} = {}) {
+  const configuredRoot = String(env[REMEDIATION_WORKSPACE_ROOT_ENV] || '').trim();
+  const hqRoot = String(env.HQ_ROOT || '').trim();
+  const workspaceRoot = configuredRoot
+    ? resolve(configuredRoot)
+    : hqRoot
+      ? resolve(hqRoot, ...HQ_REMEDIATION_WORKSPACE_SEGMENTS)
+      : getFollowUpJobDir(rootDir, 'workspaces');
+
+  const deployCheckout = resolveDeployCheckout(env);
+  const sourceRoot = resolve(rootDir);
+  const externalRootConfigured = Boolean(configuredRoot || hqRoot);
+  if (!externalRootConfigured && isPathInsideOrEqual(deployCheckout, sourceRoot)) {
+    throw new Error(
+      `${REMEDIATION_WORKSPACE_ROOT_ENV} or HQ_ROOT must be set before spawning remediation workers ` +
+      `from the deploy checkout (${deployCheckout}); refusing to create mutable worker clones under live source`
+    );
+  }
+
+  if (externalRootConfigured && isPathInsideOrEqual(deployCheckout, workspaceRoot)) {
+    throw new Error(
+      `Invalid remediation workspace root: ${workspaceRoot} is inside deploy checkout ${deployCheckout}`
+    );
+  }
+
+  return workspaceRoot;
+}
+
+function serializeWorkerPath(rootDir, absolutePath) {
+  const resolvedPath = resolve(absolutePath);
+  const rel = relative(rootDir, resolvedPath);
+  if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
+    return rel;
+  }
+  return resolvedPath;
+}
+
 /**
  * Audit a remediation workspace for branch contamination — commits on HEAD
  * that are patch-equivalent to commits already on `origin/<baseBranch>`.
@@ -1208,11 +1263,13 @@ async function prepareWorkspaceForJob({
   rootDir = ROOT,
   job,
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
+  env = process.env,
   execFileImpl = execFileAsync,
 }) {
   const repo = assertValidRepoSlug(job.repo);
-  const workspaceDir = join(getFollowUpJobDir(rootDir, 'workspaces'), job.jobId);
-  mkdirSync(getFollowUpJobDir(rootDir, 'workspaces'), { recursive: true });
+  const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env });
+  const workspaceDir = join(workspaceRootDir, job.jobId);
+  mkdirSync(workspaceRootDir, { recursive: true });
   const workspaceState = await inspectWorkspaceState({
     workspaceDir,
     expectedRepo: repo,
@@ -1500,6 +1557,27 @@ function resolveJobRelativePath(rootDir, relativePath, { label, allowMissing = t
   return absolutePath;
 }
 
+function resolveWorkerStoredPath(rootDir, storedPath, { label, allowMissing = true } = {}) {
+  if (!storedPath) {
+    return null;
+  }
+
+  const value = String(storedPath);
+  if (!isAbsolute(value)) {
+    return resolveJobRelativePath(rootDir, value, { label, allowMissing });
+  }
+
+  const absolutePath = resolve(value);
+  const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir });
+  if (!isPathInsideOrEqual(workspaceRootDir, absolutePath)) {
+    throw new Error(`Invalid ${label}: absolute path escapes remediation workspace root`);
+  }
+  if (!allowMissing && !existsSync(absolutePath)) {
+    throw new Error(`Invalid ${label}: path does not exist`);
+  }
+  return absolutePath;
+}
+
 function resolveHqReplyArtifactPath(replyPath, { hqRoot, allowMissing = true } = {}) {
   if (!replyPath) {
     return null;
@@ -1630,13 +1708,13 @@ function buildReconciliationPaths(rootDir, job) {
   const { replyPath: expectedReplyPath } = replyTarget.resolvePath({
     launchRequestId: replyStorageKey,
   });
-  const workspaceDir = resolveJobRelativePath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
+  const workspaceDir = resolveWorkerStoredPath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
     label: 'workspaceDir',
   });
-  const outputPath = resolveJobRelativePath(rootDir, worker.outputPath || null, {
+  const outputPath = resolveWorkerStoredPath(rootDir, worker.outputPath || null, {
     label: 'outputPath',
   });
-  const logPath = resolveJobRelativePath(rootDir, worker.logPath || null, {
+  const logPath = resolveWorkerStoredPath(rootDir, worker.logPath || null, {
     label: 'logPath',
   });
   const storedReplyPath = worker.replyPath || job?.remediationReply?.path || null;
@@ -2387,9 +2465,8 @@ async function reconcileFollowUpJob({
             jobPath: failed.jobPath,
           };
         }
-        const workspaceDir = join(getFollowUpJobDir(rootDir, 'workspaces'), job.jobId);
         const contaminationAudit = await auditWorkspaceForContaminationImpl({
-          workspaceDir,
+          workspaceDir: paths.workspaceDir,
           baseBranch,
           execFileImpl,
         });
@@ -3117,10 +3194,10 @@ async function consumeNextFollowUpJob({
       worker: {
         ...worker,
         workspaceState,
-        workspaceDir: relative(rootDir, worker.workspaceDir),
-        promptPath: relative(rootDir, worker.promptPath),
-        outputPath: relative(rootDir, worker.outputPath),
-        logPath: relative(rootDir, worker.logPath),
+        workspaceDir: serializeWorkerPath(rootDir, worker.workspaceDir),
+        promptPath: serializeWorkerPath(rootDir, worker.promptPath),
+        outputPath: serializeWorkerPath(rootDir, worker.outputPath),
+        logPath: serializeWorkerPath(rootDir, worker.logPath),
         replyPath,
       },
     });
@@ -3458,8 +3535,10 @@ export {
   resolveHqRoot,
   resolveLocalRepliesRoot,
   resolveRemediationReplyTarget,
+  resolveRemediationWorkspaceRoot,
   shouldUseHqIntegration,
   resolveJobRelativePath,
+  resolveWorkerStoredPath,
   resolveReplyStorageKey,
   resolveRemediationMaxConcurrentJobs,
   summarizeWorkerFinalMessage,

@@ -236,6 +236,19 @@ be required in branch protection if you want merge to depend on a
 passing verdict. Overrides are restricted to log-safe context names
 matching `[A-Za-z0-9._/-]+` with a 100-character maximum.
 
+On Agent OS hosts, a successful gate can also hand the PR to the
+`merge-agent` worker class. Before invoking `hq dispatch --worker-class
+merge-agent`, the watcher derives the original worker id from the PR head
+branch prefix (for example `codex-lac-660/...` -> `codex-lac-660`) and
+tears down that original worker only if its `worker_runs` row is
+`succeeded`, or the PR lifecycle is already terminal. This frees the PR
+branch for the merge-agent worktree without using `git worktree add
+--force`. If the original worker is still active, the watcher logs a
+structured `merge_agent.dispatch_deferred` event and skips that tick; the
+next watcher tick retries. Successful cleanup logs
+`merge_agent.original_worker_tornDown` with the PR number, original worker
+id, and launch request id.
+
 Operator surface, when something needs intervention:
 
 ```bash

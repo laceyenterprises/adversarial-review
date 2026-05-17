@@ -26,6 +26,7 @@ const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 const DEFAULT_HQ_PATH = 'hq';
+const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
 // "I approve merging this current PR head now; do not wait for the
@@ -104,6 +105,205 @@ function isFinalPassOnRequestChangesEnabled({
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+function mergeAgentLifecycleLog(logger, event, fields = {}) {
+  const sink = logger && typeof logger.info === 'function'
+    ? logger.info.bind(logger)
+    : console.log.bind(console);
+  sink(JSON.stringify({ event, ...fields }));
+}
+
+function deriveOriginalWorkerIdFromBranch(branch) {
+  const normalized = String(branch || '').trim();
+  if (!normalized.includes('/')) return null;
+  const [workerId] = normalized.split('/');
+  return workerId || null;
+}
+
+function readJsonFile(filePath) {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function resolveHqRoot(env = {}) {
+  return String(env.HQ_ROOT || DEFAULT_HQ_ROOT);
+}
+
+function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
+  if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
+    return String(env.AGENT_OS_SESSION_LEDGER_DB_PATH);
+  }
+  const config = readJsonFile(join(hqRoot, '.hq', 'config.json'));
+  if (config?.ledgerDbPath) {
+    return String(config.ledgerDbPath);
+  }
+  return null;
+}
+
+function normalizeWorkerRunStatus(status) {
+  return String(status || '').trim().toLowerCase();
+}
+
+function prStateAllowsOriginalWorkerTeardown(job) {
+  const state = String(job?.prState || '').trim().toLowerCase();
+  return state === 'closed' || state === 'merged' || state === 'merged-pending' || Boolean(job?.merged);
+}
+
+async function lookupOriginalWorkerRunStatus({
+  workerDir,
+  hqRoot,
+  env,
+} = {}) {
+  const workspace = readJsonFile(join(workerDir, 'workspace.json'));
+  const run = readJsonFile(join(workerDir, 'run.json'));
+  const launchRequestId = workspace?.launchRequestId || workspace?.dispatchId
+    || run?.launchRequestId || run?.dispatchId || null;
+  const runId = run?.runId || null;
+  if (!launchRequestId && !runId) {
+    return { found: false, reason: 'missing-launch-request-id' };
+  }
+
+  const dbPath = resolveSessionLedgerDbPath({ hqRoot, env });
+  if (!dbPath || !existsSync(dbPath)) {
+    return { found: false, reason: 'missing-ledger-db', launchRequestId, runId };
+  }
+
+  let Database;
+  try {
+    Database = (await import('better-sqlite3')).default;
+  } catch (err) {
+    return {
+      found: false,
+      reason: 'better-sqlite3-unavailable',
+      detail: err?.message || String(err),
+      launchRequestId,
+      runId,
+    };
+  }
+
+  let db;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const where = [];
+    const params = {};
+    if (launchRequestId) {
+      where.push('launch_request_id = @launchRequestId');
+      params.launchRequestId = launchRequestId;
+    }
+    if (runId) {
+      where.push('run_id = @runId');
+      params.runId = runId;
+    }
+    const row = db.prepare(`
+      SELECT run_id, launch_request_id, status
+      FROM worker_runs
+      WHERE ${where.join(' OR ')}
+      ORDER BY rowid DESC
+      LIMIT 1
+    `).get(params);
+    if (!row) {
+      return { found: false, reason: 'missing-worker-run-row', launchRequestId, runId };
+    }
+    return {
+      found: true,
+      status: normalizeWorkerRunStatus(row.status),
+      launchRequestId: row.launch_request_id || launchRequestId || null,
+      runId: row.run_id || runId || null,
+    };
+  } catch (err) {
+    return {
+      found: false,
+      reason: 'worker-run-lookup-failed',
+      detail: err?.message || String(err),
+      launchRequestId,
+      runId,
+    };
+  } finally {
+    if (db) db.close();
+  }
+}
+
+async function prepareOriginalWorkerForMergeAgent({
+  job,
+  hqPath,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  now = isoNow(),
+  logger = console,
+  lookupRunStatusImpl = lookupOriginalWorkerRunStatus,
+} = {}) {
+  const originalWorkerId = deriveOriginalWorkerIdFromBranch(job?.branch);
+  if (!originalWorkerId) {
+    return { decision: 'ready', reason: 'no-derived-worker-id' };
+  }
+
+  const hqRoot = resolveHqRoot(env);
+  const workerDir = join(hqRoot, 'workers', originalWorkerId);
+  const workspace = readJsonFile(join(workerDir, 'workspace.json'));
+  const workspacePath = workspace?.workspacePath || workspace?.worktreePath || null;
+
+  if (!existsSync(workerDir) || !workspace || (workspacePath && !existsSync(workspacePath))) {
+    return {
+      decision: 'ready',
+      reason: 'original-worker-already-torn-down',
+      originalWorkerId,
+      hqRoot,
+    };
+  }
+
+  const runStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
+  if (!runStatus.found && runStatus.reason === 'missing-worker-run-row') {
+    return {
+      decision: 'ready',
+      reason: 'original-worker-run-row-missing',
+      originalWorkerId,
+      hqRoot,
+      launchRequestId: runStatus.launchRequestId || null,
+    };
+  }
+  const mayTearDown = runStatus.found && runStatus.status === 'succeeded';
+  const prStateOverride = prStateAllowsOriginalWorkerTeardown(job);
+
+  if (!mayTearDown && !prStateOverride) {
+    const reason = runStatus.found
+      ? `worker-run-status-${runStatus.status || 'unknown'}`
+      : runStatus.reason || 'worker-run-status-unknown';
+    mergeAgentLifecycleLog(logger, 'merge_agent.dispatch_deferred', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason,
+      worker_status: runStatus.status || null,
+      at: now,
+    });
+    return {
+      decision: 'deferred',
+      reason,
+      originalWorkerId,
+      workerStatus: runStatus.status || null,
+      launchRequestId: runStatus.launchRequestId || null,
+    };
+  }
+
+  const args = ['worker', 'tear-down', originalWorkerId, '--force', '--root', hqRoot];
+  await execFileImpl(hqPath, args, { env, maxBuffer: 5 * 1024 * 1024 });
+  mergeAgentLifecycleLog(logger, 'merge_agent.original_worker_tornDown', {
+    lrq: runStatus.launchRequestId || null,
+    original_worker_id: originalWorkerId,
+    pr_number: job?.prNumber ?? null,
+    worker_status: runStatus.status || null,
+    at: now,
+  });
+  return {
+    decision: 'torn-down',
+    originalWorkerId,
+    workerStatus: runStatus.status || null,
+    launchRequestId: runStatus.launchRequestId || null,
+  };
 }
 
 // Detect whether agent-os (the host OS that provides the `hq` worker-pool
@@ -955,6 +1155,8 @@ async function dispatchMergeAgentForPR({
   now = isoNow(),
   hqPath = DEFAULT_HQ_PATH,
   agentOsDetectImpl = detectAgentOsPresence,
+  prepareOriginalWorkerImpl = prepareOriginalWorkerForMergeAgent,
+  logger = console,
   env = process.env,
 } = {}) {
   const runtimeEnv = { ...process.env, ...env };
@@ -1066,6 +1268,24 @@ async function dispatchMergeAgentForPR({
   const resolvedHqPath = agentOsState.path || hqPath;
   const parentSession = resolveMergeAgentParentSession(runtimeEnv);
   const hqProject = resolveMergeAgentProject(runtimeEnv);
+
+  const originalWorkerPrep = await prepareOriginalWorkerImpl({
+    job,
+    hqPath: resolvedHqPath,
+    execFileImpl,
+    env: runtimeEnv,
+    now,
+    logger,
+  });
+  if (originalWorkerPrep?.decision === 'deferred') {
+    return {
+      decision: 'dispatch-deferred',
+      reason: originalWorkerPrep.reason || 'original-worker-not-terminal',
+      originalWorkerId: originalWorkerPrep.originalWorkerId || null,
+      workerStatus: originalWorkerPrep.workerStatus || null,
+      launchRequestId: originalWorkerPrep.launchRequestId || null,
+    };
+  }
 
   const prompt = buildMergeAgentPrompt(job, { trigger });
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
@@ -1250,6 +1470,7 @@ export {
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
+  prepareOriginalWorkerForMergeAgent,
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,

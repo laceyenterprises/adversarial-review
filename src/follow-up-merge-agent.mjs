@@ -27,6 +27,18 @@ const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 const DEFAULT_HQ_PATH = 'hq';
+const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
+const HQ_DISPATCH_TIMEOUT_MS = 90_000;
+const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const WORKER_ID_CLASS_PREFIXES = [
+  'claude-code',
+  'clio-agent',
+  'merge-agent',
+  'codex',
+  'gemini',
+  'pi',
+  'stub',
+];
 // Must stay aligned with platform/session-ledger/src/session_ledger/models.py
 // WORKER_RUN_TERMINAL_STATUSES. Merge-agent preflight may tear down the
 // original worker ONLY after the canonical ledger marks the run terminal.
@@ -35,6 +47,7 @@ const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
   'missing-ledger-db',
   'better-sqlite3-unavailable',
   'worker-run-lookup-failed',
+  'worker-run-lookup-threw',
 ]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
@@ -130,6 +143,14 @@ function deriveOriginalWorkerIdFromBranch(branch) {
   return workerId || null;
 }
 
+function isRecognizedOriginalWorkerId(workerId) {
+  const normalized = String(workerId || '').trim();
+  return WORKER_ID_PATTERN.test(normalized)
+    && WORKER_ID_CLASS_PREFIXES.some((prefix) => (
+      normalized === prefix || normalized.startsWith(`${prefix}-`)
+    ));
+}
+
 function readJsonFileDetailed(filePath) {
   try {
     return { ok: true, value: JSON.parse(readFileSync(filePath, 'utf8')) };
@@ -201,6 +222,12 @@ function formatExecFailure(command, err) {
   return augmented;
 }
 
+function isExecTimeout(err) {
+  return err?.code === 'ETIMEDOUT'
+    || err?.killed === true
+    || String(err?.message || '').toLowerCase().includes('timed out');
+}
+
 function readWorkerWorkspace(workerDir) {
   const workspacePath = join(workerDir, 'workspace.json');
   const workspace = readJsonFileDetailed(workspacePath);
@@ -236,11 +263,6 @@ function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
 
 function normalizeWorkerRunStatus(status) {
   return String(status || '').trim().toLowerCase();
-}
-
-function prStateAllowsOriginalWorkerTeardown(job) {
-  const state = String(job?.prState || '').trim().toLowerCase();
-  return state === 'closed' || state === 'merged' || Boolean(job?.merged);
 }
 
 async function lookupOriginalWorkerRunStatus({
@@ -321,6 +343,19 @@ async function prepareOriginalWorkerForMergeAgent({
   if (!originalWorkerId) {
     return { decision: 'ready', reason: 'no-derived-worker-id' };
   }
+  if (!isRecognizedOriginalWorkerId(originalWorkerId)) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: 'unrecognized-worker-id-shape',
+      at: now,
+    });
+    return {
+      decision: 'ready',
+      reason: 'unrecognized-worker-id-shape',
+      originalWorkerId,
+    };
+  }
 
   const hqRoot = resolveHqRoot(env);
   if (!hqRoot) {
@@ -389,7 +424,16 @@ async function prepareOriginalWorkerForMergeAgent({
     };
   }
 
-  const runStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
+  let runStatus;
+  try {
+    runStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
+  } catch (err) {
+    runStatus = {
+      found: false,
+      reason: 'worker-run-lookup-threw',
+      detail: err?.message || String(err),
+    };
+  }
   if (!runStatus.found && DEFERRED_LOOKUP_FAILURE_REASONS.has(runStatus.reason)) {
     mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
       lrq: runStatus.launchRequestId || null,
@@ -417,9 +461,8 @@ async function prepareOriginalWorkerForMergeAgent({
     };
   }
   const mayTearDown = runStatus.found && isTerminalWorkerRunStatus(runStatus.status);
-  const prStateOverride = prStateAllowsOriginalWorkerTeardown(job);
 
-  if (!mayTearDown && !prStateOverride) {
+  if (!mayTearDown) {
     const reason = runStatus.found
       ? `worker-run-status-${runStatus.status || 'unknown'}`
       : runStatus.reason || 'worker-run-status-unknown';
@@ -484,16 +527,23 @@ async function prepareOriginalWorkerForMergeAgent({
 
   const args = ['worker', 'tear-down', originalWorkerId, '--force', '--root', hqRoot];
   try {
-    await execFileImpl(hqPath, args, { env, maxBuffer: 5 * 1024 * 1024 });
+    await execFileImpl(hqPath, args, {
+      env,
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
+    });
   } catch (err) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_failed', {
+    const timedOut = isExecTimeout(err);
+    mergeAgentLifecycleLog(logger, timedOut ? 'merge_agent.tear_down_timeout' : 'merge_agent.tear_down_failed', {
       lrq: runStatus.launchRequestId || null,
       original_worker_id: originalWorkerId,
       pr_number: job?.prNumber ?? null,
-      reason: 'tear-down-command-failed',
+      reason: timedOut ? 'tear-down-timeout' : 'tear-down-command-failed',
       worker_status: runStatus.status || null,
       stderr: String(err?.stderr ?? '').trim() || null,
       stdout: String(err?.stdout ?? '').trim() || null,
+      timeout_ms: timedOut ? HQ_WORKER_TEAR_DOWN_TIMEOUT_MS : null,
       at: now,
     });
     throw formatExecFailure('hq worker tear-down', err);
@@ -1542,6 +1592,8 @@ async function dispatchMergeAgentForPR({
     execResult = await execFileImpl(resolvedHqPath, args, {
       env: dispatchEnv,
       maxBuffer: 5 * 1024 * 1024,
+      timeout: HQ_DISPATCH_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
     });
   } catch (err) {
     throw formatExecFailure('hq dispatch', err);
@@ -1657,9 +1709,12 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
 export {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
+  HQ_DISPATCH_TIMEOUT_MS,
+  HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
   OPERATOR_APPROVED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_SKIP_LABELS,
+  TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
   buildScopedOperatorApproval,

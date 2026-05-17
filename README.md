@@ -251,11 +251,13 @@ branch for the merge-agent worktree without using `git worktree add
 the derived branch prefix does not match the worker's `workspace.json`, or
 the original worker is still active, the watcher logs a structured
 skip/defer event and leaves the existing dispatch path to retry or fail
-with its own diagnostics. Active original workers specifically emit
-`merge_agent.dispatch_deferred` and skip that tick; the next watcher tick
-retries. Successful cleanup logs
+with its own diagnostics. Branch prefixes that do not look like registered
+worker ids are ignored before any filesystem probe or `hq` invocation. Active
+original workers specifically emit `merge_agent.dispatch_deferred` and skip
+that tick; the next watcher tick retries. Successful cleanup logs
 `merge_agent.original_worker_torn_down` with the PR number, original worker
-id, and launch request id.
+id, and launch request id. The `hq worker tear-down` call is bounded to the
+watcher tick budget and logs `merge_agent.tear_down_timeout` on timeout.
 
 Operator surface, when something needs intervention:
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -8,6 +8,9 @@ import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
 import {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
+  HQ_DISPATCH_TIMEOUT_MS,
+  HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
+  TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
   detectAgentOsPresence,
@@ -1332,6 +1335,31 @@ test('prepareOriginalWorkerForMergeAgent matches canonical terminal semantics fo
   }
 });
 
+test('merge-agent terminal status set matches parent session-ledger model when available', (t) => {
+  const modelsPath = path.resolve(
+    '..',
+    '..',
+    'platform',
+    'session-ledger',
+    'src',
+    'session_ledger',
+    'models.py'
+  );
+  if (!existsSync(modelsPath)) {
+    t.skip('parent agent-os session-ledger model is not present in standalone checkout');
+    return;
+  }
+
+  const models = readFileSync(modelsPath, 'utf8');
+  const match = models.match(/WORKER_RUN_TERMINAL_STATUSES\s*=\s*frozenset\(\{([^}]+)\}\)/s);
+  assert.ok(match, 'could not parse WORKER_RUN_TERMINAL_STATUSES from session-ledger models.py');
+  const pythonStatuses = [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]).sort();
+  assert.deepEqual(
+    [...TERMINAL_WORKER_RUN_STATUSES].sort(),
+    pythonStatuses
+  );
+});
+
 test('dispatchMergeAgentForPR is idempotent when original worker is already torn down', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -1535,6 +1563,36 @@ test('prepareOriginalWorkerForMergeAgent skips teardown when branch prefix does 
   assert.equal(logs[0].workspace_worker_id, 'codex-lac-other');
 });
 
+test('prepareOriginalWorkerForMergeAgent ignores unrecognized worker-id branch prefixes before filesystem or hq access', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const logs = [];
+  let execCalled = false;
+  let lookupCalled = false;
+
+  const result = await prepareOriginalWorkerForMergeAgent({
+    job: makeJob({ branch: '--root=/tmp/other/LAC-664c-bad-worker-id' }),
+    hqPath: 'hq',
+    env: { HQ_ROOT: hqRoot, USER: 'placey' },
+    logger: { info: (line) => logs.push(JSON.parse(line)) },
+    lookupRunStatusImpl: async () => {
+      lookupCalled = true;
+      throw new Error('lookup must not run for invalid worker ids');
+    },
+    execFileImpl: async () => {
+      execCalled = true;
+      throw new Error('execFileImpl must not run for invalid worker ids');
+    },
+    now: '2026-05-17T14:33:50.000Z',
+  });
+
+  assert.equal(result.decision, 'ready');
+  assert.equal(result.reason, 'unrecognized-worker-id-shape');
+  assert.equal(lookupCalled, false);
+  assert.equal(execCalled, false);
+  assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
+  assert.equal(logs[0].reason, 'unrecognized-worker-id-shape');
+});
+
 test('prepareOriginalWorkerForMergeAgent surfaces tear-down stderr/stdout and logs failure details', async () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const originalWorkerId = 'codex-lac-665';
@@ -1578,6 +1636,55 @@ test('prepareOriginalWorkerForMergeAgent surfaces tear-down stderr/stdout and lo
   assert.equal(logs[0].event, 'merge_agent.tear_down_failed');
   assert.equal(logs[0].stderr, 'owner mismatch');
   assert.equal(logs[0].stdout, 'suggested command');
+});
+
+test('prepareOriginalWorkerForMergeAgent bounds tear-down and logs timeout distinctly', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const originalWorkerId = 'codex-lac-665timeout';
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ownerUser: 'placey' }));
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    launchRequestId: 'lrq_timeout',
+  }));
+  const logs = [];
+  let execOptions = null;
+
+  await assert.rejects(
+    prepareOriginalWorkerForMergeAgent({
+      job: makeJob({ branch: `${originalWorkerId}/LAC-665-timeout` }),
+      hqPath: 'hq',
+      env: { HQ_ROOT: hqRoot, USER: 'placey' },
+      logger: { info: (line) => logs.push(JSON.parse(line)) },
+      lookupRunStatusImpl: async () => ({
+        found: true,
+        status: 'succeeded',
+        launchRequestId: 'lrq_timeout',
+        runId: 'run_timeout',
+      }),
+      execFileImpl: async (_cmd, _args, options) => {
+        execOptions = options;
+        const error = new Error('Command timed out');
+        error.code = 'ETIMEDOUT';
+        error.killed = true;
+        error.signal = 'SIGTERM';
+        throw error;
+      },
+      now: '2026-05-17T14:34:10.000Z',
+    }),
+    /hq worker tear-down failed/
+  );
+
+  assert.equal(execOptions.timeout, HQ_WORKER_TEAR_DOWN_TIMEOUT_MS);
+  assert.equal(execOptions.killSignal, 'SIGTERM');
+  assert.equal(logs[0].event, 'merge_agent.tear_down_timeout');
+  assert.equal(logs[0].reason, 'tear-down-timeout');
+  assert.equal(logs[0].timeout_ms, HQ_WORKER_TEAR_DOWN_TIMEOUT_MS);
 });
 
 test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured ledger db', async () => {
@@ -1736,7 +1843,7 @@ test('dispatchMergeAgentForPR records a skip when worker-run lookup fails operat
   assert.equal(skipRecord.decision, 'skip-better-sqlite3-unavailable');
 });
 
-test('closed PR state can tear down terminal workers, but merged-pending alone does not bypass active-worker safety', async () => {
+test('closed and merged-pending PR state do not bypass active-worker safety', async () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const originalWorkerId = 'codex-lac-666d';
   const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
@@ -1788,8 +1895,46 @@ test('closed PR state can tear down terminal workers, but merged-pending alone d
     },
     now: '2026-05-17T14:35:15.000Z',
   });
-  assert.equal(closed.decision, 'torn-down');
-  assert.equal(execCalled, true);
+  assert.equal(closed.decision, 'deferred');
+  assert.equal(closed.reason, 'worker-run-status-running');
+  assert.equal(execCalled, false);
+});
+
+test('prepareOriginalWorkerForMergeAgent converts thrown worker-run lookups into structured skips', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const originalWorkerId = 'codex-lac-666e';
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    launchRequestId: 'lrq_lookup_throw',
+  }));
+  const logs = [];
+  let execCalled = false;
+
+  const result = await prepareOriginalWorkerForMergeAgent({
+    job: makeJob({ branch: `${originalWorkerId}/LAC-666e-lookup-throw` }),
+    hqPath: 'hq',
+    env: { HQ_ROOT: hqRoot, USER: 'placey' },
+    logger: { info: (line) => logs.push(JSON.parse(line)) },
+    lookupRunStatusImpl: async () => {
+      throw new Error('native sqlite panic');
+    },
+    execFileImpl: async () => {
+      execCalled = true;
+      throw new Error('execFileImpl must not run after lookup throw');
+    },
+  });
+
+  assert.equal(result.decision, 'skip');
+  assert.equal(result.reason, 'worker-run-lookup-threw');
+  assert.equal(execCalled, false);
+  assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
+  assert.equal(logs[0].reason, 'worker-run-lookup-threw');
+  assert.match(logs[0].detail, /native sqlite panic/);
 });
 
 test('buildMergeAgentPrompt omits trigger header when no trigger is passed', () => {
@@ -2334,6 +2479,8 @@ test('dispatchMergeAgentForPR merges env overrides for detection, args, and laun
     assert.equal(hqCalls[0].options.env.MERGE_AGENT_PARENT_SESSION, env.MERGE_AGENT_PARENT_SESSION);
     assert.equal(hqCalls[0].options.env.MERGE_AGENT_HQ_PROJECT, env.MERGE_AGENT_HQ_PROJECT);
     assert.equal(hqCalls[0].options.env.ADV_REVIEW_ENV_MERGE_TEST, 'from-process-env');
+    assert.equal(hqCalls[0].options.timeout, HQ_DISPATCH_TIMEOUT_MS);
+    assert.equal(hqCalls[0].options.killSignal, 'SIGTERM');
     assert.match(hqCalls[0].args.join(' '), /--parent-session session:test:custom-parent/);
     assert.match(hqCalls[0].args.join(' '), /--project custom-project/);
   } finally {

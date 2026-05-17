@@ -42,6 +42,9 @@ git -C "$PR_WORKTREE" fetch --prune origin "${BASE_BRANCH}" || exit 78
 # 3. Rebase onto the FETCHED ref — origin/${BASE_BRANCH}, not local ${BASE_BRANCH}.
 #    Git's default cherry-pick detection drops commits whose patch
 #    matches an upstream commit; we rely on that behavior here.
+#    Do not blindly rebase your whole in-progress worktree onto the
+#    remote PR branch to catch up with another writer. Stale PR heads
+#    are handled by the bounded publish-replay loop below.
 git -C "$PR_WORKTREE" rebase "origin/${BASE_BRANCH}" || {
   # Conflicts: try to resolve them in this round. If you cannot, abort
   # the rebase and record an operationalBlockers[] entry — never `git rebase --skip` your
@@ -67,6 +70,9 @@ if [ -n "$suspect" ]; then
   printf '%s\n' "$suspect" >&2
   exit 78
 fi
+
+# 5. Before making remediation edits, capture the clean replay base.
+REMEDIATION_BASE_HEAD="$(git -C "$PR_WORKTREE" rev-parse HEAD)"
 ```
 
 The audit is the load-bearing step. If it ever fires, **stop**. Do not
@@ -80,6 +86,30 @@ After the rebase succeeds and the audit passes, re-run the relevant
 tests so the rebase outcome is validated, not just the original fix.
 If the rebase produced no conflicts and no audit hits, treat the
 rebase as routine and move on to the actual remediation work.
+
+## Publish contract — moved PR heads are normal optimistic concurrency
+
+Do not halt just because the remote PR branch moved while you were working.
+After committing your remediation, push with a lease against the remote head
+you just fetched. If that lease fails or Git reports a non-fast-forward push,
+recover by replaying **only your remediation patch** onto the fresh PR head:
+
+1. Save your remediation commits with
+   `git format-patch --stdout "$REMEDIATION_BASE_HEAD"..HEAD`.
+2. Fetch the current PR branch and record the fresh remote head SHA.
+3. Reset the worktree to that fresh remote head.
+4. Replay the saved patch with `git am --3way`.
+5. Re-run the contamination audit and the relevant validation.
+6. Push again with
+   `git push --force-with-lease=refs/heads/<this-pr-branch>:<fresh-remote-sha> origin HEAD:refs/heads/<this-pr-branch>`.
+
+Retry that stale-head replay at most three times. If the patch is already
+present on the fresh remote head, treat that as success and request re-review.
+Use `operationalBlockers[]` with `title: "stale-pr-head"` only after the
+bounded replay loop is exhausted, the replay conflicts in a way you cannot
+resolve safely, the remote force-rewrite makes your own patch identity
+ambiguous, or post-replay validation/audit fails. Include the last remote head
+SHA, your local remediation commit SHA, and the replay attempt count.
 
 When you finish:
 - Summarize what you changed.

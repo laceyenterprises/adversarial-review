@@ -27,17 +27,14 @@ const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 const DEFAULT_HQ_PATH = 'hq';
-const ACTIVE_WORKER_RUN_STATUSES = new Set([
-  'pending',
-  'queued',
-  'requested',
-  'expected',
-  'leased',
-  'starting',
-  'running',
-  'in_progress',
-  'waiting_approval',
-  'waiting_input',
+// Must stay aligned with platform/session-ledger/src/session_ledger/models.py
+// WORKER_RUN_TERMINAL_STATUSES. Merge-agent preflight may tear down the
+// original worker ONLY after the canonical ledger marks the run terminal.
+const TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
+const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
+  'missing-ledger-db',
+  'better-sqlite3-unavailable',
+  'worker-run-lookup-failed',
 ]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
@@ -149,7 +146,29 @@ function resolveHqRoot(env = {}) {
 function resolveHqOwner(hqRoot) {
   if (!hqRoot) return null;
   const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
-  return config.ok ? String(config.value?.ownerUser || '').trim() || null : null;
+  if (!config.ok) {
+    return {
+      ownerUser: null,
+      reason: 'hq-owner-unknown',
+      detail: config.error?.message || String(config.error),
+      code: config.error?.code || null,
+    };
+  }
+  const ownerUser = String(config.value?.ownerUser || '').trim();
+  if (!ownerUser) {
+    return {
+      ownerUser: null,
+      reason: 'hq-owner-unknown',
+      detail: 'ownerUser missing from .hq/config.json',
+      code: null,
+    };
+  }
+  return {
+    ownerUser,
+    reason: null,
+    detail: null,
+    code: null,
+  };
 }
 
 function currentUser(env = process.env) {
@@ -164,7 +183,7 @@ function currentUser(env = process.env) {
 
 function isTerminalWorkerRunStatus(status) {
   const normalized = normalizeWorkerRunStatus(status);
-  return Boolean(normalized) && !ACTIVE_WORKER_RUN_STATUSES.has(normalized);
+  return Boolean(normalized) && TERMINAL_WORKER_RUN_STATUSES.has(normalized);
 }
 
 function formatExecFailure(command, err) {
@@ -216,7 +235,7 @@ function normalizeWorkerRunStatus(status) {
 
 function prStateAllowsOriginalWorkerTeardown(job) {
   const state = String(job?.prState || '').trim().toLowerCase();
-  return state === 'closed' || state === 'merged' || state === 'merged-pending' || Boolean(job?.merged);
+  return state === 'closed' || state === 'merged' || Boolean(job?.merged);
 }
 
 async function lookupOriginalWorkerRunStatus({
@@ -227,10 +246,9 @@ async function lookupOriginalWorkerRunStatus({
   const workspace = readWorkerWorkspace(workerDir).workspace || null;
   const run = readJsonFileDetailed(join(workerDir, 'run.json'));
   const runRecord = run.ok ? run.value : null;
-  const launchRequestId = workspace?.launchRequestId || workspace?.dispatchId
-    || runRecord?.launchRequestId || runRecord?.dispatchId || null;
+  const launchRequestId = workspace?.launchRequestId || runRecord?.launchRequestId || null;
   const runId = runRecord?.runId || null;
-  if (!launchRequestId && !runId) {
+  if (!launchRequestId) {
     return { found: false, reason: 'missing-launch-request-id' };
   }
 
@@ -255,23 +273,13 @@ async function lookupOriginalWorkerRunStatus({
   let db;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const where = [];
-    const params = {};
-    if (launchRequestId) {
-      where.push('launch_request_id = @launchRequestId');
-      params.launchRequestId = launchRequestId;
-    }
-    if (runId) {
-      where.push('run_id = @runId');
-      params.runId = runId;
-    }
     const row = db.prepare(`
       SELECT run_id, launch_request_id, status
       FROM worker_runs
-      WHERE ${where.join(' OR ')}
+      WHERE launch_request_id = @launchRequestId
       ORDER BY rowid DESC
       LIMIT 1
-    `).get(params);
+    `).get({ launchRequestId });
     if (!row) {
       return { found: false, reason: 'missing-worker-run-row', launchRequestId, runId };
     }
@@ -328,7 +336,7 @@ async function prepareOriginalWorkerForMergeAgent({
   const workspace = workspaceState.workspace || null;
   const workspacePath = workspace?.workspacePath || workspace?.worktreePath || null;
 
-  if (!existsSync(workerDir) || workspaceState.reason === 'workspace-missing' || (workspacePath && !existsSync(workspacePath))) {
+  if (!existsSync(workerDir) || (workspaceState.found && workspacePath && !existsSync(workspacePath))) {
     return {
       decision: 'ready',
       reason: 'original-worker-already-torn-down',
@@ -337,22 +345,48 @@ async function prepareOriginalWorkerForMergeAgent({
     };
   }
   if (!workspaceState.found) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.workspace_read_failed', {
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: workspaceState.reason || 'workspace-read-failed',
-      detail: workspaceState.detail || null,
-      code: workspaceState.code || null,
-      at: now,
-    });
-    return {
-      decision: 'deferred',
-      reason: workspaceState.reason || 'workspace-read-failed',
-      originalWorkerId,
-    };
+    if (workspaceState.reason === 'workspace-missing') {
+      mergeAgentLifecycleLog(logger, 'merge_agent.workspace_missing', {
+        original_worker_id: originalWorkerId,
+        pr_number: job?.prNumber ?? null,
+        reason: workspaceState.reason,
+        at: now,
+      });
+    } else {
+      mergeAgentLifecycleLog(logger, 'merge_agent.workspace_read_failed', {
+        original_worker_id: originalWorkerId,
+        pr_number: job?.prNumber ?? null,
+        reason: workspaceState.reason || 'workspace-read-failed',
+        detail: workspaceState.detail || null,
+        code: workspaceState.code || null,
+        at: now,
+      });
+      return {
+        decision: 'deferred',
+        reason: workspaceState.reason || 'workspace-read-failed',
+        originalWorkerId,
+      };
+    }
   }
 
   const runStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
+  if (!runStatus.found && DEFERRED_LOOKUP_FAILURE_REASONS.has(runStatus.reason)) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: runStatus.reason,
+      detail: runStatus.detail || null,
+      at: now,
+    });
+    return {
+      decision: 'skip',
+      reason: runStatus.reason,
+      originalWorkerId,
+      launchRequestId: runStatus.launchRequestId || null,
+      detail: runStatus.detail || null,
+    };
+  }
   if (!runStatus.found && runStatus.reason === 'missing-worker-run-row') {
     return {
       decision: 'ready',
@@ -386,8 +420,28 @@ async function prepareOriginalWorkerForMergeAgent({
     };
   }
 
-  const ownerUser = resolveHqOwner(hqRoot);
+  const ownerResolution = resolveHqOwner(hqRoot);
+  const ownerUser = ownerResolution?.ownerUser || null;
   const runtimeUser = currentUser(env);
+  if (!ownerUser) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: ownerResolution?.reason || 'hq-owner-unknown',
+      hq_root: hqRoot,
+      detail: ownerResolution?.detail || null,
+      code: ownerResolution?.code || null,
+      at: now,
+    });
+    return {
+      decision: 'deferred',
+      reason: ownerResolution?.reason || 'hq-owner-unknown',
+      originalWorkerId,
+      workerStatus: runStatus.status || null,
+      launchRequestId: runStatus.launchRequestId || null,
+    };
+  }
   if (ownerUser && runtimeUser && ownerUser !== runtimeUser) {
     mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
       lrq: runStatus.launchRequestId || null,
@@ -1417,6 +1471,20 @@ async function dispatchMergeAgentForPR({
       originalWorkerId: originalWorkerPrep.originalWorkerId || null,
       workerStatus: originalWorkerPrep.workerStatus || null,
       launchRequestId: originalWorkerPrep.launchRequestId || null,
+    };
+  }
+  if (originalWorkerPrep?.decision === 'skip') {
+    const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
+      skippedAt: now,
+      decision: `skip-${originalWorkerPrep.reason || 'original-worker-preflight'}`,
+      trigger,
+    });
+    return {
+      decision: 'dispatch-skipped',
+      reason: originalWorkerPrep.reason || 'original-worker-preflight',
+      originalWorkerId: originalWorkerPrep.originalWorkerId || null,
+      launchRequestId: originalWorkerPrep.launchRequestId || null,
+      skippedRecordPath,
     };
   }
 

@@ -1557,7 +1557,11 @@ function resolveJobRelativePath(rootDir, relativePath, { label, allowMissing = t
   return absolutePath;
 }
 
-function resolveWorkerStoredPath(rootDir, storedPath, { label, allowMissing = true } = {}) {
+function resolveWorkerStoredPath(rootDir, storedPath, {
+  label,
+  allowMissing = true,
+  workspaceRootDir = null,
+} = {}) {
   if (!storedPath) {
     return null;
   }
@@ -1568,12 +1572,29 @@ function resolveWorkerStoredPath(rootDir, storedPath, { label, allowMissing = tr
   }
 
   const absolutePath = resolve(value);
-  const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir });
-  if (!isPathInsideOrEqual(workspaceRootDir, absolutePath)) {
+  const allowedWorkspaceRoot = workspaceRootDir
+    ? resolve(workspaceRootDir)
+    : resolveRemediationWorkspaceRoot({ rootDir });
+  if (!isPathInsideOrEqual(allowedWorkspaceRoot, absolutePath)) {
     throw new Error(`Invalid ${label}: absolute path escapes remediation workspace root`);
   }
   if (!allowMissing && !existsSync(absolutePath)) {
     throw new Error(`Invalid ${label}: path does not exist`);
+  }
+  return absolutePath;
+}
+
+function resolveStoredWorkspaceRoot(rootDir, storedPath, { allowMissing = true } = {}) {
+  if (!storedPath) {
+    return null;
+  }
+
+  const value = String(storedPath);
+  const absolutePath = isAbsolute(value)
+    ? resolve(value)
+    : resolveJobRelativePath(rootDir, value, { label: 'workspaceRoot', allowMissing });
+  if (!allowMissing && !existsSync(absolutePath)) {
+    throw new Error('Invalid workspaceRoot: path does not exist');
   }
   return absolutePath;
 }
@@ -1708,18 +1729,25 @@ function buildReconciliationPaths(rootDir, job) {
   const { replyPath: expectedReplyPath } = replyTarget.resolvePath({
     launchRequestId: replyStorageKey,
   });
+  const storedWorkspaceRoot = worker.workspaceRoot || job.workspaceRoot || null;
+  const workspaceRootDir = resolveStoredWorkspaceRoot(rootDir, storedWorkspaceRoot)
+    || resolveRemediationWorkspaceRoot({ rootDir });
   const workspaceDir = resolveWorkerStoredPath(rootDir, job.workspaceDir || worker.workspaceDir || null, {
     label: 'workspaceDir',
+    workspaceRootDir,
   });
+  const resolvedWorkspaceDir = workspaceDir || join(workspaceRootDir, job.jobId);
   const outputPath = resolveWorkerStoredPath(rootDir, worker.outputPath || null, {
     label: 'outputPath',
+    workspaceRootDir,
   });
   const logPath = resolveWorkerStoredPath(rootDir, worker.logPath || null, {
     label: 'logPath',
+    workspaceRootDir,
   });
   const storedReplyPath = worker.replyPath || job?.remediationReply?.path || null;
   let replyPath = expectedReplyPath;
-  let legacyReplyPath = join(workspaceDir, '.adversarial-follow-up', 'remediation-reply.json');
+  let legacyReplyPath = join(resolvedWorkspaceDir, '.adversarial-follow-up', 'remediation-reply.json');
   if (storedReplyPath && isAbsolute(storedReplyPath)) {
     if (replyTarget.mode === 'hq') {
       replyPath = resolveHqReplyArtifactPath(storedReplyPath, { hqRoot: replyTarget.root });
@@ -1736,14 +1764,15 @@ function buildReconciliationPaths(rootDir, job) {
     });
   }
 
-  assertContainedInWorkspace('outputPath', workspaceDir, outputPath);
-  assertContainedInWorkspace('logPath', workspaceDir, logPath);
+  assertContainedInWorkspace('outputPath', resolvedWorkspaceDir, outputPath);
+  assertContainedInWorkspace('logPath', resolvedWorkspaceDir, logPath);
   if (legacyReplyPath) {
-    assertContainedInWorkspace('legacyReplyPath', workspaceDir, legacyReplyPath);
+    assertContainedInWorkspace('legacyReplyPath', resolvedWorkspaceDir, legacyReplyPath);
   }
 
   return {
-    workspaceDir,
+    workspaceDir: resolvedWorkspaceDir,
+    workspaceRootDir,
     outputPath,
     logPath,
     replyPath,
@@ -3212,6 +3241,7 @@ async function consumeNextFollowUpJob({
       worker: {
         ...worker,
         workspaceState,
+        workspaceRoot: serializeWorkerPath(rootDir, dirname(worker.workspaceDir)),
         workspaceDir: serializeWorkerPath(rootDir, worker.workspaceDir),
         promptPath: serializeWorkerPath(rootDir, worker.promptPath),
         outputPath: serializeWorkerPath(rootDir, worker.outputPath),

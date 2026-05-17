@@ -56,6 +56,42 @@ Validation keeps three invariants load-bearing:
   actual blocking review finding must fail loudly instead of being silently
   relocated.
 
+## Remediation Workspace Contract
+
+Remediation worker clones live under a canonical workspace root that is resolved
+in this precedence order:
+
+1. `ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT`
+2. `HQ_ROOT/adversarial-review/follow-up-workspaces`
+3. Legacy in-source fallback: `<tool-root>/data/follow-up-jobs/workspaces`
+
+When the daemon is running from the production deploy checkout
+`/Users/airlock/agent-os`, it must refuse to create mutable remediation clones
+under the live source tree unless either `ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT`
+or `HQ_ROOT` points the worker at an external workspace root. An explicitly
+configured workspace root must also be rejected if it resolves inside the deploy
+checkout.
+
+Spawn persists both the resolved `workspaceRoot` and the per-job `workspaceDir`
+on the durable worker record. Reconciliation validates stored absolute artifact
+paths against that persisted workspace root rather than re-resolving the current
+process environment, so operator changes to `HQ_ROOT` or
+`ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT` do not orphan in-flight jobs that were
+spawned under an earlier root.
+
+When a durable worker record is missing `workspaceDir`, reconciliation falls
+back to `<persisted workspaceRoot>/<jobId>` before reading legacy workspace
+artifacts or running the branch-contamination audit. This preserves the
+pre-relocation invariant that the audit has a deterministic per-job workspace
+path even for legacy or partially-written records.
+
+Operational ownership expectation: if `HQ_ROOT` is used, the runtime user must
+have read/write access under `HQ_ROOT/adversarial-review/` and
+`HQ_ROOT/dispatch/remediation-replies/`. LaunchAgent templates that are kept for
+operator revival or diagnostic bounces must carry the same `HQ_ROOT` value as
+the live daemon so a temporary bounce cannot consume jobs into an unwritable or
+mis-resolved workspace tree.
+
 ## Adversarial Gate Commit Status
 
 The watcher projects the durable adversarial-review ledger onto the PR head SHA as a GitHub commit status with context `agent-os/adversarial-gate` by default.

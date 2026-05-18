@@ -129,9 +129,21 @@ async function maybeFireMergeAgentStuckAlert({
   // key when not present.
   const stuck = dispatched?.stuckDetail;
   if (!stuck) return false;
-  const lrq = stuck?.lastRefusedAt && (dispatched?.recordedDispatch?.launchRequestId
+  // ROUND-2 review fix: stuckDetail now carries `launchRequestId`
+  // directly (set by describeStaleDispatch from the validated `lrq`
+  // local). The previous chain — `stuck?.lastRefusedAt && (dispatched.
+  // recordedDispatch.launchRequestId || dispatched.launchRequestId)` —
+  // collapsed to `null` because dispatchMergeAgentForPR's return shape
+  // doesn't include either `recordedDispatch` or a top-level
+  // `launchRequestId`. The alert payload then went out with
+  // `launchRequestId: null` and the debounce key collapsed to
+  // `repo-pr-no-lrq` — a single shared slot across every stuck
+  // dispatch on the same PR. The fallback chain is retained for any
+  // legacy caller that pre-dates the stuckDetail change.
+  const lrq = (typeof stuck.launchRequestId === 'string' && stuck.launchRequestId)
+    || dispatched?.recordedDispatch?.launchRequestId
     || dispatched?.launchRequestId
-    || null);
+    || null;
   // Key the debounce file on a stable identifier — repo + PR + LRQ
   // if available, otherwise repo + PR + age bucket. Sanitize slashes.
   const safeRepo = String(repoPath).replace(/[^A-Za-z0-9._-]/g, '_');
@@ -1785,6 +1797,7 @@ export {
   classifyReviewerFailure,
   evaluateRoundBudgetForReview,
   handlePostedReviewRow,
+  maybeFireMergeAgentStuckAlert,
   pollOnce,
   persistReviewerPgid,
   readWatcherDrainState,
@@ -1793,6 +1806,8 @@ export {
   shouldDeferReviewForActiveFollowUp,
   shouldPreserveReviewersOnSigterm,
   shouldReconcileStaleReviewerSession,
+  STUCK_DISPATCH_ALERT_DEBOUNCE_MS,
+  STUCK_DISPATCH_ALERT_STATE_DIR,
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,

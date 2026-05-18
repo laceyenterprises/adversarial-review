@@ -436,6 +436,107 @@ test('concurrent detector writers do not lose observations', async () => {
   }
 });
 
+test('stale detector lock is reclaimed without operator cleanup', async () => {
+  const alertStateDir = tmpStateDir();
+  try {
+    const staleLockPath = path.join(alertStateDir, 'fleet-state.lock');
+    writeFileSync(
+      staleLockPath,
+      JSON.stringify({ pid: 999999, acquiredAt: '2026-05-18T00:00:00.000Z' }) + '\n',
+    );
+
+    const fired = await maybeFireFleetWideFalseDeferralAlert({
+      dispatched: buildDispatchedDeferred({ lrq: 'lrq-after-crash' }),
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 661,
+      deliverAlertFn: async () => ({ ok: true }),
+      logger: quietLogger(),
+      now: Date.parse('2026-05-18T03:30:00Z'),
+      alertStateDir,
+    });
+
+    assert.strictEqual(fired, false);
+    assert.strictEqual(existsSync(staleLockPath), false, 'stale lock must not strand the detector');
+    const persisted = JSON.parse(readFileSync(path.join(alertStateDir, 'fleet-state.json'), 'utf8'));
+    assert.deepStrictEqual(persisted.observations.map((observation) => observation.lrq), ['lrq-after-crash']);
+  } finally {
+    rmSync(alertStateDir, { recursive: true, force: true });
+  }
+});
+
+test('fleet-wide alert delivery happens after releasing the detector state lock', async () => {
+  const alertStateDir = tmpStateDir();
+  try {
+    const calls = [];
+    let releaseAlert;
+    const alertStarted = new Promise((resolve) => {
+      releaseAlert = resolve;
+    });
+    let releaseDelivery;
+    const deliveryCanFinish = new Promise((resolve) => {
+      releaseDelivery = resolve;
+    });
+    const slowDeliverFn = async (text, structured) => {
+      calls.push({ text, structured });
+      releaseAlert();
+      await deliveryCanFinish;
+      return { ok: true };
+    };
+    const now0 = Date.parse('2026-05-18T03:30:00Z');
+
+    await maybeFireFleetWideFalseDeferralAlert({
+      dispatched: buildDispatchedDeferred({ lrq: 'lrq-1' }),
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 661,
+      deliverAlertFn: slowDeliverFn,
+      logger: quietLogger(),
+      now: now0,
+      alertStateDir,
+    });
+    await maybeFireFleetWideFalseDeferralAlert({
+      dispatched: buildDispatchedDeferred({ lrq: 'lrq-2' }),
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 662,
+      deliverAlertFn: slowDeliverFn,
+      logger: quietLogger(),
+      now: now0 + 60_000,
+      alertStateDir,
+    });
+
+    const thresholdPromise = maybeFireFleetWideFalseDeferralAlert({
+      dispatched: buildDispatchedDeferred({ lrq: 'lrq-3' }),
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 663,
+      deliverAlertFn: slowDeliverFn,
+      logger: quietLogger(),
+      now: now0 + 120_000,
+      alertStateDir,
+    });
+    await alertStarted;
+    assert.strictEqual(existsSync(path.join(alertStateDir, 'fleet-state.lock')), false);
+
+    const peerResult = await Promise.race([
+      maybeFireFleetWideFalseDeferralAlert({
+        dispatched: buildDispatchedDeferred({ lrq: 'lrq-4' }),
+        repoPath: 'laceyenterprises/agent-os',
+        prNumber: 664,
+        deliverAlertFn: slowDeliverFn,
+        logger: quietLogger(),
+        now: now0 + 180_000,
+        alertStateDir,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 100)),
+    ]);
+    assert.strictEqual(peerResult, false, 'peer writer should not block behind slow alert delivery');
+
+    releaseDelivery();
+    assert.strictEqual(await thresholdPromise, true);
+    assert.strictEqual(calls.length, 1);
+  } finally {
+    rmSync(alertStateDir, { recursive: true, force: true });
+  }
+});
+
 test('corrupt state file fails closed and emits a degraded detector alert', async () => {
   const alertStateDir = tmpStateDir();
   try {

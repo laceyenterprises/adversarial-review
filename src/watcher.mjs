@@ -250,26 +250,65 @@ const FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_STATE_FILE = 'degraded-alert-state.json
 const FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_LOCK_FILE = 'degraded-alert-state.lock';
 const FLEET_WIDE_FALSE_DEFERRAL_LOCK_RETRY_MS = 10;
 const FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS = 5_000;
+const FLEET_WIDE_FALSE_DEFERRAL_STALE_LOCK_MS = 2 * 60 * 1000;
 
 function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function acquireFleetWideFalseDeferralLock(lockPath, {
+function readFleetWideFalseDeferralLock(lockPath) {
+  let raw = '';
+  try {
+    raw = readFileSync(lockPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      pid: parsed?.pid || null,
+      acquiredAt: typeof parsed?.acquiredAt === 'string' ? parsed.acquiredAt : null,
+    };
+  } catch {
+    try {
+      const stat = statSync(lockPath);
+      return { pid: null, acquiredAtMs: stat.mtimeMs };
+    } catch {
+      return { pid: null, acquiredAtMs: null };
+    }
+  }
+}
+
+function isFleetWideFalseDeferralLockStale(lockPath, nowMs, staleLockMs) {
+  const lock = readFleetWideFalseDeferralLock(lockPath);
+  const acquiredAtMs = Number.isFinite(lock.acquiredAtMs)
+    ? lock.acquiredAtMs
+    : Date.parse(lock.acquiredAt || '');
+  return Number.isFinite(acquiredAtMs) && (nowMs - acquiredAtMs) >= staleLockMs;
+}
+
+async function acquireFleetWideFalseDeferralLock(lockPath, {
   retryMs = FLEET_WIDE_FALSE_DEFERRAL_LOCK_RETRY_MS,
   timeoutMs = FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS,
+  staleLockMs = FLEET_WIDE_FALSE_DEFERRAL_STALE_LOCK_MS,
+  nowFn = Date.now,
 } = {}) {
-  const startedAt = Date.now();
+  const startedAt = nowFn();
   while (true) {
     try {
-      writeFileSync(lockPath, `${process.pid}\n`, { flag: 'wx' });
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ pid: process.pid, acquiredAt: new Date(nowFn()).toISOString() }) + '\n',
+        { flag: 'wx' },
+      );
       return;
     } catch (err) {
       if (err?.code !== 'EEXIST') throw err;
-      if ((Date.now() - startedAt) >= timeoutMs) {
+      const nowMs = nowFn();
+      if (isFleetWideFalseDeferralLockStale(lockPath, nowMs, staleLockMs)) {
+        rmSync(lockPath, { force: true });
+        continue;
+      }
+      if ((nowMs - startedAt) >= timeoutMs) {
         throw new Error(`Timed out waiting for fleet-wide false-deferral lock: ${lockPath}`);
       }
-      sleepMs(retryMs);
+      await sleepMs(retryMs);
     }
   }
 }
@@ -281,7 +320,7 @@ async function withFleetWideFalseDeferralLock(
 ) {
   mkdirSync(alertStateDir, { recursive: true });
   const lockPath = join(alertStateDir, lockFile);
-  acquireFleetWideFalseDeferralLock(lockPath);
+  await acquireFleetWideFalseDeferralLock(lockPath);
   try {
     return await callback();
   } finally {
@@ -437,8 +476,9 @@ async function maybeFireFleetWideFalseDeferralAlert({
   if (!lrq) return false;
 
   const statePath = join(alertStateDir, FLEET_WIDE_FALSE_DEFERRAL_STATE_FILE);
+  let alertToDeliver = null;
   try {
-    return await withFleetWideFalseDeferralLock(alertStateDir, async () => {
+    alertToDeliver = await withFleetWideFalseDeferralLock(alertStateDir, async () => {
       let state = { observations: [], lastAlertedAt: null };
       try {
         if (fsImpl.existsSync(statePath)) {
@@ -501,11 +541,11 @@ async function maybeFireFleetWideFalseDeferralAlert({
         });
       }
 
-      if (state.observations.length < threshold) return false;
+      if (state.observations.length < threshold) return null;
 
       const lastAlertedMs = Date.parse(state.lastAlertedAt || '');
       if (Number.isFinite(lastAlertedMs) && (now - lastAlertedMs) < debounceMs) {
-        return false;
+        return null;
       }
 
       const observedTargets = [...new Set(state.observations
@@ -523,7 +563,7 @@ async function maybeFireFleetWideFalseDeferralAlert({
         + `Check that consumers are reading the deploy-checkout DB, not the `
         + `managed-service-root DB.`
       );
-      await deliverAlertFn(text, {
+      const structuredAlert = {
         event: 'merge_agent.fleet_wide_false_deferral',
         payload: {
           reason: FLEET_WIDE_FALSE_DEFERRAL_REASON,
@@ -533,7 +573,7 @@ async function maybeFireFleetWideFalseDeferralAlert({
           observedTargets,
           observations: state.observations,
         },
-      });
+      };
 
       state.lastAlertedAt = new Date(now).toISOString();
       try {
@@ -552,7 +592,7 @@ async function maybeFireFleetWideFalseDeferralAlert({
           degradedAlertDebounceMs,
         });
       }
-      return true;
+      return { text, structuredAlert };
     });
   } catch (lockErr) {
     if (typeof lockErr?.message === 'string'
@@ -572,6 +612,9 @@ async function maybeFireFleetWideFalseDeferralAlert({
       degradedAlertDebounceMs,
     });
   }
+  if (!alertToDeliver) return false;
+  await deliverAlertFn(alertToDeliver.text, alertToDeliver.structuredAlert);
+  return true;
 }
 
 function readWatcherDrainState({

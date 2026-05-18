@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import {
   constants as fsConstants,
   accessSync,
@@ -886,6 +886,241 @@ function getRecordedMergeAgentDispatch(rootDir, job) {
   }
 }
 
+// LRQ identifiers come from the agent-os dispatch daemon and have the
+// shape `lrq_<8>-<4>-<4>-<4>-<12>` (UUID after the prefix). The watcher
+// runs as a long-lived operator daemon with broad fs access, so we
+// MUST regex-validate any LRQ before interpolating it into a path —
+// otherwise a malformed or attacker-controlled launchRequestId in a
+// dispatch record would let the watcher act as an arbitrary file
+// reader. Pattern is intentionally narrow: lowercase hex segments only.
+const LRQ_ID_PATTERN = /^lrq_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function _isValidLrqId(value) {
+  return typeof value === 'string' && LRQ_ID_PATTERN.test(value);
+}
+
+// Threshold below which a recorded dispatch is considered "still
+// reasonably booting" — under this we don't classify it as stuck even
+// if its LRQ shows pre-spawn. Tuned with operator (2026-05-18) at 10
+// minutes; codex workers + warm starts can take a few minutes legitimately,
+// so a tighter threshold would false-positive.
+const STUCK_DISPATCH_MIN_AGE_MINUTES = 10;
+// Minimum count of audit refusals before we classify as stuck. Under
+// this and we treat the dispatch as in-flight (the daemon may have
+// admitted it on first try; the LRQ status read could just be lagging).
+const STUCK_DISPATCH_MIN_REFUSALS = 3;
+
+// EXPORT THESE for ad-hoc operator tooling + tests. They are intentional
+// public knobs.
+const STUCK_DISPATCH_DEFAULTS = Object.freeze({
+  minAgeMinutes: STUCK_DISPATCH_MIN_AGE_MINUTES,
+  minRefusals: STUCK_DISPATCH_MIN_REFUSALS,
+});
+
+function _safeReadJsonLines(path, fsImpl) {
+  try {
+    const text = fsImpl.readFileSync(path, 'utf8');
+    return text.split('\n').filter((line) => line.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+function _utcDateString(timestampMs) {
+  return new Date(timestampMs).toISOString().slice(0, 10);
+}
+
+/**
+ * Classifies a recorded merge-agent dispatch as "stuck pre-spawn" when
+ * the dispatch daemon has been refusing to admit it for long enough
+ * that an operator should know.
+ *
+ * Returns null when:
+ *   - hqRoot is not provided / not readable (OSS standalone case;
+ *     this is intentional — outside the agent-os bundled environment
+ *     we cannot observe the dispatch daemon's audit log, so we MUST
+ *     fail closed and never claim stuck.)
+ *   - recorded dispatch is younger than minAgeMinutes (still booting)
+ *   - fewer than minRefusals audit-recorded admit refusals (in-flight)
+ *   - audit files missing (treated as no signal — caller can act on
+ *     other surfaces but we don't fabricate a classification)
+ *
+ * Returns { stuckForMinutes, refusalCount, primaryReason, lastRefusedAt }
+ * when the signals indicate the spawn never happened.
+ *
+ * Pure-ish: optional `fsImpl` / `now` make this fully testable without
+ * touching the real filesystem or clock.
+ */
+// Authoritative HQ status tokens that mean the dispatch has reached a
+// terminal state OR is actively running. If the dispatch reports any
+// of these, refusal history is irrelevant — the LRQ was admitted at
+// some point, refusals are just earlier-in-history attempts. Without
+// this check the helper would mislabel healthy in-flight dispatches
+// as BLOCKED forever once historical refusals exist in the audit log.
+const _NON_STUCK_DISPATCH_STATUSES = new Set([
+  // terminal — request finished one way or the other
+  'succeeded',
+  'failed',
+  'cancelled',
+  'canceled',
+  'superseded',
+  // actively progressing — admission already happened
+  'running',
+  'starting',
+  // intentional non-progress, but admission did happen
+  'blocked',
+  'stalled',
+]);
+
+// Synchronous probe of `hq dispatch status <lrq>` — returns
+// `{status: <string>}` or `null` on any failure (no hqPath, non-zero
+// exit, malformed JSON, timeout). Used by the caller in
+// dispatchMergeAgentForPR to wire describeStaleDispatch's
+// dispatchStateProbe so the round-2 reviewer's blocking finding is
+// closed: historical refusal audit rows must NOT promote to BLOCKED
+// when the same LRQ is currently running / succeeded.
+//
+// Returning null on any failure is intentional: describeStaleDispatch
+// falls through to refusal-count-only classification (the OSS-safe
+// behavior); a probe failure should not change the OSS contract.
+//
+// Timeout: 5 seconds. `hq dispatch status` should be <200ms in a
+// healthy state; a long wait usually means the daemon is wedged on
+// the very SQLite lock we're trying to diagnose. We do NOT want this
+// probe to block the watcher loop on the daemon's recovery — cap and
+// fall through.
+function _probeDispatchStatusViaHq({ hqPath, lrq, execFileImpl, env = {} } = {}) {
+  if (!hqPath || !_isValidLrqId(lrq)) return null;
+  // The probe is synchronous (describeStaleDispatch treats the return
+  // value as a plain object, not a promise). spawnSync is the right
+  // tool — execFileImpl from the outer scope is async.
+  let result;
+  try {
+    result = spawnSync(hqPath, ['dispatch', 'status', lrq], {
+      env: { ...env },
+      timeout: 5_000,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    return null;
+  }
+  if (!result || result.error || result.status !== 0) return null;
+  const stdout = String(result.stdout || '').trim();
+  if (!stdout) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const status = typeof parsed.status === 'string' ? parsed.status : null;
+  return status ? { status } : null;
+}
+
+function describeStaleDispatch(recordedDispatch, {
+  hqRoot = null,
+  now = Date.now(),
+  fsImpl = { readFileSync },
+  minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
+  minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
+  // Optional caller-supplied probe of current dispatch state. When
+  // provided AND the returned status is in _NON_STUCK_DISPATCH_STATUSES,
+  // we return null (the request was admitted at some point — refusal
+  // history is just earlier attempts). When omitted, we fall back to
+  // refusal-count-only classification (safe for OSS standalone where
+  // no probe is available, but in agent-os contexts callers SHOULD
+  // pass the probe to avoid false-positive BLOCKED on healthy dispatches).
+  dispatchStateProbe = null,
+} = {}) {
+  if (!recordedDispatch || !recordedDispatch.dispatchedAt) return null;
+  if (!hqRoot) return null;
+  const dispatchedAtMs = Date.parse(String(recordedDispatch.dispatchedAt));
+  if (!Number.isFinite(dispatchedAtMs)) return null;
+  const ageMinutes = (now - dispatchedAtMs) / 60_000;
+  if (ageMinutes < minAgeMinutes) return null;
+  const lrq = recordedDispatch.launchRequestId;
+  if (!_isValidLrqId(lrq)) return null;
+
+  // Live-state check (round-1 reviewer's blocking finding): if a probe
+  // is available AND the dispatch is in a non-stuck state, return null
+  // immediately. Refusal history alone is not authoritative because
+  // earlier refusals can predate a successful later admit.
+  if (typeof dispatchStateProbe === 'function') {
+    let probed = null;
+    try { probed = dispatchStateProbe(lrq); } catch { probed = null; }
+    const probedStatus = typeof probed?.status === 'string' ? probed.status.toLowerCase() : null;
+    if (probedStatus && _NON_STUCK_DISPATCH_STATUSES.has(probedStatus)) {
+      return null;
+    }
+  }
+
+  // Audit logs are UTC-keyed (see modules/worker-pool .../daemon.py
+  // _append_dispatch_audit_jsonl, and the 2026-05-18 incident docs).
+  // A dispatch could have started yesterday-UTC and still be queued
+  // today-UTC, so scan both. Don't use $(date +%Y-%m-%d) — local time
+  // misses events at the day boundary; this trap previously hid 1621
+  // memory-pressure events from operator visibility.
+  const todayUtc = _utcDateString(now);
+  const yesterdayUtc = _utcDateString(now - 86_400_000);
+  const dates = todayUtc === yesterdayUtc ? [todayUtc] : [yesterdayUtc, todayUtc];
+
+  const refusals = [];
+  for (const date of dates) {
+    const path = join(hqRoot, 'dispatch', 'audit', date, `${lrq}.jsonl`);
+    const lines = _safeReadJsonLines(path, fsImpl);
+    if (!lines) continue;
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        if (typeof event?.decision === 'string' && event.decision.startsWith('refuse_')) {
+          refusals.push(event);
+        }
+      } catch {
+        // Skip malformed lines silently — audit log integrity is
+        // tracked elsewhere; we don't want to crash the watcher loop
+        // over one corrupt line.
+      }
+    }
+  }
+  if (refusals.length < minRefusals) return null;
+
+  // Reason-code histogram: which refusal cause is dominating?
+  const counts = new Map();
+  for (const event of refusals) {
+    const structured = Array.isArray(event?.structuredReasons) ? event.structuredReasons : [];
+    for (const r of structured) {
+      const code = (r && typeof r.reasonCode === 'string') ? r.reasonCode : 'unknown';
+      counts.set(code, (counts.get(code) || 0) + 1);
+    }
+  }
+  let primaryReason = null;
+  let primaryCount = -1;
+  for (const [code, n] of counts) {
+    if (n > primaryCount) {
+      primaryReason = code;
+      primaryCount = n;
+    }
+  }
+
+  return {
+    // Include the LRQ so the Sentinel alert path in watcher.mjs can
+    // key on it directly. Round-2 review finding: the alert was
+    // reaching back through `dispatched.recordedDispatch.launchRequestId`
+    // / `dispatched.launchRequestId`, neither of which the dispatch
+    // result carried — so the alert payload had `launchRequestId: null`
+    // and the debounce key collapsed to a `repo-pr-no-lrq` slot.
+    // Surfacing the LRQ on stuckDetail itself is the single source of
+    // truth — alert + log + debounce all read from one place.
+    launchRequestId: lrq,
+    stuckForMinutes: Math.round(ageMinutes),
+    refusalCount: refusals.length,
+    primaryReason,
+    lastRefusedAt: refusals[refusals.length - 1]?.createdAt || null,
+  };
+}
+
 function findLatestFollowUpJobForPR(rootDir, { repo, prNumber }) {
   const keys = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
   let latest = null;
@@ -1556,6 +1791,57 @@ async function dispatchMergeAgentForPR({
           observedExternally: true,
         });
       }
+      // Probe whether the dispatch is stuck pre-spawn (the daemon has
+      // been refusing admission long enough that operator should know).
+      // Returns null silently when:
+      //   - hqRoot is missing (OSS standalone — no audit log to read)
+      //   - dispatch is younger than the min-age threshold (booting)
+      //   - audit log shows fewer than min refusals (in-flight)
+      //   - live-state probe says the LRQ is now running/succeeded
+      // i.e. fails closed for the OSS path, surfaces signal only when
+      // operator action is genuinely warranted.
+      //
+      // ROUND-2 review fixes:
+      //
+      // (1) hqRoot was being set from `hqPath` which is the `hq`
+      //     EXECUTABLE path resolved by detectAgentOsPresence — not
+      //     the HQ ROOT directory. Audit logs live at
+      //     `${HQ_ROOT}/dispatch/audit/...`. Resolve via runtimeEnv's
+      //     HQ_ROOT instead.
+      //
+      // (2) describeStaleDispatch accepts a `dispatchStateProbe` arg
+      //     that suppresses false-positive BLOCKED when historical
+      //     refusals predate a successful later admit, but the caller
+      //     wasn't passing one. Wire `hq dispatch status <lrq>` as the
+      //     probe — shell out, parse JSON, return `{status: ...}`. Any
+      //     probe failure falls through to refusal-count-only
+      //     classification (the OSS-safe behavior).
+      const hqRootForAudit = resolveHqRoot(runtimeEnv);
+      const stuckDetail = describeStaleDispatch(recordedDispatch, {
+        hqRoot: hqRootForAudit || null,
+        now: Date.parse(String(now)) || Date.now(),
+        dispatchStateProbe: hqPath && _isValidLrqId(recordedDispatch?.launchRequestId)
+          ? (lrqArg) => _probeDispatchStatusViaHq({
+              hqPath,
+              lrq: lrqArg,
+              execFileImpl,
+              env: runtimeEnv,
+            })
+          : null,
+      });
+      if (stuckDetail) {
+        mergeAgentLifecycleLog(logger, 'merge_agent.stuck_pre_spawn', {
+          repo,
+          prNumber,
+          launchRequestId: recordedDispatch.launchRequestId,
+          dispatchedAt: recordedDispatch.dispatchedAt,
+          trigger: recordedDispatch.trigger,
+          stuckForMinutes: stuckDetail.stuckForMinutes,
+          refusalCount: stuckDetail.refusalCount,
+          primaryReason: stuckDetail.primaryReason,
+          lastRefusedAt: stuckDetail.lastRefusedAt,
+        });
+      }
       return {
         decision,
         trigger: recordedDispatch.trigger,
@@ -1563,6 +1849,7 @@ async function dispatchMergeAgentForPR({
         operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
         mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
         labelRemovalErrors: labelRemoval.labelRemovalErrors,
+        stuckDetail,
       };
     }
     return { decision };
@@ -1797,6 +2084,8 @@ export {
   buildMergeAgentPrompt,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
+  describeStaleDispatch,
+  STUCK_DISPATCH_DEFAULTS,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,
   extractOperatorNotes,

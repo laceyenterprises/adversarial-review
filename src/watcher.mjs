@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
@@ -56,6 +56,7 @@ import {
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
+import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
   deleteGateRecordsForPR,
   projectAdversarialGateStatus,
@@ -99,6 +100,96 @@ ensureReviewStateSchema(db);
 const watcherHealthProbe = createWatcherHealthProbe();
 const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
+
+// Stuck-pre-spawn alert debounce. Once we've alerted on a particular
+// (repo, PR, dispatchedAt) tuple, suppress the next alert for this
+// many milliseconds. Operator confirmed 30-min stuck threshold; a
+// 60-min debounce means at most ~1 alert per hour per stuck PR even
+// if the watcher tick keeps observing it. State lives in a tiny
+// sidecar JSON file alongside the merge-agent dispatch records.
+const STUCK_DISPATCH_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
+const STUCK_DISPATCH_ALERT_STATE_DIR = join(
+  ROOT, 'data', 'follow-up-jobs', 'merge-agent-stuck-alerts',
+);
+
+async function maybeFireMergeAgentStuckAlert({
+  rootDir,
+  repoPath,
+  prNumber,
+  dispatched,
+  deliverAlertFn,
+  logger,
+  now = Date.now(),
+  alertStateDir = STUCK_DISPATCH_ALERT_STATE_DIR,
+  debounceMs = STUCK_DISPATCH_ALERT_DEBOUNCE_MS,
+  fsImpl = { readFileSync, mkdirSync, writeFileSync, existsSync },
+}) {
+  // The recorded dispatch object is on `dispatched` (via stuckDetail
+  // surfacing in follow-up-merge-agent.mjs); fall back to a derivable
+  // key when not present.
+  const stuck = dispatched?.stuckDetail;
+  if (!stuck) return false;
+  const lrq = stuck?.lastRefusedAt && (dispatched?.recordedDispatch?.launchRequestId
+    || dispatched?.launchRequestId
+    || null);
+  // Key the debounce file on a stable identifier — repo + PR + LRQ
+  // if available, otherwise repo + PR + age bucket. Sanitize slashes.
+  const safeRepo = String(repoPath).replace(/[^A-Za-z0-9._-]/g, '_');
+  const dedupeKey = lrq
+    ? `${safeRepo}-pr-${prNumber}-${lrq}.json`
+    : `${safeRepo}-pr-${prNumber}-no-lrq.json`;
+  const statePath = join(alertStateDir, dedupeKey);
+  // Read prior alert state (if any) — fail closed on read errors
+  // (alert fires; better to over-alert once than to silently swallow).
+  let priorAlertAt = null;
+  try {
+    if (fsImpl.existsSync(statePath)) {
+      const doc = JSON.parse(fsImpl.readFileSync(statePath, 'utf8'));
+      const at = Date.parse(String(doc?.alertedAt || ''));
+      if (Number.isFinite(at)) priorAlertAt = at;
+    }
+  } catch { /* fall through — over-alert is safer than under-alert */ }
+  if (priorAlertAt && (now - priorAlertAt) < debounceMs) {
+    return false;
+  }
+  // Fire the alert. Wrapped by caller try/catch; this layer formats.
+  const text = (
+    `Adversarial-watcher: merge-agent dispatch for ${repoPath}#${prNumber} `
+    + `is stuck pre-spawn ${stuck.stuckForMinutes}min. `
+    + `${stuck.refusalCount} admit refusals; primary reason: ${stuck.primaryReason || 'unknown'}. `
+    + `Last refused at ${stuck.lastRefusedAt}. `
+    + `Run \`scripts/hq-merge-agent-why.sh ${prNumber}\` for details.`
+  );
+  await deliverAlertFn(text, {
+    event: 'merge_agent.stuck_pre_spawn',
+    payload: {
+      repo: repoPath,
+      prNumber,
+      launchRequestId: lrq,
+      stuckForMinutes: stuck.stuckForMinutes,
+      refusalCount: stuck.refusalCount,
+      primaryReason: stuck.primaryReason,
+      lastRefusedAt: stuck.lastRefusedAt,
+    },
+  });
+  // Persist debounce state. Failure to persist isn't fatal — we may
+  // alert again on the next tick which is at worst noisy.
+  try {
+    fsImpl.mkdirSync(alertStateDir, { recursive: true });
+    fsImpl.writeFileSync(statePath, JSON.stringify({
+      repo: repoPath,
+      prNumber,
+      launchRequestId: lrq,
+      alertedAt: new Date(now).toISOString(),
+      stuckForMinutes: stuck.stuckForMinutes,
+    }, null, 2) + '\n');
+  } catch (writeErr) {
+    logger?.warn?.(
+      `[watcher] failed to persist stuck-dispatch alert debounce state: ${writeErr?.message || writeErr}`
+    );
+  }
+  return true;
+}
 
 function readWatcherDrainState({
   drainFile = WATCHER_DRAIN_FILE,
@@ -944,9 +1035,40 @@ async function handlePostedReviewRow({
       rootDir,
       ...dispatchJob,
     });
+    // Enrich the decision log line when the dispatch is stuck pre-spawn
+    // (recorded, daemon refusing admission). Surfaces what
+    // `skip-already-dispatched` alone hides — see PR #649 for the on-
+    // demand diagnostic of the same gap. Fails closed: when the helper
+    // returns null (OSS standalone, hqRoot missing, audit dir empty,
+    // dispatch still booting) the message is unchanged.
+    const stuck = dispatched?.stuckDetail || null;
+    const stuckSuffix = stuck
+      ? ` BLOCKED stuck=${stuck.stuckForMinutes}min refusals=${stuck.refusalCount} primary=${stuck.primaryReason || 'unknown'}`
+      : '';
     logger.log(
-      `[watcher] merge-agent decision for ${repoPath}#${prNumber}: ${dispatched.decision}`
+      `[watcher] merge-agent decision for ${repoPath}#${prNumber}: ${dispatched.decision}${stuckSuffix}`
     );
+    // Escalate to a Sentinel alert at the operator-confirmed 30-min
+    // threshold. Debounced: don't refire the same alert within an hour.
+    // Wrapped in try/catch so missing ALERT_TO / unreachable hooks
+    // endpoint never crashes the watcher loop (matches the OSS-friendly
+    // shape of health-probe.mjs::sendTransitionAlert).
+    if (stuck && stuck.stuckForMinutes >= 30) {
+      try {
+        await maybeFireMergeAgentStuckAlert({
+          rootDir,
+          repoPath,
+          prNumber,
+          dispatched,
+          deliverAlertFn: defaultDeliverAlert,
+          logger,
+        });
+      } catch (alertErr) {
+        logger?.error?.(
+          `[watcher] stuck-dispatch alert delivery failed: ${alertErr?.message || alertErr}`
+        );
+      }
+    }
   } catch (err) {
     // The augmented error from `dispatchMergeAgentForPR` already
     // inlines stderr+stdout into `err.message`, so just dumping

@@ -886,6 +886,130 @@ function getRecordedMergeAgentDispatch(rootDir, job) {
   }
 }
 
+// Threshold below which a recorded dispatch is considered "still
+// reasonably booting" — under this we don't classify it as stuck even
+// if its LRQ shows pre-spawn. Tuned with operator (2026-05-18) at 10
+// minutes; codex workers + warm starts can take a few minutes legitimately,
+// so a tighter threshold would false-positive.
+const STUCK_DISPATCH_MIN_AGE_MINUTES = 10;
+// Minimum count of audit refusals before we classify as stuck. Under
+// this and we treat the dispatch as in-flight (the daemon may have
+// admitted it on first try; the LRQ status read could just be lagging).
+const STUCK_DISPATCH_MIN_REFUSALS = 3;
+
+// EXPORT THESE for ad-hoc operator tooling + tests. They are intentional
+// public knobs.
+const STUCK_DISPATCH_DEFAULTS = Object.freeze({
+  minAgeMinutes: STUCK_DISPATCH_MIN_AGE_MINUTES,
+  minRefusals: STUCK_DISPATCH_MIN_REFUSALS,
+});
+
+function _safeReadJsonLines(path, fsImpl) {
+  try {
+    const text = fsImpl.readFileSync(path, 'utf8');
+    return text.split('\n').filter((line) => line.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+function _utcDateString(timestampMs) {
+  return new Date(timestampMs).toISOString().slice(0, 10);
+}
+
+/**
+ * Classifies a recorded merge-agent dispatch as "stuck pre-spawn" when
+ * the dispatch daemon has been refusing to admit it for long enough
+ * that an operator should know.
+ *
+ * Returns null when:
+ *   - hqRoot is not provided / not readable (OSS standalone case;
+ *     this is intentional — outside the agent-os bundled environment
+ *     we cannot observe the dispatch daemon's audit log, so we MUST
+ *     fail closed and never claim stuck.)
+ *   - recorded dispatch is younger than minAgeMinutes (still booting)
+ *   - fewer than minRefusals audit-recorded admit refusals (in-flight)
+ *   - audit files missing (treated as no signal — caller can act on
+ *     other surfaces but we don't fabricate a classification)
+ *
+ * Returns { stuckForMinutes, refusalCount, primaryReason, lastRefusedAt }
+ * when the signals indicate the spawn never happened.
+ *
+ * Pure-ish: optional `fsImpl` / `now` make this fully testable without
+ * touching the real filesystem or clock.
+ */
+function describeStaleDispatch(recordedDispatch, {
+  hqRoot = null,
+  now = Date.now(),
+  fsImpl = { readFileSync },
+  minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
+  minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
+} = {}) {
+  if (!recordedDispatch || !recordedDispatch.dispatchedAt) return null;
+  if (!hqRoot) return null;
+  const dispatchedAtMs = Date.parse(String(recordedDispatch.dispatchedAt));
+  if (!Number.isFinite(dispatchedAtMs)) return null;
+  const ageMinutes = (now - dispatchedAtMs) / 60_000;
+  if (ageMinutes < minAgeMinutes) return null;
+  const lrq = recordedDispatch.launchRequestId;
+  if (!lrq) return null;
+
+  // Audit logs are UTC-keyed (see modules/worker-pool .../daemon.py
+  // _append_dispatch_audit_jsonl, and the 2026-05-18 incident docs).
+  // A dispatch could have started yesterday-UTC and still be queued
+  // today-UTC, so scan both. Don't use $(date +%Y-%m-%d) — local time
+  // misses events at the day boundary; this trap previously hid 1621
+  // memory-pressure events from operator visibility.
+  const todayUtc = _utcDateString(now);
+  const yesterdayUtc = _utcDateString(now - 86_400_000);
+  const dates = todayUtc === yesterdayUtc ? [todayUtc] : [yesterdayUtc, todayUtc];
+
+  const refusals = [];
+  for (const date of dates) {
+    const path = join(hqRoot, 'dispatch', 'audit', date, `${lrq}.jsonl`);
+    const lines = _safeReadJsonLines(path, fsImpl);
+    if (!lines) continue;
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        if (typeof event?.decision === 'string' && event.decision.startsWith('refuse_')) {
+          refusals.push(event);
+        }
+      } catch {
+        // Skip malformed lines silently — audit log integrity is
+        // tracked elsewhere; we don't want to crash the watcher loop
+        // over one corrupt line.
+      }
+    }
+  }
+  if (refusals.length < minRefusals) return null;
+
+  // Reason-code histogram: which refusal cause is dominating?
+  const counts = new Map();
+  for (const event of refusals) {
+    const structured = Array.isArray(event?.structuredReasons) ? event.structuredReasons : [];
+    for (const r of structured) {
+      const code = (r && typeof r.reasonCode === 'string') ? r.reasonCode : 'unknown';
+      counts.set(code, (counts.get(code) || 0) + 1);
+    }
+  }
+  let primaryReason = null;
+  let primaryCount = -1;
+  for (const [code, n] of counts) {
+    if (n > primaryCount) {
+      primaryReason = code;
+      primaryCount = n;
+    }
+  }
+
+  return {
+    stuckForMinutes: Math.round(ageMinutes),
+    refusalCount: refusals.length,
+    primaryReason,
+    lastRefusedAt: refusals[refusals.length - 1]?.createdAt || null,
+  };
+}
+
 function findLatestFollowUpJobForPR(rootDir, { repo, prNumber }) {
   const keys = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
   let latest = null;
@@ -1556,6 +1680,31 @@ async function dispatchMergeAgentForPR({
           observedExternally: true,
         });
       }
+      // Probe whether the dispatch is stuck pre-spawn (the daemon has
+      // been refusing admission long enough that operator should know).
+      // Returns null silently when:
+      //   - hqPath is missing (OSS standalone — no audit log to read)
+      //   - dispatch is younger than the min-age threshold (booting)
+      //   - audit log shows fewer than min refusals (in-flight)
+      // i.e. fails closed for the OSS path, surfaces signal only when
+      // operator action is genuinely warranted.
+      const stuckDetail = describeStaleDispatch(recordedDispatch, {
+        hqRoot: hqPath || null,
+        now: Date.parse(String(now)) || Date.now(),
+      });
+      if (stuckDetail) {
+        mergeAgentLifecycleLog(logger, 'merge_agent.stuck_pre_spawn', {
+          repo,
+          prNumber,
+          launchRequestId: recordedDispatch.launchRequestId,
+          dispatchedAt: recordedDispatch.dispatchedAt,
+          trigger: recordedDispatch.trigger,
+          stuckForMinutes: stuckDetail.stuckForMinutes,
+          refusalCount: stuckDetail.refusalCount,
+          primaryReason: stuckDetail.primaryReason,
+          lastRefusedAt: stuckDetail.lastRefusedAt,
+        });
+      }
       return {
         decision,
         trigger: recordedDispatch.trigger,
@@ -1563,6 +1712,7 @@ async function dispatchMergeAgentForPR({
         operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
         mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
         labelRemovalErrors: labelRemoval.labelRemovalErrors,
+        stuckDetail,
       };
     }
     return { decision };
@@ -1797,6 +1947,8 @@ export {
   buildMergeAgentPrompt,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
+  describeStaleDispatch,
+  STUCK_DISPATCH_DEFAULTS,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,
   extractOperatorNotes,

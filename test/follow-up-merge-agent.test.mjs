@@ -26,6 +26,7 @@ import {
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
+  resolveSessionLedgerDbPath,
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
 
@@ -1984,6 +1985,120 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
   assert.equal(result.status, 'failed');
   assert.equal(result.launchRequestId, 'lrq_alias');
   assert.equal(result.runId, 'run_alias');
+});
+
+// Regression for the 2026-05-18 outage where merge-agent emitted false
+// `original-worker-run-row-missing-but-worktree-present` deferrals for
+// every newly-provisioned worker (PRs #661 #664 #665 stuck >6h).
+//
+// Root cause: resolveSessionLedgerDbPath picked the managed-service-root
+// DB (/Users/<owner>/.agent-os/session-ledger/ledger.db, updated only by
+// the session-ledger service-refresh loop) ahead of the deploy-checkout
+// DB (<deploy>/.agent-os/session-ledger/ledger.db, where the dispatch
+// daemon actually writes worker_runs). When service-refresh lagged or
+// wedged, the merge-agent read a stale snapshot and never saw the rows
+// the daemon had just written.
+
+test('resolveSessionLedgerDbPath prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/session-ledger/ledger.db over managed-service-root fallback', () => {
+  const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
+  const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-'));
+  const deployLedgerDir = path.join(deployCheckout, '.agent-os', 'session-ledger');
+  const homeLedgerDir = path.join(homeDir, '.agent-os', 'session-ledger');
+  const deployLedgerDbPath = path.join(deployLedgerDir, 'ledger.db');
+  const homeLedgerDbPath = path.join(homeLedgerDir, 'ledger.db');
+  mkdirSync(deployLedgerDir, { recursive: true });
+  mkdirSync(homeLedgerDir, { recursive: true });
+  writeFileSync(deployLedgerDbPath, '');
+  writeFileSync(homeLedgerDbPath, '');
+
+  const result = resolveSessionLedgerDbPath({
+    hqRoot: '/Users/airlock/agent-os-hq',
+    env: { AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
+  });
+
+  assert.equal(result, deployLedgerDbPath,
+    'When both deploy-checkout DB and managed-service-root DB exist, the '
+    + 'deploy-checkout DB must win — the dispatch daemon writes worker_runs '
+    + 'there, and reading the managed-service-root DB returns a stale snapshot.');
+});
+
+test('resolveSessionLedgerDbPath falls back to HOME-based ledger.db when no deploy-checkout DB exists', () => {
+  // Pre-fix behavior must still work when there is no repo-rooted DB
+  // (e.g., fresh install, or repo-rooted DB legitimately absent).
+  // hqRoot uses a tmpdir path (outside /Users/) so the hqRootOwnerHome
+  // regex returns undefined and no /Users/-derived candidates leak in
+  // from the test host's actual filesystem.
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-fallback-'));
+  const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-fallback-'));
+  const homeLedgerDir = path.join(homeDir, '.agent-os', 'session-ledger');
+  const homeLedgerDbPath = path.join(homeLedgerDir, 'ledger.db');
+  mkdirSync(homeLedgerDir, { recursive: true });
+  writeFileSync(homeLedgerDbPath, '');
+
+  const result = resolveSessionLedgerDbPath({
+    hqRoot,
+    env: { HOME: homeDir },
+  });
+
+  assert.equal(result, homeLedgerDbPath,
+    'When no deploy-checkout DB exists, the lookup must still find the '
+    + 'HOME-based fallback DB so the merge-agent can operate on hosts '
+    + 'where only the service-refresh DB is provisioned.');
+});
+
+test('lookupOriginalWorkerRunStatus finds a worker_run row in the deploy-checkout DB even when a stale managed-service-root DB exists alongside (regression: 2026-05-18 false original-worker-run-row-missing-but-worktree-present)', async () => {
+  const { default: Database } = await import('better-sqlite3');
+  const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
+  const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-stale-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-lac-451-f');
+  const deployLedgerDir = path.join(deployCheckout, '.agent-os', 'session-ledger');
+  const deployLedgerDbPath = path.join(deployLedgerDir, 'ledger.db');
+  const staleLedgerDir = path.join(homeDir, '.agent-os', 'session-ledger');
+  const staleLedgerDbPath = path.join(staleLedgerDir, 'ledger.db');
+  mkdirSync(workerDir, { recursive: true });
+  mkdirSync(deployLedgerDir, { recursive: true });
+  mkdirSync(staleLedgerDir, { recursive: true });
+
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-lac-451-f',
+    launchRequestId: 'lrq_f80d593f-44b5-4cf2-9bbf-fd7cfdf002be',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'wrun_2e08dd49-ce66-43cf-9c5f-6acac8bbc227',
+  }));
+
+  // Deploy-checkout DB has the row (this is where the dispatch daemon
+  // writes). Mirrors the live SQL we verified on 2026-05-18 from
+  // /Users/airlock/agent-os/.agent-os/session-ledger/ledger.db.
+  const deployDb = new Database(deployLedgerDbPath);
+  deployDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
+  deployDb.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
+    .run('wrun_2e08dd49-ce66-43cf-9c5f-6acac8bbc227', 'lrq_f80d593f-44b5-4cf2-9bbf-fd7cfdf002be', 'succeeded');
+  deployDb.close();
+
+  // Managed-service-root DB is empty for this LRQ (simulates a stale
+  // service-refresh DB that lags hours behind the daemon's writes).
+  // Pre-fix the merge-agent would read this DB and emit
+  // `missing-worker-run-row` → false deferral.
+  const staleDb = new Database(staleLedgerDbPath);
+  staleDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
+  staleDb.close();
+
+  const result = await lookupOriginalWorkerRunStatus({
+    workerDir,
+    hqRoot,
+    env: { AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
+  });
+
+  assert.equal(result.found, true,
+    'Pre-fix: lookup hit the stale managed-service-root DB and returned '
+    + '`missing-worker-run-row`, causing merge-agent to defer dispatch on '
+    + 'every newly-provisioned worker. Post-fix: the deploy-checkout DB '
+    + 'is read first and the row IS found.');
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.launchRequestId, 'lrq_f80d593f-44b5-4cf2-9bbf-fd7cfdf002be');
+  assert.equal(result.runId, 'wrun_2e08dd49-ce66-43cf-9c5f-6acac8bbc227');
 });
 
 test('lookupOriginalWorkerRunStatus defers when launchRequestId is missing even if run.json has a runId', async () => {

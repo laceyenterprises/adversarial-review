@@ -272,9 +272,30 @@ function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
   if (config.ok && config.value?.ledgerDbPath) {
     return String(config.value.ledgerDbPath);
   }
+  // The dispatch daemon (cwp_dispatch.daemon) writes worker_runs into the
+  // REPO-ROOTED DB under the deploy checkout
+  // (<deploy>/.agent-os/session-ledger/ledger.db). The MANAGED-SERVICE-ROOT
+  // DB at $HOME/.agent-os/session-ledger/ledger.db is updated by a separate
+  // service-refresh loop and lags (or stops entirely if that LaunchAgent
+  // wedges). The merge-agent MUST read from the deploy-checkout DB, otherwise
+  // a stale snapshot causes false `original-worker-run-row-missing-but-
+  // worktree-present` deferrals for every newly-provisioned worker.
+  // See CLAUDE.md §"Session Ledger — Data paths — two roots, on purpose".
   const candidates = [];
   const hqRootOwnerHome = String(hqRoot || '').match(/^\/Users\/([^/]+)/)?.[1];
+  const deployCheckoutEnv = String(env.AGENT_OS_DEPLOY_CHECKOUT || '').trim();
+  if (deployCheckoutEnv) {
+    candidates.push(join(deployCheckoutEnv, '.agent-os', 'session-ledger', 'ledger.db'));
+  }
   if (hqRootOwnerHome) {
+    // Convention: the deploy checkout is the sibling of agent-os-hq under
+    // the hq owner's home (/Users/<owner>/agent-os/). This is the daemon's
+    // canonical write target.
+    candidates.push(join('/Users', hqRootOwnerHome, 'agent-os', '.agent-os', 'session-ledger', 'ledger.db'));
+  }
+  if (hqRootOwnerHome) {
+    // Fallback: managed-service-root DB. Kept for back-compat but lower
+    // priority than the deploy-checkout DB above for the reasons above.
     candidates.push(join('/Users', hqRootOwnerHome, '.agent-os', 'session-ledger', 'ledger.db'));
   }
   const runtimeHome = String(env.HOME || '').trim();
@@ -2102,6 +2123,7 @@ export {
   pickMergeAgentDispatchDetail,
   lookupOriginalWorkerRunStatus,
   prepareOriginalWorkerForMergeAgent,
+  resolveSessionLedgerDbPath,
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,

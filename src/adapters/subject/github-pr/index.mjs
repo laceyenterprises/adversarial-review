@@ -10,6 +10,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { prepareWorkspaceForJob as defaultPrepareWorkspaceForJob } from '../../../follow-up-remediation.mjs';
 import { builderClassFromTitle } from './title-tagging.mjs';
@@ -121,6 +122,7 @@ function stateFromSnapshot(snapshot, {
  *   execFileImpl?: typeof execFileAsync,
  *   prepareWorkspaceForJobImpl?: Function,
  *   now?: () => Date,
+ *   monotonicNowMs?: () => number,
  * }} options
  * @returns {SubjectChannelAdapter}
  */
@@ -161,35 +163,36 @@ function createGitHubPRSubjectAdapter({
   execFileImpl = execFileAsync,
   prepareWorkspaceForJobImpl = null,
   now = () => new Date(),
+  monotonicNowMs = () => performance.now(),
   cacheTtlMs = resolveSubjectCacheTtlMs(),
 } = {}) {
-  // Per-adapter-instance scratch cache. Entries carry `_fetchedAtMs`
-  // and are rejected on read once older than `cacheTtlMs` (default
-  // 30s, overridable via SUBJECT_ADAPTER_CACHE_TTL_MS). See the
-  // module-level comment on DEFAULT_SUBJECT_CACHE_TTL_MS for why this
-  // matters during long-running ticks.
+  // Per-adapter-instance scratch cache. Entries carry a monotonic
+  // fetch timestamp and are rejected on read once older than
+  // `cacheTtlMs` (default 30s, overridable via
+  // SUBJECT_ADAPTER_CACHE_TTL_MS). The cache is per subject, not per
+  // revisionRef: within TTL, the newest snapshot we have for that PR is
+  // authoritative even when callers keep using an older SubjectRef.
   const snapshotBySubjectExternalId = new Map();
 
   function setCache(snapshot) {
-    snapshot._fetchedAtMs = now().getTime();
+    snapshot._fetchedAtMonotonicMs = monotonicNowMs();
     snapshotBySubjectExternalId.set(snapshot.subjectExternalId, snapshot);
   }
 
-  function getFreshCache(subjectExternalId, revisionRef) {
+  function getFreshCache(subjectExternalId) {
     const cached = snapshotBySubjectExternalId.get(subjectExternalId);
     if (!cached) return null;
-    if (revisionRef && cached.revisionRef !== revisionRef) return null;
     // `>=` so cacheTtlMs=0 disables caching outright (always miss) —
     // useful as an operator escape hatch via SUBJECT_ADAPTER_CACHE_TTL_MS=0
     // if the TTL logic ever needs to be neutralized.
-    const ageMs = now().getTime() - (cached._fetchedAtMs ?? 0);
+    const ageMs = monotonicNowMs() - (cached._fetchedAtMonotonicMs ?? 0);
     if (ageMs >= cacheTtlMs) return null;
     return cached;
   }
 
   async function fetchPRSnapshot(ref) {
     const { repo, prNumber } = parseSubjectExternalId(ref.subjectExternalId);
-    const cached = getFreshCache(ref.subjectExternalId, ref.revisionRef);
+    const cached = getFreshCache(ref.subjectExternalId);
     if (cached) return cached;
     if (!octokit?.rest?.pulls?.get) {
       throw new Error(`No GitHub client available to fetch ${ref.subjectExternalId}`);

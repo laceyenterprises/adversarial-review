@@ -214,6 +214,146 @@ async function maybeFireMergeAgentStuckAlert({
   return true;
 }
 
+// Fleet-wide false-deferral alert.
+//
+// Defense-in-depth against the 2026-05-18 bug class — see adversarial-
+// review#129 + agent-os#669/#670. The merge-agent's prepareOriginalWorker
+// guard returns `dispatch-deferred` with reason `original-worker-run-
+// row-missing-but-worktree-present` when it can't find a worker_run row
+// matching the worker's workspace.json LRQ. The intended use of that
+// guard is to refuse dispatch on an orphaned worker dir; the unintended
+// use is to silently mask a wrong-DB-path bug for hours because the
+// query returns 0 rows from a stale snapshot. The 2026-05-18 stall took
+// >6h to detect because each individual deferral looked benign.
+//
+// This alert watches for the SIGNATURE: many distinct LRQs hitting the
+// same deferral reason in a short window. One stuck LRQ is fine; many
+// distinct LRQs simultaneously deferring is the fleet-wide pattern.
+//
+// Threshold + window: 3 distinct LRQs in 30 min. Set conservatively —
+// false positives cost operator attention, so prefer to miss a one-off
+// vs page on routine teardown skew. The 2026-05-18 incident would have
+// crossed this threshold within ~6 min (vs ~6h to detect manually).
+const FLEET_WIDE_FALSE_DEFERRAL_REASON =
+  'original-worker-run-row-missing-but-worktree-present';
+const FLEET_WIDE_FALSE_DEFERRAL_WINDOW_MS = 30 * 60 * 1000;
+const FLEET_WIDE_FALSE_DEFERRAL_DISTINCT_LRQ_THRESHOLD = 3;
+const FLEET_WIDE_FALSE_DEFERRAL_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
+const FLEET_WIDE_FALSE_DEFERRAL_STATE_DIR = join(
+  ROOT, 'data', 'follow-up-jobs', 'fleet-wide-false-deferral-alerts',
+);
+const FLEET_WIDE_FALSE_DEFERRAL_STATE_FILE = 'fleet-state.json';
+
+async function maybeFireFleetWideFalseDeferralAlert({
+  dispatched,
+  repoPath,
+  prNumber,
+  deliverAlertFn,
+  logger,
+  now = Date.now(),
+  alertStateDir = FLEET_WIDE_FALSE_DEFERRAL_STATE_DIR,
+  windowMs = FLEET_WIDE_FALSE_DEFERRAL_WINDOW_MS,
+  threshold = FLEET_WIDE_FALSE_DEFERRAL_DISTINCT_LRQ_THRESHOLD,
+  debounceMs = FLEET_WIDE_FALSE_DEFERRAL_ALERT_DEBOUNCE_MS,
+  fsImpl = { readFileSync, mkdirSync, writeFileSync, existsSync },
+}) {
+  if (dispatched?.decision !== 'dispatch-deferred') return false;
+  if (dispatched?.reason !== FLEET_WIDE_FALSE_DEFERRAL_REASON) return false;
+  const lrq = dispatched?.launchRequestId || null;
+  if (!lrq) return false;
+
+  const statePath = join(alertStateDir, FLEET_WIDE_FALSE_DEFERRAL_STATE_FILE);
+  let state = { observations: [], lastAlertedAt: null };
+  try {
+    if (fsImpl.existsSync(statePath)) {
+      const doc = JSON.parse(fsImpl.readFileSync(statePath, 'utf8'));
+      if (Array.isArray(doc?.observations)) state.observations = doc.observations;
+      if (typeof doc?.lastAlertedAt === 'string') state.lastAlertedAt = doc.lastAlertedAt;
+    }
+  } catch {
+    // Fall through with empty state — over-alert is safer than under-alert
+    // and a corrupt state file gets overwritten on next write.
+  }
+
+  // Prune observations outside the window; dedupe by LRQ (latest wins).
+  const cutoff = now - windowMs;
+  const byLrq = new Map();
+  for (const obs of state.observations) {
+    const observedAtMs = Date.parse(obs?.observedAt || '');
+    if (!Number.isFinite(observedAtMs) || observedAtMs < cutoff) continue;
+    if (typeof obs?.lrq !== 'string' || !obs.lrq) continue;
+    byLrq.set(obs.lrq, {
+      lrq: obs.lrq,
+      observedAt: obs.observedAt,
+      repo: typeof obs?.repo === 'string' ? obs.repo : null,
+      prNumber: Number.isFinite(obs?.prNumber) ? obs.prNumber : null,
+    });
+  }
+  byLrq.set(lrq, {
+    lrq,
+    observedAt: new Date(now).toISOString(),
+    repo: repoPath,
+    prNumber,
+  });
+  state.observations = Array.from(byLrq.values());
+
+  // Persist updated observation set before deciding whether to alert —
+  // if we crash between observation and alert, the next tick still has
+  // the data to recompute the threshold.
+  try {
+    fsImpl.mkdirSync(alertStateDir, { recursive: true });
+    fsImpl.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
+  } catch (writeErr) {
+    logger?.warn?.(
+      `[watcher] failed to persist fleet-wide false-deferral state: ${writeErr?.message || writeErr}`
+    );
+  }
+
+  if (state.observations.length < threshold) return false;
+
+  const lastAlertedMs = Date.parse(state.lastAlertedAt || '');
+  if (Number.isFinite(lastAlertedMs) && (now - lastAlertedMs) < debounceMs) {
+    return false;
+  }
+
+  const observedTargets = [...new Set(state.observations
+    .filter((o) => o.repo && Number.isFinite(o.prNumber))
+    .map((o) => `${o.repo}#${o.prNumber}`))];
+  const windowMinutes = Math.round(windowMs / 60_000);
+  const text = (
+    `Adversarial-watcher: ${state.observations.length} distinct LRQs hit `
+    + `the '${FLEET_WIDE_FALSE_DEFERRAL_REASON}' merge-agent guard in the `
+    + `last ${windowMinutes}min across ${observedTargets.length} PR(s): `
+    + `${observedTargets.slice(0, 5).join(', ')}`
+    + `${observedTargets.length > 5 ? ` (+${observedTargets.length - 5} more)` : ''}. `
+    + `This is the signature of a session-ledger DB resolution bug — see `
+    + `adversarial-review#129 + agent-os#669/#670 (2026-05-18 incident). `
+    + `Check that consumers are reading the deploy-checkout DB, not the `
+    + `managed-service-root DB.`
+  );
+  await deliverAlertFn(text, {
+    event: 'merge_agent.fleet_wide_false_deferral',
+    payload: {
+      reason: FLEET_WIDE_FALSE_DEFERRAL_REASON,
+      distinctLrqCount: state.observations.length,
+      threshold,
+      windowMinutes,
+      observedTargets,
+      observations: state.observations,
+    },
+  });
+
+  state.lastAlertedAt = new Date(now).toISOString();
+  try {
+    fsImpl.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
+  } catch (writeErr) {
+    logger?.warn?.(
+      `[watcher] failed to persist fleet-wide false-deferral lastAlertedAt: ${writeErr?.message || writeErr}`
+    );
+  }
+  return true;
+}
+
 function readWatcherDrainState({
   drainFile = WATCHER_DRAIN_FILE,
   now = new Date(),
@@ -1327,6 +1467,21 @@ async function handlePostedReviewRow({
         );
       }
     }
+    // Fleet-wide false-deferral alert — defense-in-depth against the
+    // 2026-05-18 session-ledger DB-path bug class. See helper above.
+    try {
+      await maybeFireFleetWideFalseDeferralAlert({
+        dispatched,
+        repoPath,
+        prNumber,
+        deliverAlertFn: defaultDeliverAlert,
+        logger,
+      });
+    } catch (alertErr) {
+      logger?.error?.(
+        `[watcher] fleet-wide false-deferral alert delivery failed: ${alertErr?.message || alertErr}`
+      );
+    }
   } catch (err) {
     // The augmented error from `dispatchMergeAgentForPR` already
     // inlines stderr+stdout into `err.message`, so just dumping
@@ -2082,6 +2237,7 @@ export {
   classifyReviewerFailure,
   evaluateRoundBudgetForReview,
   handlePostedReviewRow,
+  maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,
   pollOnce,
   persistReviewerPgid,
@@ -2097,6 +2253,11 @@ export {
   shouldReconcileStaleReviewerSession,
   STUCK_DISPATCH_ALERT_DEBOUNCE_MS,
   STUCK_DISPATCH_ALERT_STATE_DIR,
+  FLEET_WIDE_FALSE_DEFERRAL_REASON,
+  FLEET_WIDE_FALSE_DEFERRAL_WINDOW_MS,
+  FLEET_WIDE_FALSE_DEFERRAL_DISTINCT_LRQ_THRESHOLD,
+  FLEET_WIDE_FALSE_DEFERRAL_ALERT_DEBOUNCE_MS,
+  FLEET_WIDE_FALSE_DEFERRAL_STATE_DIR,
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,

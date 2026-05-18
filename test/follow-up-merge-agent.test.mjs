@@ -2229,7 +2229,9 @@ test('prepareOriginalWorkerForMergeAgent logs a loud error when worker-run looku
   assert.match(errors[0], /worker-run lookup dependency unavailable/);
 });
 
-test('prepareOriginalWorkerForMergeAgent defers loudly when worker_runs row is missing but worktree is present', async () => {
+test('prepareOriginalWorkerForMergeAgent defers loudly when worker_runs row is missing but worktree is present AND PR is not merge-ready', async () => {
+  // Missing worker_runs row + live worktree is an ambiguous ownership
+  // state. It must fail closed regardless of PR readiness signals.
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const originalWorkerId = 'codex-lac-666c3';
   const branch = `${originalWorkerId}/LAC-666c3-missing-row`;
@@ -2247,7 +2249,7 @@ test('prepareOriginalWorkerForMergeAgent defers loudly when worker_runs row is m
   let execCalled = false;
 
   const result = await prepareOriginalWorkerForMergeAgent({
-    job: makeJob({ branch }),
+    job: makeJob({ branch, mergeable: 'CONFLICTING' }),
     hqPath: 'hq',
     env: { HQ_ROOT: hqRoot, USER: 'placey' },
     logger: { info: (line) => logs.push(JSON.parse(line)) },
@@ -2269,6 +2271,78 @@ test('prepareOriginalWorkerForMergeAgent defers loudly when worker_runs row is m
   assert.equal(execCalled, false);
   assert.equal(logs[0].event, 'merge_agent.dispatch_deferred');
   assert.equal(logs[0].reason, 'original-worker-run-row-missing-but-worktree-present');
+});
+
+test('prepareOriginalWorkerForMergeAgent: orphan worktree + missing worker_run row defers even when the PR looks green', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-orphan-rc-'));
+  const originalWorkerId = 'codex-test-rc';
+  const branch = `${originalWorkerId}/TEST-RC`;
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const workspaceDir = path.join(hqRoot, 'workspaces', originalWorkerId);
+  mkdirSync(workerDir, { recursive: true });
+  mkdirSync(workspaceDir, { recursive: true });
+  writeFileSync(
+    path.join(workerDir, 'workspace.json'),
+    JSON.stringify({ workerId: originalWorkerId, branch, workspacePath: workspaceDir }),
+  );
+  const logs = [];
+  const captureLog = (msg) => {
+    try {
+      logs.push(JSON.parse(String(msg).replace(/^\[merge-agent\] /, '')));
+    } catch {
+      logs.push({ raw: String(msg) });
+    }
+  };
+  const logger = { log: captureLog, info: captureLog, error: () => {}, warn: () => {} };
+  const result = await prepareOriginalWorkerForMergeAgent({
+    job: {
+      prNumber: 999,
+      branch,
+      mergeable: 'MERGEABLE',
+      checksConclusion: 'SUCCESS',
+      lastVerdict: 'Comment only',
+      prState: 'open',
+    },
+    env: { AGENT_OS_DEPLOY_CHECKOUT: hqRoot, HOME: hqRoot, HQ_ROOT: hqRoot },
+    logger,
+    lookupRunStatusImpl: async () => ({ found: false, reason: 'missing-worker-run-row', launchRequestId: 'lrq_test-rc' }),
+  });
+  assert.equal(result.decision, 'deferred');
+  assert.equal(result.reason, 'original-worker-run-row-missing-but-worktree-present');
+  const deferEvent = logs.find((l) => l.event === 'merge_agent.dispatch_deferred');
+  assert.ok(deferEvent, 'expected dispatch_deferred lifecycle event');
+  rmSync(hqRoot, { recursive: true, force: true });
+});
+
+test('prepareOriginalWorkerForMergeAgent: orphan worktree + operator-approved trigger still defers', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-orphan-oa-'));
+  const originalWorkerId = 'codex-test-oa';
+  const branch = `${originalWorkerId}/TEST-OA`;
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const workspaceDir = path.join(hqRoot, 'workspaces', originalWorkerId);
+  mkdirSync(workerDir, { recursive: true });
+  mkdirSync(workspaceDir, { recursive: true });
+  writeFileSync(
+    path.join(workerDir, 'workspace.json'),
+    JSON.stringify({ workerId: originalWorkerId, branch, workspacePath: workspaceDir }),
+  );
+  const result = await prepareOriginalWorkerForMergeAgent({
+    job: {
+      prNumber: 1001,
+      branch,
+      mergeable: 'MERGEABLE',
+      checksConclusion: 'SUCCESS',
+      lastVerdict: 'Comment only',
+      prState: 'open',
+    },
+    trigger: 'operator-approved',
+    env: { AGENT_OS_DEPLOY_CHECKOUT: hqRoot, HOME: hqRoot, HQ_ROOT: hqRoot },
+    logger: { log: () => {}, info: () => {}, error: () => {}, warn: () => {} },
+    lookupRunStatusImpl: async () => ({ found: false, reason: 'missing-worker-run-row', launchRequestId: 'lrq_test-oa' }),
+  });
+  assert.equal(result.decision, 'deferred');
+  assert.equal(result.reason, 'original-worker-run-row-missing-but-worktree-present');
+  rmSync(hqRoot, { recursive: true, force: true });
 });
 
 test('closed and merged-pending PR state do not bypass active-worker safety', async () => {
@@ -3125,6 +3199,55 @@ test('dispatchMergeAgentForPR does not mutate the caller job fields while record
 
   assert.equal(input.mergeAgentTrigger, undefined);
   assert.equal(listMergeAgentDispatches(rootDir)[0].trigger, 'operator-approved');
+});
+
+test('dispatchMergeAgentForPR defers override-triggered dispatch when orphan-worktree liveness is ambiguous', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const originalWorkerId = 'codex-lac-661b';
+  const branch = `${originalWorkerId}/LAC-661b-orphan`;
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    branch,
+    launchRequestId: 'lrq_orphan',
+  }));
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      branch,
+      lastVerdict: null,
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'MERGEABLE',
+      checksConclusion: 'SUCCESS',
+      remediationCurrentRound: 0,
+      remediationMaxRounds: 0,
+    }),
+    env: { HQ_ROOT: hqRoot },
+    prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
+      ...opts,
+      lookupRunStatusImpl: async () => ({
+        found: false,
+        reason: 'missing-worker-run-row',
+        launchRequestId: 'lrq_orphan',
+      }),
+    }),
+    execFileImpl: async () => {
+      throw new Error('hq must not dispatch while original-worker liveness is ambiguous');
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch-deferred');
+  assert.equal(result.reason, 'original-worker-run-row-missing-but-worktree-present');
+  assert.equal(listMergeAgentDispatches(rootDir).length, 0);
 });
 
 test('dispatchMergeAgentForPR leaves no durable dispatch record when hq launch fails', async () => {

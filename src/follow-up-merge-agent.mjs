@@ -390,6 +390,7 @@ async function lookupOriginalWorkerRunStatus({
 
 async function prepareOriginalWorkerForMergeAgent({
   job,
+  trigger = null,
   hqPath,
   execFileImpl = execFileAsync,
   env = process.env,
@@ -2184,6 +2185,7 @@ async function dispatchMergeAgentForPR({
 
   const originalWorkerPrep = await prepareOriginalWorkerImpl({
     job,
+    trigger,
     hqPath: resolvedHqPath,
     execFileImpl,
     env: runtimeEnv,

@@ -193,3 +193,248 @@ test('recordRemediationCommit reports commit revision without poisoning cached P
   assert.equal(recorded.ref.revisionRef, 'remediation-sha');
   assert.equal(current.ref.revisionRef, 'abc123def456');
 });
+
+// Regression for the 2026-05-18 incident where the watcher stopped
+// consuming `retrigger-review` labels on long-running ticks. Root cause:
+// the per-adapter snapshot cache, populated at tick-start by
+// discoverSubjects(), never expired. After a 15-30 min reviewer-spawn
+// chain inside one tick, fetchState() returned the original snapshot
+// for every PR — so the retrigger-review label-check + auto-refresh-
+// stale guard both saw stale labels and stale head_sha, and neither
+// fired. Operators reported labels sitting unconsumed for hours; the
+// pattern recurred across an entire weekend.
+
+function makeAdapterClock() {
+  // Mutable split clock so tests can independently model wall-clock
+  // jumps and monotonic elapsed time.
+  let wallMs = Date.parse('2026-05-18T12:07:00.000Z');
+  let monotonicMs = 0;
+  return {
+    now: () => new Date(wallMs),
+    monotonicNowMs: () => monotonicMs,
+    advance(deltaMs) {
+      wallMs += deltaMs;
+      monotonicMs += deltaMs;
+    },
+    rewindWall(deltaMs) { wallMs -= deltaMs; },
+    wallNowMs() { return wallMs; },
+    monotonicMs() { return monotonicMs; },
+  };
+}
+
+function makeMutableOctokit(initialPR) {
+  // Octokit double whose `pulls.list` + `pulls.get` return the CURRENT
+  // PR state at call time (not a snapshot). Tracks call counts so tests
+  // can assert cache hits vs misses.
+  let current = JSON.parse(JSON.stringify(initialPR));
+  const calls = { list: 0, get: 0 };
+  return {
+    calls,
+    setPR(next) { current = JSON.parse(JSON.stringify(next)); },
+    octokit: {
+      rest: {
+        pulls: {
+          list: async () => {
+            calls.list += 1;
+            return { data: [current] };
+          },
+          get: async () => {
+            calls.get += 1;
+            return { data: current };
+          },
+        },
+      },
+    },
+  };
+}
+
+const REGRESSION_PR_BASE = {
+  number: 661,
+  title: '[codex] ADAG-13: comms-event DAG triggers',
+  state: 'open',
+  updated_at: '2026-05-18T04:08:48.000Z',
+  head: { sha: '70194f3c82f6b37fb1b84bcc80f5ed5347d1e824', ref: 'codex-adag-13-r7/ADAG-13' },
+  user: { login: 'codex-worker' },
+  labels: [],
+};
+
+test('fetchState returns cached snapshot for back-to-back calls within TTL (coalescing preserved)', async () => {
+  // Within a normal-cadence tick (sub-second back-to-back calls on the
+  // same ref), the cache must still coalesce so we don\'t fire two
+  // `pulls.get` requests for the same PR in the same loop iteration.
+  const clock = makeAdapterClock();
+  const mut = makeMutableOctokit(REGRESSION_PR_BASE);
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: mut.octokit,
+    repos: ['laceyenterprises/agent-os'],
+    now: clock.now,
+    monotonicNowMs: clock.monotonicNowMs,
+    cacheTtlMs: 30_000,
+  });
+  const [ref] = await adapter.discoverSubjects();
+  assert.equal(mut.calls.list, 1);
+  assert.equal(mut.calls.get, 0);
+
+  // Same iteration → cached; no get.
+  clock.advance(50);
+  const s1 = await adapter.fetchState(ref);
+  assert.equal(mut.calls.get, 0, 'fast back-to-back fetchState must hit cache');
+  assert.deepEqual(s1.labels, []);
+
+  clock.advance(200);
+  const s2 = await adapter.fetchState(ref);
+  assert.equal(mut.calls.get, 0, 'second fast fetchState must hit cache');
+  assert.deepEqual(s2.labels, []);
+});
+
+test('REGRESSION 2026-05-18: fetchState re-fetches after cache TTL elapses (picks up labels applied mid-tick)', async () => {
+  const clock = makeAdapterClock();
+  const mut = makeMutableOctokit(REGRESSION_PR_BASE);
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: mut.octokit,
+    repos: ['laceyenterprises/agent-os'],
+    now: clock.now,
+    monotonicNowMs: clock.monotonicNowMs,
+    cacheTtlMs: 30_000,
+  });
+  const [ref] = await adapter.discoverSubjects();
+  assert.deepEqual(
+    (await adapter.fetchState(ref)).labels, [],
+    'initial fetchState reflects the labels at tick-start',
+  );
+
+  // Simulate the operator applying the retrigger-review label and the
+  // PR being force-pushed to a new head WHILE the watcher is busy
+  // spawning a reviewer for some other PR.
+  mut.setPR({
+    ...REGRESSION_PR_BASE,
+    head: { ...REGRESSION_PR_BASE.head, sha: 'eb7277e8e6f651e1627c1dd6af1ec1ad57362fe1' },
+    labels: [{ name: 'retrigger-review' }],
+  });
+
+  // Less than TTL — still cached, still stale (intentional: short
+  // back-to-back coalescing).
+  clock.advance(15_000);
+  const stillStale = await adapter.fetchState(ref);
+  assert.deepEqual(stillStale.labels, [],
+    'Under-TTL fetchState MUST return cached value to preserve coalescing');
+
+  // Past TTL — must re-fetch.
+  clock.advance(20_000);
+  const fresh = await adapter.fetchState(ref);
+  assert.deepEqual(fresh.labels, ['retrigger-review'],
+    'Pre-fix bug: fetchState returned the stale cached snapshot indefinitely. '
+    + 'Post-fix: after the 30s TTL elapses, fetchState must re-fetch and '
+    + 'pick up labels applied mid-tick — the failure mode that masked '
+    + 'retrigger-review labels for hours on 2026-05-18.');
+  assert.equal(fresh.headSha, 'eb7277e8e6f651e1627c1dd6af1ec1ad57362fe1',
+    'head_sha drift must also be picked up after TTL — the auto-refresh-'
+    + 'stale guard depends on subject.headSha being current.');
+  assert.equal(mut.calls.get, 1, 'exactly one pulls.get fired on the TTL miss');
+});
+
+test('TTL=0 disables caching entirely (every fetchState calls pulls.get)', async () => {
+  // Belt-and-suspenders: operators can set
+  // SUBJECT_ADAPTER_CACHE_TTL_MS=0 to disable the cache outright if
+  // they suspect a regression. Pin that escape hatch works.
+  const clock = makeAdapterClock();
+  const mut = makeMutableOctokit(REGRESSION_PR_BASE);
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: mut.octokit,
+    repos: ['laceyenterprises/agent-os'],
+    now: clock.now,
+    monotonicNowMs: clock.monotonicNowMs,
+    cacheTtlMs: 0,
+  });
+  const [ref] = await adapter.discoverSubjects();
+  assert.equal(mut.calls.list, 1);
+
+  await adapter.fetchState(ref);
+  await adapter.fetchState(ref);
+  await adapter.fetchState(ref);
+  assert.equal(mut.calls.get, 3,
+    'TTL=0 must force a fresh pulls.get on every fetchState');
+});
+
+test('fetchContent within TTL also reuses the cached snapshot', async () => {
+  // The same TTL applies to fetchContent's snapshot lookup so the
+  // diff-fetch path doesn\'t double-fetch within the coalescing window.
+  const clock = makeAdapterClock();
+  const mut = makeMutableOctokit(REGRESSION_PR_BASE);
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: mut.octokit,
+    repos: ['laceyenterprises/agent-os'],
+    now: clock.now,
+    monotonicNowMs: clock.monotonicNowMs,
+    cacheTtlMs: 30_000,
+    execFileImpl: async () => ({ stdout: 'diff --git fake\n' }),
+  });
+  const [ref] = await adapter.discoverSubjects();
+  await adapter.fetchState(ref);
+  await adapter.fetchContent(ref);
+  assert.equal(mut.calls.get, 0,
+    'fetchContent right after fetchState within TTL must hit cache (coalescing)');
+});
+
+test('REGRESSION 2026-05-18: cache TTL still expires after wall-clock rollback', async () => {
+  const clock = makeAdapterClock();
+  const mut = makeMutableOctokit(REGRESSION_PR_BASE);
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: mut.octokit,
+    repos: ['laceyenterprises/agent-os'],
+    now: clock.now,
+    monotonicNowMs: clock.monotonicNowMs,
+    cacheTtlMs: 30_000,
+  });
+  const [ref] = await adapter.discoverSubjects();
+  await adapter.fetchState(ref);
+
+  mut.setPR({
+    ...REGRESSION_PR_BASE,
+    head: { ...REGRESSION_PR_BASE.head, sha: '91dd3b75644fd0281e3d65fd97e6e2105b6b0db6' },
+    labels: [{ name: 'retrigger-review' }],
+  });
+
+  clock.advance(10_000);
+  clock.rewindWall(60_000);
+  clock.advance(25_000);
+
+  const fresh = await adapter.fetchState(ref);
+  assert.deepEqual(fresh.labels, ['retrigger-review'],
+    'TTL must follow monotonic elapsed time, not wall-clock rollback.');
+  assert.equal(fresh.headSha, '91dd3b75644fd0281e3d65fd97e6e2105b6b0db6');
+  assert.equal(mut.calls.get, 1, 'rollback path must still force one TTL refresh');
+});
+
+test('REGRESSION 2026-05-18: fresh cache snapshot is reused even when caller keeps the original SubjectRef', async () => {
+  const clock = makeAdapterClock();
+  const mut = makeMutableOctokit(REGRESSION_PR_BASE);
+  let diffCalls = 0;
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: mut.octokit,
+    repos: ['laceyenterprises/agent-os'],
+    now: clock.now,
+    monotonicNowMs: clock.monotonicNowMs,
+    cacheTtlMs: 30_000,
+    execFileImpl: async () => {
+      diffCalls += 1;
+      return { stdout: 'diff --git fake\n' };
+    },
+  });
+  const [initialRef] = await adapter.discoverSubjects();
+
+  clock.advance(31_000);
+  mut.setPR({
+    ...REGRESSION_PR_BASE,
+    head: { ...REGRESSION_PR_BASE.head, sha: 'd3717f5b7ec06b1904ce4b86117783b1679b8d53' },
+  });
+
+  const refreshedState = await adapter.fetchState(initialRef);
+  const content = await adapter.fetchContent(initialRef);
+
+  assert.equal(refreshedState.ref.revisionRef, 'd3717f5b7ec06b1904ce4b86117783b1679b8d53');
+  assert.equal(content.ref.revisionRef, 'd3717f5b7ec06b1904ce4b86117783b1679b8d53');
+  assert.equal(mut.calls.get, 1,
+    'fetchContent with the original ref should reuse the fresh snapshot from fetchState');
+  assert.equal(diffCalls, 1);
+});

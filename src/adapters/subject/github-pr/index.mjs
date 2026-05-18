@@ -10,6 +10,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { prepareWorkspaceForJob as defaultPrepareWorkspaceForJob } from '../../../follow-up-remediation.mjs';
 import { builderClassFromTitle } from './title-tagging.mjs';
@@ -121,9 +122,40 @@ function stateFromSnapshot(snapshot, {
  *   execFileImpl?: typeof execFileAsync,
  *   prepareWorkspaceForJobImpl?: Function,
  *   now?: () => Date,
+ *   monotonicNowMs?: () => number,
  * }} options
  * @returns {SubjectChannelAdapter}
  */
+// Per-snapshot cache TTL. Within a single watcher tick, multiple call
+// sites (fetchState, fetchContent, freshness re-checks) may hit the
+// same PR; the cache coalesces them and avoids a duplicate `pulls.get`.
+// But ticks are NOT short — when one PR's reviewer takes 5+ min to
+// spawn, later PRs in the serial loop were being evaluated against the
+// snapshot warmed at tick-start, with labels and head_sha that were
+// already minutes stale. The retrigger-review label-check and the
+// auto-refresh-stale guard both compared cached values, so labels
+// applied mid-tick and pushes that landed mid-tick were invisible
+// until the NEXT tick. With long ticks chaining back-to-back, an
+// operator's retrigger-review label could sit unconsumed for an hour
+// or more — the symptom reported on 2026-05-18.
+//
+// 30s is well above the same-iteration coalescing window (typically
+// <1s between adapter calls for a single PR) and well below typical
+// reviewer-spawn delays. Override via SUBJECT_ADAPTER_CACHE_TTL_MS.
+const DEFAULT_SUBJECT_CACHE_TTL_MS = 30_000;
+
+function resolveSubjectCacheTtlMs(env = process.env) {
+  const raw = env?.SUBJECT_ADAPTER_CACHE_TTL_MS;
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_SUBJECT_CACHE_TTL_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_SUBJECT_CACHE_TTL_MS;
+  }
+  return parsed;
+}
+
 function createGitHubPRSubjectAdapter({
   octokit,
   repos = [],
@@ -131,18 +163,37 @@ function createGitHubPRSubjectAdapter({
   execFileImpl = execFileAsync,
   prepareWorkspaceForJobImpl = null,
   now = () => new Date(),
+  monotonicNowMs = () => performance.now(),
+  cacheTtlMs = resolveSubjectCacheTtlMs(),
 } = {}) {
-  // Per-adapter-instance scratch cache: discoverSubjects() warms it so the
-  // matching fetchState()/fetchContent() calls in the same watcher poll do not
-  // re-fetch PRs. It is not intended as a cross-poll freshness cache.
+  // Per-adapter-instance scratch cache. Entries carry a monotonic
+  // fetch timestamp and are rejected on read once older than
+  // `cacheTtlMs` (default 30s, overridable via
+  // SUBJECT_ADAPTER_CACHE_TTL_MS). The cache is per subject, not per
+  // revisionRef: within TTL, the newest snapshot we have for that PR is
+  // authoritative even when callers keep using an older SubjectRef.
   const snapshotBySubjectExternalId = new Map();
+
+  function setCache(snapshot) {
+    snapshot._fetchedAtMonotonicMs = monotonicNowMs();
+    snapshotBySubjectExternalId.set(snapshot.subjectExternalId, snapshot);
+  }
+
+  function getFreshCache(subjectExternalId) {
+    const cached = snapshotBySubjectExternalId.get(subjectExternalId);
+    if (!cached) return null;
+    // `>=` so cacheTtlMs=0 disables caching outright (always miss) —
+    // useful as an operator escape hatch via SUBJECT_ADAPTER_CACHE_TTL_MS=0
+    // if the TTL logic ever needs to be neutralized.
+    const ageMs = monotonicNowMs() - (cached._fetchedAtMonotonicMs ?? 0);
+    if (ageMs >= cacheTtlMs) return null;
+    return cached;
+  }
 
   async function fetchPRSnapshot(ref) {
     const { repo, prNumber } = parseSubjectExternalId(ref.subjectExternalId);
-    const cached = snapshotBySubjectExternalId.get(ref.subjectExternalId);
-    if (cached && (!ref.revisionRef || cached.revisionRef === ref.revisionRef)) {
-      return cached;
-    }
+    const cached = getFreshCache(ref.subjectExternalId);
+    if (cached) return cached;
     if (!octokit?.rest?.pulls?.get) {
       throw new Error(`No GitHub client available to fetch ${ref.subjectExternalId}`);
     }
@@ -153,7 +204,7 @@ function createGitHubPRSubjectAdapter({
       pull_number: prNumber,
     });
     const snapshot = normalizePRSnapshot(repo, data);
-    snapshotBySubjectExternalId.set(snapshot.subjectExternalId, snapshot);
+    setCache(snapshot);
     return snapshot;
   }
 
@@ -176,7 +227,7 @@ function createGitHubPRSubjectAdapter({
         });
         for (const pr of data) {
           const snapshot = normalizePRSnapshot(repoPath, pr);
-          snapshotBySubjectExternalId.set(snapshot.subjectExternalId, snapshot);
+          setCache(snapshot);
           refs.push({
             domainId: snapshot.domainId,
             subjectExternalId: snapshot.subjectExternalId,

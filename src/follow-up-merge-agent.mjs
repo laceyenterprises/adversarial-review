@@ -15,6 +15,7 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
+  MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_APPROVED_LABEL,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
@@ -1166,6 +1167,15 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   const lines = [
     '# Merge-Agent Dispatch',
     '',
+    '## Preamble: abort if PR is no longer open',
+    '',
+    `Before doing ANY other work, run \`gh pr view ${job.prNumber} --repo ${job.repo} --json state,mergedAt,closedAt\` and inspect the result.`,
+    '',
+    '- If `state` is `"MERGED"` (operator-merged ahead of you) OR `state` is `"CLOSED"` (operator abandoned the PR): **abort this session immediately**. Do not check out the branch, do not run remediation, do not push commits, do not call `hq` adjudicate. Exit cleanly with a short stdout note like `merge-agent abort: PR state=<X> at session start; no work performed`.',
+    '- If `state` is `"OPEN"`: proceed normally with the dispatch below.',
+    '',
+    'Rationale: the watcher applies the `merge-agent-dispatched` label when it dispatches you and removes it on cancel-on-merge. If you started before the watcher could cancel you (the cancel path is best-effort), this preamble is the second line of defense against wasting budget on a closed PR.',
+    '',
     `- Repo: ${job.repo}`,
     `- PR: #${job.prNumber}`,
     `- Branch: ${job.branch}`,
@@ -1687,6 +1697,134 @@ async function removeConsumedTriggerLabel({
   return result;
 }
 
+// Best-effort: apply the merge-agent-dispatched label after a successful
+// `hq dispatch`. Two purposes: (1) visibility for operators, and (2) the
+// watcher uses presence of this label as the lookup key for the cancel-
+// on-merge path. A failed add is logged but does not throw — the
+// dispatch already happened and we don\'t want to roll it back over a
+// transient gh failure.
+async function addMergeAgentDispatchedLabel({
+  repo,
+  prNumber,
+  ghExecFileImpl,
+  now = isoNow(),
+} = {}) {
+  const result = {
+    attempted: true,
+    label: MERGE_AGENT_DISPATCHED_LABEL,
+    attemptedAt: now,
+    added: false,
+    error: null,
+  };
+  try {
+    await ghExecFileImpl('gh', [
+      'pr',
+      'edit',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--add-label',
+      MERGE_AGENT_DISPATCHED_LABEL,
+    ], { maxBuffer: 5 * 1024 * 1024 });
+    result.added = true;
+  } catch (err) {
+    result.error = err?.message || String(err);
+    console.warn(
+      `[follow-up-merge-agent] failed to add '${MERGE_AGENT_DISPATCHED_LABEL}' label to ${repo}#${prNumber}: ${result.error}`
+    );
+  }
+  return result;
+}
+
+// Best-effort: when the watcher sees a PR has been closed/merged while
+// the `merge-agent-dispatched` label is still set, look up the most
+// recent merge-agent dispatch record for that PR, call `hq dispatch
+// cancel <lrq>` on the in-flight pool worker, and remove the label.
+//
+// "Best-effort" means: every failure mode is logged but non-fatal — a
+// missed cancel just means the worker runs to completion and discovers
+// the closed PR via the prompt preamble. The label removal is the
+// state-management part; even if cancel fails, removing the label
+// prevents the watcher from re-attempting cancellation on every tick.
+async function cancelMergeAgentDispatchOnMerge({
+  rootDir,
+  repo,
+  prNumber,
+  hqPath,
+  ghExecFileImpl,
+  hqExecFileImpl = ghExecFileImpl,
+  now = isoNow(),
+  listImpl = listMergeAgentDispatches,
+} = {}) {
+  const result = {
+    attempted: true,
+    repo,
+    prNumber,
+    attemptedAt: now,
+    launchRequestId: null,
+    cancelled: false,
+    cancelError: null,
+    labelRemoved: false,
+    labelRemovalError: null,
+  };
+
+  // Find the most recent merge-agent dispatch record for this PR. If
+  // there\'s none, nothing to cancel — but we still remove the label so
+  // the watcher doesn\'t loop on this PR forever.
+  let dispatches = [];
+  try {
+    dispatches = listImpl(rootDir, { repo, prNumber });
+  } catch (err) {
+    result.cancelError = `dispatch lookup failed: ${err?.message || err}`;
+  }
+  const latest = dispatches
+    .filter((d) => d?.launchRequestId)
+    .sort((a, b) => String(b.dispatchedAt || '').localeCompare(String(a.dispatchedAt || '')))
+    .at(0);
+  if (latest) {
+    result.launchRequestId = latest.launchRequestId;
+    if (hqPath) {
+      try {
+        await hqExecFileImpl(hqPath, [
+          'dispatch',
+          'cancel',
+          latest.launchRequestId,
+        ], { maxBuffer: 5 * 1024 * 1024 });
+        result.cancelled = true;
+      } catch (err) {
+        result.cancelError = err?.message || String(err);
+        console.warn(
+          `[follow-up-merge-agent] best-effort cancel of merge-agent dispatch ${latest.launchRequestId} for ${repo}#${prNumber} failed: ${result.cancelError}`
+        );
+      }
+    } else {
+      result.cancelError = 'no hqPath provided; skipped cancel';
+    }
+  }
+
+  // Remove the label regardless of cancel outcome — leaving it on a
+  // closed PR causes the watcher to retry cancel every tick.
+  try {
+    await ghExecFileImpl('gh', [
+      'pr',
+      'edit',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--remove-label',
+      MERGE_AGENT_DISPATCHED_LABEL,
+    ], { maxBuffer: 5 * 1024 * 1024 });
+    result.labelRemoved = true;
+  } catch (err) {
+    result.labelRemovalError = err?.message || String(err);
+    console.warn(
+      `[follow-up-merge-agent] failed to remove '${MERGE_AGENT_DISPATCHED_LABEL}' from ${repo}#${prNumber} after close: ${result.labelRemovalError}`
+    );
+  }
+
+  return result;
+}
+
 function writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt = isoNow() } = {}) {
   const dir = mergeAgentPromptDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -2012,6 +2150,17 @@ async function dispatchMergeAgentForPR({
     });
   }
 
+  // Apply the merge-agent-dispatched marker label so operators (and the
+  // watcher\'s cancel-on-merge path) can see at a glance that a merge-
+  // agent worker is out for this PR. Best-effort: a failed add is
+  // logged but does not roll back the dispatch we just completed.
+  const dispatchedLabel = await addMergeAgentDispatchedLabel({
+    repo,
+    prNumber,
+    ghExecFileImpl,
+    now,
+  });
+
   return {
     decision,
     trigger,
@@ -2021,6 +2170,8 @@ async function dispatchMergeAgentForPR({
     operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
     mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
     labelRemovalErrors: labelRemoval.labelRemovalErrors,
+    dispatchedLabelAdded: dispatchedLabel.added,
+    dispatchedLabelError: dispatchedLabel.error,
   };
 }
 
@@ -2098,11 +2249,14 @@ export {
   HQ_DISPATCH_TIMEOUT_MS,
   HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
   OPERATOR_APPROVED_LABEL,
+  MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_SKIP_LABELS,
   TERMINAL_WORKER_RUN_STATUSES,
+  addMergeAgentDispatchedLabel,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
+  cancelMergeAgentDispatchOnMerge,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
   describeStaleDispatch,

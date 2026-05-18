@@ -17,6 +17,7 @@ import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters
 import { routeSubject } from './adapters/subject/github-pr/routing.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
+  MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_APPROVED_LABEL,
   legacyLabelEventFromControlResult,
@@ -53,6 +54,7 @@ import {
 } from './branch-protection.mjs';
 import {
   buildMergeAgentDispatchJob,
+  cancelMergeAgentDispatchOnMerge,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
 } from './follow-up-merge-agent.mjs';
@@ -979,6 +981,9 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         }, linearTicketId),
         'finalized'
       );
+      await maybeCancelMergeAgentOnLifecycleTransition({
+        pr, repo, prNumber, transition: 'merged',
+      });
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
       stmtMarkClosed.run(pr.closed_at ?? new Date().toISOString(), repo, prNumber);
@@ -991,8 +996,48 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         }, linearTicketId),
         'halted'
       );
+      await maybeCancelMergeAgentOnLifecycleTransition({
+        pr, repo, prNumber, transition: 'closed',
+      });
     }
     // Still open → nothing to do
+  }
+}
+
+// Best-effort cancel of an in-flight merge-agent pool worker when its PR
+// has just transitioned to merged/closed. Triggered by the
+// `merge-agent-dispatched` label on the PR (applied at dispatch time).
+// All errors are non-fatal — the worker\'s own preamble (gh pr view
+// state check) is the second line of defense.
+async function maybeCancelMergeAgentOnLifecycleTransition({
+  pr, repo, prNumber, transition,
+} = {}) {
+  const labelNames = Array.isArray(pr?.labels)
+    ? pr.labels
+      .map((l) => (typeof l === 'string' ? l : l?.name || ''))
+      .filter(Boolean)
+    : [];
+  if (!labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) return;
+  try {
+    const cancelResult = await cancelMergeAgentDispatchOnMerge({
+      rootDir: ROOT,
+      repo,
+      prNumber,
+      hqPath: process.env.HQ_BIN || 'hq',
+      ghExecFileImpl: execFileAsync,
+    });
+    console.log(
+      `[watcher] cancel-on-${transition} for ${repo}#${prNumber}: ` +
+      `lrq=${cancelResult.launchRequestId || 'none'} ` +
+      `cancelled=${cancelResult.cancelled} ` +
+      `labelRemoved=${cancelResult.labelRemoved}` +
+      (cancelResult.cancelError ? ` cancelError=${cancelResult.cancelError}` : '')
+    );
+  } catch (err) {
+    console.warn(
+      `[watcher] cancel-on-${transition} for ${repo}#${prNumber} raised:`,
+      err?.message || err
+    );
   }
 }
 

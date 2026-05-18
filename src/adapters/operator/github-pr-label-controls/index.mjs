@@ -18,6 +18,14 @@ const FORCE_REREVIEW_LABEL = 'force-rereview';
 const HALTED_LOOP_LABEL = 'halted-loop';
 const RAISED_ROUND_CAP_LABEL = 'raised-round-cap';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
+// Write-only marker applied by the watcher right after a successful
+// `hq dispatch --worker-class merge-agent`. Two purposes:
+//   1. Visibility: operators (and ad-hoc tooling) can see at a glance
+//      which PRs have a merge-agent worker out for them.
+//   2. Best-effort cancel-on-merge: if the operator manually merges a
+//      labeled PR, the watcher cancels the in-flight pool worker so
+//      it doesn\'t waste budget remediating a now-closed PR.
+const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched';
 
 function isoNow() {
   return new Date().toISOString();
@@ -241,6 +249,7 @@ function createGitHubPRLabelControlsAdapter({
 export {
   FORCE_REREVIEW_LABEL,
   HALTED_LOOP_LABEL,
+  MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_APPROVED_LABEL,
   RAISED_ROUND_CAP_LABEL,

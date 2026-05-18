@@ -253,7 +253,10 @@ the derived branch prefix does not match the worker's `workspace.json`,
 session-ledger row is missing while the worktree still exists, or the
 original worker is still active, the watcher logs a structured skip/defer
 event and leaves the existing dispatch path to retry or fail with its own
-diagnostics. Branch prefixes that do not look like registered worker ids are
+diagnostics. Override labels such as `operator-approved` and
+`merge-agent-requested` do not bypass this liveness check; missing worker-run
+state still fails closed until the original worker is provably terminal.
+Branch prefixes that do not look like registered worker ids are
 ignored before any filesystem probe or `hq` invocation. Active original
 workers specifically emit `merge_agent.dispatch_deferred` and skip that tick;
 the next watcher tick retries. Successful cleanup logs

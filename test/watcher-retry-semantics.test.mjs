@@ -16,9 +16,14 @@ import {
   evaluateRoundBudgetForReview,
   persistReviewerPgid,
   resolveStaleReviewerReconcilePerPoll,
+  retryPendingMergeAgentLifecycleCleanups,
   shouldDeferReviewForActiveFollowUp,
   shouldReconcileStaleReviewerSession,
 } from '../src/watcher.mjs';
+import {
+  listMergeAgentLifecycleCleanups,
+  upsertMergeAgentLifecycleCleanup,
+} from '../src/follow-up-merge-agent.mjs';
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 
 function setupDb() {
@@ -218,6 +223,43 @@ test('steady-state reattach per-poll cap defaults small and accepts zero for dis
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '1' }), 1);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '0' }), 0);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: 'bad' }), 3);
+});
+
+test('pending merge-agent lifecycle cleanup retries after the PR leaves the open set', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  upsertMergeAgentLifecycleCleanup(rootDir, {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 133,
+    transition: 'merged',
+    headSha: 'sha-cleanup-133',
+    queuedAt: '2026-05-18T15:00:00.000Z',
+  });
+
+  const calls = [];
+  await retryPendingMergeAgentLifecycleCleanups({
+    rootDir,
+    cancelImpl: async (args) => {
+      calls.push(args);
+      return {
+        attempted: true,
+        repo: args.repo,
+        prNumber: args.prNumber,
+        attemptedAt: '2026-05-18T15:01:00.000Z',
+        launchRequestId: 'lrq_retry',
+        cancelled: true,
+        cancelError: null,
+        labelRemoved: true,
+        labelRemovalError: null,
+        cleanupComplete: true,
+        retryable: false,
+      };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].repo, 'laceyenterprises/adversarial-review');
+  assert.equal(calls[0].prNumber, 133);
+  assert.deepEqual(listMergeAgentLifecycleCleanups(rootDir), []);
 });
 
 test('persistReviewerPgid logs CAS misses instead of throwing into the spawned reviewer', () => {

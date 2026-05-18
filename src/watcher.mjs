@@ -55,8 +55,12 @@ import {
 import {
   buildMergeAgentDispatchJob,
   cancelMergeAgentDispatchOnMerge,
+  clearMergeAgentLifecycleCleanup,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
+  listMergeAgentLifecycleCleanups,
+  updateMergeAgentLifecycleCleanup,
+  upsertMergeAgentLifecycleCleanup,
 } from './follow-up-merge-agent.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
@@ -948,6 +952,117 @@ async function refreshOrgRepos(octokit) {
 
 // ── Lifecycle sync: check open PRs for merge/close ──────────────────────────
 
+async function attemptMergeAgentLifecycleCleanup({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  transition = 'unknown',
+  source = 'retry-loop',
+  cancelImpl = cancelMergeAgentDispatchOnMerge,
+} = {}) {
+  try {
+    const cancelResult = await cancelImpl({
+      rootDir,
+      repo,
+      prNumber,
+      hqPath: process.env.HQ_BIN || 'hq',
+      ghExecFileImpl: execFileAsync,
+    });
+    updateMergeAgentLifecycleCleanup(rootDir, {
+      repo,
+      prNumber,
+      result: {
+        ...cancelResult,
+        transition,
+        source,
+      },
+      attemptedAt: cancelResult.attemptedAt,
+    });
+    if (cancelResult.cleanupComplete) {
+      clearMergeAgentLifecycleCleanup(rootDir, { repo, prNumber });
+    }
+    console.log(
+      `[watcher] cancel-on-${transition} (${source}) for ${repo}#${prNumber}: `
+      + `lrq=${cancelResult.launchRequestId || 'none'} `
+      + `cancelled=${cancelResult.cancelled} `
+      + `labelRemoved=${cancelResult.labelRemoved} `
+      + `retryable=${cancelResult.retryable}`
+      + (cancelResult.cancelError ? ` cancelError=${cancelResult.cancelError}` : '')
+      + (cancelResult.labelRemovalError ? ` labelRemovalError=${cancelResult.labelRemovalError}` : '')
+    );
+    return cancelResult;
+  } catch (err) {
+    console.warn(
+      `[watcher] cancel-on-${transition} (${source}) for ${repo}#${prNumber} raised:`,
+      err?.message || err
+    );
+    updateMergeAgentLifecycleCleanup(rootDir, {
+      repo,
+      prNumber,
+      result: {
+        attempted: true,
+        repo,
+        prNumber,
+        attemptedAt: new Date().toISOString(),
+        cancelled: false,
+        labelRemoved: false,
+        cleanupComplete: false,
+        retryable: true,
+        transition,
+        source,
+        cancelError: err?.message || String(err),
+      },
+    });
+    return null;
+  }
+}
+
+async function queueAndAttemptMergeAgentLifecycleCleanup({
+  rootDir = ROOT,
+  pr,
+  repo,
+  prNumber,
+  transition,
+} = {}) {
+  const labelNames = Array.isArray(pr?.labels)
+    ? pr.labels
+      .map((l) => (typeof l === 'string' ? l : l?.name || ''))
+      .filter(Boolean)
+    : [];
+  if (!labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) return null;
+
+  upsertMergeAgentLifecycleCleanup(rootDir, {
+    repo,
+    prNumber,
+    transition,
+    headSha: pr?.head?.sha || null,
+  });
+  return attemptMergeAgentLifecycleCleanup({
+    rootDir,
+    repo,
+    prNumber,
+    transition,
+    source: 'lifecycle-sync',
+  });
+}
+
+async function retryPendingMergeAgentLifecycleCleanups({
+  rootDir = ROOT,
+  cancelImpl = cancelMergeAgentDispatchOnMerge,
+} = {}) {
+  const pending = listMergeAgentLifecycleCleanups(rootDir);
+  for (const cleanup of pending) {
+    await attemptMergeAgentLifecycleCleanup({
+      rootDir,
+      repo: cleanup.repo,
+      prNumber: cleanup.prNumber,
+      transition: cleanup.transition || 'unknown',
+      source: 'retry-loop',
+      cancelImpl,
+    });
+  }
+}
+
 /**
  * For every PR we previously marked as "open", check if it has since been
  * merged or closed and update Linear accordingly.
@@ -971,6 +1086,9 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 
     if (pr.merged_at) {
       console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
+      await queueAndAttemptMergeAgentLifecycleCleanup({
+        pr, repo, prNumber, transition: 'merged',
+      });
       stmtMarkMerged.run(pr.merged_at, repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await operatorSurface.syncTriageStatus(
@@ -981,11 +1099,11 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         }, linearTicketId),
         'finalized'
       );
-      await maybeCancelMergeAgentOnLifecycleTransition({
-        pr, repo, prNumber, transition: 'merged',
-      });
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
+      await queueAndAttemptMergeAgentLifecycleCleanup({
+        pr, repo, prNumber, transition: 'closed',
+      });
       stmtMarkClosed.run(pr.closed_at ?? new Date().toISOString(), repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await operatorSurface.syncTriageStatus(
@@ -996,48 +1114,8 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         }, linearTicketId),
         'halted'
       );
-      await maybeCancelMergeAgentOnLifecycleTransition({
-        pr, repo, prNumber, transition: 'closed',
-      });
     }
     // Still open → nothing to do
-  }
-}
-
-// Best-effort cancel of an in-flight merge-agent pool worker when its PR
-// has just transitioned to merged/closed. Triggered by the
-// `merge-agent-dispatched` label on the PR (applied at dispatch time).
-// All errors are non-fatal — the worker\'s own preamble (gh pr view
-// state check) is the second line of defense.
-async function maybeCancelMergeAgentOnLifecycleTransition({
-  pr, repo, prNumber, transition,
-} = {}) {
-  const labelNames = Array.isArray(pr?.labels)
-    ? pr.labels
-      .map((l) => (typeof l === 'string' ? l : l?.name || ''))
-      .filter(Boolean)
-    : [];
-  if (!labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) return;
-  try {
-    const cancelResult = await cancelMergeAgentDispatchOnMerge({
-      rootDir: ROOT,
-      repo,
-      prNumber,
-      hqPath: process.env.HQ_BIN || 'hq',
-      ghExecFileImpl: execFileAsync,
-    });
-    console.log(
-      `[watcher] cancel-on-${transition} for ${repo}#${prNumber}: ` +
-      `lrq=${cancelResult.launchRequestId || 'none'} ` +
-      `cancelled=${cancelResult.cancelled} ` +
-      `labelRemoved=${cancelResult.labelRemoved}` +
-      (cancelResult.cancelError ? ` cancelError=${cancelResult.cancelError}` : '')
-    );
-  } catch (err) {
-    console.warn(
-      `[watcher] cancel-on-${transition} for ${repo}#${prNumber} raised:`,
-      err?.message || err
-    );
   }
 }
 
@@ -1188,6 +1266,8 @@ async function pollOnce(
     defaultBaseBranch: config.adversarialGateBaseBranch || 'main',
     logger: console,
   });
+
+  await retryPendingMergeAgentLifecycleCleanups();
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit, operatorSurface);
@@ -1885,6 +1965,7 @@ export {
   readWatcherDrainState,
   reconcileOrphanedReviewing,
   resolveStaleReviewerReconcilePerPoll,
+  retryPendingMergeAgentLifecycleCleanups,
   shouldDeferReviewForActiveFollowUp,
   shouldPreserveReviewersOnSigterm,
   shouldReconcileStaleReviewerSession,

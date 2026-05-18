@@ -3487,10 +3487,7 @@ test('cancelMergeAgentDispatchOnMerge cancels the latest dispatch + removes the 
   ]);
 });
 
-test('cancelMergeAgentDispatchOnMerge still removes the label when cancel fails (no infinite retry)', async () => {
-  // Critical invariant: leaving the label set would cause the watcher
-  // to retry cancel every tick forever. Label removal MUST happen
-  // regardless of cancel outcome.
+test('cancelMergeAgentDispatchOnMerge removes the label after a terminal cancel failure', async () => {
   const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 661 }), {
@@ -3521,6 +3518,43 @@ test('cancelMergeAgentDispatchOnMerge still removes the label when cancel fails 
   assert.match(result.cancelError, /already terminated/);
   assert.equal(labelRemoved, true);
   assert.equal(result.labelRemoved, true);
+  assert.equal(result.cleanupComplete, true);
+  assert.equal(result.retryable, false);
+});
+
+test('cancelMergeAgentDispatchOnMerge keeps the label when cancel fails transiently', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 661 }), {
+    dispatchedAt: '2026-05-18T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_x',
+    launchRequestId: 'lrq_x',
+    trigger: null,
+  });
+
+  let ghCalled = false;
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => {
+      ghCalled = true;
+      return { stdout: '', stderr: '' };
+    },
+    hqExecFileImpl: async () => {
+      throw new Error('hq: dispatch cancel failed — daemon unavailable');
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.cancelled, false);
+  assert.match(result.cancelError, /daemon unavailable/);
+  assert.equal(ghCalled, false);
+  assert.equal(result.labelRemoved, false);
+  assert.equal(result.cleanupComplete, false);
+  assert.equal(result.retryable, true);
 });
 
 test('cancelMergeAgentDispatchOnMerge removes label even when no dispatch record exists', async () => {

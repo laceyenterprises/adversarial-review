@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -26,6 +27,7 @@ import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.m
 const execFileAsync = promisify(execFile);
 
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
+const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
@@ -842,6 +844,10 @@ function mergeAgentPromptDir(rootDir) {
   return join(getFollowUpJobDir(rootDir, 'pending'), '..', 'merge-agent-prompts');
 }
 
+function mergeAgentLifecycleCleanupDir(rootDir) {
+  return join(getFollowUpJobDir(rootDir, 'pending'), '..', 'merge-agent-lifecycle-cleanups');
+}
+
 function sanitizeDispatchPathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
 }
@@ -861,6 +867,14 @@ function mergeAgentSkippedDispatchFilePath(rootDir, job) {
   return join(
     mergeAgentSkippedDispatchDir(rootDir),
     `${safeRepo}-pr-${Number(job?.prNumber)}-${safeSha}.json`
+  );
+}
+
+function mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber } = {}) {
+  const safeRepo = sanitizeDispatchPathSegment(String(repo ?? '').replace(/\//g, '__'));
+  return join(
+    mergeAgentLifecycleCleanupDir(rootDir),
+    `${safeRepo}-pr-${Number(prNumber)}.json`
   );
 }
 
@@ -884,6 +898,24 @@ function listMergeAgentDispatches(rootDir) {
 
 function listMergeAgentSkippedDispatches(rootDir) {
   const dir = mergeAgentSkippedDispatchDir(rootDir);
+  try {
+    return readdirSync(dir)
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => {
+        try {
+          return JSON.parse(readFileSync(join(dir, name), 'utf8'));
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function listMergeAgentLifecycleCleanups(rootDir) {
+  const dir = mergeAgentLifecycleCleanupDir(rootDir);
   try {
     return readdirSync(dir)
       .filter((name) => name.endsWith('.json'))
@@ -1643,6 +1675,77 @@ function updateMergeAgentDispatchLabelRemoval(rootDir, job, {
   return filePath;
 }
 
+function upsertMergeAgentLifecycleCleanup(rootDir, {
+  repo,
+  prNumber,
+  transition,
+  headSha = null,
+  queuedAt = isoNow(),
+} = {}) {
+  const dir = mergeAgentLifecycleCleanupDir(rootDir);
+  mkdirSync(dir, { recursive: true });
+  const filePath = mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber });
+  const existing = readJsonFileDetailed(filePath);
+  const previous = existing.ok ? existing.value : null;
+  const doc = {
+    schemaVersion: MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION,
+    repo,
+    prNumber: Number(prNumber),
+    transition,
+    headSha,
+    queuedAt: previous?.queuedAt || queuedAt,
+    lastAttemptAt: previous?.lastAttemptAt || null,
+    completedAt: previous?.completedAt || null,
+    lastResult: previous?.lastResult || null,
+  };
+  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
+  return doc;
+}
+
+function updateMergeAgentLifecycleCleanup(rootDir, {
+  repo,
+  prNumber,
+  result,
+  attemptedAt = isoNow(),
+} = {}) {
+  const filePath = mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber });
+  const existing = readJsonFileDetailed(filePath);
+  const previous = existing.ok ? existing.value : {
+    schemaVersion: MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION,
+    repo,
+    prNumber: Number(prNumber),
+    transition: null,
+    headSha: null,
+    queuedAt: attemptedAt,
+  };
+  const next = {
+    ...previous,
+    lastAttemptAt: attemptedAt,
+    completedAt: result?.cleanupComplete ? attemptedAt : null,
+    lastResult: result || null,
+  };
+  writeFileAtomic(filePath, `${JSON.stringify(next, null, 2)}\n`);
+  return next;
+}
+
+function clearMergeAgentLifecycleCleanup(rootDir, { repo, prNumber } = {}) {
+  const filePath = mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber });
+  try {
+    rmSync(filePath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isTerminalMergeAgentCancelError(detail) {
+  return /\balready terminated\b|\balready cancelled\b|\bnot found\b|\bno such\b/i.test(String(detail || ''));
+}
+
+function isTerminalMergeAgentLabelRemovalError(detail) {
+  return /\bHTTP 422\b|\bnot found\b|\bdoes not exist\b/i.test(String(detail || ''));
+}
+
 async function removeConsumedTriggerLabel({
   repo,
   prNumber,
@@ -1743,9 +1846,10 @@ async function addMergeAgentDispatchedLabel({
 //
 // "Best-effort" means: every failure mode is logged but non-fatal — a
 // missed cancel just means the worker runs to completion and discovers
-// the closed PR via the prompt preamble. The label removal is the
-// state-management part; even if cancel fails, removing the label
-// prevents the watcher from re-attempting cancellation on every tick.
+// the closed PR via the prompt preamble. Non-terminal cancel/label
+// failures are intentionally retryable: the watcher persists cleanup
+// work on disk and replays it on later ticks even after the PR leaves
+// the open-set query.
 async function cancelMergeAgentDispatchOnMerge({
   rootDir,
   repo,
@@ -1766,11 +1870,14 @@ async function cancelMergeAgentDispatchOnMerge({
     cancelError: null,
     labelRemoved: false,
     labelRemovalError: null,
+    cleanupComplete: false,
+    retryable: false,
   };
 
   // Find the most recent merge-agent dispatch record for this PR. If
-  // there\'s none, nothing to cancel — but we still remove the label so
-  // the watcher doesn\'t loop on this PR forever.
+  // there\'s none, nothing to cancel — but we still try to remove the
+  // label so the durable cleanup record can converge to the desired
+  // "no running worker / no marker label" state.
   let dispatches = [];
   try {
     dispatches = listImpl(rootDir, { repo, prNumber });
@@ -1802,25 +1909,38 @@ async function cancelMergeAgentDispatchOnMerge({
     }
   }
 
-  // Remove the label regardless of cancel outcome — leaving it on a
-  // closed PR causes the watcher to retry cancel every tick.
-  try {
-    await ghExecFileImpl('gh', [
-      'pr',
-      'edit',
-      String(prNumber),
-      '--repo',
-      repo,
-      '--remove-label',
-      MERGE_AGENT_DISPATCHED_LABEL,
-    ], { maxBuffer: 5 * 1024 * 1024 });
-    result.labelRemoved = true;
-  } catch (err) {
-    result.labelRemovalError = err?.message || String(err);
-    console.warn(
-      `[follow-up-merge-agent] failed to remove '${MERGE_AGENT_DISPATCHED_LABEL}' from ${repo}#${prNumber} after close: ${result.labelRemovalError}`
-    );
+  const cancelReachedTerminalOutcome = (
+    !result.launchRequestId
+    || result.cancelled
+    || isTerminalMergeAgentCancelError(result.cancelError)
+  );
+
+  if (cancelReachedTerminalOutcome) {
+    try {
+      await ghExecFileImpl('gh', [
+        'pr',
+        'edit',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--remove-label',
+        MERGE_AGENT_DISPATCHED_LABEL,
+      ], { maxBuffer: 5 * 1024 * 1024 });
+      result.labelRemoved = true;
+    } catch (err) {
+      result.labelRemovalError = err?.message || String(err);
+      if (isTerminalMergeAgentLabelRemovalError(result.labelRemovalError)) {
+        result.labelRemoved = true;
+      } else {
+        console.warn(
+          `[follow-up-merge-agent] failed to remove '${MERGE_AGENT_DISPATCHED_LABEL}' from ${repo}#${prNumber} after close: ${result.labelRemovalError}`
+        );
+      }
+    }
   }
+
+  result.cleanupComplete = cancelReachedTerminalOutcome && result.labelRemoved;
+  result.retryable = !result.cleanupComplete;
 
   return result;
 }
@@ -2257,6 +2377,7 @@ export {
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
   cancelMergeAgentDispatchOnMerge,
+  clearMergeAgentLifecycleCleanup,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
   describeStaleDispatch,
@@ -2271,6 +2392,7 @@ export {
   isScopedOperatorApproval,
   isScopedMergeAgentRequest,
   listMergeAgentDispatches,
+  listMergeAgentLifecycleCleanups,
   listMergeAgentSkippedDispatches,
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
@@ -2279,6 +2401,8 @@ export {
   prepareOriginalWorkerForMergeAgent,
   resolveSessionLedgerDbPath,
   recordMergeAgentDispatch,
+  updateMergeAgentLifecycleCleanup,
+  upsertMergeAgentLifecycleCleanup,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
   summarizeChecksConclusion,

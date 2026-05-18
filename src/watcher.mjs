@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
@@ -244,8 +244,60 @@ const FLEET_WIDE_FALSE_DEFERRAL_STATE_DIR = join(
   ROOT, 'data', 'follow-up-jobs', 'fleet-wide-false-deferral-alerts',
 );
 const FLEET_WIDE_FALSE_DEFERRAL_STATE_FILE = 'fleet-state.json';
+const FLEET_WIDE_FALSE_DEFERRAL_LOCK_FILE = 'fleet-state.lock';
 const FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
-const fleetWideFalseDeferralDegradedAlerts = new Map();
+const FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_STATE_FILE = 'degraded-alert-state.json';
+const FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_LOCK_FILE = 'degraded-alert-state.lock';
+const FLEET_WIDE_FALSE_DEFERRAL_LOCK_RETRY_MS = 10;
+const FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS = 5_000;
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function acquireFleetWideFalseDeferralLock(lockPath, {
+  retryMs = FLEET_WIDE_FALSE_DEFERRAL_LOCK_RETRY_MS,
+  timeoutMs = FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS,
+} = {}) {
+  const startedAt = Date.now();
+  while (true) {
+    try {
+      writeFileSync(lockPath, `${process.pid}\n`, { flag: 'wx' });
+      return;
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      if ((Date.now() - startedAt) >= timeoutMs) {
+        throw new Error(`Timed out waiting for fleet-wide false-deferral lock: ${lockPath}`);
+      }
+      sleepMs(retryMs);
+    }
+  }
+}
+
+async function withFleetWideFalseDeferralLock(
+  alertStateDir,
+  callback,
+  { lockFile = FLEET_WIDE_FALSE_DEFERRAL_LOCK_FILE } = {},
+) {
+  mkdirSync(alertStateDir, { recursive: true });
+  const lockPath = join(alertStateDir, lockFile);
+  acquireFleetWideFalseDeferralLock(lockPath);
+  try {
+    return await callback();
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+}
+
+function readFleetWideFalseDeferralDegradedState({
+  degradedStatePath,
+  fsImpl,
+}) {
+  if (!fsImpl.existsSync(degradedStatePath)) return {};
+  const doc = JSON.parse(fsImpl.readFileSync(degradedStatePath, 'utf8'));
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return {};
+  return doc;
+}
 
 function buildFleetWideFalseDeferralDetectorDegradedText({
   operation,
@@ -277,11 +329,32 @@ async function reportFleetWideFalseDeferralDetectorDegraded({
   err,
   now = Date.now(),
   degradedAlertDebounceMs = FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_ALERT_DEBOUNCE_MS,
+  fsImpl = { readFileSync, existsSync },
+  writeDegradedStateFileFn = (filePath, content) => writeFileAtomic(filePath, content),
 }) {
   const errorMessage = err?.message || String(err);
-  const lastAlertedAt = fleetWideFalseDeferralDegradedAlerts.get(statePath) || 0;
-  if ((now - lastAlertedAt) < degradedAlertDebounceMs) return;
-  fleetWideFalseDeferralDegradedAlerts.set(statePath, now);
+  const alertStateDir = dirname(statePath);
+  const degradedStatePath = join(alertStateDir, FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_STATE_FILE);
+
+  let shouldDeliver = false;
+  try {
+    shouldDeliver = await withFleetWideFalseDeferralLock(alertStateDir, async () => {
+      const degradedState = readFleetWideFalseDeferralDegradedState({ degradedStatePath, fsImpl });
+      const lastAlertedMs = Date.parse(degradedState[statePath] || '');
+      if (Number.isFinite(lastAlertedMs) && (now - lastAlertedMs) < degradedAlertDebounceMs) {
+        return false;
+      }
+      degradedState[statePath] = new Date(now).toISOString();
+      writeDegradedStateFileFn(degradedStatePath, JSON.stringify(degradedState, null, 2) + '\n');
+      return true;
+    }, { lockFile: FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_LOCK_FILE });
+  } catch (stateErr) {
+    logger?.error?.(
+      `[watcher] fleet-wide false-deferral degraded alert debounce persistence failed: ${stateErr?.message || stateErr}`
+    );
+    shouldDeliver = true;
+  }
+  if (!shouldDeliver) return;
 
   try {
     await deliverAlertFn(
@@ -364,122 +437,141 @@ async function maybeFireFleetWideFalseDeferralAlert({
   if (!lrq) return false;
 
   const statePath = join(alertStateDir, FLEET_WIDE_FALSE_DEFERRAL_STATE_FILE);
-  let state = { observations: [], lastAlertedAt: null };
   try {
-    if (fsImpl.existsSync(statePath)) {
-      const doc = JSON.parse(fsImpl.readFileSync(statePath, 'utf8'));
-      if (Array.isArray(doc?.observations)) state.observations = doc.observations;
-      if (typeof doc?.lastAlertedAt === 'string') state.lastAlertedAt = doc.lastAlertedAt;
+    return await withFleetWideFalseDeferralLock(alertStateDir, async () => {
+      let state = { observations: [], lastAlertedAt: null };
+      try {
+        if (fsImpl.existsSync(statePath)) {
+          const doc = JSON.parse(fsImpl.readFileSync(statePath, 'utf8'));
+          if (Array.isArray(doc?.observations)) state.observations = doc.observations;
+          if (typeof doc?.lastAlertedAt === 'string') state.lastAlertedAt = doc.lastAlertedAt;
+        }
+      } catch (readErr) {
+        await failClosedFleetWideFalseDeferralDetector({
+          deliverAlertFn,
+          logger,
+          operation: 'read',
+          statePath,
+          repoPath,
+          prNumber,
+          lrq,
+          err: readErr,
+          now,
+          degradedAlertDebounceMs,
+        });
+      }
+
+      // Serialize the entire read-modify-write cycle so concurrent
+      // watcher variants cannot overwrite each other's observations.
+      const cutoff = now - windowMs;
+      const byLrq = new Map();
+      for (const obs of state.observations) {
+        const observedAtMs = Date.parse(obs?.observedAt || '');
+        if (!Number.isFinite(observedAtMs) || observedAtMs < cutoff) continue;
+        if (typeof obs?.lrq !== 'string' || !obs.lrq) continue;
+        byLrq.set(obs.lrq, {
+          lrq: obs.lrq,
+          observedAt: obs.observedAt,
+          repo: typeof obs?.repo === 'string' ? obs.repo : null,
+          prNumber: Number.isFinite(obs?.prNumber) ? obs.prNumber : null,
+        });
+      }
+      byLrq.set(lrq, {
+        lrq,
+        observedAt: new Date(now).toISOString(),
+        repo: repoPath,
+        prNumber,
+      });
+      state.observations = Array.from(byLrq.values());
+
+      try {
+        writeStateFileFn(statePath, JSON.stringify(state, null, 2) + '\n');
+      } catch (writeErr) {
+        await failClosedFleetWideFalseDeferralDetector({
+          deliverAlertFn,
+          logger,
+          operation: 'write-observations',
+          statePath,
+          repoPath,
+          prNumber,
+          lrq,
+          err: writeErr,
+          now,
+          degradedAlertDebounceMs,
+        });
+      }
+
+      if (state.observations.length < threshold) return false;
+
+      const lastAlertedMs = Date.parse(state.lastAlertedAt || '');
+      if (Number.isFinite(lastAlertedMs) && (now - lastAlertedMs) < debounceMs) {
+        return false;
+      }
+
+      const observedTargets = [...new Set(state.observations
+        .filter((o) => o.repo && Number.isFinite(o.prNumber))
+        .map((o) => `${o.repo}#${o.prNumber}`))];
+      const windowMinutes = Math.round(windowMs / 60_000);
+      const text = (
+        `Adversarial-watcher: ${state.observations.length} distinct LRQs hit `
+        + `the '${FLEET_WIDE_FALSE_DEFERRAL_REASON}' merge-agent guard in the `
+        + `last ${windowMinutes}min across ${observedTargets.length} PR(s): `
+        + `${observedTargets.slice(0, 5).join(', ')}`
+        + `${observedTargets.length > 5 ? ` (+${observedTargets.length - 5} more)` : ''}. `
+        + `This is the signature of a session-ledger DB resolution bug — see `
+        + `adversarial-review#129 + agent-os#669/#670 (2026-05-18 incident). `
+        + `Check that consumers are reading the deploy-checkout DB, not the `
+        + `managed-service-root DB.`
+      );
+      await deliverAlertFn(text, {
+        event: 'merge_agent.fleet_wide_false_deferral',
+        payload: {
+          reason: FLEET_WIDE_FALSE_DEFERRAL_REASON,
+          distinctLrqCount: state.observations.length,
+          threshold,
+          windowMinutes,
+          observedTargets,
+          observations: state.observations,
+        },
+      });
+
+      state.lastAlertedAt = new Date(now).toISOString();
+      try {
+        writeStateFileFn(statePath, JSON.stringify(state, null, 2) + '\n');
+      } catch (writeErr) {
+        await failClosedFleetWideFalseDeferralDetector({
+          deliverAlertFn,
+          logger,
+          operation: 'write-lastAlertedAt',
+          statePath,
+          repoPath,
+          prNumber,
+          lrq,
+          err: writeErr,
+          now,
+          degradedAlertDebounceMs,
+        });
+      }
+      return true;
+    });
+  } catch (lockErr) {
+    if (typeof lockErr?.message === 'string'
+      && lockErr.message.startsWith('[watcher] fleet-wide false-deferral detector state ')) {
+      throw lockErr;
     }
-  } catch (readErr) {
     await failClosedFleetWideFalseDeferralDetector({
       deliverAlertFn,
       logger,
-      operation: 'read',
+      operation: 'lock',
       statePath,
       repoPath,
       prNumber,
       lrq,
-      err: readErr,
+      err: lockErr,
       now,
       degradedAlertDebounceMs,
     });
   }
-
-  // Prune observations outside the window; dedupe by LRQ (latest wins).
-  const cutoff = now - windowMs;
-  const byLrq = new Map();
-  for (const obs of state.observations) {
-    const observedAtMs = Date.parse(obs?.observedAt || '');
-    if (!Number.isFinite(observedAtMs) || observedAtMs < cutoff) continue;
-    if (typeof obs?.lrq !== 'string' || !obs.lrq) continue;
-    byLrq.set(obs.lrq, {
-      lrq: obs.lrq,
-      observedAt: obs.observedAt,
-      repo: typeof obs?.repo === 'string' ? obs.repo : null,
-      prNumber: Number.isFinite(obs?.prNumber) ? obs.prNumber : null,
-    });
-  }
-  byLrq.set(lrq, {
-    lrq,
-    observedAt: new Date(now).toISOString(),
-    repo: repoPath,
-    prNumber,
-  });
-  state.observations = Array.from(byLrq.values());
-
-  // Persist updated observation set before deciding whether to alert —
-  // if we crash between observation and alert, the next tick still has
-  // the data to recompute the threshold.
-  try {
-    writeStateFileFn(statePath, JSON.stringify(state, null, 2) + '\n');
-  } catch (writeErr) {
-    await failClosedFleetWideFalseDeferralDetector({
-      deliverAlertFn,
-      logger,
-      operation: 'write-observations',
-      statePath,
-      repoPath,
-      prNumber,
-      lrq,
-      err: writeErr,
-      now,
-      degradedAlertDebounceMs,
-    });
-  }
-
-  if (state.observations.length < threshold) return false;
-
-  const lastAlertedMs = Date.parse(state.lastAlertedAt || '');
-  if (Number.isFinite(lastAlertedMs) && (now - lastAlertedMs) < debounceMs) {
-    return false;
-  }
-
-  const observedTargets = [...new Set(state.observations
-    .filter((o) => o.repo && Number.isFinite(o.prNumber))
-    .map((o) => `${o.repo}#${o.prNumber}`))];
-  const windowMinutes = Math.round(windowMs / 60_000);
-  const text = (
-    `Adversarial-watcher: ${state.observations.length} distinct LRQs hit `
-    + `the '${FLEET_WIDE_FALSE_DEFERRAL_REASON}' merge-agent guard in the `
-    + `last ${windowMinutes}min across ${observedTargets.length} PR(s): `
-    + `${observedTargets.slice(0, 5).join(', ')}`
-    + `${observedTargets.length > 5 ? ` (+${observedTargets.length - 5} more)` : ''}. `
-    + `This is the signature of a session-ledger DB resolution bug — see `
-    + `adversarial-review#129 + agent-os#669/#670 (2026-05-18 incident). `
-    + `Check that consumers are reading the deploy-checkout DB, not the `
-    + `managed-service-root DB.`
-  );
-  await deliverAlertFn(text, {
-    event: 'merge_agent.fleet_wide_false_deferral',
-    payload: {
-      reason: FLEET_WIDE_FALSE_DEFERRAL_REASON,
-      distinctLrqCount: state.observations.length,
-      threshold,
-      windowMinutes,
-      observedTargets,
-      observations: state.observations,
-    },
-  });
-
-  state.lastAlertedAt = new Date(now).toISOString();
-  try {
-    writeStateFileFn(statePath, JSON.stringify(state, null, 2) + '\n');
-  } catch (writeErr) {
-    await failClosedFleetWideFalseDeferralDetector({
-      deliverAlertFn,
-      logger,
-      operation: 'write-lastAlertedAt',
-      statePath,
-      repoPath,
-      prNumber,
-      lrq,
-      err: writeErr,
-      now,
-      degradedAlertDebounceMs,
-    });
-  }
-  return true;
 }
 
 function readWatcherDrainState({

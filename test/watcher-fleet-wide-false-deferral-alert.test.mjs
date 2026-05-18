@@ -10,9 +10,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   FLEET_WIDE_FALSE_DEFERRAL_REASON,
@@ -35,6 +37,49 @@ function buildDispatchedDeferred({ lrq, reason = FLEET_WIDE_FALSE_DEFERRAL_REASO
     workerStatus: null,
     launchRequestId: lrq,
   };
+}
+
+async function runDetectorInChildProcess({ alertStateDir, lrq, prNumber, now }) {
+  const watcherModuleUrl = pathToFileURL(
+    fileURLToPath(new URL('../src/watcher.mjs', import.meta.url))
+  ).href;
+  const script = `
+    const { maybeFireFleetWideFalseDeferralAlert, FLEET_WIDE_FALSE_DEFERRAL_REASON } =
+      await import(${JSON.stringify(watcherModuleUrl)});
+    const fired = await maybeFireFleetWideFalseDeferralAlert({
+      dispatched: {
+        decision: 'dispatch-deferred',
+        reason: FLEET_WIDE_FALSE_DEFERRAL_REASON,
+        originalWorkerId: 'codex-fake',
+        workerStatus: null,
+        launchRequestId: ${JSON.stringify(lrq)},
+      },
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: ${JSON.stringify(prNumber)},
+      deliverAlertFn: async () => ({ ok: true }),
+      logger: { log() {}, info() {}, warn() {}, error() {} },
+      now: ${JSON.stringify(now)},
+      alertStateDir: ${JSON.stringify(alertStateDir)},
+    });
+    console.log(JSON.stringify({ fired }));
+  `;
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`child detector run failed (${code}): ${stderr}`));
+    });
+  });
 }
 
 test('no alert until distinct-LRQ threshold is crossed within the window', async () => {
@@ -338,6 +383,59 @@ test('state file is persisted between observations so later LRQs can cross the t
   }
 });
 
+test('concurrent detector writers do not lose observations', async () => {
+  const alertStateDir = tmpStateDir();
+  try {
+    const seededState = {
+      observations: [
+        {
+          lrq: 'lrq-1',
+          observedAt: '2026-05-18T03:30:00.000Z',
+          repo: 'laceyenterprises/agent-os',
+          prNumber: 661,
+        },
+      ],
+      lastAlertedAt: null,
+    };
+    writeFileSync(
+      path.join(alertStateDir, 'fleet-state.json'),
+      JSON.stringify(seededState, null, 2) + '\n',
+    );
+
+    const concurrentNow = Date.parse('2026-05-18T03:32:00Z');
+    await Promise.all([
+      runDetectorInChildProcess({
+        alertStateDir,
+        lrq: 'lrq-2',
+        prNumber: 662,
+        now: concurrentNow,
+      }),
+      runDetectorInChildProcess({
+        alertStateDir,
+        lrq: 'lrq-3',
+        prNumber: 663,
+        now: concurrentNow,
+      }),
+    ]);
+
+    const persisted = JSON.parse(
+      readFileSync(path.join(alertStateDir, 'fleet-state.json'), 'utf8')
+    );
+    assert.deepStrictEqual(
+      persisted.observations.map((observation) => observation.lrq).sort(),
+      ['lrq-1', 'lrq-2', 'lrq-3'],
+      'serialized writers must preserve both concurrent LRQs',
+    );
+    assert.match(
+      persisted.lastAlertedAt,
+      /^2026-05-18T03:32:00\.000Z$/,
+      'the third distinct LRQ should still trip the fleet-wide alert under concurrency',
+    );
+  } finally {
+    rmSync(alertStateDir, { recursive: true, force: true });
+  }
+});
+
 test('corrupt state file fails closed and emits a degraded detector alert', async () => {
   const alertStateDir = tmpStateDir();
   try {
@@ -404,6 +502,48 @@ test('state write failure fails closed and emits a degraded detector alert', asy
       'merge_agent.fleet_wide_false_deferral_detector_degraded',
     );
     assert.strictEqual(calls[0].structured?.payload?.operation, 'write-observations');
+  } finally {
+    rmSync(alertStateDir, { recursive: true, force: true });
+  }
+});
+
+test('degraded detector alert debounce persists across repeated failures', async () => {
+  const alertStateDir = tmpStateDir();
+  try {
+    const calls = [];
+    const deliverFn = async (text, structured) => {
+      calls.push({ text, structured });
+      return { ok: true };
+    };
+    const now0 = Date.parse('2026-05-18T03:30:00Z');
+
+    for (const offsetMinutes of [0, 30]) {
+      await assert.rejects(
+        maybeFireFleetWideFalseDeferralAlert({
+          dispatched: buildDispatchedDeferred({ lrq: `lrq-${offsetMinutes}` }),
+          repoPath: 'laceyenterprises/agent-os',
+          prNumber: 661,
+          deliverAlertFn: deliverFn,
+          logger: quietLogger(),
+          now: now0 + (offsetMinutes * 60_000),
+          alertStateDir,
+          writeStateFileFn: () => {
+            throw new Error('disk full');
+          },
+        }),
+        /fleet-wide false-deferral detector state write-observations failed/
+      );
+    }
+
+    assert.strictEqual(
+      calls.length,
+      1,
+      'the degraded detector alert debounce should survive repeated failures within one hour',
+    );
+    assert.strictEqual(
+      calls[0].structured?.event,
+      'merge_agent.fleet_wide_false_deferral_detector_degraded',
+    );
   } finally {
     rmSync(alertStateDir, { recursive: true, force: true });
   }

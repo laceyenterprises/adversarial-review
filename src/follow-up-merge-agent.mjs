@@ -886,6 +886,19 @@ function getRecordedMergeAgentDispatch(rootDir, job) {
   }
 }
 
+// LRQ identifiers come from the agent-os dispatch daemon and have the
+// shape `lrq_<8>-<4>-<4>-<4>-<12>` (UUID after the prefix). The watcher
+// runs as a long-lived operator daemon with broad fs access, so we
+// MUST regex-validate any LRQ before interpolating it into a path —
+// otherwise a malformed or attacker-controlled launchRequestId in a
+// dispatch record would let the watcher act as an arbitrary file
+// reader. Pattern is intentionally narrow: lowercase hex segments only.
+const LRQ_ID_PATTERN = /^lrq_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function _isValidLrqId(value) {
+  return typeof value === 'string' && LRQ_ID_PATTERN.test(value);
+}
+
 // Threshold below which a recorded dispatch is considered "still
 // reasonably booting" — under this we don't classify it as stuck even
 // if its LRQ shows pre-spawn. Tuned with operator (2026-05-18) at 10
@@ -938,12 +951,41 @@ function _utcDateString(timestampMs) {
  * Pure-ish: optional `fsImpl` / `now` make this fully testable without
  * touching the real filesystem or clock.
  */
+// Authoritative HQ status tokens that mean the dispatch has reached a
+// terminal state OR is actively running. If the dispatch reports any
+// of these, refusal history is irrelevant — the LRQ was admitted at
+// some point, refusals are just earlier-in-history attempts. Without
+// this check the helper would mislabel healthy in-flight dispatches
+// as BLOCKED forever once historical refusals exist in the audit log.
+const _NON_STUCK_DISPATCH_STATUSES = new Set([
+  // terminal — request finished one way or the other
+  'succeeded',
+  'failed',
+  'cancelled',
+  'canceled',
+  'superseded',
+  // actively progressing — admission already happened
+  'running',
+  'starting',
+  // intentional non-progress, but admission did happen
+  'blocked',
+  'stalled',
+]);
+
 function describeStaleDispatch(recordedDispatch, {
   hqRoot = null,
   now = Date.now(),
   fsImpl = { readFileSync },
   minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
+  // Optional caller-supplied probe of current dispatch state. When
+  // provided AND the returned status is in _NON_STUCK_DISPATCH_STATUSES,
+  // we return null (the request was admitted at some point — refusal
+  // history is just earlier attempts). When omitted, we fall back to
+  // refusal-count-only classification (safe for OSS standalone where
+  // no probe is available, but in agent-os contexts callers SHOULD
+  // pass the probe to avoid false-positive BLOCKED on healthy dispatches).
+  dispatchStateProbe = null,
 } = {}) {
   if (!recordedDispatch || !recordedDispatch.dispatchedAt) return null;
   if (!hqRoot) return null;
@@ -952,7 +994,20 @@ function describeStaleDispatch(recordedDispatch, {
   const ageMinutes = (now - dispatchedAtMs) / 60_000;
   if (ageMinutes < minAgeMinutes) return null;
   const lrq = recordedDispatch.launchRequestId;
-  if (!lrq) return null;
+  if (!_isValidLrqId(lrq)) return null;
+
+  // Live-state check (round-1 reviewer's blocking finding): if a probe
+  // is available AND the dispatch is in a non-stuck state, return null
+  // immediately. Refusal history alone is not authoritative because
+  // earlier refusals can predate a successful later admit.
+  if (typeof dispatchStateProbe === 'function') {
+    let probed = null;
+    try { probed = dispatchStateProbe(lrq); } catch { probed = null; }
+    const probedStatus = typeof probed?.status === 'string' ? probed.status.toLowerCase() : null;
+    if (probedStatus && _NON_STUCK_DISPATCH_STATUSES.has(probedStatus)) {
+      return null;
+    }
+  }
 
   // Audit logs are UTC-keyed (see modules/worker-pool .../daemon.py
   // _append_dispatch_audit_jsonl, and the 2026-05-18 incident docs).

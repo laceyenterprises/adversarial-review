@@ -20,7 +20,10 @@ import {
 } from '../src/follow-up-merge-agent.mjs';
 
 const NOW = Date.parse('2026-05-18T03:30:00Z');
-const LRQ = 'lrq_test-1234567890';
+// Valid LRQ shape: lrq_<8>-<4>-<4>-<4>-<12> hex (regex-validated to
+// prevent path-traversal via attacker-controlled launchRequestId in a
+// dispatch record).
+const LRQ = 'lrq_fb1a7760-4378-4f34-b731-4a1033bec5dd';
 
 function tmpHqRoot() {
   return mkdtempSync(path.join(tmpdir(), 'hq-stuck-test-'));
@@ -195,4 +198,145 @@ test('describeStaleDispatch — corrupt audit lines are skipped silently', () =>
 test('STUCK_DISPATCH_DEFAULTS — contract is stable (10 min, 3 refusals)', () => {
   assert.equal(STUCK_DISPATCH_DEFAULTS.minAgeMinutes, 10);
   assert.equal(STUCK_DISPATCH_DEFAULTS.minRefusals, 3);
+});
+
+// ───── round-1 review fixes (2026-05-18) ─────
+
+test('describeStaleDispatch — rejects malformed launchRequestId (path-traversal guard)', () => {
+  // Round-1 reviewer's "Unvalidated LRQ file path" finding: the
+  // watcher runs as a long-lived operator daemon with broad
+  // filesystem access. An attacker-controlled or malformed
+  // launchRequestId in a dispatch record would let the watcher act
+  // as an arbitrary file reader. Regex validation MUST reject anything
+  // that doesn't match the canonical `lrq_<uuid>` shape.
+  const hqRoot = tmpHqRoot();
+  try {
+    for (const bad of [
+      '../etc/passwd',
+      'lrq_../../../etc/passwd',
+      'lrq_NOT-HEX-UPPERCASE',
+      'lrq_short',
+      '',
+      null,
+      undefined,
+      123,
+      'lrq_fb1a7760-4378-4f34-b731-4a1033bec5dd; rm -rf /',
+    ]) {
+      const detail = describeStaleDispatch(
+        { dispatchedAt: '2026-05-18T02:00:00Z', launchRequestId: bad },
+        { hqRoot, now: NOW },
+      );
+      assert.equal(detail, null, `should reject malformed LRQ: ${bad}`);
+    }
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('describeStaleDispatch — live-state probe overrides refusal history', () => {
+  // Round-1 reviewer's "Refusal history mislabels live dispatches"
+  // finding: historical refusal events in the audit log remain
+  // forever. If a dispatch was refused 3 times early then successfully
+  // admitted + completed, the helper should NOT report it as stuck.
+  // The probe callback returns the live HQ status, which the helper
+  // consults before falling back to refusal-count classification.
+  const hqRoot = tmpHqRoot();
+  try {
+    writeAuditEvents(hqRoot, LRQ, '2026-05-18', [
+      refusal('2026-05-18T02:00:00Z'),
+      refusal('2026-05-18T02:01:00Z'),
+      refusal('2026-05-18T02:02:00Z'),
+      refusal('2026-05-18T02:03:00Z'),
+    ]);
+    for (const liveStatus of [
+      'succeeded', 'failed', 'cancelled', 'canceled', 'superseded',
+      'running', 'starting', 'blocked', 'stalled',
+      'SUCCEEDED',  // case-insensitive
+    ]) {
+      const detail = describeStaleDispatch(
+        { dispatchedAt: '2026-05-18T02:00:00Z', launchRequestId: LRQ },
+        {
+          hqRoot,
+          now: NOW,
+          dispatchStateProbe: () => ({ status: liveStatus }),
+        },
+      );
+      assert.equal(detail, null, `live status ${liveStatus} should suppress stuck detail`);
+    }
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('describeStaleDispatch — live-state probe absent falls back to refusal-count classification', () => {
+  // Without a probe (OSS standalone, no agent-os bundle), the helper
+  // returns stuck-detail based on refusal count alone. This preserves
+  // the OSS-friendly contract: we never need the probe to be safe,
+  // but probe-equipped callers get sharper accuracy.
+  const hqRoot = tmpHqRoot();
+  try {
+    writeAuditEvents(hqRoot, LRQ, '2026-05-18', [
+      refusal('2026-05-18T02:00:00Z'),
+      refusal('2026-05-18T02:01:00Z'),
+      refusal('2026-05-18T02:02:00Z'),
+      refusal('2026-05-18T02:03:00Z'),
+    ]);
+    const detail = describeStaleDispatch(
+      { dispatchedAt: '2026-05-18T02:00:00Z', launchRequestId: LRQ },
+      { hqRoot, now: NOW },  // no probe
+    );
+    assert.notEqual(detail, null);
+    assert.equal(detail.refusalCount, 4);
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('describeStaleDispatch — live-state probe failure is treated as no-probe (fail-open to refusal classification)', () => {
+  // If the probe throws (e.g., hq subprocess error), don't crash and
+  // don't silently suppress. Fall back to refusal-count behavior so
+  // the caller still gets a signal.
+  const hqRoot = tmpHqRoot();
+  try {
+    writeAuditEvents(hqRoot, LRQ, '2026-05-18', [
+      refusal('2026-05-18T02:00:00Z'),
+      refusal('2026-05-18T02:01:00Z'),
+      refusal('2026-05-18T02:02:00Z'),
+    ]);
+    const detail = describeStaleDispatch(
+      { dispatchedAt: '2026-05-18T02:00:00Z', launchRequestId: LRQ },
+      {
+        hqRoot,
+        now: NOW,
+        dispatchStateProbe: () => { throw new Error('hq subprocess failed'); },
+      },
+    );
+    assert.notEqual(detail, null);
+    assert.equal(detail.refusalCount, 3);
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('describeStaleDispatch — probe returning unknown status falls through to refusal classification', () => {
+  // A probe that returns a status not in the non-stuck set (e.g.
+  // unknown future state, or null/missing status) should be treated
+  // as "no live evidence" — we still fall back to refusal counts.
+  const hqRoot = tmpHqRoot();
+  try {
+    writeAuditEvents(hqRoot, LRQ, '2026-05-18', [
+      refusal('2026-05-18T02:00:00Z'),
+      refusal('2026-05-18T02:01:00Z'),
+      refusal('2026-05-18T02:02:00Z'),
+    ]);
+    for (const probeReturn of [{ status: 'unknown_future_state' }, { status: null }, {}, null]) {
+      const detail = describeStaleDispatch(
+        { dispatchedAt: '2026-05-18T02:00:00Z', launchRequestId: LRQ },
+        { hqRoot, now: NOW, dispatchStateProbe: () => probeReturn },
+      );
+      assert.notEqual(detail, null, `probe ${JSON.stringify(probeReturn)} should fall through`);
+    }
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
 });

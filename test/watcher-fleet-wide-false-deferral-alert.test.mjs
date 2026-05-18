@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -281,12 +281,12 @@ test('repeated observations of the same LRQ do not inflate the distinct-LRQ coun
   }
 });
 
-test('state file is persisted between observations and survives corruption', async () => {
+test('state file is persisted between observations so later LRQs can cross the threshold', async () => {
   const alertStateDir = tmpStateDir();
   try {
     const calls = [];
-    const deliverFn = async () => {
-      calls.push(true);
+    const deliverFn = async (text, structured) => {
+      calls.push({ text, structured });
       return { ok: true };
     };
     const now0 = Date.parse('2026-05-18T03:30:00Z');
@@ -306,6 +306,104 @@ test('state file is persisted between observations and survives corruption', asy
     const persisted = JSON.parse(readFileSync(statePath, 'utf8'));
     assert.strictEqual(persisted.observations.length, 1);
     assert.strictEqual(persisted.observations[0].lrq, 'lrq-1');
+
+    // Subsequent observations must reload prior LRQs from disk and fire
+    // once the persisted distinct-LRQ threshold is reached.
+    await maybeFireFleetWideFalseDeferralAlert({
+      dispatched: buildDispatchedDeferred({ lrq: 'lrq-2' }),
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 662,
+      deliverAlertFn: deliverFn,
+      logger: quietLogger(),
+      now: now0 + 60_000,
+      alertStateDir,
+    });
+    const fired = await maybeFireFleetWideFalseDeferralAlert({
+      dispatched: buildDispatchedDeferred({ lrq: 'lrq-3' }),
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 663,
+      deliverAlertFn: deliverFn,
+      logger: quietLogger(),
+      now: now0 + 120_000,
+      alertStateDir,
+    });
+    assert.strictEqual(fired, true);
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(
+      calls[0].structured?.event,
+      'merge_agent.fleet_wide_false_deferral',
+    );
+  } finally {
+    rmSync(alertStateDir, { recursive: true, force: true });
+  }
+});
+
+test('corrupt state file fails closed and emits a degraded detector alert', async () => {
+  const alertStateDir = tmpStateDir();
+  try {
+    const calls = [];
+    const deliverFn = async (text, structured) => {
+      calls.push({ text, structured });
+      return { ok: true };
+    };
+    const statePath = path.join(alertStateDir, 'fleet-state.json');
+    writeFileSync(statePath, '{not-json\n');
+
+    await assert.rejects(
+      maybeFireFleetWideFalseDeferralAlert({
+        dispatched: buildDispatchedDeferred({ lrq: 'lrq-1' }),
+        repoPath: 'laceyenterprises/agent-os',
+        prNumber: 661,
+        deliverAlertFn: deliverFn,
+        logger: quietLogger(),
+        now: Date.parse('2026-05-18T03:30:00Z'),
+        alertStateDir,
+      }),
+      /fleet-wide false-deferral detector state read failed/
+    );
+
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(
+      calls[0].structured?.event,
+      'merge_agent.fleet_wide_false_deferral_detector_degraded',
+    );
+    assert.strictEqual(calls[0].structured?.payload?.operation, 'read');
+  } finally {
+    rmSync(alertStateDir, { recursive: true, force: true });
+  }
+});
+
+test('state write failure fails closed and emits a degraded detector alert', async () => {
+  const alertStateDir = tmpStateDir();
+  try {
+    const calls = [];
+    const deliverFn = async (text, structured) => {
+      calls.push({ text, structured });
+      return { ok: true };
+    };
+
+    await assert.rejects(
+      maybeFireFleetWideFalseDeferralAlert({
+        dispatched: buildDispatchedDeferred({ lrq: 'lrq-1' }),
+        repoPath: 'laceyenterprises/agent-os',
+        prNumber: 661,
+        deliverAlertFn: deliverFn,
+        logger: quietLogger(),
+        now: Date.parse('2026-05-18T03:30:00Z'),
+        alertStateDir,
+        writeStateFileFn: () => {
+          throw new Error('disk full');
+        },
+      }),
+      /fleet-wide false-deferral detector state write-observations failed/
+    );
+
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(
+      calls[0].structured?.event,
+      'merge_agent.fleet_wide_false_deferral_detector_degraded',
+    );
+    assert.strictEqual(calls[0].structured?.payload?.operation, 'write-observations');
   } finally {
     rmSync(alertStateDir, { recursive: true, force: true });
   }

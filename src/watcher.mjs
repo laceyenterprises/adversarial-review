@@ -86,6 +86,7 @@ import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -243,6 +244,104 @@ const FLEET_WIDE_FALSE_DEFERRAL_STATE_DIR = join(
   ROOT, 'data', 'follow-up-jobs', 'fleet-wide-false-deferral-alerts',
 );
 const FLEET_WIDE_FALSE_DEFERRAL_STATE_FILE = 'fleet-state.json';
+const FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
+const fleetWideFalseDeferralDegradedAlerts = new Map();
+
+function buildFleetWideFalseDeferralDetectorDegradedText({
+  operation,
+  statePath,
+  repoPath,
+  prNumber,
+  lrq,
+  errorMessage,
+}) {
+  return [
+    'Adversarial-watcher: merge_agent.fleet_wide_false_deferral_detector_degraded',
+    `Operation: ${operation}`,
+    `State file: ${statePath}`,
+    `Repo/PR: ${repoPath}#${prNumber}`,
+    `LRQ: ${lrq}`,
+    `Error: ${errorMessage}`,
+    'The detector depends on durable cross-observation state and is failing closed until this state path is valid and writable again.',
+  ].join('\n');
+}
+
+async function reportFleetWideFalseDeferralDetectorDegraded({
+  deliverAlertFn,
+  logger,
+  operation,
+  statePath,
+  repoPath,
+  prNumber,
+  lrq,
+  err,
+  now = Date.now(),
+  degradedAlertDebounceMs = FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_ALERT_DEBOUNCE_MS,
+}) {
+  const errorMessage = err?.message || String(err);
+  const lastAlertedAt = fleetWideFalseDeferralDegradedAlerts.get(statePath) || 0;
+  if ((now - lastAlertedAt) < degradedAlertDebounceMs) return;
+  fleetWideFalseDeferralDegradedAlerts.set(statePath, now);
+
+  try {
+    await deliverAlertFn(
+      buildFleetWideFalseDeferralDetectorDegradedText({
+        operation,
+        statePath,
+        repoPath,
+        prNumber,
+        lrq,
+        errorMessage,
+      }),
+      {
+        event: 'merge_agent.fleet_wide_false_deferral_detector_degraded',
+        payload: {
+          operation,
+          statePath,
+          repoPath,
+          prNumber,
+          launchRequestId: lrq,
+          error: errorMessage,
+        },
+      }
+    );
+  } catch (alertErr) {
+    logger?.error?.(
+      `[watcher] fleet-wide false-deferral degraded alert delivery failed: ${alertErr?.message || alertErr}`
+    );
+  }
+}
+
+async function failClosedFleetWideFalseDeferralDetector({
+  deliverAlertFn,
+  logger,
+  operation,
+  statePath,
+  repoPath,
+  prNumber,
+  lrq,
+  err,
+  now,
+  degradedAlertDebounceMs,
+}) {
+  await reportFleetWideFalseDeferralDetectorDegraded({
+    deliverAlertFn,
+    logger,
+    operation,
+    statePath,
+    repoPath,
+    prNumber,
+    lrq,
+    err,
+    now,
+    degradedAlertDebounceMs,
+  });
+  const failure = new Error(
+    `[watcher] fleet-wide false-deferral detector state ${operation} failed at ${statePath}: ${err?.message || err}`
+  );
+  failure.cause = err;
+  throw failure;
+}
 
 async function maybeFireFleetWideFalseDeferralAlert({
   dispatched,
@@ -255,7 +354,9 @@ async function maybeFireFleetWideFalseDeferralAlert({
   windowMs = FLEET_WIDE_FALSE_DEFERRAL_WINDOW_MS,
   threshold = FLEET_WIDE_FALSE_DEFERRAL_DISTINCT_LRQ_THRESHOLD,
   debounceMs = FLEET_WIDE_FALSE_DEFERRAL_ALERT_DEBOUNCE_MS,
-  fsImpl = { readFileSync, mkdirSync, writeFileSync, existsSync },
+  degradedAlertDebounceMs = FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_ALERT_DEBOUNCE_MS,
+  fsImpl = { readFileSync, existsSync },
+  writeStateFileFn = (filePath, content) => writeFileAtomic(filePath, content),
 }) {
   if (dispatched?.decision !== 'dispatch-deferred') return false;
   if (dispatched?.reason !== FLEET_WIDE_FALSE_DEFERRAL_REASON) return false;
@@ -270,9 +371,19 @@ async function maybeFireFleetWideFalseDeferralAlert({
       if (Array.isArray(doc?.observations)) state.observations = doc.observations;
       if (typeof doc?.lastAlertedAt === 'string') state.lastAlertedAt = doc.lastAlertedAt;
     }
-  } catch {
-    // Fall through with empty state — over-alert is safer than under-alert
-    // and a corrupt state file gets overwritten on next write.
+  } catch (readErr) {
+    await failClosedFleetWideFalseDeferralDetector({
+      deliverAlertFn,
+      logger,
+      operation: 'read',
+      statePath,
+      repoPath,
+      prNumber,
+      lrq,
+      err: readErr,
+      now,
+      degradedAlertDebounceMs,
+    });
   }
 
   // Prune observations outside the window; dedupe by LRQ (latest wins).
@@ -301,12 +412,20 @@ async function maybeFireFleetWideFalseDeferralAlert({
   // if we crash between observation and alert, the next tick still has
   // the data to recompute the threshold.
   try {
-    fsImpl.mkdirSync(alertStateDir, { recursive: true });
-    fsImpl.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
+    writeStateFileFn(statePath, JSON.stringify(state, null, 2) + '\n');
   } catch (writeErr) {
-    logger?.warn?.(
-      `[watcher] failed to persist fleet-wide false-deferral state: ${writeErr?.message || writeErr}`
-    );
+    await failClosedFleetWideFalseDeferralDetector({
+      deliverAlertFn,
+      logger,
+      operation: 'write-observations',
+      statePath,
+      repoPath,
+      prNumber,
+      lrq,
+      err: writeErr,
+      now,
+      degradedAlertDebounceMs,
+    });
   }
 
   if (state.observations.length < threshold) return false;
@@ -345,11 +464,20 @@ async function maybeFireFleetWideFalseDeferralAlert({
 
   state.lastAlertedAt = new Date(now).toISOString();
   try {
-    fsImpl.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
+    writeStateFileFn(statePath, JSON.stringify(state, null, 2) + '\n');
   } catch (writeErr) {
-    logger?.warn?.(
-      `[watcher] failed to persist fleet-wide false-deferral lastAlertedAt: ${writeErr?.message || writeErr}`
-    );
+    await failClosedFleetWideFalseDeferralDetector({
+      deliverAlertFn,
+      logger,
+      operation: 'write-lastAlertedAt',
+      statePath,
+      repoPath,
+      prNumber,
+      lrq,
+      err: writeErr,
+      now,
+      degradedAlertDebounceMs,
+    });
   }
   return true;
 }
@@ -1479,7 +1607,7 @@ async function handlePostedReviewRow({
       });
     } catch (alertErr) {
       logger?.error?.(
-        `[watcher] fleet-wide false-deferral alert delivery failed: ${alertErr?.message || alertErr}`
+        `[watcher] fleet-wide false-deferral detector failed: ${alertErr?.message || alertErr}`
       );
     }
   } catch (err) {

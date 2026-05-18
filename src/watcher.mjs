@@ -1611,6 +1611,43 @@ async function pollOnce(
         'in-review'
       );
 
+      // Freshness re-check (2026-05-18): `subject` was populated from the
+      // per-adapter snapshot cache that `discoverSubjects` warmed at the
+      // START of the tick. Long ticks (5-min reviewer timeouts × multiple
+      // PRs) can take 30+ min, by which time a PR may have been closed,
+      // merged, or admin-resolved by the operator. Spawning a reviewer
+      // for a PR that's no longer open is wasted work that also delays
+      // the next PR's spawn in the serial loop. Re-fetch state directly
+      // from GitHub right before the spawn and skip if no longer open.
+      try {
+        const { data: freshPR } = await octokit.rest.pulls.get({
+          owner,
+          repo,
+          pull_number: prNumber,
+        });
+        if (freshPR.merged_at) {
+          console.log(
+            `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
+          );
+          stmtMarkMerged.run(freshPR.merged_at, repoPath, prNumber);
+          continue;
+        }
+        if (freshPR.state !== 'open') {
+          console.log(
+            `[watcher] PR ${repoPath}#${prNumber} was closed since tick-start snapshot (state=${freshPR.state}) — marking row + skipping reviewer spawn`
+          );
+          stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
+          continue;
+        }
+      } catch (err) {
+        // Non-fatal — proceed with spawn rather than block. A failed
+        // freshness check is no worse than not having one at all.
+        console.warn(
+          `[watcher] freshness re-check failed for ${repoPath}#${prNumber}; proceeding with spawn:`,
+          err?.message || err
+        );
+      }
+
       // Final-round inputs come from the durable per-PR follow-up ledger,
       // not from `reviewed_prs.review_attempts`. Two reasons (reviewer
       // blocking issues #1 and #2):

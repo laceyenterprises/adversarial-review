@@ -15,10 +15,19 @@ import {
 import {
   evaluateRoundBudgetForReview,
   persistReviewerPgid,
+  resolveMergeAgentLifecycleCleanupPerPoll,
+  resolveMergeAgentLifecycleCleanupRetryMs,
   resolveStaleReviewerReconcilePerPoll,
+  retryPendingMergeAgentLifecycleCleanups,
   shouldDeferReviewForActiveFollowUp,
+  shouldRetryMergeAgentLifecycleCleanup,
   shouldReconcileStaleReviewerSession,
 } from '../src/watcher.mjs';
+import {
+  MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+  listMergeAgentLifecycleCleanups,
+  upsertMergeAgentLifecycleCleanup,
+} from '../src/follow-up-merge-agent.mjs';
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 
 function setupDb() {
@@ -218,6 +227,134 @@ test('steady-state reattach per-poll cap defaults small and accepts zero for dis
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '1' }), 1);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '0' }), 0);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: 'bad' }), 3);
+});
+
+test('pending merge-agent lifecycle cleanup retries after the PR leaves the open set', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  upsertMergeAgentLifecycleCleanup(rootDir, {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 133,
+    transition: 'merged',
+    headSha: 'sha-cleanup-133',
+    queuedAt: '2026-05-18T15:00:00.000Z',
+  });
+
+  const calls = [];
+  await retryPendingMergeAgentLifecycleCleanups({
+    rootDir,
+    cancelImpl: async (args) => {
+      calls.push(args);
+      return {
+        attempted: true,
+        repo: args.repo,
+        prNumber: args.prNumber,
+        attemptedAt: '2026-05-18T15:01:00.000Z',
+        launchRequestId: 'lrq_retry',
+        cancelled: true,
+        cancelError: null,
+        labelRemoved: true,
+        labelRemovalError: null,
+        cleanupComplete: true,
+        retryable: false,
+      };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].repo, 'laceyenterprises/adversarial-review');
+  assert.equal(calls[0].prNumber, 133);
+  assert.deepEqual(listMergeAgentLifecycleCleanups(rootDir), []);
+});
+
+test('pending merge-agent dispatched-label add cleanup retries and clears on success', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  upsertMergeAgentLifecycleCleanup(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    transition: MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+    headSha: 'sha-label-add',
+    queuedAt: '2026-05-18T15:00:00.000Z',
+  });
+
+  const calls = [];
+  await retryPendingMergeAgentLifecycleCleanups({
+    rootDir,
+    labelAddImpl: async (args) => {
+      calls.push(args);
+      return {
+        attempted: true,
+        label: 'merge-agent-dispatched',
+        attemptedAt: '2026-05-18T15:01:00.000Z',
+        added: true,
+        error: null,
+      };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].repo, 'laceyenterprises/agent-os');
+  assert.equal(calls[0].prNumber, 661);
+  assert.deepEqual(listMergeAgentLifecycleCleanups(rootDir), []);
+});
+
+test('merge-agent lifecycle cleanup retry pacing skips recent attempts and honors the per-poll cap', async () => {
+  assert.equal(resolveMergeAgentLifecycleCleanupRetryMs({}), 60000);
+  assert.equal(resolveMergeAgentLifecycleCleanupRetryMs({ ADVERSARIAL_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS: '0' }), 0);
+  assert.equal(resolveMergeAgentLifecycleCleanupPerPoll({}), 5);
+  assert.equal(resolveMergeAgentLifecycleCleanupPerPoll({ ADVERSARIAL_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL: '0' }), 0);
+  assert.equal(
+    shouldRetryMergeAgentLifecycleCleanup(
+      { lastAttemptAt: '2026-05-18T15:00:30.000Z' },
+      { nowMs: Date.parse('2026-05-18T15:01:00.000Z'), retryMs: 60000 }
+    ),
+    false
+  );
+  assert.equal(
+    shouldRetryMergeAgentLifecycleCleanup(
+      { lastAttemptAt: '2026-05-18T15:00:00.000Z' },
+      { nowMs: Date.parse('2026-05-18T15:01:00.000Z'), retryMs: 60000 }
+    ),
+    true
+  );
+
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  upsertMergeAgentLifecycleCleanup(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1,
+    transition: 'merged',
+    queuedAt: '2026-05-18T15:00:00.000Z',
+  });
+  upsertMergeAgentLifecycleCleanup(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 2,
+    transition: 'merged',
+    queuedAt: '2026-05-18T15:00:00.000Z',
+  });
+
+  const calls = [];
+  const result = await retryPendingMergeAgentLifecycleCleanups({
+    rootDir,
+    maxPerPoll: 1,
+    cancelImpl: async (args) => {
+      calls.push(args);
+      return {
+        attempted: true,
+        repo: args.repo,
+        prNumber: args.prNumber,
+        attemptedAt: '2026-05-18T15:01:00.000Z',
+        launchRequestId: null,
+        cancelled: false,
+        cancelError: null,
+        labelRemoved: true,
+        labelRemovalError: null,
+        cleanupComplete: true,
+        retryable: false,
+      };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(result, { attempted: 1, skipped: 1, pending: 2 });
 });
 
 test('persistReviewerPgid logs CAS misses instead of throwing into the spawned reviewer', () => {

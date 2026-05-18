@@ -18,8 +18,10 @@ import {
   fetchMergeAgentCandidate,
   isFinalPassOnRequestChangesEnabled,
   listMergeAgentDispatches,
+  listMergeAgentLifecycleCleanups,
   listMergeAgentSkippedDispatches,
   lookupOriginalWorkerRunStatus,
+  MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
   prepareOriginalWorkerForMergeAgent,
@@ -2656,8 +2658,17 @@ test('dispatchMergeAgentForPR treats scoped merge-agent-requested as the trigger
   assert.equal(result.decision, 'dispatch');
   assert.equal(result.trigger, 'merge-agent-requested');
   assert.equal(result.mergeAgentRequestedLabelRemoved, true);
-  assert.equal(ghCalls.length, 1);
-  assert.equal(ghCalls[0].args.at(-1), 'merge-agent-requested');
+  // Filter to remove-label calls only — the add of `merge-agent-dispatched`
+  // (new in PR D) ALSO routes through ghExecFileImpl, but is asserted
+  // separately below; the invariant here is "exactly one trigger-label
+  // removal happens".
+  const removes = ghCalls.filter((c) => c.args.includes('--remove-label'));
+  assert.equal(removes.length, 1);
+  assert.equal(removes[0].args.at(-1), 'merge-agent-requested');
+  // And the merge-agent-dispatched marker MUST be applied (PR D).
+  const adds = ghCalls.filter((c) => c.args.includes('--add-label'));
+  assert.equal(adds.length, 1);
+  assert.equal(adds[0].args.at(-1), 'merge-agent-dispatched');
 });
 
 test('dispatchMergeAgentForPR removes only the label that authorized dispatch', async () => {
@@ -2686,8 +2697,18 @@ test('dispatchMergeAgentForPR removes only the label that authorized dispatch', 
   assert.equal(result.trigger, 'operator-approved');
   assert.equal(result.operatorApprovalLabelRemoved, true);
   assert.equal(result.mergeAgentRequestedLabelRemoved, false);
-  assert.equal(ghCalls.length, 1);
-  assert.equal(ghCalls[0].args.at(-1), 'operator-approved');
+  // Filter to remove-label calls only — the add of `merge-agent-dispatched`
+  // (new in PR D) ALSO routes through ghExecFileImpl. The invariant
+  // pinned here is "only operator-approved is removed, NOT merge-agent-
+  // requested" — even though both labels are present, only the trigger
+  // gets cleared.
+  const removes = ghCalls.filter((c) => c.args.includes('--remove-label'));
+  assert.equal(removes.length, 1);
+  assert.equal(removes[0].args.at(-1), 'operator-approved');
+  // And the merge-agent-dispatched marker MUST be applied (PR D).
+  const adds = ghCalls.filter((c) => c.args.includes('--add-label'));
+  assert.equal(adds.length, 1);
+  assert.equal(adds[0].args.at(-1), 'merge-agent-dispatched');
 });
 
 test('dispatchMergeAgentForPR logs consumed-label removal failures', async () => {
@@ -3331,4 +3352,301 @@ test('detectAgentOsPresence: HQ_BIN pointing to a directory returns not-found', 
     },
   });
   assert.deepEqual(state, { present: false, source: 'not-found' });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// PR D: merge-agent-dispatched label + cancel-on-merge + prompt preamble.
+// ───────────────────────────────────────────────────────────────────────────
+
+test('buildMergeAgentPrompt includes an abort-if-closed preamble naming the PR + repo', () => {
+  const job = {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    branch: 'codex-adag-13-r7/ADAG-13',
+    baseBranch: 'main',
+    headSha: 'eb7277e8e6f651e1627c1dd6af1ec1ad57362fe1',
+  };
+  const prompt = buildMergeAgentPrompt(job);
+  assert.match(prompt, /## Preamble: abort if PR is no longer open/);
+  assert.match(prompt, /gh pr view 661 --repo laceyenterprises\/agent-os --json state,mergedAt,closedAt/);
+  assert.match(prompt, /MERGED/);
+  assert.match(prompt, /CLOSED/);
+  assert.match(prompt, /abort this session immediately/);
+});
+
+test('addMergeAgentDispatchedLabel applies the label via gh pr edit', async () => {
+  const { addMergeAgentDispatchedLabel } = await import('../src/follow-up-merge-agent.mjs');
+  const calls = [];
+  const result = await addMergeAgentDispatchedLabel({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    ghExecFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'gh');
+  assert.deepEqual(calls[0].args, [
+    'pr', 'edit', '661',
+    '--repo', 'laceyenterprises/agent-os',
+    '--add-label', 'merge-agent-dispatched',
+  ]);
+  assert.equal(result.added, true);
+  assert.equal(result.label, 'merge-agent-dispatched');
+  assert.equal(result.error, null);
+});
+
+test('addMergeAgentDispatchedLabel logs but does not throw on gh failure', async () => {
+  const { addMergeAgentDispatchedLabel } = await import('../src/follow-up-merge-agent.mjs');
+  const result = await addMergeAgentDispatchedLabel({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    ghExecFileImpl: async () => {
+      throw new Error('gh: HTTP 422 label not found');
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+  // Critical: failure MUST NOT throw or roll back the dispatch.
+  assert.equal(result.added, false);
+  assert.match(result.error, /HTTP 422/);
+});
+
+test('dispatchMergeAgentForPR adds merge-agent-dispatched label after successful hq dispatch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const ghCalls = [];
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob(),
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"disp_label","lrq":"lrq_label"}\n',
+    }),
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.dispatchedLabelAdded, true);
+  // Default makeJob has no trigger label → no remove call. The single
+  // gh call MUST be the merge-agent-dispatched add.
+  assert.equal(ghCalls.length, 1);
+  assert.deepEqual(ghCalls[0].args.slice(-2), ['--add-label', 'merge-agent-dispatched']);
+});
+
+test('dispatchMergeAgentForPR records retryable lifecycle cleanup when dispatched label add fails', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({ prNumber: 661, headSha: 'sha-label-fail' }),
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"disp_label_fail","lrq":"lrq_label_fail"}\n',
+    }),
+    ghExecFileImpl: async () => {
+      throw new Error('gh: transient label write failure');
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.dispatchedLabelAdded, false);
+  assert.match(result.dispatchedLabelError, /transient label write failure/);
+  const [cleanup] = listMergeAgentLifecycleCleanups(rootDir);
+  assert.equal(cleanup.repo, 'laceyenterprises/agent-os');
+  assert.equal(cleanup.prNumber, 661);
+  assert.equal(cleanup.transition, MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION);
+  assert.equal(cleanup.headSha, 'sha-label-fail');
+  assert.equal(cleanup.lastResult.retryable, true);
+});
+
+test('cancelMergeAgentDispatchOnMerge cancels the latest dispatch + removes the label', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  // Seed two dispatch records — cancel-on-merge should pick the latest.
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 661 }), {
+    dispatchedAt: '2026-05-18T03:00:00.000Z',
+    prompt: 'old',
+    dispatchId: 'disp_old',
+    launchRequestId: 'lrq_old',
+    trigger: null,
+  });
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 661 }), {
+    dispatchedAt: '2026-05-18T12:00:00.000Z',
+    prompt: 'new',
+    dispatchId: 'disp_new',
+    launchRequestId: 'lrq_new',
+    trigger: null,
+  });
+
+  const ghCalls = [];
+  const hqCalls = [];
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    hqExecFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args });
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  // Cancel hits the LATEST LRQ.
+  assert.equal(result.launchRequestId, 'lrq_new');
+  assert.equal(result.cancelled, true);
+  assert.equal(hqCalls.length, 1);
+  assert.deepEqual(hqCalls[0].args, ['dispatch', 'cancel', 'lrq_new']);
+
+  assert.equal(result.labelRemoved, true);
+  assert.equal(ghCalls.length, 1);
+  assert.deepEqual(ghCalls[0].args, [
+    'pr', 'edit', '661',
+    '--repo', 'laceyenterprises/agent-os',
+    '--remove-label', 'merge-agent-dispatched',
+  ]);
+});
+
+test('cancelMergeAgentDispatchOnMerge filters dispatch records by repo and PR before selecting LRQ', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ repo: 'laceyenterprises/agent-os', prNumber: 661 }), {
+    dispatchedAt: '2026-05-18T12:00:00.000Z',
+    prompt: 'matching',
+    dispatchId: 'disp_matching',
+    launchRequestId: 'lrq_matching',
+    trigger: null,
+  });
+  recordMergeAgentDispatch(rootDir, makeJob({ repo: 'laceyenterprises/adversarial-review', prNumber: 133 }), {
+    dispatchedAt: '2026-05-18T12:30:00.000Z',
+    prompt: 'newer but unrelated',
+    dispatchId: 'disp_unrelated',
+    launchRequestId: 'lrq_unrelated',
+    trigger: null,
+  });
+
+  const hqCalls = [];
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args });
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.launchRequestId, 'lrq_matching');
+  assert.deepEqual(hqCalls[0].args, ['dispatch', 'cancel', 'lrq_matching']);
+});
+
+test('cancelMergeAgentDispatchOnMerge removes the label after a terminal cancel failure', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 661 }), {
+    dispatchedAt: '2026-05-18T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_x',
+    launchRequestId: 'lrq_x',
+    trigger: null,
+  });
+
+  let labelRemoved = false;
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => {
+      labelRemoved = true;
+      return { stdout: '', stderr: '' };
+    },
+    hqExecFileImpl: async () => {
+      throw new Error('hq: dispatch cancel failed — already terminated');
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.cancelled, false);
+  assert.match(result.cancelError, /already terminated/);
+  assert.equal(labelRemoved, true);
+  assert.equal(result.labelRemoved, true);
+  assert.equal(result.cleanupComplete, true);
+  assert.equal(result.retryable, false);
+});
+
+test('cancelMergeAgentDispatchOnMerge keeps the label when cancel fails transiently', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 661 }), {
+    dispatchedAt: '2026-05-18T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_x',
+    launchRequestId: 'lrq_x',
+    trigger: null,
+  });
+
+  let ghCalled = false;
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => {
+      ghCalled = true;
+      return { stdout: '', stderr: '' };
+    },
+    hqExecFileImpl: async () => {
+      throw new Error('hq: dispatch cancel failed — daemon unavailable');
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.cancelled, false);
+  assert.match(result.cancelError, /daemon unavailable/);
+  assert.equal(ghCalled, false);
+  assert.equal(result.labelRemoved, false);
+  assert.equal(result.cleanupComplete, false);
+  assert.equal(result.retryable, true);
+});
+
+test('cancelMergeAgentDispatchOnMerge removes label even when no dispatch record exists', async () => {
+  // Edge case: dispatch record dir wiped, OR label applied by some
+  // other tool. We still clean up the label so the watcher stops
+  // retrying on this PR.
+  const { cancelMergeAgentDispatchOnMerge } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  const ghCalls = [];
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    hqExecFileImpl: async () => {
+      throw new Error('should not be called when no LRQ found');
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.launchRequestId, null);
+  assert.equal(result.cancelled, false);
+  assert.equal(result.labelRemoved, true);
+  assert.equal(ghCalls.length, 1);
+  assert.deepEqual(ghCalls[0].args.slice(-2), ['--remove-label', 'merge-agent-dispatched']);
 });

@@ -118,7 +118,7 @@ test('maxBuffer kills stdout side-channel writers before reading the full file',
           stdoutPath,
           stderrPath,
           maxBuffer: 8 * 1024,
-          progressTimeout: 100,
+          progressTimeout: 0,
           killGraceMs: 100,
         }
       ),

@@ -1223,7 +1223,7 @@ async function pollOnce(
         console.log(staleDriftSkip.message);
         continue;
       }
-      const existing = stmtGetReviewRow.get(repoPath, prNumber);
+      let existing = stmtGetReviewRow.get(repoPath, prNumber);
       if (!subject.terminal && existing?.review_status === 'pending') {
         healthProbe?.recordOpenPending?.(healthTick, {
           repo: repoPath,

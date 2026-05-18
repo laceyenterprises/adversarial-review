@@ -18,8 +18,10 @@ import {
   fetchMergeAgentCandidate,
   isFinalPassOnRequestChangesEnabled,
   listMergeAgentDispatches,
+  listMergeAgentLifecycleCleanups,
   listMergeAgentSkippedDispatches,
   lookupOriginalWorkerRunStatus,
+  MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
   prepareOriginalWorkerForMergeAgent,
@@ -3435,6 +3437,32 @@ test('dispatchMergeAgentForPR adds merge-agent-dispatched label after successful
   assert.deepEqual(ghCalls[0].args.slice(-2), ['--add-label', 'merge-agent-dispatched']);
 });
 
+test('dispatchMergeAgentForPR records retryable lifecycle cleanup when dispatched label add fails', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({ prNumber: 661, headSha: 'sha-label-fail' }),
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"disp_label_fail","lrq":"lrq_label_fail"}\n',
+    }),
+    ghExecFileImpl: async () => {
+      throw new Error('gh: transient label write failure');
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.dispatchedLabelAdded, false);
+  assert.match(result.dispatchedLabelError, /transient label write failure/);
+  const [cleanup] = listMergeAgentLifecycleCleanups(rootDir);
+  assert.equal(cleanup.repo, 'laceyenterprises/agent-os');
+  assert.equal(cleanup.prNumber, 661);
+  assert.equal(cleanup.transition, MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION);
+  assert.equal(cleanup.headSha, 'sha-label-fail');
+  assert.equal(cleanup.lastResult.retryable, true);
+});
+
 test('cancelMergeAgentDispatchOnMerge cancels the latest dispatch + removes the label', async () => {
   const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
@@ -3485,6 +3513,42 @@ test('cancelMergeAgentDispatchOnMerge cancels the latest dispatch + removes the 
     '--repo', 'laceyenterprises/agent-os',
     '--remove-label', 'merge-agent-dispatched',
   ]);
+});
+
+test('cancelMergeAgentDispatchOnMerge filters dispatch records by repo and PR before selecting LRQ', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ repo: 'laceyenterprises/agent-os', prNumber: 661 }), {
+    dispatchedAt: '2026-05-18T12:00:00.000Z',
+    prompt: 'matching',
+    dispatchId: 'disp_matching',
+    launchRequestId: 'lrq_matching',
+    trigger: null,
+  });
+  recordMergeAgentDispatch(rootDir, makeJob({ repo: 'laceyenterprises/adversarial-review', prNumber: 133 }), {
+    dispatchedAt: '2026-05-18T12:30:00.000Z',
+    prompt: 'newer but unrelated',
+    dispatchId: 'disp_unrelated',
+    launchRequestId: 'lrq_unrelated',
+    trigger: null,
+  });
+
+  const hqCalls = [];
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 661,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args });
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    now: '2026-05-18T13:00:00.000Z',
+  });
+
+  assert.equal(result.launchRequestId, 'lrq_matching');
+  assert.deepEqual(hqCalls[0].args, ['dispatch', 'cancel', 'lrq_matching']);
 });
 
 test('cancelMergeAgentDispatchOnMerge removes the label after a terminal cancel failure', async () => {

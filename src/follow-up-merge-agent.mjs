@@ -878,7 +878,13 @@ function mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber } = {}) {
   );
 }
 
-function listMergeAgentDispatches(rootDir) {
+function dispatchMatchesFilter(dispatch, { repo = null, prNumber = null } = {}) {
+  if (repo && dispatch?.repo !== repo) return false;
+  if (prNumber != null && Number(dispatch?.prNumber) !== Number(prNumber)) return false;
+  return true;
+}
+
+function listMergeAgentDispatches(rootDir, filter = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
   try {
     return readdirSync(dir)
@@ -890,7 +896,8 @@ function listMergeAgentDispatches(rootDir) {
           return null;
         }
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((dispatch) => dispatchMatchesFilter(dispatch, filter));
   } catch {
     return [];
   }
@@ -922,7 +929,10 @@ function listMergeAgentLifecycleCleanups(rootDir) {
       .map((name) => {
         try {
           return JSON.parse(readFileSync(join(dir, name), 'utf8'));
-        } catch {
+        } catch (err) {
+          console.warn(
+            `[follow-up-merge-agent] malformed merge-agent lifecycle cleanup record ignored: ${join(dir, name)}: ${err?.message || err}`
+          );
           return null;
         }
       })
@@ -1746,6 +1756,8 @@ function isTerminalMergeAgentLabelRemovalError(detail) {
   return /\bHTTP 422\b|\bnot found\b|\bdoes not exist\b/i.test(String(detail || ''));
 }
 
+const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add';
+
 async function removeConsumedTriggerLabel({
   repo,
   prNumber,
@@ -2280,6 +2292,31 @@ async function dispatchMergeAgentForPR({
     ghExecFileImpl,
     now,
   });
+  if (!dispatchedLabel.added) {
+    upsertMergeAgentLifecycleCleanup(rootDir, {
+      repo,
+      prNumber,
+      transition: MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+      headSha,
+      queuedAt: now,
+    });
+    updateMergeAgentLifecycleCleanup(rootDir, {
+      repo,
+      prNumber,
+      result: {
+        attempted: true,
+        repo,
+        prNumber,
+        attemptedAt: dispatchedLabel.attemptedAt,
+        transition: MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+        labelAdded: false,
+        labelAddError: dispatchedLabel.error,
+        cleanupComplete: false,
+        retryable: true,
+      },
+      attemptedAt: dispatchedLabel.attemptedAt,
+    });
+  }
 
   return {
     decision,
@@ -2370,6 +2407,7 @@ export {
   HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
   OPERATOR_APPROVED_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL,
+  MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_SKIP_LABELS,
   TERMINAL_WORKER_RUN_STATUSES,

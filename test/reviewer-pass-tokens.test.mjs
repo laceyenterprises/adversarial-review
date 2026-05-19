@@ -169,6 +169,32 @@ function createLedgerDb(dbPath) {
   db.close();
 }
 
+test('reviewer_passes schema migrates existing tables to reviewer_model', () => {
+  const rootDir = tempRoot();
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.exec(`
+      CREATE TABLE reviewer_passes (
+        pass_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        reviewer_class TEXT NOT NULL,
+        pass_kind TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(repo, pr_number, attempt_number, pass_kind)
+      );
+    `);
+    ensureReviewStateSchema(db);
+    const columns = db.prepare('PRAGMA table_info(reviewer_passes)').all().map((column) => column.name);
+    assert.ok(columns.includes('reviewer_model'));
+  } finally {
+    db.close();
+  }
+});
+
 test('reviewer pass writer inserts running row, completes it, and unique key prevents duplicates', () => {
   const rootDir = tempRoot();
   beginReviewerPass(rootDir, {
@@ -190,6 +216,15 @@ test('reviewer pass writer inserts running row, completes it, and unique key pre
     startedAt: '2026-05-18T00:00:00.000Z',
   });
   assert.equal(countReviewerPasses(rootDir), 1);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const inserted = db.prepare('SELECT reviewer_class, reviewer_model FROM reviewer_passes WHERE pr_number = 42').get();
+    assert.equal(inserted.reviewer_class, 'claude');
+    assert.equal(inserted.reviewer_model, 'claude-sonnet');
+  } finally {
+    db.close();
+  }
 
   const row = completeReviewerPass(rootDir, {
     repo: 'laceyenterprises/agent-os',
@@ -213,6 +248,7 @@ test('reviewer pass writer inserts running row, completes it, and unique key pre
   assert.equal(row.token_cache_write, 2);
   assert.equal(row.token_cost_usd, null);
   assert.equal(row.token_source, 'session-ledger');
+  assert.equal(row.reviewer_model, 'claude-sonnet');
 });
 
 test('worker-run rollup join reads token columns and cache totals from runtime session', () => {
@@ -340,4 +376,31 @@ test('tokens CLI prints per-PR rollup with reviewer breakdown', () => {
   assert.match(out.value, /laceyenterprises\/agent-os#44/);
   assert.match(out.value, /150/);
   assert.match(out.value, /codex:150\/\$0\.25/);
+});
+
+test('tokens CLI groups --by-reviewer by raw reviewer model when available', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 45,
+    attemptNumber: 1,
+    reviewerClass: 'claude-sonnet',
+    passKind: 'first-pass',
+    startedAt: '2026-05-18T00:00:00.000Z',
+  });
+  completeReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 45,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    tokenUsage: { input: 5, output: 7, source: 'session-ledger' },
+  });
+  const out = { value: '', write(chunk) { this.value += chunk; } };
+  const err = { value: '', write(chunk) { this.value += chunk; } };
+  const code = tokensMain(['--root-dir', rootDir, '--by-reviewer'], { stdout: out, stderr: err });
+
+  assert.equal(code, 0);
+  assert.match(out.value, /claude-sonnet/);
+  assert.doesNotMatch(out.value, /^claude\s/m);
 });

@@ -1103,6 +1103,7 @@ async function spawnReviewer({
       prNumber,
       attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
       reviewerClass: reviewerModel,
+      reviewerModel,
       passKind,
       workspacePath: workspacePath || null,
       startedAt,

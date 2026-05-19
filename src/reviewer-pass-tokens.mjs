@@ -14,6 +14,11 @@ function normalizeReviewerClass(value) {
   return 'claude';
 }
 
+function normalizeReviewerModel(value) {
+  const text = String(value || '').trim();
+  return text || null;
+}
+
 function normalizePassKind(value) {
   const normalized = String(value || '').trim();
   if (!PASS_KINDS.has(normalized)) {
@@ -75,6 +80,7 @@ function beginReviewerPass(rootDir, {
   prNumber,
   attemptNumber,
   reviewerClass,
+  reviewerModel = null,
   passKind,
   workerRunId = null,
   workspacePath = null,
@@ -82,19 +88,21 @@ function beginReviewerPass(rootDir, {
   metadata = {},
 } = {}) {
   const key = passKey({ repo, prNumber, attemptNumber, passKind });
+  const model = normalizeReviewerModel(reviewerModel || reviewerClass);
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
     db.prepare(
       `INSERT OR IGNORE INTO reviewer_passes (
-         repo, pr_number, attempt_number, reviewer_class, pass_kind,
+         repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
          worker_run_id, workspace_path, started_at, status, metadata_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`
     ).run(
       key.repo,
       key.prNumber,
       key.attemptNumber,
-      normalizeReviewerClass(reviewerClass),
+      normalizeReviewerClass(model || reviewerClass),
+      model,
       key.passKind,
       workerRunId || null,
       workspacePath || null,
@@ -112,12 +120,14 @@ function beginReviewerPass(rootDir, {
     db.prepare(
       `UPDATE reviewer_passes
           SET reviewer_class = COALESCE(?, reviewer_class),
+              reviewer_model = COALESCE(?, reviewer_model),
               worker_run_id = COALESCE(?, worker_run_id),
               workspace_path = COALESCE(?, workspace_path),
               metadata_json = ?
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).run(
-      normalizeReviewerClass(reviewerClass),
+      normalizeReviewerClass(model || reviewerClass),
+      model,
       workerRunId || null,
       workspacePath || null,
       metadataJson(mergedMetadata),
@@ -515,6 +525,7 @@ function backfillReviewerPasses(rootDir, {
       prNumber,
       attemptNumber,
       reviewerClass: worker.workerClass || worker.model || 'codex',
+      reviewerModel: worker.model || worker.workerClass || 'codex',
       passKind: 'remediation',
       workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
       workspacePath,

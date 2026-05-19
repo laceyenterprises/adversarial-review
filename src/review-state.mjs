@@ -87,6 +87,7 @@ function ensureReviewStateSchema(db) {
       pr_number            INTEGER NOT NULL,
       attempt_number       INTEGER NOT NULL,
       reviewer_class       TEXT NOT NULL,
+      reviewer_model       TEXT,
       pass_kind            TEXT NOT NULL,
       worker_run_id        TEXT,
       workspace_path       TEXT,
@@ -109,6 +110,7 @@ function ensureReviewStateSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_reviewer_passes_started
       ON reviewer_passes(started_at);
   `);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
 
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
@@ -126,6 +128,10 @@ function getReviewRow(db, { repo, prNumber }) {
 }
 
 function addReviewedPRsColumnIfMissing(db, sql) {
+  addColumnIfMissing(db, sql);
+}
+
+function addColumnIfMissing(db, sql) {
   try {
     db.exec(sql);
   } catch (err) {

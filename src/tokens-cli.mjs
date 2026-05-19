@@ -54,7 +54,7 @@ function rowTokens(row) {
 }
 
 function addBreakdown(target, row) {
-  const key = row.reviewer_class || 'unknown';
+  const key = row.reviewer_model || row.reviewer_class || 'unknown';
   const bucket = target[key] || { passes: 0, tokens: 0, costUSD: null };
   bucket.passes += 1;
   bucket.tokens += rowTokens(row);
@@ -91,9 +91,10 @@ function summarizeRows(rows, mode = 'pass') {
   if (mode === 'reviewer') {
     const groups = new Map();
     for (const row of rows) {
-      const key = row.reviewer_class || 'unknown';
+      const key = row.reviewer_model || row.reviewer_class || 'unknown';
       const group = groups.get(key) || {
-        reviewerClass: key,
+        reviewer: key,
+        reviewerClass: row.reviewer_class || 'unknown',
         passCount: 0,
         totalTokens: 0,
         costUSD: null,
@@ -114,6 +115,7 @@ function summarizeRows(rows, mode = 'pass') {
     attemptNumber: row.attempt_number,
     passKind: row.pass_kind,
     reviewerClass: row.reviewer_class,
+    reviewerModel: row.reviewer_model,
     status: row.status,
     totalTokens: rowTokens(row),
     inputTokens: row.token_input,
@@ -168,7 +170,7 @@ function render(summary, mode) {
     return table([
       ['reviewer', 'passes', 'tokens', 'cost'],
       ...summary.map((row) => [
-        row.reviewerClass,
+        row.reviewer,
         row.passCount,
         formatTokens(row.totalTokens),
         formatCost(row.costUSD),
@@ -181,7 +183,7 @@ function render(summary, mode) {
       `${row.repo}#${row.prNumber}`,
       row.attemptNumber,
       row.passKind,
-      row.reviewerClass,
+      row.reviewerModel || row.reviewerClass,
       row.status,
       formatTokens(row.totalTokens),
       formatCost(row.costUSD),

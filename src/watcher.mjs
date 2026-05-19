@@ -1888,7 +1888,7 @@ async function pollOnce(
         .map((l) => (typeof l === 'string' ? l : l?.name || ''))
         .filter(Boolean);
       if (prLabelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) {
-        activeMergeAgentPRs.push({ repo: repoPath, prNumber });
+        activeMergeAgentPRs.push({ repo: repoPath, prNumber, headSha: subject.headSha || null });
       }
       if (staleDriftSkip) {
         console.log(staleDriftSkip.message);

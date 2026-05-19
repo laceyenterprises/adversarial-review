@@ -41,7 +41,7 @@ function buildAuditFile(hqRoot, lrq, refusalCount) {
   writeFileSync(path.join(auditDir, `${lrq}.jsonl`), lines.join('\n') + '\n');
 }
 
-function writeLifecycleCleanup(rootDir, { repo, prNumber }) {
+function writeLifecycleCleanup(rootDir, { repo, prNumber, headSha = null }) {
   const cleanupDir = path.join(rootDir, 'data', 'follow-up-jobs', 'merge-agent-lifecycle-cleanups');
   mkdirSync(cleanupDir, { recursive: true });
   writeFileSync(
@@ -50,6 +50,7 @@ function writeLifecycleCleanup(rootDir, { repo, prNumber }) {
       schemaVersion: 1,
       repo,
       prNumber,
+      headSha,
       transition: 'closed',
       queuedAt: '2026-05-19T03:25:00Z',
       lastResult: { cleanupComplete: false, retryable: true },
@@ -76,7 +77,12 @@ test('scanStuckMergeAgentDispatches surfaces a stuck dispatch even when watcher 
   const reports = scanStuckMergeAgentDispatches({
     rootDir,
     hqRoot,
-    activePRs: [{ repo: 'laceyenterprises/agent-os', prNumber: 719 }],
+    activePRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 719,
+      headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+    }],
+    hqPath: null,
     now: NOW,
   });
 
@@ -136,11 +142,13 @@ test('scanStuckMergeAgentDispatches includes unresolved lifecycle cleanups even 
   writeLifecycleCleanup(rootDir, {
     repo: 'laceyenterprises/agent-os',
     prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
   });
 
   const reports = scanStuckMergeAgentDispatches({
     rootDir,
     hqRoot,
+    hqPath: null,
     now: NOW,
   });
 
@@ -179,11 +187,76 @@ test('scanStuckMergeAgentDispatches only inspects the latest dispatch for an act
   const reports = scanStuckMergeAgentDispatches({
     rootDir,
     hqRoot,
-    activePRs: [{ repo: 'laceyenterprises/agent-os', prNumber: 719 }],
+    activePRs: [{ repo: 'laceyenterprises/agent-os', prNumber: 719, headSha: 'new-head' }],
+    hqPath: null,
     now: NOW,
   });
 
   assert.equal(reports.length, 0, 'the latest dispatch has no refusal history and should win');
+});
+
+test('scanStuckMergeAgentDispatches honors live-state probe so admitted LRQs are not reclassified as stuck', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  buildAuditFile(hqRoot, STUCK_LRQ, 6);
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot,
+    activePRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 719,
+      headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+    }],
+    now: NOW,
+    dispatchStateProbe: () => ({ status: 'running' }),
+    listLifecycleCleanupsImpl: () => [],
+  });
+
+  assert.equal(reports.length, 0);
+});
+
+test('scanStuckMergeAgentDispatches reads the keyed active-head dispatch record directly', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  buildAuditFile(hqRoot, STUCK_LRQ, 6);
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot,
+    activePRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 719,
+      headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+    }],
+    hqPath: null,
+    now: NOW,
+    listLifecycleCleanupsImpl: () => [],
+  });
+
+  assert.equal(reports.length, 1);
 });
 
 test('scanStuckMergeAgentDispatches returns empty when hqRoot is missing (OSS-safe)', () => {

@@ -951,6 +951,15 @@ function getRecordedMergeAgentDispatch(rootDir, job) {
   }
 }
 
+function getRecordedMergeAgentDispatchForHead(rootDir, {
+  repo,
+  prNumber,
+  headSha,
+} = {}) {
+  if (!repo || prNumber == null || !headSha) return null;
+  return getRecordedMergeAgentDispatch(rootDir, { repo, prNumber, headSha });
+}
+
 // LRQ identifiers come from the agent-os dispatch daemon and have the
 // shape `lrq_<8>-<4>-<4>-<4>-<12>` (UUID after the prefix). The watcher
 // runs as a long-lived operator daemon with broad fs access, so we
@@ -1221,52 +1230,60 @@ function scanStuckMergeAgentDispatches({
   now = Date.now(),
   minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
-  listImpl = listMergeAgentDispatches,
+  hqPath = process.env.HQ_BIN || DEFAULT_HQ_PATH,
+  runtimeEnv = process.env,
+  dispatchStateProbe = null,
   listLifecycleCleanupsImpl = listMergeAgentLifecycleCleanups,
 } = {}) {
   if (!hqRoot) return [];
-  const eligibleKeys = new Set();
+  const eligibleHeadsByKey = new Map();
   for (const activePR of activePRs) {
-    if (!activePR?.repo || activePR?.prNumber == null) continue;
+    if (!activePR?.repo || activePR?.prNumber == null || !activePR?.headSha) continue;
     if (repo && activePR.repo !== repo) continue;
-    eligibleKeys.add(`${activePR.repo}#${Number(activePR.prNumber)}`);
+    eligibleHeadsByKey.set(
+      `${activePR.repo}#${Number(activePR.prNumber)}`,
+      {
+        repo: activePR.repo,
+        prNumber: Number(activePR.prNumber),
+        headSha: activePR.headSha,
+      }
+    );
   }
   try {
     for (const cleanup of listLifecycleCleanupsImpl(rootDir)) {
-      if (!cleanup?.repo || cleanup?.prNumber == null) continue;
+      if (!cleanup?.repo || cleanup?.prNumber == null || !cleanup?.headSha) continue;
       if (repo && cleanup.repo !== repo) continue;
-      eligibleKeys.add(`${cleanup.repo}#${Number(cleanup.prNumber)}`);
+      const key = `${cleanup.repo}#${Number(cleanup.prNumber)}`;
+      if (!eligibleHeadsByKey.has(key)) {
+        eligibleHeadsByKey.set(key, {
+          repo: cleanup.repo,
+          prNumber: Number(cleanup.prNumber),
+          headSha: cleanup.headSha,
+        });
+      }
     }
   } catch {
     return [];
   }
-  if (eligibleKeys.size === 0) return [];
-  let dispatches;
-  try {
-    dispatches = listImpl(rootDir, repo ? { repo } : {});
-  } catch {
-    return [];
-  }
-  const latestByKey = new Map();
-  for (const recordedDispatch of dispatches) {
-    if (!recordedDispatch?.repo || recordedDispatch?.prNumber == null) continue;
-    const key = `${recordedDispatch.repo}#${Number(recordedDispatch.prNumber)}`;
-    if (!eligibleKeys.has(key)) continue;
-    const previous = latestByKey.get(key);
-    const recordedAt = String(recordedDispatch.dispatchedAt || '');
-    const previousAt = String(previous?.dispatchedAt || '');
-    if (!previous || recordedAt > previousAt) {
-      latestByKey.set(key, recordedDispatch);
-    }
-  }
+  if (eligibleHeadsByKey.size === 0) return [];
   const stuckReports = [];
-  for (const recordedDispatch of latestByKey.values()) {
+  for (const eligible of eligibleHeadsByKey.values()) {
+    const recordedDispatch = getRecordedMergeAgentDispatchForHead(rootDir, eligible);
     if (!recordedDispatch || !recordedDispatch.launchRequestId) continue;
     const stuck = describeStaleDispatch(recordedDispatch, {
       hqRoot,
       now,
       minAgeMinutes,
       minRefusals,
+      dispatchStateProbe: dispatchStateProbe || (
+        hqPath && _isValidLrqId(recordedDispatch.launchRequestId)
+          ? (lrqArg) => _probeDispatchStatusViaHq({
+              hqPath,
+              lrq: lrqArg,
+              env: runtimeEnv,
+            })
+          : null
+      ),
     });
     if (!stuck) continue;
     stuckReports.push({

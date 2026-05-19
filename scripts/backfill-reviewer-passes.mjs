@@ -9,11 +9,18 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const USAGE = `\
 Usage:
-  node scripts/backfill-reviewer-passes.mjs [--root-dir <path>] [--ledger-db <path>] [--dry-run] [--json]
+  node scripts/backfill-reviewer-passes.mjs [--root-dir <path>] [--ledger-db <path>] [--codex-session-root <path>] [--transcript-fallback] [--dry-run] [--json]
 `;
 
 function parseArgs(argv) {
-  const args = { rootDir: ROOT, ledgerDbPath: null, dryRun: false, json: false };
+  const args = {
+    rootDir: ROOT,
+    ledgerDbPath: null,
+    codexSessionRoots: [],
+    transcriptFallback: false,
+    dryRun: false,
+    json: false,
+  };
   for (let idx = 0; idx < argv.length; idx += 1) {
     const arg = argv[idx];
     if (arg === '--root-dir') {
@@ -24,6 +31,13 @@ function parseArgs(argv) {
       idx += 1;
       if (!argv[idx]) throw new Error('--ledger-db requires a value');
       args.ledgerDbPath = argv[idx];
+    } else if (arg === '--codex-session-root') {
+      idx += 1;
+      if (!argv[idx]) throw new Error('--codex-session-root requires a value');
+      args.codexSessionRoots.push(argv[idx]);
+      args.transcriptFallback = true;
+    } else if (arg === '--transcript-fallback') {
+      args.transcriptFallback = true;
     } else if (arg === '--json') {
       args.json = true;
     } else if (arg === '--dry-run') {
@@ -48,6 +62,8 @@ function main(argv = process.argv.slice(2), io = {}) {
     }
     const result = backfillReviewerPasses(args.rootDir, {
       ledgerDbPath: args.ledgerDbPath,
+      codexSessionRoots: args.codexSessionRoots,
+      transcriptFallback: args.transcriptFallback,
       dryRun: args.dryRun,
     });
     if (args.json) {
@@ -60,6 +76,8 @@ function main(argv = process.argv.slice(2), io = {}) {
         `unique_pass_keys=${result.uniquePassKeys} ` +
         `inserted_or_updated=${result.insertedOrUpdated} ` +
         `token_matched=${result.tokenMatched} ` +
+        `worker_log_matched=${result.workerLogMatched} ` +
+        `transcript_matched=${result.transcriptMatched} ` +
         `skipped=${result.skipped}\n`
       );
     }

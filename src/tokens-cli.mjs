@@ -47,6 +47,9 @@ function parseArgs(argv) {
 }
 
 function rowTokens(row) {
+  if (row.token_total !== null && row.token_total !== undefined) {
+    return Number(row.token_total || 0);
+  }
   return Number(row.token_input || 0)
     + Number(row.token_output || 0)
     + Number(row.token_cache_read || 0)
@@ -122,6 +125,7 @@ function summarizeRows(rows, mode = 'pass') {
     outputTokens: row.token_output,
     cacheReadTokens: row.token_cache_read,
     cacheWriteTokens: row.token_cache_write,
+    totalTokensReported: row.token_total,
     costUSD: row.token_cost_usd,
     tokenSource: row.token_source,
     startedAt: row.started_at,

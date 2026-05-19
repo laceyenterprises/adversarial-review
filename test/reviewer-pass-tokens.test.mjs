@@ -10,6 +10,7 @@ import {
   backfillReviewerPasses,
   beginReviewerPass,
   completeReviewerPass,
+  readCodexTranscriptTokenUsage,
   readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,
 } from '../src/reviewer-pass-tokens.mjs';
@@ -382,6 +383,160 @@ test('backfill dry-run reports eligible live-shaped jobs without writing reviewe
   assert.equal(result.insertedOrUpdated, 0);
   assert.equal(result.tokenMatched, 1);
   assert.equal(countReviewerPasses(rootDir), 0);
+});
+
+test('codex transcript fallback links token counts by workspace cwd and launch window', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-transcript');
+  const codexRoot = path.join(rootDir, 'codex-sessions');
+  const codexDayDir = path.join(codexRoot, '2026', '05', '18');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(codexDayDir, { recursive: true });
+  const transcriptPath = path.join(codexDayDir, 'rollout-2026-05-18T04-00-10-session-1.jsonl');
+  writeFileSync(transcriptPath, [
+    JSON.stringify({
+      timestamp: '2026-05-18T04:00:10.000Z',
+      type: 'session_meta',
+      payload: {
+        id: 'codex-session-1',
+        timestamp: '2026-05-18T04:00:10.000Z',
+        cwd: workspace,
+      },
+    }),
+    JSON.stringify({
+      timestamp: '2026-05-18T04:01:10.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          total_token_usage: {
+            input_tokens: 321,
+            cached_input_tokens: 123,
+            output_tokens: 45,
+            reasoning_output_tokens: 7,
+            total_tokens: 366,
+          },
+        },
+      },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const usage = readCodexTranscriptTokenUsage({
+    workspacePath: workspace,
+    startedAt: '2026-05-18T04:00:00.000Z',
+    endedAt: '2026-05-18T04:02:00.000Z',
+    sessionRoots: [codexRoot],
+    rootDir,
+  });
+  assert.equal(usage.input, 321);
+  assert.equal(usage.output, 45);
+  assert.equal(usage.cacheRead, 123);
+  assert.equal(usage.source, 'codex-transcript');
+  assert.equal(usage.adapterSessionKey, 'codex-session-1');
+
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'job-transcript.json'), JSON.stringify({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 47,
+    jobId: 'job-transcript',
+    status: 'completed',
+    completedAt: '2026-05-18T04:02:00.000Z',
+    remediationPlan: {
+      currentRound: 3,
+      rounds: [{
+        round: 3,
+        finishedAt: '2026-05-18T04:02:00.000Z',
+        worker: {
+          model: 'gpt-5.2',
+          spawnedAt: '2026-05-18T04:00:00.000Z',
+          workspaceDir: workspace,
+        },
+      }],
+    },
+  }), 'utf8');
+
+  const result = backfillReviewerPasses(rootDir, {
+    codexSessionRoots: [codexRoot],
+    transcriptFallback: true,
+  });
+
+  assert.equal(result.considered, 1);
+  assert.equal(result.tokenMatched, 1);
+  assert.equal(result.transcriptMatched, 1);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 47').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.attempt_number, 3);
+    assert.equal(row.reviewer_model, 'gpt-5.2');
+    assert.equal(row.token_input, 321);
+    assert.equal(row.token_output, 45);
+    assert.equal(row.token_cache_read, 123);
+    assert.equal(row.token_total, 366);
+    assert.equal(row.token_source, 'codex-transcript');
+    assert.equal(metadata.transcriptSessionId, 'codex-session-1');
+    assert.equal(metadata.transcriptPath, transcriptPath);
+  } finally {
+    db.close();
+  }
+});
+
+test('backfill recovers codex exec token total and session id from worker log', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-worker-log');
+  const logPath = path.join(workspace, '.adversarial-follow-up', 'codex-worker.log');
+  mkdirSync(path.dirname(logPath), { recursive: true });
+  writeFileSync(logPath, [
+    'OpenAI Codex v0.130.0',
+    'workdir: /tmp/example',
+    'session id: 019e3ebb-58d0-7061-ab5b-b690cf4df3af',
+    'tokens used',
+    '287,605',
+    '',
+  ].join('\n'), 'utf8');
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'job-worker-log.json'), JSON.stringify({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 48,
+    jobId: 'job-worker-log',
+    status: 'completed',
+    completedAt: '2026-05-18T04:02:00.000Z',
+    workspaceDir: workspace,
+    remediationPlan: {
+      currentRound: 1,
+      rounds: [{
+        round: 1,
+        worker: {
+          model: 'codex',
+          spawnedAt: '2026-05-18T04:00:00.000Z',
+          workspaceDir: workspace,
+          logPath,
+        },
+      }],
+    },
+  }), 'utf8');
+
+  const result = backfillReviewerPasses(rootDir);
+
+  assert.equal(result.considered, 1);
+  assert.equal(result.tokenMatched, 1);
+  assert.equal(result.workerLogMatched, 1);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 48').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.token_total, 287605);
+    assert.equal(row.token_source, 'codex-worker-log');
+    assert.equal(metadata.transcriptSessionId, '019e3ebb-58d0-7061-ab5b-b690cf4df3af');
+    assert.equal(metadata.workerLogPath, logPath);
+  } finally {
+    db.close();
+  }
 });
 
 test('tokens CLI prints per-PR rollup with reviewer breakdown', () => {

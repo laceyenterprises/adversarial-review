@@ -86,6 +86,7 @@ function ensureReviewStateSchema(db) {
   // Handles DBs that briefly saw the inline reviewer_passes schema before the
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);
 
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique

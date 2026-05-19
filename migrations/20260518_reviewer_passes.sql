@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS reviewer_passes (
   token_output         INTEGER,
   token_cache_read     INTEGER,
   token_cache_write    INTEGER,
+  token_total          INTEGER,
   token_cost_usd       REAL,
   token_source         TEXT,
   metadata_json        TEXT NOT NULL DEFAULT '{}',

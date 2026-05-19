@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
@@ -179,6 +179,7 @@ function completeReviewerPass(rootDir, {
               token_output = COALESCE(?, token_output),
               token_cache_read = COALESCE(?, token_cache_read),
               token_cache_write = COALESCE(?, token_cache_write),
+              token_total = COALESCE(?, token_total),
               token_cost_usd = COALESCE(?, token_cost_usd),
               token_source = COALESCE(?, token_source),
               metadata_json = ?
@@ -191,6 +192,7 @@ function completeReviewerPass(rootDir, {
       usage?.output ?? null,
       usage?.cacheRead ?? null,
       usage?.cacheWrite ?? null,
+      usage?.total ?? null,
       usage?.costUSD ?? null,
       tokenSource || usage?.source || null,
       metadataJson(mergedMetadata),
@@ -214,8 +216,9 @@ function normalizeTokenUsage(tokenUsage) {
   const output = coerceNonNegativeInt(tokenUsage.output ?? tokenUsage.outputTokens ?? tokenUsage.token_output);
   const cacheRead = coerceNonNegativeInt(tokenUsage.cacheRead ?? tokenUsage.cache_read ?? tokenUsage.token_cache_read);
   const cacheWrite = coerceNonNegativeInt(tokenUsage.cacheWrite ?? tokenUsage.cache_write ?? tokenUsage.token_cache_write);
+  const total = coerceNonNegativeInt(tokenUsage.total ?? tokenUsage.totalTokens ?? tokenUsage.token_total);
   const costUSD = coerceNonNegativeFloat(tokenUsage.costUSD ?? tokenUsage.cost_usd ?? tokenUsage.token_cost_usd);
-  if (input === null && output === null && cacheRead === null && cacheWrite === null && costUSD === null) {
+  if (input === null && output === null && cacheRead === null && cacheWrite === null && total === null && costUSD === null) {
     return null;
   }
   return {
@@ -223,6 +226,7 @@ function normalizeTokenUsage(tokenUsage) {
     output,
     cacheRead,
     cacheWrite,
+    total,
     costUSD,
     source: tokenUsage.source || null,
   };
@@ -410,6 +414,212 @@ function tokenUsageFromRuntimeSession(row) {
   };
 }
 
+function readCodexTranscriptTokenUsage({
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  sessionRoots = [],
+  transcriptSummaryCache = null,
+  transcriptPathCache = null,
+  rootDir = process.cwd(),
+} = {}) {
+  const workspacePaths = normalizedWorkspacePaths(workspacePath, rootDir);
+  if (workspacePaths.length === 0 || sessionRoots.length === 0) return null;
+  const transcriptPaths = listCodexTranscriptPaths(sessionRoots, { startedAt, endedAt }, transcriptPathCache);
+  const matches = [];
+  for (const transcriptPath of transcriptPaths) {
+    const summary = readCachedCodexTranscriptSummary(transcriptPath, transcriptSummaryCache);
+    if (!summary?.cwd || !workspacePaths.includes(resolve(summary.cwd))) continue;
+    if (!timestampOverlapsWindow(summary.startedAt, summary.endedAt, startedAt, endedAt)) continue;
+    if (!summary.tokenUsage) continue;
+    matches.push({
+      transcriptPath,
+      sessionId: summary.sessionId,
+      usage: summary.tokenUsage,
+    });
+  }
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  return {
+    ...match.usage,
+    source: 'codex-transcript',
+    adapterSessionKey: match.sessionId || null,
+    transcriptPath: match.transcriptPath,
+  };
+}
+
+function readCachedCodexTranscriptSummary(transcriptPath, cache) {
+  if (!cache) return readCodexTranscriptSummary(transcriptPath);
+  if (!cache.has(transcriptPath)) {
+    cache.set(transcriptPath, readCodexTranscriptSummary(transcriptPath));
+  }
+  return cache.get(transcriptPath);
+}
+
+function normalizedWorkspacePaths(workspacePath, rootDir) {
+  if (!workspacePath) return [];
+  const raw = String(workspacePath);
+  const candidates = [raw];
+  if (!isAbsolute(raw)) candidates.push(join(rootDir, raw));
+  return [...new Set(candidates.map((candidate) => resolve(candidate)))];
+}
+
+function listCodexTranscriptPaths(sessionRoots, { startedAt = null, endedAt = null } = {}, cache = null) {
+  const cacheKey = cache
+    ? JSON.stringify({
+      roots: sessionRoots.map((root) => resolve(String(root))),
+      startedAt: dayKey(startedAt),
+      endedAt: dayKey(endedAt || startedAt),
+    })
+    : null;
+  if (cacheKey && cache.has(cacheKey)) return cache.get(cacheKey);
+  const paths = [];
+  const seen = new Set();
+  for (const root of sessionRoots) {
+    if (!root) continue;
+    const resolvedRoot = resolve(String(root));
+    const dateDirs = codexSessionDateDirs(resolvedRoot, { startedAt, endedAt });
+    for (const dir of dateDirs.length > 0 ? dateDirs : [resolvedRoot]) {
+      addJsonlFilesRecursively(dir, paths, seen);
+    }
+  }
+  if (cacheKey) cache.set(cacheKey, paths);
+  return paths;
+}
+
+function dayKey(value) {
+  const parsed = parseDate(value);
+  if (!parsed) return null;
+  return parsed.toISOString().slice(0, 10);
+}
+
+function codexSessionDateDirs(root, { startedAt = null, endedAt = null } = {}) {
+  const start = parseDate(startedAt);
+  const end = parseDate(endedAt) || start;
+  if (!start) return [];
+  const days = [];
+  const first = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+  first.setUTCDate(first.getUTCDate() - 1);
+  const last = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()));
+  last.setUTCDate(last.getUTCDate() + 1);
+  for (const day = new Date(first); day <= last; day.setUTCDate(day.getUTCDate() + 1)) {
+    const yyyy = String(day.getUTCFullYear());
+    const mm = String(day.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(day.getUTCDate()).padStart(2, '0');
+    const dir = join(root, yyyy, mm, dd);
+    if (existsSync(dir)) days.push(dir);
+  }
+  return days;
+}
+
+function addJsonlFilesRecursively(dir, paths, seen) {
+  if (!existsSync(dir)) return;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const entryPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      addJsonlFilesRecursively(entryPath, paths, seen);
+    } else if (entry.isFile() && entry.name.endsWith('.jsonl') && !seen.has(entryPath)) {
+      seen.add(entryPath);
+      paths.push(entryPath);
+    }
+  }
+}
+
+function readCodexTranscriptSummary(transcriptPath) {
+  let sessionId = null;
+  let cwd = null;
+  let startedAt = null;
+  let endedAt = null;
+  let tokenUsage = null;
+  try {
+    for (const line of readFileSync(transcriptPath, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let item;
+      try {
+        item = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const timestamp = item.timestamp || item.payload?.timestamp || null;
+      if (timestamp) {
+        startedAt ||= timestamp;
+        endedAt = timestamp;
+      }
+      if (item.type === 'session_meta') {
+        sessionId ||= item.payload?.id || null;
+        cwd ||= item.payload?.cwd || null;
+        if (item.payload?.timestamp) startedAt = item.payload.timestamp;
+      } else if (item.type === 'event_msg' && item.payload?.type === 'token_count') {
+        const total = item.payload?.info?.total_token_usage || null;
+        const usage = tokenUsageFromCodexTotal(total);
+        if (usage) tokenUsage = usage;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return { sessionId, cwd, startedAt, endedAt, tokenUsage };
+}
+
+function tokenUsageFromCodexTotal(total) {
+  if (!total || typeof total !== 'object') return null;
+  return normalizeTokenUsage({
+    input: total.input_tokens,
+    output: total.output_tokens,
+    cacheRead: total.cached_input_tokens,
+    cacheWrite: 0,
+    total: total.total_tokens,
+    source: 'codex-transcript',
+  });
+}
+
+function readCodexWorkerLogTokenUsage(logPath) {
+  if (!logPath || !existsSync(logPath)) return null;
+  let text;
+  try {
+    text = readFileSync(logPath, 'utf8');
+  } catch {
+    return null;
+  }
+  const tokenMatch = text.match(/(?:^|\n)[^\S\r\n]*tokens used(?:[^\S\r\n]+|\r?\n[^\S\r\n]*)([\d,]+)/i);
+  if (!tokenMatch) return null;
+  const usage = normalizeTokenUsage({
+    total: tokenMatch[1].replaceAll(',', ''),
+    source: 'codex-worker-log',
+  });
+  if (!usage) return null;
+  const sessionMatch = text.match(/^\s*session id:\s*(\S+)/mi);
+  return {
+    ...usage,
+    adapterSessionKey: sessionMatch?.[1] || null,
+    transcriptPath: logPath,
+  };
+}
+
+function timestampOverlapsWindow(startedAt, endedAt, windowStart, windowEnd) {
+  const start = parseDate(startedAt);
+  const end = parseDate(endedAt) || start;
+  if (!start) return false;
+  const graceMs = 15 * 60 * 1000;
+  const low = parseDate(windowStart);
+  const high = parseDate(windowEnd) || low;
+  if (low && end < new Date(low.getTime() - graceMs)) return false;
+  if (high && start > new Date(high.getTime() + graceMs)) return false;
+  return true;
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function reviewerPassRows(rootDir, { since = null } = {}) {
   const db = openReviewStateDb(rootDir);
   try {
@@ -492,6 +702,8 @@ function readHistoricalFollowUpJobs(rootDir) {
 
 function backfillReviewerPasses(rootDir, {
   ledgerDbPath = null,
+  codexSessionRoots = [],
+  transcriptFallback = false,
   now = () => new Date().toISOString(),
   dryRun = false,
 } = {}) {
@@ -500,20 +712,27 @@ function backfillReviewerPasses(rootDir, {
   let insertedOrUpdated = 0;
   let wouldInsertOrUpdate = 0;
   let tokenMatched = 0;
+  let workerLogMatched = 0;
+  let transcriptMatched = 0;
   let skipped = 0;
   const uniquePassKeys = new Set();
+  const transcriptSummaryCache = new Map();
+  const transcriptPathCache = new Map();
   for (const { job, jobPath } of jobs) {
-    const worker = job?.remediationWorker || {};
+    const worker = historicalWorkerForJob(job);
     const repo = job?.repo;
     const prNumber = Number(job?.prNumber);
-    const workspacePath = job?.workspaceDir || worker.workspaceDir || null;
+    const workspacePath = worker.workspaceDir || job?.workspaceDir || null;
     if (!repo || !Number.isInteger(prNumber) || !workspacePath) {
       skipped += 1;
       continue;
     }
     considered += 1;
+    const round = latestRemediationRound(job);
     const attemptNumber = normalizeAttemptNumber(
-      job?.remediationPlan?.currentRound
+      round?.round
+      || round?.attemptNumber
+      || job?.remediationPlan?.currentRound
       || job?.currentRound
       || 1
     );
@@ -531,10 +750,24 @@ function backfillReviewerPasses(rootDir, {
       rootDir,
     }) || readReviewerSessionTokenUsage({
       workspacePath,
+      startedAt,
+      endedAt,
       ledgerDbPath,
       rootDir,
-    });
-    if (usage) tokenMatched += 1;
+    }) || (transcriptFallback ? readCodexTranscriptTokenUsage({
+      workspacePath,
+      startedAt,
+      endedAt,
+      sessionRoots: codexSessionRoots,
+      transcriptSummaryCache,
+      transcriptPathCache,
+      rootDir,
+    }) : null) || readCodexWorkerLogTokenUsage(worker.logPath);
+    if (usage) {
+      tokenMatched += 1;
+      if (usage.source === 'codex-worker-log') workerLogMatched += 1;
+      if (usage.source === 'codex-transcript') transcriptMatched += 1;
+    }
     wouldInsertOrUpdate += 1;
     if (dryRun) continue;
 
@@ -553,6 +786,9 @@ function backfillReviewerPasses(rootDir, {
         jobPath,
         jobId: job.jobId || null,
         launchRequestId,
+        transcriptPath: usage?.transcriptPath || null,
+        transcriptSessionId: usage?.adapterSessionKey || null,
+        workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
       },
     });
     completeReviewerPass(rootDir, {
@@ -568,6 +804,9 @@ function backfillReviewerPasses(rootDir, {
       metadata: {
         backfill: true,
         jobPath,
+        transcriptPath: usage?.transcriptPath || null,
+        transcriptSessionId: usage?.adapterSessionKey || null,
+        workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
       },
     });
     insertedOrUpdated += 1;
@@ -578,7 +817,33 @@ function backfillReviewerPasses(rootDir, {
     wouldInsertOrUpdate,
     uniquePassKeys: uniquePassKeys.size,
     tokenMatched,
+    workerLogMatched,
+    transcriptMatched,
     skipped,
+  };
+}
+
+function latestRemediationRound(job) {
+  const rounds = Array.isArray(job?.remediationPlan?.rounds) ? job.remediationPlan.rounds : [];
+  return rounds.length > 0 ? rounds[rounds.length - 1] : null;
+}
+
+function historicalWorkerForJob(job) {
+  const round = latestRemediationRound(job);
+  const roundWorker = round?.worker || {};
+  const topLevelWorker = job?.remediationWorker || {};
+  return {
+    ...topLevelWorker,
+    ...roundWorker,
+    model: roundWorker.model || topLevelWorker.model || job?.reviewerModel || 'codex',
+    workerClass: roundWorker.workerClass || topLevelWorker.workerClass || roundWorker.model || topLevelWorker.model || 'codex',
+    workerRunId: roundWorker.workerRunId || topLevelWorker.workerRunId || roundWorker.runId || topLevelWorker.runId || null,
+    runId: roundWorker.runId || topLevelWorker.runId || null,
+    launchRequestId: roundWorker.launchRequestId || topLevelWorker.launchRequestId || null,
+    launchRequestID: roundWorker.launchRequestID || topLevelWorker.launchRequestID || null,
+    workspaceDir: roundWorker.workspaceDir || topLevelWorker.workspaceDir || job?.workspaceDir || null,
+    spawnedAt: roundWorker.spawnedAt || topLevelWorker.spawnedAt || round?.spawnedAt || job?.claimedAt || null,
+    reconciledAt: roundWorker.reconciledAt || topLevelWorker.reconciledAt || round?.finishedAt || null,
   };
 }
 
@@ -589,6 +854,8 @@ export {
   normalizeReviewerClass,
   normalizeTokenUsage,
   parseSince,
+  readCodexTranscriptTokenUsage,
+  readCodexWorkerLogTokenUsage,
   readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,
   reviewerPassRows,

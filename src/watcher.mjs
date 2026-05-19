@@ -28,6 +28,11 @@ import {
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } from './watcher-poll-guard.mjs';
 import { ensureReviewStateSchema, openReviewStateDb, requestReviewRereview } from './review-state.mjs';
+import {
+  beginReviewerPass,
+  completeReviewerPass,
+  readReviewerSessionTokenUsage,
+} from './reviewer-pass-tokens.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
   CASCADE_FAILURE_CAP,
@@ -1073,6 +1078,8 @@ async function spawnReviewer({
   builderTag,
   reviewerHeadSha,
   reviewAttemptNumber,
+  reviewDbAttemptNumber,
+  passKind = 'first-pass',
   maxRemediationRounds,
   reviewerSessionUuid,
   onReviewerPgid = () => {},
@@ -1089,6 +1096,22 @@ async function spawnReviewer({
 
   inFlightReviewerSessions.add(reviewerSessionUuid);
   try {
+    beginReviewerPass(ROOT, {
+      repo,
+      prNumber,
+      attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
+      reviewerClass: reviewerModel,
+      passKind,
+      workspacePath: process.cwd(),
+      startedAt: new Date().toISOString(),
+      metadata: {
+        reviewerSessionUuid,
+        reviewerModel,
+        reviewAttemptNumber,
+        maxRemediationRounds,
+      },
+    });
+
     // The reviewer-runtime adapter (LAC-563) owns the spawn contract:
     // canonical OAuth env-strip, atomic run-state records, process-group
     // isolation, failure classification. The `forbiddenFallbacks` arg is
@@ -1117,6 +1140,37 @@ async function spawnReviewer({
     });
     if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
+    try {
+      const tokenUsage = readReviewerSessionTokenUsage({
+        adapterSessionKey: result.reattachToken || reviewerSessionUuid,
+        sessionKeys: [
+          reviewerSessionUuid,
+          result.reattachToken,
+          result.sessionUuid,
+        ],
+        rootDir: ROOT,
+      });
+      completeReviewerPass(ROOT, {
+        repo,
+        prNumber,
+        attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
+        passKind,
+        status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
+        endedAt: new Date().toISOString(),
+        tokenUsage,
+        tokenSource: tokenUsage?.source || 'unknown',
+        metadata: {
+          reviewerSessionUuid,
+          reattachToken: result.reattachToken || null,
+          failureClass: result.failureClass || null,
+        },
+      });
+    } catch (err) {
+      console.warn(
+        `[watcher] reviewer_pass_token_update_failed repo=${repo} pr=${prNumber} ` +
+        `session=${reviewerSessionUuid}: ${err?.message || err}`
+      );
+    }
     return result;
   } finally {
     inFlightReviewerSessions.delete(reviewerSessionUuid);
@@ -2341,9 +2395,13 @@ async function pollOnce(
       }, { rootDir: ROOT });
       const latestMaxRounds = Number(ledger.latestMaxRounds);
       const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
+      const reviewDbAttemptNumber = Number(current?.review_attempts || 0) + 1;
       const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
         ? latestMaxRounds
         : roundBudget.roundBudget;
+      const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
+        ? 'rereview'
+        : 'first-pass';
 
       const result = await spawnReviewer({
         repo: repoPath,
@@ -2354,6 +2412,8 @@ async function pollOnce(
         builderTag: route.tag,
         reviewerHeadSha,
         reviewAttemptNumber,
+        reviewDbAttemptNumber,
+        passKind,
         maxRemediationRounds,
         reviewerSessionUuid,
         onReviewerPgid: ({ pgid }) => {

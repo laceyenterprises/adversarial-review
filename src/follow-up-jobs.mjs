@@ -11,6 +11,11 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { buildCodePrSubjectIdentity, buildDeliveryKey } from './identity-shapes.mjs';
 import {
+  beginReviewerPass,
+  completeReviewerPass,
+  readWorkerRunTokenUsage,
+} from './reviewer-pass-tokens.mjs';
+import {
   PUBLIC_REPLY_MAX_CHARS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
@@ -1482,6 +1487,12 @@ function markFollowUpJobSpawned({
   spawnedAt = new Date().toISOString(),
 }) {
   const currentJob = readFollowUpJob(jobPath);
+  recordRemediationPassStartedSafe({
+    rootDir: inferRootDirFromFollowUpJobPath(jobPath),
+    job: currentJob,
+    worker,
+    spawnedAt,
+  });
   let nextJob = {
     ...currentJob,
     status: 'in_progress',
@@ -1518,6 +1529,81 @@ function markFollowUpJobSpawned({
 
   writeFollowUpJob(jobPath, nextJob);
   return { job: nextJob, jobPath };
+}
+
+function inferRootDirFromFollowUpJobPath(jobPath) {
+  const marker = `${join('data', 'follow-up-jobs')}`;
+  const normalized = resolve(jobPath);
+  const idx = normalized.indexOf(`${marker}`);
+  if (idx <= 0) return dirname(dirname(dirname(normalized)));
+  return normalized.slice(0, idx - 1);
+}
+
+function remediationAttemptNumber(job) {
+  const parsed = Number(job?.remediationPlan?.currentRound || job?.currentRound || 1);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 1;
+}
+
+function workerLaunchRequestId(job, worker = {}) {
+  return worker.launchRequestId || worker.launchRequestID || worker.lrq || job?.replyStorageKey || null;
+}
+
+function shouldRecordRemediationPass(job, worker = {}) {
+  const prNumber = Number(job?.prNumber);
+  if (!job?.repo || !Number.isInteger(prNumber)) return false;
+  if (worker?.state === 'never-spawned') return false;
+  return Boolean(worker?.workspaceDir || job?.workspaceDir || worker?.processId || worker?.workerRunId || worker?.runId);
+}
+
+function recordRemediationPassStartedSafe({ rootDir, job, worker = {}, spawnedAt }) {
+  if (!rootDir || !shouldRecordRemediationPass(job, worker)) return;
+  try {
+    beginReviewerPass(rootDir, {
+      repo: job.repo,
+      prNumber: Number(job.prNumber),
+      attemptNumber: remediationAttemptNumber(job),
+      reviewerClass: worker.workerClass || worker.model || 'codex',
+      passKind: 'remediation',
+      workerRunId: worker.workerRunId || worker.runId || null,
+      workspacePath: worker.workspaceDir || job.workspaceDir || null,
+      startedAt: spawnedAt,
+      metadata: {
+        jobId: job.jobId || null,
+        launchRequestId: workerLaunchRequestId(job, worker),
+      },
+    });
+  } catch (err) {
+    console.warn(`[follow-up-jobs] reviewer_pass_start_failed job=${job?.jobId || '<unknown>'}: ${err?.message || err}`);
+  }
+}
+
+function recordRemediationPassTerminalSafe({ rootDir, job, worker = {}, status, endedAt }) {
+  if (!rootDir || !shouldRecordRemediationPass(job, worker)) return;
+  try {
+    const launchRequestId = workerLaunchRequestId(job, worker);
+    const usage = readWorkerRunTokenUsage({
+      workerRunId: worker.workerRunId || worker.runId || null,
+      launchRequestId,
+      rootDir,
+    });
+    completeReviewerPass(rootDir, {
+      repo: job.repo,
+      prNumber: Number(job.prNumber),
+      attemptNumber: remediationAttemptNumber(job),
+      passKind: 'remediation',
+      status,
+      endedAt,
+      workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
+      tokenUsage: usage,
+      tokenSource: usage?.source || (usage ? 'session-ledger' : 'unknown'),
+      metadata: {
+        jobId: job.jobId || null,
+        launchRequestId,
+      },
+    });
+  } catch (err) {
+    console.warn(`[follow-up-jobs] reviewer_pass_finish_failed job=${job?.jobId || '<unknown>'}: ${err?.message || err}`);
+  }
 }
 
 function markFollowUpJobFailed({
@@ -1586,6 +1672,13 @@ function markFollowUpJobFailed({
         };
       }
 
+      recordRemediationPassTerminalSafe({
+        rootDir,
+        job: nextJob,
+        worker: nextJob.remediationWorker || {},
+        status: 'failed',
+        endedAt: failedAt,
+      });
       return nextJob;
     },
   });
@@ -1643,6 +1736,13 @@ function markFollowUpJobCompleted({
         nextJob.commentDelivery = commentDelivery;
       }
 
+      recordRemediationPassTerminalSafe({
+        rootDir,
+        job: nextJob,
+        worker: nextJob.remediationWorker || {},
+        status: 'completed',
+        endedAt: normalizedCompletedAt,
+      });
       return nextJob;
     },
   });
@@ -1718,6 +1818,13 @@ function markFollowUpJobStopped({
         nextJob.commentDelivery = commentDelivery;
       }
 
+      recordRemediationPassTerminalSafe({
+        rootDir,
+        job: nextJob,
+        worker: nextJob.remediationWorker || {},
+        status: 'cancelled',
+        endedAt: stoppedAt,
+      });
       return nextJob;
     },
   });

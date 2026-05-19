@@ -1,0 +1,139 @@
+// Proactive stuck-merge-agent scan tests.
+//
+// 2026-05-19 incident: PR #719 merge-agent stalled for 33 min under memory
+// pressure. The existing 30-min stuck Sentinel alert never fired because
+// it depended on a PR-revisit happening AT the right moment. The
+// proactive scan added in this PR runs every watcher tick, independent
+// of which PRs the watcher happens to be polling.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import {
+  scanStuckMergeAgentDispatches,
+  recordMergeAgentDispatch,
+} from '../src/follow-up-merge-agent.mjs';
+
+const NOW = Date.parse('2026-05-19T03:30:00Z');
+const STUCK_LRQ = 'lrq_069112b8-68a3-48d8-acac-46c026c2349c';
+const STUCK_DISPATCHED_AT = '2026-05-19T02:47:02.429Z'; // ~43 min before NOW
+const TODAY_UTC = '2026-05-19';
+
+function buildAuditFile(hqRoot, lrq, refusalCount) {
+  const auditDir = path.join(hqRoot, 'dispatch', 'audit', TODAY_UTC);
+  mkdirSync(auditDir, { recursive: true });
+  const lines = [];
+  for (let i = 0; i < refusalCount; i += 1) {
+    lines.push(JSON.stringify({
+      actor: 'dispatch-daemon',
+      createdAt: '2026-05-19T03:1' + (9 - i) + ':00Z',
+      decision: 'refuse_admit_memory_pressure',
+      fromState: 'requested',
+      launchRequestId: lrq,
+      structuredReasons: [
+        { reasonCode: 'memory_pressure_elevated', severity: 'warning' },
+      ],
+    }));
+  }
+  writeFileSync(path.join(auditDir, `${lrq}.jsonl`), lines.join('\n') + '\n');
+}
+
+test('scanStuckMergeAgentDispatches surfaces a stuck dispatch even when watcher hasn\'t revisited the PR', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  buildAuditFile(hqRoot, STUCK_LRQ, 6);
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot,
+    hqPath: null, // skip probe — fall through to refusal-count classification
+    execFileImpl: null,
+    now: NOW,
+  });
+
+  assert.equal(reports.length, 1, 'one stuck dispatch should be detected');
+  const r = reports[0];
+  assert.equal(r.repo, 'laceyenterprises/agent-os');
+  assert.equal(r.prNumber, 719);
+  assert.equal(r.launchRequestId, STUCK_LRQ);
+  assert.equal(r.stuckDetail.refusalCount, 6);
+  assert.ok(
+    r.stuckDetail.stuckForMinutes >= 40,
+    `expected stuckForMinutes >= 40, got ${r.stuckDetail.stuckForMinutes}`
+  );
+  assert.equal(r.stuckDetail.primaryReason, 'memory_pressure_elevated');
+});
+
+test('scanStuckMergeAgentDispatches skips dispatches with completed label removal', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  buildAuditFile(hqRoot, STUCK_LRQ, 6);
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  // Manually mutate the dispatch record to mark cleanup-as-removed —
+  // the watcher's lifecycle path does this on PR merge/close.
+  const dispatchDir = path.join(rootDir, 'data', 'follow-up-jobs', 'merge-agent-dispatches');
+  for (const name of readdirSync(dispatchDir)) {
+    const fpath = path.join(dispatchDir, name);
+    const doc = JSON.parse(readFileSync(fpath, 'utf8'));
+    doc.labelRemoval = { removed: true, attemptedAt: '2026-05-19T03:25:00Z' };
+    writeFileSync(fpath, JSON.stringify(doc, null, 2));
+  }
+
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot,
+    hqPath: null,
+    execFileImpl: null,
+    now: NOW,
+  });
+
+  assert.equal(reports.length, 0, 'completed cleanups should be skipped');
+});
+
+test('scanStuckMergeAgentDispatches returns empty when hqRoot is missing (OSS-safe)', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot: null,
+    now: NOW,
+  });
+
+  assert.equal(reports.length, 0, 'no hqRoot = no audit-log path; fail closed');
+});

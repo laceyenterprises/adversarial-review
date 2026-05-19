@@ -3709,6 +3709,68 @@ test('cancelMergeAgentDispatchOnMerge removes the label after a terminal cancel 
   assert.equal(result.retryable, false);
 });
 
+test('cancelMergeAgentDispatchOnMerge treats "already terminal" stdout JSON as terminal (2026-05-19 fix)', async () => {
+  // 2026-05-19 incident: `hq dispatch cancel` for an already-terminal LRQ
+  // exits non-zero with the explanation
+  //   {"ok":false,"reason":"already terminal (status=failed)","currentStatus":"failed"}
+  // on STDOUT (not stderr). The watcher's err.message was the bare
+  // "Command failed: hq dispatch cancel <lrq>" — the old regex didn't
+  // match "already terminal", so every retry tick logged retryable=true
+  // and the cancel loop never converged. Fix: parse the structured
+  // stdout via isTerminalMergeAgentCancelDetail.
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: '2026-05-19T02:47:02.429Z',
+    prompt: '',
+    dispatchId: 'lrq_069112b8-68a3-48d8-acac-46c026c2349c',
+    launchRequestId: 'lrq_069112b8-68a3-48d8-acac-46c026c2349c',
+    trigger: null,
+  });
+
+  let labelRemoved = false;
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => {
+      labelRemoved = true;
+      return { stdout: '', stderr: '' };
+    },
+    hqExecFileImpl: async () => {
+      // Simulate the actual `hq dispatch cancel` behavior: exit non-zero
+      // with structured JSON on stdout (not stderr) explaining the LRQ
+      // is already terminal.
+      const err = new Error('Command failed: hq dispatch cancel lrq_069112b8-...');
+      err.code = 1;
+      err.stdout = JSON.stringify({
+        ok: false,
+        reason: 'already terminal (status=failed)',
+        currentStatus: 'failed',
+      });
+      err.stderr = '';
+      throw err;
+    },
+    now: '2026-05-19T03:30:00.000Z',
+  });
+
+  assert.equal(result.cancelled, false);
+  // err.message ("Command failed: …") doesn't contain "already terminal",
+  // but the structured stdout does. The classifier must read stdout.
+  assert.equal(result.cleanupComplete, true, 'cleanup must converge on terminal LRQ');
+  assert.equal(result.retryable, false, 'must NOT retry — LRQ is already terminal');
+  assert.equal(labelRemoved, true);
+  assert.equal(result.labelRemoved, true);
+  // Result fields the proactive-stuck-scan + log surfacing depend on.
+  assert.ok(result.cancelStdout && result.cancelStdout.includes('already terminal'),
+    'cancelStdout must surface structured cancel response');
+});
+
 test('cancelMergeAgentDispatchOnMerge keeps the label when cancel fails transiently', async () => {
   const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));

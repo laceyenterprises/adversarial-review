@@ -614,6 +614,15 @@ test('backfill recovers codex exec token total and session id from worker log', 
     'OpenAI Codex v0.130.0',
     'workdir: /tmp/example',
     'session id: 019e3ebb-58d0-7061-ab5b-b690cf4df3af',
+    JSON.stringify({
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 1000,
+        cached_input_tokens: 400,
+        output_tokens: 25,
+        total_tokens: 1025,
+      },
+    }),
     'tokens used',
     '287,605',
     '',
@@ -651,7 +660,10 @@ test('backfill recovers codex exec token total and session id from worker log', 
     ensureReviewStateSchema(db);
     const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 48').get();
     const metadata = JSON.parse(row.metadata_json);
-    assert.equal(row.token_total, 287605);
+    assert.equal(row.token_input, 1000);
+    assert.equal(row.token_output, 25);
+    assert.equal(row.token_cache_read, 400);
+    assert.equal(row.token_total, 1025);
     assert.equal(row.token_source, 'codex-worker-log');
     assert.equal(metadata.transcriptSessionId, '019e3ebb-58d0-7061-ab5b-b690cf4df3af');
     assert.equal(metadata.workerLogPath, logPath);

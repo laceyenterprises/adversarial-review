@@ -1145,7 +1145,7 @@ async function spawnReviewer({
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
     try {
       const endedAt = new Date().toISOString();
-      const tokenUsage = readBestReviewerEvidenceTokenUsage({
+      const tokenUsage = result.tokenUsage || readBestReviewerEvidenceTokenUsage({
         adapterSessionKey: result.reattachToken || reviewerSessionUuid,
         sessionKeys: [
           reviewerSessionUuid,

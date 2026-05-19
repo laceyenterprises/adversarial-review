@@ -715,9 +715,10 @@ function readCodexWorkerLogTokenUsage(logPath) {
   } catch {
     return null;
   }
+  const jsonUsage = readCodexWorkerLogJsonTokenUsage(text);
   const tokenMatch = text.match(/(?:^|\n)[^\S\r\n]*tokens used(?:[^\S\r\n]+|\r?\n[^\S\r\n]*)([\d,]+)/i);
-  if (!tokenMatch) return null;
-  const usage = normalizeTokenUsage({
+  if (!jsonUsage && !tokenMatch) return null;
+  const usage = jsonUsage || normalizeTokenUsage({
     total: tokenMatch[1].replaceAll(',', ''),
     source: 'codex-worker-log',
   });
@@ -728,6 +729,34 @@ function readCodexWorkerLogTokenUsage(logPath) {
     adapterSessionKey: sessionMatch?.[1] || null,
     transcriptPath: logPath,
   };
+}
+
+function readCodexWorkerLogJsonTokenUsage(text) {
+  let tokenUsage = null;
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed'))) continue;
+    let item;
+    try {
+      item = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const total = item.type === 'turn.completed'
+      ? item.usage
+      : (
+          item.type === 'event_msg' && item.payload?.type === 'token_count'
+            ? item.payload?.info?.total_token_usage
+            : null
+        );
+    const usage = tokenUsageFromCodexTotal(total || null);
+    if (usage) {
+      tokenUsage = {
+        ...usage,
+        source: 'codex-worker-log',
+      };
+    }
+  }
+  return tokenUsage;
 }
 
 function defaultCodexSessionRoots({ env = process.env } = {}) {

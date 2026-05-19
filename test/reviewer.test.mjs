@@ -463,6 +463,7 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
     'exec',
     '--dangerously-bypass-approvals-and-sandbox',
     '--ephemeral',
+    '--json',
     '--output-last-message',
     outputPath,
     '--',

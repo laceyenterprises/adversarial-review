@@ -1481,6 +1481,7 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
       'exec',
       '--dangerously-bypass-approvals-and-sandbox',
       '--ephemeral',
+      '--json',
       '--output-last-message',
       outputPath,
       '-',

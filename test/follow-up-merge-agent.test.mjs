@@ -1098,16 +1098,26 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
   assert.equal(result.launchRequestId, 'lrq_456');
   assert.equal(listMergeAgentDispatches(rootDir).length, 1);
   assert.equal(hqCalls[0].cmd, 'hq');
-  assert.deepEqual(hqCalls[0].args.slice(0, 15), [
+  assert.deepEqual(hqCalls[0].args.slice(0, 17), [
     'dispatch',
     '--worker-class', 'merge-agent',
     '--task-kind', 'merge',
+    '--priority', 'critical',
     '--repo', 'agent-os',
     '--pr', '401',
     '--ticket', 'PR-401',
     '--parent-session', 'session:test:merge-watcher',
     '--project', 'merge-project',
   ]);
+  // Regression guard for 2026-05-19 PR #719: merge-agent was stuck in
+  // `requested` for 30+ min, refused every admission tick for
+  // `refuse_admit_memory_pressure`. The fix is the `--priority critical`
+  // flag above — DO NOT remove it. The critical lane bypasses memory-
+  // pressure refusals via HQ_PRIORITY_LANE_CAPACITY (reserved capacity=1).
+  assert.ok(
+    hqCalls[0].args.includes('--priority') && hqCalls[0].args.includes('critical'),
+    'merge-agent must dispatch on the critical priority lane'
+  );
 });
 
 test('dispatchMergeAgentForPR tears down terminal original worker before merge-agent dispatch', async () => {

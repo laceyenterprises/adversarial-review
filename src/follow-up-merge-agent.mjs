@@ -2219,10 +2219,31 @@ async function dispatchMergeAgentForPR({
   const prompt = buildMergeAgentPrompt(job, { trigger });
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
 
+  // Dispatch merge-agent on the `critical` priority lane.
+  //
+  // Why: the merge-agent is the convergence layer of the entire pipeline. It is
+  // small-footprint and, on success, FREES memory by tearing down the source
+  // worker. Running it at `normal` priority means it gets refused with
+  // `refuse_admit_memory_pressure` whenever the fleet's pressure level is
+  // elevated — which is the exact moment merge-agents are most needed (because
+  // the only way to relieve pressure is to merge work in flight).
+  //
+  // Observed 2026-05-19: PR #719 merge-agent stuck in `requested` for 30+ min
+  // across 4+ admission ticks, all refused for memory pressure at freeMB=51-60,
+  // swap 88-94%. 2/2 merge-agent dispatches on that day were refused; 0
+  // admitted. The watcher recorded the dispatch + applied the
+  // `merge-agent-dispatched` label, but the worker never ran.
+  //
+  // The `critical` lane has a reserved capacity (`HQ_PRIORITY_LANE_CAPACITY`,
+  // default 1) that bypasses memory-pressure refusals without preempting
+  // existing workers. Merge-agent runs are intentionally serialized in
+  // practice (we don't run multiple merge-agents in parallel against the same
+  // PR), so the capacity=1 reservation is a natural fit.
   const args = [
     'dispatch',
     '--worker-class', 'merge-agent',
     '--task-kind', 'merge',
+    '--priority', 'critical',
     '--repo', repo.split('/')[1] || repo,
     '--pr', String(prNumber),
     '--ticket', `PR-${prNumber}`,

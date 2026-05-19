@@ -1811,64 +1811,6 @@ async function pollOnce(
 
   await retryPendingMergeAgentLifecycleCleanups();
 
-  // Proactive stuck-merge-agent scan — independent of PR revisit timing.
-  // The existing 30-min stuck Sentinel alert only fires when the watcher
-  // happens to revisit a PR with `decision='skip-already-dispatched'` AT
-  // a moment when the LRQ is still stuck. PRs that admit between two
-  // watcher ticks silently skip the alert window. 2026-05-19 PR #719:
-  // 33-minute memory-pressure stall, no stuck alert ever fired.
-  //
-  // This scan walks every recorded dispatch each poll, applies the same
-  // stale-classification rules, and surfaces any stuck dispatch through
-  // the same Sentinel alert path (debounced by the existing state files).
-  try {
-    const stuckReports = scanStuckMergeAgentDispatches({
-      rootDir: ROOT,
-      hqPath: process.env.HQ_BIN || 'hq',
-      execFileImpl: execFileAsync,
-    });
-    for (const report of stuckReports) {
-      // Synthesize a `dispatched`-shaped object so the existing Sentinel
-      // helper accepts it without modification. The helper reads
-      // `dispatched.stuckDetail` (with `stuckDetail.launchRequestId`
-      // surfaced for debounce keying).
-      const dispatched = {
-        decision: 'skip-already-dispatched',
-        stuckDetail: report.stuckDetail,
-        launchRequestId: report.launchRequestId,
-      };
-      console.log(
-        `[watcher] proactive-stuck-scan ${report.repo}#${report.prNumber}: `
-        + `lrq=${report.launchRequestId} `
-        + `stuck=${report.stuckDetail.stuckForMinutes}min `
-        + `refusals=${report.stuckDetail.refusalCount} `
-        + `primary=${report.stuckDetail.primaryReason || 'unknown'}`
-      );
-      if (report.stuckDetail.stuckForMinutes >= 30) {
-        try {
-          await maybeFireMergeAgentStuckAlert({
-            rootDir: ROOT,
-            repoPath: report.repo,
-            prNumber: report.prNumber,
-            dispatched,
-            deliverAlertFn: defaultDeliverAlert,
-            logger: console,
-          });
-        } catch (alertErr) {
-          console.error(
-            `[watcher] proactive-stuck-scan alert delivery failed for `
-            + `${report.repo}#${report.prNumber}: ${alertErr?.message || alertErr}`
-          );
-        }
-      }
-    }
-  } catch (scanErr) {
-    // Stay non-fatal: a scan failure must never crash the watcher loop.
-    console.error(
-      `[watcher] proactive-stuck-scan raised: ${scanErr?.message || scanErr}`
-    );
-  }
-
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit, operatorSurface);
 
@@ -1920,6 +1862,7 @@ async function pollOnce(
     });
 
     let subjectRefs;
+    const activeMergeAgentPRs = [];
     try {
       subjectRefs = await subjectAdapter.discoverSubjects();
     } catch (err) {
@@ -1944,6 +1887,9 @@ async function pollOnce(
       const prLabelNames = (Array.isArray(subject.labels) ? subject.labels : [])
         .map((l) => (typeof l === 'string' ? l : l?.name || ''))
         .filter(Boolean);
+      if (prLabelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) {
+        activeMergeAgentPRs.push({ repo: repoPath, prNumber });
+      }
       if (staleDriftSkip) {
         console.log(staleDriftSkip.message);
         continue;
@@ -2430,6 +2376,54 @@ async function pollOnce(
         result,
         maxRemediationRounds,
       });
+    }
+
+    // Proactive stuck-merge-agent scan — independent of PR revisit timing.
+    // Scope only to PRs whose lifecycle is still active in this tick:
+    // current snapshots with `merge-agent-dispatched` plus unresolved
+    // durable cleanup records. Historical dispatches outside that set are
+    // intentionally ignored.
+    try {
+      const stuckReports = scanStuckMergeAgentDispatches({
+        rootDir: ROOT,
+        repo: repoPath,
+        activePRs: activeMergeAgentPRs,
+      });
+      for (const report of stuckReports) {
+        const dispatched = {
+          decision: 'skip-already-dispatched',
+          stuckDetail: report.stuckDetail,
+          launchRequestId: report.launchRequestId,
+        };
+        console.log(
+          `[watcher] proactive-stuck-scan ${report.repo}#${report.prNumber}: `
+          + `lrq=${report.launchRequestId} `
+          + `stuck=${report.stuckDetail.stuckForMinutes}min `
+          + `refusals=${report.stuckDetail.refusalCount} `
+          + `primary=${report.stuckDetail.primaryReason || 'unknown'}`
+        );
+        if (report.stuckDetail.stuckForMinutes >= 30) {
+          try {
+            await maybeFireMergeAgentStuckAlert({
+              rootDir: ROOT,
+              repoPath: report.repo,
+              prNumber: report.prNumber,
+              dispatched,
+              deliverAlertFn: defaultDeliverAlert,
+              logger: console,
+            });
+          } catch (alertErr) {
+            console.error(
+              `[watcher] proactive-stuck-scan alert delivery failed for `
+              + `${report.repo}#${report.prNumber}: ${alertErr?.message || alertErr}`
+            );
+          }
+        }
+      }
+    } catch (scanErr) {
+      console.error(
+        `[watcher] proactive-stuck-scan raised for ${repoPath}: ${scanErr?.message || scanErr}`
+      );
     }
   }
   } finally {

@@ -1201,53 +1201,72 @@ function describeStaleDispatch(recordedDispatch, {
 // review of `data/follow-up-jobs/merge-agent-dispatches/`. CLAUDE.md
 // memory `LAC-648` covers the related rate-limit cascade.
 //
-// This scan iterates every recorded merge-agent dispatch under
-// `data/follow-up-jobs/merge-agent-dispatches/`, applies the same
-// `describeStaleDispatch` classification, and surfaces the result.
-// Caller threads it through `maybeFireMergeAgentStuckAlert` for the
-// 30-min Sentinel route (debounce file ensures we don't alert spam).
+// This scan classifies only PRs still active in the merge-agent
+// lifecycle: ones whose current GitHub snapshot still carries the
+// watcher-owned `merge-agent-dispatched` label, plus any durable
+// lifecycle-cleanup records that have not converged yet. Historical
+// dispatch records for unrelated/completed PRs are ignored even if they
+// still carry old refusal audit rows.
 //
-// Cost: O(N) where N is the number of recorded dispatches (currently
-// 71 on the live system). Each iteration is a fs stat + JSON parse +
-// audit-file scan. At the watcher's 30-60s tick cadence this is ~1ms
-// per dispatch — acceptable.
+// We intentionally do NOT live-probe `hq dispatch status` here. The
+// proactive path runs inside the watcher loop, so serial `spawnSync`
+// fan-out would turn a degraded HQ/SQLite state into minutes of blocked
+// event-loop time. This path therefore relies only on the durable audit
+// log for a bounded set of known-active PRs.
 function scanStuckMergeAgentDispatches({
   rootDir,
+  repo = null,
   hqRoot = resolveHqRoot(process.env),
-  hqPath = null,
-  execFileImpl = null,
+  activePRs = [],
   now = Date.now(),
   minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
   listImpl = listMergeAgentDispatches,
+  listLifecycleCleanupsImpl = listMergeAgentLifecycleCleanups,
 } = {}) {
   if (!hqRoot) return [];
-  let dispatches;
+  const eligibleKeys = new Set();
+  for (const activePR of activePRs) {
+    if (!activePR?.repo || activePR?.prNumber == null) continue;
+    if (repo && activePR.repo !== repo) continue;
+    eligibleKeys.add(`${activePR.repo}#${Number(activePR.prNumber)}`);
+  }
   try {
-    dispatches = listImpl(rootDir);
+    for (const cleanup of listLifecycleCleanupsImpl(rootDir)) {
+      if (!cleanup?.repo || cleanup?.prNumber == null) continue;
+      if (repo && cleanup.repo !== repo) continue;
+      eligibleKeys.add(`${cleanup.repo}#${Number(cleanup.prNumber)}`);
+    }
   } catch {
     return [];
   }
-  const stuckReports = [];
+  if (eligibleKeys.size === 0) return [];
+  let dispatches;
+  try {
+    dispatches = listImpl(rootDir, repo ? { repo } : {});
+  } catch {
+    return [];
+  }
+  const latestByKey = new Map();
   for (const recordedDispatch of dispatches) {
+    if (!recordedDispatch?.repo || recordedDispatch?.prNumber == null) continue;
+    const key = `${recordedDispatch.repo}#${Number(recordedDispatch.prNumber)}`;
+    if (!eligibleKeys.has(key)) continue;
+    const previous = latestByKey.get(key);
+    const recordedAt = String(recordedDispatch.dispatchedAt || '');
+    const previousAt = String(previous?.dispatchedAt || '');
+    if (!previous || recordedAt > previousAt) {
+      latestByKey.set(key, recordedDispatch);
+    }
+  }
+  const stuckReports = [];
+  for (const recordedDispatch of latestByKey.values()) {
     if (!recordedDispatch || !recordedDispatch.launchRequestId) continue;
-    // Skip if a cleanup has already happened (cancelled / label-removed).
-    // The watcher's lifecycle-cleanup updates these fields when the PR
-    // merges or closes.
-    if (recordedDispatch.labelRemoval?.removed === true) continue;
     const stuck = describeStaleDispatch(recordedDispatch, {
       hqRoot,
       now,
       minAgeMinutes,
       minRefusals,
-      dispatchStateProbe: hqPath && execFileImpl
-        ? (lrqArg) => _probeDispatchStatusViaHq({
-            hqPath,
-            lrq: lrqArg,
-            execFileImpl,
-            env: process.env,
-          })
-        : null,
     });
     if (!stuck) continue;
     stuckReports.push({

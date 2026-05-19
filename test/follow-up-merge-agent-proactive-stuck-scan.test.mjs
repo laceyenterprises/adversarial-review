@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -41,6 +41,22 @@ function buildAuditFile(hqRoot, lrq, refusalCount) {
   writeFileSync(path.join(auditDir, `${lrq}.jsonl`), lines.join('\n') + '\n');
 }
 
+function writeLifecycleCleanup(rootDir, { repo, prNumber }) {
+  const cleanupDir = path.join(rootDir, 'data', 'follow-up-jobs', 'merge-agent-lifecycle-cleanups');
+  mkdirSync(cleanupDir, { recursive: true });
+  writeFileSync(
+    path.join(cleanupDir, `${repo.replace(/\//g, '__')}-pr-${prNumber}.json`),
+    JSON.stringify({
+      schemaVersion: 1,
+      repo,
+      prNumber,
+      transition: 'closed',
+      queuedAt: '2026-05-19T03:25:00Z',
+      lastResult: { cleanupComplete: false, retryable: true },
+    }, null, 2) + '\n'
+  );
+}
+
 test('scanStuckMergeAgentDispatches surfaces a stuck dispatch even when watcher hasn\'t revisited the PR', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -60,8 +76,7 @@ test('scanStuckMergeAgentDispatches surfaces a stuck dispatch even when watcher 
   const reports = scanStuckMergeAgentDispatches({
     rootDir,
     hqRoot,
-    hqPath: null, // skip probe — fall through to refusal-count classification
-    execFileImpl: null,
+    activePRs: [{ repo: 'laceyenterprises/agent-os', prNumber: 719 }],
     now: NOW,
   });
 
@@ -78,7 +93,7 @@ test('scanStuckMergeAgentDispatches surfaces a stuck dispatch even when watcher 
   assert.equal(r.stuckDetail.primaryReason, 'memory_pressure_elevated');
 });
 
-test('scanStuckMergeAgentDispatches skips dispatches with completed label removal', () => {
+test('scanStuckMergeAgentDispatches ignores historical dispatches without active lifecycle state', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   buildAuditFile(hqRoot, STUCK_LRQ, 6);
@@ -94,25 +109,81 @@ test('scanStuckMergeAgentDispatches skips dispatches with completed label remova
     trigger: 'final-pass-on-budget-exhausted',
   });
 
-  // Manually mutate the dispatch record to mark cleanup-as-removed —
-  // the watcher's lifecycle path does this on PR merge/close.
-  const dispatchDir = path.join(rootDir, 'data', 'follow-up-jobs', 'merge-agent-dispatches');
-  for (const name of readdirSync(dispatchDir)) {
-    const fpath = path.join(dispatchDir, name);
-    const doc = JSON.parse(readFileSync(fpath, 'utf8'));
-    doc.labelRemoval = { removed: true, attemptedAt: '2026-05-19T03:25:00Z' };
-    writeFileSync(fpath, JSON.stringify(doc, null, 2));
-  }
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot,
+    now: NOW,
+  });
+
+  assert.equal(reports.length, 0, 'historical dispatches should not be rescanned forever');
+});
+
+test('scanStuckMergeAgentDispatches includes unresolved lifecycle cleanups even without active label snapshot', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  buildAuditFile(hqRoot, STUCK_LRQ, 6);
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+  writeLifecycleCleanup(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+  });
 
   const reports = scanStuckMergeAgentDispatches({
     rootDir,
     hqRoot,
-    hqPath: null,
-    execFileImpl: null,
     now: NOW,
   });
 
-  assert.equal(reports.length, 0, 'completed cleanups should be skipped');
+  assert.equal(reports.length, 1, 'unresolved lifecycle cleanup should keep the dispatch eligible');
+});
+
+test('scanStuckMergeAgentDispatches only inspects the latest dispatch for an active PR', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const oldLrq = 'lrq_11111111-1111-1111-1111-111111111111';
+  const newLrq = 'lrq_22222222-2222-2222-2222-222222222222';
+  buildAuditFile(hqRoot, oldLrq, 6);
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'old-head',
+  }, {
+    dispatchedAt: '2026-05-19T01:00:00.000Z',
+    prompt: '',
+    dispatchId: oldLrq,
+    launchRequestId: oldLrq,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'new-head',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: newLrq,
+    launchRequestId: newLrq,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot,
+    activePRs: [{ repo: 'laceyenterprises/agent-os', prNumber: 719 }],
+    now: NOW,
+  });
+
+  assert.equal(reports.length, 0, 'the latest dispatch has no refusal history and should win');
 });
 
 test('scanStuckMergeAgentDispatches returns empty when hqRoot is missing (OSS-safe)', () => {

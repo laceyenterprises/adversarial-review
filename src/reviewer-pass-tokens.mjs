@@ -448,6 +448,54 @@ function readCodexTranscriptTokenUsage({
   };
 }
 
+function readClaudeTranscriptTokenUsage({
+  adapterSessionKey = null,
+  sessionKeys = [],
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  sessionRoots = [],
+  transcriptSummaryCache = null,
+  transcriptPathCache = null,
+  rootDir = process.cwd(),
+} = {}) {
+  const keys = new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String));
+  const workspacePaths = normalizedWorkspacePaths(workspacePath, rootDir);
+  if (keys.size === 0 && workspacePaths.length === 0) return null;
+  if (sessionRoots.length === 0) return null;
+  const transcriptPaths = listClaudeTranscriptPaths(sessionRoots, transcriptPathCache);
+  const matches = [];
+  for (const transcriptPath of transcriptPaths) {
+    const summary = readCachedClaudeTranscriptSummary(transcriptPath, transcriptSummaryCache);
+    if (!summary?.tokenUsage) continue;
+    const sessionMatched = summary.sessionId && keys.has(String(summary.sessionId));
+    const workspaceMatched = summary.cwd && workspacePaths.includes(resolve(summary.cwd));
+    if (!sessionMatched && !workspaceMatched) continue;
+    if (!timestampOverlapsWindow(summary.startedAt, summary.endedAt, startedAt, endedAt)) continue;
+    matches.push({
+      transcriptPath,
+      sessionId: summary.sessionId,
+      usage: summary.tokenUsage,
+    });
+  }
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  return {
+    ...match.usage,
+    source: 'claude-transcript',
+    adapterSessionKey: match.sessionId || null,
+    transcriptPath: match.transcriptPath,
+  };
+}
+
+function readCachedClaudeTranscriptSummary(transcriptPath, cache) {
+  if (!cache) return readClaudeTranscriptSummary(transcriptPath);
+  if (!cache.has(transcriptPath)) {
+    cache.set(transcriptPath, readClaudeTranscriptSummary(transcriptPath));
+  }
+  return cache.get(transcriptPath);
+}
+
 function readCachedCodexTranscriptSummary(transcriptPath, cache) {
   if (!cache) return readCodexTranscriptSummary(transcriptPath);
   if (!cache.has(transcriptPath)) {
@@ -482,6 +530,21 @@ function listCodexTranscriptPaths(sessionRoots, { startedAt = null, endedAt = nu
     for (const dir of dateDirs.length > 0 ? dateDirs : [resolvedRoot]) {
       addJsonlFilesRecursively(dir, paths, seen);
     }
+  }
+  if (cacheKey) cache.set(cacheKey, paths);
+  return paths;
+}
+
+function listClaudeTranscriptPaths(sessionRoots, cache = null) {
+  const cacheKey = cache
+    ? JSON.stringify({ roots: sessionRoots.map((root) => resolve(String(root))) })
+    : null;
+  if (cacheKey && cache.has(cacheKey)) return cache.get(cacheKey);
+  const paths = [];
+  const seen = new Set();
+  for (const root of sessionRoots) {
+    if (!root) continue;
+    addJsonlFilesRecursively(resolve(String(root)), paths, seen);
   }
   if (cacheKey) cache.set(cacheKey, paths);
   return paths;
@@ -567,6 +630,59 @@ function readCodexTranscriptSummary(transcriptPath) {
   return { sessionId, cwd, startedAt, endedAt, tokenUsage };
 }
 
+function readClaudeTranscriptSummary(transcriptPath) {
+  let sessionId = null;
+  let cwd = null;
+  let startedAt = null;
+  let endedAt = null;
+  const totals = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  };
+  let sawUsage = false;
+  try {
+    for (const line of readFileSync(transcriptPath, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let item;
+      try {
+        item = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const timestamp = item.timestamp || item.message?.timestamp || null;
+      if (timestamp) {
+        startedAt ||= timestamp;
+        endedAt = timestamp;
+      }
+      sessionId ||= item.sessionId || item.message?.sessionId || null;
+      cwd ||= item.cwd || item.message?.cwd || null;
+      const usage = item.message?.usage || item.usage || null;
+      if (usage && typeof usage === 'object') {
+        const normalized = tokenUsageFromClaudeUsage(usage);
+        if (normalized) {
+          sawUsage = true;
+          totals.input += normalized.input || 0;
+          totals.output += normalized.output || 0;
+          totals.cacheRead += normalized.cacheRead || 0;
+          totals.cacheWrite += normalized.cacheWrite || 0;
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  const tokenUsage = sawUsage
+    ? normalizeTokenUsage({
+      ...totals,
+      total: totals.input + totals.output + totals.cacheRead + totals.cacheWrite,
+      source: 'claude-transcript',
+    })
+    : null;
+  return { sessionId, cwd, startedAt, endedAt, tokenUsage };
+}
+
 function tokenUsageFromCodexTotal(total) {
   if (!total || typeof total !== 'object') return null;
   return normalizeTokenUsage({
@@ -576,6 +692,18 @@ function tokenUsageFromCodexTotal(total) {
     cacheWrite: 0,
     total: total.total_tokens,
     source: 'codex-transcript',
+  });
+}
+
+function tokenUsageFromClaudeUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  return normalizeTokenUsage({
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cacheRead: usage.cache_read_input_tokens,
+    cacheWrite: usage.cache_creation_input_tokens,
+    total: usage.total_tokens,
+    source: 'claude-transcript',
   });
 }
 
@@ -600,6 +728,107 @@ function readCodexWorkerLogTokenUsage(logPath) {
     adapterSessionKey: sessionMatch?.[1] || null,
     transcriptPath: logPath,
   };
+}
+
+function defaultCodexSessionRoots({ env = process.env } = {}) {
+  return uniqueExistingPaths([
+    ...(env.CODEX_SESSION_ROOTS ? env.CODEX_SESSION_ROOTS.split(':') : []),
+    env.CODEX_SESSION_ROOT,
+    join(homedir(), '.codex', 'sessions'),
+  ]);
+}
+
+function defaultClaudeSessionRoots({ env = process.env } = {}) {
+  return uniqueExistingPaths([
+    ...(env.CLAUDE_SESSION_ROOTS ? env.CLAUDE_SESSION_ROOTS.split(':') : []),
+    env.CLAUDE_SESSION_ROOT,
+    env.CLAUDE_PROJECTS_ROOT,
+    join(homedir(), '.claude', 'projects'),
+  ]);
+}
+
+function uniqueExistingPaths(paths) {
+  const result = [];
+  const seen = new Set();
+  for (const path of paths) {
+    if (!path) continue;
+    const resolved = resolve(String(path));
+    if (seen.has(resolved) || !existsSync(resolved)) continue;
+    seen.add(resolved);
+    result.push(resolved);
+  }
+  return result;
+}
+
+function readBestReviewerEvidenceTokenUsage({
+  workerRunId = null,
+  launchRequestId = null,
+  adapterSessionKey = null,
+  sessionKeys = [],
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  ledgerDbPath = null,
+  rootDir = process.cwd(),
+  reviewerModel = null,
+  codexSessionRoots = null,
+  claudeSessionRoots = null,
+  transcriptFallback = true,
+  workerLogPath = null,
+} = {}) {
+  const ledgerUsage = readWorkerRunTokenUsage({
+    workerRunId,
+    launchRequestId,
+    ledgerDbPath,
+    rootDir,
+  }) || readReviewerSessionTokenUsage({
+    adapterSessionKey,
+    sessionKeys,
+    workspacePath,
+    startedAt,
+    endedAt,
+    ledgerDbPath,
+    rootDir,
+  });
+  if (ledgerUsage) return ledgerUsage;
+  if (transcriptFallback) {
+    const shouldUseDefaults = shouldUseDefaultTranscriptRoots(rootDir);
+    const resolvedCodexSessionRoots = codexSessionRoots || (shouldUseDefaults ? defaultCodexSessionRoots() : []);
+    const resolvedClaudeSessionRoots = claudeSessionRoots || (shouldUseDefaults ? defaultClaudeSessionRoots() : []);
+    const transcriptReaders = normalizeReviewerClass(reviewerModel) === 'claude'
+      ? [readClaudeTranscriptTokenUsage, readCodexTranscriptTokenUsage]
+      : [readCodexTranscriptTokenUsage, readClaudeTranscriptTokenUsage];
+    for (const reader of transcriptReaders) {
+      const usage = reader === readClaudeTranscriptTokenUsage
+        ? reader({
+          adapterSessionKey,
+          sessionKeys,
+          workspacePath,
+          startedAt,
+          endedAt,
+          sessionRoots: resolvedClaudeSessionRoots,
+          rootDir,
+        })
+        : reader({
+          workspacePath,
+          startedAt,
+          endedAt,
+          sessionRoots: resolvedCodexSessionRoots,
+          rootDir,
+        });
+      if (usage) return usage;
+    }
+  }
+  return readCodexWorkerLogTokenUsage(workerLogPath);
+}
+
+function shouldUseDefaultTranscriptRoots(rootDir) {
+  if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '1') return true;
+  if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '0') return false;
+  const resolved = resolve(String(rootDir || ''));
+  return resolved === '/Users/airlock/agent-os/tools/adversarial-review'
+    || resolved === '/Users/placey/agent-os-trees/codex/agent-os/tools/adversarial-review'
+    || resolved === '/Users/placey/agent-os-trees/claude-code/agent-os/tools/adversarial-review';
 }
 
 function timestampOverlapsWindow(startedAt, endedAt, windowStart, windowEnd) {
@@ -703,6 +932,7 @@ function readHistoricalFollowUpJobs(rootDir) {
 function backfillReviewerPasses(rootDir, {
   ledgerDbPath = null,
   codexSessionRoots = [],
+  claudeSessionRoots = [],
   transcriptFallback = false,
   now = () => new Date().toISOString(),
   dryRun = false,
@@ -714,10 +944,13 @@ function backfillReviewerPasses(rootDir, {
   let tokenMatched = 0;
   let workerLogMatched = 0;
   let transcriptMatched = 0;
+  let claudeTranscriptMatched = 0;
   let skipped = 0;
   const uniquePassKeys = new Set();
-  const transcriptSummaryCache = new Map();
-  const transcriptPathCache = new Map();
+  const codexTranscriptSummaryCache = new Map();
+  const codexTranscriptPathCache = new Map();
+  const claudeTranscriptSummaryCache = new Map();
+  const claudeTranscriptPathCache = new Map();
   for (const { job, jobPath } of jobs) {
     const worker = historicalWorkerForJob(job);
     const repo = job?.repo;
@@ -754,19 +987,24 @@ function backfillReviewerPasses(rootDir, {
       endedAt,
       ledgerDbPath,
       rootDir,
-    }) || (transcriptFallback ? readCodexTranscriptTokenUsage({
+    }) || (transcriptFallback ? readTranscriptTokenUsageForModel({
+      reviewerModel: worker.model || worker.workerClass,
       workspacePath,
       startedAt,
       endedAt,
-      sessionRoots: codexSessionRoots,
-      transcriptSummaryCache,
-      transcriptPathCache,
+      codexSessionRoots,
+      claudeSessionRoots,
+      codexTranscriptSummaryCache,
+      codexTranscriptPathCache,
+      claudeTranscriptSummaryCache,
+      claudeTranscriptPathCache,
       rootDir,
     }) : null) || readCodexWorkerLogTokenUsage(worker.logPath);
     if (usage) {
       tokenMatched += 1;
       if (usage.source === 'codex-worker-log') workerLogMatched += 1;
       if (usage.source === 'codex-transcript') transcriptMatched += 1;
+      if (usage.source === 'claude-transcript') claudeTranscriptMatched += 1;
     }
     wouldInsertOrUpdate += 1;
     if (dryRun) continue;
@@ -819,8 +1057,54 @@ function backfillReviewerPasses(rootDir, {
     tokenMatched,
     workerLogMatched,
     transcriptMatched,
+    claudeTranscriptMatched,
     skipped,
   };
+}
+
+function readTranscriptTokenUsageForModel({
+  reviewerModel = null,
+  adapterSessionKey = null,
+  sessionKeys = [],
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  codexSessionRoots = [],
+  claudeSessionRoots = [],
+  codexTranscriptSummaryCache = null,
+  codexTranscriptPathCache = null,
+  claudeTranscriptSummaryCache = null,
+  claudeTranscriptPathCache = null,
+  rootDir = process.cwd(),
+} = {}) {
+  const readers = normalizeReviewerClass(reviewerModel) === 'claude'
+    ? ['claude', 'codex']
+    : ['codex', 'claude'];
+  for (const reader of readers) {
+    const usage = reader === 'claude'
+      ? readClaudeTranscriptTokenUsage({
+        adapterSessionKey,
+        sessionKeys,
+        workspacePath,
+        startedAt,
+        endedAt,
+        sessionRoots: claudeSessionRoots,
+        transcriptSummaryCache: claudeTranscriptSummaryCache,
+        transcriptPathCache: claudeTranscriptPathCache,
+        rootDir,
+      })
+      : readCodexTranscriptTokenUsage({
+        workspacePath,
+        startedAt,
+        endedAt,
+        sessionRoots: codexSessionRoots,
+        transcriptSummaryCache: codexTranscriptSummaryCache,
+        transcriptPathCache: codexTranscriptPathCache,
+        rootDir,
+      });
+    if (usage) return usage;
+  }
+  return null;
 }
 
 function latestRemediationRound(job) {
@@ -854,6 +1138,8 @@ export {
   normalizeReviewerClass,
   normalizeTokenUsage,
   parseSince,
+  readBestReviewerEvidenceTokenUsage,
+  readClaudeTranscriptTokenUsage,
   readCodexTranscriptTokenUsage,
   readCodexWorkerLogTokenUsage,
   readReviewerSessionTokenUsage,

@@ -10,6 +10,8 @@ import {
   backfillReviewerPasses,
   beginReviewerPass,
   completeReviewerPass,
+  readBestReviewerEvidenceTokenUsage,
+  readClaudeTranscriptTokenUsage,
   readCodexTranscriptTokenUsage,
   readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,
@@ -478,6 +480,125 @@ test('codex transcript fallback links token counts by workspace cwd and launch w
     assert.equal(row.token_total, 366);
     assert.equal(row.token_source, 'codex-transcript');
     assert.equal(metadata.transcriptSessionId, 'codex-session-1');
+    assert.equal(metadata.transcriptPath, transcriptPath);
+  } finally {
+    db.close();
+  }
+});
+
+test('claude transcript fallback links input output and cache token counts', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-claude-transcript');
+  const claudeRoot = path.join(rootDir, 'claude-projects');
+  const projectDir = path.join(claudeRoot, '-tmp-job-claude-transcript');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(projectDir, { recursive: true });
+  const transcriptPath = path.join(projectDir, 'claude-session-1.jsonl');
+  writeFileSync(transcriptPath, [
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2026-05-18T05:00:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-session-1',
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-05-18T05:01:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-session-1',
+      message: {
+        usage: {
+          input_tokens: 10,
+          cache_creation_input_tokens: 20,
+          cache_read_input_tokens: 30,
+          output_tokens: 40,
+        },
+      },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-05-18T05:02:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-session-1',
+      message: {
+        usage: {
+          input_tokens: 1,
+          cache_creation_input_tokens: 2,
+          cache_read_input_tokens: 3,
+          output_tokens: 4,
+        },
+      },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const direct = readClaudeTranscriptTokenUsage({
+    workspacePath: workspace,
+    startedAt: '2026-05-18T05:00:00.000Z',
+    endedAt: '2026-05-18T05:03:00.000Z',
+    sessionRoots: [claudeRoot],
+    rootDir,
+  });
+  assert.equal(direct.input, 11);
+  assert.equal(direct.output, 44);
+  assert.equal(direct.cacheRead, 33);
+  assert.equal(direct.cacheWrite, 22);
+  assert.equal(direct.total, 110);
+  assert.equal(direct.source, 'claude-transcript');
+
+  const preferred = readBestReviewerEvidenceTokenUsage({
+    workspacePath: workspace,
+    startedAt: '2026-05-18T05:00:00.000Z',
+    endedAt: '2026-05-18T05:03:00.000Z',
+    reviewerModel: 'claude-code',
+    claudeSessionRoots: [claudeRoot],
+    codexSessionRoots: [],
+    rootDir,
+  });
+  assert.equal(preferred.source, 'claude-transcript');
+  assert.equal(preferred.cacheRead, 33);
+
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'job-claude-transcript.json'), JSON.stringify({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 49,
+    jobId: 'job-claude-transcript',
+    status: 'completed',
+    completedAt: '2026-05-18T05:03:00.000Z',
+    remediationPlan: {
+      currentRound: 1,
+      rounds: [{
+        round: 1,
+        worker: {
+          model: 'claude-code',
+          spawnedAt: '2026-05-18T05:00:00.000Z',
+          workspaceDir: workspace,
+        },
+      }],
+    },
+  }), 'utf8');
+
+  const result = backfillReviewerPasses(rootDir, {
+    claudeSessionRoots: [claudeRoot],
+    transcriptFallback: true,
+  });
+
+  assert.equal(result.tokenMatched, 1);
+  assert.equal(result.claudeTranscriptMatched, 1);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number = 49').get();
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(row.reviewer_model, 'claude-code');
+    assert.equal(row.token_input, 11);
+    assert.equal(row.token_output, 44);
+    assert.equal(row.token_cache_read, 33);
+    assert.equal(row.token_cache_write, 22);
+    assert.equal(row.token_total, 110);
+    assert.equal(row.token_source, 'claude-transcript');
+    assert.equal(metadata.transcriptSessionId, 'claude-session-1');
     assert.equal(metadata.transcriptPath, transcriptPath);
   } finally {
     db.close();

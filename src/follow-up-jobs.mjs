@@ -13,7 +13,7 @@ import { buildCodePrSubjectIdentity, buildDeliveryKey } from './identity-shapes.
 import {
   beginReviewerPass,
   completeReviewerPass,
-  readWorkerRunTokenUsage,
+  readBestReviewerEvidenceTokenUsage,
 } from './reviewer-pass-tokens.mjs';
 import {
   PUBLIC_REPLY_MAX_CHARS,
@@ -1585,9 +1585,14 @@ function recordRemediationPassTerminalSafe({ rootDir, job, worker = {}, status, 
   if (!rootDir || !shouldRecordRemediationPass(job, worker)) return;
   try {
     const launchRequestId = workerLaunchRequestId(job, worker);
-    const usage = readWorkerRunTokenUsage({
+    const usage = readBestReviewerEvidenceTokenUsage({
       workerRunId: worker.workerRunId || worker.runId || null,
       launchRequestId,
+      workspacePath: worker.workspaceDir || job.workspaceDir || null,
+      startedAt: worker.spawnedAt || job.claimedAt || job.createdAt || null,
+      endedAt,
+      reviewerModel: worker.model || worker.workerClass || job.reviewerModel || 'codex',
+      workerLogPath: worker.logPath || null,
       rootDir,
     });
     completeReviewerPass(rootDir, {
@@ -1603,6 +1608,9 @@ function recordRemediationPassTerminalSafe({ rootDir, job, worker = {}, status, 
       metadata: {
         jobId: job.jobId || null,
         launchRequestId,
+        transcriptPath: usage?.transcriptPath || null,
+        transcriptSessionId: usage?.adapterSessionKey || null,
+        workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
       },
     });
   } catch (err) {

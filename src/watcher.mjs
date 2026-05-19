@@ -31,7 +31,7 @@ import { ensureReviewStateSchema, openReviewStateDb, requestReviewRereview } fro
 import {
   beginReviewerPass,
   completeReviewerPass,
-  readReviewerSessionTokenUsage,
+  readBestReviewerEvidenceTokenUsage,
 } from './reviewer-pass-tokens.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
@@ -1145,7 +1145,7 @@ async function spawnReviewer({
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
     try {
       const endedAt = new Date().toISOString();
-      const tokenUsage = readReviewerSessionTokenUsage({
+      const tokenUsage = readBestReviewerEvidenceTokenUsage({
         adapterSessionKey: result.reattachToken || reviewerSessionUuid,
         sessionKeys: [
           reviewerSessionUuid,
@@ -1155,6 +1155,7 @@ async function spawnReviewer({
         workspacePath: workspacePath || null,
         startedAt,
         endedAt,
+        reviewerModel,
         rootDir: ROOT,
       });
       completeReviewerPass(ROOT, {

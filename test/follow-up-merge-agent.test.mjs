@@ -1184,6 +1184,74 @@ test('dispatchMergeAgentForPR retries without --priority when hq rejects the fla
   assert.equal(listMergeAgentDispatches(rootDir)[0].priorityFlagSupported, false);
 });
 
+test('dispatchMergeAgentForPR does not drop priority for unrelated hq parser errors', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
+
+  await assert.rejects(
+    dispatchMergeAgentForPR({
+      agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+      rootDir,
+      ...makeJob({
+        labels: [{ name: 'merge-agent-requested' }],
+        mergeAgentRequest: makeMergeAgentRequest(),
+        mergeable: 'CONFLICTING',
+      }),
+      execFileImpl: async (cmd, args) => {
+        hqCalls.push({ cmd, args });
+        const err = new Error(`Command failed: hq ${args.join(' ')}`);
+        err.code = 2;
+        err.stderr = 'hq: error: unknown project merge-project\n';
+        throw err;
+      },
+      dispatchRetryDelaysMs: [],
+      now: '2026-05-19T04:20:00.000Z',
+    }),
+    /unknown project merge-project/
+  );
+
+  assert.equal(hqCalls.length, 1);
+  assert.ok(hqCalls[0].args.includes('--priority'));
+  assert.equal(listMergeAgentDispatches(rootDir).length, 0);
+});
+
+test('dispatchMergeAgentForPR retries transient hq dispatch failures with the same args', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'CONFLICTING',
+    }),
+    execFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args: [...args] });
+      if (hqCalls.length < 3) {
+        const err = new Error('database is locked');
+        err.code = 'SQLITE_BUSY';
+        err.stderr = 'sqlite3.OperationalError: database is locked\n';
+        throw err;
+      }
+      return {
+        stdout: '{"dispatchId":"disp_after_retry","lrq":"lrq_after_retry"}\n',
+      };
+    },
+    dispatchRetryDelaysMs: [0, 0],
+    now: '2026-05-19T04:25:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(hqCalls.length, 3);
+  assert.deepEqual(hqCalls[0].args, hqCalls[1].args);
+  assert.deepEqual(hqCalls[1].args, hqCalls[2].args);
+  assert.ok(hqCalls[2].args.includes('--priority'));
+  assert.equal(result.launchRequestId, 'lrq_after_retry');
+  assert.equal(listMergeAgentDispatches(rootDir)[0].priorityFlagSupported, true);
+});
+
 test('dispatchMergeAgentForPR tears down terminal original worker before merge-agent dispatch', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));

@@ -32,6 +32,7 @@ const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', '
 const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
+const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WORKER_ID_CLASS_PREFIXES = [
   'claude-code',
@@ -102,7 +103,6 @@ const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
-const HQ_PRIORITY_FLAG_REJECTION_PATTERN = /\b(?:unrecognized|unknown)\b|\bno such option\b/i;
 
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
@@ -235,15 +235,45 @@ function formatExecFailure(command, err) {
   return augmented;
 }
 
+function errorDiagnosticLines(err) {
+  const primary = [err?.stderr, err?.stdout].filter(Boolean).join('\n');
+  const detail = primary || String(err?.message || '');
+  return detail
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+}
+
 function isUnsupportedHqPriorityFlagError(err) {
+  return errorDiagnosticLines(err).some((line) => {
+    if (!line.includes('--priority')) return false;
+    return /\b(unrecognized|unknown|no such|unexpected)\b.*\b(argument|option|flag|parameter)s?\b.*--priority\b/i.test(line)
+      || /\b(argument|option|flag|parameter)s?\b.*--priority\b.*\b(unrecognized|unknown|no such|unexpected)\b/i.test(line);
+  });
+}
+
+function isTransientHqDispatchError(err) {
+  if (isExecTimeout(err)) return true;
   const detail = [
+    err?.code,
     err?.message,
     err?.stderr,
     err?.stdout,
   ]
     .filter(Boolean)
-    .join('\n');
-  return detail.includes('--priority') && HQ_PRIORITY_FLAG_REJECTION_PATTERN.test(detail);
+    .join('\n')
+    .toLowerCase();
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eagain|epipe)\b/.test(detail)
+    || detail.includes('database is locked')
+    || detail.includes('sqlite_busy')
+    || detail.includes('resource temporarily unavailable')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable');
+}
+
+function sleep(ms) {
+  if (!ms) return Promise.resolve();
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function isExecTimeout(err) {
@@ -2042,6 +2072,7 @@ async function dispatchMergeAgentForPR({
   hqPath = DEFAULT_HQ_PATH,
   agentOsDetectImpl = detectAgentOsPresence,
   prepareOriginalWorkerImpl = prepareOriginalWorkerForMergeAgent,
+  dispatchRetryDelaysMs = HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS,
   logger = console,
   env = process.env,
 } = {}) {
@@ -2256,10 +2287,12 @@ async function dispatchMergeAgentForPR({
   // operator-requested stuck-branch path is the load-bearing case that needs
   // bypass semantics; broadening that escape hatch to every merge-agent launch
   // is not.
-  const args = [
+  const hqDispatchHeadArgs = [
     'dispatch',
     '--worker-class', 'merge-agent',
     '--task-kind', 'merge',
+  ];
+  const hqDispatchTailArgs = [
     '--repo', repo.split('/')[1] || repo,
     '--pr', String(prNumber),
     '--ticket', `PR-${prNumber}`,
@@ -2267,6 +2300,7 @@ async function dispatchMergeAgentForPR({
     '--project', hqProject,
     '--prompt', promptPath,
   ];
+  const args = [...hqDispatchHeadArgs, ...hqDispatchTailArgs];
   // Machine-readable trigger for the worker. The prompt also carries it
   // for human/agent readability, but adapters that branch on dispatch mode
   // should read the env var rather than parsing markdown.
@@ -2285,32 +2319,36 @@ async function dispatchMergeAgentForPR({
   let execResult;
   let priorityFlagSupported = true;
   const argsWithPriority = [
-    'dispatch',
-    '--worker-class', 'merge-agent',
-    '--task-kind', 'merge',
+    ...hqDispatchHeadArgs,
     '--priority', dispatchPriority,
-    ...args.slice(5),
+    ...hqDispatchTailArgs,
   ];
-  try {
-    execResult = await execFileImpl(resolvedHqPath, argsWithPriority, {
-      env: dispatchEnv,
-      maxBuffer: 5 * 1024 * 1024,
-      timeout: HQ_DISPATCH_TIMEOUT_MS,
-      killSignal: 'SIGTERM',
-    });
-  } catch (err) {
-    if (!isUnsupportedHqPriorityFlagError(err)) {
+  let activeArgs = argsWithPriority;
+  let transientRetryIndex = 0;
+  for (;;) {
+    try {
+      execResult = await execFileImpl(resolvedHqPath, activeArgs, {
+        env: dispatchEnv,
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: HQ_DISPATCH_TIMEOUT_MS,
+        killSignal: 'SIGTERM',
+      });
+      break;
+    } catch (err) {
+      if (activeArgs === argsWithPriority && isUnsupportedHqPriorityFlagError(err)) {
+        priorityFlagSupported = false;
+        activeArgs = args;
+        transientRetryIndex = 0;
+        continue;
+      }
+      if (isTransientHqDispatchError(err) && transientRetryIndex < dispatchRetryDelaysMs.length) {
+        const delayMs = Number(dispatchRetryDelaysMs[transientRetryIndex]) || 0;
+        transientRetryIndex += 1;
+        await sleep(delayMs);
+        continue;
+      }
       throw formatExecFailure('hq dispatch', err);
     }
-    priorityFlagSupported = false;
-    execResult = await execFileImpl(resolvedHqPath, args, {
-      env: dispatchEnv,
-      maxBuffer: 5 * 1024 * 1024,
-      timeout: HQ_DISPATCH_TIMEOUT_MS,
-      killSignal: 'SIGTERM',
-    }).catch((retryErr) => {
-      throw formatExecFailure('hq dispatch', retryErr);
-    });
   }
   const { stdout } = execResult;
   const parsed = parseMergeAgentDispatchOutput(stdout);

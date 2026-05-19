@@ -1150,6 +1150,40 @@ test('dispatchMergeAgentForPR uses the critical lane only for merge-agent-reques
   );
 });
 
+test('dispatchMergeAgentForPR retries without --priority when hq rejects the flag', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'CONFLICTING',
+    }),
+    execFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args });
+      if (hqCalls.length === 1) {
+        const err = new Error('hq: unrecognized arguments: --priority critical');
+        err.code = 2;
+        err.stderr = 'usage: hq dispatch\nhq: error: unrecognized arguments: --priority critical\n';
+        throw err;
+      }
+      return {
+        stdout: '{"dispatchId":"disp_legacy","lrq":"lrq_legacy"}\n',
+      };
+    },
+    now: '2026-05-19T04:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(hqCalls.length, 2);
+  assert.ok(hqCalls[0].args.includes('--priority'));
+  assert.ok(!hqCalls[1].args.includes('--priority'));
+  assert.equal(listMergeAgentDispatches(rootDir)[0].priority, 'critical');
+  assert.equal(listMergeAgentDispatches(rootDir)[0].priorityFlagSupported, false);
+});
+
 test('dispatchMergeAgentForPR tears down terminal original worker before merge-agent dispatch', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));

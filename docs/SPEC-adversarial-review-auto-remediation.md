@@ -227,7 +227,7 @@ The sanctioned operator override is `npm run retrigger-remediation` or the PR-si
 
 The pipeline closes the loop on a PR by handing it to a merge-agent once the adversarial review converges. The merge-agent runs in the host agent-os worker-pool, not in adversarial-review itself; adversarial-review's responsibility is to (a) decide when to dispatch, (b) build the dispatch prompt, (c) record the dispatch, and (d) clean up consumed trigger labels.
 
-Every durable dispatch record under `data/follow-up-jobs/merge-agent-dispatches/` persists both the dispatch `trigger` and the resolved worker-pool `priority`, so postmortems can distinguish default-lane launches from priority-lane escape hatches without reconstructing code history.
+Every durable dispatch record under `data/follow-up-jobs/merge-agent-dispatches/` persists the dispatch `trigger`, the resolved worker-pool `priority`, and `priorityFlagSupported`. On fully rolled-out hosts `priorityFlagSupported` is `true` and `hq dispatch` received `--priority <lane>`; on mixed-version hosts the watcher retries once without `--priority`, records `priorityFlagSupported: false`, and still preserves the resolved priority selection for auditability.
 
 ### Dispatch trigger
 
@@ -249,6 +249,8 @@ Merge-agent priority is narrower than merge-agent triggering:
 That split is intentional. `merge-agent-requested` is the operator's explicit stuck-branch escape hatch, and the observed 2026-05-19 outage was exactly that path getting wedged behind `refuse_admit_memory_pressure`. By contrast, clean-verdict and final-pass merge-agents can run for minutes, push commits, and wait on checks; sending every one of those to the single reserved critical lane would turn a PR-local admission problem into fleet-wide starvation of genuinely urgent critical work.
 
 The worker-pool priority lane is governed by `HQ_PRIORITY_LANE_CAPACITY` (default `1`). When that env var is `0`, the reserved lane is disabled and a `critical` dispatch no longer bypasses memory-pressure refusal; it degrades to ordinary high-priority admission. Operators investigating contention should check `hq priority-lane status --root /Users/airlock/agent-os-hq` alongside the recorded dispatch JSON and the individual LRQ state from `hq dispatch status <dispatchId>`.
+
+Because watcher and worker-pool can roll out independently, `src/follow-up-merge-agent.mjs::dispatchMergeAgentForPR` must treat an explicit CLI rejection of `--priority` as a compatibility downgrade, not a hard dispatch failure. The watcher first tries the flagged invocation, then retries once without `--priority` only for the specific unknown-argument / unrecognized-argument class of error. Any other `hq dispatch` failure still aborts the launch normally.
 
 ### Merge-agent original-worker preparation
 
@@ -314,8 +316,8 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 - `merge-agent-requested` — explicit scoped request to fire a merge-agent pass for the current head SHA even when the standard verdict gate would skip. It still respects open-PR, hard-skip, active-remediation, and duplicate-dispatch guards, but it can bypass mergeability, checks, verdict parsing, and remediation-round exhaustion. Consumed after a successful dispatch, or after an acknowledged `skip-no-agent-os` when agent-os is missing or merge-agent dispatch is force-disabled.
 - `merge-agent-skip`, `merge-agent-stuck`, `do-not-merge` — hard skips that even an operator-approved label does not bypass.
 
-The `final-pass-on-budget-exhausted` trigger is **not** a label — it is selected automatically by the dispatch decision tree when the env flag is set and the round budget is consumed. There is no GitHub-visible label for it; the audit trail is the dispatch record (`data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`, `trigger` field) plus the `MERGE_AGENT_DISPATCH_TRIGGER` env var passed to the worker.
+The `final-pass-on-budget-exhausted` trigger is **not** a label — it is selected automatically by the dispatch decision tree when the env flag is set and the round budget is consumed. There is no GitHub-visible label for it; the audit trail is the dispatch record (`data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`, `trigger`, `priority`, and `priorityFlagSupported` fields) plus the `MERGE_AGENT_DISPATCH_TRIGGER` env var passed to the worker.
 
 ### Dispatch state
 
-Successful dispatches write a record under `data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`. Each record carries the dispatch timestamp, the trigger label (or null for the standard verdict path), the resulting `dispatchId` and `launchRequestId` from the hq invocation, and the label-removal attempt result. Pre-existing dispatches with the same `(repo, prNumber, headSha)` triple short-circuit a second dispatch via the `skip-already-dispatched` decision, and the consumed-label removal is retried best-effort each tick until the label is observed gone from the PR.
+Successful dispatches write a record under `data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`. Each record carries the dispatch timestamp, the trigger label (or null for the standard verdict path), the resolved priority selection, whether the host actually supported `--priority`, the resulting `dispatchId` and `launchRequestId` from the hq invocation, and the label-removal attempt result. Pre-existing dispatches with the same `(repo, prNumber, headSha)` triple short-circuit a second dispatch via the `skip-already-dispatched` decision, and the consumed-label removal is retried best-effort each tick until the label is observed gone from the PR.

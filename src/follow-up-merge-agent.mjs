@@ -102,6 +102,7 @@ const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
+const HQ_PRIORITY_FLAG_REJECTION_PATTERN = /\b(?:unrecognized|unknown)\b|\bno such option\b/i;
 
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
@@ -232,6 +233,17 @@ function formatExecFailure(command, err) {
   augmented.stdout = err?.stdout;
   augmented.cause = err;
   return augmented;
+}
+
+function isUnsupportedHqPriorityFlagError(err) {
+  const detail = [
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return detail.includes('--priority') && HQ_PRIORITY_FLAG_REJECTION_PATTERN.test(detail);
 }
 
 function isExecTimeout(err) {
@@ -1599,6 +1611,7 @@ function recordMergeAgentDispatch(rootDir, job, {
   launchRequestId = null,
   trigger = null,
   priority = NORMAL_MERGE_AGENT_DISPATCH_PRIORITY,
+  priorityFlagSupported = true,
   labelRemoval = null,
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
@@ -1615,6 +1628,7 @@ function recordMergeAgentDispatch(rootDir, job, {
     mergeAgentRequest: job.mergeAgentRequest || null,
     trigger,
     priority,
+    priorityFlagSupported,
     labelRemoval,
     dispatchedAt,
     dispatchId,
@@ -2246,7 +2260,6 @@ async function dispatchMergeAgentForPR({
     'dispatch',
     '--worker-class', 'merge-agent',
     '--task-kind', 'merge',
-    '--priority', dispatchPriority,
     '--repo', repo.split('/')[1] || repo,
     '--pr', String(prNumber),
     '--ticket', `PR-${prNumber}`,
@@ -2270,15 +2283,34 @@ async function dispatchMergeAgentForPR({
   // watcher's log; only by running hq dispatch by hand did the real
   // error surface.
   let execResult;
+  let priorityFlagSupported = true;
+  const argsWithPriority = [
+    'dispatch',
+    '--worker-class', 'merge-agent',
+    '--task-kind', 'merge',
+    '--priority', dispatchPriority,
+    ...args.slice(5),
+  ];
   try {
-    execResult = await execFileImpl(resolvedHqPath, args, {
+    execResult = await execFileImpl(resolvedHqPath, argsWithPriority, {
       env: dispatchEnv,
       maxBuffer: 5 * 1024 * 1024,
       timeout: HQ_DISPATCH_TIMEOUT_MS,
       killSignal: 'SIGTERM',
     });
   } catch (err) {
-    throw formatExecFailure('hq dispatch', err);
+    if (!isUnsupportedHqPriorityFlagError(err)) {
+      throw formatExecFailure('hq dispatch', err);
+    }
+    priorityFlagSupported = false;
+    execResult = await execFileImpl(resolvedHqPath, args, {
+      env: dispatchEnv,
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: HQ_DISPATCH_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
+    }).catch((retryErr) => {
+      throw formatExecFailure('hq dispatch', retryErr);
+    });
   }
   const { stdout } = execResult;
   const parsed = parseMergeAgentDispatchOutput(stdout);
@@ -2290,6 +2322,7 @@ async function dispatchMergeAgentForPR({
     launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
     trigger,
     priority: dispatchPriority,
+    priorityFlagSupported,
   });
 
   const labelRemoval = await removeConsumedTriggerLabel({

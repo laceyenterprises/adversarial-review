@@ -13,7 +13,9 @@ function fileUrl(...parts) {
   return pathToFileURL(path.join(REPO_ROOT, ...parts)).href;
 }
 
-function buildLoaderSource() {
+function buildLoaderSource({
+  reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+} = {}) {
   const reviewStateUrl = fileUrl('src', 'review-state.mjs');
   const reviewStateActualUrl = `${reviewStateUrl}?actual`;
   const subjectAdapterUrl = fileUrl('src', 'adapters', 'subject', 'github-pr', 'index.mjs');
@@ -188,7 +190,7 @@ export async function load(url, context, nextLoad) {
     return {
       format: 'module',
       shortCircuit: true,
-      source: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }"
+      source: ${JSON.stringify(reviewerRuntimeSource)}
     };
   }
 
@@ -224,7 +226,7 @@ register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
 `;
 }
 
-function buildRunnerSource() {
+function buildRunnerSource({ expectPollError = false } = {}) {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 import assert from 'node:assert/strict';
@@ -242,6 +244,12 @@ function readRows(db) {
     'SELECT repo, pr_number, review_status, reviewer_head_sha FROM reviewed_prs ORDER BY pr_number'
   ).all();
   return Object.fromEntries(rows.map((row) => [String(row.pr_number), row]));
+}
+
+function readPassRows(db) {
+  return db.prepare(
+    'SELECT repo, pr_number, attempt_number, pass_kind, status, workspace_path, metadata_json FROM reviewer_passes ORDER BY pr_number, pass_id'
+  ).all();
 }
 
 try {
@@ -310,26 +318,37 @@ try {
     },
   };
 
-  await pollOnce(octokit, {
-    healthProbe: {
-      beginTick() { return {}; },
-      recordOpenPending() {},
-      recordSpawn() {},
-      async finishTick() {},
-    },
-    afterClaim(payload) {
-      claims.push(payload);
-    },
-  });
+  let pollError = null;
+  try {
+    await pollOnce(octokit, {
+      healthProbe: {
+        beginTick() { return {}; },
+        recordOpenPending() {},
+        recordSpawn() {},
+        async finishTick() {},
+      },
+      afterClaim(payload) {
+        claims.push(payload);
+      },
+    });
+  } catch (err) {
+    pollError = err;
+  }
+
+  if (${expectPollError ? 'pollError === null' : 'pollError !== null'}) {
+    throw pollError || new Error('expected watcher pollOnce to throw');
+  }
 
   console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
     rows: readRows(db),
+    reviewerPassRows: readPassRows(db),
     claims,
     githubCalls,
     githubWrites,
     fetchCalls,
     operatorWrites: globalThis.__watcherClaimLoopOperatorWrites || [],
     reviewerSpawns: globalThis.__watcherClaimLoopReviewerSpawns || [],
+    pollError: pollError ? String(pollError.message || pollError) : null,
   }));
 } catch (err) {
   console.error(err?.stack || err?.message || err);
@@ -399,6 +418,50 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       summary.reviewerSpawns.every(Boolean),
       'happy-path subjects should spawn reviewer work after the claim'
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn throws', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_TOKEN: 'fixture-token',
+        },
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.pollError, 'fixture reviewer spawn failure');
+    assert.equal(summary.reviewerSpawns.length, 1);
+    assert.equal(summary.reviewerPassRows.length, 1);
+    assert.equal(summary.reviewerPassRows[0].status, 'failed');
+    assert.equal(summary.reviewerPassRows[0].workspace_path, null);
+    assert.match(summary.reviewerPassRows[0].metadata_json, /fixture reviewer spawn failure/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

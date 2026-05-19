@@ -1082,6 +1082,7 @@ async function spawnReviewer({
   passKind = 'first-pass',
   maxRemediationRounds,
   reviewerSessionUuid,
+  workspacePath = null,
   onReviewerPgid = () => {},
 }) {
   const finalRound = (
@@ -1096,14 +1097,15 @@ async function spawnReviewer({
 
   inFlightReviewerSessions.add(reviewerSessionUuid);
   try {
+    const startedAt = new Date().toISOString();
     beginReviewerPass(ROOT, {
       repo,
       prNumber,
       attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
       reviewerClass: reviewerModel,
       passKind,
-      workspacePath: process.cwd(),
-      startedAt: new Date().toISOString(),
+      workspacePath: workspacePath || null,
+      startedAt,
       metadata: {
         reviewerSessionUuid,
         reviewerModel,
@@ -1141,6 +1143,7 @@ async function spawnReviewer({
     if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
     try {
+      const endedAt = new Date().toISOString();
       const tokenUsage = readReviewerSessionTokenUsage({
         adapterSessionKey: result.reattachToken || reviewerSessionUuid,
         sessionKeys: [
@@ -1148,6 +1151,9 @@ async function spawnReviewer({
           result.reattachToken,
           result.sessionUuid,
         ],
+        workspacePath: workspacePath || null,
+        startedAt,
+        endedAt,
         rootDir: ROOT,
       });
       completeReviewerPass(ROOT, {
@@ -1156,7 +1162,7 @@ async function spawnReviewer({
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
         passKind,
         status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
-        endedAt: new Date().toISOString(),
+        endedAt,
         tokenUsage,
         tokenSource: tokenUsage?.source || 'unknown',
         metadata: {
@@ -1172,6 +1178,28 @@ async function spawnReviewer({
       );
     }
     return result;
+  } catch (err) {
+    try {
+      completeReviewerPass(ROOT, {
+        repo,
+        prNumber,
+        attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
+        passKind,
+        status: 'failed',
+        endedAt: new Date().toISOString(),
+        metadata: {
+          reviewerSessionUuid,
+          reviewerModel,
+          error: err?.message || String(err),
+        },
+      });
+    } catch (settleErr) {
+      console.warn(
+        `[watcher] reviewer_pass_token_update_failed repo=${repo} pr=${prNumber} ` +
+        `session=${reviewerSessionUuid}: ${settleErr?.message || settleErr}`
+      );
+    }
+    throw err;
   } finally {
     inFlightReviewerSessions.delete(reviewerSessionUuid);
   }
@@ -2416,6 +2444,7 @@ async function pollOnce(
         passKind,
         maxRemediationRounds,
         reviewerSessionUuid,
+        workspacePath: null,
         onReviewerPgid: ({ pgid }) => {
           persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });
         },

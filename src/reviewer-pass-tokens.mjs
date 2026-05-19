@@ -245,7 +245,6 @@ function resolveSessionLedgerDbPath({ env = process.env, hqRoot = null, rootDir 
     candidates.push(join(resolvedHqRoot, 'session-ledger', 'ledger.db'));
   }
   candidates.push(join(rootDir, '.agent-os', 'session-ledger', 'ledger.db'));
-  candidates.push(join('/Users/airlock/agent-os', '.agent-os', 'session-ledger', 'ledger.db'));
   candidates.push(join(homedir(), '.agent-os', 'session-ledger', 'ledger.db'));
   candidates.push(join(homedir(), 'agent-os', '.agent-os', 'session-ledger', 'ledger.db'));
 
@@ -264,6 +263,8 @@ function readReviewerSessionTokenUsage({
   adapterSessionKey,
   sessionKeys = [],
   workspacePath = null,
+  startedAt = null,
+  endedAt = null,
   ledgerDbPath = null,
   env = process.env,
   rootDir = process.cwd(),
@@ -271,28 +272,40 @@ function readReviewerSessionTokenUsage({
   const dbPath = resolveSessionLedgerDbPath({ explicitPath: ledgerDbPath, env, rootDir });
   if (!dbPath) return null;
   const keys = [...new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String))];
-  const where = [];
-  const params = {};
-  if (keys.length > 0) {
-    where.push(`adapter_session_key IN (${keys.map((_, idx) => `@key${idx}`).join(', ')})`);
-    keys.forEach((key, idx) => { params[`key${idx}`] = key; });
-  }
-  if (workspacePath) {
-    where.push(`source_path = @workspacePath`);
-    params.workspacePath = workspacePath;
-  }
-  if (where.length === 0) return null;
+  if (keys.length === 0 && !workspacePath) return null;
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    const row = db.prepare(
-      `SELECT adapter_session_key, total_input_tokens, total_output_tokens,
-              total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-              source_path, started_at, ended_at
-         FROM runtime_sessions
-        WHERE ${where.map((clause) => `(${clause})`).join(' OR ')}
-        ORDER BY COALESCE(ended_at, started_at, '') DESC
-        LIMIT 1`
-    ).get(params);
+    const window = runtimeSessionWindowClause({ startedAt, endedAt });
+    let row = null;
+    if (keys.length > 0) {
+      const params = { ...window.params };
+      keys.forEach((key, idx) => { params[`key${idx}`] = key; });
+      row = db.prepare(
+        `SELECT adapter_session_key, total_input_tokens, total_output_tokens,
+                total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+                source_path, started_at, ended_at
+           FROM runtime_sessions
+          WHERE adapter_session_key IN (${keys.map((_, idx) => `@key${idx}`).join(', ')})
+            ${window.clause}
+          ORDER BY COALESCE(ended_at, started_at, '') DESC
+          LIMIT 1`
+      ).get(params);
+    }
+    if (!row && workspacePath) {
+      row = db.prepare(
+        `SELECT adapter_session_key, total_input_tokens, total_output_tokens,
+                total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+                source_path, started_at, ended_at
+           FROM runtime_sessions
+          WHERE source_path = @workspacePath
+            ${window.clause}
+          ORDER BY COALESCE(ended_at, started_at, '') DESC
+          LIMIT 1`
+      ).get({
+        workspacePath,
+        ...window.params,
+      });
+    }
     return tokenUsageFromRuntimeSession(row);
   } finally {
     closeOwnedReviewDb(db);
@@ -310,16 +323,21 @@ function readWorkerRunTokenUsage({
   if (!dbPath || (!workerRunId && !launchRequestId)) return null;
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    const clauses = [];
-    const params = {};
     if (workerRunId) {
-      clauses.push('wr.run_id = @workerRunId');
-      params.workerRunId = workerRunId;
+      const row = db.prepare(
+        `SELECT wr.run_id, wr.launch_request_id,
+                wr.token_usage_input, wr.token_usage_output,
+                wr.token_usage_cost_usd, wr.token_usage_source,
+                rs.total_cache_read_tokens, rs.total_cache_write_tokens
+           FROM worker_runs wr
+           LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
+          WHERE wr.run_id = @workerRunId
+          ORDER BY COALESCE(wr.ended_at, wr.updated_at, wr.started_at, '') DESC
+          LIMIT 1`
+      ).get({ workerRunId });
+      if (row) return tokenUsageFromWorkerRun(row, { workerRunId, launchRequestId });
     }
-    if (launchRequestId) {
-      clauses.push('wr.launch_request_id = @launchRequestId');
-      params.launchRequestId = launchRequestId;
-    }
+    if (!launchRequestId) return null;
     const row = db.prepare(
       `SELECT wr.run_id, wr.launch_request_id,
               wr.token_usage_input, wr.token_usage_output,
@@ -327,24 +345,45 @@ function readWorkerRunTokenUsage({
               rs.total_cache_read_tokens, rs.total_cache_write_tokens
          FROM worker_runs wr
          LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
-        WHERE ${clauses.map((clause) => `(${clause})`).join(' OR ')}
+        WHERE wr.launch_request_id = @launchRequestId
         ORDER BY COALESCE(wr.ended_at, wr.updated_at, wr.started_at, '') DESC
         LIMIT 1`
-    ).get(params);
-    if (!row) return null;
-    return {
-      workerRunId: row.run_id || workerRunId || null,
-      launchRequestId: row.launch_request_id || launchRequestId || null,
-      input: coerceNonNegativeInt(row.token_usage_input),
-      output: coerceNonNegativeInt(row.token_usage_output),
-      cacheRead: coerceNonNegativeInt(row.total_cache_read_tokens),
-      cacheWrite: coerceNonNegativeInt(row.total_cache_write_tokens),
-      costUSD: coerceNonNegativeFloat(row.token_usage_cost_usd),
-      source: row.token_usage_source || 'session-ledger',
-    };
+    ).get({ launchRequestId });
+    return tokenUsageFromWorkerRun(row, { workerRunId, launchRequestId });
   } finally {
-    db.close();
+    closeOwnedReviewDb(db);
   }
+}
+
+function runtimeSessionWindowClause({ startedAt = null, endedAt = null } = {}) {
+  const params = {};
+  const clauses = [];
+  if (endedAt) {
+    params.windowEnd = endedAt;
+    clauses.push(`COALESCE(started_at, '') <= @windowEnd`);
+  }
+  if (startedAt) {
+    params.windowStart = startedAt;
+    clauses.push(`COALESCE(ended_at, started_at, '') >= @windowStart`);
+  }
+  return {
+    clause: clauses.length > 0 ? ` AND ${clauses.join(' AND ')}` : '',
+    params,
+  };
+}
+
+function tokenUsageFromWorkerRun(row, { workerRunId = null, launchRequestId = null } = {}) {
+  if (!row) return null;
+  return {
+    workerRunId: row.run_id || workerRunId || null,
+    launchRequestId: row.launch_request_id || launchRequestId || null,
+    input: coerceNonNegativeInt(row.token_usage_input),
+    output: coerceNonNegativeInt(row.token_usage_output),
+    cacheRead: coerceNonNegativeInt(row.total_cache_read_tokens),
+    cacheWrite: coerceNonNegativeInt(row.total_cache_write_tokens),
+    costUSD: coerceNonNegativeFloat(row.token_usage_cost_usd),
+    source: row.token_usage_source || 'session-ledger',
+  };
 }
 
 function tokenUsageFromRuntimeSession(row) {
@@ -378,7 +417,7 @@ function reviewerPassRows(rootDir, { since = null } = {}) {
         ORDER BY started_at DESC, pass_id DESC`
     ).all(params);
   } finally {
-    db.close();
+    closeOwnedReviewDb(db);
   }
 }
 

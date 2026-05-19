@@ -3310,6 +3310,7 @@ async function consumeNextFollowUpJob({
     spawnedWorker = worker;
 
     const updated = markFollowUpJobSpawned({
+      rootDir,
       jobPath: claimed.jobPath,
       spawnedAt: now(),
       worker: {

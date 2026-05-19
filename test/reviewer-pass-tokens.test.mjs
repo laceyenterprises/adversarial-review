@@ -10,6 +10,7 @@ import {
   backfillReviewerPasses,
   beginReviewerPass,
   completeReviewerPass,
+  readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,
 } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
@@ -76,6 +77,24 @@ function createLedgerDb(dbPath) {
     '2026-05-18T01:02:00.000Z'
   );
   db.prepare(
+    `INSERT INTO runtime_sessions (
+       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
+       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+       source_path, started_at, ended_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'rs_2',
+    'session-2',
+    999,
+    333,
+    44,
+    22,
+    1.11,
+    '/tmp/review-workspace',
+    '2026-05-18T03:00:00.000Z',
+    '2026-05-18T03:05:00.000Z'
+  );
+  db.prepare(
     `INSERT INTO worker_runs (
        run_id, launch_request_id, session_id, token_usage_input,
        token_usage_output, token_usage_cost_usd, token_usage_source,
@@ -84,6 +103,60 @@ function createLedgerDb(dbPath) {
   ).run(
     'wr_1',
     'lrq_1',
+    'rs_1',
+    120,
+    45,
+    0.35,
+    'session-ledger',
+    '2026-05-18T01:00:00.000Z',
+    '2026-05-18T01:02:00.000Z',
+    '2026-05-18T01:02:00.000Z'
+  );
+  db.prepare(
+    `INSERT INTO worker_runs (
+       run_id, launch_request_id, session_id, token_usage_input,
+       token_usage_output, token_usage_cost_usd, token_usage_source,
+       started_at, ended_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'wr_2',
+    'lrq_2',
+    'rs_2',
+    999,
+    333,
+    1.11,
+    'session-ledger',
+    '2026-05-18T03:00:00.000Z',
+    '2026-05-18T03:05:00.000Z',
+    '2026-05-18T03:05:00.000Z'
+  );
+  db.prepare(
+    `INSERT INTO worker_runs (
+       run_id, launch_request_id, session_id, token_usage_input,
+       token_usage_output, token_usage_cost_usd, token_usage_source,
+       started_at, ended_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'wr_3',
+    'shared-lrq',
+    'rs_2',
+    999,
+    333,
+    1.11,
+    'session-ledger',
+    '2026-05-18T03:00:00.000Z',
+    '2026-05-18T03:05:00.000Z',
+    '2026-05-18T03:05:00.000Z'
+  );
+  db.prepare(
+    `INSERT INTO worker_runs (
+       run_id, launch_request_id, session_id, token_usage_input,
+       token_usage_output, token_usage_cost_usd, token_usage_source,
+       started_at, ended_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'wr_1_shared',
+    'shared-lrq-old',
     'rs_1',
     120,
     45,
@@ -160,6 +233,43 @@ test('worker-run rollup join reads token columns and cache totals from runtime s
   assert.equal(usage.cacheWrite, 7);
   assert.equal(usage.costUSD, 0.35);
   assert.equal(usage.source, 'session-ledger');
+});
+
+test('reviewer session lookup prefers adapter session keys over newer workspace siblings', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createLedgerDb(ledgerDb);
+
+  const usage = readReviewerSessionTokenUsage({
+    adapterSessionKey: 'session-1',
+    workspacePath: '/tmp/review-workspace',
+    startedAt: '2026-05-18T00:59:00.000Z',
+    endedAt: '2026-05-18T01:03:00.000Z',
+    ledgerDbPath: ledgerDb,
+    rootDir,
+  });
+
+  assert.equal(usage.adapterSessionKey, 'session-1');
+  assert.equal(usage.input, 120);
+  assert.equal(usage.output, 45);
+});
+
+test('worker-run lookup prefers explicit workerRunId over a newer launch request sibling', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createLedgerDb(ledgerDb);
+
+  const usage = readWorkerRunTokenUsage({
+    workerRunId: 'wr_1_shared',
+    launchRequestId: 'shared-lrq',
+    ledgerDbPath: ledgerDb,
+    rootDir,
+  });
+
+  assert.equal(usage.workerRunId, 'wr_1_shared');
+  assert.equal(usage.launchRequestId, 'shared-lrq-old');
+  assert.equal(usage.input, 120);
+  assert.equal(usage.output, 45);
 });
 
 test('backfill is idempotent for historical follow-up workspaces', () => {

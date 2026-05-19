@@ -1482,17 +1482,12 @@ function claimNextFollowUpJob({
 }
 
 function markFollowUpJobSpawned({
+  rootDir = null,
   jobPath,
   worker,
   spawnedAt = new Date().toISOString(),
 }) {
   const currentJob = readFollowUpJob(jobPath);
-  recordRemediationPassStartedSafe({
-    rootDir: inferRootDirFromFollowUpJobPath(jobPath),
-    job: currentJob,
-    worker,
-    spawnedAt,
-  });
   let nextJob = {
     ...currentJob,
     status: 'in_progress',
@@ -1528,6 +1523,12 @@ function markFollowUpJobSpawned({
   }
 
   writeFollowUpJob(jobPath, nextJob);
+  recordRemediationPassStartedSafe({
+    rootDir: rootDir || inferRootDirFromFollowUpJobPath(jobPath),
+    job: nextJob,
+    worker,
+    spawnedAt,
+  });
   return { job: nextJob, jobPath };
 }
 
@@ -1535,7 +1536,9 @@ function inferRootDirFromFollowUpJobPath(jobPath) {
   const marker = `${join('data', 'follow-up-jobs')}`;
   const normalized = resolve(jobPath);
   const idx = normalized.indexOf(`${marker}`);
-  if (idx <= 0) return dirname(dirname(dirname(normalized)));
+  if (idx < 0) {
+    throw new Error(`Cannot infer rootDir from follow-up job path outside ${marker}: ${jobPath}`);
+  }
   return normalized.slice(0, idx - 1);
 }
 

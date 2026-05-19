@@ -100,6 +100,8 @@ const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPEC
 // to disable.
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
+const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
+const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
 
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
@@ -131,6 +133,12 @@ function isFinalPassOnRequestChangesEnabled({
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+function resolveMergeAgentDispatchPriority(trigger = null) {
+  return trigger === MERGE_AGENT_REQUESTED_LABEL
+    ? CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY
+    : NORMAL_MERGE_AGENT_DISPATCH_PRIORITY;
 }
 
 function mergeAgentLifecycleLog(logger, event, fields = {}) {
@@ -1590,6 +1598,7 @@ function recordMergeAgentDispatch(rootDir, job, {
   dispatchId = null,
   launchRequestId = null,
   trigger = null,
+  priority = NORMAL_MERGE_AGENT_DISPATCH_PRIORITY,
   labelRemoval = null,
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
@@ -1605,6 +1614,7 @@ function recordMergeAgentDispatch(rootDir, job, {
     operatorApproval: job.operatorApproval || null,
     mergeAgentRequest: job.mergeAgentRequest || null,
     trigger,
+    priority,
     labelRemoval,
     dispatchedAt,
     dispatchId,
@@ -2218,32 +2228,25 @@ async function dispatchMergeAgentForPR({
 
   const prompt = buildMergeAgentPrompt(job, { trigger });
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
+  const dispatchPriority = resolveMergeAgentDispatchPriority(trigger);
 
-  // Dispatch merge-agent on the `critical` priority lane.
+  // `merge-agent-requested` is the explicit stuck-branch escape hatch, so it
+  // alone gets the reserved `critical` lane. Everything else stays `normal`:
+  // final-pass and clean-verdict merge-agents can run for minutes, push new
+  // commits, and wait on checks, so reserving the single memory-pressure-bypass
+  // slot for all of them would turn a PR-local delay into fleet-wide critical
+  // lane starvation.
   //
-  // Why: the merge-agent is the convergence layer of the entire pipeline. It is
-  // small-footprint and, on success, FREES memory by tearing down the source
-  // worker. Running it at `normal` priority means it gets refused with
-  // `refuse_admit_memory_pressure` whenever the fleet's pressure level is
-  // elevated — which is the exact moment merge-agents are most needed (because
-  // the only way to relieve pressure is to merge work in flight).
-  //
-  // Observed 2026-05-19: PR #719 merge-agent stuck in `requested` for 30+ min
-  // across 4+ admission ticks, all refused for memory pressure at freeMB=51-60,
-  // swap 88-94%. 2/2 merge-agent dispatches on that day were refused; 0
-  // admitted. The watcher recorded the dispatch + applied the
-  // `merge-agent-dispatched` label, but the worker never ran.
-  //
-  // The `critical` lane has a reserved capacity (`HQ_PRIORITY_LANE_CAPACITY`,
-  // default 1) that bypasses memory-pressure refusals without preempting
-  // existing workers. Merge-agent runs are intentionally serialized in
-  // practice (we don't run multiple merge-agents in parallel against the same
-  // PR), so the capacity=1 reservation is a natural fit.
+  // Observed 2026-05-19: PR #719's merge-agent-requested dispatch was refused
+  // for memory pressure across multiple admission ticks and never spawned. The
+  // operator-requested stuck-branch path is the load-bearing case that needs
+  // bypass semantics; broadening that escape hatch to every merge-agent launch
+  // is not.
   const args = [
     'dispatch',
     '--worker-class', 'merge-agent',
     '--task-kind', 'merge',
-    '--priority', 'critical',
+    '--priority', dispatchPriority,
     '--repo', repo.split('/')[1] || repo,
     '--pr', String(prNumber),
     '--ticket', `PR-${prNumber}`,
@@ -2286,6 +2289,7 @@ async function dispatchMergeAgentForPR({
     dispatchId: parsed?.dispatchId || null,
     launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
     trigger,
+    priority: dispatchPriority,
   });
 
   const labelRemoval = await removeConsumedTriggerLabel({

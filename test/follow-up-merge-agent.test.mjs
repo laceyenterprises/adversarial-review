@@ -1097,26 +1097,56 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
   assert.equal(result.dispatchId, 'disp_123');
   assert.equal(result.launchRequestId, 'lrq_456');
   assert.equal(listMergeAgentDispatches(rootDir).length, 1);
+  assert.equal(listMergeAgentDispatches(rootDir)[0].priority, 'normal');
   assert.equal(hqCalls[0].cmd, 'hq');
   assert.deepEqual(hqCalls[0].args.slice(0, 17), [
     'dispatch',
     '--worker-class', 'merge-agent',
     '--task-kind', 'merge',
-    '--priority', 'critical',
+    '--priority', 'normal',
     '--repo', 'agent-os',
     '--pr', '401',
     '--ticket', 'PR-401',
     '--parent-session', 'session:test:merge-watcher',
     '--project', 'merge-project',
   ]);
-  // Regression guard for 2026-05-19 PR #719: merge-agent was stuck in
-  // `requested` for 30+ min, refused every admission tick for
-  // `refuse_admit_memory_pressure`. The fix is the `--priority critical`
-  // flag above — DO NOT remove it. The critical lane bypasses memory-
-  // pressure refusals via HQ_PRIORITY_LANE_CAPACITY (reserved capacity=1).
+  assert.ok(
+    hqCalls[0].args.includes('--priority') && hqCalls[0].args.includes('normal'),
+    'default merge-agent dispatches must stay on the normal lane'
+  );
+});
+
+test('dispatchMergeAgentForPR uses the critical lane only for merge-agent-requested', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
+  const env = {
+    MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+    MERGE_AGENT_HQ_PROJECT: 'merge-project',
+  };
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      labels: [{ name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest(),
+      mergeable: 'CONFLICTING',
+    }),
+    env,
+    execFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args });
+      return {
+        stdout: '{"dispatchId":"disp_critical","lrq":"lrq_critical"}\n',
+      };
+    },
+    now: '2026-05-03T12:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(listMergeAgentDispatches(rootDir)[0].trigger, 'merge-agent-requested');
+  assert.equal(listMergeAgentDispatches(rootDir)[0].priority, 'critical');
   assert.ok(
     hqCalls[0].args.includes('--priority') && hqCalls[0].args.includes('critical'),
-    'merge-agent must dispatch on the critical priority lane'
+    'merge-agent-requested dispatches must use the critical lane'
   );
 });
 

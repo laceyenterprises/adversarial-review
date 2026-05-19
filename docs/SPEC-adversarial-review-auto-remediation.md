@@ -227,6 +227,8 @@ The sanctioned operator override is `npm run retrigger-remediation` or the PR-si
 
 The pipeline closes the loop on a PR by handing it to a merge-agent once the adversarial review converges. The merge-agent runs in the host agent-os worker-pool, not in adversarial-review itself; adversarial-review's responsibility is to (a) decide when to dispatch, (b) build the dispatch prompt, (c) record the dispatch, and (d) clean up consumed trigger labels.
 
+Every durable dispatch record under `data/follow-up-jobs/merge-agent-dispatches/` persists both the dispatch `trigger` and the resolved worker-pool `priority`, so postmortems can distinguish default-lane launches from priority-lane escape hatches without reconstructing code history.
+
 ### Dispatch trigger
 
 `src/follow-up-merge-agent.mjs::pickMergeAgentDispatchDetail` evaluates dispatch in layers instead of applying one universal gate matrix to every trigger:
@@ -236,6 +238,17 @@ The pipeline closes the loop on a PR by handing it to a merge-agent once the adv
 3. **Normal verdict path:** without a live override label, the latest follow-up job must NOT be `pending` or `in-progress`. A clean `comment-only` verdict dispatches immediately. A `request-changes` verdict dispatches only when the remediation budget is exhausted; if more rounds are claimable, the merge-agent waits for remediation instead of racing it.
 4. **`merge-agent-requested` override:** a scoped `merge-agent-requested` label is the explicit "run the merge-agent now" escape hatch. It still respects the universal hard gates and the active-remediation guard, but it can bypass mergeability, checks, verdict parsing, and remediation-round exhaustion so the merge-agent can rebase or clean the branch on demand.
 5. **Final-pass-on-budget-exhausted:** when `MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=1` is set in the per-call env (set on the follow-up daemon LaunchAgent in this repo) AND `remediationCurrentRound >= remediationMaxRounds` AND the verdict is still `request-changes` AND no scoped `operator-approved` label is present, the merge-agent is dispatched with the trigger `final-pass-on-budget-exhausted`. The merge-agent's own `comment_only_followups.py` sub-worker is then responsible for the final substance triage: **apply every actionable in-scope reviewer finding inline (trivial polish and substantive non-trivial work alike), merge after light-to-medium fixes, and request a fresh review pass only for major in-PR refactors**. The previous policy of "apply trivial, defer non-trivial" is gone — see the "Apply, don't defer" subsection below. The merge-agent hard-refuses (`merge-rejected`) when the sub-worker surfaces a non-empty `blockers_observed` list (data corruption, secret leakage, security regression, broken external contract); blocker receipts/log summaries include only blocker count and normalized kinds, while detailed payloads stay in `.adversarial-follow-up/followups-reply.json` so secret-leakage findings are not echoed back into public surfaces. Items the sub-worker records under `suggestions_unable_to_apply` (multi-PR scope, cross-module refactor, conflicts with PR intent) are not a handoff shortcut: the merge-agent must file Linear tickets for each follow-up refactor and proceed with the merge when no blocker remains. The dispatched worker receives the trigger via the `MERGE_AGENT_DISPATCH_TRIGGER` env var (machine-readable) AND in the rendered prompt's `{{DISPATCH_TRIGGER}}` placeholder, so the merge-agent's adapter and prompt can branch on dispatch mode without parsing markdown. The universal hard gates, the `mergeable === 'MERGEABLE'` requirement, and the `SUCCESS` check rollup requirement all still apply — failing CI or a conflicted PR still skips even with the flag enabled.
+
+### Dispatch priority
+
+Merge-agent priority is narrower than merge-agent triggering:
+
+- Default behavior is `--priority normal` for clean-verdict dispatches, `operator-approved`, and `final-pass-on-budget-exhausted`.
+- Only the scoped `merge-agent-requested` trigger uses `--priority critical`.
+
+That split is intentional. `merge-agent-requested` is the operator's explicit stuck-branch escape hatch, and the observed 2026-05-19 outage was exactly that path getting wedged behind `refuse_admit_memory_pressure`. By contrast, clean-verdict and final-pass merge-agents can run for minutes, push commits, and wait on checks; sending every one of those to the single reserved critical lane would turn a PR-local admission problem into fleet-wide starvation of genuinely urgent critical work.
+
+The worker-pool priority lane is governed by `HQ_PRIORITY_LANE_CAPACITY` (default `1`). When that env var is `0`, the reserved lane is disabled and a `critical` dispatch no longer bypasses memory-pressure refusal; it degrades to ordinary high-priority admission. Operators investigating contention should check `hq priority-lane status --root /Users/airlock/agent-os-hq` alongside the recorded dispatch JSON and the individual LRQ state from `hq dispatch status <dispatchId>`.
 
 ### Merge-agent original-worker preparation
 

@@ -62,6 +62,7 @@ import {
   listMergeAgentDispatches,
   listMergeAgentLifecycleCleanups,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+  scanStuckMergeAgentDispatches,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
 } from './follow-up-merge-agent.mjs';
@@ -1861,6 +1862,7 @@ async function pollOnce(
     });
 
     let subjectRefs;
+    const activeMergeAgentPRs = [];
     try {
       subjectRefs = await subjectAdapter.discoverSubjects();
     } catch (err) {
@@ -1885,6 +1887,9 @@ async function pollOnce(
       const prLabelNames = (Array.isArray(subject.labels) ? subject.labels : [])
         .map((l) => (typeof l === 'string' ? l : l?.name || ''))
         .filter(Boolean);
+      if (prLabelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) {
+        activeMergeAgentPRs.push({ repo: repoPath, prNumber, headSha: subject.headSha || null });
+      }
       if (staleDriftSkip) {
         console.log(staleDriftSkip.message);
         continue;
@@ -2371,6 +2376,55 @@ async function pollOnce(
         result,
         maxRemediationRounds,
       });
+    }
+
+    // Proactive stuck-merge-agent scan — independent of PR revisit timing.
+    // Scope only to PRs whose lifecycle is still active in this tick:
+    // current snapshots with `merge-agent-dispatched` plus unresolved
+    // durable cleanup records. Historical dispatches outside that set are
+    // intentionally ignored.
+    try {
+      const stuckReports = scanStuckMergeAgentDispatches({
+        rootDir: ROOT,
+        repo: repoPath,
+        activePRs: activeMergeAgentPRs,
+        hqPath: null,
+      });
+      for (const report of stuckReports) {
+        const dispatched = {
+          decision: 'skip-already-dispatched',
+          stuckDetail: report.stuckDetail,
+          launchRequestId: report.launchRequestId,
+        };
+        console.log(
+          `[watcher] proactive-stuck-scan ${report.repo}#${report.prNumber}: `
+          + `lrq=${report.launchRequestId} `
+          + `stuck=${report.stuckDetail.stuckForMinutes}min `
+          + `refusals=${report.stuckDetail.refusalCount} `
+          + `primary=${report.stuckDetail.primaryReason || 'unknown'}`
+        );
+        if (report.stuckDetail.stuckForMinutes >= 30) {
+          try {
+            await maybeFireMergeAgentStuckAlert({
+              rootDir: ROOT,
+              repoPath: report.repo,
+              prNumber: report.prNumber,
+              dispatched,
+              deliverAlertFn: defaultDeliverAlert,
+              logger: console,
+            });
+          } catch (alertErr) {
+            console.error(
+              `[watcher] proactive-stuck-scan alert delivery failed for `
+              + `${report.repo}#${report.prNumber}: ${alertErr?.message || alertErr}`
+            );
+          }
+        }
+      }
+    } catch (scanErr) {
+      console.error(
+        `[watcher] proactive-stuck-scan raised for ${repoPath}: ${scanErr?.message || scanErr}`
+      );
     }
   }
   } finally {

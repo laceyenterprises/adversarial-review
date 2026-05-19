@@ -993,12 +993,28 @@ function listMergeAgentLifecycleCleanups(rootDir) {
   }
 }
 
+function isUnresolvedMergeAgentLifecycleCleanup(cleanup) {
+  if (!cleanup) return false;
+  if (cleanup.completedAt) return false;
+  if (cleanup.lastResult?.cleanupComplete === true) return false;
+  return true;
+}
+
 function getRecordedMergeAgentDispatch(rootDir, job) {
   try {
     return JSON.parse(readFileSync(mergeAgentDispatchFilePath(rootDir, job), 'utf8'));
   } catch {
     return null;
   }
+}
+
+function getRecordedMergeAgentDispatchForHead(rootDir, {
+  repo,
+  prNumber,
+  headSha,
+} = {}) {
+  if (!repo || prNumber == null || !headSha) return null;
+  return getRecordedMergeAgentDispatch(rootDir, { repo, prNumber, headSha });
 }
 
 // LRQ identifiers come from the agent-os dispatch daemon and have the
@@ -1234,6 +1250,112 @@ function describeStaleDispatch(recordedDispatch, {
     primaryReason,
     lastRefusedAt: refusals[refusals.length - 1]?.createdAt || null,
   };
+}
+
+// Proactive stuck-merge-agent scan — independent of PR revisit timing.
+//
+// Background: the existing stuck-detection (describeStaleDispatch + the
+// 30-min Sentinel alert in watcher.mjs::maybeFireMergeAgentStuckAlert)
+// only runs when the watcher polls a PR AND the dispatch path returns
+// `decision: 'skip-already-dispatched'`. If the watcher misses a tick
+// window (e.g., the PR was visited at T+25min, and the next visit is
+// at T+40min but the LRQ admitted at T+33min), the alert window closes
+// without firing.
+//
+// PR #719 hit exactly this: 33-minute admit delay due to memory pressure,
+// no stuck-alert ever logged, operator only discovered it via manual
+// review of `data/follow-up-jobs/merge-agent-dispatches/`. CLAUDE.md
+// memory `LAC-648` covers the related rate-limit cascade.
+//
+// This scan classifies only PRs still active in the merge-agent
+// lifecycle: ones whose current GitHub snapshot still carries the
+// watcher-owned `merge-agent-dispatched` label, plus any durable
+// lifecycle-cleanup records that have not converged yet. Historical
+// dispatch records for unrelated/completed PRs are ignored even if they
+// still carry old refusal audit rows.
+//
+// We intentionally do NOT live-probe `hq dispatch status` here. The
+// proactive path runs inside the watcher loop, so serial `spawnSync`
+// fan-out would turn a degraded HQ/SQLite state into minutes of blocked
+// event-loop time. This path therefore relies only on the durable audit
+// log for a bounded set of known-active PRs.
+function scanStuckMergeAgentDispatches({
+  rootDir,
+  repo = null,
+  hqRoot = resolveHqRoot(process.env),
+  activePRs = [],
+  now = Date.now(),
+  minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
+  minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
+  hqPath = null,
+  runtimeEnv = process.env,
+  dispatchStateProbe = null,
+  listLifecycleCleanupsImpl = listMergeAgentLifecycleCleanups,
+} = {}) {
+  if (!hqRoot) return [];
+  const eligibleHeadsByKey = new Map();
+  for (const activePR of activePRs) {
+    if (!activePR?.repo || activePR?.prNumber == null || !activePR?.headSha) continue;
+    if (repo && activePR.repo !== repo) continue;
+    eligibleHeadsByKey.set(
+      `${activePR.repo}#${Number(activePR.prNumber)}`,
+      {
+        repo: activePR.repo,
+        prNumber: Number(activePR.prNumber),
+        headSha: activePR.headSha,
+      }
+    );
+  }
+  let lifecycleCleanups = [];
+  try {
+    lifecycleCleanups = listLifecycleCleanupsImpl(rootDir);
+  } catch {
+    lifecycleCleanups = [];
+  }
+  for (const cleanup of lifecycleCleanups) {
+    if (!isUnresolvedMergeAgentLifecycleCleanup(cleanup)) continue;
+    if (!cleanup?.repo || cleanup?.prNumber == null || !cleanup?.headSha) continue;
+    if (repo && cleanup.repo !== repo) continue;
+    const key = `${cleanup.repo}#${Number(cleanup.prNumber)}`;
+    if (!eligibleHeadsByKey.has(key)) {
+      eligibleHeadsByKey.set(key, {
+        repo: cleanup.repo,
+        prNumber: Number(cleanup.prNumber),
+        headSha: cleanup.headSha,
+      });
+    }
+  }
+  if (eligibleHeadsByKey.size === 0) return [];
+  const stuckReports = [];
+  for (const eligible of eligibleHeadsByKey.values()) {
+    const recordedDispatch = getRecordedMergeAgentDispatchForHead(rootDir, eligible);
+    if (!recordedDispatch || !recordedDispatch.launchRequestId) continue;
+    const stuck = describeStaleDispatch(recordedDispatch, {
+      hqRoot,
+      now,
+      minAgeMinutes,
+      minRefusals,
+      dispatchStateProbe: dispatchStateProbe || (
+        hqPath && _isValidLrqId(recordedDispatch.launchRequestId)
+          ? (lrqArg) => _probeDispatchStatusViaHq({
+              hqPath,
+              lrq: lrqArg,
+              env: runtimeEnv,
+            })
+          : null
+      ),
+    });
+    if (!stuck) continue;
+    stuckReports.push({
+      repo: recordedDispatch.repo,
+      prNumber: recordedDispatch.prNumber,
+      launchRequestId: recordedDispatch.launchRequestId,
+      dispatchedAt: recordedDispatch.dispatchedAt,
+      trigger: recordedDispatch.trigger,
+      stuckDetail: stuck,
+    });
+  }
+  return stuckReports;
 }
 
 function findLatestFollowUpJobForPR(rootDir, { repo, prNumber }) {
@@ -1804,7 +1926,46 @@ function clearMergeAgentLifecycleCleanup(rootDir, { repo, prNumber } = {}) {
 }
 
 function isTerminalMergeAgentCancelError(detail) {
-  return /\balready terminated\b|\balready cancelled\b|\bnot found\b|\bno such\b/i.test(String(detail || ''));
+  // `hq dispatch cancel` emits structured JSON on stdout (not stderr) on
+  // already-terminal LRQs:
+  //   {"ok":false,"reason":"already terminal (status=failed)","currentStatus":"failed"}
+  // The watcher historically only saw err.message ("Command failed: hq
+  // dispatch cancel <lrq>") and the regex below did not match "already
+  // terminal", so every such cancel attempt logged retryable=true and the
+  // operator saw an endless "best-effort cancel … failed" retry loop.
+  //
+  // Broadening: also match "already terminal" + a few related shapes the
+  // hq cancel path can emit. Callers that capture stdout separately should
+  // use isTerminalMergeAgentCancelDetail (below) to read the structured
+  // JSON path — this regex covers the path where only the wrapped
+  // err.message is available.
+  return /\balready terminated\b|\balready cancelled\b|\balready terminal\b|\bnot found\b|\bno such\b|\bcurrentStatus":"(failed|succeeded|cancelled|canceled|superseded)"/i
+    .test(String(detail || ''));
+}
+
+// Structured classifier: when the caller captured stdout from
+// `hq dispatch cancel` (cancelStdout on the cancel-result), inspect it
+// for the `{ok: false, reason: "already terminal …"}` contract. This is
+// the canonical signal — far more reliable than regex-matching err.message.
+function isTerminalMergeAgentCancelDetail({ cancelStdout, cancelError } = {}) {
+  if (cancelStdout) {
+    try {
+      const parsed = JSON.parse(String(cancelStdout));
+      if (parsed && parsed.ok === false) {
+        const reason = String(parsed.reason || '').toLowerCase();
+        const currentStatus = String(parsed.currentStatus || '').toLowerCase();
+        if (
+          /\balready (terminal|terminated|cancelled|canceled|superseded)\b/.test(reason)
+          || /\b(failed|succeeded|cancelled|canceled|superseded)\b/.test(currentStatus)
+        ) {
+          return true;
+        }
+      }
+    } catch {
+      // Fall through to regex-based fallback below — stdout wasn't JSON.
+    }
+  }
+  return isTerminalMergeAgentCancelError(cancelError);
 }
 
 function isTerminalMergeAgentLabelRemovalError(detail) {
@@ -1966,7 +2127,22 @@ async function cancelMergeAgentDispatchOnMerge({
         ], { maxBuffer: 5 * 1024 * 1024 });
         result.cancelled = true;
       } catch (err) {
-        result.cancelError = err?.message || String(err);
+        // Use formatExecFailure so stderr+stdout surface in the
+        // log. Without it, every cancel failure logged as the bare
+        // exec wrapper text — "Command failed: hq dispatch cancel
+        // lrq_…" — with the actual cause invisible. Concrete
+        // 2026-05-19 incident: `hq dispatch cancel` for an
+        // already-terminal LRQ exits non-zero with the explanation
+        // {"ok":false,"reason":"already terminal (status=failed)"}
+        // on STDOUT (not stderr). The watcher's retry-loop log then
+        // claimed retryable=true indefinitely because the actual
+        // contract was never surfaced. Also stash structured
+        // stderr/stdout on the result so the terminal-classifier
+        // below can read structured output, not just message text.
+        const formatted = formatExecFailure('hq dispatch cancel', err);
+        result.cancelError = formatted.message;
+        result.cancelStderr = err?.stderr ? String(err.stderr) : null;
+        result.cancelStdout = err?.stdout ? String(err.stdout) : null;
         console.warn(
           `[follow-up-merge-agent] best-effort cancel of merge-agent dispatch ${latest.launchRequestId} for ${repo}#${prNumber} failed: ${result.cancelError}`
         );
@@ -1979,7 +2155,10 @@ async function cancelMergeAgentDispatchOnMerge({
   const cancelReachedTerminalOutcome = (
     !result.launchRequestId
     || result.cancelled
-    || isTerminalMergeAgentCancelError(result.cancelError)
+    || isTerminalMergeAgentCancelDetail({
+      cancelStdout: result.cancelStdout,
+      cancelError: result.cancelError,
+    })
   );
 
   if (cancelReachedTerminalOutcome) {
@@ -2517,6 +2696,8 @@ export {
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
   describeStaleDispatch,
+  scanStuckMergeAgentDispatches,
+  isTerminalMergeAgentCancelDetail,
   STUCK_DISPATCH_DEFAULTS,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,

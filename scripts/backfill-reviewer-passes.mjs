@@ -9,11 +9,11 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const USAGE = `\
 Usage:
-  node scripts/backfill-reviewer-passes.mjs [--root-dir <path>] [--ledger-db <path>] [--json]
+  node scripts/backfill-reviewer-passes.mjs [--root-dir <path>] [--ledger-db <path>] [--dry-run] [--json]
 `;
 
 function parseArgs(argv) {
-  const args = { rootDir: ROOT, ledgerDbPath: null, json: false };
+  const args = { rootDir: ROOT, ledgerDbPath: null, dryRun: false, json: false };
   for (let idx = 0; idx < argv.length; idx += 1) {
     const arg = argv[idx];
     if (arg === '--root-dir') {
@@ -26,6 +26,8 @@ function parseArgs(argv) {
       args.ledgerDbPath = argv[idx];
     } else if (arg === '--json') {
       args.json = true;
+    } else if (arg === '--dry-run') {
+      args.dryRun = true;
     } else if (arg === '--help' || arg === '-h') {
       args.help = true;
     } else {
@@ -44,13 +46,21 @@ function main(argv = process.argv.slice(2), io = {}) {
       stdout.write(USAGE);
       return 0;
     }
-    const result = backfillReviewerPasses(args.rootDir, { ledgerDbPath: args.ledgerDbPath });
+    const result = backfillReviewerPasses(args.rootDir, {
+      ledgerDbPath: args.ledgerDbPath,
+      dryRun: args.dryRun,
+    });
     if (args.json) {
       stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else {
       stdout.write(
-        `reviewer_passes backfill considered=${result.considered} ` +
-        `inserted_or_updated=${result.insertedOrUpdated}\n`
+        `reviewer_passes backfill dry_run=${args.dryRun ? 'true' : 'false'} ` +
+        `considered=${result.considered} ` +
+        `would_insert_or_update=${result.wouldInsertOrUpdate} ` +
+        `unique_pass_keys=${result.uniquePassKeys} ` +
+        `inserted_or_updated=${result.insertedOrUpdated} ` +
+        `token_matched=${result.tokenMatched} ` +
+        `skipped=${result.skipped}\n`
       );
     }
     return 0;

@@ -53,6 +53,10 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     assert.ok(columns.includes('domain_id'));
     assert.ok(columns.includes('subject_external_id'));
     assert.ok(columns.includes('revision_ref'));
+    const passColumns = db.prepare('PRAGMA table_info(reviewer_passes)').all().map((column) => column.name);
+    assert.ok(passColumns.includes('reviewer_model'));
+    const migration = db.prepare('SELECT id FROM schema_migrations WHERE id = ?').get('20260518_reviewer_passes.sql');
+    assert.equal(migration.id, '20260518_reviewer_passes.sql');
     assert.equal(db.pragma('user_version', { simple: true }), REVIEW_STATE_SCHEMA_VERSION);
   } finally {
     db.close();

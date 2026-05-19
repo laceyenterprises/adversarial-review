@@ -462,13 +462,19 @@ function readHistoricalFollowUpJobs(rootDir) {
       // Ignore malformed historical artifacts; backfill is best-effort.
     }
   }
-  for (const state of states) {
-    const dir = join(base, state);
-    if (!existsSync(dir)) continue;
-    for (const name of readdirSync(dir)) {
-      if (!name.endsWith('.json')) continue;
-      addJob(join(dir, name));
+  function addJsonFilesRecursively(dir) {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        addJsonFilesRecursively(entryPath);
+      } else if (entry.isFile() && entry.name.endsWith('.json')) {
+        addJob(entryPath);
+      }
     }
+  }
+  for (const state of states) {
+    addJsonFilesRecursively(join(base, state));
   }
 
   const workspaceRoot = join(base, 'workspaces');
@@ -487,22 +493,31 @@ function readHistoricalFollowUpJobs(rootDir) {
 function backfillReviewerPasses(rootDir, {
   ledgerDbPath = null,
   now = () => new Date().toISOString(),
+  dryRun = false,
 } = {}) {
   const jobs = readHistoricalFollowUpJobs(rootDir);
   let considered = 0;
   let insertedOrUpdated = 0;
+  let wouldInsertOrUpdate = 0;
+  let tokenMatched = 0;
+  let skipped = 0;
+  const uniquePassKeys = new Set();
   for (const { job, jobPath } of jobs) {
     const worker = job?.remediationWorker || {};
     const repo = job?.repo;
     const prNumber = Number(job?.prNumber);
     const workspacePath = job?.workspaceDir || worker.workspaceDir || null;
-    if (!repo || !Number.isInteger(prNumber) || !workspacePath) continue;
+    if (!repo || !Number.isInteger(prNumber) || !workspacePath) {
+      skipped += 1;
+      continue;
+    }
     considered += 1;
     const attemptNumber = normalizeAttemptNumber(
       job?.remediationPlan?.currentRound
       || job?.currentRound
       || 1
     );
+    uniquePassKeys.add(`${repo}#${prNumber}#${attemptNumber}#remediation`);
     const startedAt = worker.spawnedAt || job.claimedAt || job.createdAt || now();
     const endedAt = job.completedAt || job.failedAt || job.stoppedAt || worker.reconciledAt || null;
     const status = job.status === 'completed'
@@ -519,6 +534,9 @@ function backfillReviewerPasses(rootDir, {
       ledgerDbPath,
       rootDir,
     });
+    if (usage) tokenMatched += 1;
+    wouldInsertOrUpdate += 1;
+    if (dryRun) continue;
 
     beginReviewerPass(rootDir, {
       repo,
@@ -554,7 +572,14 @@ function backfillReviewerPasses(rootDir, {
     });
     insertedOrUpdated += 1;
   }
-  return { considered, insertedOrUpdated };
+  return {
+    considered,
+    insertedOrUpdated,
+    wouldInsertOrUpdate,
+    uniquePassKeys: uniquePassKeys.size,
+    tokenMatched,
+    skipped,
+  };
 }
 
 export {

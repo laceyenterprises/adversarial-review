@@ -336,6 +336,7 @@ test('backfill is idempotent for historical follow-up workspaces', () => {
 
   assert.equal(first.considered, 1);
   assert.equal(second.considered, 1);
+  assert.equal(first.uniquePassKeys, 1);
   assert.equal(countReviewerPasses(rootDir), 1);
   const db = openReviewStateDb(rootDir);
   try {
@@ -348,6 +349,39 @@ test('backfill is idempotent for historical follow-up workspaces', () => {
   } finally {
     db.close();
   }
+});
+
+test('backfill dry-run reports eligible live-shaped jobs without writing reviewer passes', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createLedgerDb(ledgerDb);
+  const archiveDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped-archived', '2026-05');
+  mkdirSync(archiveDir, { recursive: true });
+  writeFileSync(path.join(archiveDir, 'job-archive.json'), JSON.stringify({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 46,
+    jobId: 'job-archive',
+    status: 'stopped',
+    stoppedAt: '2026-05-18T01:02:00.000Z',
+    workspaceDir: '/tmp/review-workspace',
+    remediationPlan: { currentRound: 2 },
+    remediationWorker: {
+      model: 'codex',
+      state: 'stopped',
+      spawnedAt: '2026-05-18T01:00:00.000Z',
+      workerRunId: 'wr_1',
+      workspaceDir: '/tmp/review-workspace',
+    },
+  }), 'utf8');
+
+  const result = backfillReviewerPasses(rootDir, { ledgerDbPath: ledgerDb, dryRun: true });
+
+  assert.equal(result.considered, 1);
+  assert.equal(result.wouldInsertOrUpdate, 1);
+  assert.equal(result.uniquePassKeys, 1);
+  assert.equal(result.insertedOrUpdated, 0);
+  assert.equal(result.tokenMatched, 1);
+  assert.equal(countReviewerPasses(rootDir), 0);
 });
 
 test('tokens CLI prints per-PR rollup with reviewer breakdown', () => {

@@ -2388,6 +2388,7 @@ async function pollOnce(
         rootDir: ROOT,
         repo: repoPath,
         activePRs: activeMergeAgentPRs,
+        hqPath: null,
       });
       for (const report of stuckReports) {
         const dispatched = {

@@ -943,6 +943,13 @@ function listMergeAgentLifecycleCleanups(rootDir) {
   }
 }
 
+function isUnresolvedMergeAgentLifecycleCleanup(cleanup) {
+  if (!cleanup) return false;
+  if (cleanup.completedAt) return false;
+  if (cleanup.lastResult?.cleanupComplete === true) return false;
+  return true;
+}
+
 function getRecordedMergeAgentDispatch(rootDir, job) {
   try {
     return JSON.parse(readFileSync(mergeAgentDispatchFilePath(rootDir, job), 'utf8'));
@@ -1230,7 +1237,7 @@ function scanStuckMergeAgentDispatches({
   now = Date.now(),
   minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
-  hqPath = process.env.HQ_BIN || DEFAULT_HQ_PATH,
+  hqPath = null,
   runtimeEnv = process.env,
   dispatchStateProbe = null,
   listLifecycleCleanupsImpl = listMergeAgentLifecycleCleanups,
@@ -1249,21 +1256,24 @@ function scanStuckMergeAgentDispatches({
       }
     );
   }
+  let lifecycleCleanups = [];
   try {
-    for (const cleanup of listLifecycleCleanupsImpl(rootDir)) {
-      if (!cleanup?.repo || cleanup?.prNumber == null || !cleanup?.headSha) continue;
-      if (repo && cleanup.repo !== repo) continue;
-      const key = `${cleanup.repo}#${Number(cleanup.prNumber)}`;
-      if (!eligibleHeadsByKey.has(key)) {
-        eligibleHeadsByKey.set(key, {
-          repo: cleanup.repo,
-          prNumber: Number(cleanup.prNumber),
-          headSha: cleanup.headSha,
-        });
-      }
-    }
+    lifecycleCleanups = listLifecycleCleanupsImpl(rootDir);
   } catch {
-    return [];
+    lifecycleCleanups = [];
+  }
+  for (const cleanup of lifecycleCleanups) {
+    if (!isUnresolvedMergeAgentLifecycleCleanup(cleanup)) continue;
+    if (!cleanup?.repo || cleanup?.prNumber == null || !cleanup?.headSha) continue;
+    if (repo && cleanup.repo !== repo) continue;
+    const key = `${cleanup.repo}#${Number(cleanup.prNumber)}`;
+    if (!eligibleHeadsByKey.has(key)) {
+      eligibleHeadsByKey.set(key, {
+        repo: cleanup.repo,
+        prNumber: Number(cleanup.prNumber),
+        headSha: cleanup.headSha,
+      });
+    }
   }
   if (eligibleHeadsByKey.size === 0) return [];
   const stuckReports = [];

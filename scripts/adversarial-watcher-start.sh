@@ -72,16 +72,31 @@ export LINEAR_API_KEY=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zd
 export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
 export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
 
+# Secret-resolution failures (most commonly: 1Password CLI rate-limit "Too
+# many requests") MUST sleep before exit. Without the sleep, launchd
+# KeepAlive+ThrottleInterval=30 turns a single failed `op read` into a
+# 30-second respawn storm that hammers 1Password and *prolongs* the
+# rate-limit instead of clearing it. The 2026-05-19 incident produced
+# 1349 watcher restarts in 8h (~21s cadence, ~4000 op calls) and froze
+# the review pipeline for the operator's full workday.
+# Same fail-once shape as the better-sqlite3 ABI gate and the
+# OP_SERVICE_ACCOUNT_TOKEN secret-source resolver above.
 if [[ -z "${LINEAR_API_KEY:-}" ]]; then
   echo "[adversarial-watcher] ERROR: failed to resolve LINEAR_API_KEY from 1Password" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
+  sleep 3600
   exit 1
 fi
 if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: failed to resolve GH_CLAUDE_REVIEWER_TOKEN from 1Password" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
+  sleep 3600
   exit 1
 fi
 if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from 1Password" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
+  sleep 3600
   exit 1
 fi
 

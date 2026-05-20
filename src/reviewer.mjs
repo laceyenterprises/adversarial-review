@@ -744,6 +744,7 @@ function buildCodexReviewArgs({ outputPath, prompt }) {
     'exec',
     '--dangerously-bypass-approvals-and-sandbox',
     '--ephemeral',
+    '--json',
     '--output-last-message',
     outputPath,
     '--',

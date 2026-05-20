@@ -1506,6 +1506,7 @@ function spawnCodexRemediationWorker({
         'exec',
         '--dangerously-bypass-approvals-and-sandbox',
         '--ephemeral',
+        '--json',
         '--output-last-message',
         outputPath,
         '-',
@@ -1533,6 +1534,7 @@ function spawnCodexRemediationWorker({
         'exec',
         '--dangerously-bypass-approvals-and-sandbox',
         '--ephemeral',
+        '--json',
         '--output-last-message',
         outputPath,
         '-',
@@ -3310,6 +3312,7 @@ async function consumeNextFollowUpJob({
     spawnedWorker = worker;
 
     const updated = markFollowUpJobSpawned({
+      rootDir,
       jobPath: claimed.jobPath,
       spawnedAt: now(),
       worker: {

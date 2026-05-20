@@ -1,15 +1,17 @@
 import { execFile } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 3;
+const REVIEW_STATE_SCHEMA_VERSION = 4;
+const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
-const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries']);
+const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries', 'reviewer_passes']);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
   'head_sha',
@@ -80,6 +82,12 @@ function ensureReviewStateSchema(db) {
 
   backfillReviewedPRSubjectIdentity(db);
 
+  runReviewStateMigrations(db);
+  // Handles DBs that briefly saw the inline reviewer_passes schema before the
+  // migration runner became the canonical path.
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);
+
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);
@@ -95,7 +103,40 @@ function getReviewRow(db, { repo, prNumber }) {
   return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber) || null;
 }
 
+function runReviewStateMigrations(db, { migrationsDir = REVIEW_STATE_MIGRATIONS_DIR } = {}) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id         TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  let migrationNames;
+  try {
+    migrationNames = readdirSync(migrationsDir)
+      .filter((name) => name.endsWith('.sql'))
+      .sort();
+  } catch (err) {
+    if (err?.code === 'ENOENT') return;
+    throw err;
+  }
+  const hasMigration = db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?');
+  const recordMigration = db.prepare('INSERT OR IGNORE INTO schema_migrations(id) VALUES (?)');
+  for (const name of migrationNames) {
+    if (hasMigration.get(name)) continue;
+    const sql = readFileSync(join(migrationsDir, name), 'utf8');
+    const applyMigration = db.transaction(() => {
+      db.exec(sql);
+      recordMigration.run(name);
+    });
+    applyMigration();
+  }
+}
+
 function addReviewedPRsColumnIfMissing(db, sql) {
+  addColumnIfMissing(db, sql);
+}
+
+function addColumnIfMissing(db, sql) {
   try {
     db.exec(sql);
   } catch (err) {

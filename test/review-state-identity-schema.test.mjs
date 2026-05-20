@@ -19,7 +19,7 @@ function columnNames(db, tableName) {
   return db.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => column.name);
 }
 
-test('fresh DB includes subject identity columns and schema version 3', () => {
+test('fresh DB includes subject identity columns and current schema version', () => {
   const rootDir = makeRootDir();
   const db = openReviewStateDb(rootDir);
   try {
@@ -87,7 +87,7 @@ test('migration from v2 adds identity columns and backfills available head SHA',
       subject_external_id: 'laceyenterprises/agent-os#361',
       revision_ref: null,
     });
-    assert.equal(db.pragma('user_version', { simple: true }), 3);
+    assert.equal(db.pragma('user_version', { simple: true }), REVIEW_STATE_SCHEMA_VERSION);
   } finally {
     db.close();
   }

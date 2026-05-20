@@ -1,0 +1,1181 @@
+import Database from 'better-sqlite3';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
+
+import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+
+const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview']);
+const PASS_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled']);
+
+function normalizeReviewerClass(value) {
+  const text = String(value || '').toLowerCase();
+  if (text.includes('codex') || text.includes('gpt')) return 'codex';
+  return 'claude';
+}
+
+function normalizeReviewerModel(value) {
+  const text = String(value || '').trim();
+  return text || null;
+}
+
+function normalizePassKind(value) {
+  const normalized = String(value || '').trim();
+  if (!PASS_KINDS.has(normalized)) {
+    throw new TypeError(`Invalid reviewer pass_kind: ${value}`);
+  }
+  return normalized;
+}
+
+function normalizePassStatus(value) {
+  const normalized = String(value || '').trim();
+  if (!PASS_STATUSES.has(normalized)) {
+    throw new TypeError(`Invalid reviewer pass status: ${value}`);
+  }
+  return normalized;
+}
+
+function normalizeAttemptNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new TypeError(`Invalid reviewer pass attempt_number: ${value}`);
+  }
+  return parsed;
+}
+
+function metadataJson(metadata) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return '{}';
+  return JSON.stringify(metadata);
+}
+
+function parseMetadataJson(raw) {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function closeOwnedReviewDb(db) {
+  // Most call sites get a fresh file-backed connection from
+  // openReviewStateDb. A few watcher tests intentionally mock that
+  // opener with a shared in-memory singleton; closing it here would
+  // invalidate the watcher's prepared statements mid-poll.
+  if (db?.name === ':memory:') return;
+  db.close();
+}
+
+function passKey({ repo, prNumber, attemptNumber, passKind }) {
+  return {
+    repo: String(repo || ''),
+    prNumber: Number(prNumber),
+    attemptNumber: normalizeAttemptNumber(attemptNumber),
+    passKind: normalizePassKind(passKind),
+  };
+}
+
+function beginReviewerPass(rootDir, {
+  repo,
+  prNumber,
+  attemptNumber,
+  reviewerClass,
+  reviewerModel = null,
+  passKind,
+  workerRunId = null,
+  workspacePath = null,
+  startedAt = new Date().toISOString(),
+  metadata = {},
+} = {}) {
+  const key = passKey({ repo, prNumber, attemptNumber, passKind });
+  const model = normalizeReviewerModel(reviewerModel || reviewerClass);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      `INSERT OR IGNORE INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+         worker_run_id, workspace_path, started_at, status, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`
+    ).run(
+      key.repo,
+      key.prNumber,
+      key.attemptNumber,
+      normalizeReviewerClass(model || reviewerClass),
+      model,
+      key.passKind,
+      workerRunId || null,
+      workspacePath || null,
+      startedAt,
+      metadataJson(metadata)
+    );
+    const existing = db.prepare(
+      `SELECT metadata_json FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+    const mergedMetadata = {
+      ...parseMetadataJson(existing?.metadata_json),
+      ...metadata,
+    };
+    db.prepare(
+      `UPDATE reviewer_passes
+          SET reviewer_class = COALESCE(?, reviewer_class),
+              reviewer_model = COALESCE(?, reviewer_model),
+              worker_run_id = COALESCE(?, worker_run_id),
+              workspace_path = COALESCE(?, workspace_path),
+              metadata_json = ?
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).run(
+      normalizeReviewerClass(model || reviewerClass),
+      model,
+      workerRunId || null,
+      workspacePath || null,
+      metadataJson(mergedMetadata),
+      key.repo,
+      key.prNumber,
+      key.attemptNumber,
+      key.passKind
+    );
+    return db.prepare(
+      `SELECT * FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
+function completeReviewerPass(rootDir, {
+  repo,
+  prNumber,
+  attemptNumber,
+  passKind,
+  status,
+  endedAt = new Date().toISOString(),
+  workerRunId = null,
+  tokenUsage = null,
+  tokenSource = null,
+  metadata = {},
+} = {}) {
+  const key = passKey({ repo, prNumber, attemptNumber, passKind });
+  const usage = normalizeTokenUsage(tokenUsage);
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const existing = db.prepare(
+      `SELECT metadata_json FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+    const mergedMetadata = {
+      ...parseMetadataJson(existing?.metadata_json),
+      ...metadata,
+    };
+    db.prepare(
+      `UPDATE reviewer_passes
+          SET ended_at = ?,
+              status = ?,
+              worker_run_id = COALESCE(?, worker_run_id),
+              token_input = COALESCE(?, token_input),
+              token_output = COALESCE(?, token_output),
+              token_cache_read = COALESCE(?, token_cache_read),
+              token_cache_write = COALESCE(?, token_cache_write),
+              token_total = COALESCE(?, token_total),
+              token_cost_usd = COALESCE(?, token_cost_usd),
+              token_source = COALESCE(?, token_source),
+              metadata_json = ?
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).run(
+      endedAt,
+      normalizePassStatus(status),
+      workerRunId || null,
+      usage?.input ?? null,
+      usage?.output ?? null,
+      usage?.cacheRead ?? null,
+      usage?.cacheWrite ?? null,
+      usage?.total ?? null,
+      usage?.costUSD ?? null,
+      tokenSource || usage?.source || null,
+      metadataJson(mergedMetadata),
+      key.repo,
+      key.prNumber,
+      key.attemptNumber,
+      key.passKind
+    );
+    return db.prepare(
+      `SELECT * FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
+function normalizeTokenUsage(tokenUsage) {
+  if (!tokenUsage || typeof tokenUsage !== 'object') return null;
+  const input = coerceNonNegativeInt(tokenUsage.input ?? tokenUsage.inputTokens ?? tokenUsage.token_input);
+  const output = coerceNonNegativeInt(tokenUsage.output ?? tokenUsage.outputTokens ?? tokenUsage.token_output);
+  const cacheRead = coerceNonNegativeInt(tokenUsage.cacheRead ?? tokenUsage.cache_read ?? tokenUsage.token_cache_read);
+  const cacheWrite = coerceNonNegativeInt(tokenUsage.cacheWrite ?? tokenUsage.cache_write ?? tokenUsage.token_cache_write);
+  const total = coerceNonNegativeInt(tokenUsage.total ?? tokenUsage.totalTokens ?? tokenUsage.token_total);
+  const costUSD = coerceNonNegativeFloat(tokenUsage.costUSD ?? tokenUsage.cost_usd ?? tokenUsage.token_cost_usd);
+  if (input === null && output === null && cacheRead === null && cacheWrite === null && total === null && costUSD === null) {
+    return null;
+  }
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    total,
+    costUSD,
+    source: tokenUsage.source || null,
+  };
+}
+
+function coerceNonNegativeInt(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.trunc(parsed);
+}
+
+function coerceNonNegativeFloat(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+function resolveSessionLedgerDbPath({ env = process.env, hqRoot = null, rootDir = process.cwd(), explicitPath = null } = {}) {
+  const candidates = [];
+  if (explicitPath) candidates.push(explicitPath);
+  if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) candidates.push(env.AGENT_OS_SESSION_LEDGER_DB_PATH);
+  if (env.SESSION_LEDGER_DB_PATH) candidates.push(env.SESSION_LEDGER_DB_PATH);
+  if (env.AGENT_OS_DEPLOY_CHECKOUT) {
+    candidates.push(join(env.AGENT_OS_DEPLOY_CHECKOUT, '.agent-os', 'session-ledger', 'ledger.db'));
+  }
+  if (hqRoot || env.HQ_ROOT) {
+    const resolvedHqRoot = hqRoot || env.HQ_ROOT;
+    candidates.push(join(resolvedHqRoot, 'session-ledger', 'ledger.db'));
+  }
+  candidates.push(join(rootDir, '.agent-os', 'session-ledger', 'ledger.db'));
+  candidates.push(join(homedir(), '.agent-os', 'session-ledger', 'ledger.db'));
+  candidates.push(join(homedir(), 'agent-os', '.agent-os', 'session-ledger', 'ledger.db'));
+
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const resolved = resolve(String(candidate));
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    if (existsSync(resolved)) return resolved;
+  }
+  return null;
+}
+
+function readReviewerSessionTokenUsage({
+  adapterSessionKey,
+  sessionKeys = [],
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  ledgerDbPath = null,
+  env = process.env,
+  rootDir = process.cwd(),
+} = {}) {
+  const dbPath = resolveSessionLedgerDbPath({ explicitPath: ledgerDbPath, env, rootDir });
+  if (!dbPath) return null;
+  const keys = [...new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String))];
+  if (keys.length === 0 && !workspacePath) return null;
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const window = runtimeSessionWindowClause({ startedAt, endedAt });
+    let row = null;
+    if (keys.length > 0) {
+      const params = { ...window.params };
+      keys.forEach((key, idx) => { params[`key${idx}`] = key; });
+      row = db.prepare(
+        `SELECT adapter_session_key, total_input_tokens, total_output_tokens,
+                total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+                source_path, started_at, ended_at
+           FROM runtime_sessions
+          WHERE adapter_session_key IN (${keys.map((_, idx) => `@key${idx}`).join(', ')})
+            ${window.clause}
+          ORDER BY COALESCE(ended_at, started_at, '') DESC
+          LIMIT 1`
+      ).get(params);
+    }
+    if (!row && workspacePath) {
+      row = db.prepare(
+        `SELECT adapter_session_key, total_input_tokens, total_output_tokens,
+                total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+                source_path, started_at, ended_at
+           FROM runtime_sessions
+          WHERE source_path = @workspacePath
+            ${window.clause}
+          ORDER BY COALESCE(ended_at, started_at, '') DESC
+          LIMIT 1`
+      ).get({
+        workspacePath,
+        ...window.params,
+      });
+    }
+    return tokenUsageFromRuntimeSession(row);
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
+function readWorkerRunTokenUsage({
+  workerRunId,
+  launchRequestId = null,
+  ledgerDbPath = null,
+  env = process.env,
+  rootDir = process.cwd(),
+} = {}) {
+  const dbPath = resolveSessionLedgerDbPath({ explicitPath: ledgerDbPath, env, rootDir });
+  if (!dbPath || (!workerRunId && !launchRequestId)) return null;
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    if (workerRunId) {
+      const row = db.prepare(
+        `SELECT wr.run_id, wr.launch_request_id,
+                wr.token_usage_input, wr.token_usage_output,
+                wr.token_usage_cost_usd, wr.token_usage_source,
+                rs.total_cache_read_tokens, rs.total_cache_write_tokens
+           FROM worker_runs wr
+           LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
+          WHERE wr.run_id = @workerRunId
+          ORDER BY COALESCE(wr.ended_at, wr.updated_at, wr.started_at, '') DESC
+          LIMIT 1`
+      ).get({ workerRunId });
+      if (row) return tokenUsageFromWorkerRun(row, { workerRunId, launchRequestId });
+    }
+    if (!launchRequestId) return null;
+    const row = db.prepare(
+      `SELECT wr.run_id, wr.launch_request_id,
+              wr.token_usage_input, wr.token_usage_output,
+              wr.token_usage_cost_usd, wr.token_usage_source,
+              rs.total_cache_read_tokens, rs.total_cache_write_tokens
+         FROM worker_runs wr
+         LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
+        WHERE wr.launch_request_id = @launchRequestId
+        ORDER BY COALESCE(wr.ended_at, wr.updated_at, wr.started_at, '') DESC
+        LIMIT 1`
+    ).get({ launchRequestId });
+    return tokenUsageFromWorkerRun(row, { workerRunId, launchRequestId });
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
+function runtimeSessionWindowClause({ startedAt = null, endedAt = null } = {}) {
+  const params = {};
+  const clauses = [];
+  if (endedAt) {
+    params.windowEnd = endedAt;
+    clauses.push(`COALESCE(started_at, '') <= @windowEnd`);
+  }
+  if (startedAt) {
+    params.windowStart = startedAt;
+    clauses.push(`COALESCE(ended_at, started_at, '') >= @windowStart`);
+  }
+  return {
+    clause: clauses.length > 0 ? ` AND ${clauses.join(' AND ')}` : '',
+    params,
+  };
+}
+
+function tokenUsageFromWorkerRun(row, { workerRunId = null, launchRequestId = null } = {}) {
+  if (!row) return null;
+  return {
+    workerRunId: row.run_id || workerRunId || null,
+    launchRequestId: row.launch_request_id || launchRequestId || null,
+    input: coerceNonNegativeInt(row.token_usage_input),
+    output: coerceNonNegativeInt(row.token_usage_output),
+    cacheRead: coerceNonNegativeInt(row.total_cache_read_tokens),
+    cacheWrite: coerceNonNegativeInt(row.total_cache_write_tokens),
+    costUSD: coerceNonNegativeFloat(row.token_usage_cost_usd),
+    source: row.token_usage_source || 'session-ledger',
+  };
+}
+
+function tokenUsageFromRuntimeSession(row) {
+  if (!row) return null;
+  const cost = coerceNonNegativeFloat(row.total_cost_usd);
+  return {
+    adapterSessionKey: row.adapter_session_key || null,
+    input: coerceNonNegativeInt(row.total_input_tokens),
+    output: coerceNonNegativeInt(row.total_output_tokens),
+    cacheRead: coerceNonNegativeInt(row.total_cache_read_tokens),
+    cacheWrite: coerceNonNegativeInt(row.total_cache_write_tokens),
+    costUSD: cost && cost > 0 ? cost : null,
+    source: 'session-ledger',
+  };
+}
+
+function readCodexTranscriptTokenUsage({
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  sessionRoots = [],
+  transcriptSummaryCache = null,
+  transcriptPathCache = null,
+  rootDir = process.cwd(),
+} = {}) {
+  const workspacePaths = normalizedWorkspacePaths(workspacePath, rootDir);
+  if (workspacePaths.length === 0 || sessionRoots.length === 0) return null;
+  const transcriptPaths = listCodexTranscriptPaths(sessionRoots, { startedAt, endedAt }, transcriptPathCache);
+  const matches = [];
+  for (const transcriptPath of transcriptPaths) {
+    const summary = readCachedCodexTranscriptSummary(transcriptPath, transcriptSummaryCache);
+    if (!summary?.cwd || !workspacePaths.includes(resolve(summary.cwd))) continue;
+    if (!timestampOverlapsWindow(summary.startedAt, summary.endedAt, startedAt, endedAt)) continue;
+    if (!summary.tokenUsage) continue;
+    matches.push({
+      transcriptPath,
+      sessionId: summary.sessionId,
+      usage: summary.tokenUsage,
+    });
+  }
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  return {
+    ...match.usage,
+    source: 'codex-transcript',
+    adapterSessionKey: match.sessionId || null,
+    transcriptPath: match.transcriptPath,
+  };
+}
+
+function readClaudeTranscriptTokenUsage({
+  adapterSessionKey = null,
+  sessionKeys = [],
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  sessionRoots = [],
+  transcriptSummaryCache = null,
+  transcriptPathCache = null,
+  rootDir = process.cwd(),
+} = {}) {
+  const keys = new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String));
+  const workspacePaths = normalizedWorkspacePaths(workspacePath, rootDir);
+  if (keys.size === 0 && workspacePaths.length === 0) return null;
+  if (sessionRoots.length === 0) return null;
+  const transcriptPaths = listClaudeTranscriptPaths(sessionRoots, transcriptPathCache);
+  const matches = [];
+  for (const transcriptPath of transcriptPaths) {
+    const summary = readCachedClaudeTranscriptSummary(transcriptPath, transcriptSummaryCache);
+    if (!summary?.tokenUsage) continue;
+    const sessionMatched = summary.sessionId && keys.has(String(summary.sessionId));
+    const workspaceMatched = summary.cwd && workspacePaths.includes(resolve(summary.cwd));
+    if (!sessionMatched && !workspaceMatched) continue;
+    if (!timestampOverlapsWindow(summary.startedAt, summary.endedAt, startedAt, endedAt)) continue;
+    matches.push({
+      transcriptPath,
+      sessionId: summary.sessionId,
+      usage: summary.tokenUsage,
+    });
+  }
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  return {
+    ...match.usage,
+    source: 'claude-transcript',
+    adapterSessionKey: match.sessionId || null,
+    transcriptPath: match.transcriptPath,
+  };
+}
+
+function readCachedClaudeTranscriptSummary(transcriptPath, cache) {
+  if (!cache) return readClaudeTranscriptSummary(transcriptPath);
+  if (!cache.has(transcriptPath)) {
+    cache.set(transcriptPath, readClaudeTranscriptSummary(transcriptPath));
+  }
+  return cache.get(transcriptPath);
+}
+
+function readCachedCodexTranscriptSummary(transcriptPath, cache) {
+  if (!cache) return readCodexTranscriptSummary(transcriptPath);
+  if (!cache.has(transcriptPath)) {
+    cache.set(transcriptPath, readCodexTranscriptSummary(transcriptPath));
+  }
+  return cache.get(transcriptPath);
+}
+
+function normalizedWorkspacePaths(workspacePath, rootDir) {
+  if (!workspacePath) return [];
+  const raw = String(workspacePath);
+  const candidates = [raw];
+  if (!isAbsolute(raw)) candidates.push(join(rootDir, raw));
+  return [...new Set(candidates.map((candidate) => resolve(candidate)))];
+}
+
+function listCodexTranscriptPaths(sessionRoots, { startedAt = null, endedAt = null } = {}, cache = null) {
+  const cacheKey = cache
+    ? JSON.stringify({
+      roots: sessionRoots.map((root) => resolve(String(root))),
+      startedAt: dayKey(startedAt),
+      endedAt: dayKey(endedAt || startedAt),
+    })
+    : null;
+  if (cacheKey && cache.has(cacheKey)) return cache.get(cacheKey);
+  const paths = [];
+  const seen = new Set();
+  for (const root of sessionRoots) {
+    if (!root) continue;
+    const resolvedRoot = resolve(String(root));
+    const dateDirs = codexSessionDateDirs(resolvedRoot, { startedAt, endedAt });
+    for (const dir of dateDirs.length > 0 ? dateDirs : [resolvedRoot]) {
+      addJsonlFilesRecursively(dir, paths, seen);
+    }
+  }
+  if (cacheKey) cache.set(cacheKey, paths);
+  return paths;
+}
+
+function listClaudeTranscriptPaths(sessionRoots, cache = null) {
+  const cacheKey = cache
+    ? JSON.stringify({ roots: sessionRoots.map((root) => resolve(String(root))) })
+    : null;
+  if (cacheKey && cache.has(cacheKey)) return cache.get(cacheKey);
+  const paths = [];
+  const seen = new Set();
+  for (const root of sessionRoots) {
+    if (!root) continue;
+    addJsonlFilesRecursively(resolve(String(root)), paths, seen);
+  }
+  if (cacheKey) cache.set(cacheKey, paths);
+  return paths;
+}
+
+function dayKey(value) {
+  const parsed = parseDate(value);
+  if (!parsed) return null;
+  return parsed.toISOString().slice(0, 10);
+}
+
+function codexSessionDateDirs(root, { startedAt = null, endedAt = null } = {}) {
+  const start = parseDate(startedAt);
+  const end = parseDate(endedAt) || start;
+  if (!start) return [];
+  const days = [];
+  const first = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+  first.setUTCDate(first.getUTCDate() - 1);
+  const last = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()));
+  last.setUTCDate(last.getUTCDate() + 1);
+  for (const day = new Date(first); day <= last; day.setUTCDate(day.getUTCDate() + 1)) {
+    const yyyy = String(day.getUTCFullYear());
+    const mm = String(day.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(day.getUTCDate()).padStart(2, '0');
+    const dir = join(root, yyyy, mm, dd);
+    if (existsSync(dir)) days.push(dir);
+  }
+  return days;
+}
+
+function addJsonlFilesRecursively(dir, paths, seen) {
+  if (!existsSync(dir)) return;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const entryPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      addJsonlFilesRecursively(entryPath, paths, seen);
+    } else if (entry.isFile() && entry.name.endsWith('.jsonl') && !seen.has(entryPath)) {
+      seen.add(entryPath);
+      paths.push(entryPath);
+    }
+  }
+}
+
+function readCodexTranscriptSummary(transcriptPath) {
+  let sessionId = null;
+  let cwd = null;
+  let startedAt = null;
+  let endedAt = null;
+  let tokenUsage = null;
+  try {
+    for (const line of readFileSync(transcriptPath, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let item;
+      try {
+        item = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const timestamp = item.timestamp || item.payload?.timestamp || null;
+      if (timestamp) {
+        startedAt ||= timestamp;
+        endedAt = timestamp;
+      }
+      if (item.type === 'session_meta') {
+        sessionId ||= item.payload?.id || null;
+        cwd ||= item.payload?.cwd || null;
+        if (item.payload?.timestamp) startedAt = item.payload.timestamp;
+      } else if (item.type === 'turn.completed') {
+        const usage = tokenUsageFromCodexTotal(item.usage || null);
+        if (usage) tokenUsage = usage;
+      } else if (item.type === 'event_msg' && item.payload?.type === 'token_count') {
+        const total = item.payload?.info?.total_token_usage || null;
+        const usage = tokenUsageFromCodexTotal(total);
+        if (usage) tokenUsage = usage;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return { sessionId, cwd, startedAt, endedAt, tokenUsage };
+}
+
+function readClaudeTranscriptSummary(transcriptPath) {
+  let sessionId = null;
+  let cwd = null;
+  let startedAt = null;
+  let endedAt = null;
+  const totals = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  };
+  let sawUsage = false;
+  try {
+    for (const line of readFileSync(transcriptPath, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let item;
+      try {
+        item = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const timestamp = item.timestamp || item.message?.timestamp || null;
+      if (timestamp) {
+        startedAt ||= timestamp;
+        endedAt = timestamp;
+      }
+      sessionId ||= item.sessionId || item.message?.sessionId || null;
+      cwd ||= item.cwd || item.message?.cwd || null;
+      const usage = item.message?.usage || item.usage || null;
+      if (usage && typeof usage === 'object') {
+        const normalized = tokenUsageFromClaudeUsage(usage);
+        if (normalized) {
+          sawUsage = true;
+          totals.input += normalized.input || 0;
+          totals.output += normalized.output || 0;
+          totals.cacheRead += normalized.cacheRead || 0;
+          totals.cacheWrite += normalized.cacheWrite || 0;
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  const tokenUsage = sawUsage
+    ? normalizeTokenUsage({
+      ...totals,
+      total: totals.input + totals.output + totals.cacheRead + totals.cacheWrite,
+      source: 'claude-transcript',
+    })
+    : null;
+  return { sessionId, cwd, startedAt, endedAt, tokenUsage };
+}
+
+function tokenUsageFromCodexTotal(total) {
+  if (!total || typeof total !== 'object') return null;
+  return normalizeTokenUsage({
+    input: total.input_tokens,
+    output: total.output_tokens,
+    cacheRead: total.cached_input_tokens,
+    cacheWrite: 0,
+    total: total.total_tokens,
+    source: 'codex-transcript',
+  });
+}
+
+function tokenUsageFromClaudeUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  return normalizeTokenUsage({
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cacheRead: usage.cache_read_input_tokens,
+    cacheWrite: usage.cache_creation_input_tokens,
+    total: usage.total_tokens,
+    source: 'claude-transcript',
+  });
+}
+
+function readCodexWorkerLogTokenUsage(logPath) {
+  if (!logPath || !existsSync(logPath)) return null;
+  let text;
+  try {
+    text = readFileSync(logPath, 'utf8');
+  } catch {
+    return null;
+  }
+  const jsonUsage = readCodexWorkerLogJsonTokenUsage(text);
+  const tokenMatch = text.match(/(?:^|\n)[^\S\r\n]*tokens used(?:[^\S\r\n]+|\r?\n[^\S\r\n]*)([\d,]+)/i);
+  if (!jsonUsage && !tokenMatch) return null;
+  const usage = jsonUsage || normalizeTokenUsage({
+    total: tokenMatch[1].replaceAll(',', ''),
+    source: 'codex-worker-log',
+  });
+  if (!usage) return null;
+  const sessionMatch = text.match(/^\s*session id:\s*(\S+)/mi);
+  return {
+    ...usage,
+    adapterSessionKey: sessionMatch?.[1] || null,
+    transcriptPath: logPath,
+  };
+}
+
+function readCodexWorkerLogJsonTokenUsage(text) {
+  let tokenUsage = null;
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed'))) continue;
+    let item;
+    try {
+      item = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const total = item.type === 'turn.completed'
+      ? item.usage
+      : (
+          item.type === 'event_msg' && item.payload?.type === 'token_count'
+            ? item.payload?.info?.total_token_usage
+            : null
+        );
+    const usage = tokenUsageFromCodexTotal(total || null);
+    if (usage) {
+      tokenUsage = {
+        ...usage,
+        source: 'codex-worker-log',
+      };
+    }
+  }
+  return tokenUsage;
+}
+
+function defaultCodexSessionRoots({ env = process.env } = {}) {
+  return uniqueExistingPaths([
+    ...(env.CODEX_SESSION_ROOTS ? env.CODEX_SESSION_ROOTS.split(':') : []),
+    env.CODEX_SESSION_ROOT,
+    join(homedir(), '.codex', 'sessions'),
+  ]);
+}
+
+function defaultClaudeSessionRoots({ env = process.env } = {}) {
+  return uniqueExistingPaths([
+    ...(env.CLAUDE_SESSION_ROOTS ? env.CLAUDE_SESSION_ROOTS.split(':') : []),
+    env.CLAUDE_SESSION_ROOT,
+    env.CLAUDE_PROJECTS_ROOT,
+    join(homedir(), '.claude', 'projects'),
+  ]);
+}
+
+function uniqueExistingPaths(paths) {
+  const result = [];
+  const seen = new Set();
+  for (const path of paths) {
+    if (!path) continue;
+    const resolved = resolve(String(path));
+    if (seen.has(resolved) || !existsSync(resolved)) continue;
+    seen.add(resolved);
+    result.push(resolved);
+  }
+  return result;
+}
+
+function readBestReviewerEvidenceTokenUsage({
+  workerRunId = null,
+  launchRequestId = null,
+  adapterSessionKey = null,
+  sessionKeys = [],
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  ledgerDbPath = null,
+  rootDir = process.cwd(),
+  reviewerModel = null,
+  codexSessionRoots = null,
+  claudeSessionRoots = null,
+  transcriptFallback = true,
+  workerLogPath = null,
+} = {}) {
+  const ledgerUsage = readWorkerRunTokenUsage({
+    workerRunId,
+    launchRequestId,
+    ledgerDbPath,
+    rootDir,
+  }) || readReviewerSessionTokenUsage({
+    adapterSessionKey,
+    sessionKeys,
+    workspacePath,
+    startedAt,
+    endedAt,
+    ledgerDbPath,
+    rootDir,
+  });
+  if (ledgerUsage) return ledgerUsage;
+  if (transcriptFallback) {
+    const shouldUseDefaults = shouldUseDefaultTranscriptRoots(rootDir);
+    const resolvedCodexSessionRoots = codexSessionRoots || (shouldUseDefaults ? defaultCodexSessionRoots() : []);
+    const resolvedClaudeSessionRoots = claudeSessionRoots || (shouldUseDefaults ? defaultClaudeSessionRoots() : []);
+    const transcriptReaders = normalizeReviewerClass(reviewerModel) === 'claude'
+      ? [readClaudeTranscriptTokenUsage, readCodexTranscriptTokenUsage]
+      : [readCodexTranscriptTokenUsage, readClaudeTranscriptTokenUsage];
+    for (const reader of transcriptReaders) {
+      const usage = reader === readClaudeTranscriptTokenUsage
+        ? reader({
+          adapterSessionKey,
+          sessionKeys,
+          workspacePath,
+          startedAt,
+          endedAt,
+          sessionRoots: resolvedClaudeSessionRoots,
+          rootDir,
+        })
+        : reader({
+          workspacePath,
+          startedAt,
+          endedAt,
+          sessionRoots: resolvedCodexSessionRoots,
+          rootDir,
+        });
+      if (usage) return usage;
+    }
+  }
+  return readCodexWorkerLogTokenUsage(workerLogPath);
+}
+
+function shouldUseDefaultTranscriptRoots(rootDir) {
+  if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '1') return true;
+  if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '0') return false;
+  const resolved = resolve(String(rootDir || ''));
+  return resolved === '/Users/airlock/agent-os/tools/adversarial-review'
+    || resolved === '/Users/placey/agent-os-trees/codex/agent-os/tools/adversarial-review'
+    || resolved === '/Users/placey/agent-os-trees/claude-code/agent-os/tools/adversarial-review';
+}
+
+function timestampOverlapsWindow(startedAt, endedAt, windowStart, windowEnd) {
+  const start = parseDate(startedAt);
+  const end = parseDate(endedAt) || start;
+  if (!start) return false;
+  const graceMs = 15 * 60 * 1000;
+  const low = parseDate(windowStart);
+  const high = parseDate(windowEnd) || low;
+  if (low && end < new Date(low.getTime() - graceMs)) return false;
+  if (high && start > new Date(high.getTime() + graceMs)) return false;
+  return true;
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function reviewerPassRows(rootDir, { since = null } = {}) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const params = {};
+    const where = [];
+    if (since) {
+      where.push('started_at >= @since');
+      params.since = since;
+    }
+    return db.prepare(
+      `SELECT *
+         FROM reviewer_passes
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        ORDER BY started_at DESC, pass_id DESC`
+    ).all(params);
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
+function parseSince(value, { now = new Date() } = {}) {
+  if (!value) return null;
+  const text = String(value).trim();
+  const rel = text.match(/^(\d+)([dhmw])$/i);
+  if (rel) {
+    const amount = Number(rel[1]);
+    const unit = rel[2].toLowerCase();
+    const multipliers = { d: 86_400_000, h: 3_600_000, m: 60_000, w: 7 * 86_400_000 };
+    return new Date(now.getTime() - amount * multipliers[unit]).toISOString();
+  }
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new TypeError(`Invalid --since value: ${value}`);
+  }
+  return parsed.toISOString();
+}
+
+function readHistoricalFollowUpJobs(rootDir) {
+  const base = join(rootDir, 'data', 'follow-up-jobs');
+  const states = ['completed', 'failed', 'stopped', 'stopped-archived'];
+  const jobs = [];
+  const seen = new Set();
+  function addJob(jobPath) {
+    if (seen.has(jobPath)) return;
+    seen.add(jobPath);
+    try {
+      jobs.push({ jobPath, job: JSON.parse(readFileSync(jobPath, 'utf8')) });
+    } catch {
+      // Ignore malformed historical artifacts; backfill is best-effort.
+    }
+  }
+  function addJsonFilesRecursively(dir) {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        addJsonFilesRecursively(entryPath);
+      } else if (entry.isFile() && entry.name.endsWith('.json')) {
+        addJob(entryPath);
+      }
+    }
+  }
+  for (const state of states) {
+    addJsonFilesRecursively(join(base, state));
+  }
+
+  const workspaceRoot = join(base, 'workspaces');
+  if (existsSync(workspaceRoot)) {
+    for (const entry of readdirSync(workspaceRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      for (const state of states) {
+        const jobPath = join(base, state, `${entry.name}.json`);
+        if (existsSync(jobPath)) addJob(jobPath);
+      }
+    }
+  }
+  return jobs;
+}
+
+function backfillReviewerPasses(rootDir, {
+  ledgerDbPath = null,
+  codexSessionRoots = [],
+  claudeSessionRoots = [],
+  transcriptFallback = false,
+  now = () => new Date().toISOString(),
+  dryRun = false,
+} = {}) {
+  const jobs = readHistoricalFollowUpJobs(rootDir);
+  let considered = 0;
+  let insertedOrUpdated = 0;
+  let wouldInsertOrUpdate = 0;
+  let tokenMatched = 0;
+  let workerLogMatched = 0;
+  let transcriptMatched = 0;
+  let claudeTranscriptMatched = 0;
+  let skipped = 0;
+  const uniquePassKeys = new Set();
+  const codexTranscriptSummaryCache = new Map();
+  const codexTranscriptPathCache = new Map();
+  const claudeTranscriptSummaryCache = new Map();
+  const claudeTranscriptPathCache = new Map();
+  for (const { job, jobPath } of jobs) {
+    const worker = historicalWorkerForJob(job);
+    const repo = job?.repo;
+    const prNumber = Number(job?.prNumber);
+    const workspacePath = worker.workspaceDir || job?.workspaceDir || null;
+    if (!repo || !Number.isInteger(prNumber) || !workspacePath) {
+      skipped += 1;
+      continue;
+    }
+    considered += 1;
+    const round = latestRemediationRound(job);
+    const attemptNumber = normalizeAttemptNumber(
+      round?.round
+      || round?.attemptNumber
+      || job?.remediationPlan?.currentRound
+      || job?.currentRound
+      || 1
+    );
+    uniquePassKeys.add(`${repo}#${prNumber}#${attemptNumber}#remediation`);
+    const startedAt = worker.spawnedAt || job.claimedAt || job.createdAt || now();
+    const endedAt = job.completedAt || job.failedAt || job.stoppedAt || worker.reconciledAt || null;
+    const status = job.status === 'completed'
+      ? 'completed'
+      : (job.status === 'failed' ? 'failed' : 'cancelled');
+    const launchRequestId = worker.launchRequestId || worker.launchRequestID || job.replyStorageKey || null;
+    const usage = readWorkerRunTokenUsage({
+      workerRunId: worker.workerRunId || worker.runId || null,
+      launchRequestId,
+      ledgerDbPath,
+      rootDir,
+    }) || readReviewerSessionTokenUsage({
+      workspacePath,
+      startedAt,
+      endedAt,
+      ledgerDbPath,
+      rootDir,
+    }) || (transcriptFallback ? readTranscriptTokenUsageForModel({
+      reviewerModel: worker.model || worker.workerClass,
+      workspacePath,
+      startedAt,
+      endedAt,
+      codexSessionRoots,
+      claudeSessionRoots,
+      codexTranscriptSummaryCache,
+      codexTranscriptPathCache,
+      claudeTranscriptSummaryCache,
+      claudeTranscriptPathCache,
+      rootDir,
+    }) : null) || readCodexWorkerLogTokenUsage(worker.logPath);
+    if (usage) {
+      tokenMatched += 1;
+      if (usage.source === 'codex-worker-log') workerLogMatched += 1;
+      if (usage.source === 'codex-transcript') transcriptMatched += 1;
+      if (usage.source === 'claude-transcript') claudeTranscriptMatched += 1;
+    }
+    wouldInsertOrUpdate += 1;
+    if (dryRun) continue;
+
+    beginReviewerPass(rootDir, {
+      repo,
+      prNumber,
+      attemptNumber,
+      reviewerClass: worker.workerClass || worker.model || 'codex',
+      reviewerModel: worker.model || worker.workerClass || 'codex',
+      passKind: 'remediation',
+      workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
+      workspacePath,
+      startedAt,
+      metadata: {
+        backfill: true,
+        jobPath,
+        jobId: job.jobId || null,
+        launchRequestId,
+        transcriptPath: usage?.transcriptPath || null,
+        transcriptSessionId: usage?.adapterSessionKey || null,
+        workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
+      },
+    });
+    completeReviewerPass(rootDir, {
+      repo,
+      prNumber,
+      attemptNumber,
+      passKind: 'remediation',
+      status,
+      endedAt: endedAt || startedAt,
+      workerRunId: usage?.workerRunId || worker.workerRunId || worker.runId || null,
+      tokenUsage: usage,
+      tokenSource: usage?.source || (usage ? 'session-ledger' : 'unknown'),
+      metadata: {
+        backfill: true,
+        jobPath,
+        transcriptPath: usage?.transcriptPath || null,
+        transcriptSessionId: usage?.adapterSessionKey || null,
+        workerLogPath: usage?.source === 'codex-worker-log' ? usage.transcriptPath : null,
+      },
+    });
+    insertedOrUpdated += 1;
+  }
+  return {
+    considered,
+    insertedOrUpdated,
+    wouldInsertOrUpdate,
+    uniquePassKeys: uniquePassKeys.size,
+    tokenMatched,
+    workerLogMatched,
+    transcriptMatched,
+    claudeTranscriptMatched,
+    skipped,
+  };
+}
+
+function readTranscriptTokenUsageForModel({
+  reviewerModel = null,
+  adapterSessionKey = null,
+  sessionKeys = [],
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  codexSessionRoots = [],
+  claudeSessionRoots = [],
+  codexTranscriptSummaryCache = null,
+  codexTranscriptPathCache = null,
+  claudeTranscriptSummaryCache = null,
+  claudeTranscriptPathCache = null,
+  rootDir = process.cwd(),
+} = {}) {
+  const readers = normalizeReviewerClass(reviewerModel) === 'claude'
+    ? ['claude', 'codex']
+    : ['codex', 'claude'];
+  for (const reader of readers) {
+    const usage = reader === 'claude'
+      ? readClaudeTranscriptTokenUsage({
+        adapterSessionKey,
+        sessionKeys,
+        workspacePath,
+        startedAt,
+        endedAt,
+        sessionRoots: claudeSessionRoots,
+        transcriptSummaryCache: claudeTranscriptSummaryCache,
+        transcriptPathCache: claudeTranscriptPathCache,
+        rootDir,
+      })
+      : readCodexTranscriptTokenUsage({
+        workspacePath,
+        startedAt,
+        endedAt,
+        sessionRoots: codexSessionRoots,
+        transcriptSummaryCache: codexTranscriptSummaryCache,
+        transcriptPathCache: codexTranscriptPathCache,
+        rootDir,
+      });
+    if (usage) return usage;
+  }
+  return null;
+}
+
+function latestRemediationRound(job) {
+  const rounds = Array.isArray(job?.remediationPlan?.rounds) ? job.remediationPlan.rounds : [];
+  return rounds.length > 0 ? rounds[rounds.length - 1] : null;
+}
+
+function historicalWorkerForJob(job) {
+  const round = latestRemediationRound(job);
+  const roundWorker = round?.worker || {};
+  const topLevelWorker = job?.remediationWorker || {};
+  return {
+    ...topLevelWorker,
+    ...roundWorker,
+    model: roundWorker.model || topLevelWorker.model || job?.reviewerModel || 'codex',
+    workerClass: roundWorker.workerClass || topLevelWorker.workerClass || roundWorker.model || topLevelWorker.model || 'codex',
+    workerRunId: roundWorker.workerRunId || topLevelWorker.workerRunId || roundWorker.runId || topLevelWorker.runId || null,
+    runId: roundWorker.runId || topLevelWorker.runId || null,
+    launchRequestId: roundWorker.launchRequestId || topLevelWorker.launchRequestId || null,
+    launchRequestID: roundWorker.launchRequestID || topLevelWorker.launchRequestID || null,
+    workspaceDir: roundWorker.workspaceDir || topLevelWorker.workspaceDir || job?.workspaceDir || null,
+    spawnedAt: roundWorker.spawnedAt || topLevelWorker.spawnedAt || round?.spawnedAt || job?.claimedAt || null,
+    reconciledAt: roundWorker.reconciledAt || topLevelWorker.reconciledAt || round?.finishedAt || null,
+  };
+}
+
+export {
+  backfillReviewerPasses,
+  beginReviewerPass,
+  completeReviewerPass,
+  normalizeReviewerClass,
+  normalizeTokenUsage,
+  parseSince,
+  readBestReviewerEvidenceTokenUsage,
+  readClaudeTranscriptTokenUsage,
+  readCodexTranscriptTokenUsage,
+  readCodexWorkerLogTokenUsage,
+  readReviewerSessionTokenUsage,
+  readWorkerRunTokenUsage,
+  reviewerPassRows,
+  resolveSessionLedgerDbPath,
+};

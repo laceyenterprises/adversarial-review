@@ -104,6 +104,7 @@ function emptyResult({
   signal = null,
   pgid = null,
   reattachToken = null,
+  tokenUsage = null,
   error = null,
 } = {}) {
   return {
@@ -117,10 +118,41 @@ function emptyResult({
     pgid,
     spawnedAt,
     reattachToken,
+    tokenUsage,
     error,
     stderr: stderrTail,
     stdout: stdoutTail,
   };
+}
+
+function parseCodexJsonTokenUsage(stdout) {
+  let tokenUsage = null;
+  for (const line of String(stdout || '').split('\n')) {
+    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed'))) continue;
+    let item;
+    try {
+      item = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const total = item.type === 'turn.completed'
+      ? item.usage
+      : (
+          item.type === 'event_msg' && item.payload?.type === 'token_count'
+            ? item.payload?.info?.total_token_usage
+            : null
+        );
+    if (!total || typeof total !== 'object') continue;
+    tokenUsage = {
+      input: Number.isFinite(Number(total.input_tokens)) ? Math.trunc(Number(total.input_tokens)) : null,
+      output: Number.isFinite(Number(total.output_tokens)) ? Math.trunc(Number(total.output_tokens)) : null,
+      cacheRead: Number.isFinite(Number(total.cached_input_tokens)) ? Math.trunc(Number(total.cached_input_tokens)) : null,
+      cacheWrite: 0,
+      total: Number.isFinite(Number(total.total_tokens)) ? Math.trunc(Number(total.total_tokens)) : null,
+      source: 'codex-json',
+    };
+  }
+  return tokenUsage;
 }
 
 // CANONICAL_OAUTH_STRIP_ENV is the load-bearing set every adapter advertising
@@ -484,6 +516,9 @@ function createCliDirectReviewerRuntimeAdapter({
           : tailText(stderr),
         pgid: record.pgid,
         reattachToken: record.reattachToken,
+        tokenUsage: String(req.model || '').toLowerCase().includes('codex')
+          ? parseCodexJsonTokenUsage(stdout)
+          : null,
       });
     } catch (err) {
       const timedOut = isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' });

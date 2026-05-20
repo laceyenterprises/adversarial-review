@@ -903,6 +903,53 @@ test('cli-direct strips forbidden API-key fallback env before spawning', async (
   }
 });
 
+test('cli-direct returns Codex JSON token usage from reviewer stdout', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        options.onSpawn({ pgid: 5152 });
+        return {
+          stdout: [
+            JSON.stringify({
+              type: 'turn.completed',
+              usage: {
+                input_tokens: 123,
+                cached_input_tokens: 45,
+                output_tokens: 6,
+                total_tokens: 129,
+              },
+            }),
+            '',
+          ].join('\n'),
+          stderr: '',
+        };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+      timeoutMs: 100,
+      sessionUuid: 'codex-json-token-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.tokenUsage, {
+      input: 123,
+      output: 6,
+      cacheRead: 45,
+      cacheWrite: 0,
+      total: 129,
+      source: 'codex-json',
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct enforces canonical OAuth strip regardless of forbiddenFallbacks shape', async () => {
   // Regression: the watcher passes only `['api-key', 'anthropic-api-key']` as
   // forbiddenFallbacks. Previously, only OPENAI_API_KEY / ANTHROPIC_API_KEY /

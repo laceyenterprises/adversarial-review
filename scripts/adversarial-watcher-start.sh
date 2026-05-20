@@ -52,10 +52,18 @@ OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="adversarial-watcher" /opt/homeb
   }
 export OP_SERVICE_ACCOUNT_TOKEN
 
-# Resolve GitHub token from gh CLI keychain
+# Resolve GitHub token from gh CLI keychain.
+# Failure here MUST sleep before exit. Without the sleep, launchd's
+# KeepAlive=true + ThrottleInterval=30 turns a missing `gh auth token`
+# (expired credential, locked keychain window, gh upgrade transient,
+# etc.) into a 30-second respawn storm. Same fail-once shape as the
+# 1Password sleep guards added in #139 (op-read failures); the gh path
+# was missed in that pass and produces an identical respawn-storm shape.
 export GITHUB_TOKEN=$(/opt/homebrew/bin/gh auth token 2>/dev/null)
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN from gh keychain" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the gh credential and bootout the agent to recover sooner." >&2
+  sleep 3600
   exit 1
 fi
 

@@ -9,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -26,8 +27,33 @@ const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
 const DEFAULT_HQ_PATH = 'hq';
+<<<<<<< HEAD
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const WORKER_BRANCH_PREFIX_RE = /^(codex|claude-code|clio-agent)-[a-z0-9][a-z0-9-]*$/;
+=======
+const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
+const HQ_DISPATCH_TIMEOUT_MS = 90_000;
+const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const WORKER_ID_CLASS_PREFIXES = [
+  'claude-code',
+  'clio-agent',
+  'merge-agent',
+  'codex',
+  'gemini',
+  'pi',
+  'stub',
+];
+// Must stay aligned with platform/session-ledger/src/session_ledger/models.py
+// WORKER_RUN_TERMINAL_STATUSES. Merge-agent preflight may tear down the
+// original worker ONLY after the canonical ledger marks the run terminal.
+const TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
+const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
+  'missing-ledger-db',
+  'better-sqlite3-unavailable',
+  'worker-run-lookup-failed',
+  'worker-run-lookup-threw',
+]);
+>>>>>>> a214b0df36df19e53292be8b7e6f75d92412a5dd
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
 // "I approve merging this current PR head now; do not wait for the
@@ -123,32 +149,161 @@ function deriveOriginalWorkerIdFromBranch(branch) {
   return workerId;
 }
 
+<<<<<<< HEAD
 function readJsonFile(filePath) {
   return readJsonFileDetailed(filePath).value;
+=======
+function isRecognizedOriginalWorkerId(workerId) {
+  const normalized = String(workerId || '').trim();
+  return WORKER_ID_PATTERN.test(normalized)
+    && WORKER_ID_CLASS_PREFIXES.some((prefix) => (
+      normalized === prefix || normalized.startsWith(`${prefix}-`)
+    ));
+>>>>>>> a214b0df36df19e53292be8b7e6f75d92412a5dd
 }
 
 function readJsonFileDetailed(filePath) {
   try {
+<<<<<<< HEAD
     return {
       value: JSON.parse(readFileSync(filePath, 'utf8')),
       error: null,
     };
   } catch (error) {
     return { value: null, error };
+=======
+    return { ok: true, value: JSON.parse(readFileSync(filePath, 'utf8')) };
+  } catch (err) {
+    return { ok: false, error: err };
   }
 }
 
 function resolveHqRoot(env = {}) {
-  return String(env.HQ_ROOT || DEFAULT_HQ_ROOT);
+  const root = String(env.HQ_ROOT || '').trim();
+  return root || null;
+}
+
+function resolveHqOwner(hqRoot) {
+  if (!hqRoot) return null;
+  const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
+  if (!config.ok) {
+    return {
+      ownerUser: null,
+      reason: 'hq-owner-unknown',
+      detail: config.error?.message || String(config.error),
+      code: config.error?.code || null,
+    };
+  }
+  const ownerUser = String(config.value?.ownerUser || '').trim();
+  if (!ownerUser) {
+    return {
+      ownerUser: null,
+      reason: 'hq-owner-unknown',
+      detail: 'ownerUser missing from .hq/config.json',
+      code: null,
+    };
+  }
+  return {
+    ownerUser,
+    reason: null,
+    detail: null,
+    code: null,
+  };
+}
+
+function currentUser(env = process.env) {
+  const explicit = String(env.USER || env.LOGNAME || '').trim();
+  if (explicit) return explicit;
+  try {
+    return userInfo().username;
+  } catch {
+    return null;
+>>>>>>> a214b0df36df19e53292be8b7e6f75d92412a5dd
+  }
+}
+
+function isTerminalWorkerRunStatus(status) {
+  const normalized = normalizeWorkerRunStatus(status);
+  return Boolean(normalized) && TERMINAL_WORKER_RUN_STATUSES.has(normalized);
+}
+
+function formatExecFailure(command, err) {
+  const stderrText = String(err?.stderr ?? '').trim();
+  const stdoutText = String(err?.stdout ?? '').trim();
+  const augmented = new Error(
+    `${command} failed (exit code ${err?.code ?? 'unknown'}): ${err?.message || 'no message'}` +
+    (stderrText ? `\n  stderr:\n${stderrText.split('\n').map(l => `    ${l}`).join('\n')}` : '') +
+    (stdoutText ? `\n  stdout:\n${stdoutText.split('\n').map(l => `    ${l}`).join('\n')}` : '')
+  );
+  augmented.code = err?.code;
+  augmented.stderr = err?.stderr;
+  augmented.stdout = err?.stdout;
+  augmented.cause = err;
+  return augmented;
+}
+
+function isExecTimeout(err) {
+  return err?.code === 'ETIMEDOUT'
+    || err?.killed === true
+    || String(err?.message || '').toLowerCase().includes('timed out');
+}
+
+function readWorkerWorkspace(workerDir) {
+  const workspacePath = join(workerDir, 'workspace.json');
+  const workspace = readJsonFileDetailed(workspacePath);
+  if (workspace.ok) {
+    return { found: true, workspace: workspace.value };
+  }
+  if (workspace.error?.code === 'ENOENT') {
+    return { found: false, reason: 'workspace-missing' };
+  }
+  return {
+    found: false,
+    reason: 'workspace-read-failed',
+    detail: workspace.error?.message || String(workspace.error),
+    code: workspace.error?.code || null,
+  };
+}
+
+function workerWorkspaceMatchesDerivedWorker(workspace, originalWorkerId, jobBranch) {
+  // Defense-in-depth against destructive teardown of an unrelated worker
+  // when a branch prefix collides with an existing worker slot. The
+  // workspace.json contract (see projects/worker-pool/SPEC.md) says
+  // consumers MUST validate workspace.workerId before using a branch
+  // prefix as an id. Previous version returned true when workspaceWorkerId
+  // was empty — a fail-open that let teardown proceed against any
+  // workspace.json lacking the field.
+  const workspaceWorkerId = String(workspace?.workerId || '').trim();
+  if (!workspaceWorkerId) {
+    // Absent workerId is treated as MISMATCH, not match. The SPEC requires
+    // this field; missing it is a contract violation we must not paper over.
+    return false;
+  }
+  if (workspaceWorkerId !== originalWorkerId) {
+    return false;
+  }
+  // Secondary guard (reviewer-recommended): if BOTH jobBranch AND
+  // workspace.branch are set, require them to match. Catches the case
+  // where a real worker's id matches but its branch is different from
+  // the PR's. We don't fail when workspace.branch is absent — workerId
+  // match is the primary defense and the SPEC doesn't (yet) require
+  // workspace.branch — but when present it must agree.
+  if (jobBranch) {
+    const workspaceBranch = String(workspace?.branch || '').trim();
+    if (workspaceBranch && workspaceBranch !== jobBranch) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
   if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
     return String(env.AGENT_OS_SESSION_LEDGER_DB_PATH);
   }
-  const config = readJsonFile(join(hqRoot, '.hq', 'config.json'));
-  if (config?.ledgerDbPath) {
-    return String(config.ledgerDbPath);
+  const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
+  if (config.ok && config.value?.ledgerDbPath) {
+    return String(config.value.ledgerDbPath);
   }
   return null;
 }
@@ -157,22 +312,18 @@ function normalizeWorkerRunStatus(status) {
   return String(status || '').trim().toLowerCase();
 }
 
-function prStateAllowsOriginalWorkerTeardown(job) {
-  const state = String(job?.prState || '').trim().toLowerCase();
-  return state === 'closed' || state === 'merged' || state === 'merged-pending' || Boolean(job?.merged);
-}
-
 async function lookupOriginalWorkerRunStatus({
   workerDir,
   hqRoot,
   env,
 } = {}) {
-  const workspace = readJsonFile(join(workerDir, 'workspace.json'));
-  const run = readJsonFile(join(workerDir, 'run.json'));
-  const launchRequestId = workspace?.launchRequestId || workspace?.dispatchId
-    || run?.launchRequestId || run?.dispatchId || null;
-  const runId = run?.runId || null;
-  if (!launchRequestId && !runId) {
+  const workspace = readWorkerWorkspace(workerDir).workspace || null;
+  const run = readJsonFileDetailed(join(workerDir, 'run.json'));
+  const runRecord = run.ok ? run.value : null;
+  const launchRequestId = workspace?.launchRequestId || workspace?.lrq
+    || runRecord?.launchRequestId || runRecord?.lrq || null;
+  const runId = runRecord?.runId || null;
+  if (!launchRequestId) {
     return { found: false, reason: 'missing-launch-request-id' };
   }
 
@@ -197,23 +348,13 @@ async function lookupOriginalWorkerRunStatus({
   let db;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const where = [];
-    const params = {};
-    if (launchRequestId) {
-      where.push('launch_request_id = @launchRequestId');
-      params.launchRequestId = launchRequestId;
-    }
-    if (runId) {
-      where.push('run_id = @runId');
-      params.runId = runId;
-    }
     const row = db.prepare(`
       SELECT run_id, launch_request_id, status
       FROM worker_runs
-      WHERE ${where.join(' OR ')}
+      WHERE launch_request_id = @launchRequestId
       ORDER BY rowid DESC
       LIMIT 1
-    `).get(params);
+    `).get({ launchRequestId });
     if (!row) {
       return { found: false, reason: 'missing-worker-run-row', launchRequestId, runId };
     }
@@ -278,9 +419,37 @@ async function prepareOriginalWorkerForMergeAgent({
     }
     return { decision: 'ready', reason: 'no-derived-worker-id' };
   }
+  if (!isRecognizedOriginalWorkerId(originalWorkerId)) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: 'unrecognized-worker-id-shape',
+      at: now,
+    });
+    return {
+      decision: 'ready',
+      reason: 'unrecognized-worker-id-shape',
+      originalWorkerId,
+    };
+  }
 
   const hqRoot = resolveHqRoot(env);
+  if (!hqRoot) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: 'hq-root-unset',
+      at: now,
+    });
+    return {
+      decision: 'ready',
+      reason: 'hq-root-unset',
+      originalWorkerId,
+      hqRoot: null,
+    };
+  }
   const workerDir = join(hqRoot, 'workers', originalWorkerId);
+<<<<<<< HEAD
   const workspaceRead = readJsonFileDetailed(join(workerDir, 'workspace.json'));
   if (workspaceRead.error && workspaceRead.error?.code !== 'ENOENT') {
     mergeAgentLifecycleLog(logger, 'merge_agent.workspace_read_failed', {
@@ -297,9 +466,13 @@ async function prepareOriginalWorkerForMergeAgent({
     };
   }
   const workspace = workspaceRead.value;
+=======
+  const workspaceState = readWorkerWorkspace(workerDir);
+  const workspace = workspaceState.workspace || null;
+>>>>>>> a214b0df36df19e53292be8b7e6f75d92412a5dd
   const workspacePath = workspace?.workspacePath || workspace?.worktreePath || null;
 
-  if (!existsSync(workerDir) || !workspace || (workspacePath && !existsSync(workspacePath))) {
+  if (!existsSync(workerDir) || (workspaceState.found && workspacePath && !existsSync(workspacePath))) {
     return {
       decision: 'ready',
       reason: 'original-worker-already-torn-down',
@@ -307,8 +480,74 @@ async function prepareOriginalWorkerForMergeAgent({
       hqRoot,
     };
   }
+  if (!workspaceState.found) {
+    if (workspaceState.reason === 'workspace-missing') {
+      mergeAgentLifecycleLog(logger, 'merge_agent.workspace_missing', {
+        original_worker_id: originalWorkerId,
+        pr_number: job?.prNumber ?? null,
+        reason: workspaceState.reason,
+        at: now,
+      });
+    } else {
+      mergeAgentLifecycleLog(logger, 'merge_agent.workspace_read_failed', {
+        original_worker_id: originalWorkerId,
+        pr_number: job?.prNumber ?? null,
+        reason: workspaceState.reason || 'workspace-read-failed',
+        detail: workspaceState.detail || null,
+        code: workspaceState.code || null,
+        at: now,
+      });
+      return {
+        decision: 'deferred',
+        reason: workspaceState.reason || 'workspace-read-failed',
+        originalWorkerId,
+      };
+    }
+  } else if (!workerWorkspaceMatchesDerivedWorker(workspace, originalWorkerId, job?.branch)) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      original_worker_id: originalWorkerId,
+      workspace_worker_id: workspace?.workerId || null,
+      workspace_branch: workspace?.branch || null,
+      pr_branch: job?.branch || null,
+      pr_number: job?.prNumber ?? null,
+      reason: 'workspace-worker-id-mismatch',
+      at: now,
+    });
+    return {
+      decision: 'ready',
+      reason: 'workspace-worker-id-mismatch',
+      originalWorkerId,
+      hqRoot,
+    };
+  }
 
-  const runStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
+  let runStatus;
+  try {
+    runStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
+  } catch (err) {
+    runStatus = {
+      found: false,
+      reason: 'worker-run-lookup-threw',
+      detail: err?.message || String(err),
+    };
+  }
+  if (!runStatus.found && DEFERRED_LOOKUP_FAILURE_REASONS.has(runStatus.reason)) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: runStatus.reason,
+      detail: runStatus.detail || null,
+      at: now,
+    });
+    return {
+      decision: 'skip',
+      reason: runStatus.reason,
+      originalWorkerId,
+      launchRequestId: runStatus.launchRequestId || null,
+      detail: runStatus.detail || null,
+    };
+  }
   if (!runStatus.found && runStatus.reason === 'missing-worker-run-row') {
     return {
       decision: 'deferred',
@@ -318,10 +557,9 @@ async function prepareOriginalWorkerForMergeAgent({
       launchRequestId: runStatus.launchRequestId || null,
     };
   }
-  const mayTearDown = runStatus.found && runStatus.status === 'succeeded';
-  const prStateOverride = prStateAllowsOriginalWorkerTeardown(job);
+  const mayTearDown = runStatus.found && isTerminalWorkerRunStatus(runStatus.status);
 
-  if (!mayTearDown && !prStateOverride) {
+  if (!mayTearDown) {
     const reason = runStatus.found
       ? `worker-run-status-${runStatus.status || 'unknown'}`
       : runStatus.reason || 'worker-run-status-unknown';
@@ -342,6 +580,7 @@ async function prepareOriginalWorkerForMergeAgent({
     };
   }
 
+<<<<<<< HEAD
   if (mayTearDown && !prStateOverride) {
     const recheckedRunStatus = await lookupRunStatusImpl({ workerDir, hqRoot, env, job, originalWorkerId });
     if (!recheckedRunStatus.found || recheckedRunStatus.status !== 'succeeded') {
@@ -383,6 +622,74 @@ async function prepareOriginalWorkerForMergeAgent({
     maxBuffer: 5 * 1024 * 1024,
   });
   mergeAgentLifecycleLog(logger, 'merge_agent.original_worker_tornDown', {
+=======
+  const ownerResolution = resolveHqOwner(hqRoot);
+  const ownerUser = ownerResolution?.ownerUser || null;
+  const runtimeUser = currentUser(env);
+  if (!ownerUser) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: ownerResolution?.reason || 'hq-owner-unknown',
+      hq_root: hqRoot,
+      detail: ownerResolution?.detail || null,
+      code: ownerResolution?.code || null,
+      at: now,
+    });
+    return {
+      decision: 'deferred',
+      reason: ownerResolution?.reason || 'hq-owner-unknown',
+      originalWorkerId,
+      workerStatus: runStatus.status || null,
+      launchRequestId: runStatus.launchRequestId || null,
+    };
+  }
+  if (ownerUser && runtimeUser && ownerUser !== runtimeUser) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: 'hq-owner-mismatch',
+      hq_root: hqRoot,
+      hq_owner_user: ownerUser,
+      runtime_user: runtimeUser,
+      at: now,
+    });
+    return {
+      decision: 'deferred',
+      reason: 'hq-owner-mismatch',
+      originalWorkerId,
+      workerStatus: runStatus.status || null,
+      launchRequestId: runStatus.launchRequestId || null,
+    };
+  }
+
+  const args = ['worker', 'tear-down', originalWorkerId, '--force', '--root', hqRoot];
+  try {
+    await execFileImpl(hqPath, args, {
+      env,
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
+    });
+  } catch (err) {
+    const timedOut = isExecTimeout(err);
+    mergeAgentLifecycleLog(logger, timedOut ? 'merge_agent.tear_down_timeout' : 'merge_agent.tear_down_failed', {
+      lrq: runStatus.launchRequestId || null,
+      original_worker_id: originalWorkerId,
+      pr_number: job?.prNumber ?? null,
+      reason: timedOut ? 'tear-down-timeout' : 'tear-down-command-failed',
+      worker_status: runStatus.status || null,
+      stderr: String(err?.stderr ?? '').trim() || null,
+      stdout: String(err?.stdout ?? '').trim() || null,
+      timeout_ms: timedOut ? HQ_WORKER_TEAR_DOWN_TIMEOUT_MS : null,
+      at: now,
+    });
+    throw formatExecFailure('hq worker tear-down', err);
+  }
+  mergeAgentLifecycleLog(logger, 'merge_agent.original_worker_torn_down', {
+>>>>>>> a214b0df36df19e53292be8b7e6f75d92412a5dd
     lrq: runStatus.launchRequestId || null,
     original_worker_id: originalWorkerId,
     pr_number: job?.prNumber ?? null,
@@ -1377,6 +1684,20 @@ async function dispatchMergeAgentForPR({
       launchRequestId: originalWorkerPrep.launchRequestId || null,
     };
   }
+  if (originalWorkerPrep?.decision === 'skip') {
+    const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
+      skippedAt: now,
+      decision: `skip-${originalWorkerPrep.reason || 'original-worker-preflight'}`,
+      trigger,
+    });
+    return {
+      decision: 'dispatch-skipped',
+      reason: originalWorkerPrep.reason || 'original-worker-preflight',
+      originalWorkerId: originalWorkerPrep.originalWorkerId || null,
+      launchRequestId: originalWorkerPrep.launchRequestId || null,
+      skippedRecordPath,
+    };
+  }
 
   const prompt = buildMergeAgentPrompt(job, { trigger });
   const promptPath = writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt: now });
@@ -1412,22 +1733,11 @@ async function dispatchMergeAgentForPR({
     execResult = await execFileImpl(resolvedHqPath, args, {
       env: dispatchEnv,
       maxBuffer: 5 * 1024 * 1024,
+      timeout: HQ_DISPATCH_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
     });
   } catch (err) {
-    const stderrText = String(err?.stderr ?? '').trim();
-    const stdoutText = String(err?.stdout ?? '').trim();
-    const augmented = new Error(
-      `hq dispatch failed (exit code ${err?.code ?? 'unknown'}): ${err?.message || 'no message'}` +
-      (stderrText ? `\n  stderr:\n${stderrText.split('\n').map(l => `    ${l}`).join('\n')}` : '') +
-      (stdoutText ? `\n  stdout:\n${stdoutText.split('\n').map(l => `    ${l}`).join('\n')}` : '')
-    );
-    // Preserve the underlying error metadata so callers can branch on
-    // `err.code` / `err.stderr` if they need machine-readable handling.
-    augmented.code = err?.code;
-    augmented.stderr = err?.stderr;
-    augmented.stdout = err?.stdout;
-    augmented.cause = err;
-    throw augmented;
+    throw formatExecFailure('hq dispatch', err);
   }
   const { stdout } = execResult;
   const parsed = parseMergeAgentDispatchOutput(stdout);
@@ -1540,9 +1850,12 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
 export {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
+  HQ_DISPATCH_TIMEOUT_MS,
+  HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
   OPERATOR_APPROVED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_SKIP_LABELS,
+  TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
   buildScopedOperatorApproval,
@@ -1562,6 +1875,7 @@ export {
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
+  lookupOriginalWorkerRunStatus,
   prepareOriginalWorkerForMergeAgent,
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,

@@ -618,6 +618,9 @@ function readCodexTranscriptSummary(transcriptPath) {
         sessionId ||= item.payload?.id || null;
         cwd ||= item.payload?.cwd || null;
         if (item.payload?.timestamp) startedAt = item.payload.timestamp;
+      } else if (item.type === 'turn.completed') {
+        const usage = tokenUsageFromCodexTotal(item.usage || null);
+        if (usage) tokenUsage = usage;
       } else if (item.type === 'event_msg' && item.payload?.type === 'token_count') {
         const total = item.payload?.info?.total_token_usage || null;
         const usage = tokenUsageFromCodexTotal(total);

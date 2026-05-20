@@ -672,6 +672,51 @@ test('backfill recovers codex exec token total and session id from worker log', 
   }
 });
 
+test('codex transcript fallback reads turn.completed token usage', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-codex-transcript-turn');
+  const codexRoot = path.join(rootDir, 'codex-sessions');
+  const transcriptPath = path.join(codexRoot, '2026', '05', '18', 'rollout.jsonl');
+  mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(transcriptPath, [
+    JSON.stringify({
+      type: 'session_meta',
+      timestamp: '2026-05-18T06:00:00.000Z',
+      payload: {
+        id: 'codex-session-turn',
+        cwd: workspace,
+      },
+    }),
+    JSON.stringify({
+      type: 'turn.completed',
+      timestamp: '2026-05-18T06:03:00.000Z',
+      usage: {
+        input_tokens: 222,
+        cached_input_tokens: 111,
+        output_tokens: 33,
+        total_tokens: 255,
+      },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const usage = readCodexTranscriptTokenUsage({
+    workspacePath: workspace,
+    startedAt: '2026-05-18T05:59:00.000Z',
+    endedAt: '2026-05-18T06:05:00.000Z',
+    sessionRoots: [codexRoot],
+  });
+
+  assert.equal(usage.input, 222);
+  assert.equal(usage.output, 33);
+  assert.equal(usage.cacheRead, 111);
+  assert.equal(usage.total, 255);
+  assert.equal(usage.source, 'codex-transcript');
+  assert.equal(usage.adapterSessionKey, 'codex-session-turn');
+  assert.equal(usage.transcriptPath, transcriptPath);
+});
+
 test('tokens CLI prints per-PR rollup with reviewer breakdown', () => {
   const rootDir = tempRoot();
   beginReviewerPass(rootDir, {

@@ -1102,6 +1102,12 @@ const _NON_STUCK_DISPATCH_STATUSES = new Set([
   'blocked',
   'stalled',
 ]);
+const _REQUESTED_RETRYABLE_DISPATCH_STATUSES = new Set([
+  'failed',
+  'cancelled',
+  'canceled',
+  'superseded',
+]);
 
 // Synchronous probe of `hq dispatch status <lrq>` — returns
 // `{status: <string>}` or `null` on any failure (no hqPath, non-zero
@@ -1148,6 +1154,28 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, execFileImpl, env = {} } = {})
   if (!parsed || typeof parsed !== 'object') return null;
   const status = typeof parsed.status === 'string' ? parsed.status : null;
   return status ? { status } : null;
+}
+
+async function probeDispatchStatusViaHq({ hqPath, lrq, execFileImpl = execFileAsync, env = {} } = {}) {
+  if (!hqPath || !_isValidLrqId(lrq)) return null;
+  try {
+    const { stdout } = await execFileImpl(hqPath, ['dispatch', 'status', lrq], {
+      env: { ...env },
+      maxBuffer: 1024 * 1024,
+      timeout: 5_000,
+    });
+    const parsed = JSON.parse(String(stdout || '{}'));
+    const status = typeof parsed?.status === 'string'
+      ? parsed.status.trim().toLowerCase()
+      : null;
+    return status ? { status } : null;
+  } catch {
+    return null;
+  }
+}
+
+function isRetryableRecordedDispatchStatus(status) {
+  return _REQUESTED_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
 function describeStaleDispatch(recordedDispatch, {
@@ -2278,8 +2306,31 @@ async function dispatchMergeAgentForPR({
     mergeAgentRequest,
   };
   const recordedDispatch = getRecordedMergeAgentDispatch(rootDir, job);
+  let duplicateDispatches = recordedDispatch ? [recordedDispatch] : [];
+  const scopedMergeAgentRetryRequested = normalizeLabelNames(labels).includes(MERGE_AGENT_REQUESTED_LABEL)
+    && isScopedMergeAgentRequest(job);
+  const recordedDispatchStatus = scopedMergeAgentRetryRequested && recordedDispatch?.launchRequestId
+    ? await probeDispatchStatusViaHq({
+        hqPath: runtimeEnv.HQ_BIN || hqPath,
+        lrq: recordedDispatch.launchRequestId,
+        execFileImpl,
+        env: runtimeEnv,
+      })
+    : null;
+  if (recordedDispatch && isRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) {
+    duplicateDispatches = [];
+    mergeAgentLifecycleLog(logger, 'merge_agent.retrying_failed_dispatch', {
+      repo,
+      prNumber,
+      launchRequestId: recordedDispatch.launchRequestId,
+      previousStatus: recordedDispatchStatus.status,
+      previousTrigger: recordedDispatch.trigger || null,
+      retryTrigger: MERGE_AGENT_REQUESTED_LABEL,
+      at: now,
+    });
+  }
   const dispatchDecision = pickMergeAgentDispatchDetail(job, {
-    recentDispatches: recordedDispatch ? [recordedDispatch] : [],
+    recentDispatches: duplicateDispatches,
     // Honor the merged runtime env so callers can opt-in per-invocation
     // without mutating process.env globally. This keeps the flag consistent
     // with the rest of dispatchMergeAgentForPR (agent-os detection, parent

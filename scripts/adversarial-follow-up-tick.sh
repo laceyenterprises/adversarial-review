@@ -98,8 +98,15 @@ export OP_SERVICE_ACCOUNT_TOKEN
 # operator's identity, distinct from the reviewer-bot PATs the comment
 # poster uses (see below).
 export GITHUB_TOKEN=$(/opt/homebrew/bin/gh auth token 2>/dev/null)
+# Failure here MUST sleep before exit. Same fail-once shape as the
+# 1Password sleep guards added in #139; the gh path was missed in
+# that pass. Without the sleep, KeepAlive=true (via SuccessfulExit
+# = false) + ThrottleInterval=30 turns a missing gh credential into
+# a 30-second respawn storm against the gh keychain.
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "[follow-up-tick] ERROR: could not resolve GITHUB_TOKEN from gh keychain" >&2
+  echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix the gh credential and bootout the agent to recover sooner." >&2
+  sleep 3600
   exit 1
 fi
 

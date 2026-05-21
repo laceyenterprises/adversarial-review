@@ -1106,7 +1106,7 @@ async function spawnReviewer({
       reviewerClass: reviewerModel,
       reviewerModel,
       passKind,
-      workspacePath: workspacePath || null,
+      workspacePath: workspacePath || ROOT,
       startedAt,
       metadata: {
         reviewerSessionUuid,
@@ -1153,7 +1153,7 @@ async function spawnReviewer({
           result.reattachToken,
           result.sessionUuid,
         ],
-        workspacePath: workspacePath || null,
+        workspacePath: workspacePath || ROOT,
         startedAt,
         endedAt,
         reviewerModel,

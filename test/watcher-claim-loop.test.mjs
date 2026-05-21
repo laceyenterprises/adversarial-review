@@ -418,6 +418,10 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       summary.reviewerSpawns.every(Boolean),
       'happy-path subjects should spawn reviewer work after the claim'
     );
+    assert.ok(
+      summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT),
+      'reviewer pass rows should retain the tool root so transcript token fallback can match Claude sessions on disk'
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -460,7 +464,7 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
     assert.equal(summary.reviewerSpawns.length, 1);
     assert.equal(summary.reviewerPassRows.length, 1);
     assert.equal(summary.reviewerPassRows[0].status, 'failed');
-    assert.equal(summary.reviewerPassRows[0].workspace_path, null);
+    assert.equal(summary.reviewerPassRows[0].workspace_path, REPO_ROOT);
     assert.match(summary.reviewerPassRows[0].metadata_json, /fixture reviewer spawn failure/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });

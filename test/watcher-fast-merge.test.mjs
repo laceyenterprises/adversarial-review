@@ -159,7 +159,12 @@ for (const row of scenario.seedRows || []) {
   ).run(row.repo, row.prNumber, row.reviewedAt, row.reviewer, row.prState, row.reviewStatus, JSON.stringify(row.labels || []), row.fastMergeAuthorizedHeadSha || null);
 }
 const octokit = {
-  paginate: async () => [{ name: 'agent-os', archived: false }],
+  paginate: async (method, params) => {
+    if (method === octokit.rest.issues.listEventsForTimeline) {
+      return scenario.timelineEvents?.[String(params.issue_number)] || [];
+    }
+    return [{ name: 'agent-os', archived: false }];
+  },
   rest: {
     repos: { listForOrg: async () => ({ data: [] }) },
     pulls: {
@@ -176,6 +181,9 @@ const octokit = {
     issues: {
       listLabelsOnIssue: async ({ issue_number }) => ({
         data: scenario.labels[String(issue_number)] || [],
+      }),
+      listEventsForTimeline: async ({ issue_number }) => ({
+        data: scenario.timelineEvents?.[String(issue_number)] || [],
       }),
     },
   },
@@ -212,6 +220,14 @@ function subject(prNumber, { title = '[codex] fast merge test', headSha = `sha-s
     terminal: false,
     observedAt: '2026-05-20T12:00:01.000Z',
   };
+}
+
+function timelineLabel(label, createdAt) {
+  return { event: 'labeled', label: { name: label }, created_at: createdAt };
+}
+
+function timelineSynchronize(createdAt) {
+  return { event: 'synchronize', created_at: createdAt };
 }
 
 function runWatcherScenario(scenario, { skipEnabled = false } = {}) {
@@ -266,6 +282,9 @@ test('fast-merge watcher: single category skips when flag is enabled and records
     subjects: [subject(802, { labels: [{ name: 'fast-merge:docs' }] })],
     labels: { 802: [{ name: 'fast-merge:docs' }] },
     heads: { 802: 'sha-live-802' },
+    timelineEvents: {
+      802: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+    },
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
   assert.equal(summary.rows[0].review_status, 'fast_merge_skipped');
@@ -283,6 +302,9 @@ test('fast-merge watcher: flag-off default audits would-have-skipped but reviews
     subjects: [subject(803, { labels: [{ name: 'fast-merge:docs' }] })],
     labels: { 803: [{ name: 'fast-merge:docs' }] },
     heads: { 803: 'sha-live-803' },
+    timelineEvents: {
+      803: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+    },
   });
   assert.equal(summary.rows[0].pr_state, 'open');
   assert.equal(summary.rows[0].review_status, 'posted');
@@ -295,15 +317,40 @@ test('fast-merge watcher: flag-off default audits would-have-skipped but reviews
 });
 
 test('fast-merge watcher: multiple categories are captured in skip audit and labels_json', () => {
-  const labels = [{ name: 'fast-merge:docs' }, { name: 'fast-merge:additive-sql' }];
+  const labels = [{ name: 'fast-merge:docs' }, { name: 'fast-merge:submodule-bump' }];
   const summary = runWatcherScenario({
     subjects: [subject(804, { labels })],
     labels: { 804: labels },
     heads: { 804: 'sha-live-804' },
+    timelineEvents: {
+      804: [
+        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
+        timelineLabel('fast-merge:submodule-bump', '2026-05-20T12:00:06.000Z'),
+      ],
+    },
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
   assert.deepEqual(JSON.parse(summary.rows[0].labels_json), labels);
-  assert.deepEqual(summary.auditEntries[0].categories, ['docs', 'additive-sql']);
+  assert.deepEqual(summary.auditEntries[0].categories, ['docs', 'submodule-bump']);
+});
+
+test('fast-merge watcher: post-label head advance falls back to normal review', () => {
+  const summary = runWatcherScenario({
+    subjects: [subject(809, { labels: [{ name: 'fast-merge:docs' }] })],
+    labels: { 809: [{ name: 'fast-merge:docs' }] },
+    heads: { 809: 'sha-live-809' },
+    timelineEvents: {
+      809: [
+        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
+        timelineSynchronize('2026-05-20T12:00:06.000Z'),
+      ],
+    },
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'open');
+  assert.equal(summary.rows[0].review_status, 'posted');
+  assert.equal(summary.rows[0].fast_merge_authorized_head_sha, null);
+  assert.equal(summary.spawns.length, 1);
+  assert.equal(summary.auditEntries.length, 0);
 });
 
 test('fast-merge watcher: veto wins on open and veto-only is normal review', () => {

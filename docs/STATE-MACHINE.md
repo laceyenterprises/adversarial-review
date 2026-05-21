@@ -232,6 +232,50 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ---
 
+## 3) Fast-merge skip lane
+
+Source of truth:
+
+```text
+data/reviews.db.reviewed_prs
+```
+
+Fast-merge is a watcher-owned bypass lane for narrowly allowlisted PR labels.
+It is gated by `FML_WATCHER_SKIP_ENABLED=true`; when the flag is false, the
+watcher records audit-only `would-have-skipped` entries and still runs normal
+first-pass adversarial review.
+
+### Additional watcher states
+
+| Field | Value | Meaning |
+|---|---|---|
+| `pr_state` | `fast_merge_skipped` | watcher deliberately skipped first-pass review for an authorized head |
+| `pr_state` | `fast_merge_merged` | merge-agent merged the authorized fast-merge head |
+| `pr_state` | `fast_merge_closed` | PR closed without merging after entering the fast-merge lane |
+| `pr_state` | `fast_merge_blocked` | merge-agent or watcher refused to complete the fast-merge lane |
+| `review_status` | `fast_merge_skipped` | first-pass review was intentionally bypassed for the stored authorized head |
+
+### Authorization rule
+
+The label alone is never the authority. The watcher may set
+`fast_merge_authorized_head_sha` only when all of the following are true:
+
+- A current allowlisted `fast-merge:*` label is present and `fast-merge-veto` is absent.
+- The current PR head SHA can be fetched successfully.
+- The issue timeline shows a matching allowlisted `labeled` event that is strictly newer than the most recent `synchronize` or `head_ref_force_pushed` event.
+
+If that proof is missing, the watcher fails closed to the normal review path.
+
+### Merge-agent contract
+
+`fast_merge_authorized_head_sha` is the commit the operator effectively approved
+for the bypass lane. Any merge-agent path that consumes a `fast_merge_skipped`
+row must confirm the live PR head still equals that stored SHA before merging.
+If the head differs, the lane is stale and the PR must return to normal review
+instead of inheriting the earlier label authorization.
+
+---
+
 ## Failure/stop codes worth remembering
 
 ### Queue stop reasons

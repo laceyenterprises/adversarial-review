@@ -135,7 +135,6 @@ const FAST_MERGE_CATEGORY_BY_LABEL = Object.freeze({
   'fast-merge:docs': 'docs',
   'fast-merge:test-fixtures': 'test-fixtures',
   'fast-merge:submodule-bump': 'submodule-bump',
-  'fast-merge:additive-sql': 'additive-sql',
 });
 const FAST_MERGE_SKIP_ENABLED = process.env.FML_WATCHER_SKIP_ENABLED === 'true';
 
@@ -194,6 +193,84 @@ async function fetchLivePRHeadSha(octokit, { owner, repo, prNumber, fallbackHead
   } catch (err) {
     logger.warn?.(
       `[watcher] fast-merge head SHA fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
+function parseFastMergeEventTime(value) {
+  const ms = Date.parse(String(value || ''));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function latestTimelineFastMergeAuthorization(events, allowedLabelNames) {
+  const allowed = new Set(
+    (Array.isArray(allowedLabelNames) ? allowedLabelNames : [])
+      .map((name) => normalizeLabelName(name).toLowerCase())
+      .filter(Boolean)
+  );
+  if (allowed.size === 0 || !Array.isArray(events)) return null;
+
+  let latestLabel = null;
+  let latestHeadAdvanceMs = null;
+
+  for (const event of events) {
+    const eventName = String(event?.event || '').trim().toLowerCase();
+    const createdAt = event?.created_at || event?.createdAt || null;
+    const createdAtMs = parseFastMergeEventTime(createdAt);
+    if (createdAtMs == null) continue;
+
+    if (eventName === 'labeled') {
+      const labelName = normalizeLabelName(event?.label?.name || event?.label || event?.name || '').toLowerCase();
+      if (!allowed.has(labelName)) continue;
+      if (!latestLabel || createdAtMs > latestLabel.createdAtMs) {
+        latestLabel = {
+          createdAt,
+          createdAtMs,
+          label: labelName,
+        };
+      }
+      continue;
+    }
+
+    if (eventName === 'head_ref_force_pushed' || eventName === 'synchronize') {
+      latestHeadAdvanceMs = latestHeadAdvanceMs == null
+        ? createdAtMs
+        : Math.max(latestHeadAdvanceMs, createdAtMs);
+    }
+  }
+
+  if (!latestLabel) return null;
+  if (latestHeadAdvanceMs != null && latestLabel.createdAtMs <= latestHeadAdvanceMs) {
+    return null;
+  }
+  return {
+    authorizedAt: latestLabel.createdAt,
+    label: latestLabel.label,
+  };
+}
+
+async function fetchFastMergeAuthorizationFromTimeline(
+  octokit,
+  { owner, repo, prNumber, allowedLabelNames = [], logger = console } = {},
+) {
+  try {
+    if (typeof octokit?.rest?.issues?.listEventsForTimeline !== 'function') {
+      throw new Error('octokit.rest.issues.listEventsForTimeline unavailable');
+    }
+    const params = {
+      owner,
+      repo,
+      issue_number: prNumber,
+      per_page: 100,
+    };
+    const events = typeof octokit?.paginate === 'function'
+      ? await octokit.paginate(octokit.rest.issues.listEventsForTimeline, params)
+      : (await octokit.rest.issues.listEventsForTimeline(params))?.data;
+    return latestTimelineFastMergeAuthorization(events, allowedLabelNames);
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] fast-merge timeline fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
     );
     return null;
   }
@@ -2451,14 +2528,24 @@ async function pollOnce(
         if (liveLabels) {
           const fastMergeDecision = fastMergeDecisionFromLabels(liveLabels);
           if (fastMergeDecision.hasFastMergeLabel && !fastMergeDecision.hasVeto) {
-            const authorizedAt = new Date().toISOString();
             const authorizedHeadSha = await fetchLivePRHeadSha(octokit, {
               owner,
               repo,
               prNumber,
               fallbackHeadSha: subject.headSha || null,
             });
-            if (authorizedHeadSha && FAST_MERGE_SKIP_ENABLED) {
+            const timelineAuthorization = authorizedHeadSha
+              ? await fetchFastMergeAuthorizationFromTimeline(octokit, {
+                owner,
+                repo,
+                prNumber,
+                allowedLabelNames: fastMergeDecision.labelNames.filter(
+                  (name) => Object.prototype.hasOwnProperty.call(FAST_MERGE_CATEGORY_BY_LABEL, name)
+                ),
+              })
+              : null;
+            if (authorizedHeadSha && timelineAuthorization && FAST_MERGE_SKIP_ENABLED) {
+              const authorizedAt = timelineAuthorization.authorizedAt;
               stmtCreateFastMergeSkippedReviewRow.run(
                 repoPath,
                 prNumber,
@@ -2485,7 +2572,8 @@ async function pollOnce(
               await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
               continue;
             }
-            if (authorizedHeadSha && !FAST_MERGE_SKIP_ENABLED) {
+            if (authorizedHeadSha && timelineAuthorization && !FAST_MERGE_SKIP_ENABLED) {
+              const authorizedAt = timelineAuthorization.authorizedAt;
               writeFastMergeAuditEntry(ROOT, {
                 action: 'would-have-skipped',
                 repo: repoPath,
@@ -2499,6 +2587,10 @@ async function pollOnce(
               console.log(
                 `[watcher] Fast-merge audit-only for ${repoPath}#${prNumber}: ` +
                   `would have skipped ${fastMergeDecision.categories.join(',')} @ ${authorizedHeadSha.slice(0, 12)}`
+              );
+            } else if (authorizedHeadSha) {
+              console.log(
+                `[watcher] Fast-merge labels present for ${repoPath}#${prNumber} but timeline does not authorize current head; using normal review path`
               );
             }
           }

@@ -12,6 +12,7 @@ const {
   LAUNCHCTL,
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
+  parseCodexJsonTokenUsage,
   queueFollowUpForPostedReview,
   resolveCodexAuthPath,
   resolveReviewerTimeoutMs,
@@ -469,6 +470,31 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
     '--',
     prompt,
   ]);
+});
+
+test('Codex JSON token parser reads turn.completed usage from native stdout', () => {
+  const usage = parseCodexJsonTokenUsage([
+    '{"type":"thread.started","thread_id":"thread_1"}',
+    JSON.stringify({
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 123,
+        cached_input_tokens: 45,
+        output_tokens: 6,
+        total_tokens: 174,
+      },
+    }),
+    '',
+  ].join('\n'));
+
+  assert.deepEqual(usage, {
+    input: 123,
+    output: 6,
+    cacheRead: 45,
+    cacheWrite: 0,
+    total: 174,
+    source: 'codex-json',
+  });
 });
 
 test('spawnClaude rejects invalid darwin uids', async () => {

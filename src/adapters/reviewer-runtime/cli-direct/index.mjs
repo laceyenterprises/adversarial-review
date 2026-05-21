@@ -128,11 +128,22 @@ function emptyResult({
 function parseCodexJsonTokenUsage(stdout) {
   let tokenUsage = null;
   for (const line of String(stdout || '').split('\n')) {
-    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed'))) continue;
+    if (
+      !line.trim() ||
+      (
+        !line.includes('token_count') &&
+        !line.includes('turn.completed') &&
+        !line.includes('reviewer.token_usage')
+      )
+    ) continue;
     let item;
     try {
       item = JSON.parse(line);
     } catch {
+      continue;
+    }
+    if (item.type === 'reviewer.token_usage' && item.tokenUsage) {
+      tokenUsage = item.tokenUsage;
       continue;
     }
     const total = item.type === 'turn.completed'

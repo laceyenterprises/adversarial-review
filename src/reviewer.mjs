@@ -752,6 +752,36 @@ function buildCodexReviewArgs({ outputPath, prompt }) {
   ];
 }
 
+function parseCodexJsonTokenUsage(stdout) {
+  let tokenUsage = null;
+  for (const line of String(stdout || '').split('\n')) {
+    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed'))) continue;
+    let item;
+    try {
+      item = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const total = item.type === 'turn.completed'
+      ? item.usage
+      : (
+          item.type === 'event_msg' && item.payload?.type === 'token_count'
+            ? item.payload?.info?.total_token_usage
+            : null
+        );
+    if (!total || typeof total !== 'object') continue;
+    tokenUsage = {
+      input: Number.isFinite(Number(total.input_tokens)) ? Math.trunc(Number(total.input_tokens)) : null,
+      output: Number.isFinite(Number(total.output_tokens)) ? Math.trunc(Number(total.output_tokens)) : null,
+      cacheRead: Number.isFinite(Number(total.cached_input_tokens)) ? Math.trunc(Number(total.cached_input_tokens)) : null,
+      cacheWrite: 0,
+      total: Number.isFinite(Number(total.total_tokens)) ? Math.trunc(Number(total.total_tokens)) : null,
+      source: 'codex-json',
+    };
+  }
+  return tokenUsage;
+}
+
 async function spawnCodexReview({
   codexCli = CODEX_CLI,
   outputPath,
@@ -845,6 +875,7 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
   console.error(`[reviewWithCodex] stdout preview: ${previewText(stdout)}`);
   console.error(`[reviewWithCodex] stderr preview: ${previewText(stderr)}`);
   console.error(`[reviewWithCodex] file preview: ${previewText(fileOutput)}`);
+  const tokenUsage = parseCodexJsonTokenUsage(stdout);
 
   const cleanedStdout = stripCodexRuntimeNoise(stdout);
   const cleanedStderr = stripCodexRuntimeNoise(stderr);
@@ -860,7 +891,10 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
     throw new Error(`Native Codex returned empty output.${hint}`);
   }
 
-  return combined;
+  return {
+    reviewText: combined,
+    tokenUsage,
+  };
 }
 
 // ── GitHub review posting ────────────────────────────────────────────────────
@@ -1047,13 +1081,16 @@ async function main() {
 
   let reviewText;
   let rawReviewText;
+  let tokenUsage = null;
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
     if (effectiveModel === 'claude') {
       rawReviewText = await reviewWithClaude(diff, extraContext, { promptStage: reviewerPromptStage });
       reviewText = rawReviewText;
     } else {
-      rawReviewText = await reviewWithCodex(diff, extraContext, { promptStage: reviewerPromptStage });
+      const codexResult = await reviewWithCodex(diff, extraContext, { promptStage: reviewerPromptStage });
+      rawReviewText = codexResult.reviewText;
+      tokenUsage = codexResult.tokenUsage;
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
       try {
         reviewText = sanitizeCodexReviewPayload(rawReviewText);
@@ -1092,6 +1129,9 @@ async function main() {
     process.exit(1);
   }
 
+  if (tokenUsage) {
+    console.log(JSON.stringify({ type: 'reviewer.token_usage', tokenUsage }));
+  }
   console.log(`[reviewer] Review generated (${reviewText.length} chars)`);
 
   // 3. Post to GitHub
@@ -1179,6 +1219,7 @@ const __test__ = {
   spawnCaptured,
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
+  parseCodexJsonTokenUsage,
   spawnCodexReview,
 };
 

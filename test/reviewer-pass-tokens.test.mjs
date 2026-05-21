@@ -274,6 +274,53 @@ test('worker-run rollup join reads token columns and cache totals from runtime s
   assert.equal(usage.source, 'session-ledger');
 });
 
+test('reviewer session lookup skips empty HQ_ROOT ledger stubs', () => {
+  const rootDir = tempRoot();
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const stubLedger = path.join(hqRoot, 'session-ledger', 'ledger.db');
+  const realLedger = path.join(rootDir, '.agent-os', 'session-ledger', 'ledger.db');
+  mkdirSync(path.dirname(stubLedger), { recursive: true });
+  new Database(stubLedger).close();
+  createLedgerDb(realLedger);
+
+  const usage = readReviewerSessionTokenUsage({
+    adapterSessionKey: 'session-1',
+    workspacePath: '/tmp/review-workspace',
+    startedAt: '2026-05-18T00:59:00.000Z',
+    endedAt: '2026-05-18T01:03:00.000Z',
+    env: { HQ_ROOT: hqRoot },
+    rootDir,
+  });
+
+  assert.equal(usage.adapterSessionKey, 'session-1');
+  assert.equal(usage.input, 120);
+  assert.equal(usage.output, 45);
+  assert.equal(usage.source, 'session-ledger');
+});
+
+test('worker-run lookup skips empty HQ_ROOT ledger stubs', () => {
+  const rootDir = tempRoot();
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const stubLedger = path.join(hqRoot, 'session-ledger', 'ledger.db');
+  const realLedger = path.join(rootDir, '.agent-os', 'session-ledger', 'ledger.db');
+  mkdirSync(path.dirname(stubLedger), { recursive: true });
+  new Database(stubLedger).close();
+  createLedgerDb(realLedger);
+
+  const usage = readWorkerRunTokenUsage({
+    workerRunId: 'wr_1',
+    env: { HQ_ROOT: hqRoot },
+    rootDir,
+  });
+
+  assert.equal(usage.workerRunId, 'wr_1');
+  assert.equal(usage.input, 120);
+  assert.equal(usage.output, 45);
+  assert.equal(usage.cacheRead, 11);
+  assert.equal(usage.cacheWrite, 7);
+  assert.equal(usage.source, 'session-ledger');
+});
+
 test('reviewer session lookup prefers adapter session keys over newer workspace siblings', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');

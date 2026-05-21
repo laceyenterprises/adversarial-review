@@ -203,6 +203,35 @@ function parseFastMergeEventTime(value) {
   return Number.isFinite(ms) ? ms : null;
 }
 
+const FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES = new Set([
+  'committed',
+  'head_ref_force_pushed',
+  'head_ref_restored',
+  'synchronize',
+]);
+
+function extractTimelineHeadSha(event) {
+  const candidates = [
+    event?.after,
+    event?.head_sha,
+    event?.headSha,
+    event?.sha,
+    event?.commit_id,
+    event?.commitId,
+    event?.head?.sha,
+    event?.head_commit?.id,
+    event?.head_commit?.sha,
+    event?.commit?.id,
+    event?.commit?.sha,
+    event?.commit?.oid,
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (value) return value;
+  }
+  return null;
+}
+
 function latestTimelineFastMergeAuthorization(events, allowedLabelNames) {
   const allowed = new Set(
     (Array.isArray(allowedLabelNames) ? allowedLabelNames : [])
@@ -211,42 +240,66 @@ function latestTimelineFastMergeAuthorization(events, allowedLabelNames) {
   );
   if (allowed.size === 0 || !Array.isArray(events)) return null;
 
-  let latestLabel = null;
-  let latestHeadAdvanceMs = null;
+  const normalizedEvents = events
+    .map((event, index) => {
+      const createdAt = event?.created_at || event?.createdAt || null;
+      const createdAtMs = parseFastMergeEventTime(createdAt);
+      if (createdAtMs == null) return null;
+      return {
+        event,
+        index,
+        createdAt,
+        createdAtMs,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.createdAtMs - b.createdAtMs || a.index - b.index);
 
-  for (const event of events) {
-    const eventName = String(event?.event || '').trim().toLowerCase();
-    const createdAt = event?.created_at || event?.createdAt || null;
-    const createdAtMs = parseFastMergeEventTime(createdAt);
-    if (createdAtMs == null) continue;
+  let latestLabel = null;
+
+  for (const entry of normalizedEvents) {
+    const eventName = String(entry.event?.event || '').trim().toLowerCase();
 
     if (eventName === 'labeled') {
-      const labelName = normalizeLabelName(event?.label?.name || event?.label || event?.name || '').toLowerCase();
+      const labelName = normalizeLabelName(
+        entry.event?.label?.name || entry.event?.label || entry.event?.name || ''
+      ).toLowerCase();
       if (!allowed.has(labelName)) continue;
-      if (!latestLabel || createdAtMs > latestLabel.createdAtMs) {
+      if (!latestLabel || entry.createdAtMs >= latestLabel.createdAtMs) {
         latestLabel = {
-          createdAt,
-          createdAtMs,
+          createdAt: entry.createdAt,
+          createdAtMs: entry.createdAtMs,
           label: labelName,
+          labeledHeadSha: extractTimelineHeadSha(entry.event),
         };
       }
-      continue;
-    }
-
-    if (eventName === 'head_ref_force_pushed' || eventName === 'synchronize') {
-      latestHeadAdvanceMs = latestHeadAdvanceMs == null
-        ? createdAtMs
-        : Math.max(latestHeadAdvanceMs, createdAtMs);
     }
   }
 
   if (!latestLabel) return null;
-  if (latestHeadAdvanceMs != null && latestLabel.createdAtMs <= latestHeadAdvanceMs) {
+
+  const latestHeadAdvanceAtOrAfterLabel = normalizedEvents.findLast((entry) => {
+    const eventName = String(entry.event?.event || '').trim().toLowerCase();
+    return entry.createdAtMs >= latestLabel.createdAtMs
+      && FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES.has(eventName);
+  });
+  if (latestHeadAdvanceAtOrAfterLabel) {
     return null;
   }
+
+  const priorHeadEvent = normalizedEvents.findLast((entry) => {
+    const eventName = String(entry.event?.event || '').trim().toLowerCase();
+    return entry.createdAtMs < latestLabel.createdAtMs
+      && FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES.has(eventName)
+      && extractTimelineHeadSha(entry.event);
+  });
+  const authorizedHeadSha = latestLabel.labeledHeadSha || extractTimelineHeadSha(priorHeadEvent?.event);
+  if (!authorizedHeadSha) return null;
+
   return {
     authorizedAt: latestLabel.createdAt,
     label: latestLabel.label,
+    authorizedHeadSha,
   };
 }
 
@@ -2544,7 +2597,12 @@ async function pollOnce(
                 ),
               })
               : null;
-            if (authorizedHeadSha && timelineAuthorization && FAST_MERGE_SKIP_ENABLED) {
+            if (
+              authorizedHeadSha
+              && timelineAuthorization
+              && timelineAuthorization.authorizedHeadSha === authorizedHeadSha
+              && FAST_MERGE_SKIP_ENABLED
+            ) {
               const authorizedAt = timelineAuthorization.authorizedAt;
               stmtCreateFastMergeSkippedReviewRow.run(
                 repoPath,
@@ -2572,7 +2630,12 @@ async function pollOnce(
               await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
               continue;
             }
-            if (authorizedHeadSha && timelineAuthorization && !FAST_MERGE_SKIP_ENABLED) {
+            if (
+              authorizedHeadSha
+              && timelineAuthorization
+              && timelineAuthorization.authorizedHeadSha === authorizedHeadSha
+              && !FAST_MERGE_SKIP_ENABLED
+            ) {
               const authorizedAt = timelineAuthorization.authorizedAt;
               writeFastMergeAuditEntry(ROOT, {
                 action: 'would-have-skipped',
@@ -2590,7 +2653,7 @@ async function pollOnce(
               );
             } else if (authorizedHeadSha) {
               console.log(
-                `[watcher] Fast-merge labels present for ${repoPath}#${prNumber} but timeline does not authorize current head; using normal review path`
+                `[watcher] Fast-merge labels present for ${repoPath}#${prNumber} but timeline cannot corroborate the current head; using normal review path`
               );
             }
           }

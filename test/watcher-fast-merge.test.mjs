@@ -222,12 +222,21 @@ function subject(prNumber, { title = '[codex] fast merge test', headSha = `sha-s
   };
 }
 
-function timelineLabel(label, createdAt) {
-  return { event: 'labeled', label: { name: label }, created_at: createdAt };
+function timelineLabel(label, createdAt, commitId = null) {
+  return {
+    event: 'labeled',
+    label: { name: label },
+    created_at: createdAt,
+    ...(commitId ? { commit_id: commitId } : {}),
+  };
 }
 
-function timelineSynchronize(createdAt) {
-  return { event: 'synchronize', created_at: createdAt };
+function timelineSynchronize(createdAt, after = null) {
+  return {
+    event: 'synchronize',
+    created_at: createdAt,
+    ...(after ? { after } : {}),
+  };
 }
 
 function runWatcherScenario(scenario, { skipEnabled = false } = {}) {
@@ -283,7 +292,7 @@ test('fast-merge watcher: single category skips when flag is enabled and records
     labels: { 802: [{ name: 'fast-merge:docs' }] },
     heads: { 802: 'sha-live-802' },
     timelineEvents: {
-      802: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+      802: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', 'sha-live-802')],
     },
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
@@ -303,7 +312,7 @@ test('fast-merge watcher: flag-off default audits would-have-skipped but reviews
     labels: { 803: [{ name: 'fast-merge:docs' }] },
     heads: { 803: 'sha-live-803' },
     timelineEvents: {
-      803: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+      803: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', 'sha-live-803')],
     },
   });
   assert.equal(summary.rows[0].pr_state, 'open');
@@ -324,8 +333,8 @@ test('fast-merge watcher: multiple categories are captured in skip audit and lab
     heads: { 804: 'sha-live-804' },
     timelineEvents: {
       804: [
-        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
-        timelineLabel('fast-merge:submodule-bump', '2026-05-20T12:00:06.000Z'),
+        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', 'sha-live-804'),
+        timelineLabel('fast-merge:submodule-bump', '2026-05-20T12:00:06.000Z', 'sha-live-804'),
       ],
     },
   }, { skipEnabled: true });
@@ -341,8 +350,8 @@ test('fast-merge watcher: post-label head advance falls back to normal review', 
     heads: { 809: 'sha-live-809' },
     timelineEvents: {
       809: [
-        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
-        timelineSynchronize('2026-05-20T12:00:06.000Z'),
+        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', 'sha-old-809'),
+        timelineSynchronize('2026-05-20T12:00:06.000Z', 'sha-live-809'),
       ],
     },
   }, { skipEnabled: true });
@@ -369,6 +378,41 @@ test('fast-merge watcher: veto wins on open and veto-only is normal review', () 
   assert.deepEqual(summary.rows.map((row) => row.review_status), ['posted', 'posted']);
   assert.equal(summary.spawns.length, 2);
   assert.equal(summary.auditEntries.length, 0);
+});
+
+test('fast-merge watcher: stale timeline label SHA does not authorize a newer live head', () => {
+  const summary = runWatcherScenario({
+    subjects: [subject(810, { labels: [{ name: 'fast-merge:docs' }] })],
+    labels: { 810: [{ name: 'fast-merge:docs' }] },
+    heads: { 810: 'sha-live-810-b' },
+    timelineEvents: {
+      810: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', 'sha-live-810-a')],
+    },
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'open');
+  assert.equal(summary.rows[0].review_status, 'posted');
+  assert.equal(summary.rows[0].fast_merge_authorized_head_sha, null);
+  assert.equal(summary.spawns.length, 1);
+  assert.equal(summary.auditEntries.length, 0);
+});
+
+test('fast-merge watcher: prior head-advance SHA can corroborate a label that omits commit_id', () => {
+  const summary = runWatcherScenario({
+    subjects: [subject(811, { labels: [{ name: 'fast-merge:docs' }] })],
+    labels: { 811: [{ name: 'fast-merge:docs' }] },
+    heads: { 811: 'sha-live-811' },
+    timelineEvents: {
+      811: [
+        timelineSynchronize('2026-05-20T12:00:04.000Z', 'sha-live-811'),
+        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
+      ],
+    },
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
+  assert.equal(summary.rows[0].review_status, 'fast_merge_skipped');
+  assert.equal(summary.rows[0].fast_merge_authorized_head_sha, 'sha-live-811');
+  assert.equal(summary.spawns.length, 0);
+  assert.equal(summary.auditEntries[0].fast_merge_authorized_head_sha, 'sha-live-811');
 });
 
 test('fast-merge watcher: veto added after skip requeues through pending and the normal CAS claims it', () => {

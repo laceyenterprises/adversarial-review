@@ -262,17 +262,21 @@ The label alone is never the authority. The watcher may set
 
 - A current allowlisted `fast-merge:*` label is present and `fast-merge-veto` is absent.
 - The current PR head SHA can be fetched successfully.
-- The issue timeline shows a matching allowlisted `labeled` event that is strictly newer than the most recent `synchronize` or `head_ref_force_pushed` event.
+- The issue timeline both records the authorizing label and corroborates the
+  authorized head SHA. The watcher binds authorization to the SHA carried by
+  the label event when available, otherwise to the most recent prior
+  head-advance timeline event. Any head-advance event at or after the label
+  invalidates the authorization.
 
 If that proof is missing, the watcher fails closed to the normal review path.
 
 ### Merge-agent contract
 
 `fast_merge_authorized_head_sha` is the commit the operator effectively approved
-for the bypass lane. Any merge-agent path that consumes a `fast_merge_skipped`
-row must confirm the live PR head still equals that stored SHA before merging.
-If the head differs, the lane is stale and the PR must return to normal review
-instead of inheriting the earlier label authorization.
+for the bypass lane. Merge-agent does not consume `fast_merge_skipped` rows yet;
+the live-head equality check and `fast_merge_merged` transition are deferred to
+the next fast-merge phase. Until that lands, treat `fast_merge_skipped` as a
+watcher-owned staging state rather than an active merge-agent contract.
 
 ---
 

@@ -246,7 +246,13 @@ function coerceNonNegativeFloat(value) {
   return parsed;
 }
 
-function resolveSessionLedgerDbPath({ env = process.env, hqRoot = null, rootDir = process.cwd(), explicitPath = null } = {}) {
+function resolveSessionLedgerDbPath({
+  env = process.env,
+  hqRoot = null,
+  rootDir = process.cwd(),
+  explicitPath = null,
+  requiredTables = [],
+} = {}) {
   const candidates = [];
   if (explicitPath) candidates.push(explicitPath);
   if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) candidates.push(env.AGENT_OS_SESSION_LEDGER_DB_PATH);
@@ -268,9 +274,31 @@ function resolveSessionLedgerDbPath({ env = process.env, hqRoot = null, rootDir 
     const resolved = resolve(String(candidate));
     if (seen.has(resolved)) continue;
     seen.add(resolved);
-    if (existsSync(resolved)) return resolved;
+    if (!existsSync(resolved)) continue;
+    if (!sessionLedgerDbHasTables(resolved, requiredTables)) continue;
+    return resolved;
   }
   return null;
+}
+
+function sessionLedgerDbHasTables(dbPath, tableNames = []) {
+  const required = [...new Set((tableNames || []).filter(Boolean).map(String))];
+  if (required.length === 0) return true;
+  let db = null;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const rows = db.prepare(
+      `SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN (${required.map((_, idx) => `@table${idx}`).join(', ')})`
+    ).all(Object.fromEntries(required.map((name, idx) => [`table${idx}`, name])));
+    const found = new Set(rows.map((row) => row.name));
+    return required.every((name) => found.has(name));
+  } catch {
+    return false;
+  } finally {
+    if (db) db.close();
+  }
 }
 
 function readReviewerSessionTokenUsage({
@@ -283,7 +311,12 @@ function readReviewerSessionTokenUsage({
   env = process.env,
   rootDir = process.cwd(),
 } = {}) {
-  const dbPath = resolveSessionLedgerDbPath({ explicitPath: ledgerDbPath, env, rootDir });
+  const dbPath = resolveSessionLedgerDbPath({
+    explicitPath: ledgerDbPath,
+    env,
+    rootDir,
+    requiredTables: ['runtime_sessions'],
+  });
   if (!dbPath) return null;
   const keys = [...new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String))];
   if (keys.length === 0 && !workspacePath) return null;
@@ -333,7 +366,12 @@ function readWorkerRunTokenUsage({
   env = process.env,
   rootDir = process.cwd(),
 } = {}) {
-  const dbPath = resolveSessionLedgerDbPath({ explicitPath: ledgerDbPath, env, rootDir });
+  const dbPath = resolveSessionLedgerDbPath({
+    explicitPath: ledgerDbPath,
+    env,
+    rootDir,
+    requiredTables: ['worker_runs'],
+  });
   if (!dbPath || (!workerRunId && !launchRequestId)) return null;
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {

@@ -129,6 +129,132 @@ const STUCK_DISPATCH_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
 const STUCK_DISPATCH_ALERT_STATE_DIR = join(
   ROOT, 'data', 'follow-up-jobs', 'merge-agent-stuck-alerts',
 );
+const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
+const FAST_MERGE_CATEGORY_BY_LABEL = Object.freeze({
+  'fast-merge:spec-hash-rebind': 'spec-hash-rebind',
+  'fast-merge:docs': 'docs',
+  'fast-merge:test-fixtures': 'test-fixtures',
+  'fast-merge:submodule-bump': 'submodule-bump',
+  'fast-merge:additive-sql': 'additive-sql',
+});
+const FAST_MERGE_SKIP_ENABLED = process.env.FML_WATCHER_SKIP_ENABLED === 'true';
+
+function normalizeLabelName(label) {
+  return String(typeof label === 'string' ? label : label?.name || '').trim();
+}
+
+function fastMergeDecisionFromLabels(labels) {
+  const labelNames = (Array.isArray(labels) ? labels : [])
+    .map(normalizeLabelName)
+    .filter(Boolean);
+  const categories = [...new Set(
+    labelNames
+      .map((name) => FAST_MERGE_CATEGORY_BY_LABEL[name])
+      .filter(Boolean)
+  )];
+  return {
+    hasFastMergeLabel: categories.length > 0,
+    hasVeto: labelNames.includes(FAST_MERGE_VETO_LABEL),
+    categories,
+    labelNames,
+  };
+}
+
+async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = console } = {}) {
+  try {
+    if (typeof octokit?.rest?.issues?.listLabelsOnIssue !== 'function') {
+      throw new Error('octokit.rest.issues.listLabelsOnIssue unavailable');
+    }
+    const { data } = await octokit.rest.issues.listLabelsOnIssue({
+      owner,
+      repo,
+      issue_number: prNumber,
+      per_page: 100,
+    });
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] fast-merge label fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
+async function fetchLivePRHeadSha(octokit, { owner, repo, prNumber, fallbackHeadSha = null, logger = console } = {}) {
+  try {
+    if (typeof octokit?.rest?.pulls?.get !== 'function') {
+      throw new Error('octokit.rest.pulls.get unavailable');
+    }
+    const { data } = await octokit.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: prNumber,
+    });
+    return data?.head?.sha ? String(data.head.sha) : fallbackHeadSha;
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] fast-merge head SHA fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
+function fastMergeAuditPath(rootDir, { repo, prNumber, action, at }) {
+  const safeRepo = String(repo || '').replace(/[^A-Za-z0-9._-]/g, '_');
+  const safeAt = String(at || new Date().toISOString()).replace(/[^0-9A-Za-z._-]/g, '-');
+  return join(
+    rootDir,
+    'data',
+    'reviewer-runs',
+    `fast-merge-${action}-${safeRepo}-${prNumber}-${safeAt}-${randomUUID()}.json`
+  );
+}
+
+function writeFastMergeAuditEntry(rootDir, {
+  action,
+  repo,
+  prNumber,
+  categories = [],
+  labels = [],
+  authorizedHeadSha = null,
+  authorizedAt = new Date().toISOString(),
+  skippedAt = null,
+  vetoedAt = null,
+  requeueResult = null,
+}) {
+  const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
+  const entry = {
+    sessionUuid,
+    domain: 'code-pr',
+    runtime: 'watcher-fast-merge',
+    state: 'completed',
+    pgid: null,
+    spawnedAt: authorizedAt,
+    lastHeartbeatAt: null,
+    reattachToken: null,
+    subjectContext: {
+      repo,
+      prNumber,
+      headSha: authorizedHeadSha,
+    },
+    fast_merge: true,
+    action,
+    categories,
+    repo,
+    pr_number: prNumber,
+    labels,
+    authorized_at: authorizedAt,
+    skipped_at: skippedAt,
+    vetoed_at: vetoedAt,
+    fast_merge_authorized_head_sha: authorizedHeadSha,
+    authorizing_head_sha: authorizedHeadSha,
+    requeue_result: requeueResult,
+  };
+  const targetPath = fastMergeAuditPath(rootDir, { repo, prNumber, action, at: authorizedAt });
+  mkdirSync(dirname(targetPath), { recursive: true });
+  writeFileAtomic(targetPath, `${JSON.stringify(entry, null, 2)}\n`, { overwrite: false });
+  return { entry, path: targetPath };
+}
 
 async function maybeFireMergeAgentStuckAlert({
   rootDir,
@@ -903,11 +1029,17 @@ const stmtGetReviewRow = db.prepare(
 const stmtCreateReviewRow = db.prepare(
   'INSERT OR IGNORE INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, 0)'
 );
+const stmtCreateFastMergeSkippedReviewRow = db.prepare(
+  "INSERT OR IGNORE INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts, labels_json, fast_merge_authorized_head_sha) VALUES (?, ?, ?, ?, 'fast_merge_skipped', ?, 'fast_merge_skipped', 0, ?, ?)"
+);
 const stmtUpdateReviewRouting = db.prepare(
   'UPDATE reviewed_prs SET reviewer = ?, linear_ticket = COALESCE(?, linear_ticket) WHERE repo = ? AND pr_number = ?'
 );
 const stmtUpdateReviewLabels = db.prepare(
   'UPDATE reviewed_prs SET labels_json = ? WHERE repo = ? AND pr_number = ?'
+);
+const stmtGetFastMergeSkippedPRs = db.prepare(
+  "SELECT * FROM reviewed_prs WHERE pr_state = 'fast_merge_skipped'"
 );
 const stmtMarkMalformed = db.prepare(
   "UPDATE reviewed_prs SET reviewer = 'malformed-title', review_status = 'malformed', failure_message = ?, failed_at = ?, last_attempted_at = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
@@ -1854,6 +1986,69 @@ async function handlePostedReviewRow({
   }
 }
 
+async function recoverFastMergeVetoes(octokit, { logger = console } = {}) {
+  const skippedRows = stmtGetFastMergeSkippedPRs.all();
+  for (const row of skippedRows) {
+    const [owner, repo] = String(row.repo || '').split('/');
+    if (!owner || !repo) continue;
+    const liveLabels = await fetchLivePRLabels(octokit, {
+      owner,
+      repo,
+      prNumber: row.pr_number,
+      logger,
+    });
+    if (!liveLabels) continue;
+    const decision = fastMergeDecisionFromLabels(liveLabels);
+    stmtUpdateReviewLabels.run(JSON.stringify(liveLabels), row.repo, row.pr_number);
+    if (!decision.hasVeto) continue;
+
+    const vetoedAt = new Date().toISOString();
+    let requeueResult;
+    try {
+      requeueResult = requestReviewRereview({
+        rootDir: ROOT,
+        repo: row.repo,
+        prNumber: row.pr_number,
+        requestedAt: vetoedAt,
+        reason: `fast-merge veto label observed at ${vetoedAt}; requeueing normal first-pass review`,
+        allowFastMergeSkipped: true,
+        db,
+      });
+    } catch (err) {
+      logger.error?.(
+        `[watcher] fast-merge veto requeue failed for ${row.repo}#${row.pr_number}: ${err?.message || err}`
+      );
+      continue;
+    }
+
+    let priorCategories = [];
+    try {
+      priorCategories = fastMergeDecisionFromLabels(JSON.parse(row.labels_json || '[]')).categories;
+    } catch {
+      priorCategories = [];
+    }
+    writeFastMergeAuditEntry(ROOT, {
+      action: 'veto-requeued',
+      repo: row.repo,
+      prNumber: row.pr_number,
+      categories: decision.categories.length ? decision.categories : priorCategories,
+      labels: liveLabels,
+      authorizedHeadSha: row.fast_merge_authorized_head_sha || null,
+      authorizedAt: row.reviewed_at || vetoedAt,
+      skippedAt: row.reviewed_at || null,
+      vetoedAt,
+      requeueResult: {
+        triggered: Boolean(requeueResult?.triggered),
+        status: requeueResult?.status || null,
+        reason: requeueResult?.reason || null,
+      },
+    });
+    logger.log?.(
+      `[watcher] fast-merge veto observed for ${row.repo}#${row.pr_number}: requeue ${requeueResult?.status || 'unknown'}`
+    );
+  }
+}
+
 /**
  * Poll for reviewable subjects once.
  *
@@ -1897,6 +2092,7 @@ async function pollOnce(
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit, operatorSurface);
+  await recoverFastMergeVetoes(octokit);
 
   try {
     const ackRetry = await retryPendingRetriggerAckComments({
@@ -2246,6 +2442,68 @@ async function pollOnce(
       // duplicate block removed — caused SyntaxError on import per LAC-439.)
 
       const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
+      if (!existing) {
+        const liveLabels = await fetchLivePRLabels(octokit, {
+          owner,
+          repo,
+          prNumber,
+        });
+        if (liveLabels) {
+          const fastMergeDecision = fastMergeDecisionFromLabels(liveLabels);
+          if (fastMergeDecision.hasFastMergeLabel && !fastMergeDecision.hasVeto) {
+            const authorizedAt = new Date().toISOString();
+            const authorizedHeadSha = await fetchLivePRHeadSha(octokit, {
+              owner,
+              repo,
+              prNumber,
+              fallbackHeadSha: subject.headSha || null,
+            });
+            if (authorizedHeadSha && FAST_MERGE_SKIP_ENABLED) {
+              stmtCreateFastMergeSkippedReviewRow.run(
+                repoPath,
+                prNumber,
+                authorizedAt,
+                route.reviewerModel,
+                linearTicketId,
+                JSON.stringify(liveLabels),
+                authorizedHeadSha
+              );
+              writeFastMergeAuditEntry(ROOT, {
+                action: 'skipped',
+                repo: repoPath,
+                prNumber,
+                categories: fastMergeDecision.categories,
+                labels: liveLabels,
+                authorizedHeadSha,
+                authorizedAt,
+                skippedAt: authorizedAt,
+              });
+              console.log(
+                `[watcher] Fast-merge skip for ${repoPath}#${prNumber}: ` +
+                  `${fastMergeDecision.categories.join(',')} @ ${authorizedHeadSha.slice(0, 12)}`
+              );
+              await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
+              continue;
+            }
+            if (authorizedHeadSha && !FAST_MERGE_SKIP_ENABLED) {
+              writeFastMergeAuditEntry(ROOT, {
+                action: 'would-have-skipped',
+                repo: repoPath,
+                prNumber,
+                categories: fastMergeDecision.categories,
+                labels: liveLabels,
+                authorizedHeadSha,
+                authorizedAt,
+                skippedAt: authorizedAt,
+              });
+              console.log(
+                `[watcher] Fast-merge audit-only for ${repoPath}#${prNumber}: ` +
+                  `would have skipped ${fastMergeDecision.categories.join(',')} @ ${authorizedHeadSha.slice(0, 12)}`
+              );
+            }
+          }
+        }
+      }
       if (!existing) {
         stmtCreateReviewRow.run(
           repoPath,
@@ -2644,6 +2902,9 @@ if (isMain) {
 export {
   classifyReviewerFailure,
   evaluateRoundBudgetForReview,
+  fastMergeDecisionFromLabels,
+  fetchLivePRHeadSha,
+  fetchLivePRLabels,
   handlePostedReviewRow,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,
@@ -2651,6 +2912,7 @@ export {
   persistReviewerPgid,
   readWatcherDrainState,
   reconcileOrphanedReviewing,
+  recoverFastMergeVetoes,
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
   resolveStaleReviewerReconcilePerPoll,
@@ -2669,4 +2931,5 @@ export {
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,
+  writeFastMergeAuditEntry,
 };

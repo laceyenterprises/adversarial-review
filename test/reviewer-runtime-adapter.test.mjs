@@ -648,6 +648,71 @@ test('agent-os-hq classifies serialized no-output timeout messages as reviewer-t
   }
 });
 
+test('agent-os-hq classifies no-output timeout details from stderr as reviewer-timeout', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_no_output_stderr' }), stderr: '' };
+        }
+        const err = new Error('hq dispatch status failed');
+        err.stderr = 'Claude review failed: Command no output for 900000ms';
+        throw err;
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 17, linearTicketId: 'LAC-568' },
+      timeoutMs: 50_000,
+      sessionUuid: 'agent-hq-serialized-no-output-timeout-stderr',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'reviewer-timeout');
+    assert.match(result.stderrTail, /Command no output for 900000ms/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent-os-hq does not classify loose no-output substrings as reviewer-timeout', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_no_output_false_positive' }), stderr: '' };
+        }
+        throw new Error('reviewer bug: no output formatter is registered');
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 18, linearTicketId: 'LAC-568' },
+      timeoutMs: 50_000,
+      sessionUuid: 'agent-hq-no-output-false-positive',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'unknown');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq cancel does not overwrite terminal completed records', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');

@@ -36,6 +36,13 @@ const LEASE_EXPIRED_GRACE_MS = 60_000;
 const MIN_HQ_COMMAND_TIMEOUT_MS = 1_000;
 const HQ_COMMAND_TIMEOUT_BUFFER_MS = 15_000;
 const OWNER_MISMATCH_RE = /OWNER_MISMATCH|owner mismatch/i;
+const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
+  `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
+);
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function tailText(value, maxBytes = 8 * 1024) {
   const text = String(value || '');
@@ -380,12 +387,14 @@ function createAgentOsHqReviewerRuntimeAdapter({
     }
   }
 
-  function classifyHqFailure(err) {
-    const message = String(err?.message || '').toLowerCase();
+  function classifyHqFailure(err, detail = null) {
+    const message = String(
+      detail ?? [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n') ?? ''
+    ).toLowerCase();
     if (
       isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' })
-      || /timed out/i.test(message)
-      || message.includes(PROGRESS_TIMEOUT_REASON_PREFIX)
+      || /timed out/.test(message)
+      || REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE.test(message)
     ) {
       return 'reviewer-timeout';
     }
@@ -500,6 +509,8 @@ function createAgentOsHqReviewerRuntimeAdapter({
         return result({
           ok: false,
           spawnedAt,
+          // Terminal HQ statuses are expected to carry their own worker-pool
+          // failureClass; the adapter self-classifies only CLI exceptions.
           failureClass: statusPayload.failureClass || 'unknown',
           stderrTail: statusPayload.failureDetail || `hq dispatch ${dispatchId} ended with status ${status}`,
           stdoutTail: tailText(stdout),
@@ -657,7 +668,7 @@ function createAgentOsHqReviewerRuntimeAdapter({
       return result({
         ok: false,
         spawnedAt: record.spawnedAt,
-        failureClass: classifyHqFailure(err),
+        failureClass: classifyHqFailure(err, detail),
         stderrTail: tailText(err?.stderr || detail),
         stdoutTail: tailText(err?.stdout || ''),
         exitCode,
@@ -745,7 +756,7 @@ function createAgentOsHqReviewerRuntimeAdapter({
       return result({
         ok: false,
         spawnedAt,
-        failureClass: classifyHqFailure(err),
+        failureClass: classifyHqFailure(err, detail),
         stderrTail: tailText(err?.stderr || detail),
         stdoutTail: tailText(err?.stdout || ''),
         exitCode: Number.isInteger(err?.code) ? err.code : null,

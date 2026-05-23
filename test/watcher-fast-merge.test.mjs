@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -315,6 +315,41 @@ test('fast-merge watcher: single category skips when flag is enabled and records
   assert.match(summary.auditEntries[0].authorized_at, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test('fast-merge watcher: additive-sql category permits additive SQL migrations', () => {
+  const summary = runWatcherScenario({
+    subjects: [subject(816, { labels: [{ name: 'fast-merge:additive-sql' }] })],
+    labels: { 816: [{ name: 'fast-merge:additive-sql' }] },
+    heads: { 816: 'sha-live-816' },
+    changedFiles: {
+      816: [{ filename: 'migrations/20260523_add_index.sql', status: 'added', additions: 12, deletions: 0 }],
+    },
+    timelineEvents: {
+      816: [timelineLabel('fast-merge:additive-sql', '2026-05-20T12:00:05.000Z', 'sha-live-816')],
+    },
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
+  assert.equal(summary.rows[0].review_status, 'fast_merge_skipped');
+  assert.deepEqual(summary.auditEntries[0].categories, ['additive-sql']);
+});
+
+test('fast-merge watcher: additive-sql category rejects SQL deletions', () => {
+  const summary = runWatcherScenario({
+    subjects: [subject(817, { labels: [{ name: 'fast-merge:additive-sql' }] })],
+    labels: { 817: [{ name: 'fast-merge:additive-sql' }] },
+    heads: { 817: 'sha-live-817' },
+    changedFiles: {
+      817: [{ filename: 'migrations/20260523_drop_table.sql', status: 'modified', additions: 2, deletions: 4 }],
+    },
+    timelineEvents: {
+      817: [timelineLabel('fast-merge:additive-sql', '2026-05-20T12:00:05.000Z', 'sha-live-817')],
+    },
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'open');
+  assert.equal(summary.rows[0].review_status, 'posted');
+  assert.equal(summary.spawns.length, 1);
+  assert.equal(summary.auditEntries[0].action, 'would-have-skipped-shape-mismatch');
+});
+
 test('fast-merge watcher: flag-off default audits would-have-skipped but reviews normally', () => {
   const summary = runWatcherScenario({
     subjects: [subject(803, { labels: [{ name: 'fast-merge:docs' }] })],
@@ -549,6 +584,39 @@ exit 0
       });
       assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     }
+    const log = readFileSync(logPath, 'utf8');
+    assert.match(log, /label create fast-merge:additive-sql --repo laceyenterprises\/agent-os/);
+    assert.match(log, /label edit fast-merge:additive-sql --repo laceyenterprises\/agent-os/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fast-merge label creation script discovers all non-archived repos when no repo is provided', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'fast-merge-labels-all-'));
+  try {
+    const ghPath = path.join(tmp, 'gh');
+    const logPath = path.join(tmp, 'gh.log');
+    writeFileSync(ghPath, `#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "${logPath}"
+if [[ "$1 $2" == "repo list" ]]; then
+  printf '%s\\n' 'laceyenterprises/agent-os' 'laceyenterprises/adversarial-review'
+fi
+exit 0
+`);
+    const chmod = spawnSync('chmod', ['+x', ghPath], { encoding: 'utf8' });
+    assert.equal(chmod.status, 0, chmod.stderr);
+    const result = spawnSync('bash', ['scripts/create-fast-merge-labels.sh'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}` },
+    });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    const log = readFileSync(logPath, 'utf8');
+    assert.match(log, /repo list laceyenterprises --limit 1000/);
+    assert.match(log, /label create fast-merge:docs --repo laceyenterprises\/agent-os/);
+    assert.match(log, /label create fast-merge:docs --repo laceyenterprises\/adversarial-review/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

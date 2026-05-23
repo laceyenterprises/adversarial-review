@@ -9,10 +9,10 @@ import {
 } from '../src/reviewer-timeout.mjs';
 
 // Guards the subprocess timeout that protects spawnCaptured around the
-// reviewer CLI calls. Raised 10m → 20m on 2026-05-10 after PR #331 hit
+// reviewer CLI calls. Raised 10m -> 20m on 2026-05-10 after PR #331 hit
 // the 10m wall on a substantive spec diff. A future revert that drops
 // it below 20m needs to fail this test, not silently shorten review
-// budgets again.
+// budgets again. The progress timeout guards the separate no-output watchdog.
 test('default reviewer timeout is 20 minutes', () => {
   assert.equal(DEFAULT_REVIEWER_TIMEOUT_MS, 20 * 60 * 1000);
 });
@@ -37,8 +37,8 @@ test('resolveReviewerTimeoutMs floors fractional millisecond values', () => {
   assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '120000.7' }), 120000);
 });
 
-test('default reviewer progress timeout is 5 minutes', () => {
-  assert.equal(DEFAULT_PROGRESS_TIMEOUT_MS, 5 * 60 * 1000);
+test('default reviewer progress timeout is 15 minutes', () => {
+  assert.equal(DEFAULT_PROGRESS_TIMEOUT_MS, 15 * 60 * 1000);
 });
 
 test('resolveProgressTimeoutMs follows the reviewer env override parser shape', () => {

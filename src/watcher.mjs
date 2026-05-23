@@ -135,6 +135,7 @@ const FAST_MERGE_CATEGORY_BY_LABEL = Object.freeze({
   'fast-merge:docs': 'docs',
   'fast-merge:test-fixtures': 'test-fixtures',
   'fast-merge:submodule-bump': 'submodule-bump',
+  'fast-merge:additive-sql': 'additive-sql',
 });
 const FAST_MERGE_RECOVERY_PER_TICK = Math.max(
   1,
@@ -414,6 +415,11 @@ function isLikelySubmodulePath(filename) {
   return !filename.includes('.') && filename.split('/').every(Boolean);
 }
 
+function isSqlMigrationPath(filename) {
+  return filename.endsWith('.sql')
+    && /(^|\/)(migrations?|schema|sql)(\/|$)/i.test(filename);
+}
+
 function fastMergeFileMatchesCategory(file, category) {
   const normalized = normalizeChangedFile(file);
   if (!normalized.filename) return false;
@@ -436,6 +442,9 @@ function fastMergeFileMatchesCategory(file, category) {
         || /(^|\/)spec-hash/i.test(normalized.filename)
         || /(^|\/)spec-lock/i.test(normalized.filename)
       );
+  }
+  if (category === 'additive-sql') {
+    return normalized.deletions === 0 && isSqlMigrationPath(normalized.filename);
   }
   return false;
 }
@@ -3255,8 +3264,9 @@ async function main() {
   });
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped
-  // on legitimate org-wide work (a single spawnReviewer can already
-  // consume 5m, and pollOnce processes repos/PRs serially). Resolve
+  // on legitimate org-wide work (a single reviewer can consume most of
+  // the reviewer subprocess deadline, and pollOnce processes repos/PRs
+  // serially). Resolve
   // the deadline per-call from the current activeRepos count so the
   // budget grows with the workload. Operators can still pin a fixed
   // value via `config.pollDeadlineMs`; an explicit number always

@@ -268,7 +268,9 @@ The label alone is never the authority. The watcher may set
   authorized head SHA. The watcher binds authorization to the SHA carried by
   the label event when available, otherwise to the most recent prior
 - The changed-file list matches the allowlisted category shape. For example,
-  `fast-merge:docs` cannot skip a PR that touches runtime code.
+  `fast-merge:docs` cannot skip a PR that touches runtime code, and
+  `fast-merge:additive-sql` requires additive `.sql` changes under a migration,
+  schema, or sql path.
 - Any head-advance event after the label invalidates the authorization. A
   same-timestamp `synchronize` event is treated as redundant only when it names
   the same SHA as the label event.

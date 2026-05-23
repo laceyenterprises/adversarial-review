@@ -156,8 +156,8 @@ function buildSafePollOnce({
 // reviews land in the same poll. This helper is the canonical formula
 // the watcher uses; it's exported for reuse and for tests.
 //
-// `reviewerTimeoutMs` defaults to 5m to match `spawnReviewer()`'s
-// internal `execFileAsync` timeout. `apiSlackMs` covers Linear/octokit
+// `reviewerTimeoutMs` defaults to 15m to match the no-output progress
+// watchdog's default. `apiSlackMs` covers Linear/octokit
 // calls between PRs. `floorMs` keeps tiny configurations (no repos
 // configured yet, single-repo scans) from getting an unhelpfully short
 // deadline that fails on a single slow review.
@@ -175,7 +175,7 @@ function buildSafePollOnce({
 function computeWorkloadAwarePollDeadlineMs({
   activeRepoCount,
   maxPrsPerRepo = DEFAULT_MAX_PRS_PER_REPO,
-  reviewerTimeoutMs = 5 * 60 * 1000,
+  reviewerTimeoutMs = 15 * 60 * 1000,
   apiSlackMs = 5 * 60 * 1000,
   floorMs = DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } = {}) {

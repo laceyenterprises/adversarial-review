@@ -232,6 +232,13 @@ function pickAdversarialGateStatus({
     }
     return decide('pending', 'Adversarial review retry is pending.', 'review-retry-pending');
   }
+  if (reviewStatus === 'fast_merge_skipped') {
+    return decide(
+      'pending',
+      'Fast-merge review skip is recorded for this head.',
+      'fast-merge-skipped'
+    );
+  }
   if (reviewStatus === 'malformed') {
     return decide('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }

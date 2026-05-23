@@ -8,7 +8,7 @@ import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shape
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 4;
+const REVIEW_STATE_SCHEMA_VERSION = 5;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
 const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries', 'reviewer_passes']);
@@ -51,6 +51,9 @@ function ensureReviewStateSchema(db) {
       rereview_requested_at TEXT,
       rereview_reason   TEXT,
       labels_json       TEXT,
+      fast_merge_audit_status TEXT,
+      fast_merge_audit_payload_json TEXT,
+      fast_merge_audit_error TEXT,
       reviewer_session_uuid TEXT,
       reviewer_pgid     INTEGER,
       reviewer_started_at TEXT,
@@ -72,6 +75,14 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_requested_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_reason TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN labels_json TEXT`);
+  // `fast_merge_authorized_head_sha` is intentionally migration-owned by
+  // 20260520_fast_merge_authorization.sql. The audit retry columns stay here
+  // because a PR-branch build briefly created live DBs before the audit
+  // sentinel existed; idempotent schema convergence is the only safe common
+  // path for those DBs and fresh checkouts.
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_status TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_payload_json TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_error TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_session_uuid TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_pgid INTEGER`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_started_at TEXT`);
@@ -464,11 +475,15 @@ function requestReviewRereview({
   prNumber,
   requestedAt = new Date().toISOString(),
   reason,
+  allowFastMergeSkipped = false,
+  db: dbOverride = null,
 }) {
-  const db = openReviewStateDb(rootDir);
+  const db = dbOverride || openReviewStateDb(rootDir);
 
   try {
-    ensureReviewStateSchema(db);
+    if (!dbOverride) {
+      ensureReviewStateSchema(db);
+    }
 
     // Single compare-and-swap UPDATE with the eligibility predicate
     // baked in. The previous SELECT-then-UPDATE shape had a
@@ -493,9 +508,13 @@ function requestReviewRereview({
     // before). The classification read happens AFTER the UPDATE, so a
     // racing claim can no longer slip in between the check and the
     // mutation.
+    const allowedPrStatePredicate = allowFastMergeSkipped
+      ? "pr_state IN ('open', 'fast_merge_skipped')"
+      : "pr_state = 'open'";
     const updateResult = db.prepare(
       `UPDATE reviewed_prs
          SET review_status = 'pending',
+             pr_state = 'open',
              posted_at = NULL,
              failed_at = NULL,
              failure_message = NULL,
@@ -503,7 +522,7 @@ function requestReviewRereview({
              rereview_reason = ?
        WHERE repo = ?
          AND pr_number = ?
-         AND pr_state = 'open'
+         AND ${allowedPrStatePredicate}
          AND review_status NOT IN ('reviewing', 'malformed', 'pending')`
     ).run(
       requestedAt,
@@ -553,7 +572,9 @@ function requestReviewRereview({
     // here instead of silently returning success.
     return buildBlockedRereviewResult('rereview-cas-no-match', reviewRow);
   } finally {
-    db.close();
+    if (!dbOverride) {
+      db.close();
+    }
   }
 }
 

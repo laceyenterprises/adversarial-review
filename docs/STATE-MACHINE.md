@@ -232,6 +232,68 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ---
 
+## 3) Fast-merge skip lane
+
+Source of truth:
+
+```text
+data/reviews.db.reviewed_prs
+```
+
+Fast-merge is a watcher-owned bypass lane for narrowly allowlisted PR labels.
+It is gated by `FML_WATCHER_SKIP_ENABLED=true`; when the flag is false, the
+watcher records audit-only `would-have-skipped` entries and still runs normal
+first-pass adversarial review.
+
+### Additional watcher states
+
+| Field | Value | Meaning |
+|---|---|---|
+| `pr_state` | `fast_merge_skipped` | watcher deliberately skipped first-pass review for an authorized head |
+| `pr_state` | `fast_merge_merged` | merge-agent merged the authorized fast-merge head |
+| `pr_state` | `fast_merge_closed` | PR closed without merging after entering the fast-merge lane |
+| `pr_state` | `fast_merge_blocked` | merge-agent or watcher refused to complete the fast-merge lane |
+| `review_status` | `fast_merge_skipped` | first-pass review was intentionally bypassed for the stored authorized head |
+| `fast_merge_audit_status` | `pending` | a fast-merge state transition happened but its audit JSON still needs retry |
+| `fast_merge_audit_status` | `written` | the audit JSON for the latest fast-merge transition was persisted |
+
+### Authorization rule
+
+The label alone is never the authority. The watcher may set
+`fast_merge_authorized_head_sha` only when all of the following are true:
+
+- A current allowlisted `fast-merge:*` label is present and `fast-merge-veto` is absent.
+- The current PR head SHA can be fetched successfully.
+- The issue timeline both records the authorizing label and corroborates the
+  authorized head SHA by pairing the most recent allowlisted-operator label
+  event with the live PR head from `pulls.get`.
+- The changed-file list matches the allowlisted category shape. For example,
+  `fast-merge:docs` is limited to documentation file extensions,
+  `fast-merge:submodule-bump` is limited to known gitlink paths, and
+  `fast-merge:spec-hash-rebind` only allows a tiny spec-lock/spec-hash rebind.
+- Any commit, force-push, or head-restore event at or after the label
+  invalidates the authorization.
+
+If that proof is missing, the watcher fails closed to the normal review path.
+When the fast-merge label is later removed, or `fast-merge-veto` appears, the
+watcher resets the row back to normal first-pass review and records the recovery
+transition in the fast-merge audit stream. Recovery scans are bounded per tick
+to keep skipped-row cleanup from monopolizing the watcher.
+
+`reviewed_at` stores when the watcher processed the skip. The label application
+time remains in the audit entry as `authorized_at`; do not use `reviewed_at` as
+the operator-label timestamp.
+
+### Merge-agent contract
+
+`fast_merge_authorized_head_sha` is the commit the operator effectively approved
+for the bypass lane. Merge-agent does not consume `fast_merge_skipped` rows yet;
+the live-head equality check and `fast_merge_merged` transition are deferred to
+the next fast-merge phase. Until that lands, treat `fast_merge_skipped` as a
+watcher-owned staging state rather than an active merge-agent contract.
+
+---
+
 ## Failure/stop codes worth remembering
 
 ### Queue stop reasons

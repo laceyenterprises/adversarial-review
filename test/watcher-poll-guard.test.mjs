@@ -226,12 +226,12 @@ test('buildSafePollOnce rejects a non-positive deadlineMs', () => {
 
 test('DEFAULT_POLL_DEADLINE_MS is exported and is large enough for a multi-PR org-wide scan', () => {
   assert.ok(Number.isFinite(DEFAULT_POLL_DEADLINE_MS));
-  // Reviewer subprocess timeout is 5m; a single org-wide poll can
+  // Reviewer progress timeout is 15m; a single org-wide poll can
   // serialize multiple legitimate slow reviews in one pass. The
   // default must be comfortably larger than that or the watchdog
   // trips on legitimate work and the watcher restarts before
   // finishing the batch.
-  const reviewerTimeoutMs = 5 * 60 * 1000;
+  const reviewerTimeoutMs = 15 * 60 * 1000;
   assert.ok(
     DEFAULT_POLL_DEADLINE_MS > reviewerTimeoutMs * 2,
     `expected DEFAULT_POLL_DEADLINE_MS (${DEFAULT_POLL_DEADLINE_MS}) > 2 * reviewer timeout (${reviewerTimeoutMs * 2})`
@@ -301,7 +301,7 @@ test('computeWorkloadAwarePollDeadlineMs honors a non-trivial floor', () => {
   // A zero-repo or unknown-load case must still get a deadline well
   // above a single reviewer timeout, otherwise even one slow PR can
   // trip the watchdog before finishing.
-  const reviewerTimeoutMs = 5 * 60 * 1000;
+  const reviewerTimeoutMs = 15 * 60 * 1000;
   const minimal = computeWorkloadAwarePollDeadlineMs({ activeRepoCount: 0 });
   assert.ok(
     minimal > reviewerTimeoutMs * 2,
@@ -313,7 +313,7 @@ test('computeWorkloadAwarePollDeadlineMs covers the worst-case budget for a real
   // The blocking review finding: 10m default fails when 2-3 slow PRs
   // legitimately serialize. With our default, even a 10-repo poll
   // with 5 reviewable PRs each must finish before the deadline.
-  const reviewerTimeoutMs = 5 * 60 * 1000;
+  const reviewerTimeoutMs = 15 * 60 * 1000;
   const apiSlackMs = 5 * 60 * 1000;
   const repos = 10;
   const prs = 5;
@@ -340,12 +340,12 @@ test('DEFAULT_MAX_PRS_PER_REPO matches the per_page ceiling actually used by pol
 test('default workload-aware deadline covers a single-repo per_page=50 worst case', () => {
   // Single repo handing back the GitHub-query ceiling of 50 open PRs
   // — the default deadline must comfortably exceed the time to run
-  // 50 reviewer subprocesses serially at the 5m execFileAsync timeout
+  // 50 reviewer subprocesses serially at the 15m progress timeout
   // each, plus API slack. Without the per_page=50 ceiling baked into
   // the default, this case would trip the watchdog on legitimate work
   // and exit code 86 would force every surviving 'reviewing' row to
   // 'failed-orphan' on restart.
-  const reviewerTimeoutMs = 5 * 60 * 1000;
+  const reviewerTimeoutMs = 15 * 60 * 1000;
   const apiSlackMs = 5 * 60 * 1000;
   const worstCase = 1 * 50 * reviewerTimeoutMs + apiSlackMs;
   const computed = computeWorkloadAwarePollDeadlineMs({ activeRepoCount: 1 });

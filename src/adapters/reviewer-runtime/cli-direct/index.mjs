@@ -553,6 +553,8 @@ function createCliDirectReviewerRuntimeAdapter({
           killed: err?.killed === true,
           signal: err?.signal,
           code: err?.code,
+          timedOut: err?.timedOut === true,
+          progressTimedOut: err?.progressTimedOut === true,
           timeoutKilled: timedOut,
         },
       );

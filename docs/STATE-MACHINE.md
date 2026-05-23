@@ -254,6 +254,8 @@ first-pass adversarial review.
 | `pr_state` | `fast_merge_closed` | PR closed without merging after entering the fast-merge lane |
 | `pr_state` | `fast_merge_blocked` | merge-agent or watcher refused to complete the fast-merge lane |
 | `review_status` | `fast_merge_skipped` | first-pass review was intentionally bypassed for the stored authorized head |
+| `fast_merge_audit_status` | `pending` | a fast-merge state transition happened but its audit JSON still needs retry |
+| `fast_merge_audit_status` | `written` | the audit JSON for the latest fast-merge transition was persisted |
 
 ### Authorization rule
 
@@ -265,10 +267,21 @@ The label alone is never the authority. The watcher may set
 - The issue timeline both records the authorizing label and corroborates the
   authorized head SHA. The watcher binds authorization to the SHA carried by
   the label event when available, otherwise to the most recent prior
-  head-advance timeline event. Any head-advance event at or after the label
-  invalidates the authorization.
+- The changed-file list matches the allowlisted category shape. For example,
+  `fast-merge:docs` cannot skip a PR that touches runtime code.
+- Any head-advance event after the label invalidates the authorization. A
+  same-timestamp `synchronize` event is treated as redundant only when it names
+  the same SHA as the label event.
 
 If that proof is missing, the watcher fails closed to the normal review path.
+When the fast-merge label is later removed, or `fast-merge-veto` appears, the
+watcher resets the row back to normal first-pass review and records the recovery
+transition in the fast-merge audit stream. Recovery scans are bounded per tick
+to keep skipped-row cleanup from monopolizing the watcher.
+
+`reviewed_at` stores when the watcher processed the skip. The label application
+time remains in the audit entry as `authorized_at`; do not use `reviewed_at` as
+the operator-label timestamp.
 
 ### Merge-agent contract
 

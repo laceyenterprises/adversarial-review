@@ -51,6 +51,9 @@ function ensureReviewStateSchema(db) {
       rereview_requested_at TEXT,
       rereview_reason   TEXT,
       labels_json       TEXT,
+      fast_merge_audit_status TEXT,
+      fast_merge_audit_payload_json TEXT,
+      fast_merge_audit_error TEXT,
       reviewer_session_uuid TEXT,
       reviewer_pgid     INTEGER,
       reviewer_started_at TEXT,
@@ -72,6 +75,9 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_requested_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_reason TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN labels_json TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_status TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_payload_json TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_error TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_session_uuid TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_pgid INTEGER`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_started_at TEXT`);

@@ -129,7 +129,7 @@ export async function load(url, context, nextLoad) {
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed title'); }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
-    'fixture:atomic-write': "globalThis.__fastMergeAuditWrites = []; export function writeFileAtomic(path, content, options) { globalThis.__fastMergeAuditWrites.push({ path, content, options }); }",
+    'fixture:atomic-write': "globalThis.__fastMergeAuditWrites = []; export function writeFileAtomic(path, content, options) { if (globalThis.__fastMergeFailAuditWrites) { throw new Error('fixture audit write failed'); } globalThis.__fastMergeAuditWrites.push({ path, content, options }); }",
   };
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
     return { format: 'module', shortCircuit: true, source: simpleStubs[url] };
@@ -152,6 +152,7 @@ function buildRunnerSource(scenario) {
 const scenario = ${JSON.stringify(scenario)};
 const { pollOnce } = await import(${JSON.stringify(watcherUrl)});
 const db = globalThis.__fastMergeDb;
+globalThis.__fastMergeFailAuditWrites = Boolean(scenario.failAuditWrites);
 for (const row of scenario.seedRows || []) {
   db.prepare(\`INSERT INTO reviewed_prs
     (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, labels_json, fast_merge_authorized_head_sha)
@@ -177,6 +178,9 @@ const octokit = {
           head: { sha: scenario.heads[String(pull_number)] || 'sha-live-' + pull_number },
         },
       }),
+      listFiles: async ({ pull_number }) => ({
+        data: scenario.changedFiles?.[String(pull_number)] || [{ filename: 'docs/fast-merge.md', status: 'modified', additions: 1, deletions: 0 }],
+      }),
     },
     issues: {
       listLabelsOnIssue: async ({ issue_number }) => ({
@@ -197,7 +201,7 @@ await pollOnce(octokit, {
   },
 });
 const rows = db.prepare(
-  'SELECT repo, pr_number, pr_state, review_status, labels_json, fast_merge_authorized_head_sha, reviewer_head_sha FROM reviewed_prs ORDER BY pr_number'
+  'SELECT repo, pr_number, reviewed_at, pr_state, review_status, labels_json, fast_merge_authorized_head_sha, fast_merge_audit_status, fast_merge_audit_error, reviewer_head_sha FROM reviewed_prs ORDER BY pr_number'
 ).all();
 console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
   rows,
@@ -282,6 +286,7 @@ test('fast-merge watcher: no fast-merge label follows normal review path', () =>
   assert.equal(summary.rows[0].pr_state, 'open');
   assert.equal(summary.rows[0].review_status, 'posted');
   assert.equal(summary.rows[0].fast_merge_authorized_head_sha, null);
+  assert.deepEqual(JSON.parse(summary.rows[0].labels_json), [{ name: 'risk:medium' }]);
   assert.equal(summary.spawns.length, 1);
   assert.equal(summary.auditEntries.length, 0);
 });
@@ -298,11 +303,15 @@ test('fast-merge watcher: single category skips when flag is enabled and records
   assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
   assert.equal(summary.rows[0].review_status, 'fast_merge_skipped');
   assert.equal(summary.rows[0].fast_merge_authorized_head_sha, 'sha-live-802');
+  assert.notEqual(summary.rows[0].reviewed_at, '2026-05-20T12:00:05.000Z');
+  assert.equal(summary.rows[0].fast_merge_audit_status, 'written');
   assert.deepEqual(JSON.parse(summary.rows[0].labels_json), [{ name: 'fast-merge:docs' }]);
   assert.equal(summary.spawns.length, 0);
   assert.equal(summary.auditEntries[0].action, 'skipped');
   assert.deepEqual(summary.auditEntries[0].categories, ['docs']);
   assert.equal(summary.auditEntries[0].fast_merge_authorized_head_sha, 'sha-live-802');
+  assert.equal(summary.auditEntries[0].authorized_at, '2026-05-20T12:00:05.000Z');
+  assert.match(summary.auditEntries[0].skipped_at, /^\d{4}-\d{2}-\d{2}T/);
   assert.match(summary.auditEntries[0].authorized_at, /^\d{4}-\d{2}-\d{2}T/);
 });
 
@@ -360,6 +369,43 @@ test('fast-merge watcher: post-label head advance falls back to normal review', 
   assert.equal(summary.rows[0].fast_merge_authorized_head_sha, null);
   assert.equal(summary.spawns.length, 1);
   assert.equal(summary.auditEntries.length, 0);
+});
+
+test('fast-merge watcher: same-timestamp synchronize with matching SHA does not invalidate label', () => {
+  const summary = runWatcherScenario({
+    subjects: [subject(812, { labels: [{ name: 'fast-merge:docs' }] })],
+    labels: { 812: [{ name: 'fast-merge:docs' }] },
+    heads: { 812: 'sha-live-812' },
+    timelineEvents: {
+      812: [
+        timelineSynchronize('2026-05-20T12:00:05.000Z', 'sha-live-812'),
+        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', 'sha-live-812'),
+      ],
+    },
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
+  assert.equal(summary.rows[0].review_status, 'fast_merge_skipped');
+  assert.equal(summary.spawns.length, 0);
+});
+
+test('fast-merge watcher: category shape mismatch audits and falls back to normal review', () => {
+  const summary = runWatcherScenario({
+    subjects: [subject(813, { labels: [{ name: 'fast-merge:docs' }] })],
+    labels: { 813: [{ name: 'fast-merge:docs' }] },
+    heads: { 813: 'sha-live-813' },
+    changedFiles: {
+      813: [{ filename: 'src/watcher.mjs', status: 'modified', additions: 2, deletions: 0 }],
+    },
+    timelineEvents: {
+      813: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', 'sha-live-813')],
+    },
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'open');
+  assert.equal(summary.rows[0].review_status, 'posted');
+  assert.equal(summary.spawns.length, 1);
+  assert.equal(summary.auditEntries[0].action, 'would-have-skipped-shape-mismatch');
+  assert.equal(summary.auditEntries[0].shape_check.ok, false);
+  assert.match(summary.auditEntries[0].shape_check.reason, /src\/watcher\.mjs/);
 });
 
 test('fast-merge watcher: veto wins on open and veto-only is normal review', () => {
@@ -440,6 +486,46 @@ test('fast-merge watcher: veto added after skip requeues through pending and the
   assert.equal(summary.auditEntries[0].requeue_result.status, 'pending');
 });
 
+test('fast-merge watcher: removed fast-merge label requeues skipped row', () => {
+  const summary = runWatcherScenario({
+    seedRows: [{
+      repo: REPO,
+      prNumber: 814,
+      reviewedAt: '2026-05-20T11:00:00.000Z',
+      reviewer: 'claude',
+      prState: 'fast_merge_skipped',
+      reviewStatus: 'fast_merge_skipped',
+      labels: [{ name: 'fast-merge:docs' }],
+      fastMergeAuthorizedHeadSha: 'sha-live-814',
+    }],
+    subjects: [subject(814, { labels: [] })],
+    labels: { 814: [] },
+    heads: { 814: 'sha-live-814' },
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'open');
+  assert.equal(summary.rows[0].review_status, 'posted');
+  assert.equal(summary.spawns.length, 1);
+  assert.equal(summary.auditEntries[0].action, 'label-removed-requeued');
+  assert.equal(summary.auditEntries[0].requeue_result.status, 'pending');
+});
+
+test('fast-merge watcher: skip audit failure leaves retry sentinel on row', () => {
+  const summary = runWatcherScenario({
+    subjects: [subject(815, { labels: [{ name: 'fast-merge:docs' }] })],
+    labels: { 815: [{ name: 'fast-merge:docs' }] },
+    heads: { 815: 'sha-live-815' },
+    timelineEvents: {
+      815: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', 'sha-live-815')],
+    },
+    failAuditWrites: true,
+  }, { skipEnabled: true });
+  assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
+  assert.equal(summary.rows[0].review_status, 'fast_merge_skipped');
+  assert.equal(summary.rows[0].fast_merge_audit_status, 'pending');
+  assert.match(summary.rows[0].fast_merge_audit_error, /fixture audit write failed/);
+  assert.equal(summary.auditEntries.length, 0);
+});
+
 test('fast-merge label creation script is idempotent against create-then-edit gh behavior', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'fast-merge-labels-'));
   try {
@@ -475,6 +561,9 @@ test('fast-merge migration adds authorization column and rereview helper requeue
     ensureReviewStateSchema(db);
     const columns = db.prepare('PRAGMA table_info(reviewed_prs)').all().map((column) => column.name);
     assert.ok(columns.includes('fast_merge_authorized_head_sha'));
+    assert.ok(columns.includes('fast_merge_audit_status'));
+    assert.ok(columns.includes('fast_merge_audit_payload_json'));
+    assert.ok(columns.includes('fast_merge_audit_error'));
     db.prepare(
       `INSERT INTO reviewed_prs
         (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, fast_merge_authorized_head_sha)

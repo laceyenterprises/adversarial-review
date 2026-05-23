@@ -1405,6 +1405,7 @@ const stmtMarkAttemptStarted = db.prepare(
          reviewer_session_uuid = ?,
          reviewer_started_at = ?,
          reviewer_head_sha = ?,
+         reviewer_timeout_ms = ?,
          reviewer_pgid = NULL,
          failed_at = CASE
            WHEN review_status = 'pending-upstream' THEN failed_at
@@ -1526,6 +1527,7 @@ async function spawnReviewer({
   passKind = 'first-pass',
   maxRemediationRounds,
   reviewerSessionUuid,
+  reviewerTimeoutMs = resolveReviewerTimeoutMs(),
   workspacePath = null,
   onReviewerPgid = () => {},
 }) {
@@ -1580,7 +1582,7 @@ async function spawnReviewer({
         maxRemediationRounds,
         reviewerSessionUuid,
       },
-      timeoutMs: resolveReviewerTimeoutMs(),
+      timeoutMs: reviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
       forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
       onReviewerPgid,
@@ -3037,11 +3039,13 @@ async function pollOnce(
       // `ReferenceError: pr is not defined` on every poll cycle for any
       // PR that reached the claim site, silently blocking review spawns.)
       const reviewerHeadSha = subject?.headSha || null;
+      const reviewerTimeoutMs = resolveReviewerTimeoutMs();
       const claim = stmtMarkAttemptStarted.run(
         attemptAt,
         reviewerSessionUuid,
         attemptAt,
         reviewerHeadSha,
+        reviewerTimeoutMs,
         repoPath,
         prNumber
       );
@@ -3161,6 +3165,7 @@ async function pollOnce(
         passKind,
         maxRemediationRounds,
         reviewerSessionUuid,
+        reviewerTimeoutMs,
         workspacePath: null,
         onReviewerPgid: ({ pgid }) => {
           persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });

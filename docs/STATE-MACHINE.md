@@ -69,7 +69,7 @@ data/reviews.db
 | `reviewing` | reviewer subprocess in flight; durable claim before spawn |
 | `posted` | review posted successfully |
 | `failed` | review attempt failed (auto-retried by next poll) |
-| `failed-orphan` | watcher restarted while a `reviewing` row was in flight — possible orphan review post on GitHub; sticky, requires operator verification + `npm run retrigger-review` |
+| `failed-orphan` | watcher restarted while a `reviewing` row was in flight and safe automatic recovery could not be proven — sticky, requires operator verification + `npm run retrigger-review` |
 | `malformed` | title guardrail failure; terminal by design |
 
 ### Transitions
@@ -94,7 +94,10 @@ new PR
             │    └─ failed
             │
             ├─ watcher restart while reviewing
-            │    └─ failed-orphan   (sticky, operator-only recovery)
+            │    ├─ confirmed dead + no late review after bounded overdue recovery
+            │    │    └─ failed
+            │    └─ otherwise
+            │         └─ failed-orphan   (sticky, operator-only recovery)
             │
             └─ accepted rereview request from follow-up reconciliation
                  └─ pending
@@ -103,10 +106,10 @@ new PR
 ### Notes
 
 - `malformed` is intentionally sticky.
-- `failed-orphan` is intentionally sticky. It signals the orphan-review-post race the duplicate-review guard is designed to surface. Recovery is operator-only:
+- `failed-orphan` is intentionally sticky. It covers any restart-era session where the watcher cannot prove a safe handoff back to automation, including missing launch-time timeout metadata on legacy rows, a live PGID that survives the bounded SIGTERM/SIGKILL recovery loop, or a late GitHub review that appears during recovery. Recovery is operator-only:
   1. Inspect the GitHub PR. If a review was already posted by the reviewer bot, leave the row alone (the round is effectively done).
   2. If no orphan review is present, run `npm run retrigger-review --repo <slug> --pr <n> --reason "verified no orphan review"`. The reset clears the sticky state and re-arms `pending`.
-- The watchdog timeout path in `watcher.mjs` aborts every in-flight reviewer subprocess BEFORE exiting, which closes most of the orphan-post window. `failed-orphan` is the durable surface for the residual race where the child posted before SIGTERM took effect.
+- Overdue orphan auto-retry is deliberately narrow. The watcher only attempts it when the row persisted the original launch timeout, the orphan age exceeds that persisted timeout, the process group is confirmed dead after the bounded recovery loop, and GitHub is reprobed with no late review found. Any ambiguity falls back to sticky `failed-orphan` instead of launching a second reviewer.
 - Re-review does **not** happen because of prose. It happens because reconciliation resets the row to `pending`.
 - A PR can move from `posted` back to `pending` only via explicit recovery logic or a valid rereview request.
 

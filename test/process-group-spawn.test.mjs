@@ -77,8 +77,7 @@ test('progress watchdog producer output classifies as reviewer-timeout', async (
         classifyReviewerFailure(
           err.message,
           err.exitCode ?? err.code,
-          err.code,
-          err
+          err.code
         ),
         'reviewer-timeout'
       );
@@ -86,8 +85,7 @@ test('progress watchdog producer output classifies as reviewer-timeout', async (
         classifyReviewerFailure(
           `LiteLLM retry pool: all upstream attempts failed; ${err.message}`,
           err.exitCode ?? err.code,
-          err.code,
-          err
+          err.code
         ),
         'cascade'
       );

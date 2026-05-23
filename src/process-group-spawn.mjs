@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 
 import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
+import { PROGRESS_TIMEOUT_REASON_PREFIX } from './reviewer-timeout-reason.mjs';
 
 const DEFAULT_KILL_GRACE_MS = 5_000;
 const DEFAULT_FAILURE_TAIL_BYTES = 8 * 1024;
@@ -200,7 +201,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       if (progressTimer) clearTimeout(progressTimer);
       if (progressTimeout > 0) {
         progressTimer = setTimeout(() => {
-          requestKill(`no output for ${progressTimeout}ms`);
+          requestKill(`${PROGRESS_TIMEOUT_REASON_PREFIX} ${progressTimeout}ms`);
         }, progressTimeout);
       }
     };
@@ -362,7 +363,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       err.signal = closeSignal;
       err.killed = closeSignal != null || timeoutReason !== null;
       err.timedOut = timeoutReason?.startsWith('timed out') || false;
-      err.progressTimedOut = timeoutReason?.startsWith('no output') || false;
+      err.progressTimedOut = timeoutReason?.startsWith(PROGRESS_TIMEOUT_REASON_PREFIX) || false;
       err.aborted = timeoutReason === 'aborted';
       err.stdout = stdout;
       err.stderr = stderr;
@@ -378,6 +379,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
 export {
   DEFAULT_FAILURE_TAIL_BYTES,
   DEFAULT_KILL_GRACE_MS,
+  PROGRESS_TIMEOUT_REASON_PREFIX,
   formatCapturedFailureDetails,
   spawnCapturedProcessGroup,
 };

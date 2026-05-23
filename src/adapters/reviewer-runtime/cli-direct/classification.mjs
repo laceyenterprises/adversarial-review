@@ -1,9 +1,17 @@
+import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
+
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
-const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = /command no output for \d+ms/;
+const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
+  `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
+);
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
   /bootstrap failed|could not find domain|input\/output error|not privileged to set domain/;
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
   const actualSignal = String(error?.signal || '').toUpperCase();

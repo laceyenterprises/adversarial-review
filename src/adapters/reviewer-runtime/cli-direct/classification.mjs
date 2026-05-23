@@ -99,4 +99,6 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 export {
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
+  REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE,
+  REVIEWER_TIMEOUT_MESSAGE_RE,
 };

@@ -713,6 +713,39 @@ test('agent-os-hq does not classify loose no-output substrings as reviewer-timeo
   }
 });
 
+test('agent-os-hq does not classify unrelated timed out stderr as reviewer-timeout', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_timeout_false_positive' }), stderr: '' };
+        }
+        const err = new Error('hq dispatch status failed');
+        err.stderr = 'network lease timed out while reading lock state';
+        throw err;
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 19, linearTicketId: 'LAC-568' },
+      timeoutMs: 50_000,
+      sessionUuid: 'agent-hq-timeout-false-positive',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'unknown');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq cancel does not overwrite terminal completed records', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');

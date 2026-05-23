@@ -5,7 +5,6 @@ import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
 import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
-import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
 import {
   extractReviewVerdict,
   normalizeReviewVerdict,
@@ -18,7 +17,11 @@ import {
   updateReviewerRunRecord,
 } from '../run-state.mjs';
 import { stripForbiddenFallbackEnv } from '../cli-direct/index.mjs';
-import { isReviewerSubprocessTimeout } from '../cli-direct/classification.mjs';
+import {
+  isReviewerSubprocessTimeout,
+  REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE,
+  REVIEWER_TIMEOUT_MESSAGE_RE,
+} from '../cli-direct/classification.mjs';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_FORBIDDEN_FALLBACKS = ['api-key', 'anthropic-api-key'];
@@ -36,13 +39,6 @@ const LEASE_EXPIRED_GRACE_MS = 60_000;
 const MIN_HQ_COMMAND_TIMEOUT_MS = 1_000;
 const HQ_COMMAND_TIMEOUT_BUFFER_MS = 15_000;
 const OWNER_MISMATCH_RE = /OWNER_MISMATCH|owner mismatch/i;
-const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
-  `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
-);
-
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 function tailText(value, maxBytes = 8 * 1024) {
   const text = String(value || '');
@@ -389,11 +385,11 @@ function createAgentOsHqReviewerRuntimeAdapter({
 
   function classifyHqFailure(err, detail = null) {
     const message = String(
-      detail ?? [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n') ?? ''
+      detail ?? [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n')
     ).toLowerCase();
     if (
       isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' })
-      || /timed out/.test(message)
+      || REVIEWER_TIMEOUT_MESSAGE_RE.test(message)
       || REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE.test(message)
     ) {
       return 'reviewer-timeout';

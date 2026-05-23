@@ -69,6 +69,10 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'oauth-broken';
   }
 
+  // Cascade wins over both wall-timeout and progress-timeout markers. Once the
+  // run has clear upstream-cascade evidence, operators should treat the timeout
+  // text as a symptom of the exhausted upstream path rather than the primary
+  // failure bucket.
   if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
   }

@@ -298,6 +298,19 @@ test('pickAdversarialGateStatus retro-classifies legacy raw cascade stderr', () 
   assert.equal(decision.reason, 'reviewer-cascade-retry-pending');
 });
 
+test('pickAdversarialGateStatus retro-classifies legacy raw progress-timeout stderr', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'pending-upstream',
+      failure_message: 'Claude review failed: Command no output for 900000ms',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'reviewer-timeout-retry-pending');
+});
+
 test('pickAdversarialGateStatus recognizes legacy cascade failure messages', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({

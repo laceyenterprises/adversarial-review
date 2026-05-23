@@ -5,6 +5,7 @@ import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
 import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
+import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
 import {
   extractReviewVerdict,
   normalizeReviewVerdict,
@@ -380,7 +381,12 @@ function createAgentOsHqReviewerRuntimeAdapter({
   }
 
   function classifyHqFailure(err) {
-    if (isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' }) || /timed out/i.test(String(err?.message || ''))) {
+    const message = String(err?.message || '').toLowerCase();
+    if (
+      isReviewerSubprocessTimeout(err, { killSignal: 'SIGTERM' })
+      || /timed out/i.test(message)
+      || message.includes(PROGRESS_TIMEOUT_REASON_PREFIX)
+    ) {
       return 'reviewer-timeout';
     }
     return err?.configurationError ? 'bug' : 'unknown';

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
+import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
 function processExists(pid) {
   try {
@@ -55,6 +56,39 @@ test('progress watchdog escalates SIGTERM-ignoring children to process-group SIG
       assert.match(err.message, /no output/);
       assert.match(err.message, /auth probe failed: token expired/);
       assert.match(err.stderr, /auth probe failed: token expired/);
+      return true;
+    }
+  );
+});
+
+test('progress watchdog producer output classifies as reviewer-timeout', async () => {
+  await assert.rejects(
+    () => spawnCapturedProcessGroup(
+      'bash',
+      ['-c', 'trap "" TERM; echo "stalled reviewer" >&2; while :; do sleep 1; done'],
+      {
+        progressTimeout: 250,
+        killGraceMs: 250,
+        timeout: 10_000,
+      }
+    ),
+    (err) => {
+      assert.equal(
+        classifyReviewerFailure(
+          err.message,
+          err.exitCode ?? err.code,
+          err.code
+        ),
+        'reviewer-timeout'
+      );
+      assert.equal(
+        classifyReviewerFailure(
+          `LiteLLM retry pool: all upstream attempts failed; ${err.message}`,
+          err.exitCode ?? err.code,
+          err.code
+        ),
+        'cascade'
+      );
       return true;
     }
   );

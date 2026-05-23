@@ -158,9 +158,6 @@ function reviewerFailureClass(reviewRow) {
   if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
     return 'launchctl-bootstrap';
   }
-  if (message.includes('command timed out after')) {
-    return 'reviewer-timeout';
-  }
   if (/litellm\/upstream cascade|watcher backoff engaged/.test(message)) return 'cascade';
   return null;
 }

@@ -164,6 +164,10 @@ test('reviewer timeout stderr is not folded into cascade failures', () => {
     classifyReviewerFailure('Anthropic CLI error: command timed out after 600000ms', 1),
     'reviewer-timeout'
   );
+  assert.equal(
+    classifyReviewerFailure('Claude review failed: Command no output for 900000ms', 1),
+    'reviewer-timeout'
+  );
 });
 
 test('cascade markers win over wrapped reviewer timeout stderr', () => {

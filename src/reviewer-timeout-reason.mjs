@@ -1,0 +1,5 @@
+const PROGRESS_TIMEOUT_REASON_PREFIX = 'no output for';
+
+export {
+  PROGRESS_TIMEOUT_REASON_PREFIX,
+};

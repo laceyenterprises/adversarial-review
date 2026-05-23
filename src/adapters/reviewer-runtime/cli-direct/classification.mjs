@@ -1,8 +1,17 @@
+import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
+
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
+const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
+  `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
+);
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
   /bootstrap failed|could not find domain|input\/output error|not privileged to set domain/;
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
   const actualSignal = String(error?.signal || '').toUpperCase();
@@ -23,7 +32,9 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const lower = text.toLowerCase();
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
-  const mentionsReviewerTimeout = REVIEWER_TIMEOUT_MESSAGE_RE.test(lower);
+  const mentionsReviewerTimeout =
+    REVIEWER_TIMEOUT_MESSAGE_RE.test(lower) ||
+    REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE.test(lower);
   const launchctlBootstrap = lower.split(/\r?\n/).some((line) => (
     /launchctlsessionerror|claude launchctl session bootstrap failed/.test(line) ||
     (/launchctl/.test(line) && LAUNCHCTL_BOOTSTRAP_ERROR_RE.test(line))
@@ -66,6 +77,10 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'oauth-broken';
   }
 
+  // Cascade wins over both wall-timeout and progress-timeout markers. Once the
+  // run has clear upstream-cascade evidence, operators should treat the timeout
+  // text as a symptom of the exhausted upstream path rather than the primary
+  // failure bucket.
   if (CASCADE_ERROR_CODES.has(normalizedErrorCode) || (mentionsRateLimit && !mentionsReal429) || mentionsCascade) {
     return 'cascade';
   }

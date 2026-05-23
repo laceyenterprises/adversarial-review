@@ -145,6 +145,58 @@ test('invalidates an alive reviewer when the PR head sha changed', async () => {
   assert.match(log.lines.join('\n'), /reviewer_reattach_invalidated/);
 });
 
+test('kills and fails (retryably) an overdue orphan reattached after a supervisor restart', async () => {
+  // The 5h17m incident: a detached reviewer orphaned by a supervisor bounce has
+  // no in-process timer left, so without this watchdog it runs unbounded and
+  // pins the row in `reviewing` (blocking remediation rereview as
+  // `review-in-flight`). started 05:10, now 05:45 = 35min > 20min deadline.
+  const db = setupDb();
+  seedReviewing(db);
+  const killed = [];
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]), // no posted review
+    now: new Date('2026-05-11T05:45:00.000Z'),
+    log,
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA, // head unchanged
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed', 'overdue orphan fails retryably');
+  assert.notEqual(row.review_status, 'failed-orphan', 'no human needed: it never posted a review');
+  assert.equal(row.review_attempts, 3);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
+  assert.match(row.failure_message, /exceeded the reviewer deadline/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_deadline_exceeded/);
+});
+
+test('does not kill a within-deadline reattached orphan', async () => {
+  // started 05:10, now 05:25 = 15min < 20min deadline → genuine reattach.
+  const db = setupDb();
+  seedReviewing(db);
+  const killed = [];
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date('2026-05-11T05:25:00.000Z'),
+    log,
+    probeSession: () => ({ alive: true, matched: true }),
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing', 'within-deadline orphan stays reattached');
+  assert.deepEqual(killed, [], 'no kill before the deadline');
+  assert.match(log.lines.join('\n'), /reviewer_reattach_alive/);
+});
+
 test('recovers a dead reviewer when GitHub has a posted review from this bot since start', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });

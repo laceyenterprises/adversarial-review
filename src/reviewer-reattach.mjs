@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
   'A review may have been posted on GitHub by the orphaned child. ' +
@@ -192,6 +194,7 @@ async function reconcileReviewerSessions({
   findPostedReview = makeReviewPostedProbe(octokit),
   shouldReconcileRow = () => true,
   maxRows = Number.POSITIVE_INFINITY,
+  reviewerDeadlineMs = resolveReviewerTimeoutMs(),
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
     ? Number(maxRows)
@@ -340,6 +343,34 @@ async function reconcileReviewerSessions({
         log.warn(
           `[watcher] reviewer_reattach_orphan repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} posted_at=${postedReview.submitted_at}`
+        );
+        continue;
+      }
+
+      // Deadline watchdog. A reviewer spawned `detached` survives a supervisor
+      // bounce on purpose, but its in-process wall-clock timer died with that
+      // supervisor — so an orphan reattached here has nothing left to time it
+      // out. Leaving it "reattached" lets it run unbounded (the 5h17m incident)
+      // and pins the row in `reviewing`, which blocks remediation rereview as
+      // `review-in-flight`. If it has already blown past the reviewer deadline
+      // without posting a review (the postedReview branch above handled the
+      // posted case), kill its process group and fail the row RETRYABLY so the
+      // next poll re-reviews — auto-recovery instead of human intervention.
+      const orphanAgeMs = now.getTime() - parseTime(row.reviewer_started_at);
+      if (Number.isFinite(orphanAgeMs) && orphanAgeMs > reviewerDeadlineMs) {
+        killProcessGroup(row.reviewer_pgid, 'SIGKILL');
+        statements.markFailed.run(
+          failureAt,
+          `Reviewer session ${row.reviewer_session_uuid} (pgid ${row.reviewer_pgid}) was orphaned by a ` +
+          `supervisor restart and exceeded the reviewer deadline (age ${orphanAgeMs}ms > ${reviewerDeadlineMs}ms) ` +
+          `without posting a review; killed the process group and failed the review for automatic re-review.`,
+          row.repo,
+          row.pr_number
+        );
+        log.warn(
+          `[watcher] reviewer_reattach_deadline_exceeded repo=${row.repo} pr=${row.pr_number} ` +
+          `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} age_ms=${orphanAgeMs} ` +
+          `deadline_ms=${reviewerDeadlineMs}`
         );
         continue;
       }

@@ -135,8 +135,12 @@ const FAST_MERGE_CATEGORY_BY_LABEL = Object.freeze({
   'fast-merge:docs': 'docs',
   'fast-merge:test-fixtures': 'test-fixtures',
   'fast-merge:submodule-bump': 'submodule-bump',
-  'fast-merge:additive-sql': 'additive-sql',
 });
+const DEFAULT_FAST_MERGE_OPERATOR_ACTORS = Object.freeze(['VirtualPaul']);
+const DEFAULT_FAST_MERGE_SUBMODULE_PATHS = Object.freeze([
+  'tools/adversarial-review',
+  'modules/agent-control/vendor/agent-control',
+]);
 const FAST_MERGE_RECOVERY_PER_TICK = Math.max(
   1,
   Number.parseInt(process.env.FML_WATCHER_RECOVERY_PER_TICK || '50', 10) || 50,
@@ -223,50 +227,55 @@ const FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES = new Set([
   'committed',
   'head_ref_force_pushed',
   'head_ref_restored',
-  'synchronize',
 ]);
 
-function extractTimelineHeadSha(event) {
-  const candidates = [
-    event?.after,
-    event?.head_sha,
-    event?.headSha,
-    event?.sha,
-    event?.commit_id,
-    event?.commitId,
-    event?.head?.sha,
-    event?.head_commit?.id,
-    event?.head_commit?.sha,
-    event?.commit?.id,
-    event?.commit?.sha,
-    event?.commit?.oid,
-  ];
-  for (const candidate of candidates) {
-    const value = String(candidate || '').trim();
-    if (value) return value;
-  }
-  return null;
+function parseFastMergeList(value, fallback = []) {
+  const raw = String(value || '').trim();
+  const source = raw ? raw.split(',') : fallback;
+  return new Set(
+    source
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+  );
 }
 
-function fastMergeTimelineHeadAdvanceInvalidatesLabel(entry, latestLabel) {
-  if (!entry || !latestLabel) return false;
-  if (entry.createdAtMs > latestLabel.createdAtMs) return true;
-  if (entry.createdAtMs < latestLabel.createdAtMs) return false;
-
-  const eventName = String(entry.event?.event || '').trim().toLowerCase();
-  const eventHeadSha = extractTimelineHeadSha(entry.event);
-  if (
-    eventName === 'synchronize'
-    && eventHeadSha
-    && latestLabel.labeledHeadSha
-    && eventHeadSha === latestLabel.labeledHeadSha
-  ) {
-    return false;
-  }
-  return true;
+function fastMergeOperatorActorSet(env = process.env) {
+  return parseFastMergeList(env.FML_WATCHER_OPERATOR_ACTORS, DEFAULT_FAST_MERGE_OPERATOR_ACTORS);
 }
 
-function latestTimelineFastMergeAuthorization(events, allowedLabelNames) {
+function fastMergeSubmodulePathSet(env = process.env) {
+  return parseFastMergeList(env.FML_WATCHER_SUBMODULE_PATHS, DEFAULT_FAST_MERGE_SUBMODULE_PATHS);
+}
+
+function normalizeTimelineActor(actor) {
+  return String(actor?.login || actor?.name || actor || '').trim();
+}
+
+function isFastMergeOperatorActor(actor, env = process.env) {
+  const actorName = normalizeTimelineActor(actor);
+  if (!actorName) return false;
+  return fastMergeOperatorActorSet(env).has(actorName);
+}
+
+function fastMergeEventTimestamp(event) {
+  const eventName = String(event?.event || '').trim().toLowerCase();
+  return event?.created_at
+    || event?.createdAt
+    || (
+      eventName === 'committed'
+        ? event?.committer?.date
+          || event?.author?.date
+          || event?.commit?.committer?.date
+          || event?.commit?.author?.date
+        : null
+    );
+}
+
+function latestTimelineFastMergeAuthorization(
+  events,
+  allowedLabelNames,
+  { liveHeadSha = null, env = process.env } = {},
+) {
   const allowed = new Set(
     (Array.isArray(allowedLabelNames) ? allowedLabelNames : [])
       .map((name) => normalizeLabelName(name).toLowerCase())
@@ -276,7 +285,7 @@ function latestTimelineFastMergeAuthorization(events, allowedLabelNames) {
 
   const normalizedEvents = events
     .map((event, index) => {
-      const createdAt = event?.created_at || event?.createdAt || null;
+      const createdAt = fastMergeEventTimestamp(event);
       const createdAtMs = parseFastMergeEventTime(createdAt);
       if (createdAtMs == null) return null;
       return {
@@ -299,12 +308,19 @@ function latestTimelineFastMergeAuthorization(events, allowedLabelNames) {
         entry.event?.label?.name || entry.event?.label || entry.event?.name || ''
       ).toLowerCase();
       if (!allowed.has(labelName)) continue;
-      if (!latestLabel || entry.createdAtMs >= latestLabel.createdAtMs) {
+      const actor = normalizeTimelineActor(entry.event?.actor);
+      if (!isFastMergeOperatorActor(actor, env)) continue;
+      if (
+        !latestLabel
+        || entry.createdAtMs > latestLabel.createdAtMs
+        || (entry.createdAtMs === latestLabel.createdAtMs && entry.index > latestLabel.index)
+      ) {
         latestLabel = {
           createdAt: entry.createdAt,
           createdAtMs: entry.createdAtMs,
+          index: entry.index,
           label: labelName,
-          labeledHeadSha: extractTimelineHeadSha(entry.event),
+          actor,
         };
       }
     }
@@ -315,31 +331,29 @@ function latestTimelineFastMergeAuthorization(events, allowedLabelNames) {
   const latestHeadAdvanceAtOrAfterLabel = normalizedEvents.findLast((entry) => {
     const eventName = String(entry.event?.event || '').trim().toLowerCase();
     return FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES.has(eventName)
-      && fastMergeTimelineHeadAdvanceInvalidatesLabel(entry, latestLabel);
+      && (
+        entry.createdAtMs > latestLabel.createdAtMs
+        || (entry.createdAtMs === latestLabel.createdAtMs && entry.index > latestLabel.index)
+      );
   });
   if (latestHeadAdvanceAtOrAfterLabel) {
     return null;
   }
 
-  const priorHeadEvent = normalizedEvents.findLast((entry) => {
-    const eventName = String(entry.event?.event || '').trim().toLowerCase();
-    return entry.createdAtMs < latestLabel.createdAtMs
-      && FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES.has(eventName)
-      && extractTimelineHeadSha(entry.event);
-  });
-  const authorizedHeadSha = latestLabel.labeledHeadSha || extractTimelineHeadSha(priorHeadEvent?.event);
+  const authorizedHeadSha = String(liveHeadSha || '').trim();
   if (!authorizedHeadSha) return null;
 
   return {
     authorizedAt: latestLabel.createdAt,
     label: latestLabel.label,
     authorizedHeadSha,
+    actor: latestLabel.actor,
   };
 }
 
 async function fetchFastMergeAuthorizationFromTimeline(
   octokit,
-  { owner, repo, prNumber, allowedLabelNames = [], logger = console } = {},
+  { owner, repo, prNumber, allowedLabelNames = [], liveHeadSha = null, logger = console } = {},
 ) {
   try {
     if (typeof octokit?.rest?.issues?.listEventsForTimeline !== 'function') {
@@ -358,7 +372,7 @@ async function fetchFastMergeAuthorizationFromTimeline(
       events.push(...pageEvents);
       if (pageEvents.length < params.per_page) break;
     }
-    return latestTimelineFastMergeAuthorization(events, allowedLabelNames);
+    return latestTimelineFastMergeAuthorization(events, allowedLabelNames, { liveHeadSha });
   } catch (err) {
     logger.warn?.(
       `[watcher] fast-merge timeline fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
@@ -404,20 +418,15 @@ function normalizeChangedFile(file) {
 }
 
 function isMarkdownOrDocsPath(filename) {
-  return filename.endsWith('.md') || filename.startsWith('docs/');
+  return /\.(adoc|md|mdx|rst|txt)$/i.test(filename);
 }
 
 function isTestFixturePath(filename) {
   return /(^|\/)(fixtures?|testdata|snapshots?)(\/|$)/i.test(filename);
 }
 
-function isLikelySubmodulePath(filename) {
-  return !filename.includes('.') && filename.split('/').every(Boolean);
-}
-
-function isSqlMigrationPath(filename) {
-  return filename.endsWith('.sql')
-    && /(^|\/)(migrations?|schema|sql)(\/|$)/i.test(filename);
+function isKnownSubmodulePath(filename) {
+  return fastMergeSubmodulePathSet().has(String(filename || '').trim());
 }
 
 function fastMergeFileMatchesCategory(file, category) {
@@ -433,18 +442,16 @@ function fastMergeFileMatchesCategory(file, category) {
     return normalized.status === 'modified'
       && normalized.additions <= 1
       && normalized.deletions <= 1
-      && isLikelySubmodulePath(normalized.filename);
+      && isKnownSubmodulePath(normalized.filename);
   }
   if (category === 'spec-hash-rebind') {
-    return normalized.deletions === 0
+    return normalized.additions <= 5
+      && normalized.deletions <= 5
       && (
         /(^|\/)SPEC[^/]*\.md$/i.test(normalized.filename)
         || /(^|\/)spec-hash/i.test(normalized.filename)
         || /(^|\/)spec-lock/i.test(normalized.filename)
       );
-  }
-  if (category === 'additive-sql') {
-    return normalized.deletions === 0 && isSqlMigrationPath(normalized.filename);
   }
   return false;
 }
@@ -2828,6 +2835,7 @@ async function pollOnce(
                 owner,
                 repo,
                 prNumber,
+                liveHeadSha: authorizedHeadSha,
                 allowedLabelNames: fastMergeDecision.labelNames.filter(
                   (name) => Object.prototype.hasOwnProperty.call(FAST_MERGE_CATEGORY_BY_LABEL, name)
                 ),

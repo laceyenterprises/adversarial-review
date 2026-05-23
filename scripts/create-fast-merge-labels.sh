@@ -22,7 +22,6 @@ declare -a LABELS=(
   "fast-merge:docs|Documentation-only changes|0e8a16"
   "fast-merge:test-fixtures|Additive test fixture data only|0e8a16"
   "fast-merge:submodule-bump|Submodule pointer bump|0e8a16"
-  "fast-merge:additive-sql|Additive SQL/schema migration only|0e8a16"
   "fast-merge-veto|Operator override: forces normal adversarial review|d93f0b"
 )
 

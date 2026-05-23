@@ -215,6 +215,19 @@ test('pickAdversarialGateStatus keeps PR #53 queued-rereview shape pending until
   assert.match(decision.description, /queued re-review/i);
 });
 
+test('pickAdversarialGateStatus keeps fast-merge skipped rows pending', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      pr_state: 'fast_merge_skipped',
+      review_status: 'fast_merge_skipped',
+    }),
+    latestJob: null,
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'fast-merge-skipped');
+});
+
 test('pickAdversarialGateStatus reports reviewer timeout precisely (non-blocking, operator decides)', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow({

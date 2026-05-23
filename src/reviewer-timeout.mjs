@@ -2,8 +2,8 @@
 // from 10 minutes -> 20 minutes on 2026-05-10 after PR #331's first review
 // attempt hit the 10-minute wall on a substantive spec diff and got
 // classified as `reviewer-timeout`. The separate no-output progress watchdog
-// is intentionally lower than the hard reviewer deadline but still generous
-// enough for quiet model turns on large diffs.
+// is intentionally 15 minutes: lower than the hard reviewer deadline, but high
+// enough for quiet model turns during final-round reviews of large diffs.
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_PROGRESS_TIMEOUT_MS = 15 * 60 * 1000;
 

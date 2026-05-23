@@ -75,6 +75,11 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_requested_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_reason TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN labels_json TEXT`);
+  // `fast_merge_authorized_head_sha` is intentionally migration-owned by
+  // 20260520_fast_merge_authorization.sql. The audit retry columns stay here
+  // because a PR-branch build briefly created live DBs before the audit
+  // sentinel existed; idempotent schema convergence is the only safe common
+  // path for those DBs and fresh checkouts.
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_status TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_payload_json TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN fast_merge_audit_error TEXT`);

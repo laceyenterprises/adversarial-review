@@ -45,6 +45,7 @@ import {
   createReviewerRuntimeAdapterForDomain,
   recoverReviewerRunRecords,
 } from './adapters/reviewer-runtime/index.mjs';
+import { settleReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
 import {
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
@@ -1403,7 +1404,7 @@ const stmtMarkAttemptStarted = db.prepare(
      SET review_status = 'reviewing',
          last_attempted_at = ?,
          reviewer_session_uuid = ?,
-         reviewer_started_at = ?,
+         reviewer_started_at = NULL,
          reviewer_head_sha = ?,
          reviewer_timeout_ms = ?,
          reviewer_pgid = NULL,
@@ -1421,7 +1422,8 @@ const stmtMarkAttemptStarted = db.prepare(
 );
 const stmtMarkReviewerPgid = db.prepare(
   `UPDATE reviewed_prs
-      SET reviewer_pgid = ?
+      SET reviewer_pgid = ?,
+          reviewer_started_at = ?
     WHERE reviewer_session_uuid = ?
       AND repo = ?
       AND pr_number = ?
@@ -1476,7 +1478,15 @@ const stmtMarkClosed = db.prepare(
 // cross-process claim CAS below is still the only place new reviewer
 // subprocesses are admitted.
 async function reconcileOrphanedReviewing(octokit) {
-  return reconcileReviewerSessions({ db, octokit });
+  return reconcileReviewerSessions({
+    db,
+    octokit,
+    onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
+      sessionUuid: row?.reviewer_session_uuid,
+      state,
+      settledAt,
+    }),
+  });
 }
 
 function shouldReconcileStaleReviewerSession(row, now, {
@@ -1491,9 +1501,41 @@ function shouldReconcileStaleReviewerSession(row, now, {
   return (startedAtMs + effectiveTimeoutMs) <= now.getTime();
 }
 
-function persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber, log = console }) {
+function settleDurableReviewerRunState({
+  rootDir = ROOT,
+  sessionUuid,
+  state,
+  settledAt = new Date().toISOString(),
+  log = console,
+} = {}) {
+  if (!sessionUuid || !state) return null;
   try {
-    const result = stmtMarkReviewerPgid.run(pgid, reviewerSessionUuid, repoPath, prNumber);
+    return settleReviewerRunRecord(rootDir, sessionUuid, { state, settledAt });
+  } catch (err) {
+    log.warn?.(
+      `[watcher] reviewer_run_state_settle_failed session=${sessionUuid} state=${state} ` +
+      `error=${err?.message || err}`
+    );
+    return null;
+  }
+}
+
+function persistReviewerPgid({
+  pgid,
+  reviewerSessionUuid,
+  repoPath,
+  prNumber,
+  startedAt = new Date().toISOString(),
+  log = console,
+}) {
+  try {
+    const result = stmtMarkReviewerPgid.run(
+      pgid,
+      startedAt,
+      reviewerSessionUuid,
+      repoPath,
+      prNumber
+    );
     if (result.changes === 0) {
       log.warn?.(
         `[watcher] reviewer_session_handle_cas_miss repo=${repoPath} pr=${prNumber} ` +
@@ -2450,6 +2492,11 @@ async function pollOnce(
     octokit,
     maxRows: resolveStaleReviewerReconcilePerPoll(),
     shouldReconcileRow: (row, now) => shouldReconcileStaleReviewerSession(row, now),
+    onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
+      sessionUuid: row?.reviewer_session_uuid,
+      state,
+      settledAt,
+    }),
   });
   if (reattach.skipped > 0) {
     console.log(
@@ -3047,7 +3094,6 @@ async function pollOnce(
       const claim = stmtMarkAttemptStarted.run(
         attemptAt,
         reviewerSessionUuid,
-        attemptAt,
         reviewerHeadSha,
         reviewerTimeoutMs,
         repoPath,
@@ -3171,8 +3217,14 @@ async function pollOnce(
         reviewerSessionUuid,
         reviewerTimeoutMs,
         workspacePath: null,
-        onReviewerPgid: ({ pgid }) => {
-          persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber });
+        onReviewerPgid: ({ pgid, spawnedAt }) => {
+          persistReviewerPgid({
+            pgid,
+            reviewerSessionUuid,
+            repoPath,
+            prNumber,
+            startedAt: spawnedAt,
+          });
         },
       });
       if (result.ok) {

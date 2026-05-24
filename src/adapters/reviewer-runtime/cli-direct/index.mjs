@@ -501,14 +501,16 @@ function createCliDirectReviewerRuntimeAdapter({
           stdoutPath: sideChannels.stdoutPath,
           stderrPath: sideChannels.stderrPath,
           onSpawn: ({ pgid }) => {
+            const authoritativeSpawnedAt = now();
             record = updateReviewerRunRecord(rootDir, record, {
               state: 'heartbeating',
               pgid,
-              lastHeartbeatAt: now(),
+              spawnedAt: authoritativeSpawnedAt,
+              lastHeartbeatAt: authoritativeSpawnedAt,
             });
             activeRun.record = record;
             activeRuns.set(sessionUuid, activeRun);
-            req.onReviewerPgid?.({ sessionUuid, pgid });
+            req.onReviewerPgid?.({ sessionUuid, pgid, spawnedAt: authoritativeSpawnedAt });
           },
         }
       );

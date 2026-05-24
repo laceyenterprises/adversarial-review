@@ -251,6 +251,24 @@ test('steady-state reattach selection uses persisted launch timeout before curre
   );
 });
 
+test('steady-state reattach keys off authoritative spawn time, not earlier claim time', () => {
+  const now = new Date('2026-05-11T05:21:00.000Z');
+
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        last_attempted_at: '2026-05-11T05:00:00.000Z',
+        reviewer_started_at: '2026-05-11T05:10:30.000Z',
+        reviewer_timeout_ms: 15 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 15 * 60 * 1000 }
+    ),
+    false,
+    'a delayed spawn must keep its full runtime budget even when claim happened much earlier'
+  );
+});
+
 test('steady-state reattach per-poll cap defaults small and accepts zero for disable', () => {
   assert.equal(resolveStaleReviewerReconcilePerPoll({}), 3);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '1' }), 1);

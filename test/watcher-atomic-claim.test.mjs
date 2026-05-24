@@ -19,8 +19,9 @@ const CLAIM_SQL = `UPDATE reviewed_prs
      SET review_status = 'reviewing',
          last_attempted_at = ?,
          reviewer_session_uuid = ?,
-         reviewer_started_at = ?,
+         reviewer_started_at = NULL,
          reviewer_head_sha = ?,
+         reviewer_timeout_ms = ?,
          reviewer_pgid = NULL,
          failed_at = CASE
            WHEN review_status = 'pending-upstream' THEN failed_at
@@ -37,12 +38,13 @@ const CLAIM_SQL = `UPDATE reviewed_prs
 function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
   sessionUuid = 'session-999',
   headSha = 'head-999',
+  reviewerTimeoutMs = 20 * 60 * 1000,
 } = {}) {
   return db.prepare(CLAIM_SQL).run(
     attemptedAt,
     sessionUuid,
-    attemptedAt,
     headSha,
+    reviewerTimeoutMs,
     repo,
     prNumber
   );
@@ -91,8 +93,9 @@ test('atomic claim succeeds for a pending row and flips status to reviewing', ()
   assert.equal(row.review_status, 'reviewing');
   assert.equal(row.last_attempted_at, '2026-05-02T18:10:00.000Z');
   assert.equal(row.reviewer_session_uuid, 'session-999');
-  assert.equal(row.reviewer_started_at, '2026-05-02T18:10:00.000Z');
+  assert.equal(row.reviewer_started_at, null);
   assert.equal(row.reviewer_head_sha, 'head-999');
+  assert.equal(row.reviewer_timeout_ms, 20 * 60 * 1000);
   assert.equal(row.reviewer_pgid, null);
   assert.equal(row.failed_at, null);
   assert.equal(row.failure_message, null);

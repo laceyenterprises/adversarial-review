@@ -56,10 +56,13 @@ function createFixtureStubReviewerRuntimeAdapter({
         reattachToken: claim.record?.reattachToken || `fixture:${sessionUuid}`,
       };
     }
+    const authoritativeSpawnedAt = now();
     let record = updateReviewerRunRecord(rootDir, claim.record, {
       state: 'heartbeating',
-      lastHeartbeatAt: now(),
+      spawnedAt: authoritativeSpawnedAt,
+      lastHeartbeatAt: authoritativeSpawnedAt,
     });
+    req.onReviewerPgid?.({ sessionUuid, pgid: null, spawnedAt: authoritativeSpawnedAt });
     const reviewBody = reviewQueue.shift() || '';
     record = updateReviewerRunRecord(rootDir, record, {
       state: 'completed',

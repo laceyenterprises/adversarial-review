@@ -157,6 +157,7 @@ test('kills and fails (retryably) an overdue orphan only after proving exit and 
   seedReviewing(db, { reviewerTimeoutMs: 20 * 60 * 1000 });
   const killed = [];
   const log = makeLog();
+  const settled = [];
   let probeCount = 0;
 
   await reconcileReviewerSessions({
@@ -172,6 +173,7 @@ test('kills and fails (retryably) an overdue orphan only after proving exit and 
     },
     killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
     fetchHeadSha: async () => HEAD_SHA, // head unchanged
+    onTerminalDeadSession: async (event) => settled.push(event),
     reviewerDeadlineMs: 20 * 60 * 1000,
     sleep: async () => {},
   });
@@ -181,6 +183,10 @@ test('kills and fails (retryably) an overdue orphan only after proving exit and 
   assert.notEqual(row.review_status, 'failed-orphan', 'no human needed: it never posted a review');
   assert.equal(row.review_attempts, 3);
   assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGTERM' }]);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'failed', reason: 'deadline-exceeded' }]
+  );
   assert.match(row.failure_message, /exceeded its persisted launch timeout/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_deadline_exceeded/);
 }, { timeout: 10_000 });
@@ -438,12 +444,14 @@ test('marks a dead reviewer without a GitHub review as retryable failed', async 
   const db = setupDb();
   seedReviewing(db, { reviewer: 'claude' });
   const log = makeLog();
+  const settled = [];
 
   await reconcileReviewerSessions({
     db,
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
+    onTerminalDeadSession: async (event) => settled.push(event),
     probeAlive: () => false,
     fetchHeadSha: async () => HEAD_SHA,
   });
@@ -452,6 +460,10 @@ test('marks a dead reviewer without a GitHub review as retryable failed', async 
   assert.equal(row.review_status, 'failed');
   assert.notEqual(row.review_status, 'failed-orphan');
   assert.equal(row.review_attempts, 3);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'failed', reason: 'dead-no-review' }]
+  );
   assert.match(row.failure_message, /no GitHub review was found from claude-reviewer-lacey/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_dead/);
 });

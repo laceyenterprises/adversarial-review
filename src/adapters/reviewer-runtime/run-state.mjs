@@ -82,6 +82,22 @@ function updateReviewerRunRecord(rootDir, record, patch = {}) {
   });
 }
 
+function settleReviewerRunRecord(rootDir, sessionUuid, {
+  state,
+  settledAt = new Date().toISOString(),
+} = {}) {
+  if (!TERMINAL_RUN_STATES.has(state)) {
+    throw new TypeError(`settleReviewerRunRecord requires a terminal state; received ${state}`);
+  }
+  const record = readReviewerRunRecord(rootDir, sessionUuid);
+  if (!record) return null;
+  if (TERMINAL_RUN_STATES.has(record.state)) return record;
+  return updateReviewerRunRecord(rootDir, record, {
+    state,
+    lastHeartbeatAt: settledAt,
+  });
+}
+
 function readReviewerRunRecord(rootDir, sessionUuid) {
   try {
     return normalizeReviewerRunRecord(
@@ -197,6 +213,7 @@ export {
   removeReviewerRunRecord,
   reviewerRunSideChannelPaths,
   reviewerRunStatePath,
+  settleReviewerRunRecord,
   TERMINAL_RUN_STATES,
   updateReviewerRunRecord,
   writeReviewerRunRecord,

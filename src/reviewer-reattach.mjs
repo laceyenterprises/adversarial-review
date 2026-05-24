@@ -203,6 +203,7 @@ async function reconcileReviewerSessions({
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
   findPostedReview = makeReviewPostedProbe(octokit),
   shouldReconcileRow = () => true,
+  onTerminalDeadSession = async () => {},
   maxRows = Number.POSITIVE_INFINITY,
   reviewerDeadlineMs = resolveReviewerTimeoutMs(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -349,6 +350,12 @@ async function reconcileReviewerSessions({
               return true;
             }
 
+            await onTerminalDeadSession({
+              row,
+              state: 'failed',
+              settledAt: failureAt,
+              reason: 'deadline-exceeded',
+            });
             statements.markFailed.run(
               failureAt,
               `Reviewer session ${row.reviewer_session_uuid} (pgid ${row.reviewer_pgid}) was orphaned by a ` +
@@ -478,6 +485,12 @@ async function reconcileReviewerSessions({
     if (!(await probePostedReviewOrMarkSticky())) continue;
 
     if (postedReview) {
+      await onTerminalDeadSession({
+        row,
+        state: 'completed',
+        settledAt: postedReview.submitted_at,
+        reason: 'posted-review-recovered',
+      });
       statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
       log.log(
         `[watcher] reviewer_reattach_recovered repo=${row.repo} pr=${row.pr_number} ` +
@@ -486,6 +499,12 @@ async function reconcileReviewerSessions({
       continue;
     }
 
+    await onTerminalDeadSession({
+      row,
+      state: 'failed',
+      settledAt: failureAt,
+      reason: 'dead-no-review',
+    });
     statements.markFailed.run(
       failureAt,
       `Reviewer session ${row.reviewer_session_uuid} is no longer alive and no GitHub review was found from ${reviewerBotLogin(row.reviewer)} since ${row.reviewer_started_at || 'unknown start time'}.`,

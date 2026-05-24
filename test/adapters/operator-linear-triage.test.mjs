@@ -1,12 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   buildCriticalFlagComment,
   createLinearTriageAdapter,
   extractLinearTicketId,
+  isTicketPipelinePaused,
+  repoPausePath,
   routePR,
+  TICKET_PIPELINE_PAUSED_LABEL,
 } from '../../src/adapters/operator/linear-triage/index.mjs';
+import { setRepoTicketPipelinePause } from '../../src/ticket-pipeline-pause.mjs';
 
 function makeLinearFixture({ currentState = 'Todo' } = {}) {
   const updates = [];
@@ -112,6 +119,63 @@ test('recordReviewCompleted posts critical flag comments for critical reviews', 
   assert.equal(comments[0].issueId, 'issue-1');
   assert.match(comments[0].body, /Adversarial review flagged critical issues/);
   assert.match(comments[0].body, /critical, vulnerability, security/);
+});
+
+test('ticket-pipeline-paused PR label suppresses Linear updates and comments', async () => {
+  const { linear, updates, comments } = makeLinearFixture();
+  let providerCalls = 0;
+  const logs = [];
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => {
+      providerCalls += 1;
+      return linear;
+    },
+    logger: { log: (message) => logs.push(message) },
+  });
+  const pausedRef = {
+    ...subjectRef(),
+    labels: [{ name: TICKET_PIPELINE_PAUSED_LABEL }],
+  };
+
+  await adapter.syncTriageStatus(pausedRef, 'in-review');
+  await adapter.recordReviewCompleted(pausedRef, {
+    critical: true,
+    reviewSummary: 'Critical security vulnerability in request handling.',
+  });
+
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(updates, []);
+  assert.deepEqual(comments, []);
+  assert.equal(logs.length, 2);
+});
+
+test('repo-level ticket pipeline pause suppresses Linear updates', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  setRepoTicketPipelinePause({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    paused: true,
+    reason: 'Linear outage',
+    requestedAt: '2026-05-24T15:30:00.000Z',
+    requestedBy: 'placey',
+  });
+  const { linear, updates } = makeLinearFixture();
+  let providerCalls = 0;
+  const adapter = createLinearTriageAdapter({
+    rootDir,
+    linearClientProvider: async () => {
+      providerCalls += 1;
+      return linear;
+    },
+    logger: {},
+  });
+
+  assert.equal(isTicketPipelinePaused(subjectRef(), { rootDir }), true);
+  assert.match(repoPausePath(rootDir, 'laceyenterprises/adversarial-review'), /ticket-pipeline-pauses/);
+  await adapter.syncTriageStatus(subjectRef(), 'in-review');
+
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(updates, []);
 });
 
 test('adapter memoizes the Linear client across triage calls', async () => {

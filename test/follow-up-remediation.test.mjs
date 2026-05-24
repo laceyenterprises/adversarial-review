@@ -1225,7 +1225,7 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
   writeFileSync(promptPath, 'fix it.\n', 'utf8');
 
   let capturedEnv;
-  spawnClaudeCodeRemediationWorker({
+  const worker = spawnClaudeCodeRemediationWorker({
     workspaceDir,
     promptPath,
     outputPath,
@@ -1242,6 +1242,7 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
   assert.equal(capturedEnv.WORKER_CLASS, 'claude-code-remediation');
   assert.equal(capturedEnv.WORKER_JOB_ID, 'claude-code-job-xyz');
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-05-01T21:00:00Z');
+  assert.equal(worker.processGroupId, 333);
 });
 
 // ── Claude Code auth pre-flight (`claude auth status --json`) ─────────────
@@ -1475,6 +1476,7 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     });
 
     assert.equal(worker.processId, 8123);
+    assert.equal(worker.processGroupId, 8123);
     assert.equal(worker.outputPath, outputPath);
     assert.equal(spawnCalls[0].command, '/tmp/codex');
     assert.deepEqual(spawnCalls[0].args, [

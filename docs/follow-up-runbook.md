@@ -34,6 +34,10 @@ npm run follow-up:consume                         # claim + spawn one job (manua
 npm run follow-up:reconcile                       # reconcile in-progress jobs (manual tick)
 npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
 npm run follow-up:stop -- <job-path> [reason]     # stop an in-progress job
+npm run follow-up:cancel-worker -- <job-path> [reason]  # signal spawned worker without moving job state
+npm run review:cancel -- --repo <slug> --pr <n> [reason]  # signal active reviewer without moving review state
+npm run ticket-pipeline:pause -- --repo <slug> --pr <n> [reason]  # pause Linear sync for one PR via label
+npm run ticket-pipeline:pause -- --repo <slug> --scope repo [reason]  # pause Linear sync for the whole repo
 npm run check-branch-protection                   # verify agent-os/adversarial-gate is required
 npm run retrigger-review -- --repo <slug> --pr <n> --reason "<why>"  # force a re-review pass
 npm run retrigger-remediation -- --repo <slug> --pr <n> --reason "<why>"  # bump/requeue one remediation round
@@ -113,6 +117,8 @@ Dispatch precedence is intentionally diagnostic-first for hard stops: closed/mer
 `merge-agent-dispatched` is the watcher-owned lifecycle marker for an active merge-agent dispatch. The watcher adds it after a successful `hq dispatch`; if the label add fails, the failed add is recorded under `data/follow-up-jobs/merge-agent-lifecycle-cleanups/` and retried on later ticks instead of being lost as a log-only side effect. That unresolved `transition: "dispatched-label-add"` cleanup record is part of the watcher-owned lifecycle contract: if the worker later dies in a terminal retryable state before the label ever lands, the watcher still treats the dispatch as "died without handoff" and may reclaim it instead of wedging forever on `skip-already-dispatched`. On merge or close, the watcher writes a durable cleanup record before the PR leaves the open-set query, attempts `hq dispatch cancel <lrq>`, and retries that cleanup on later ticks until both worker cancellation and label removal converge. Non-terminal cancel failures keep the label present as the public retry signal; terminal cancel outcomes such as "already terminated" still proceed to label removal so stale labels do not linger forever. Cleanup retries are paced and capped per poll so an HQ or GitHub outage does not monopolize the watcher; malformed cleanup records are logged loudly instead of being silently dropped.
 
 Watcher-owned same-head re-dispatch is bounded and status-scoped. Autonomous retries are allowed only when the prior LRQ is terminal `failed`, `superseded`, or authoritative `not-found`, and the per-head `watcherReDispatchCount` budget in the dispatch record is still below the bound. `cancelled` / `canceled` do not auto-relaunch; that remains operator intent and requires a scoped `merge-agent-requested` label. The `not-found` classification is safe only when the watcher definitely passed `--as-owner <hq owner>` to `hq dispatch status`; if `.hq/config.json` is unreadable, malformed, or missing `ownerUser`, the watcher logs the degraded state, treats the status as unknown, and preserves duplicate-dispatch protection instead of guessing that the LRQ is gone.
+
+`ticket-pipeline-paused` is the PR-level Linear-ticket pipeline pause. Apply it with `npm run ticket-pipeline:pause -- --repo <owner/repo> --pr <n> "<reason>"`. The command creates the GitHub repository label if needed, applies it to the PR, and the watcher/reviewer skip Linear state changes and critical-flag comments while the label is present. Remove it with the same command plus `--resume`. For repo-wide outages, use `npm run ticket-pipeline:pause -- --repo <owner/repo> --scope repo "<reason>"`; that writes `data/ticket-pipeline-pauses/<repo>.json`, which pauses Linear sync for every PR in that repo until `--resume --scope repo` removes the record.
 
 Legacy in-flight jobs keep their persisted `maxRounds` cap. Fresh jobs re-derive from risk class unless the latest PR cap is higher than the current tier, in which case the elevated cap is preserved as the in-flight/operator migration guard. Do not retroactively rewrite existing queue records.
 
@@ -429,6 +435,48 @@ Meaning:
 
 Operator action:
 - continue with manual handling
+
+### Cancel a spawned worker without changing job state
+
+Use this when the remediation worker process itself needs to be interrupted but
+the follow-up job should remain in its current durable state for normal
+reconcile. This is the right handle for stopping a duplicate or runaway worker
+without moving the job to `stopped/` first:
+
+```bash
+npm run follow-up:cancel-worker -- data/follow-up-jobs/in-progress/<jobId>.json "Duplicate worker; operator is applying the remediation manually"
+```
+
+Behavior:
+
+- reads only the in-progress job JSON and its persisted `remediationWorker`
+  process handle
+- sends `SIGTERM` to the worker process group by default
+- writes an audit receipt under `data/follow-up-jobs/worker-cancellations/`
+- does not move the job file or mutate the review/follow-up ledger state
+
+Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
+to ignore graceful termination.
+
+### Cancel an active reviewer without changing review state
+
+Use this when the first-pass or re-review process itself needs to be
+interrupted but `reviews.db` should remain the durable source of truth for the
+normal orphan/reconcile path:
+
+```bash
+npm run review:cancel -- --repo <owner/repo> --pr <n> "Duplicate active reviewer; operator is restarting the loop"
+```
+
+Behavior:
+
+- reads the `review_status='reviewing'` row from `data/reviews.db`
+- sends `SIGTERM` to the persisted `reviewer_pgid` process group by default
+- writes an audit receipt under `data/review-cancellations/`
+- does not mutate `review_status`, retry counters, or any PR state columns
+
+Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
+to ignore graceful termination.
 
 ## Operator retrigger contracts
 

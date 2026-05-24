@@ -213,6 +213,8 @@ function buildReviewerProcessArgs(subjectContext = {}) {
     reviewerModel: subjectContext.reviewerModel || subjectContext.model,
     botTokenEnv: subjectContext.botTokenEnv,
     linearTicketId: subjectContext.linearTicketId,
+    labels: subjectContext.labels,
+    ticketPipelinePaused: subjectContext.ticketPipelinePaused,
     builderTag: subjectContext.builderTag,
     reviewerHeadSha: subjectContext.reviewerHeadSha,
     reviewAttemptNumber: subjectContext.reviewAttemptNumber,

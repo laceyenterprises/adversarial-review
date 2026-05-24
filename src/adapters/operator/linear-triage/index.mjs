@@ -7,15 +7,62 @@
  * @typedef {import('../../../kernel/contracts.d.ts').TriageStatus} TriageStatus
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   extractLinearTicketId,
   routePR,
 } from '../../subject/github-pr/routing.mjs';
 
 const DEFAULT_CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
+const TICKET_PIPELINE_PAUSED_LABEL = 'ticket-pipeline-paused';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_ROOT = join(__dirname, '..', '..', '..', '..');
 
 function resolveLinearTicketId(subjectRef) {
   return subjectRef?.linearTicketId || null;
+}
+
+function normalizeLabelName(label) {
+  return String(typeof label === 'string' ? label : label?.name || '').trim().toLowerCase();
+}
+
+function hasTicketPipelinePauseLabel(subjectRef) {
+  const labels = Array.isArray(subjectRef?.labels) ? subjectRef.labels : [];
+  return labels.some((label) => normalizeLabelName(label) === TICKET_PIPELINE_PAUSED_LABEL);
+}
+
+function repoFromSubjectRef(subjectRef) {
+  const value = String(subjectRef?.repo || subjectRef?.subjectExternalId || '');
+  const marker = value.indexOf('#');
+  return (marker === -1 ? value : value.slice(0, marker)).trim();
+}
+
+function repoPausePath(rootDir, repo) {
+  const safeRepo = String(repo || '')
+    .replace(/[^A-Za-z0-9_.-]/g, '_')
+    .replace(/_+/g, '_')
+    || 'unknown';
+  return join(rootDir, 'data', 'ticket-pipeline-pauses', `${safeRepo}.json`);
+}
+
+function isRepoTicketPipelinePaused(rootDir, repo) {
+  if (!repo) return false;
+  const filePath = repoPausePath(rootDir, repo);
+  if (!existsSync(filePath)) return false;
+  try {
+    const record = JSON.parse(readFileSync(filePath, 'utf8'));
+    return record?.paused !== false;
+  } catch {
+    return true;
+  }
+}
+
+function isTicketPipelinePaused(subjectRef, { rootDir = DEFAULT_ROOT } = {}) {
+  if (subjectRef?.ticketPipelinePaused) return true;
+  if (hasTicketPipelinePauseLabel(subjectRef)) return true;
+  return isRepoTicketPipelinePaused(rootDir, repoFromSubjectRef(subjectRef));
 }
 
 async function defaultLinearClientProvider() {
@@ -124,6 +171,7 @@ function createLinearTriageAdapter({
   logger = console,
   stateNames = {},
   criticalWords = DEFAULT_CRITICAL_WORDS,
+  rootDir = DEFAULT_ROOT,
 } = {}) {
   const resolvedStateNames = {
     inReview: stateNames.inReview || 'In Review',
@@ -160,6 +208,10 @@ function createLinearTriageAdapter({
   }
 
   async function syncTriageStatus(subjectRef, status) {
+    if (isTicketPipelinePaused(subjectRef, { rootDir })) {
+      logger.log?.(`[linear-triage] ticket pipeline paused for ${subjectRef?.subjectExternalId || subjectRef?.repo || '<unknown>'} - skipping ${status}`);
+      return;
+    }
     const ticketId = resolveLinearTicketId(subjectRef);
     const targetStateName = normalizeStatusName(status, resolvedStateNames);
     await setLinearState({
@@ -188,6 +240,10 @@ function createLinearTriageAdapter({
     critical = false,
     reviewSummary = '',
   } = {}) {
+    if (isTicketPipelinePaused(subjectRef, { rootDir })) {
+      logger.log?.(`[linear-triage] ticket pipeline paused for ${subjectRef?.subjectExternalId || subjectRef?.repo || '<unknown>'} - skipping review completion`);
+      return;
+    }
     const ticketId = resolveLinearTicketId(subjectRef);
     if (!ticketId) return;
 
@@ -223,8 +279,12 @@ function createLinearTriageAdapter({
 
 export {
   DEFAULT_CRITICAL_WORDS,
+  TICKET_PIPELINE_PAUSED_LABEL,
   buildCriticalFlagComment,
   createLinearTriageAdapter,
   extractLinearTicketId,
+  hasTicketPipelinePauseLabel,
+  isTicketPipelinePaused,
+  repoPausePath,
   routePR,
 };

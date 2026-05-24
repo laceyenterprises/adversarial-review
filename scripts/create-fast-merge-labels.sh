@@ -13,7 +13,7 @@ else
 fi
 
 if [[ ${#REPOS[@]} -eq 0 ]]; then
-  echo "No repositories found for fast-merge label initialization." >&2
+  echo "No repositories found for adversarial-review label initialization." >&2
   exit 1
 fi
 
@@ -23,10 +23,11 @@ declare -a LABELS=(
   "fast-merge:test-fixtures|Additive test fixture data only|0e8a16"
   "fast-merge:submodule-bump|Submodule pointer bump|0e8a16"
   "fast-merge-veto|Operator override: forces normal adversarial review|d93f0b"
+  "ticket-pipeline-paused|Pause adversarial-review Linear ticket pipeline sync for this PR|f9d0c4"
 )
 
 for repo in "${REPOS[@]}"; do
-  echo "Initializing fast-merge labels in $repo"
+  echo "Initializing adversarial-review labels in $repo"
   for entry in "${LABELS[@]}"; do
     IFS='|' read -r name desc color <<< "$entry"
     gh label create "$name" --repo "$repo" --description "$desc" --color "$color" 2>/dev/null \

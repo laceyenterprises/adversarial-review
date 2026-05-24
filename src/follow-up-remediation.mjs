@@ -694,6 +694,7 @@ function spawnClaudeCodeRemediationWorker({
     return {
       model: 'claude-code',
       processId: child.pid,
+      processGroupId: child.pid,
       workspaceDir,
       promptPath,
       outputPath,
@@ -1523,6 +1524,7 @@ function spawnCodexRemediationWorker({
       model: 'codex',
       workerClass,
       processId: child.pid,
+      processGroupId: child.pid,
       workspaceDir,
       promptPath,
       outputPath,

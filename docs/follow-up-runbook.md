@@ -36,6 +36,8 @@ npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
 npm run follow-up:stop -- <job-path> [reason]     # stop an in-progress job
 npm run follow-up:cancel-worker -- <job-path> [reason]  # signal spawned worker without moving job state
 npm run review:cancel -- --repo <slug> --pr <n> [reason]  # signal active reviewer without moving review state
+npm run merge-agent:cancel -- --repo <slug> --pr <n> [reason]  # cancel latest merge-agent LRQ + clear dispatched marker
+npm run no-merge:hold -- --repo <slug> --pr <n> [reason]  # apply a no-merge hold label for one PR/ticket
 npm run ticket-pipeline:pause -- --repo <slug> --pr <n> [reason]  # pause Linear sync for one PR via label
 npm run ticket-pipeline:pause -- --repo <slug> --scope repo [reason]  # pause Linear sync for the whole repo
 npm run check-branch-protection                   # verify agent-os/adversarial-gate is required
@@ -110,7 +112,9 @@ Merge-agent dispatch priority is trigger-scoped, not universal. Clean-verdict la
 
 The critical lane is the worker-pool reserved lane controlled by `HQ_PRIORITY_LANE_CAPACITY` (default `1`). If `HQ_PRIORITY_LANE_CAPACITY=0`, the reservation is disabled and `critical` no longer bypasses `refuse_admit_memory_pressure`; expect the request to behave like ordinary high-priority work. To inspect contention, run `hq priority-lane status --root /Users/airlock/agent-os-hq` and compare the output with the recorded merge-agent dispatch JSON plus `hq dispatch status <dispatchId>` for the LRQ you are debugging.
 
-`merge-agent-skip`, `merge-agent-stuck`, and `do-not-merge` are explicit skip labels. `merge-agent-skip` and `do-not-merge` always win over both override labels and surface as `skip-operator-skip`. `merge-agent-stuck` remains the terminal handoff marker for watcher-owned auto-retries, but a scoped current-head `merge-agent-requested` label is the explicit operator recovery action for that state and can bypass `merge-agent-stuck` for one recovery dispatch. Stale or unattributed requests still fail closed as `skip-merge-agent-requested-stale`.
+`merge-agent-skip`, `do-not-merge`, and `no-merge-hold` are unbypassable skip labels. They win over both override labels and surface as `skip-operator-skip`. `merge-agent-stuck` remains the terminal handoff marker for watcher-owned auto-retries, but a scoped current-head `merge-agent-requested` label is the explicit operator recovery action for that state and can bypass `merge-agent-stuck` for one recovery dispatch. Stale or unattributed requests still fail closed as `skip-merge-agent-requested-stale`.
+
+`no-merge-hold` is the operator-friendly ticket/PR hold. Apply it with `npm run no-merge:hold -- --repo <owner/repo> --pr <n> "<reason>"`. The command creates the GitHub repository label if needed, applies it to the PR, and writes an operator-mutation receipt under `data/operator-mutations/no-merge-holds/`. While present, it blocks the merge-agent dispatch decision and the adversarial gate even if `operator-approved` or `merge-agent-requested` is also present. Release it with the same command plus `--resume`.
 
 Dispatch precedence is intentionally diagnostic-first for hard stops: closed/merged PRs, unbypassable skip labels (`merge-agent-skip`, `do-not-merge`), scoped `operator-approved` hard gates, active remediation, normal verdict/mergeable/check/remediation diagnostics, scoped `merge-agent-requested` override, stale `operator-approved` diagnostics only when no dispatch path applies, duplicate-dispatch protection, then dispatch. `merge-agent-stuck` normally surfaces `skip-operator-skip`, but a scoped current-head `merge-agent-requested` label is evaluated first for the explicit operator recovery path and stale recovery requests fail closed as `skip-merge-agent-requested-stale`. A scoped `operator-approved` label surfaces mergeability/check diagnostics before dispatching, and otherwise bypasses review/remediation diagnostics. If a scoped `merge-agent-requested` label is present on a PR that was already green enough for the normal path, or on a `merge-agent-stuck` PR the operator is explicitly recovering, the request label authorizes that dispatch and is consumed. After a successful dispatch, the watcher removes only the label that actually authorized that dispatch; unused labels stay in place as operator audit trail.
 
@@ -477,6 +481,28 @@ Behavior:
 
 Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
 to ignore graceful termination.
+
+### Cancel the latest merge-agent dispatch
+
+Use this when a merge-agent LRQ should be interrupted for an open PR without
+waiting for merge/close lifecycle cleanup:
+
+```bash
+npm run merge-agent:cancel -- --repo <owner/repo> --pr <n> "Operator is holding this merge"
+```
+
+Behavior:
+
+- reads the latest matching merge-agent dispatch record under
+  `data/follow-up-jobs/merge-agent-dispatches/`
+- runs `hq dispatch cancel <lrq>` when an LRQ is present
+- removes the `merge-agent-dispatched` label after cancellation reaches a
+  terminal outcome
+- writes an audit receipt under `data/follow-up-jobs/merge-agent-cancellations/`
+- does not mutate `reviews.db` or follow-up job state
+
+If the cancel path reports `retryable=true`, inspect the receipt and retry after
+the HQ or GitHub label-write failure clears.
 
 ## Operator retrigger contracts
 

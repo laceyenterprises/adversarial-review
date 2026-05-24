@@ -624,6 +624,8 @@ exit 0
     }
     const log = readFileSync(logPath, 'utf8');
     assert.match(log, /label create fast-merge:docs --repo laceyenterprises\/agent-os/);
+    assert.match(log, /label create ticket-pipeline-paused --repo laceyenterprises\/agent-os/);
+    assert.match(log, /label create no-merge-hold --repo laceyenterprises\/agent-os/);
     assert.match(log, /label edit fast-merge:docs --repo laceyenterprises\/agent-os/);
     assert.doesNotMatch(log, /fast-merge:additive-sql/);
   } finally {
@@ -656,6 +658,8 @@ exit 0
     assert.match(log, /repo list laceyenterprises --limit 1000/);
     assert.match(log, /label create fast-merge:docs --repo laceyenterprises\/agent-os/);
     assert.match(log, /label create fast-merge:docs --repo laceyenterprises\/adversarial-review/);
+    assert.match(log, /label create no-merge-hold --repo laceyenterprises\/agent-os/);
+    assert.match(log, /label create no-merge-hold --repo laceyenterprises\/adversarial-review/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -10,6 +10,7 @@ import {
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
   HQ_DISPATCH_TIMEOUT_MS,
   HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
+  NO_MERGE_HOLD_LABEL,
   TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
@@ -293,6 +294,15 @@ test('pickMergeAgentDispatch fails closed on unrecognized verdicts', () => {
 test('pickMergeAgentDispatch honors do-not-merge label', () => {
   const decision = pickMergeAgentDispatch(makeJob({
     labels: [{ name: 'do-not-merge' }],
+  }));
+  assert.equal(decision, 'skip-operator-skip');
+});
+
+test('pickMergeAgentDispatch honors no-merge-hold label', () => {
+  const decision = pickMergeAgentDispatch(makeJob({
+    labels: [{ name: NO_MERGE_HOLD_LABEL }, { name: 'operator-approved' }, { name: 'merge-agent-requested' }],
+    operatorApproval: makeOperatorApproval(),
+    mergeAgentRequest: makeMergeAgentRequest(),
   }));
   assert.equal(decision, 'skip-operator-skip');
 });

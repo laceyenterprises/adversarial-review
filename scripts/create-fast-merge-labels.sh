@@ -24,6 +24,7 @@ declare -a LABELS=(
   "fast-merge:submodule-bump|Submodule pointer bump|0e8a16"
   "fast-merge-veto|Operator override: forces normal adversarial review|d93f0b"
   "ticket-pipeline-paused|Pause adversarial-review Linear ticket pipeline sync for this PR|f9d0c4"
+  "no-merge-hold|Operator hold: block merge-agent and adversarial gate for this PR|d93f0b"
 )
 
 for repo in "${REPOS[@]}"; do

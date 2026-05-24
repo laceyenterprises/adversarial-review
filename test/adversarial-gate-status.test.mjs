@@ -412,6 +412,18 @@ test('pickAdversarialGateStatus lets explicit skip labels override operator-appr
   assert.equal(decision.reason, 'operator-skip-label');
 });
 
+test('pickAdversarialGateStatus treats no-merge-hold as an explicit skip label', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    labels: [{ name: 'no-merge-hold' }, { name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
+    headSha: 'abc123',
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'operator-skip-label');
+});
+
 test('pickAdversarialGateStatus ignores unvalidated operator approvals', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),

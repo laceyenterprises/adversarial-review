@@ -68,4 +68,43 @@ test('cancelMergeAgentDispatch delegates to merge-agent cleanup and writes recei
   assert.equal(receipt.kind, 'adversarial-review-merge-agent-cancellation');
   assert.equal(receipt.reason, 'operator hold');
   assert.equal(receipt.result.cleanupComplete, true);
+  assert.equal(receipt.lifecycleCleanupQueued, false);
+});
+
+test('cancelMergeAgentDispatch queues watcher cleanup when operator cancel is retryable', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const result = await cancelMergeAgentDispatch({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    requestedAt: '2026-05-24T16:05:00.000Z',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    cancelImpl: async () => ({
+      attempted: true,
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 401,
+      attemptedAt: '2026-05-24T16:05:00.000Z',
+      launchRequestId: 'lrq_merge',
+      cancelled: true,
+      cancelError: null,
+      labelRemoved: false,
+      labelRemovalError: 'gh unavailable',
+      cleanupComplete: false,
+      retryable: true,
+    }),
+  });
+
+  assert.equal(result.lifecycleCleanupQueued, true);
+  const cleanupPath = path.join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    'merge-agent-lifecycle-cleanups',
+    'laceyenterprises__agent-os-pr-401.json'
+  );
+  assert.equal(existsSync(cleanupPath), true);
+  const cleanup = JSON.parse(readFileSync(cleanupPath, 'utf8'));
+  assert.equal(cleanup.transition, 'operator-cancel');
+  assert.equal(cleanup.lastResult.retryable, true);
 });

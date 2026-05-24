@@ -9,6 +9,12 @@ function spawnDetachedCli(command, args, options = {}) {
     stdio: options.stdio,
   });
 
+  if (!child.spawnedAt) {
+    child.spawnedAt = typeof options.now === 'function'
+      ? options.now()
+      : new Date().toISOString();
+  }
+
   if (options.unref !== false && typeof child.unref === 'function') {
     child.unref();
   }

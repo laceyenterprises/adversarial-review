@@ -3,7 +3,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { cancelMergeAgentDispatchOnMerge } from './follow-up-merge-agent.mjs';
+import {
+  cancelMergeAgentDispatchOnMerge,
+  clearMergeAgentLifecycleCleanup,
+  updateMergeAgentLifecycleCleanup,
+  upsertMergeAgentLifecycleCleanup,
+} from './follow-up-merge-agent.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -108,6 +113,24 @@ async function cancelMergeAgentDispatch({
     hqExecFileImpl,
     now: requestedAt,
   });
+  let lifecycleCleanupQueued = false;
+  if (result.retryable) {
+    upsertMergeAgentLifecycleCleanup(rootDir, {
+      repo,
+      prNumber,
+      transition: 'operator-cancel',
+      queuedAt: requestedAt,
+    });
+    updateMergeAgentLifecycleCleanup(rootDir, {
+      repo,
+      prNumber,
+      result,
+      attemptedAt: requestedAt,
+    });
+    lifecycleCleanupQueued = true;
+  } else if (result.cleanupComplete) {
+    clearMergeAgentLifecycleCleanup(rootDir, { repo, prNumber });
+  }
   const receipt = {
     kind: 'adversarial-review-merge-agent-cancellation',
     schemaVersion: 1,
@@ -117,11 +140,13 @@ async function cancelMergeAgentDispatch({
     repo,
     prNumber,
     hqPath,
+    lifecycleCleanupQueued,
     result,
   };
   const receiptPath = writeCancellationReceipt(rootDir, receipt);
   return {
     ...result,
+    lifecycleCleanupQueued,
     receipt,
     receiptPath,
   };

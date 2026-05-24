@@ -15,6 +15,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const execFileAsync = promisify(execFile);
 const VALID_SCOPES = new Set(['pr', 'repo', 'both']);
+const CONFIRM_LIVE_ROOT_FLAG = '--confirm-live-root';
 
 function parseArgs(argv) {
   const args = [...argv];
@@ -22,6 +23,8 @@ function parseArgs(argv) {
   let prNumber = null;
   let scope = null;
   let resume = false;
+  let rootDir = ROOT;
+  let confirmLiveRoot = false;
   const reasonParts = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -56,6 +59,19 @@ function parseArgs(argv) {
       resume = true;
       continue;
     }
+    if (arg === '--root') {
+      rootDir = args[index + 1] || rootDir;
+      index += 1;
+      continue;
+    }
+    if (arg?.startsWith('--root=')) {
+      rootDir = arg.slice('--root='.length) || rootDir;
+      continue;
+    }
+    if (arg === CONFIRM_LIVE_ROOT_FLAG) {
+      confirmLiveRoot = true;
+      continue;
+    }
     reasonParts.push(arg);
   }
 
@@ -77,8 +93,26 @@ function parseArgs(argv) {
     prNumber,
     scope,
     resume,
+    rootDir,
+    confirmLiveRoot,
     reason: reasonParts.join(' ').trim() || (resume ? 'Operator resumed ticket pipeline.' : 'Operator paused ticket pipeline.'),
   };
+}
+
+function ensureRepoPauseRootConfirmed({
+  rootDir = ROOT,
+  scope,
+  confirmLiveRoot = false,
+  env = process.env,
+} = {}) {
+  const resolvedRoot = resolveTicketPipelinePauseRoot(rootDir, env);
+  if ((scope === 'repo' || scope === 'both') && !confirmLiveRoot) {
+    throw new Error(
+      `Repo-scope pause will write under ${resolvedRoot}. Re-run with ${CONFIRM_LIVE_ROOT_FLAG} ` +
+      `once this matches the live daemon root; use --root, ${TICKET_PIPELINE_PAUSE_ROOT_ENV}, or HQ_ROOT if needed.`
+    );
+  }
+  return resolvedRoot;
 }
 
 async function ensureTicketPipelinePauseLabel({ repo, execFileImpl = execFileAsync } = {}) {
@@ -129,7 +163,7 @@ function setRepoTicketPipelinePause({
   const filePath = repoPausePath(pauseRootDir, repo);
   if (!paused) {
     if (existsSync(filePath)) {
-      rmSync(filePath);
+      rmSync(filePath, { force: true });
     }
     return { paused: false, filePath, pauseRootDir };
   }
@@ -198,21 +232,22 @@ async function applyTicketPipelinePause({
 async function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
+    ensureRepoPauseRootConfirmed({
+      rootDir: args.rootDir,
+      scope: args.scope,
+      confirmLiveRoot: args.confirmLiveRoot,
+    });
     const result = await applyTicketPipelinePause({
-      rootDir: ROOT,
+      rootDir: args.rootDir,
       ...args,
     });
     console.log(
       `[ticket-pipeline-pause] paused=${result.paused} scope=${result.scope} repo=${result.repo}` +
       (result.prNumber ? ` pr=${result.prNumber}` : '') +
       (result.repoPausePath ? ` repoPause=${result.repoPausePath}` : '') +
+      (result.repoPauseRootDir ? ` repoPauseRoot=${result.repoPauseRootDir}` : '') +
       ` label=${result.label}`
     );
-    if (result.repoPauseRootDir && result.repoPauseRootDir !== ROOT) {
-      console.warn(
-        `[ticket-pipeline-pause] repo pause root resolved outside this checkout via ${TICKET_PIPELINE_PAUSE_ROOT_ENV}/HQ_ROOT: ${result.repoPauseRootDir}`
-      );
-    }
   } catch (err) {
     console.error(`[ticket-pipeline-pause] Failed: ${err.message}`);
     process.exit(1);
@@ -225,6 +260,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
 export {
   applyTicketPipelinePause,
+  ensureRepoPauseRootConfirmed,
   ensureTicketPipelinePauseLabel,
   parseArgs,
   setPRTicketPipelinePause,

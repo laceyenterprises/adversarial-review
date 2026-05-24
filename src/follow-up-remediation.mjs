@@ -688,6 +688,7 @@ function spawnClaudeCodeRemediationWorker({
         env,
         stdio: [promptFd, stdoutFd, stderrFd],
         spawnImpl,
+        now,
       }
     );
 
@@ -695,6 +696,7 @@ function spawnClaudeCodeRemediationWorker({
       model: 'claude-code',
       processId: child.pid,
       processGroupId: child.pid,
+      spawnedAt: child.spawnedAt || now(),
       workspaceDir,
       promptPath,
       outputPath,
@@ -1517,6 +1519,7 @@ function spawnCodexRemediationWorker({
         env,
         stdio: [promptFd, stdoutFd, stderrFd],
         spawnImpl,
+        now,
       }
     );
 
@@ -1525,6 +1528,7 @@ function spawnCodexRemediationWorker({
       workerClass,
       processId: child.pid,
       processGroupId: child.pid,
+      spawnedAt: child.spawnedAt || now(),
       workspaceDir,
       promptPath,
       outputPath,

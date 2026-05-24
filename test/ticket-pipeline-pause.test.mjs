@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   applyTicketPipelinePause,
+  ensureRepoPauseRootConfirmed,
   parseArgs,
   setRepoTicketPipelinePause,
 } from '../src/ticket-pipeline-pause.mjs';
@@ -26,20 +27,48 @@ test('parseArgs defaults to PR scope when --pr is present and repo scope otherwi
     prNumber: 149,
     scope: 'pr',
     resume: false,
+    rootDir: path.join(path.dirname(new URL(import.meta.url).pathname), '..'),
+    confirmLiveRoot: false,
     reason: 'pause ticket',
   });
   assert.deepEqual(parseArgs([
     '--repo=laceyenterprises/adversarial-review',
     '--scope',
     'repo',
+    '--root',
+    '/srv/adversarial-review',
+    '--confirm-live-root',
     '--resume',
   ]), {
     repo: 'laceyenterprises/adversarial-review',
     prNumber: null,
     scope: 'repo',
     resume: true,
+    rootDir: '/srv/adversarial-review',
+    confirmLiveRoot: true,
     reason: 'Operator resumed ticket pipeline.',
   });
+});
+
+test('ensureRepoPauseRootConfirmed refuses unconfirmed repo-scope writes and returns the resolved root once confirmed', () => {
+  const worktreeRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-worktree-'));
+  assert.throws(
+    () => ensureRepoPauseRootConfirmed({
+      rootDir: worktreeRoot,
+      scope: 'repo',
+      env: {},
+    }),
+    /--confirm-live-root/
+  );
+  assert.equal(
+    ensureRepoPauseRootConfirmed({
+      rootDir: worktreeRoot,
+      scope: 'repo',
+      confirmLiveRoot: true,
+      env: {},
+    }),
+    worktreeRoot
+  );
 });
 
 test('applyTicketPipelinePause creates the label and applies it to one PR', async () => {

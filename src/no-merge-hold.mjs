@@ -129,6 +129,12 @@ async function main() {
       `[no-merge-hold] held=${result.held} repo=${args.repo} pr=${args.prNumber} ` +
       `label=${result.label} receipt=${result.receiptPath}`
     );
+    if (result.held) {
+      console.warn(
+        '[no-merge-hold] note: this blocks future merge-agent dispatch and the adversarial gate, ' +
+        'but does not stop a merge-agent worker already dispatched; run merge-agent:cancel separately if needed.'
+      );
+    }
   } catch (err) {
     console.error(`[no-merge-hold] Failed: ${err.message}`);
     process.exit(1);

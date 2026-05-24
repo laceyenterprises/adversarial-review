@@ -85,7 +85,7 @@ function extractReviewVerdict(reviewBody) {
   const heading = text.match(/^##\s+Verdict\s*$/im);
   if (!heading) return null;
 
-  const sectionStart = Number(heading.index) + heading[0].length;
+  const sectionStart = heading.index + heading[0].length;
   const remainder = text.slice(sectionStart);
   const nextHeading = remainder.search(/^##\s+/m);
   const section = nextHeading >= 0 ? remainder.slice(0, nextHeading) : remainder;
@@ -93,13 +93,18 @@ function extractReviewVerdict(reviewBody) {
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean);
+  if (lines.length === 0) return null;
 
-  for (const line of [...lines].reverse()) {
-    if (normalizeReviewVerdict(line) !== 'unknown') {
-      return line;
-    }
+  const normalizedLines = lines.map((line) => normalizeReviewVerdict(line));
+  const hasRequestChanges = normalizedLines.includes('request-changes');
+  const hasPermissiveVerdict = normalizedLines.includes('comment-only')
+    || normalizedLines.includes('approved');
+
+  if (hasRequestChanges && hasPermissiveVerdict) {
+    return [...lines].reverse().find((line) => normalizeReviewVerdict(line) === 'request-changes') ?? lines.at(-1);
   }
-  return lines[0] ?? null;
+
+  return lines.at(-1);
 }
 
 /**

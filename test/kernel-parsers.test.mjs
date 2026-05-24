@@ -67,6 +67,37 @@ test('kernel verdict parser accepts explanatory prose before final verdict line'
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
 });
 
+test('kernel verdict parser keeps request-changes when trailing prose starts with Approved or Comment only', () => {
+  const cases = [
+    [
+      'Approved direction overall, but the merge gate still needs the blocking fix above.',
+      'approved',
+    ],
+    [
+      'Comment only on the doc typo once the blocking migration issue is fixed.',
+      'comment-only',
+    ],
+  ];
+
+  for (const [trailingLine, trailingKind] of cases) {
+    const review = [
+      '## Summary',
+      'One blocking issue remains.',
+      '',
+      '## Verdict',
+      'Request changes on the migration safety.',
+      trailingLine,
+    ].join('\n');
+
+    assert.equal(
+      extractReviewVerdict(review),
+      'Request changes on the migration safety.',
+      `expected request-changes to win over trailing ${trailingKind} prose`,
+    );
+    assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+  }
+});
+
 test('kernel remediation-reply parser accepts a production reply without changing bytes', () => {
   const raw = JSON.stringify(remediationReply, null, 2);
   const parsed = parseRemediationReply(raw, { expectedJob: remediationJob });

@@ -68,6 +68,8 @@ import {
   listMergeAgentDispatches,
   listMergeAgentLifecycleCleanups,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+  pollFastMergeQueue,
+  resolveFastMergePerPollCap,
   scanStuckMergeAgentDispatches,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
@@ -77,6 +79,7 @@ import {
   deleteGateRecordsForPR,
   projectAdversarialGateStatus,
 } from './adversarial-gate-status.mjs';
+import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
@@ -482,17 +485,6 @@ function evaluateFastMergeDiffShape(files, categories) {
   return { ok: true, reason: 'shape-ok', files: normalizedFiles };
 }
 
-function fastMergeAuditPath(rootDir, { repo, prNumber, action, at }) {
-  const safeRepo = String(repo || '').replace(/[^A-Za-z0-9._-]/g, '_');
-  const safeAt = String(at || new Date().toISOString()).replace(/[^0-9A-Za-z._-]/g, '-');
-  return join(
-    rootDir,
-    'data',
-    'reviewer-runs',
-    `fast-merge-${action}-${safeRepo}-${prNumber}-${safeAt}-${randomUUID()}.json`
-  );
-}
-
 function buildFastMergeAuditEntry({
   action,
   repo,
@@ -509,19 +501,10 @@ function buildFastMergeAuditEntry({
 }) {
   const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
   const entry = {
+    kind: 'fast-merge-audit',
+    schemaVersion: 1,
+    auditType: 'fast-merge-skip',
     sessionUuid,
-    domain: 'code-pr',
-    runtime: 'watcher-fast-merge',
-    state: 'completed',
-    pgid: null,
-    spawnedAt: authorizedAt,
-    lastHeartbeatAt: null,
-    reattachToken: null,
-    subjectContext: {
-      repo,
-      prNumber,
-      headSha: authorizedHeadSha,
-    },
     fast_merge: true,
     action,
     categories,
@@ -2183,6 +2166,40 @@ async function retryPendingMergeAgentLifecycleCleanups({
   return { attempted, skipped, pending: pending.length };
 }
 
+async function runFastMergeClosePathIsolated({
+  pollImpl = pollFastMergeQueue,
+  db: reviewDb = db,
+  ghClient = execFileAsync,
+  rootDir = ROOT,
+  perPollCap = resolveFastMergePerPollCap(),
+  repos = activeRepos,
+  logger = console,
+} = {}) {
+  try {
+    const fastMergeSummary = await pollImpl({
+      db: reviewDb,
+      ghClient,
+      rootDir,
+      perPollCap,
+      repos,
+      logger,
+    });
+    if (fastMergeSummary.processed > 0) {
+      logger.log?.(
+        `[watcher] fast-merge close path: processed=${fastMergeSummary.processed} ` +
+        `merged=${fastMergeSummary.merged} blocked=${fastMergeSummary.blocked} ` +
+        `requeued_head_change=${fastMergeSummary.requeued_head_change} ` +
+        `requeued_veto=${fastMergeSummary.requeued_veto} ` +
+        `pending=${fastMergeSummary.skipped_still_pending}`
+      );
+    }
+    return { ok: true, summary: fastMergeSummary };
+  } catch (err) {
+    logger.error?.('[watcher] fast-merge close path failed; continuing normal merge-agent/review work:', err?.message || err);
+    return { ok: false, error: err };
+  }
+}
+
 /**
  * For every PR we previously marked as "open", check if it has since been
  * merged or closed and update Linear accordingly.
@@ -2536,6 +2553,7 @@ async function pollOnce(
   await syncPRLifecycle(octokit, operatorSurface);
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);
+  await runFastMergeClosePathIsolated();
 
   try {
     const ackRetry = await retryPendingRetriggerAckComments({
@@ -3447,6 +3465,7 @@ export {
   readWatcherDrainState,
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
+  runFastMergeClosePathIsolated,
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
   resolveStaleReviewerReconcilePerPoll,

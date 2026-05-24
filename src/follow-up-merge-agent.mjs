@@ -1,4 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   constants as fsConstants,
   accessSync,
@@ -15,6 +16,7 @@ import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
@@ -22,6 +24,7 @@ import {
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
+import { requestReviewRereview } from './review-state.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -105,6 +108,19 @@ const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHA
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
 const MERGE_AGENT_STUCK_LABEL = 'merge-agent-stuck';
+const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
+const FAST_MERGE_LABEL_PREFIX = 'fast-merge:';
+const FAST_MERGE_SKIPPED_STATE = 'fast_merge_skipped';
+const FAST_MERGE_MERGED_STATE = 'fast_merge_merged';
+const FAST_MERGE_CLOSED_STATE = 'fast_merge_closed';
+const FAST_MERGE_BLOCKED_STATE = 'fast_merge_blocked';
+const FML_MERGE_AGENT_PER_POLL_CAP_ENV = 'FML_MERGE_AGENT_PER_POLL_CAP';
+const DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP = 5;
+const FAST_MERGE_GH_RETRY_DELAYS_MS = [250, 1_000];
+const FAST_MERGE_GH_TIMEOUT_MS = 30_000;
+const FAST_MERGE_FAILURE_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'fail', 'cancel']);
+const FAST_MERGE_PENDING_STATES = new Set(['', 'pending', 'in_progress', 'queued', 'waiting', 'requested', 'expected']);
+const FAST_MERGE_SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped', 'pass', 'skipping']);
 // Max times the watcher will auto-re-dispatch a merge-agent that died WITHOUT
 // handing off (terminal-failed but its own `merge-agent-dispatched` marker is
 // still set) for the same head SHA before handing the PR to the operator via
@@ -2899,6 +2915,937 @@ async function dispatchMergeAgentForPR({
   };
 }
 
+function resolveFastMergePerPollCap(env = process.env) {
+  const raw = env?.[FML_MERGE_AGENT_PER_POLL_CAP_ENV];
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP;
+  }
+  const parsed = Number.parseInt(String(raw), 10);
+  return Number.isInteger(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP;
+}
+
+function buildFastMergeCloseAuditEntry({
+  action,
+  repo,
+  prNumber,
+  authorizedHeadSha = null,
+  currentHeadSha = null,
+  mergedHeadSha = null,
+  mergeSha = null,
+  manualMergeDetected = false,
+  closedWithoutMerge = false,
+  failureReason = null,
+  checkConclusions = null,
+  headChanged = false,
+  vetoDetected = false,
+  labelRemoved = false,
+  requeuePath = null,
+  requeueResult = null,
+  mergeStdout = null,
+  mergeStderr = null,
+  at = isoNow(),
+} = {}) {
+  const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
+  return {
+    kind: 'fast-merge-audit',
+    schemaVersion: 1,
+    auditType: 'fast-merge-close',
+    sessionUuid,
+    fast_merge: true,
+    action,
+    repo,
+    pr_number: prNumber,
+    authorized_head_sha: authorizedHeadSha,
+    fast_merge_authorized_head_sha: authorizedHeadSha,
+    current_head_sha: currentHeadSha,
+    merged_head_sha: mergedHeadSha,
+    merge_sha: mergeSha,
+    manual_merge_detected: Boolean(manualMergeDetected),
+    closed_without_merge: Boolean(closedWithoutMerge),
+    failure_reason: failureReason,
+    check_conclusions: checkConclusions,
+    head_changed: Boolean(headChanged),
+    veto_detected: Boolean(vetoDetected),
+    label_removed: Boolean(labelRemoved),
+    requeue_path: requeuePath,
+    requeue_result: requeueResult,
+    merge_stdout: mergeStdout,
+    merge_stderr: mergeStderr,
+    recorded_at: at,
+  };
+}
+
+function writeFastMergeCloseAuditEntry(rootDir, entry) {
+  mkdirSync(fastMergeAuditDir(rootDir), { recursive: true });
+  const filePath = fastMergeAuditPath(rootDir, {
+    repo: entry?.repo,
+    prNumber: entry?.pr_number,
+    action: entry?.action || 'unknown',
+    at: entry?.recorded_at,
+  });
+  writeFileAtomic(filePath, `${JSON.stringify(entry, null, 2)}\n`);
+  return filePath;
+}
+
+function recordFastMergeCloseAuditPending(db, { repo, prNumber, entry, err } = {}) {
+  if (!db || typeof db.prepare !== 'function') return false;
+  db.prepare(
+    `UPDATE reviewed_prs
+        SET fast_merge_audit_status = 'pending',
+            fast_merge_audit_payload_json = ?,
+            fast_merge_audit_error = ?
+      WHERE repo = ?
+        AND pr_number = ?`
+  ).run(
+    JSON.stringify(entry),
+    String(err?.message || err || 'unknown audit write failure'),
+    repo,
+    prNumber
+  );
+  return true;
+}
+
+async function writeFastMergeAudit({
+  db = null,
+  rootDir,
+  auditWriter,
+  logger = console,
+  entry,
+} = {}) {
+  try {
+    if (typeof auditWriter === 'function') {
+      await auditWriter(entry);
+      return true;
+    }
+    writeFastMergeCloseAuditEntry(rootDir, entry);
+    return true;
+  } catch (err) {
+    logger?.error?.(
+      `[follow-up-merge-agent] fast-merge audit write failed for ${entry?.repo}#${entry?.pr_number}: ${err?.message || err}`
+    );
+    recordFastMergeCloseAuditPending(db, {
+      repo: entry?.repo,
+      prNumber: entry?.pr_number,
+      entry,
+      err,
+    });
+    return false;
+  }
+}
+
+function execFileFromGhClient(ghClient) {
+  if (typeof ghClient === 'function') return ghClient;
+  if (typeof ghClient?.execFile === 'function') return ghClient.execFile.bind(ghClient);
+  if (typeof ghClient?.execFileImpl === 'function') return ghClient.execFileImpl.bind(ghClient);
+  return execFileAsync;
+}
+
+function isRetryableGhTransportError(err) {
+  if (isExecTimeout(err)) return true;
+  const detail = [
+    err?.code,
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].filter(Boolean).join('\n').toLowerCase();
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
+    || detail.includes('timeout')
+    || detail.includes('timed out')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable')
+    || detail.includes('rate limit')
+    || detail.includes('secondary rate limit')
+    || detail.includes('502 bad gateway')
+    || detail.includes('503 service unavailable')
+    || detail.includes('504 gateway timeout');
+}
+
+async function withGhRetry(operation, {
+  retryDelaysMs = FAST_MERGE_GH_RETRY_DELAYS_MS,
+  isRetryable = isRetryableGhTransportError,
+} = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err) || attempt >= retryDelaysMs.length) {
+        throw err;
+      }
+      await sleep(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastErr;
+}
+
+function parseGhJson(stdout, fallback = {}) {
+  return JSON.parse(String(stdout || '').trim() || JSON.stringify(fallback));
+}
+
+function normalizePrView(parsed = {}) {
+  const labels = Array.isArray(parsed.labels) ? parsed.labels : [];
+  const state = String(parsed.state || '').trim().toUpperCase();
+  return {
+    state,
+    isDraft: Boolean(parsed.isDraft),
+    mergedAt: parsed.mergedAt || null,
+    closedAt: parsed.closedAt || null,
+    headRefOid: parsed.headRefOid || null,
+    labels,
+  };
+}
+
+async function fetchFastMergePrView({ ghClient, repo, prNumber }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+    'pr',
+    'view',
+    String(prNumber),
+    '--repo',
+    repo,
+    '--json',
+    'state,isDraft,mergedAt,closedAt,headRefOid,labels',
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+  }));
+  return normalizePrView(parseGhJson(stdout));
+}
+
+async function fetchFastMergeMergeCommit({ ghClient, repo, prNumber }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+    'pr',
+    'view',
+    String(prNumber),
+    '--repo',
+    repo,
+    '--json',
+    'mergeCommit',
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+  }));
+  const parsed = parseGhJson(stdout, {});
+  const oid = parsed?.mergeCommit?.oid;
+  return oid ? String(oid) : null;
+}
+
+async function fetchFastMergeChecks({ ghClient, repo, prNumber }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  let stdout = '';
+  try {
+    ({ stdout } = await withGhRetry(() => execFileImpl('gh', [
+      'pr',
+      'checks',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--json',
+      'name,state,bucket,workflow,link',
+    ], {
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: FAST_MERGE_GH_TIMEOUT_MS,
+    })));
+  } catch (err) {
+    const code = Number(err?.code);
+    if ((code === 1 || code === 8) && typeof err?.stdout === 'string' && err.stdout.trim()) {
+      stdout = err.stdout;
+    } else if (isNoChecksReportedGhError(err)) {
+      stdout = '[]';
+    } else {
+      throw err;
+    }
+  }
+  const parsed = parseGhJson(stdout, []);
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed?.checks)) return parsed.checks;
+  return [];
+}
+
+function isNoChecksReportedGhError(err) {
+  const detail = [err?.message, err?.stderr, err?.stdout]
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+  return detail.includes('no checks') && detail.includes('reported');
+}
+
+async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  return withGhRetry(() => execFileImpl('gh', [
+    'pr',
+    'merge',
+    String(prNumber),
+    '--repo',
+    repo,
+    '--squash',
+    '--admin',
+    '--match-head-commit',
+    String(matchHeadCommit),
+    '--delete-branch',
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+  }));
+}
+
+function normalizeFastMergeLabelNames(labels) {
+  return normalizeLabelNames(labels);
+}
+
+function hasFastMergeVeto(labels) {
+  return normalizeFastMergeLabelNames(labels).includes(FAST_MERGE_VETO_LABEL);
+}
+
+function hasFastMergeAuthorizationLabel(labels) {
+  return normalizeFastMergeLabelNames(labels)
+    .some((label) => label.startsWith(FAST_MERGE_LABEL_PREFIX) && label !== FAST_MERGE_VETO_LABEL);
+}
+
+function checkIdentity(check, index) {
+  return check?.name || check?.workflow || check?.link || `check-${index + 1}`;
+}
+
+function summarizeFastMergeChecks(checks) {
+  const normalized = (Array.isArray(checks) ? checks : []).map((check, index) => {
+    const conclusion = check?.conclusion == null
+      ? null
+      : String(check.conclusion).trim().toLowerCase();
+    const state = check?.state == null
+      ? null
+      : String(check.state).trim().toLowerCase();
+    const bucket = check?.bucket == null
+      ? null
+      : String(check.bucket).trim().toLowerCase();
+    return {
+      name: checkIdentity(check, index),
+      conclusion,
+      state,
+      bucket,
+    };
+  });
+
+  const failed = normalized.filter((check) => (
+    FAST_MERGE_FAILURE_CONCLUSIONS.has(check.conclusion)
+    || FAST_MERGE_FAILURE_CONCLUSIONS.has(check.state)
+    || FAST_MERGE_FAILURE_CONCLUSIONS.has(check.bucket)
+  ));
+  if (failed.length > 0) {
+    return {
+      status: 'failed',
+      totalCount: normalized.length,
+      checkConclusions: normalized,
+      failureMessage: `fast-merge CI failed: ${failed.map((check) => `${check.name}:${check.conclusion || check.state || check.bucket}`).join(', ')}`,
+    };
+  }
+
+  const pending = normalized.filter((check) => {
+    if (check.conclusion === null) {
+      if (check.state == null) return true;
+      if (FAST_MERGE_PENDING_STATES.has(check.state)) return true;
+      if (check.bucket != null && FAST_MERGE_PENDING_STATES.has(check.bucket)) return true;
+      if (!FAST_MERGE_SUCCESS_CONCLUSIONS.has(check.state) && !FAST_MERGE_SUCCESS_CONCLUSIONS.has(check.bucket)) {
+        return true;
+      }
+    }
+    if (check.conclusion != null && FAST_MERGE_PENDING_STATES.has(check.conclusion)) return true;
+    if (check.state != null && FAST_MERGE_PENDING_STATES.has(check.state)) return true;
+    if (check.bucket != null && FAST_MERGE_PENDING_STATES.has(check.bucket)) return true;
+    return false;
+  });
+  if (pending.length > 0 && normalized.length > 0) {
+    return {
+      status: 'pending',
+      totalCount: normalized.length,
+      checkConclusions: normalized,
+      failureMessage: null,
+    };
+  }
+
+  const unexpected = normalized.filter((check) => (
+    check.conclusion && !FAST_MERGE_SUCCESS_CONCLUSIONS.has(check.conclusion)
+  ));
+  if (unexpected.length > 0) {
+    return {
+      status: 'failed',
+      totalCount: normalized.length,
+      checkConclusions: normalized,
+      failureMessage: `fast-merge CI not successful: ${unexpected.map((check) => `${check.name}:${check.conclusion}`).join(', ')}`,
+    };
+  }
+
+  return {
+    status: 'success',
+    totalCount: normalized.length,
+    checkConclusions: normalized,
+    failureMessage: null,
+  };
+}
+
+function updateFastMergeTerminalState(db, {
+  state,
+  repo,
+  prNumber,
+  at = isoNow(),
+  failureMessage = null,
+}) {
+  if (state === FAST_MERGE_MERGED_STATE) {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = ?,
+              review_status = ?,
+              merged_at = COALESCE(merged_at, ?),
+              failure_message = NULL
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pr_state = ?`
+    ).run(state, state, at, repo, prNumber, FAST_MERGE_SKIPPED_STATE);
+    return;
+  }
+  if (state === FAST_MERGE_CLOSED_STATE) {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = ?,
+              review_status = ?,
+              closed_at = COALESCE(closed_at, ?),
+              failure_message = NULL
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pr_state = ?`
+    ).run(state, state, at, repo, prNumber, FAST_MERGE_SKIPPED_STATE);
+    return;
+  }
+  if (state === FAST_MERGE_BLOCKED_STATE) {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = ?,
+              review_status = ?,
+              failed_at = ?,
+              failure_message = ?
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pr_state = ?`
+    ).run(state, state, at, failureMessage || 'fast-merge blocked', repo, prNumber, FAST_MERGE_SKIPPED_STATE);
+  }
+}
+
+function requeueFastMergeForNormalReview(db, {
+  rootDir,
+  repo,
+  prNumber,
+  reason,
+  requestedAt = isoNow(),
+}) {
+  return requestReviewRereview({
+    rootDir,
+    repo,
+    prNumber,
+    requestedAt,
+    reason,
+    allowFastMergeSkipped: true,
+    db,
+  });
+}
+
+async function auditAndRequeueFastMerge({
+  db,
+  rootDir,
+  ghClient,
+  repo,
+  prNumber,
+  authorizedHeadSha,
+  currentHeadSha,
+  labels = [],
+  reason,
+  action,
+  headChanged = false,
+  vetoDetected = false,
+  labelRemoved = false,
+  auditWriter,
+  logger = console,
+}) {
+  const requeuedAt = isoNow();
+  const requeuePath = 'retrigger_helper';
+  const initialEntry = buildFastMergeCloseAuditEntry({
+    action,
+    repo,
+    prNumber,
+    authorizedHeadSha,
+    currentHeadSha,
+    headChanged,
+    vetoDetected,
+    labelRemoved,
+    requeuePath,
+    requeueResult: {
+      triggered: false,
+      status: 'attempting',
+      reason,
+    },
+    at: requeuedAt,
+  });
+  await writeFastMergeAudit({ db, rootDir, auditWriter, logger, entry: initialEntry });
+  const requeueResult = requeueFastMergeForNormalReview(db, {
+    rootDir,
+    repo,
+    prNumber,
+    reason,
+    requestedAt: requeuedAt,
+  });
+  const finalEntry = {
+    ...initialEntry,
+    labels,
+    requeue_result: {
+      triggered: Boolean(requeueResult?.triggered),
+      status: requeueResult?.status || null,
+      reason: requeueResult?.reason || null,
+    },
+    requeueResult: undefined,
+  };
+  await writeFastMergeAudit({ db, rootDir, auditWriter, logger, entry: finalEntry });
+  return {
+    status: headChanged ? 'requeued_head_change' : (labelRemoved ? 'requeued_label_removed' : 'requeued_veto'),
+    requeueResult,
+  };
+}
+
+async function fetchAndSummarizeFastMergeChecks({ ghClient, repo, prNumber, logger = console } = {}) {
+  try {
+    const checks = await fetchFastMergeChecks({ ghClient, repo, prNumber });
+    return { ok: true, checks, summary: summarizeFastMergeChecks(checks) };
+  } catch (err) {
+    logger?.warn?.(
+      `[follow-up-merge-agent] fast-merge checks unavailable for ${repo}#${prNumber}; leaving skipped: ${err?.message || err}`
+    );
+    return { ok: false, reason: 'checks-transport-failed', err };
+  }
+}
+
+async function processFastMergePR({
+  db,
+  ghClient = execFileAsync,
+  rootDir = process.cwd(),
+  repo,
+  prNumber,
+  authorizedHeadSha,
+  auditWriter = null,
+  logger = console,
+} = {}) {
+  const firstView = await fetchFastMergePrView({ ghClient, repo, prNumber });
+  if (firstView.state === 'MERGED' || firstView.mergedAt) {
+    const at = firstView.mergedAt || isoNow();
+    updateFastMergeTerminalState(db, {
+      state: FAST_MERGE_MERGED_STATE,
+      repo,
+      prNumber,
+      at,
+    });
+    await writeFastMergeAudit({
+      db,
+      rootDir,
+      auditWriter,
+      logger,
+      entry: buildFastMergeCloseAuditEntry({
+        action: 'merged',
+        repo,
+        prNumber,
+        authorizedHeadSha,
+        currentHeadSha: firstView.headRefOid,
+        mergedHeadSha: firstView.headRefOid,
+        manualMergeDetected: true,
+        at,
+      }),
+    });
+    return { status: 'merged', manualMergeDetected: true };
+  }
+  if (firstView.state === 'CLOSED') {
+    const at = firstView.closedAt || isoNow();
+    updateFastMergeTerminalState(db, {
+      state: FAST_MERGE_CLOSED_STATE,
+      repo,
+      prNumber,
+      at,
+    });
+    await writeFastMergeAudit({
+      db,
+      rootDir,
+      auditWriter,
+      logger,
+      entry: buildFastMergeCloseAuditEntry({
+        action: 'closed',
+        repo,
+        prNumber,
+        authorizedHeadSha,
+        currentHeadSha: firstView.headRefOid,
+        closedWithoutMerge: true,
+        failureReason: 'PR closed without merge',
+        at,
+      }),
+    });
+    return { status: 'closed' };
+  }
+
+  if (!authorizedHeadSha || String(firstView.headRefOid || '') !== String(authorizedHeadSha)) {
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha,
+      currentHeadSha: firstView.headRefOid || null,
+      labels: firstView.labels,
+      reason: `fast-merge head changed: authorized ${authorizedHeadSha || 'missing'}; current ${firstView.headRefOid || 'missing'}`,
+      action: 'head-changed-requeued',
+      headChanged: true,
+      auditWriter,
+      logger,
+    });
+  }
+
+  if (hasFastMergeVeto(firstView.labels)) {
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha,
+      currentHeadSha: firstView.headRefOid || null,
+      labels: firstView.labels,
+      reason: 'fast-merge veto label detected; requeueing normal first-pass review',
+      action: 'veto-requeued',
+      vetoDetected: true,
+      auditWriter,
+      logger,
+    });
+  }
+
+  if (!hasFastMergeAuthorizationLabel(firstView.labels)) {
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha,
+      currentHeadSha: firstView.headRefOid || null,
+      labels: firstView.labels,
+      reason: 'fast-merge authorization label absent; requeueing normal first-pass review',
+      action: 'label-removed-requeued',
+      labelRemoved: true,
+      auditWriter,
+      logger,
+    });
+  }
+
+  const initialChecks = await fetchAndSummarizeFastMergeChecks({ ghClient, repo, prNumber, logger });
+  if (!initialChecks.ok) return { status: 'skipped_still_pending', reason: initialChecks.reason };
+  const checkSummary = initialChecks.summary;
+  if (checkSummary.status === 'failed') {
+    updateFastMergeTerminalState(db, {
+      state: FAST_MERGE_BLOCKED_STATE,
+      repo,
+      prNumber,
+      failureMessage: checkSummary.failureMessage,
+    });
+    await writeFastMergeAudit({
+      db,
+      rootDir,
+      auditWriter,
+      logger,
+      entry: buildFastMergeCloseAuditEntry({
+        action: 'blocked',
+        repo,
+        prNumber,
+        authorizedHeadSha,
+        currentHeadSha: firstView.headRefOid,
+        failureReason: checkSummary.failureMessage,
+        checkConclusions: checkSummary.checkConclusions,
+      }),
+    });
+    return { status: 'blocked', reason: 'ci-failed' };
+  }
+  if (checkSummary.status === 'pending') {
+    return { status: 'skipped_still_pending', reason: 'ci-pending' };
+  }
+
+  const preMergeView = await fetchFastMergePrView({ ghClient, repo, prNumber });
+  if (!authorizedHeadSha || String(preMergeView.headRefOid || '') !== String(authorizedHeadSha)) {
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha,
+      currentHeadSha: preMergeView.headRefOid || null,
+      labels: preMergeView.labels,
+      reason: `fast-merge head changed before merge: authorized ${authorizedHeadSha || 'missing'}; current ${preMergeView.headRefOid || 'missing'}`,
+      action: 'head-changed-requeued',
+      headChanged: true,
+      auditWriter,
+      logger,
+    });
+  }
+  if (hasFastMergeVeto(preMergeView.labels)) {
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha,
+      currentHeadSha: preMergeView.headRefOid || null,
+      labels: preMergeView.labels,
+      reason: 'fast-merge veto label detected before merge; requeueing normal first-pass review',
+      action: 'veto-requeued',
+      vetoDetected: true,
+      auditWriter,
+      logger,
+    });
+  }
+  if (!hasFastMergeAuthorizationLabel(preMergeView.labels)) {
+    return auditAndRequeueFastMerge({
+      db,
+      rootDir,
+      ghClient,
+      repo,
+      prNumber,
+      authorizedHeadSha,
+      currentHeadSha: preMergeView.headRefOid || null,
+      labels: preMergeView.labels,
+      reason: 'fast-merge authorization label absent before merge; requeueing normal first-pass review',
+      action: 'label-removed-requeued',
+      labelRemoved: true,
+      auditWriter,
+      logger,
+    });
+  }
+
+  const preMergeChecks = await fetchAndSummarizeFastMergeChecks({ ghClient, repo, prNumber, logger });
+  if (!preMergeChecks.ok) return { status: 'skipped_still_pending', reason: preMergeChecks.reason };
+  if (preMergeChecks.summary.status === 'failed') {
+    updateFastMergeTerminalState(db, {
+      state: FAST_MERGE_BLOCKED_STATE,
+      repo,
+      prNumber,
+      failureMessage: preMergeChecks.summary.failureMessage,
+    });
+    await writeFastMergeAudit({
+      db,
+      rootDir,
+      auditWriter,
+      logger,
+      entry: buildFastMergeCloseAuditEntry({
+        action: 'blocked',
+        repo,
+        prNumber,
+        authorizedHeadSha,
+        currentHeadSha: preMergeView.headRefOid,
+        failureReason: preMergeChecks.summary.failureMessage,
+        checkConclusions: preMergeChecks.summary.checkConclusions,
+      }),
+    });
+    return { status: 'blocked', reason: 'ci-failed-before-merge' };
+  }
+  if (preMergeChecks.summary.status === 'pending') {
+    return { status: 'skipped_still_pending', reason: 'ci-pending-before-merge' };
+  }
+
+  let mergeResult;
+  try {
+    mergeResult = await mergeFastMergePr({
+      ghClient,
+      repo,
+      prNumber,
+      matchHeadCommit: authorizedHeadSha,
+    });
+  } catch (err) {
+    if (isRetryableGhTransportError(err)) {
+      logger?.warn?.(
+        `[follow-up-merge-agent] fast-merge transport failure exhausted for ${repo}#${prNumber}; leaving skipped: ${err?.message || err}`
+      );
+      return { status: 'skipped_still_pending', reason: 'merge-transport-failed' };
+    }
+    let postMergeView;
+    try {
+      postMergeView = await fetchFastMergePrView({ ghClient, repo, prNumber });
+    } catch (viewErr) {
+      if (isRetryableGhTransportError(viewErr)) {
+        logger?.warn?.(
+          `[follow-up-merge-agent] fast-merge post-merge verification unavailable for ${repo}#${prNumber}; leaving skipped: ${viewErr?.message || viewErr}`
+        );
+        return { status: 'skipped_still_pending', reason: 'merge-postcheck-transport-failed' };
+      }
+      throw viewErr;
+    }
+    if (postMergeView.state === 'MERGED' || postMergeView.mergedAt) {
+      const mergedAt = postMergeView.mergedAt || isoNow();
+      let mergeSha = null;
+      try {
+        mergeSha = await fetchFastMergeMergeCommit({ ghClient, repo, prNumber });
+      } catch {}
+      updateFastMergeTerminalState(db, {
+        state: FAST_MERGE_MERGED_STATE,
+        repo,
+        prNumber,
+        at: mergedAt,
+      });
+      await writeFastMergeAudit({
+        db,
+        rootDir,
+        auditWriter,
+        logger,
+        entry: buildFastMergeCloseAuditEntry({
+          action: 'merged',
+          repo,
+          prNumber,
+          authorizedHeadSha,
+          currentHeadSha: postMergeView.headRefOid || preMergeView.headRefOid,
+          mergedHeadSha: postMergeView.headRefOid || authorizedHeadSha,
+          mergeSha,
+          manualMergeDetected: true,
+          checkConclusions: checkSummary.checkConclusions,
+          mergeStderr: err?.stderr || null,
+          mergeStdout: err?.stdout || null,
+          at: mergedAt,
+        }),
+      });
+      return { status: 'merged', manualMergeDetected: true };
+    }
+    const detail = String(err?.stderr || err?.stdout || err?.message || err).trim();
+    updateFastMergeTerminalState(db, {
+      state: FAST_MERGE_BLOCKED_STATE,
+      repo,
+      prNumber,
+      failureMessage: detail || 'GitHub refused fast-merge',
+    });
+    await writeFastMergeAudit({
+      db,
+      rootDir,
+      auditWriter,
+      logger,
+      entry: buildFastMergeCloseAuditEntry({
+        action: 'blocked',
+        repo,
+        prNumber,
+        authorizedHeadSha,
+        currentHeadSha: preMergeView.headRefOid,
+        failureReason: detail || 'GitHub refused fast-merge',
+        checkConclusions: checkSummary.checkConclusions,
+        mergeStderr: err?.stderr || null,
+        mergeStdout: err?.stdout || null,
+      }),
+    });
+    return { status: 'blocked', reason: 'merge-refused' };
+  }
+
+  const mergedAt = isoNow();
+  let mergeSha = null;
+  try {
+    mergeSha = await fetchFastMergeMergeCommit({ ghClient, repo, prNumber });
+  } catch {}
+  updateFastMergeTerminalState(db, {
+    state: FAST_MERGE_MERGED_STATE,
+    repo,
+    prNumber,
+    at: mergedAt,
+  });
+  await writeFastMergeAudit({
+    db,
+    rootDir,
+    auditWriter,
+    logger,
+    entry: buildFastMergeCloseAuditEntry({
+      action: 'merged',
+      repo,
+      prNumber,
+      authorizedHeadSha,
+      currentHeadSha: preMergeView.headRefOid,
+      mergedHeadSha: authorizedHeadSha,
+      mergeSha,
+      checkConclusions: checkSummary.checkConclusions,
+      mergeStdout: mergeResult?.stdout || null,
+      mergeStderr: mergeResult?.stderr || null,
+      at: mergedAt,
+    }),
+  });
+  return { status: 'merged' };
+}
+
+async function pollFastMergeQueue({
+  db,
+  ghClient = execFileAsync,
+  rootDir = process.cwd(),
+  perPollCap = resolveFastMergePerPollCap(),
+  repos = null,
+  auditWriter = null,
+  logger = console,
+} = {}) {
+  const cap = Number.isInteger(perPollCap) && perPollCap > 0
+    ? perPollCap
+    : DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP;
+  const repoSet = Array.isArray(repos) && repos.length > 0
+    ? new Set(repos.map((repo) => String(repo)))
+    : null;
+  const repoFilter = repoSet ? [...repoSet] : [];
+  const repoPredicate = repoFilter.length > 0
+    ? ` AND repo IN (${repoFilter.map(() => '?').join(', ')})`
+    : '';
+  const rows = db.prepare(
+    `SELECT id AS pass_id, repo, pr_number, fast_merge_authorized_head_sha
+      FROM reviewed_prs
+      WHERE pr_state = ?${repoPredicate}
+      ORDER BY reviewed_at ASC, id ASC
+      LIMIT ?`
+  ).all(FAST_MERGE_SKIPPED_STATE, ...repoFilter, cap * 5);
+  const summary = {
+    processed: 0,
+    merged: 0,
+    blocked: 0,
+    requeued_head_change: 0,
+    requeued_veto: 0,
+    requeued_label_removed: 0,
+    skipped_still_pending: 0,
+  };
+  let terminalProgress = 0;
+  for (const row of rows) {
+    summary.processed += 1;
+    try {
+      const result = await processFastMergePR({
+        db,
+        ghClient,
+        rootDir,
+        repo: row.repo,
+        prNumber: row.pr_number,
+        authorizedHeadSha: row.fast_merge_authorized_head_sha,
+        auditWriter,
+        logger,
+      });
+      if (result?.status === 'merged') summary.merged += 1;
+      else if (result?.status === 'blocked') summary.blocked += 1;
+      else if (result?.status === 'requeued_head_change') summary.requeued_head_change += 1;
+      else if (result?.status === 'requeued_veto') summary.requeued_veto += 1;
+      else if (result?.status === 'requeued_label_removed') summary.requeued_label_removed += 1;
+      else if (result?.status === 'skipped_still_pending') summary.skipped_still_pending += 1;
+      if (result?.status && result.status !== 'skipped_still_pending') {
+        terminalProgress += 1;
+      }
+    } catch (err) {
+      logger?.error?.(
+        `[follow-up-merge-agent] fast-merge processing failed for ${row.repo}#${row.pr_number}: ${err?.message || err}`
+      );
+      summary.skipped_still_pending += 1;
+    }
+    if (terminalProgress >= cap) break;
+  }
+  return summary;
+}
+
 async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync,
   operatorApprovalEvent = undefined,
@@ -2978,8 +3925,10 @@ export {
   MERGE_AGENT_REQUESTED_LABEL,
   NO_MERGE_HOLD_LABEL,
   OPERATOR_SKIP_LABELS,
+  FML_MERGE_AGENT_PER_POLL_CAP_ENV,
   TERMINAL_WORKER_RUN_STATUSES,
   addMergeAgentDispatchedLabel,
+  buildFastMergeCloseAuditEntry,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
   cancelMergeAgentDispatchOnMerge,
@@ -3005,8 +3954,11 @@ export {
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,
+  pollFastMergeQueue,
+  processFastMergePR,
   lookupOriginalWorkerRunStatus,
   prepareOriginalWorkerForMergeAgent,
+  resolveFastMergePerPollCap,
   resolveSessionLedgerDbPath,
   recordMergeAgentDispatch,
   updateMergeAgentLifecycleCleanup,
@@ -3014,5 +3966,7 @@ export {
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
   summarizeChecksConclusion,
+  summarizeFastMergeChecks,
+  writeFastMergeCloseAuditEntry,
   writeMergeAgentPrompt,
 };

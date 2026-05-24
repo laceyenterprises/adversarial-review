@@ -291,10 +291,25 @@ the operator-label timestamp.
 ### Merge-agent contract
 
 `fast_merge_authorized_head_sha` is the commit the operator effectively approved
-for the bypass lane. Merge-agent does not consume `fast_merge_skipped` rows yet;
-the live-head equality check and `fast_merge_merged` transition are deferred to
-the next fast-merge phase. Until that lands, treat `fast_merge_skipped` as a
-watcher-owned staging state rather than an active merge-agent contract.
+for the bypass lane. The follow-up daemon now actively consumes
+`fast_merge_skipped` rows and closes them through the fast-merge path:
+
+- it re-checks the live PR head, the live fast-merge authorization label, and `fast-merge-veto`,
+- summarizes `gh pr checks --json name,state,bucket,workflow,link` output for pending/failed/successful CI,
+- re-summarizes checks in the immediate pre-merge window,
+- merges with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>`,
+- records `fast_merge_merged`, `fast_merge_closed`, or `fast_merge_blocked`,
+- and requeues normal first-pass review when the head changed, veto appeared, or the authorization label was removed.
+
+Before recording `fast_merge_blocked` on a merge error, the daemon must re-fetch
+PR state; if GitHub already shows the PR merged, the durable state becomes
+`fast_merge_merged` instead so partial merge success cannot be misreported as a
+blocked refusal. Fast-merge audit JSON is stored separately under
+`data/fast-merge-audits/`; it is not part of the reviewer runtime
+`data/reviewer-runs/` ledger. Skip and close records share the directory but
+carry distinct audit-type discriminators, and terminal close-path audit failures
+leave `fast_merge_audit_status='pending'` on the row so the watcher retry lane
+can re-emit the audit.
 
 ---
 

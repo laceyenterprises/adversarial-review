@@ -8,6 +8,8 @@ import {
   dispatchMergeAgentForPR,
   listMergeAgentDispatches,
   recordMergeAgentDispatch,
+  updateMergeAgentLifecycleCleanup,
+  upsertMergeAgentLifecycleCleanup,
 } from '../src/follow-up-merge-agent.mjs';
 
 const AGENT_OS_PRESENT_STUB = () => ({ present: true, source: 'test' });
@@ -183,4 +185,83 @@ test('not-found dispatch (reaped) is treated as re-dispatchable under watcher ow
 
   assert.equal(result.decision, 'dispatch', 'a reaped (not-found) dispatch is no longer live => safe to re-dispatch');
   assert.equal(dispatchCalls.length, 1);
+});
+
+test('not-found fails closed when HQ owner resolution degraded and --as-owner cannot be proven', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'hq-root-'));
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({}));
+  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  const dispatchCalls = [];
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [{ name: 'merge-agent-dispatched' }] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        const err = new Error('Command failed');
+        err.code = 1;
+        err.stderr = '[hq] no dispatch with id: lrq_94ae724b-9546-4e0c-afd3-a752304a1138 (or owned by another account)\n';
+        throw err;
+      }
+      dispatchCalls.push(args);
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    now: '2026-05-24T04:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'skip-already-dispatched', 'without proven --as-owner visibility the watcher must fail closed');
+  assert.equal(dispatchCalls.length, 0);
+});
+
+test('failed worker is still reclaimed when dispatched-label add cleanup is pending', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = makeHqRoot('airlock');
+  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  upsertMergeAgentLifecycleCleanup(rootDir, {
+    repo: makeJob().repo,
+    prNumber: makeJob().prNumber,
+    transition: 'dispatched-label-add',
+    headSha: makeJob().headSha,
+    queuedAt: '2026-05-24T00:00:01.000Z',
+  });
+  updateMergeAgentLifecycleCleanup(rootDir, {
+    repo: makeJob().repo,
+    prNumber: makeJob().prNumber,
+    attemptedAt: '2026-05-24T00:00:02.000Z',
+    result: {
+      attempted: true,
+      cleanupComplete: false,
+      retryable: true,
+      transition: 'dispatched-label-add',
+      labelAdded: false,
+      labelAddError: 'github 502',
+    },
+  });
+  const dispatchCalls = [];
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      dispatchCalls.push(args);
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    now: '2026-05-24T04:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch', 'pending dispatched-label cleanup must not wedge retry ownership');
+  assert.equal(dispatchCalls.length, 1);
+  const records = listMergeAgentDispatches(rootDir);
+  assert.equal(records[0].watcherReDispatchCount, 1);
 });

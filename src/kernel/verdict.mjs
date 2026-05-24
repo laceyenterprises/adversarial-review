@@ -81,8 +81,25 @@ function sanitizeCodexReviewPayload(reviewText) {
 }
 
 function extractReviewVerdict(reviewBody) {
-  const match = String(reviewBody ?? '').match(/^##\s+Verdict\s*$\s*([^\n]+)/im);
-  return match ? match[1].trim() : null;
+  const text = String(reviewBody ?? '');
+  const heading = text.match(/^##\s+Verdict\s*$/im);
+  if (!heading) return null;
+
+  const sectionStart = Number(heading.index) + heading[0].length;
+  const remainder = text.slice(sectionStart);
+  const nextHeading = remainder.search(/^##\s+/m);
+  const section = nextHeading >= 0 ? remainder.slice(0, nextHeading) : remainder;
+  const lines = section
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of [...lines].reverse()) {
+    if (normalizeReviewVerdict(line) !== 'unknown') {
+      return line;
+    }
+  }
+  return lines[0] ?? null;
 }
 
 /**

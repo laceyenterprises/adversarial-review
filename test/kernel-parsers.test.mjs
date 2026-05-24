@@ -51,6 +51,22 @@ test('kernel verdict parser preserves a production failing verdict byte-for-byte
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(sanitized)), 'request-changes');
 });
 
+test('kernel verdict parser accepts explanatory prose before final verdict line', () => {
+  const review = [
+    '## Summary',
+    'The final pass found no blocking issues, but still has non-blocking findings.',
+    '',
+    '## Verdict',
+    'No blocking issues: the gated Postgres lane cannot corrupt live SQLite.',
+    'The findings above are legitimate but non-blocking under the final-round categorization.',
+    '',
+    'Request changes',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), 'Request changes');
+  assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+});
+
 test('kernel remediation-reply parser accepts a production reply without changing bytes', () => {
   const raw = JSON.stringify(remediationReply, null, 2);
   const parsed = parseRemediationReply(raw, { expectedJob: remediationJob });
@@ -151,9 +167,7 @@ test('kernel sanitizer stops processing further sections after a duplicate is se
 
   const sanitized = sanitizeCodexReviewPayload(dupVerdict);
 
-  // First Verdict must be the one extractReviewVerdict returns, even
-  // though the duplicate's "Request changes" text is still present in
-  // the trailing slice.
+  // First Verdict must be the one extractReviewVerdict returns.
   assert.equal(extractReviewVerdict(sanitized), 'Comment only');
 });
 

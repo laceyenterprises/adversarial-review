@@ -157,6 +157,21 @@ test('kernel verdict parser ignores prose that starts with a verdict keyword whe
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'comment-only');
 });
 
+test('kernel verdict parser keeps blocking negation over trailing permissive prose', () => {
+  const requestChangesLine = 'Request changes -- the items the author marked "now resolved" are NOT fixed; data loss remains.';
+  const review = [
+    '## Summary',
+    'One blocking issue remains.',
+    '',
+    '## Verdict',
+    requestChangesLine,
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), requestChangesLine);
+  assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+});
+
 test('kernel remediation-reply parser accepts a production reply without changing bytes', () => {
   const raw = JSON.stringify(remediationReply, null, 2);
   const parsed = parseRemediationReply(raw, { expectedJob: remediationJob });

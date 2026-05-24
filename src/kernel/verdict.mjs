@@ -124,7 +124,13 @@ function normalizeVerdictSectionLine(verdict) {
 }
 
 function isResolvedRequestChangesProse(normalized) {
-  return /^request changes\b.*\b(?:are|is|were|was|have been|has been|now|already)\s+(?:resolved|addressed|fixed|closed)\b/i
+  if (!/^request changes\b/i.test(normalized)) return false;
+
+  const stillBlocking = /\b(?:not|never|still|remain|remains|must|need|needs|required|requires|unresolved|unsafe|broken|failing|fails?|regression|blocker|blocking|before merge)\b/i
+    .test(normalized);
+  if (stillBlocking) return false;
+
+  return /^request changes\b.{0,160}\b(?:(?:are|is|were|was|have been|has been|have now been|has now been|now|already)\s+(?:resolved|addressed|fixed|closed))\b/i
     .test(normalized);
 }
 

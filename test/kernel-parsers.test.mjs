@@ -98,6 +98,46 @@ test('kernel verdict parser keeps request-changes when trailing prose starts wit
   }
 });
 
+test('kernel verdict parser fails closed on request-changes clauses before permissive prose', () => {
+  const cases = [
+    'Request changes: migration unsafe.',
+    'Request changes - migration unsafe.',
+    'Request changes needed for the migration.',
+  ];
+
+  for (const requestChangesLine of cases) {
+    const review = [
+      '## Summary',
+      'One blocking issue remains.',
+      '',
+      '## Verdict',
+      requestChangesLine,
+      'Comment only addresses the doc nit.',
+    ].join('\n');
+
+    assert.equal(
+      extractReviewVerdict(review),
+      requestChangesLine,
+      `expected ${requestChangesLine} to win over trailing permissive prose`,
+    );
+    assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+  }
+});
+
+test('kernel verdict parser preserves verdict line when trailing clarifier is not a verdict', () => {
+  const review = [
+    '## Summary',
+    'One blocking issue remains.',
+    '',
+    '## Verdict',
+    'Request changes',
+    'See the blocking issues above for details.',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), 'Request changes');
+  assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+});
+
 test('kernel verdict parser ignores prose that starts with a verdict keyword when the final verdict is clean', () => {
   const review = [
     '## Summary',

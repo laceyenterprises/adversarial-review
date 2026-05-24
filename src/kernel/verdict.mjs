@@ -95,26 +95,36 @@ function extractReviewVerdict(reviewBody) {
     .filter(Boolean);
   if (lines.length === 0) return null;
 
-  const normalizedLines = lines.map((line) => normalizeReviewVerdict(line));
-  const dedicatedRequestChangesLines = lines
-    .filter((line) => normalizeDedicatedRequestChangesLine(line) === 'request-changes');
-  const hasRequestChanges = dedicatedRequestChangesLines.length > 0;
+  const normalizedLines = lines.map((line) => normalizeVerdictSectionLine(line));
+  const requestChangesLines = lines
+    .filter((line) => normalizeVerdictSectionLine(line) === 'request-changes');
+  const hasRequestChanges = requestChangesLines.length > 0;
   const hasPermissiveVerdict = normalizedLines.includes('comment-only')
     || normalizedLines.includes('approved');
 
   if (hasRequestChanges && hasPermissiveVerdict) {
-    return dedicatedRequestChangesLines.at(-1);
+    return requestChangesLines.at(-1);
+  }
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const lineVerdict = normalizeVerdictSectionLine(lines[index]);
+    if (lineVerdict && lineVerdict !== 'unknown') {
+      return lines[index];
+    }
   }
 
   return lines.at(-1);
 }
 
-function normalizeDedicatedRequestChangesLine(verdict) {
+function normalizeVerdictSectionLine(verdict) {
   const normalized = normalizeVerdictText(verdict);
   if (!normalized) return null;
-  return /^request changes(?:$|[.!?:;,-]|(?:\s+(?:on|for|regarding|re)\b.*))$/i.test(normalized)
-    ? 'request-changes'
-    : null;
+  if (isResolvedRequestChangesProse(normalized)) return 'unknown';
+  return normalizeReviewVerdict(normalized);
+}
+
+function isResolvedRequestChangesProse(normalized) {
+  return /^request changes\b.*\b(?:resolved|addressed|fixed|closed)\b/i.test(normalized);
 }
 
 function normalizeVerdictText(verdict) {

@@ -98,6 +98,20 @@ test('kernel verdict parser keeps request-changes when trailing prose starts wit
   }
 });
 
+test('kernel verdict parser ignores prose that starts with a verdict keyword when the final verdict is clean', () => {
+  const review = [
+    '## Summary',
+    'The prior blocking items are resolved.',
+    '',
+    '## Verdict',
+    'Request changes from the prior round are now resolved.',
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), 'Comment only');
+  assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'comment-only');
+});
+
 test('kernel remediation-reply parser accepts a production reply without changing bytes', () => {
   const raw = JSON.stringify(remediationReply, null, 2);
   const parsed = parseRemediationReply(raw, { expectedJob: remediationJob });

@@ -96,15 +96,33 @@ function extractReviewVerdict(reviewBody) {
   if (lines.length === 0) return null;
 
   const normalizedLines = lines.map((line) => normalizeReviewVerdict(line));
-  const hasRequestChanges = normalizedLines.includes('request-changes');
+  const dedicatedRequestChangesLines = lines
+    .filter((line) => normalizeDedicatedRequestChangesLine(line) === 'request-changes');
+  const hasRequestChanges = dedicatedRequestChangesLines.length > 0;
   const hasPermissiveVerdict = normalizedLines.includes('comment-only')
     || normalizedLines.includes('approved');
 
   if (hasRequestChanges && hasPermissiveVerdict) {
-    return [...lines].reverse().find((line) => normalizeReviewVerdict(line) === 'request-changes') ?? lines.at(-1);
+    return dedicatedRequestChangesLines.at(-1);
   }
 
   return lines.at(-1);
+}
+
+function normalizeDedicatedRequestChangesLine(verdict) {
+  const normalized = normalizeVerdictText(verdict);
+  if (!normalized) return null;
+  return /^request changes(?:$|[.!?:;,-]|(?:\s+(?:on|for|regarding|re)\b.*))$/i.test(normalized)
+    ? 'request-changes'
+    : null;
+}
+
+function normalizeVerdictText(verdict) {
+  return String(verdict ?? '')
+    .replace(/[*_`~]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 /**
@@ -112,11 +130,7 @@ function extractReviewVerdict(reviewBody) {
  * @returns {ReviewVerdictKind | null}
  */
 function normalizeReviewVerdict(verdict) {
-  const text = String(verdict ?? '')
-    .replace(/[*_`~]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+  const text = normalizeVerdictText(verdict);
   if (!text) return null;
   if (text.startsWith('request changes')) return 'request-changes';
   if (text.startsWith('comment only')) return 'comment-only';

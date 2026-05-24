@@ -51,6 +51,127 @@ test('kernel verdict parser preserves a production failing verdict byte-for-byte
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(sanitized)), 'request-changes');
 });
 
+test('kernel verdict parser accepts explanatory prose before final verdict line', () => {
+  const review = [
+    '## Summary',
+    'The final pass found no blocking issues, but still has non-blocking findings.',
+    '',
+    '## Verdict',
+    'No blocking issues: the gated Postgres lane cannot corrupt live SQLite.',
+    'The findings above are legitimate but non-blocking under the final-round categorization.',
+    '',
+    'Request changes',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), 'Request changes');
+  assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+});
+
+test('kernel verdict parser keeps request-changes when trailing prose starts with Approved or Comment only', () => {
+  const cases = [
+    [
+      'Approved direction overall, but the merge gate still needs the blocking fix above.',
+      'approved',
+    ],
+    [
+      'Comment only on the doc typo once the blocking migration issue is fixed.',
+      'comment-only',
+    ],
+  ];
+
+  for (const [trailingLine, trailingKind] of cases) {
+    const review = [
+      '## Summary',
+      'One blocking issue remains.',
+      '',
+      '## Verdict',
+      'Request changes on the migration safety.',
+      trailingLine,
+    ].join('\n');
+
+    assert.equal(
+      extractReviewVerdict(review),
+      'Request changes on the migration safety.',
+      `expected request-changes to win over trailing ${trailingKind} prose`,
+    );
+    assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+  }
+});
+
+test('kernel verdict parser fails closed on request-changes clauses before permissive prose', () => {
+  const cases = [
+    'Request changes: migration unsafe.',
+    'Request changes - migration unsafe.',
+    'Request changes needed for the migration.',
+    'Request changes -- the migration must be fixed.',
+    'Request changes - the migration needs to be addressed before merge.',
+    'Request changes because the data-loss bug should be resolved first.',
+  ];
+
+  for (const requestChangesLine of cases) {
+    for (const permissiveLine of ['Comment only addresses the doc nit.', 'Approved directionally after the fix.']) {
+      const review = [
+        '## Summary',
+        'One blocking issue remains.',
+        '',
+        '## Verdict',
+        requestChangesLine,
+        permissiveLine,
+      ].join('\n');
+
+      assert.equal(
+        extractReviewVerdict(review),
+        requestChangesLine,
+        `expected ${requestChangesLine} to win over trailing permissive prose`,
+      );
+      assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+    }
+  }
+});
+
+test('kernel verdict parser preserves verdict line when trailing clarifier is not a verdict', () => {
+  const review = [
+    '## Summary',
+    'One blocking issue remains.',
+    '',
+    '## Verdict',
+    'Request changes',
+    'See the blocking issues above for details.',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), 'Request changes');
+  assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+});
+
+test('kernel verdict parser ignores prose that starts with a verdict keyword when the final verdict is clean', () => {
+  const review = [
+    '## Summary',
+    'The prior blocking items are resolved.',
+    '',
+    '## Verdict',
+    'Request changes from the prior round are now resolved.',
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), 'Comment only');
+  assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'comment-only');
+});
+
+test('kernel verdict parser keeps blocking negation over trailing permissive prose', () => {
+  const requestChangesLine = 'Request changes -- the items the author marked "now resolved" are NOT fixed; data loss remains.';
+  const review = [
+    '## Summary',
+    'One blocking issue remains.',
+    '',
+    '## Verdict',
+    requestChangesLine,
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), requestChangesLine);
+  assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+});
+
 test('kernel remediation-reply parser accepts a production reply without changing bytes', () => {
   const raw = JSON.stringify(remediationReply, null, 2);
   const parsed = parseRemediationReply(raw, { expectedJob: remediationJob });
@@ -151,9 +272,7 @@ test('kernel sanitizer stops processing further sections after a duplicate is se
 
   const sanitized = sanitizeCodexReviewPayload(dupVerdict);
 
-  // First Verdict must be the one extractReviewVerdict returns, even
-  // though the duplicate's "Request changes" text is still present in
-  // the trailing slice.
+  // First Verdict must be the one extractReviewVerdict returns.
   assert.equal(extractReviewVerdict(sanitized), 'Comment only');
 });
 

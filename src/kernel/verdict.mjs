@@ -81,8 +81,65 @@ function sanitizeCodexReviewPayload(reviewText) {
 }
 
 function extractReviewVerdict(reviewBody) {
-  const match = String(reviewBody ?? '').match(/^##\s+Verdict\s*$\s*([^\n]+)/im);
-  return match ? match[1].trim() : null;
+  const text = String(reviewBody ?? '');
+  const heading = text.match(/^##\s+Verdict\s*$/im);
+  if (!heading) return null;
+
+  const sectionStart = heading.index + heading[0].length;
+  const remainder = text.slice(sectionStart);
+  const nextHeading = remainder.search(/^##\s+/m);
+  const section = nextHeading >= 0 ? remainder.slice(0, nextHeading) : remainder;
+  const lines = section
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  const normalizedLines = lines.map((line) => normalizeVerdictSectionLine(line));
+  const requestChangesLines = lines
+    .filter((_, index) => normalizedLines[index] === 'request-changes');
+  const hasRequestChanges = requestChangesLines.length > 0;
+  const hasPermissiveVerdict = normalizedLines.includes('comment-only')
+    || normalizedLines.includes('approved');
+
+  if (hasRequestChanges && hasPermissiveVerdict) {
+    return requestChangesLines.at(-1);
+  }
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const lineVerdict = normalizedLines[index];
+    if (lineVerdict && lineVerdict !== 'unknown') {
+      return lines[index];
+    }
+  }
+
+  return lines.at(-1);
+}
+
+function normalizeVerdictSectionLine(verdict) {
+  const normalized = normalizeVerdictText(verdict);
+  if (!normalized) return null;
+  if (isResolvedRequestChangesProse(normalized)) return 'unknown';
+  return normalizeReviewVerdict(normalized);
+}
+
+function isResolvedRequestChangesProse(normalized) {
+  if (!/^request changes\b/i.test(normalized)) return false;
+
+  const stillBlocking = /\b(?:not|never|still|remain|remains|must|need|needs|required|requires|unresolved|unsafe|broken|failing|fails?|regression|blocker|blocking|before merge)\b/i
+    .test(normalized);
+  if (stillBlocking) return false;
+
+  return /^request changes\b.{0,160}\b(?:(?:are|is|were|was|have been|has been|have now been|has now been|now|already)\s+(?:resolved|addressed|fixed|closed))\b/i
+    .test(normalized);
+}
+
+function normalizeVerdictText(verdict) {
+  return String(verdict ?? '')
+    .replace(/[*_`~]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 /**
@@ -90,11 +147,7 @@ function extractReviewVerdict(reviewBody) {
  * @returns {ReviewVerdictKind | null}
  */
 function normalizeReviewVerdict(verdict) {
-  const text = String(verdict ?? '')
-    .replace(/[*_`~]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+  const text = normalizeVerdictText(verdict);
   if (!text) return null;
   if (text.startsWith('request changes')) return 'request-changes';
   if (text.startsWith('comment only')) return 'comment-only';

@@ -185,6 +185,8 @@ Reason mapping:
 
 Clean review verdicts still create follow-up jobs for auditability and gate projection. When the consumer sees a `Comment only` or `Approved` verdict, it moves that job to `stopped` with `review-settled` instead of spawning a remediation worker.
 
+Within the review body's `## Verdict` section, the authoritative verdict is the last recognized verdict line. If the section contains both a blocking `Request changes` verdict line, including clause forms such as `Request changes: ...` or `Request changes -- ... must be fixed`, and a permissive `Comment only` or `Approved` line, the parser resolves conservatively to `Request changes`; explanatory prior-round resolution prose only avoids this override when the request-changes clause is explicitly in a resolved state, such as `Request changes ... are now resolved` or `Request changes ... have been addressed`. Any negated, current, or future blocking phrase on the same line (`not fixed`, `still`, `remains`, `must be fixed`, `needs to be addressed`, etc.) keeps the line classified as blocking even if it quotes or mentions resolved-state language. If no line is recognized, the verdict remains malformed and the gate fails closed.
+
 The watcher must project the gate on terminal early-exit paths, including already-posted review rows. A settled PR must not stay frozen at an earlier `pending` projection after the durable review verdict is available.
 
 ## Operator Retrigger Contracts

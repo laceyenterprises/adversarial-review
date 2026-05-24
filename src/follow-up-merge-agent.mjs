@@ -1646,7 +1646,9 @@ function pickMergeAgentDispatchDetail(job, {
     return { decision: 'skip-pr-not-open', trigger: null };
   }
 
-  const hasUnbypassableSkipLabel = labels.has('merge-agent-skip') || labels.has('do-not-merge');
+  const hasUnbypassableSkipLabel = labels.has('merge-agent-skip')
+    || labels.has('do-not-merge')
+    || labels.has(NO_MERGE_HOLD_LABEL);
   if (hasUnbypassableSkipLabel) {
     return { decision: 'skip-operator-skip', trigger: null };
   }

@@ -222,6 +222,86 @@ test('steady-state reattach only probes reviewer sessions older than the reviewe
   );
 });
 
+test('steady-state reattach does not touch a freshly claimed row before spawn callback lands', () => {
+  const now = new Date('2026-05-11T05:20:00.000Z');
+
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        last_attempted_at: '2026-05-11T05:19:30.000Z',
+        reviewer_started_at: null,
+        reviewer_pgid: null,
+        reviewer_timeout_ms: 20 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    false,
+    'claim-to-spawn window must not be marked stale just because reviewer_started_at has not been persisted yet'
+  );
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        last_attempted_at: '2026-05-11T04:50:00.000Z',
+        reviewer_started_at: null,
+        reviewer_pgid: null,
+        reviewer_timeout_ms: 20 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    true,
+    'missing spawn metadata becomes reconcilable after the persisted claim timeout expires'
+  );
+});
+
+test('steady-state reattach selection uses persisted launch timeout before current env', () => {
+  const now = new Date('2026-05-11T05:20:00.000Z');
+
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        reviewer_started_at: '2026-05-11T05:05:00.000Z',
+        reviewer_timeout_ms: 10 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 60 * 60 * 1000 }
+    ),
+    true,
+    'row launched with a shorter timeout is stale even if current env is longer'
+  );
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        reviewer_started_at: '2026-05-11T04:30:00.000Z',
+        reviewer_timeout_ms: 60 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    false,
+    'row launched with a longer timeout is not stale just because current env is shorter'
+  );
+});
+
+test('steady-state reattach keys off authoritative spawn time, not earlier claim time', () => {
+  const now = new Date('2026-05-11T05:21:00.000Z');
+
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        last_attempted_at: '2026-05-11T05:00:00.000Z',
+        reviewer_started_at: '2026-05-11T05:10:30.000Z',
+        reviewer_timeout_ms: 15 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 15 * 60 * 1000 }
+    ),
+    false,
+    'a delayed spawn must keep its full runtime budget even when claim happened much earlier'
+  );
+});
+
 test('steady-state reattach per-poll cap defaults small and accepts zero for disable', () => {
   assert.equal(resolveStaleReviewerReconcilePerPoll({}), 3);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '1' }), 1);

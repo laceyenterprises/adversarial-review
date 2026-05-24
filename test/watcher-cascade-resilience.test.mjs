@@ -521,8 +521,9 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
           SET review_status = 'reviewing',
               last_attempted_at = ?,
               reviewer_session_uuid = ?,
-              reviewer_started_at = ?,
+              reviewer_started_at = NULL,
               reviewer_head_sha = ?,
+              reviewer_timeout_ms = ?,
               reviewer_pgid = NULL,
               failed_at = CASE
                 WHEN review_status = 'pending-upstream' THEN failed_at
@@ -538,8 +539,8 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
     ).run(
       '2026-05-04T07:30:00.000Z',
       'session-cascade',
-      '2026-05-04T07:30:00.000Z',
       'head-cascade',
+      20 * 60 * 1000,
       repo,
       prNumber
     );

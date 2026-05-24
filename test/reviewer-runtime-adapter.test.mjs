@@ -36,6 +36,7 @@ import {
   removeReviewerRunRecord,
   reviewerRunSideChannelPaths,
   reviewerRunStatePath,
+  settleReviewerRunRecord,
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -2099,6 +2100,33 @@ test('cancelled reviewer run records remain recoverable on next startup', () => 
     const recoverable = readRecoverableReviewerRunRecords(rootDir);
     assert.equal(recoverable.length, 1);
     assert.equal(recoverable[0].state, 'cancelled');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerRunRecord marks active runs terminal for steady-state recovery cleanup', () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'settle-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      pgid: 6060,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'settle-session',
+    });
+
+    const settled = settleReviewerRunRecord(rootDir, 'settle-session', {
+      state: 'failed',
+      settledAt: '2026-05-11T20:01:00.000Z',
+    });
+
+    assert.equal(settled.state, 'failed');
+    assert.equal(settled.lastHeartbeatAt, '2026-05-11T20:01:00.000Z');
+    assert.equal(readRecoverableReviewerRunRecords(rootDir).length, 0);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

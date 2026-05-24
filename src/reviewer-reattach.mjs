@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
   'A review may have been posted on GitHub by the orphaned child. ' +
@@ -16,6 +18,10 @@ const PROBE_FAILURE_MESSAGE =
   'Reviewer session reattach probe failed; operator must verify GitHub before retrying.';
 const PGID_IDENTITY_FAILURE_MESSAGE =
   'Reviewer process group is alive but does not match the recorded reviewer session; treating as sticky until operator verifies GitHub.';
+const MISSING_TIMEOUT_FAILURE_MESSAGE =
+  'Reviewer session launch timeout was not persisted on this row; refusing to auto-kill based on current watcher config.';
+const OVERDUE_RECOVERY_FAILURE_MESSAGE =
+  'Overdue reviewer recovery could not prove the process exited cleanly without a late GitHub review; operator must verify before retrying.';
 
 const REVIEWER_BOT_LOGINS = new Map([
   ['claude', 'claude-reviewer-lacey'],
@@ -36,6 +42,12 @@ function reviewerBotLogin(reviewer) {
 function parseTime(value) {
   const parsed = Date.parse(value || '');
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parsePositiveInteger(value) {
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric <= 0) return null;
+  return numeric;
 }
 
 function probePgidAlive(pgid) {
@@ -92,14 +104,14 @@ function killPgid(pgid, signal = 'SIGKILL') {
 function makeReviewPostedProbe(octokit, { log = console } = {}) {
   const cache = new Map();
 
-  return async function reviewPostedAfter(row) {
+  return async function reviewPostedAfter(row, { refresh = false } = {}) {
     const startedAtMs = parseTime(row.reviewer_started_at);
     if (startedAtMs === null) return null;
 
     const { owner, repo } = splitRepoPath(row.repo);
     const key = `${row.repo}#${row.pr_number}`;
     let reviews = cache.get(key);
-    if (!reviews) {
+    if (!reviews || refresh) {
       const params = {
         owner,
         repo,
@@ -146,7 +158,7 @@ function prepareStatements(db) {
     listReviewing: db.prepare(
       `SELECT repo, pr_number, reviewer, review_attempts, last_attempted_at,
               reviewer_session_uuid, reviewer_pgid, reviewer_started_at,
-              reviewer_head_sha
+              reviewer_head_sha, reviewer_timeout_ms
          FROM reviewed_prs
         WHERE review_status = 'reviewing'`
     ),
@@ -191,7 +203,11 @@ async function reconcileReviewerSessions({
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
   findPostedReview = makeReviewPostedProbe(octokit),
   shouldReconcileRow = () => true,
+  onTerminalDeadSession = async () => {},
   maxRows = Number.POSITIVE_INFINITY,
+  reviewerDeadlineMs = resolveReviewerTimeoutMs(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  postKillReviewReprobeDelaysMs = [500, 1500, 3000],
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
     ? Number(maxRows)
@@ -278,9 +294,9 @@ async function reconcileReviewerSessions({
     );
     let postedReview = null;
 
-    async function probePostedReviewOrMarkSticky() {
+    async function probePostedReviewOrMarkSticky({ refresh = false } = {}) {
       try {
-        postedReview = await findPostedReview(row);
+        postedReview = await findPostedReview(row, { refresh });
         return true;
       } catch (err) {
         log.warn(
@@ -297,6 +313,96 @@ async function reconcileReviewerSessions({
         });
         return false;
       }
+    }
+
+    async function probePostedReviewAfterRecoveryDeath() {
+      const delays = Array.isArray(postKillReviewReprobeDelaysMs)
+        ? postKillReviewReprobeDelaysMs
+        : [];
+      for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+        if (attempt > 0) {
+          const delayMs = Number(delays[attempt - 1]);
+          if (Number.isFinite(delayMs) && delayMs > 0) {
+            await sleep(delayMs);
+          }
+        }
+        if (!(await probePostedReviewOrMarkSticky({ refresh: true }))) return false;
+        if (postedReview) return true;
+      }
+      return true;
+    }
+
+    async function tryRecoverOverdueAliveSession({ launchTimeoutMs, orphanAgeMs }) {
+      const recoverySignals = ['SIGTERM', 'SIGKILL'];
+      let latestSessionProbe = { alive: true, matched: true };
+      let lastSignal = null;
+
+      for (const signal of recoverySignals) {
+        lastSignal = signal;
+        killProcessGroup(row.reviewer_pgid, signal);
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await sleep(signal === 'SIGTERM' ? 200 : 100);
+          latestSessionProbe = typeof probeSession === 'function'
+            ? probeSession(row)
+            : probeReviewerSession({
+              pgid: row.reviewer_pgid,
+              sessionUuid: row.reviewer_session_uuid,
+              probeAlive,
+            });
+          const stillAlive = typeof latestSessionProbe === 'boolean'
+            ? latestSessionProbe
+            : latestSessionProbe?.alive === true;
+          if (!stillAlive) {
+            if (!(await probePostedReviewAfterRecoveryDeath())) return true;
+            if (postedReview) {
+              markStickyOrphan({
+                statements,
+                row,
+                failureAt,
+                message:
+                  `Reviewer session ${row.reviewer_session_uuid} posted a GitHub review at ` +
+                  `${postedReview.submitted_at} after overdue recovery. Operator must inspect before retrying.`,
+                log,
+                event: 'reviewer_reattach_deadline_posted_during_recovery',
+              });
+              return true;
+            }
+
+            await onTerminalDeadSession({
+              row,
+              state: 'failed',
+              settledAt: failureAt,
+              reason: 'deadline-exceeded',
+            });
+            statements.markFailed.run(
+              failureAt,
+              `Reviewer session ${row.reviewer_session_uuid} (pgid ${row.reviewer_pgid}) was orphaned by a ` +
+              `supervisor restart, exceeded its persisted launch timeout (age ${orphanAgeMs}ms > ${launchTimeoutMs}ms), ` +
+              `and was confirmed dead before automatic re-review.`,
+              row.repo,
+              row.pr_number
+            );
+            log.warn(
+              `[watcher] reviewer_reattach_deadline_exceeded repo=${row.repo} pr=${row.pr_number} ` +
+              `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} age_ms=${orphanAgeMs} ` +
+              `deadline_ms=${launchTimeoutMs} final_signal=${signal}`
+            );
+            return true;
+          }
+        }
+      }
+
+      markStickyOrphan({
+        statements,
+        row,
+        failureAt,
+        message:
+          `${OVERDUE_RECOVERY_FAILURE_MESSAGE} last_signal=${lastSignal || 'none'} ` +
+          `age_ms=${orphanAgeMs} timeout_ms=${launchTimeoutMs}`,
+        log,
+        event: 'reviewer_reattach_deadline_recovery_inconclusive',
+      });
+      return true;
     }
 
     if (alive) {
@@ -344,6 +450,34 @@ async function reconcileReviewerSessions({
         continue;
       }
 
+      // Deadline watchdog. A reviewer spawned `detached` survives a supervisor
+      // bounce on purpose, but its in-process wall-clock timer died with that
+      // supervisor — so an orphan reattached here has nothing left to time it
+      // out. Leaving it "reattached" lets it run unbounded (the 5h17m incident)
+      // and pins the row in `reviewing`, which blocks remediation rereview as
+      // `review-in-flight`. If it has already blown past the reviewer deadline
+      // without posting a review (the postedReview branch above handled the
+      // posted case), attempt bounded recovery. Only auto-fail after the
+      // process is confirmed dead and GitHub is reprobed with no late review.
+      // Any ambiguity falls back to sticky/manual recovery.
+      const orphanAgeMs = now.getTime() - parseTime(row.reviewer_started_at);
+      const launchTimeoutMs = parsePositiveInteger(row.reviewer_timeout_ms);
+      if (launchTimeoutMs === null && Number.isFinite(orphanAgeMs) && orphanAgeMs > reviewerDeadlineMs) {
+        markStickyOrphan({
+          statements,
+          row,
+          failureAt,
+          message: `${MISSING_TIMEOUT_FAILURE_MESSAGE} reviewer_started_at=${row.reviewer_started_at}`,
+          log,
+          event: 'reviewer_reattach_missing_timeout',
+        });
+        continue;
+      }
+      if (Number.isFinite(orphanAgeMs) && launchTimeoutMs !== null && orphanAgeMs > launchTimeoutMs) {
+        await tryRecoverOverdueAliveSession({ launchTimeoutMs, orphanAgeMs });
+        continue;
+      }
+
       log.log(
         `[watcher] reviewer_reattach_alive repo=${row.repo} pr=${row.pr_number} ` +
         `reattached to reviewer session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid}`
@@ -369,6 +503,12 @@ async function reconcileReviewerSessions({
     if (!(await probePostedReviewOrMarkSticky())) continue;
 
     if (postedReview) {
+      await onTerminalDeadSession({
+        row,
+        state: 'completed',
+        settledAt: postedReview.submitted_at,
+        reason: 'posted-review-recovered',
+      });
       statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
       log.log(
         `[watcher] reviewer_reattach_recovered repo=${row.repo} pr=${row.pr_number} ` +
@@ -377,6 +517,12 @@ async function reconcileReviewerSessions({
       continue;
     }
 
+    await onTerminalDeadSession({
+      row,
+      state: 'failed',
+      settledAt: failureAt,
+      reason: 'dead-no-review',
+    });
     statements.markFailed.run(
       failureAt,
       `Reviewer session ${row.reviewer_session_uuid} is no longer alive and no GitHub review was found from ${reviewerBotLogin(row.reviewer)} since ${row.reviewer_started_at || 'unknown start time'}.`,

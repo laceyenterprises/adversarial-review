@@ -390,15 +390,17 @@ function createAcpxReviewerRuntimeAdapter({
           signal: controller.signal,
           onSpawn: ({ pgid }) => {
             assertIsolatedPgid(pgid);
+            const authoritativeSpawnedAt = now();
             record = updateReviewerRunRecord(rootDir, record, {
               state: 'heartbeating',
               pgid,
-              lastHeartbeatAt: now(),
+              spawnedAt: authoritativeSpawnedAt,
+              lastHeartbeatAt: authoritativeSpawnedAt,
             });
             activeRun.record = record;
             activeRun.heartbeatTimer = setInterval(heartbeat, heartbeatIntervalMs);
             activeRun.heartbeatTimer.unref?.();
-            req.onReviewerPgid?.({ sessionUuid, pgid });
+            req.onReviewerPgid?.({ sessionUuid, pgid, spawnedAt: authoritativeSpawnedAt });
           },
         },
       );

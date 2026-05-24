@@ -68,6 +68,8 @@ import {
   listMergeAgentDispatches,
   listMergeAgentLifecycleCleanups,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+  pollFastMergeQueue,
+  resolveFastMergePerPollCap,
   scanStuckMergeAgentDispatches,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
@@ -2183,6 +2185,40 @@ async function retryPendingMergeAgentLifecycleCleanups({
   return { attempted, skipped, pending: pending.length };
 }
 
+async function runFastMergeClosePathIsolated({
+  pollImpl = pollFastMergeQueue,
+  db: reviewDb = db,
+  ghClient = execFileAsync,
+  rootDir = ROOT,
+  perPollCap = resolveFastMergePerPollCap(),
+  repos = activeRepos,
+  logger = console,
+} = {}) {
+  try {
+    const fastMergeSummary = await pollImpl({
+      db: reviewDb,
+      ghClient,
+      rootDir,
+      perPollCap,
+      repos,
+      logger,
+    });
+    if (fastMergeSummary.processed > 0) {
+      logger.log?.(
+        `[watcher] fast-merge close path: processed=${fastMergeSummary.processed} ` +
+        `merged=${fastMergeSummary.merged} blocked=${fastMergeSummary.blocked} ` +
+        `requeued_head_change=${fastMergeSummary.requeued_head_change} ` +
+        `requeued_veto=${fastMergeSummary.requeued_veto} ` +
+        `pending=${fastMergeSummary.skipped_still_pending}`
+      );
+    }
+    return { ok: true, summary: fastMergeSummary };
+  } catch (err) {
+    logger.error?.('[watcher] fast-merge close path failed; continuing normal merge-agent/review work:', err?.message || err);
+    return { ok: false, error: err };
+  }
+}
+
 /**
  * For every PR we previously marked as "open", check if it has since been
  * merged or closed and update Linear accordingly.
@@ -2536,6 +2572,7 @@ async function pollOnce(
   await syncPRLifecycle(octokit, operatorSurface);
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);
+  await runFastMergeClosePathIsolated();
 
   try {
     const ackRetry = await retryPendingRetriggerAckComments({
@@ -3447,6 +3484,7 @@ export {
   readWatcherDrainState,
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
+  runFastMergeClosePathIsolated,
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
   resolveStaleReviewerReconcilePerPoll,

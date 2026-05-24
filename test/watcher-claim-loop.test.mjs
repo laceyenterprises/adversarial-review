@@ -15,6 +15,7 @@ function fileUrl(...parts) {
 
 function buildLoaderSource({
   reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+  followUpMergeAgentSource = "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export function resolveFastMergePerPollCap() { return 5; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; }",
 } = {}) {
   const reviewStateUrl = fileUrl('src', 'review-state.mjs');
   const reviewStateActualUrl = `${reviewStateUrl}?actual`;
@@ -199,7 +200,7 @@ export async function load(url, context, nextLoad) {
     'fixture:adversarial-gate-status': "export function deleteGateRecordsForPR() {} export async function projectAdversarialGateStatus() { return { decision: { state: 'pending', reason: 'fixture' } }; }",
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
     'fixture:follow-up-jobs': "export function resolveRoundBudgetForJob() { return { roundBudget: 1, riskClass: 'medium' }; } export function summarizePRRemediationLedger() { return { completedRoundsForPR: 0, latestRiskClass: 'medium', latestMaxRounds: 1 }; } export const PUBLIC_REPLY_MAX_CHARS = 1200; export function detectPublicReplyNoiseSignal() { return null; }",
-    'fixture:follow-up-merge-agent': "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; }",
+    'fixture:follow-up-merge-agent': ${JSON.stringify(followUpMergeAgentSource)},
     'fixture:follow-up-retrigger-label': "export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation'; export async function retryPendingRetriggerAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerRemediationFromLabel() { return { outcome: 'noop' }; }",
     'fixture:operator-retrigger-helpers': "export function findLatestFollowUpJob() { return null; }",
     'fixture:reviewer-cascade': "export const CASCADE_FAILURE_CAP = 3; export function classifyReviewerFailure() { return 'unknown'; } export function clearCascadeState() {} export function formatTransientFailureBreakdown() { return ''; } export function isReviewerSubprocessTimeout() { return false; } export function recordCascadeFailure() { return { consecutiveTransientFailures: 1, transientFailureBreakdown: {}, backoffMinutes: 1 }; } export function shouldBackoffReviewerSpawn() { return { shouldBackoff: false }; }",
@@ -422,6 +423,48 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT),
       'reviewer pass rows should retain the tool root so transcript token fallback can match Claude sessions on disk'
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce isolates fast-merge poll exceptions and still claims normal review work', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      followUpMergeAgentSource: "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export async function pollFastMergeQueue() { throw new Error('fixture fast-merge select failed'); } export function resolveFastMergePerPollCap() { return 5; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; }",
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_TOKEN: 'fixture-token',
+        },
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /fixture fast-merge select failed/);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+    assert.equal(summary.pollError, null);
+    assert.equal(summary.rows['101'].review_status, 'posted');
+    assert.equal(summary.rows['102'].review_status, 'posted');
+    assert.equal(summary.reviewerSpawns.length, 2);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

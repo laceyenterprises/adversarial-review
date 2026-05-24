@@ -295,7 +295,7 @@ for the bypass lane. The follow-up daemon now actively consumes
 `fast_merge_skipped` rows and closes them through the fast-merge path:
 
 - it re-checks the live PR head and `fast-merge-veto` label,
-- summarizes `gh pr checks` output for pending/failed/successful CI,
+- summarizes `gh pr checks --json name,state,bucket,workflow,link` output for pending/failed/successful CI,
 - merges with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>`,
 - records `fast_merge_merged`, `fast_merge_closed`, or `fast_merge_blocked`,
 - and requeues normal first-pass review when the head changed or veto appeared.
@@ -303,7 +303,9 @@ for the bypass lane. The follow-up daemon now actively consumes
 Before recording `fast_merge_blocked` on a merge error, the daemon must re-fetch
 PR state; if GitHub already shows the PR merged, the durable state becomes
 `fast_merge_merged` instead so partial merge success cannot be misreported as a
-blocked refusal.
+blocked refusal. Fast-merge audit JSON is stored separately under
+`data/fast-merge-audits/`; it is not part of the reviewer runtime
+`data/reviewer-runs/` ledger.
 
 ---
 

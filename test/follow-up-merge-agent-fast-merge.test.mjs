@@ -1,12 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 
 import {
+  buildFastMergeCloseAuditEntry,
   pollFastMergeQueue,
   processFastMergePR,
   resolveFastMergePerPollCap,
+  writeFastMergeCloseAuditEntry,
 } from '../src/follow-up-merge-agent.mjs';
+import { fastMergeAuditDir } from '../src/fast-merge-audit-storage.mjs';
 import { ensureReviewStateSchema, getReviewRow } from '../src/review-state.mjs';
 
 const REPO = 'laceyenterprises/adversarial-review';
@@ -45,15 +51,15 @@ function openView(head = 'sha-A', labels = []) {
 }
 
 function successChecks() {
-  return [{ name: 'ci', conclusion: 'success', state: 'COMPLETED' }];
+  return [{ name: 'ci', state: 'SUCCESS', bucket: 'pass' }];
 }
 
 function pendingChecks() {
-  return [{ name: 'ci', conclusion: null, state: 'IN_PROGRESS' }];
+  return [{ name: 'ci', state: 'IN_PROGRESS', bucket: 'pending' }];
 }
 
 function failedChecks() {
-  return [{ name: 'ci', conclusion: 'failure', state: 'COMPLETED' }];
+  return [{ name: 'ci', state: 'FAILURE', bucket: 'fail' }];
 }
 
 function transportError(message = 'timed out') {
@@ -278,7 +284,7 @@ test('fast-merge failed CI from gh non-zero exit still blocks with audit', async
   const audits = [];
   const gh = makeGhStub({
     views: [openView('sha-A')],
-    checks: [checksCliError(1, [{ name: 'ci', conclusion: 'failure', state: 'COMPLETED', bucket: 'fail' }])],
+    checks: [checksCliError(1, [{ name: 'ci', state: 'FAILURE', bucket: 'fail' }])],
   });
 
   const result = await processFastMergePR({
@@ -301,7 +307,7 @@ test('fast-merge pending CI from gh exit 8 stays skipped', async () => {
   seedFastMerge(db, 8062);
   const gh = makeGhStub({
     views: [openView('sha-A')],
-    checks: [checksCliError(8, [{ name: 'ci', conclusion: null, state: 'IN_PROGRESS', bucket: 'pending' }])],
+    checks: [checksCliError(8, [{ name: 'ci', state: 'IN_PROGRESS', bucket: 'pending' }])],
   });
 
   const result = await processFastMergePR({
@@ -531,4 +537,56 @@ test('fast-merge merge refusal that already landed records merged instead of blo
   assert.equal(row(db, 827).pr_state, 'fast_merge_merged');
   assert.equal(row(db, 827).review_status, 'fast_merge_merged');
   assert.equal(audits.at(-1).merge_sha, 'feedfacefeedfacefeedfacefeedfacefeedface');
+});
+
+test('fast-merge checks request only real gh JSON fields', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 828);
+  const calls = [];
+  const gh = async (cmd, args) => {
+    calls.push({ cmd, args });
+    const command = args.slice(0, 2).join(' ');
+    if (command === 'pr view') {
+      return { stdout: JSON.stringify(openView('sha-A')), stderr: '' };
+    }
+    if (command === 'pr checks') {
+      const jsonFields = args[args.indexOf('--json') + 1];
+      assert.equal(jsonFields, 'name,state,bucket,workflow,link');
+      return { stdout: JSON.stringify(successChecks()), stderr: '' };
+    }
+    if (command === 'pr merge') {
+      return { stdout: 'Merged\n', stderr: '' };
+    }
+    throw new Error(`unexpected gh call: ${cmd} ${args.join(' ')}`);
+  };
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 828,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: () => {},
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.ok(calls.some((call) => call.args.slice(0, 2).join(' ') === 'pr checks'));
+});
+
+test('fast-merge close audits write to dedicated fast-merge audit directory', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'fast-merge-audit-'));
+  const entry = buildFastMergeCloseAuditEntry({
+    action: 'merged',
+    repo: REPO,
+    prNumber: 829,
+    at: '2026-05-24T20:00:00.000Z',
+  });
+
+  const writtenPath = writeFastMergeCloseAuditEntry(rootDir, entry);
+  const payload = JSON.parse(readFileSync(writtenPath, 'utf8'));
+
+  assert.ok(writtenPath.startsWith(fastMergeAuditDir(rootDir)));
+  assert.ok(existsSync(writtenPath));
+  assert.equal(payload.kind, 'fast-merge-audit');
+  assert.equal(payload.schemaVersion, 1);
 });

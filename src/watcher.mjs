@@ -79,6 +79,7 @@ import {
   deleteGateRecordsForPR,
   projectAdversarialGateStatus,
 } from './adversarial-gate-status.mjs';
+import { fastMergeAuditDir } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
@@ -488,9 +489,7 @@ function fastMergeAuditPath(rootDir, { repo, prNumber, action, at }) {
   const safeRepo = String(repo || '').replace(/[^A-Za-z0-9._-]/g, '_');
   const safeAt = String(at || new Date().toISOString()).replace(/[^0-9A-Za-z._-]/g, '-');
   return join(
-    rootDir,
-    'data',
-    'reviewer-runs',
+    fastMergeAuditDir(rootDir),
     `fast-merge-${action}-${safeRepo}-${prNumber}-${safeAt}-${randomUUID()}.json`
   );
 }
@@ -511,19 +510,9 @@ function buildFastMergeAuditEntry({
 }) {
   const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
   const entry = {
+    kind: 'fast-merge-audit',
+    schemaVersion: 1,
     sessionUuid,
-    domain: 'code-pr',
-    runtime: 'watcher-fast-merge',
-    state: 'completed',
-    pgid: null,
-    spawnedAt: authorizedAt,
-    lastHeartbeatAt: null,
-    reattachToken: null,
-    subjectContext: {
-      repo,
-      prNumber,
-      headSha: authorizedHeadSha,
-    },
     fast_merge: true,
     action,
     categories,

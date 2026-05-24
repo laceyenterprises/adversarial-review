@@ -239,12 +239,12 @@ Each poll processes up to `DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP = 5` rows unless
 
 - Re-fetch the PR view and refuse the bypass if the live head no longer matches `fast_merge_authorized_head_sha`.
 - Requeue normal first-pass review instead of merging when the head changed or `fast-merge-veto` is present.
-- Validate CI with `gh pr checks --json ...`, treating CLI exits `8` (pending) and `1` (failed) as data-bearing results when stdout contains parseable JSON rather than as transport failures.
+- Validate CI with `gh pr checks --json name,state,bucket,workflow,link`, treating CLI exits `8` (pending) and `1` (failed) as data-bearing results when stdout contains parseable JSON rather than as transport failures.
 - Merge only with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>` so GitHub rejects the merge if the head moved after the last verification step.
 
 The `--admin` flag is an intentional branch-protection bypass for this lane. The safety floor is therefore explicit and cumulative: the row must already be in the watcher-authorized fast-merge state, the live head must still equal the authorized SHA, CI must summarize as successful, and `fast-merge-veto` must remain absent. If any of those predicates stop being true, the daemon must fail closed to the normal adversarial-review path or leave the row in `fast_merge_skipped` for a later poll; it must not broaden merge authority.
 
-Fast-merge state transitions are audit-bearing. Successful merges persist `fast_merge_merged`; closed-unmerged PRs persist `fast_merge_closed`; deterministic refusals while the PR is provably still open persist `fast_merge_blocked`. Merge CLI errors are not authoritative on their own: before recording `fast_merge_blocked`, the daemon must re-fetch PR state and treat an already-merged PR as `fast_merge_merged` so a server-side merge followed by client timeout or branch-delete failure does not strand the row in a false blocked state. Merge audits should capture the real merge commit SHA from `gh pr view --json mergeCommit` when available rather than regex-scraping CLI output.
+Fast-merge state transitions are audit-bearing. Successful merges persist `fast_merge_merged`; closed-unmerged PRs persist `fast_merge_closed`; deterministic refusals while the PR is provably still open persist `fast_merge_blocked`. Merge CLI errors are not authoritative on their own: before recording `fast_merge_blocked`, the daemon must re-fetch PR state and treat an already-merged PR as `fast_merge_merged` so a server-side merge followed by client timeout or branch-delete failure does not strand the row in a false blocked state. Merge audits should capture the real merge commit SHA from `gh pr view --json mergeCommit` when available rather than regex-scraping CLI output, and fast-merge audit JSON belongs under `data/fast-merge-audits/` rather than the reviewer runtime state directory.
 
 ### Dispatch trigger
 

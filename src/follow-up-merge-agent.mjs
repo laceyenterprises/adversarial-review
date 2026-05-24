@@ -16,6 +16,7 @@ import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { fastMergeAuditDir } from './fast-merge-audit-storage.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
@@ -2924,10 +2925,6 @@ function resolveFastMergePerPollCap(env = process.env) {
     : DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP;
 }
 
-function fastMergeAuditDir(rootDir) {
-  return join(rootDir, 'data', 'reviewer-runs');
-}
-
 function fastMergeAuditPath(rootDir, { repo, prNumber, action, at }) {
   const safeRepo = String(repo || '').replace(/[^A-Za-z0-9._-]/g, '_');
   const safeAt = String(at || isoNow()).replace(/[^0-9A-Za-z._-]/g, '-');
@@ -2959,19 +2956,9 @@ function buildFastMergeCloseAuditEntry({
 } = {}) {
   const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
   return {
+    kind: 'fast-merge-audit',
+    schemaVersion: 1,
     sessionUuid,
-    domain: 'code-pr',
-    runtime: 'merge-agent-fast-merge',
-    state: 'completed',
-    pgid: null,
-    spawnedAt: at,
-    lastHeartbeatAt: null,
-    reattachToken: null,
-    subjectContext: {
-      repo,
-      prNumber,
-      headSha: authorizedHeadSha,
-    },
     fast_merge: true,
     action,
     repo,
@@ -3138,7 +3125,7 @@ async function fetchFastMergeChecks({ ghClient, repo, prNumber }) {
       '--repo',
       repo,
       '--json',
-      'name,state,conclusion,bucket,workflow,link',
+      'name,state,bucket,workflow,link',
     ], {
       maxBuffer: 5 * 1024 * 1024,
       timeout: FAST_MERGE_GH_TIMEOUT_MS,

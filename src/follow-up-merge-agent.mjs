@@ -103,6 +103,16 @@ const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
+const MERGE_AGENT_STUCK_LABEL = 'merge-agent-stuck';
+// Max times the watcher will auto-re-dispatch a merge-agent that died WITHOUT
+// handing off (terminal-failed but its own `merge-agent-dispatched` marker is
+// still set) for the same head SHA before handing the PR to the operator via
+// `merge-agent-stuck`. Bounded on purpose: an unbounded retry on a persistently
+// failing worker is exactly the loop shape that caused the 2026-05-24 reap
+// storm. A scoped current-head `merge-agent-requested` label is the explicit
+// operator recovery action for that stuck state and forces one retry path past
+// this bound.
+const _WATCHER_REDISPATCH_BOUND = 2;
 
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
@@ -1107,7 +1117,33 @@ const _REQUESTED_RETRYABLE_DISPATCH_STATUSES = new Set([
   'cancelled',
   'canceled',
   'superseded',
+  // The recorded dispatch's launch request is gone from the ledger (reaped /
+  // archived). Because the probe now passes --as-owner, a live cross-account
+  // dispatch is visible; a remaining "not-found" therefore means the worker is
+  // genuinely no longer there — a safe signal that re-dispatch won't duplicate
+  // a live worker.
+  'not-found',
 ]);
+const _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES = new Set([
+  'failed',
+  'superseded',
+  'not-found',
+]);
+
+// `hq dispatch status` exits 1 with "no dispatch with id ..." when the id
+// resolves to no launch request the caller can see. With --as-owner passed the
+// cross-account case is excluded, so this signals the dispatch is genuinely
+// gone (reaped/archived) rather than a transient probe failure (timeout, hq
+// missing, ledger busy) — only the former is safe to treat as re-dispatchable.
+function _isNotFoundDispatchStatusError(err) {
+  if (!err) return false;
+  const code = err.code ?? err.status ?? null;
+  return (code === 1 || code === '1') && /no dispatch with id/i.test(String(err.stderr || ''));
+}
+
+function hasAuthoritativeOwnerVisibility(asOwner) {
+  return Boolean(String(asOwner || '').trim());
+}
 
 // Synchronous probe of `hq dispatch status <lrq>` — returns
 // `{status: <string>}` or `null` on any failure (no hqPath, non-zero
@@ -1126,14 +1162,21 @@ const _REQUESTED_RETRYABLE_DISPATCH_STATUSES = new Set([
 // the very SQLite lock we're trying to diagnose. We do NOT want this
 // probe to block the watcher loop on the daemon's recovery — cap and
 // fall through.
-function _probeDispatchStatusViaHq({ hqPath, lrq, execFileImpl, env = {} } = {}) {
+function _probeDispatchStatusViaHq({ hqPath, lrq, asOwner = null, execFileImpl, env = {}, logger = console } = {}) {
   if (!hqPath || !_isValidLrqId(lrq)) return null;
   // The probe is synchronous (describeStaleDispatch treats the return
   // value as a plain object, not a promise). spawnSync is the right
   // tool — execFileImpl from the outer scope is async.
+  // --as-owner: `hq dispatch status` scopes to the calling OS user, but the
+  // merge-agent dispatch is owned by the HQ-root owner (e.g. airlock) while the
+  // watcher runs as a different account — without it the probe is blind to its
+  // own worker. It's a read; HQ filesystem perms already gate cross-account.
+  const args = asOwner
+    ? ['dispatch', 'status', lrq, '--as-owner', asOwner]
+    : ['dispatch', 'status', lrq];
   let result;
   try {
-    result = spawnSync(hqPath, ['dispatch', 'status', lrq], {
+    result = spawnSync(hqPath, args, {
       env: { ...env },
       timeout: 5_000,
       encoding: 'utf8',
@@ -1142,7 +1185,19 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, execFileImpl, env = {} } = {})
   } catch {
     return null;
   }
-  if (!result || result.error || result.status !== 0) return null;
+  if (!result || result.error) return null;
+  if (result.status !== 0) {
+    const notFound = result.status === 1 && /no dispatch with id/i.test(String(result.stderr || ''));
+    if (hasAuthoritativeOwnerVisibility(asOwner) && notFound) {
+      return { status: 'not-found' };
+    }
+    if (notFound && logger && typeof logger.warn === 'function') {
+      logger.warn(
+        '[follow-up-merge-agent] refusing to classify dispatch status as not-found without a proven HQ owner; duplicate-dispatch protection stays active'
+      );
+    }
+    return null;
+  }
   const stdout = String(result.stdout || '').trim();
   if (!stdout) return null;
   let parsed;
@@ -1156,10 +1211,23 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, execFileImpl, env = {} } = {})
   return status ? { status } : null;
 }
 
-async function probeDispatchStatusViaHq({ hqPath, lrq, execFileImpl = execFileAsync, env = {} } = {}) {
+async function probeDispatchStatusViaHq({
+  hqPath,
+  lrq,
+  asOwner = null,
+  execFileImpl = execFileAsync,
+  env = {},
+  logger = console,
+} = {}) {
   if (!hqPath || !_isValidLrqId(lrq)) return null;
+  // --as-owner makes the watcher's cross-account dispatch status visible (see
+  // _probeDispatchStatusViaHq). Without it the placey watcher gets "no dispatch
+  // with id" for its airlock-owned merge-agent and can never see `failed`.
+  const args = asOwner
+    ? ['dispatch', 'status', lrq, '--as-owner', asOwner]
+    : ['dispatch', 'status', lrq];
   try {
-    const { stdout } = await execFileImpl(hqPath, ['dispatch', 'status', lrq], {
+    const { stdout } = await execFileImpl(hqPath, args, {
       env: { ...env },
       maxBuffer: 1024 * 1024,
       timeout: 5_000,
@@ -1169,13 +1237,60 @@ async function probeDispatchStatusViaHq({ hqPath, lrq, execFileImpl = execFileAs
       ? parsed.status.trim().toLowerCase()
       : null;
     return status ? { status } : null;
-  } catch {
+  } catch (err) {
+    if (hasAuthoritativeOwnerVisibility(asOwner) && _isNotFoundDispatchStatusError(err)) {
+      return { status: 'not-found' };
+    }
+    if (_isNotFoundDispatchStatusError(err) && logger && typeof logger.warn === 'function') {
+      logger.warn(
+        '[follow-up-merge-agent] refusing to classify dispatch status as not-found without a proven HQ owner; duplicate-dispatch protection stays active'
+      );
+    }
     return null;
   }
 }
 
 function isRetryableRecordedDispatchStatus(status) {
   return _REQUESTED_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
+}
+
+function isWatcherAutonomousRetryableRecordedDispatchStatus(status) {
+  return _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
+}
+
+function getRecordedMergeAgentLifecycleCleanup(rootDir, { repo, prNumber } = {}) {
+  const detail = readJsonFileDetailed(mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber }));
+  return detail.ok ? detail.value : null;
+}
+
+function getRecordedMergeAgentLifecycleCleanupDetailed(rootDir, { repo, prNumber } = {}, { logger = console } = {}) {
+  const filePath = mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber });
+  const detail = readJsonFileDetailed(filePath);
+  if (detail.ok) return { ok: true, value: detail.value, filePath };
+  if (detail.error?.code === 'ENOENT') {
+    return { ok: true, value: null, filePath, missing: true };
+  }
+  logger?.error?.(
+    `[follow-up-merge-agent] failed to read merge-agent lifecycle cleanup record for ${repo}#${prNumber} at ${filePath}: ${detail.error?.message || String(detail.error)}`
+  );
+  mergeAgentLifecycleLog(logger, 'merge_agent.lifecycle_cleanup_read_failed', {
+    repo,
+    prNumber,
+    filePath,
+    error: detail.error?.message || String(detail.error),
+    code: detail.error?.code || null,
+  });
+  return { ok: false, error: detail.error, filePath };
+}
+
+function hasPendingDispatchedLabelAddCleanup(rootDir, job, { logger = console } = {}) {
+  const detail = getRecordedMergeAgentLifecycleCleanupDetailed(rootDir, job, { logger });
+  if (!detail.ok) return true;
+  const cleanup = detail.value;
+  if (!isUnresolvedMergeAgentLifecycleCleanup(cleanup)) return false;
+  if (cleanup.transition !== MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION) return false;
+  if (cleanup.headSha && job?.headSha && cleanup.headSha !== job.headSha) return false;
+  return true;
 }
 
 function describeStaleDispatch(recordedDispatch, {
@@ -1368,6 +1483,7 @@ function scanStuckMergeAgentDispatches({
           ? (lrqArg) => _probeDispatchStatusViaHq({
               hqPath,
               lrq: lrqArg,
+              asOwner: resolveHqOwner(hqRoot)?.ownerUser || null,
               env: runtimeEnv,
             })
           : null
@@ -1521,14 +1637,23 @@ function pickMergeAgentDispatchDetail(job, {
   // but bypasses review/remediation-state gates for the current head.
   // `merge-agent-requested` is different: it asks the merge-agent to
   // clean/rebase the branch, so it can bypass current
-  // mergeability/check/verdict gates, but not hard stop labels, active
-  // remediation, or duplicate-dispatch protection.
+  // mergeability/check/verdict gates, the terminal `merge-agent-stuck`
+  // handoff marker for the current head, but not closed PRs, active
+  // remediation, other hard stop labels, or duplicate-dispatch
+  // protection.
   if (String(job?.prState ?? '').trim().toLowerCase() !== 'open' || Boolean(job?.merged)) {
     return { decision: 'skip-pr-not-open', trigger: null };
   }
 
-  if ([...OPERATOR_SKIP_LABELS].some((label) => labels.has(label))) {
-    // Skip-labels win even when approval/request labels are also present.
+  const hasUnbypassableSkipLabel = labels.has('merge-agent-skip') || labels.has('do-not-merge');
+  if (hasUnbypassableSkipLabel) {
+    return { decision: 'skip-operator-skip', trigger: null };
+  }
+  const hasMergeAgentStuckLabel = labels.has(MERGE_AGENT_STUCK_LABEL);
+  if (hasMergeAgentStuckLabel && hasMergeAgentRequestedLabel && !mergeAgentRequested) {
+    return { decision: 'skip-merge-agent-requested-stale', trigger: null };
+  }
+  if (hasMergeAgentStuckLabel && !mergeAgentRequested) {
     return { decision: 'skip-operator-skip', trigger: null };
   }
 
@@ -1793,6 +1918,7 @@ function recordMergeAgentDispatch(rootDir, job, {
   priority = NORMAL_MERGE_AGENT_DISPATCH_PRIORITY,
   priorityFlagSupported = true,
   labelRemoval = null,
+  watcherReDispatchCount = 0,
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -1810,6 +1936,9 @@ function recordMergeAgentDispatch(rootDir, job, {
     priority,
     priorityFlagSupported,
     labelRemoval,
+    // Per-(PR, head SHA) count of watcher-owned re-dispatches of a died-without-
+    // handoff worker. Bounds the auto-retry (see _WATCHER_REDISPATCH_BOUND).
+    watcherReDispatchCount: Number(watcherReDispatchCount || 0),
     dispatchedAt,
     dispatchId,
     launchRequestId,
@@ -2001,6 +2130,37 @@ function isTerminalMergeAgentLabelRemovalError(detail) {
 }
 
 const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add';
+
+// Best-effort terminal hand-off: mark the PR `merge-agent-stuck` so it surfaces
+// for the operator and OPERATOR_SKIP_LABELS halts further auto-dispatch. Used
+// when the watcher's bounded re-dispatch budget is exhausted. Never throws into
+// the watcher loop — a failed label add just leaves the PR in its prior state.
+async function applyMergeAgentStuckLabel({
+  repo,
+  prNumber,
+  labels = [],
+  ghExecFileImpl = execFileAsync,
+  logger = console,
+} = {}) {
+  if (normalizeLabelNames(labels).includes(MERGE_AGENT_STUCK_LABEL)) return false;
+  try {
+    await ghExecFileImpl('gh', [
+      'pr',
+      'edit',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--add-label',
+      MERGE_AGENT_STUCK_LABEL,
+    ], { maxBuffer: 5 * 1024 * 1024 });
+    return true;
+  } catch (err) {
+    logger?.error?.(
+      `merge-agent: failed to apply ${MERGE_AGENT_STUCK_LABEL} to ${repo}#${prNumber}: ${err?.message || err}`
+    );
+    return false;
+  }
+}
 
 async function removeConsumedTriggerLabel({
   repo,
@@ -2307,27 +2467,98 @@ async function dispatchMergeAgentForPR({
   };
   const recordedDispatch = getRecordedMergeAgentDispatch(rootDir, job);
   let duplicateDispatches = recordedDispatch ? [recordedDispatch] : [];
-  const scopedMergeAgentRetryRequested = normalizeLabelNames(labels).includes(MERGE_AGENT_REQUESTED_LABEL)
+  const labelNames = normalizeLabelNames(labels);
+  const scopedMergeAgentRetryRequested = labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
     && isScopedMergeAgentRequest(job);
-  const recordedDispatchStatus = scopedMergeAgentRetryRequested && recordedDispatch?.launchRequestId
+  const ownerResolution = resolveHqOwner(resolveHqRoot(runtimeEnv));
+  const statusProbeAsOwner = ownerResolution?.ownerUser || null;
+  const hasPendingLabelAddCleanup = hasPendingDispatchedLabelAddCleanup(rootDir, job, { logger });
+
+  // Watcher owns its worker's outcome. Probe the recorded dispatch's REAL status
+  // every tick (not only when an operator label is present) so a worker that
+  // came back failed doesn't sit forever behind `skip-already-dispatched`. The
+  // probe passes --as-owner so the cross-account (HQ-root-owned) status is
+  // visible; without it the watcher only ever sees "no dispatch with id" for its
+  // own airlock-owned worker. Recovery-first + bounded so this can never become
+  // an unbounded re-dispatch loop (cf. the 2026-05-24 reap storm).
+  const recordedDispatchStatus = recordedDispatch?.launchRequestId
     ? await probeDispatchStatusViaHq({
         hqPath: runtimeEnv.HQ_BIN || hqPath,
         lrq: recordedDispatch.launchRequestId,
+        asOwner: statusProbeAsOwner,
         execFileImpl,
         env: runtimeEnv,
       })
     : null;
+
+  // Threaded into recordMergeAgentDispatch so the per-(PR, head SHA) re-dispatch
+  // budget survives across watcher ticks.
+  let watcherReDispatchCountForRecord = null;
   if (recordedDispatch && isRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) {
-    duplicateDispatches = [];
-    mergeAgentLifecycleLog(logger, 'merge_agent.retrying_failed_dispatch', {
-      repo,
-      prNumber,
-      launchRequestId: recordedDispatch.launchRequestId,
-      previousStatus: recordedDispatchStatus.status,
-      previousTrigger: recordedDispatch.trigger || null,
-      retryTrigger: MERGE_AGENT_REQUESTED_LABEL,
-      at: now,
-    });
+    // The merge-agent clears its own `merge-agent-dispatched` marker when it
+    // hands off to a recovery worker or applies `merge-agent-stuck`. So if the
+    // marker is STILL set while the dispatch reads terminal-failed, the worker
+    // died WITHOUT handing off (the #849-class gap) and the watcher must own the
+    // retry. If the marker is already cleared, the merge-agent escalated on its
+    // own (recovery owns it, or operator-stuck) — recovery-first means do NOT
+    // re-dispatch over that.
+    const diedWithoutHandoff = labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL) || hasPendingLabelAddCleanup;
+    const priorReDispatches = Number(recordedDispatch.watcherReDispatchCount || 0);
+    if (scopedMergeAgentRetryRequested) {
+      // Operator escape-hatch: force a re-dispatch regardless of the bound.
+      // Does not consume the auto-budget (operator intent is explicit).
+      duplicateDispatches = [];
+      watcherReDispatchCountForRecord = priorReDispatches;
+      mergeAgentLifecycleLog(logger, 'merge_agent.retrying_failed_dispatch', {
+        repo,
+        prNumber,
+        launchRequestId: recordedDispatch.launchRequestId,
+        previousStatus: recordedDispatchStatus.status,
+        previousTrigger: recordedDispatch.trigger || null,
+        retryTrigger: MERGE_AGENT_REQUESTED_LABEL,
+        reDispatchCount: priorReDispatches,
+        at: now,
+      });
+    } else if (
+      diedWithoutHandoff
+      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)
+      && priorReDispatches < _WATCHER_REDISPATCH_BOUND
+    ) {
+      // Auto-own the retry, bounded per head SHA.
+      duplicateDispatches = [];
+      watcherReDispatchCountForRecord = priorReDispatches + 1;
+      mergeAgentLifecycleLog(logger, 'merge_agent.watcher_owned_redispatch', {
+        repo,
+        prNumber,
+        launchRequestId: recordedDispatch.launchRequestId,
+        previousStatus: recordedDispatchStatus.status,
+        previousTrigger: recordedDispatch.trigger || null,
+        reDispatchCount: priorReDispatches + 1,
+        bound: _WATCHER_REDISPATCH_BOUND,
+        at: now,
+      });
+    } else if (diedWithoutHandoff && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) {
+      // Bound exhausted, still no clean handoff: hand the PR to the operator
+      // with a durable terminal marker instead of looping. Best-effort — if the
+      // label add fails the dispatch simply stays in skip-already-dispatched
+      // (still no loop).
+      mergeAgentLifecycleLog(logger, 'merge_agent.watcher_redispatch_exhausted', {
+        repo,
+        prNumber,
+        launchRequestId: recordedDispatch.launchRequestId,
+        previousStatus: recordedDispatchStatus.status,
+        reDispatchCount: priorReDispatches,
+        bound: _WATCHER_REDISPATCH_BOUND,
+        at: now,
+      });
+      await applyMergeAgentStuckLabel({
+        repo,
+        prNumber,
+        labels: labelNames,
+        ghExecFileImpl,
+        logger,
+      });
+    }
   }
   const dispatchDecision = pickMergeAgentDispatchDetail(job, {
     recentDispatches: duplicateDispatches,
@@ -2401,6 +2632,7 @@ async function dispatchMergeAgentForPR({
           ? (lrqArg) => _probeDispatchStatusViaHq({
               hqPath,
               lrq: lrqArg,
+              asOwner: statusProbeAsOwner,
               execFileImpl,
               env: runtimeEnv,
             })
@@ -2591,6 +2823,10 @@ async function dispatchMergeAgentForPR({
     trigger,
     priority: dispatchPriority,
     priorityFlagSupported,
+    // Carry the watcher-owned re-dispatch budget forward (0 for a fresh
+    // dispatch). When this dispatch is a watcher-owned retry of a died-without-
+    // handoff worker, watcherReDispatchCountForRecord is the incremented count.
+    watcherReDispatchCount: watcherReDispatchCountForRecord ?? 0,
   });
 
   const labelRemoval = await removeConsumedTriggerLabel({

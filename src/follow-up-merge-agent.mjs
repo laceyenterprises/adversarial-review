@@ -116,9 +116,9 @@ const FML_MERGE_AGENT_PER_POLL_CAP_ENV = 'FML_MERGE_AGENT_PER_POLL_CAP';
 const DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP = 5;
 const FAST_MERGE_GH_RETRY_DELAYS_MS = [250, 1_000];
 const FAST_MERGE_GH_TIMEOUT_MS = 30_000;
-const FAST_MERGE_FAILURE_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out']);
+const FAST_MERGE_FAILURE_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'fail', 'cancel']);
 const FAST_MERGE_PENDING_STATES = new Set(['', 'pending', 'in_progress', 'queued', 'waiting', 'requested', 'expected']);
-const FAST_MERGE_SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
+const FAST_MERGE_SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped', 'pass', 'skipping']);
 // Max times the watcher will auto-re-dispatch a merge-agent that died WITHOUT
 // handing off (terminal-failed but its own `merge-agent-dispatched` marker is
 // still set) for the same head SHA before handing the PR to the operator via
@@ -3108,27 +3108,56 @@ async function fetchFastMergePrView({ ghClient, repo, prNumber }) {
   return normalizePrView(parseGhJson(stdout));
 }
 
-async function fetchFastMergeChecks({ ghClient, repo, prNumber }) {
+async function fetchFastMergeMergeCommit({ ghClient, repo, prNumber }) {
   const execFileImpl = execFileFromGhClient(ghClient);
   const { stdout } = await withGhRetry(() => execFileImpl('gh', [
     'pr',
-    'checks',
+    'view',
     String(prNumber),
     '--repo',
     repo,
     '--json',
-    'name,state,conclusion,bucket,workflow,link',
+    'mergeCommit',
   ], {
     maxBuffer: 5 * 1024 * 1024,
     timeout: FAST_MERGE_GH_TIMEOUT_MS,
   }));
+  const parsed = parseGhJson(stdout, {});
+  const oid = parsed?.mergeCommit?.oid;
+  return oid ? String(oid) : null;
+}
+
+async function fetchFastMergeChecks({ ghClient, repo, prNumber }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  let stdout = '';
+  try {
+    ({ stdout } = await withGhRetry(() => execFileImpl('gh', [
+      'pr',
+      'checks',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--json',
+      'name,state,conclusion,bucket,workflow,link',
+    ], {
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: FAST_MERGE_GH_TIMEOUT_MS,
+    })));
+  } catch (err) {
+    const code = Number(err?.code);
+    if ((code === 1 || code === 8) && typeof err?.stdout === 'string' && err.stdout.trim()) {
+      stdout = err.stdout;
+    } else {
+      throw err;
+    }
+  }
   const parsed = parseGhJson(stdout, []);
   if (Array.isArray(parsed)) return parsed;
   if (Array.isArray(parsed?.checks)) return parsed.checks;
   return [];
 }
 
-async function mergeFastMergePr({ ghClient, repo, prNumber }) {
+async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit }) {
   const execFileImpl = execFileFromGhClient(ghClient);
   return withGhRetry(() => execFileImpl('gh', [
     'pr',
@@ -3138,6 +3167,8 @@ async function mergeFastMergePr({ ghClient, repo, prNumber }) {
     repo,
     '--squash',
     '--admin',
+    '--match-head-commit',
+    String(matchHeadCommit),
     '--delete-branch',
   ], {
     maxBuffer: 5 * 1024 * 1024,
@@ -3191,11 +3222,14 @@ function summarizeFastMergeChecks(checks) {
   }
 
   const pending = normalized.filter((check) => {
-    if (check.conclusion === null && (
-      check.state == null
-      || FAST_MERGE_PENDING_STATES.has(check.state)
-      || (check.bucket != null && FAST_MERGE_PENDING_STATES.has(check.bucket))
-    )) return true;
+    if (check.conclusion === null) {
+      if (check.state == null) return true;
+      if (FAST_MERGE_PENDING_STATES.has(check.state)) return true;
+      if (check.bucket != null && FAST_MERGE_PENDING_STATES.has(check.bucket)) return true;
+      if (!FAST_MERGE_SUCCESS_CONCLUSIONS.has(check.state) && !FAST_MERGE_SUCCESS_CONCLUSIONS.has(check.bucket)) {
+        return true;
+      }
+    }
     if (check.conclusion != null && FAST_MERGE_PENDING_STATES.has(check.conclusion)) return true;
     if (check.state != null && FAST_MERGE_PENDING_STATES.has(check.state)) return true;
     if (check.bucket != null && FAST_MERGE_PENDING_STATES.has(check.bucket)) return true;
@@ -3228,12 +3262,6 @@ function summarizeFastMergeChecks(checks) {
     checkConclusions: normalized,
     failureMessage: null,
   };
-}
-
-function extractMergeShaFromOutput(stdout, stderr) {
-  const detail = [stdout, stderr].filter(Boolean).join('\n');
-  const match = detail.match(/\b[0-9a-f]{40}\b/i);
-  return match ? match[0] : null;
 }
 
 function updateFastMergeTerminalState(db, {
@@ -3533,13 +3561,63 @@ async function processFastMergePR({
 
   let mergeResult;
   try {
-    mergeResult = await mergeFastMergePr({ ghClient, repo, prNumber });
+    mergeResult = await mergeFastMergePr({
+      ghClient,
+      repo,
+      prNumber,
+      matchHeadCommit: authorizedHeadSha,
+    });
   } catch (err) {
     if (isRetryableGhTransportError(err)) {
       logger?.warn?.(
         `[follow-up-merge-agent] fast-merge transport failure exhausted for ${repo}#${prNumber}; leaving skipped: ${err?.message || err}`
       );
       return { status: 'skipped_still_pending', reason: 'merge-transport-failed' };
+    }
+    let postMergeView;
+    try {
+      postMergeView = await fetchFastMergePrView({ ghClient, repo, prNumber });
+    } catch (viewErr) {
+      if (isRetryableGhTransportError(viewErr)) {
+        logger?.warn?.(
+          `[follow-up-merge-agent] fast-merge post-merge verification unavailable for ${repo}#${prNumber}; leaving skipped: ${viewErr?.message || viewErr}`
+        );
+        return { status: 'skipped_still_pending', reason: 'merge-postcheck-transport-failed' };
+      }
+      throw viewErr;
+    }
+    if (postMergeView.state === 'MERGED' || postMergeView.mergedAt) {
+      const mergedAt = postMergeView.mergedAt || isoNow();
+      let mergeSha = null;
+      try {
+        mergeSha = await fetchFastMergeMergeCommit({ ghClient, repo, prNumber });
+      } catch {}
+      updateFastMergeTerminalState(db, {
+        state: FAST_MERGE_MERGED_STATE,
+        repo,
+        prNumber,
+        at: mergedAt,
+      });
+      await writeFastMergeAudit({
+        rootDir,
+        auditWriter,
+        logger,
+        entry: buildFastMergeCloseAuditEntry({
+          action: 'merged',
+          repo,
+          prNumber,
+          authorizedHeadSha,
+          currentHeadSha: postMergeView.headRefOid || preMergeView.headRefOid,
+          mergedHeadSha: postMergeView.headRefOid || authorizedHeadSha,
+          mergeSha,
+          manualMergeDetected: true,
+          checkConclusions: checkSummary.checkConclusions,
+          mergeStderr: err?.stderr || null,
+          mergeStdout: err?.stdout || null,
+          at: mergedAt,
+        }),
+      });
+      return { status: 'merged', manualMergeDetected: true };
     }
     const detail = String(err?.stderr || err?.stdout || err?.message || err).trim();
     updateFastMergeTerminalState(db, {
@@ -3568,7 +3646,10 @@ async function processFastMergePR({
   }
 
   const mergedAt = isoNow();
-  const mergeSha = extractMergeShaFromOutput(mergeResult?.stdout, mergeResult?.stderr);
+  let mergeSha = null;
+  try {
+    mergeSha = await fetchFastMergeMergeCommit({ ghClient, repo, prNumber });
+  } catch {}
   updateFastMergeTerminalState(db, {
     state: FAST_MERGE_MERGED_STATE,
     repo,

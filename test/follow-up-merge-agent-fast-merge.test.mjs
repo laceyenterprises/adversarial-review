@@ -69,6 +69,14 @@ function refusalError(message = 'GraphQL: Pull request is not mergeable') {
   return err;
 }
 
+function checksCliError(code, payload, message = `gh pr checks exited ${code}`) {
+  const err = new Error(message);
+  err.code = code;
+  err.stdout = JSON.stringify(payload);
+  err.stderr = message;
+  return err;
+}
+
 function makeGhStub({
   views = [],
   checks = [],
@@ -84,6 +92,12 @@ function makeGhStub({
     calls.push({ cmd, args });
     const command = args.slice(0, 2).join(' ');
     if (command === 'pr view') {
+      if (args.includes('mergeCommit')) {
+        return {
+          stdout: JSON.stringify({ mergeCommit: { oid: 'feedfacefeedfacefeedfacefeedfacefeedface' } }),
+          stderr: '',
+        };
+      }
       const item = queues.views.length ? queues.views.shift() : openView();
       if (item instanceof Error) throw item;
       return { stdout: JSON.stringify(item), stderr: '' };
@@ -140,6 +154,8 @@ test('fast-merge happy path merges authorized green head and writes audit', asyn
   assert.equal(mergeCalls(gh).length, 1);
   assert.equal(audits.at(-1).authorized_head_sha, 'sha-A');
   assert.equal(audits.at(-1).merged_head_sha, 'sha-A');
+  assert.equal(audits.at(-1).merge_sha, 'feedfacefeedfacefeedfacefeedfacefeedface');
+  assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-A', '--delete-branch']);
 });
 
 test('fast-merge head change requeues through canonical review reset and never merges', async () => {
@@ -254,6 +270,51 @@ test('fast-merge failed CI blocks with failure message and audit', async () => {
   assert.equal(row(db, 806).pr_state, 'fast_merge_blocked');
   assert.match(row(db, 806).failure_message, /ci failed/i);
   assert.equal(audits.at(-1).failure_reason, row(db, 806).failure_message);
+});
+
+test('fast-merge failed CI from gh non-zero exit still blocks with audit', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8061);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [openView('sha-A')],
+    checks: [checksCliError(1, [{ name: 'ci', conclusion: 'failure', state: 'COMPLETED', bucket: 'fail' }])],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8061,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(row(db, 8061).pr_state, 'fast_merge_blocked');
+  assert.match(row(db, 8061).failure_message, /ci failed/i);
+  assert.equal(audits.at(-1).failure_reason, row(db, 8061).failure_message);
+});
+
+test('fast-merge pending CI from gh exit 8 stays skipped', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8062);
+  const gh = makeGhStub({
+    views: [openView('sha-A')],
+    checks: [checksCliError(8, [{ name: 'ci', conclusion: null, state: 'IN_PROGRESS', bucket: 'pending' }])],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8062,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: () => {},
+  });
+
+  assert.equal(result.status, 'skipped_still_pending');
+  assert.equal(row(db, 8062).pr_state, 'fast_merge_skipped');
 });
 
 test('fast-merge manual merge race records merged without gh merge call', async () => {
@@ -437,4 +498,37 @@ test('fast-merge transient merge transport exhaustion leaves skipped', async () 
 
   assert.equal(result.status, 'skipped_still_pending');
   assert.equal(row(db, 826).pr_state, 'fast_merge_skipped');
+});
+
+test('fast-merge merge refusal that already landed records merged instead of blocked', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 827);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [
+      openView('sha-A'),
+      openView('sha-A'),
+      {
+        ...openView('sha-A'),
+        state: 'MERGED',
+        mergedAt: '2026-05-24T12:40:00.000Z',
+      },
+    ],
+    checks: [successChecks()],
+    merges: [refusalError('Pull request is already merged')],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 827,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(row(db, 827).pr_state, 'fast_merge_merged');
+  assert.equal(row(db, 827).review_status, 'fast_merge_merged');
+  assert.equal(audits.at(-1).merge_sha, 'feedfacefeedfacefeedfacefeedfacefeedface');
 });

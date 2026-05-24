@@ -291,10 +291,19 @@ the operator-label timestamp.
 ### Merge-agent contract
 
 `fast_merge_authorized_head_sha` is the commit the operator effectively approved
-for the bypass lane. Merge-agent does not consume `fast_merge_skipped` rows yet;
-the live-head equality check and `fast_merge_merged` transition are deferred to
-the next fast-merge phase. Until that lands, treat `fast_merge_skipped` as a
-watcher-owned staging state rather than an active merge-agent contract.
+for the bypass lane. The follow-up daemon now actively consumes
+`fast_merge_skipped` rows and closes them through the fast-merge path:
+
+- it re-checks the live PR head and `fast-merge-veto` label,
+- summarizes `gh pr checks` output for pending/failed/successful CI,
+- merges with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>`,
+- records `fast_merge_merged`, `fast_merge_closed`, or `fast_merge_blocked`,
+- and requeues normal first-pass review when the head changed or veto appeared.
+
+Before recording `fast_merge_blocked` on a merge error, the daemon must re-fetch
+PR state; if GitHub already shows the PR merged, the durable state becomes
+`fast_merge_merged` instead so partial merge success cannot be misreported as a
+blocked refusal.
 
 ---
 

@@ -86,7 +86,7 @@ async function sendReviewerSignal({
     return { signalled: false, target: null, error: 'missing-reviewer-process-group' };
   }
   if (pgid === process.pid) {
-    return { signalled: false, target: null, error: 'refusing-to-signal-daemon-process' };
+    return { signalled: false, target: null, error: 'refusing-to-signal-current-process' };
   }
   if (!isPgidAlive(pgid, processKill)) {
     return { signalled: false, target: { kind: 'process-group', id: pgid }, error: 'process-group-not-found' };

@@ -122,7 +122,7 @@ Dispatch precedence is intentionally diagnostic-first for hard stops: closed/mer
 
 Watcher-owned same-head re-dispatch is bounded and status-scoped. Autonomous retries are allowed only when the prior LRQ is terminal `failed`, `superseded`, or authoritative `not-found`, and the per-head `watcherReDispatchCount` budget in the dispatch record is still below the bound. `cancelled` / `canceled` do not auto-relaunch; that remains operator intent and requires a scoped `merge-agent-requested` label. The `not-found` classification is safe only when the watcher definitely passed `--as-owner <hq owner>` to `hq dispatch status`; if `.hq/config.json` is unreadable, malformed, or missing `ownerUser`, the watcher logs the degraded state, treats the status as unknown, and preserves duplicate-dispatch protection instead of guessing that the LRQ is gone.
 
-`ticket-pipeline-paused` is the PR-level Linear-ticket pipeline pause. Apply it with `npm run ticket-pipeline:pause -- --repo <owner/repo> --pr <n> "<reason>"`. The command creates the GitHub repository label if needed, applies it to the PR, and the watcher/reviewer skip Linear state changes and critical-flag comments while the label is present. Remove it with the same command plus `--resume`. For repo-wide outages, use `npm run ticket-pipeline:pause -- --repo <owner/repo> --scope repo --confirm-live-root "<reason>"`. The durable pause file resolves to `ADVERSARIAL_TICKET_PIPELINE_ROOT` when set, otherwise `HQ_ROOT/adversarial-review` when `HQ_ROOT` is set, otherwise the selected checkout root (overrideable with `--root <path>`). Repo-scope writes now print the resolved absolute pause root/path and require `--confirm-live-root` so an operator cannot silently write a local checkout file while the live daemon is reading a different root.
+`ticket-pipeline-paused` is the PR-level Linear-ticket pipeline pause. Apply it with `npm run ticket-pipeline:pause -- --repo <owner/repo> --pr <n> "<reason>"`. The command creates the GitHub repository label if needed, applies it to the PR, and the watcher/reviewer skip Linear state changes and critical-flag comments while the label is present. Remove it with the same command plus `--resume`; release is idempotent if the label was already absent. For repo-wide outages, use `npm run ticket-pipeline:pause -- --repo <owner/repo> --scope repo --confirm-live-root "<reason>"`. The durable pause file resolves to `ADVERSARIAL_TICKET_PIPELINE_ROOT` when set, otherwise `HQ_ROOT/adversarial-review` when `HQ_ROOT` is set, otherwise the selected checkout root (overrideable with `--root <path>`). The live Linear triage adapter persists its resolved pause root to `data/ticket-pipeline-pauses/daemon-root-status.json`; repo-scope writes compare against that status and refuse if the operator shell resolves a different pause root. Corrupt repo-pause records fail closed and also write an alert receipt under `data/ticket-pipeline-pauses/alerts/` so the stall is visible outside a single log line.
 
 Legacy in-flight jobs keep their persisted `maxRounds` cap. Fresh jobs re-derive from risk class unless the latest PR cap is higher than the current tier, in which case the elevated cap is preserved as the in-flight/operator migration guard. Do not retroactively rewrite existing queue records.
 
@@ -455,7 +455,8 @@ Behavior:
 
 - reads only the in-progress job JSON and its persisted `remediationWorker`
   process handle
-- sends `SIGTERM` to the worker process group by default
+- verifies process-group liveness and start-time identity before signalling,
+  then sends `SIGTERM` to the worker process group by default
 - writes an audit receipt under `data/follow-up-jobs/worker-cancellations/`
 - does not move the job file or mutate the review/follow-up ledger state
 
@@ -475,7 +476,8 @@ npm run review:cancel -- --repo <owner/repo> --pr <n> "Duplicate active reviewer
 Behavior:
 
 - reads the `review_status='reviewing'` row from `data/reviews.db`
-- sends `SIGTERM` to the persisted `reviewer_pgid` process group by default
+- verifies process-group liveness and start-time identity before signalling,
+  then sends `SIGTERM` to the persisted `reviewer_pgid` process group by default
 - writes an audit receipt under `data/review-cancellations/`
 - does not mutate `review_status`, retry counters, or any PR state columns
 

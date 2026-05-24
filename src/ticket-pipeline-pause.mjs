@@ -9,6 +9,7 @@ import {
   TICKET_PIPELINE_PAUSE_ROOT_ENV,
   TICKET_PIPELINE_PAUSED_LABEL,
   repoPausePath,
+  readTicketPipelinePauseRootStatus,
 } from './adapters/operator/linear-triage/index.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -112,7 +113,29 @@ function ensureRepoPauseRootConfirmed({
       `once this matches the live daemon root; use --root, ${TICKET_PIPELINE_PAUSE_ROOT_ENV}, or HQ_ROOT if needed.`
     );
   }
+  if (scope === 'repo' || scope === 'both') {
+    const daemonStatus = readTicketPipelinePauseRootStatus(rootDir);
+    if (daemonStatus?.error) {
+      throw new Error(
+        `Cannot confirm live ticket-pipeline pause root because daemon status ${daemonStatus.filePath} is unreadable: ` +
+        `${daemonStatus.error?.message || daemonStatus.error}`
+      );
+    }
+    const liveRoot = daemonStatus?.record?.pauseRootDir;
+    if (liveRoot && liveRoot !== resolvedRoot) {
+      throw new Error(
+        `Repo-scope pause root mismatch: this command resolves ${resolvedRoot}, but the live daemon last reported ` +
+        `${liveRoot} in ${daemonStatus.filePath}. Re-run with --root, ${TICKET_PIPELINE_PAUSE_ROOT_ENV}, or HQ_ROOT ` +
+        'matching the daemon before mutating repo-wide pause state.'
+      );
+    }
+  }
   return resolvedRoot;
+}
+
+function isAbsentLabelRemovalError(err) {
+  const text = [err?.message, err?.stderr, err?.stdout].filter(Boolean).join('\n').toLowerCase();
+  return /not found|does not exist|http 422|could not remove|unable to remove|label.*not.*found/.test(text);
 }
 
 async function ensureTicketPipelinePauseLabel({ repo, execFileImpl = execFileAsync } = {}) {
@@ -139,15 +162,20 @@ async function setPRTicketPipelinePause({
   if (paused) {
     await ensureTicketPipelinePauseLabel({ repo, execFileImpl });
   }
-  await execFileImpl('gh', [
-    'pr',
-    'edit',
-    String(prNumber),
-    '--repo',
-    repo,
-    paused ? '--add-label' : '--remove-label',
-    TICKET_PIPELINE_PAUSED_LABEL,
-  ]);
+  try {
+    await execFileImpl('gh', [
+      'pr',
+      'edit',
+      String(prNumber),
+      '--repo',
+      repo,
+      paused ? '--add-label' : '--remove-label',
+      TICKET_PIPELINE_PAUSED_LABEL,
+    ]);
+  } catch (err) {
+    if (!paused && isAbsentLabelRemovalError(err)) return;
+    throw err;
+  }
 }
 
 function setRepoTicketPipelinePause({

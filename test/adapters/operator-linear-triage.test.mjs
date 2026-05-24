@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -201,6 +201,12 @@ test('corrupt repo-level pause records fail closed loudly', () => {
   }), true);
   assert.equal(errors.length, 1);
   assert.match(errors[0], /invalid repo pause record/);
+  const alertDir = path.join(rootDir, 'data', 'ticket-pipeline-pauses', 'alerts');
+  const alerts = readdirSync(alertDir);
+  assert.equal(alerts.length, 1);
+  const alert = JSON.parse(readFileSync(path.join(alertDir, alerts[0]), 'utf8'));
+  assert.equal(alert.alert, 'corrupt-repo-pause-record');
+  assert.equal(alert.repo, 'laceyenterprises/adversarial-review');
 });
 
 test('adapter memoizes the Linear client across triage calls', async () => {
@@ -224,6 +230,21 @@ test('adapter memoizes the Linear client across triage calls', async () => {
   assert.equal(providerCalls, 1);
   assert.equal(updates.length, 2);
   assert.equal(comments.length, 1);
+});
+
+test('adapter persists the resolved daemon pause root for operator CLI comparison', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  createLinearTriageAdapter({
+    rootDir,
+    env: { HQ_ROOT: hqRoot },
+    logger: {},
+  });
+
+  const statusPath = path.join(rootDir, 'data', 'ticket-pipeline-pauses', 'daemon-root-status.json');
+  assert.equal(existsSync(statusPath), true);
+  const status = JSON.parse(readFileSync(statusPath, 'utf8'));
+  assert.equal(status.pauseRootDir, resolveTicketPipelinePauseRoot(rootDir, { HQ_ROOT: hqRoot }));
 });
 
 test('adapter retries after a transient Linear client provider failure', async () => {

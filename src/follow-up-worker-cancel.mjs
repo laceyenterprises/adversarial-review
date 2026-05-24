@@ -11,8 +11,12 @@ const VALID_SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL']);
 
 function resolveFollowUpJobPath(rootDir, jobPathArg) {
   const candidate = isAbsolute(jobPathArg) ? resolve(jobPathArg) : resolve(rootDir, jobPathArg);
-  const inProgressDir = realpathSync.native?.(resolve(rootDir, 'data', 'follow-up-jobs', 'in-progress'))
-    ?? realpathSync(resolve(rootDir, 'data', 'follow-up-jobs', 'in-progress'));
+  const inProgressPath = resolve(rootDir, 'data', 'follow-up-jobs', 'in-progress');
+  if (!existsSync(inProgressPath)) {
+    throw new Error('Job path must point to an in-progress follow-up job JSON under data/follow-up-jobs/');
+  }
+  const inProgressDir = realpathSync.native?.(inProgressPath)
+    ?? realpathSync(inProgressPath);
 
   if (!existsSync(candidate)) {
     throw new Error('Job path must point to an in-progress follow-up job JSON under data/follow-up-jobs/');
@@ -98,7 +102,7 @@ async function sendWorkerSignal({
     return { signalled: false, target: null, error: 'missing-worker-process-handle' };
   }
   if (processGroupId === process.pid || processId === process.pid) {
-    return { signalled: false, target: null, error: 'refusing-to-signal-daemon-process' };
+    return { signalled: false, target: null, error: 'refusing-to-signal-current-process' };
   }
   const targetPgid = processGroupId || processId;
   if (!isPgidAlive(targetPgid, processKill)) {

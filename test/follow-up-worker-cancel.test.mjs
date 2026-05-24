@@ -93,6 +93,17 @@ test('sendWorkerSignal refuses recycled process groups when identity is unconfir
   assert.deepEqual(calls, [{ pid: -4321, signal: 0 }]);
 });
 
+test('sendWorkerSignal names the self-process guard accurately', async () => {
+  const result = await sendWorkerSignal({
+    processGroupId: process.pid,
+    processId: process.pid,
+    signal: 'SIGTERM',
+  });
+
+  assert.equal(result.signalled, false);
+  assert.equal(result.error, 'refusing-to-signal-current-process');
+});
+
 test('workerCancelHandle accepts legacy jobs without explicit processGroupId', () => {
   const handle = workerCancelHandle({
     remediationWorker: {
@@ -128,6 +139,15 @@ test('resolveFollowUpJobPath refuses terminal job directories', () => {
 
   assert.throws(
     () => resolveFollowUpJobPath(rootDir, stoppedPath),
+    /in-progress follow-up job JSON/
+  );
+});
+
+test('resolveFollowUpJobPath reports a usage error when in-progress directory is absent', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  assert.throws(
+    () => resolveFollowUpJobPath(rootDir, 'data/follow-up-jobs/in-progress/job.json'),
     /in-progress follow-up job JSON/
   );
 });

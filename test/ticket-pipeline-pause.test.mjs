@@ -11,6 +11,7 @@ import {
 } from '../src/ticket-pipeline-pause.mjs';
 import {
   TICKET_PIPELINE_PAUSED_LABEL,
+  persistTicketPipelinePauseRootStatus,
   repoPausePath,
   resolveTicketPipelinePauseRoot,
 } from '../src/adapters/operator/linear-triage/index.mjs';
@@ -71,6 +72,35 @@ test('ensureRepoPauseRootConfirmed refuses unconfirmed repo-scope writes and ret
   );
 });
 
+test('ensureRepoPauseRootConfirmed refuses repo-scope writes that diverge from daemon root status', () => {
+  const worktreeRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-worktree-'));
+  const daemonHqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  persistTicketPipelinePauseRootStatus(worktreeRoot, {
+    env: { HQ_ROOT: daemonHqRoot },
+    recordedAt: '2026-05-24T16:40:00.000Z',
+    pid: 111,
+  });
+
+  assert.throws(
+    () => ensureRepoPauseRootConfirmed({
+      rootDir: worktreeRoot,
+      scope: 'repo',
+      confirmLiveRoot: true,
+      env: {},
+    }),
+    /pause root mismatch/
+  );
+  assert.equal(
+    ensureRepoPauseRootConfirmed({
+      rootDir: worktreeRoot,
+      scope: 'repo',
+      confirmLiveRoot: true,
+      env: { HQ_ROOT: daemonHqRoot },
+    }),
+    resolveTicketPipelinePauseRoot(worktreeRoot, { HQ_ROOT: daemonHqRoot })
+  );
+});
+
 test('applyTicketPipelinePause creates the label and applies it to one PR', async () => {
   const calls = [];
   const result = await applyTicketPipelinePause({
@@ -116,6 +146,25 @@ test('applyTicketPipelinePause creates the label and applies it to one PR', asyn
       ],
     },
   ]);
+});
+
+test('applyTicketPipelinePause treats absent PR label as successful resume', async () => {
+  const calls = [];
+  const result = await applyTicketPipelinePause({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 149,
+    scope: 'pr',
+    resume: true,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const err = new Error('HTTP 422: label does not exist');
+      err.stderr = 'label does not exist';
+      throw err;
+    },
+  });
+
+  assert.equal(result.prLabelUpdated, true);
+  assert.equal(calls.length, 1);
 });
 
 test('applyTicketPipelinePause supports repo-wide durable pause and resume', async () => {

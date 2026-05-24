@@ -105,3 +105,23 @@ test('applyNoMergeHold removes the label on resume without recreating it', async
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args.slice(-2), ['--remove-label', NO_MERGE_HOLD_LABEL]);
 });
+
+test('applyNoMergeHold treats absent label as successful resume', async () => {
+  const calls = [];
+  const result = await applyNoMergeHold({
+    rootDir: mkdtempSync(path.join(tmpdir(), 'adversarial-review-')),
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    resume: true,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const err = new Error('HTTP 422: label does not exist');
+      err.stderr = 'label does not exist';
+      throw err;
+    },
+  });
+
+  assert.equal(result.held, false);
+  assert.equal(calls.length, 1);
+  assert.equal(existsSync(result.receiptPath), true);
+});

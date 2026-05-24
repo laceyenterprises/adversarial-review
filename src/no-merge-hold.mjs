@@ -69,6 +69,11 @@ async function ensureNoMergeHoldLabel({ repo, execFileImpl = execFileAsync } = {
   ]);
 }
 
+function isAbsentLabelRemovalError(err) {
+  const text = [err?.message, err?.stderr, err?.stdout].filter(Boolean).join('\n').toLowerCase();
+  return /not found|does not exist|http 422|could not remove|unable to remove|label.*not.*found/.test(text);
+}
+
 function holdReceiptPath(rootDir, { repo, prNumber, requestedAt }) {
   const safeRepo = String(repo || '').replace(/[^A-Za-z0-9_.-]/g, '_').replace(/_+/g, '_') || 'unknown';
   const safeTs = String(requestedAt || '').replace(/[^A-Za-z0-9_.-]/g, '_').replace(/_+/g, '_') || 'unknown';
@@ -88,15 +93,19 @@ async function applyNoMergeHold({
   if (!resume) {
     await ensureNoMergeHoldLabel({ repo, execFileImpl });
   }
-  await execFileImpl('gh', [
-    'pr',
-    'edit',
-    String(prNumber),
-    '--repo',
-    repo,
-    resume ? '--remove-label' : '--add-label',
-    NO_MERGE_HOLD_LABEL,
-  ]);
+  try {
+    await execFileImpl('gh', [
+      'pr',
+      'edit',
+      String(prNumber),
+      '--repo',
+      repo,
+      resume ? '--remove-label' : '--add-label',
+      NO_MERGE_HOLD_LABEL,
+    ]);
+  } catch (err) {
+    if (!resume || !isAbsentLabelRemovalError(err)) throw err;
+  }
   const receipt = {
     kind: 'adversarial-review-no-merge-hold',
     schemaVersion: 1,

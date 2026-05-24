@@ -10,6 +10,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeFileAtomic } from '../../../atomic-write.mjs';
 import {
   extractLinearTicketId,
   routePR,
@@ -56,6 +57,75 @@ function resolveTicketPipelinePauseRoot(rootDir = DEFAULT_ROOT, env = process.en
   return resolve(rootDir);
 }
 
+function ticketPipelinePauseDaemonStatusPath(rootDir = DEFAULT_ROOT) {
+  return join(resolve(rootDir), 'data', 'ticket-pipeline-pauses', 'daemon-root-status.json');
+}
+
+function persistTicketPipelinePauseRootStatus(rootDir = DEFAULT_ROOT, {
+  env = process.env,
+  logger = null,
+  recordedAt = new Date().toISOString(),
+  pid = process.pid,
+} = {}) {
+  const pauseRootDir = resolveTicketPipelinePauseRoot(rootDir, env);
+  const filePath = ticketPipelinePauseDaemonStatusPath(rootDir);
+  const record = {
+    kind: 'adversarial-review-ticket-pipeline-daemon-root-status',
+    schemaVersion: 1,
+    recordedAt,
+    pid,
+    rootDir: resolve(rootDir),
+    pauseRootDir,
+    env: {
+      [TICKET_PIPELINE_PAUSE_ROOT_ENV]: env?.[TICKET_PIPELINE_PAUSE_ROOT_ENV] || null,
+      HQ_ROOT: env?.HQ_ROOT || null,
+    },
+  };
+  try {
+    writeFileAtomic(filePath, `${JSON.stringify(record, null, 2)}\n`);
+  } catch (err) {
+    logger?.error?.(`[linear-triage] failed to persist ticket-pipeline daemon root status at ${filePath}: ${err?.message || err}`);
+  }
+  return { filePath, record };
+}
+
+function readTicketPipelinePauseRootStatus(rootDir = DEFAULT_ROOT) {
+  const filePath = ticketPipelinePauseDaemonStatusPath(rootDir);
+  if (!existsSync(filePath)) return null;
+  try {
+    return { filePath, record: JSON.parse(readFileSync(filePath, 'utf8')) };
+  } catch (err) {
+    return { filePath, error: err };
+  }
+}
+
+function recordTicketPipelinePauseAlert(rootDir, { repo, filePath, error, logger = null } = {}) {
+  const safeRepo = String(repo || 'unknown').replace(/[^A-Za-z0-9_.-]/g, '_').replace(/_+/g, '_');
+  const recordedAt = new Date().toISOString();
+  const alertPath = join(
+    resolve(rootDir || DEFAULT_ROOT),
+    'data',
+    'ticket-pipeline-pauses',
+    'alerts',
+    `${safeRepo}-${recordedAt.replace(/[^A-Za-z0-9_.-]/g, '_')}.json`,
+  );
+  const alert = {
+    kind: 'adversarial-review-ticket-pipeline-pause-alert',
+    schemaVersion: 1,
+    alert: 'corrupt-repo-pause-record',
+    repo,
+    filePath,
+    recordedAt,
+    error: error?.message || String(error),
+  };
+  try {
+    writeFileAtomic(alertPath, `${JSON.stringify(alert, null, 2)}\n`);
+  } catch (err) {
+    logger?.error?.(`[linear-triage] failed to persist ticket-pipeline pause alert at ${alertPath}: ${err?.message || err}`);
+  }
+  return { alertPath, alert };
+}
+
 function isRepoTicketPipelinePaused(rootDir, repo, { logger = null, env = process.env } = {}) {
   if (!repo) return false;
   const filePath = repoPausePath(resolveTicketPipelinePauseRoot(rootDir, env), repo);
@@ -65,6 +135,7 @@ function isRepoTicketPipelinePaused(rootDir, repo, { logger = null, env = proces
     return record?.paused !== false;
   } catch (err) {
     logger?.error?.(`[linear-triage] invalid repo pause record at ${filePath}: ${err?.message || err}`);
+    recordTicketPipelinePauseAlert(rootDir, { repo, filePath, error: err, logger });
     return true;
   }
 }
@@ -182,7 +253,9 @@ function createLinearTriageAdapter({
   stateNames = {},
   criticalWords = DEFAULT_CRITICAL_WORDS,
   rootDir = DEFAULT_ROOT,
+  env = process.env,
 } = {}) {
+  persistTicketPipelinePauseRootStatus(rootDir, { env, logger });
   const resolvedStateNames = {
     inReview: stateNames.inReview || 'In Review',
     inProgress: stateNames.inProgress || 'In Progress',
@@ -295,8 +368,11 @@ export {
   extractLinearTicketId,
   hasTicketPipelinePauseLabel,
   isTicketPipelinePaused,
+  persistTicketPipelinePauseRootStatus,
   repoPausePath,
+  readTicketPipelinePauseRootStatus,
   resolveTicketPipelinePauseRoot,
   routePR,
+  ticketPipelinePauseDaemonStatusPath,
   TICKET_PIPELINE_PAUSE_ROOT_ENV,
 };

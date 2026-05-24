@@ -143,6 +143,17 @@ test('sendReviewerSignal refuses recycled process groups when identity is unconf
   assert.match(result.identity.reason, /start-time drift/);
 });
 
+test('sendReviewerSignal names the self-process guard accurately', async () => {
+  const result = await sendReviewerSignal({
+    pgid: process.pid,
+    startedAt: '2026-05-24T15:01:00.000Z',
+    signal: 'SIGTERM',
+  });
+
+  assert.equal(result.signalled, false);
+  assert.equal(result.error, 'refusing-to-signal-current-process');
+});
+
 test('reviewerCancelHandle and parseArgs expose reviewer cancel handle', () => {
   assert.equal(reviewerCancelHandle({ reviewer_pgid: '9753' }), 9753);
   assert.equal(reviewerCancelHandle({ reviewer_pgid: 0 }), null);

@@ -597,7 +597,7 @@ function detectSpecTouchViolations(diffText) {
     violations.push({
       project: contract.project,
       thing: contract.thing,
-      message: `Contract changed without spec update. The diff modifies ${contract.thing} but no canonical spec doc for \`${contract.project}\` was touched. Update the corresponding SPEC/RUNBOOK entry or revert the contract change.`,
+      message: `Contract changed without spec update. The diff modifies ${contract.thing} but no canonical spec doc for \`${contract.project}\` was touched. The default remediation is to update the corresponding SPEC/RUNBOOK entry to match the new behavior; revert only for a concrete production regression or an explicit operator-policy conflict.`,
     });
   }
 

@@ -1487,6 +1487,7 @@ function markFollowUpJobSpawned({
   worker,
   spawnedAt = new Date().toISOString(),
 }) {
+  const effectiveSpawnedAt = worker?.spawnedAt || spawnedAt;
   const currentJob = readFollowUpJob(jobPath);
   let nextJob = {
     ...currentJob,
@@ -1494,7 +1495,7 @@ function markFollowUpJobSpawned({
     remediationWorker: {
       model: 'codex',
       state: 'spawned',
-      spawnedAt,
+      spawnedAt: effectiveSpawnedAt,
       ...worker,
     },
     remediationReply: buildRemediationReplyArtifact(worker?.replyPath ?? null),
@@ -1511,7 +1512,7 @@ function markFollowUpJobSpawned({
   nextJob = updateCurrentRound(nextJob, (round) => ({
     ...round,
     state: 'spawned',
-    spawnedAt,
+    spawnedAt: effectiveSpawnedAt,
     worker: {
       model: 'codex',
       ...worker,

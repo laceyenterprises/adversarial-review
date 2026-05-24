@@ -5,14 +5,9 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
+import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 
 const execFileAsync = promisify(execFile);
-
-// Tolerance for matching a process's `ps lstart` (per-second resolution)
-// against the reviewer record's spawnedAt (millisecond resolution). 5s gives
-// the system slop without admitting unrelated processes that happened to
-// start near the reviewer.
-const PGID_IDENTITY_TOLERANCE_MS = 5_000;
 import {
   claimReviewerRunRecord,
   readReviewerRunRecord,
@@ -213,6 +208,8 @@ function buildReviewerProcessArgs(subjectContext = {}) {
     reviewerModel: subjectContext.reviewerModel || subjectContext.model,
     botTokenEnv: subjectContext.botTokenEnv,
     linearTicketId: subjectContext.linearTicketId,
+    labels: subjectContext.labels,
+    ticketPipelinePaused: subjectContext.ticketPipelinePaused,
     builderTag: subjectContext.builderTag,
     reviewerHeadSha: subjectContext.reviewerHeadSha,
     reviewAttemptNumber: subjectContext.reviewAttemptNumber,
@@ -253,72 +250,6 @@ function assertForbiddenFallbackEnvStripped(env) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isPgidAlive(pgid, processKillImpl = process.kill) {
-  if (!Number.isInteger(pgid) || pgid <= 0) return false;
-  try {
-    processKillImpl(-pgid, 0);
-    return true;
-  } catch (err) {
-    if (err?.code === 'ESRCH') return false;
-    if (err?.code === 'EPERM') return true;
-    throw err;
-  }
-}
-
-/**
- * Verify that the live PGID still represents the same process that was
- * spawned at `expectedSpawnedAt`. Compares the kernel-reported process start
- * time (via `ps -o lstart= -p <pgid>`) against the record's `spawnedAt`
- * within PGID_IDENTITY_TOLERANCE_MS.
- *
- * Returns:
- *   { match: true,  startedAt }   PGID is the original reviewer process
- *   { match: false, startedAt, reason }  PGID has been recycled, or ps
- *                                        could not resolve it, or the
- *                                        record had no spawnedAt to compare
- *
- * NOT a true authentication probe — `ps lstart` is per-second resolution and
- * an attacker controlling timing could conceivably collide. But for
- * post-daemon-bounce PID recycling on a single host this is sound: the
- * recycled PID would have to land on a process started within ±5s of the
- * recorded reviewer spawn, which is improbable in practice.
- *
- * On any subprocess error we conservatively report match=false rather than
- * fall through to a kill. Killing the wrong process is worse than skipping
- * a kill we should have done — the alternative path just records the
- * reviewer as 'failed' with `daemon-bounce` and moves on.
- */
-async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
-  execFileImpl = execFileAsync,
-} = {}) {
-  if (!Number.isInteger(pgid) || pgid <= 0) {
-    return { match: false, reason: 'invalid pgid' };
-  }
-  if (!expectedSpawnedAt) {
-    return { match: false, reason: 'record has no spawnedAt to compare' };
-  }
-  let lstart = '';
-  try {
-    const { stdout } = await execFileImpl('ps', ['-o', 'lstart=', '-p', String(pgid)], { timeout: 5_000 });
-    lstart = String(stdout || '').trim();
-  } catch (err) {
-    return { match: false, reason: `ps probe failed: ${err?.message || err}` };
-  }
-  if (!lstart) {
-    return { match: false, reason: 'ps returned no start time (pgid may have just exited)' };
-  }
-  const actualMs = Date.parse(lstart);
-  const expectedMs = Date.parse(expectedSpawnedAt);
-  if (!Number.isFinite(actualMs) || !Number.isFinite(expectedMs)) {
-    return { match: false, reason: `unparseable timestamps actual=${lstart} expected=${expectedSpawnedAt}` };
-  }
-  const drift = Math.abs(actualMs - expectedMs);
-  if (drift <= PGID_IDENTITY_TOLERANCE_MS) {
-    return { match: true, startedAt: lstart };
-  }
-  return { match: false, startedAt: lstart, reason: `start-time drift ${drift}ms exceeds tolerance ${PGID_IDENTITY_TOLERANCE_MS}ms` };
 }
 
 async function waitForPgidExit(pgid, {

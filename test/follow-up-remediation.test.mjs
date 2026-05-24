@@ -1225,7 +1225,7 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
   writeFileSync(promptPath, 'fix it.\n', 'utf8');
 
   let capturedEnv;
-  spawnClaudeCodeRemediationWorker({
+  const worker = spawnClaudeCodeRemediationWorker({
     workspaceDir,
     promptPath,
     outputPath,
@@ -1242,6 +1242,8 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
   assert.equal(capturedEnv.WORKER_CLASS, 'claude-code-remediation');
   assert.equal(capturedEnv.WORKER_JOB_ID, 'claude-code-job-xyz');
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-05-01T21:00:00Z');
+  assert.equal(worker.processGroupId, 333);
+  assert.equal(worker.spawnedAt, '2026-05-01T21:00:00Z');
 });
 
 // ── Claude Code auth pre-flight (`claude auth status --json`) ─────────────
@@ -1462,6 +1464,7 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
       outputPath,
       logPath,
       ...testReplyContext(),
+      now: () => '2026-05-24T00:00:00.000Z',
       spawnImpl: (command, args, options) => {
         spawnCalls.push({ command, args, options });
         return {
@@ -1475,6 +1478,8 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     });
 
     assert.equal(worker.processId, 8123);
+    assert.equal(worker.processGroupId, 8123);
+    assert.equal(worker.spawnedAt, '2026-05-24T00:00:00.000Z');
     assert.equal(worker.outputPath, outputPath);
     assert.equal(spawnCalls[0].command, '/tmp/codex');
     assert.deepEqual(spawnCalls[0].args, [
@@ -3291,8 +3296,9 @@ test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral wh
             callCount += 1;
             if (callCount === 1) return '2026-04-21T10:00:00.000Z';
             if (callCount === 2) return '2026-04-21T10:00:01.000Z';
-            if (callCount === 3) throw new Error('post-spawn bookkeeping failed');
-            if (callCount === 4) return '2026-04-21T10:00:03.000Z';
+            if (callCount === 3) return '2026-04-21T10:00:02.000Z';
+            if (callCount === 4) throw new Error('post-spawn bookkeeping failed');
+            if (callCount === 5) return '2026-04-21T10:00:03.000Z';
             return '2026-04-21T10:00:04.000Z';
           };
         })(),

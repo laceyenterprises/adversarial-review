@@ -82,6 +82,8 @@ export interface SubjectRef {
   subjectExternalId: string;
   revisionRef: string;
   linearTicketId?: string | null;
+  labels?: readonly (string | { name?: string | null })[];
+  ticketPipelinePaused?: boolean;
 }
 
 export type SubjectLifecycleState =
@@ -137,6 +139,8 @@ export interface SubjectContext {
   completedRemediationRounds?: number;
   maxRemediationRounds?: number;
   reviewerSessionUuid?: string;
+  labels?: readonly (string | { name?: string | null })[];
+  ticketPipelinePaused?: boolean;
 }
 
 export interface RemediationWorkspace {

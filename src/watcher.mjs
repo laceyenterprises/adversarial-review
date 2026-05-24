@@ -1442,7 +1442,7 @@ const stmtMarkPendingUpstream = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
 );
 const stmtGetOpenPRs = db.prepare(
-  "SELECT repo, pr_number, linear_ticket FROM reviewed_prs WHERE pr_state = 'open'"
+  "SELECT repo, pr_number, linear_ticket, labels_json FROM reviewed_prs WHERE pr_state = 'open'"
 );
 const stmtMarkMerged = db.prepare(
   "UPDATE reviewed_prs SET pr_state = 'merged', merged_at = ? WHERE repo = ? AND pr_number = ?"
@@ -1572,6 +1572,7 @@ async function spawnReviewer({
   reviewerModel,
   botTokenEnv,
   linearTicketId,
+  labels = [],
   builderTag,
   reviewerHeadSha,
   reviewAttemptNumber,
@@ -1628,6 +1629,7 @@ async function spawnReviewer({
         reviewerModel,
         botTokenEnv,
         linearTicketId,
+        labels,
         builderTag,
         reviewerHeadSha,
         reviewAttemptNumber,
@@ -1890,10 +1892,20 @@ function createWatcherOperatorSurface() {
   });
 }
 
-function subjectRefWithLinearTicket(subjectRef, linearTicketId) {
+function parseStoredLabels(labelsJson) {
+  try {
+    const parsed = JSON.parse(labelsJson || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function subjectRefWithLinearTicket(subjectRef, linearTicketId, labels = []) {
   return {
     ...subjectRef,
     linearTicketId,
+    labels: Array.isArray(labels) ? labels : [],
   };
 }
 
@@ -2181,6 +2193,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 
   for (const row of openRows) {
     const { repo, pr_number: prNumber, linear_ticket: linearTicketId } = row;
+    const labels = parseStoredLabels(row.labels_json);
     const [owner, repoName] = repo.split('/');
 
     let pr;
@@ -2204,7 +2217,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.head?.sha || null,
-        }, linearTicketId),
+        }, linearTicketId, labels),
         'finalized'
       );
     } else if (pr.state === 'closed') {
@@ -2219,7 +2232,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.head?.sha || null,
-        }, linearTicketId),
+        }, linearTicketId, labels),
         'halted'
       );
     }
@@ -3132,7 +3145,7 @@ async function pollOnce(
         }
       }
       await operatorSurface.syncTriageStatus(
-        subjectRefWithLinearTicket(subject.ref, linearTicketId),
+        subjectRefWithLinearTicket(subject.ref, linearTicketId, subject.labels),
         'in-review'
       );
 
@@ -3214,6 +3227,7 @@ async function pollOnce(
         reviewerModel: route.reviewerModel,
         botTokenEnv: route.botTokenEnv,
         linearTicketId,
+        labels: Array.isArray(subject.labels) ? subject.labels : [],
         builderTag: route.tag,
         reviewerHeadSha,
         reviewAttemptNumber,

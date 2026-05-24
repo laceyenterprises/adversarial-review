@@ -1,12 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   buildCriticalFlagComment,
   createLinearTriageAdapter,
   extractLinearTicketId,
+  isTicketPipelinePaused,
+  repoPausePath,
+  resolveTicketPipelinePauseRoot,
   routePR,
+  TICKET_PIPELINE_PAUSED_LABEL,
 } from '../../src/adapters/operator/linear-triage/index.mjs';
+import { setRepoTicketPipelinePause } from '../../src/ticket-pipeline-pause.mjs';
 
 function makeLinearFixture({ currentState = 'Todo' } = {}) {
   const updates = [];
@@ -114,6 +122,93 @@ test('recordReviewCompleted posts critical flag comments for critical reviews', 
   assert.match(comments[0].body, /critical, vulnerability, security/);
 });
 
+test('ticket-pipeline-paused PR label suppresses Linear updates and comments', async () => {
+  const { linear, updates, comments } = makeLinearFixture();
+  let providerCalls = 0;
+  const logs = [];
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => {
+      providerCalls += 1;
+      return linear;
+    },
+    logger: { log: (message) => logs.push(message) },
+  });
+  const pausedRef = {
+    ...subjectRef(),
+    labels: [{ name: TICKET_PIPELINE_PAUSED_LABEL }],
+  };
+
+  await adapter.syncTriageStatus(pausedRef, 'in-review');
+  await adapter.recordReviewCompleted(pausedRef, {
+    critical: true,
+    reviewSummary: 'Critical security vulnerability in request handling.',
+  });
+
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(updates, []);
+  assert.deepEqual(comments, []);
+  assert.equal(logs.length, 2);
+});
+
+test('repo-level ticket pipeline pause suppresses Linear updates', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const previous = process.env.ADVERSARIAL_TICKET_PIPELINE_ROOT;
+  process.env.ADVERSARIAL_TICKET_PIPELINE_ROOT = rootDir;
+  try {
+    const pauseRootDir = resolveTicketPipelinePauseRoot(rootDir);
+    setRepoTicketPipelinePause({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      paused: true,
+      reason: 'Linear outage',
+      requestedAt: '2026-05-24T15:30:00.000Z',
+      requestedBy: 'placey',
+    });
+    const { linear, updates } = makeLinearFixture();
+    let providerCalls = 0;
+    const adapter = createLinearTriageAdapter({
+      rootDir,
+      linearClientProvider: async () => {
+        providerCalls += 1;
+        return linear;
+      },
+      logger: {},
+    });
+
+    assert.equal(isTicketPipelinePaused(subjectRef(), { rootDir }), true);
+    assert.match(repoPausePath(pauseRootDir, 'laceyenterprises/adversarial-review'), /ticket-pipeline-pauses/);
+    await adapter.syncTriageStatus(subjectRef(), 'in-review');
+
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(updates, []);
+  } finally {
+    if (previous === undefined) delete process.env.ADVERSARIAL_TICKET_PIPELINE_ROOT;
+    else process.env.ADVERSARIAL_TICKET_PIPELINE_ROOT = previous;
+  }
+});
+
+test('corrupt repo-level pause records fail closed loudly', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const pauseRootDir = resolveTicketPipelinePauseRoot(rootDir, {});
+  mkdirSync(path.dirname(repoPausePath(pauseRootDir, 'laceyenterprises/adversarial-review')), { recursive: true });
+  writeFileSync(repoPausePath(pauseRootDir, 'laceyenterprises/adversarial-review'), '{not json\n', 'utf8');
+  const errors = [];
+
+  assert.equal(isTicketPipelinePaused(subjectRef(), {
+    rootDir,
+    logger: { error: (message) => errors.push(message) },
+    env: {},
+  }), true);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /invalid repo pause record/);
+  const alertDir = path.join(rootDir, 'data', 'ticket-pipeline-pauses', 'alerts');
+  const alerts = readdirSync(alertDir);
+  assert.equal(alerts.length, 1);
+  const alert = JSON.parse(readFileSync(path.join(alertDir, alerts[0]), 'utf8'));
+  assert.equal(alert.alert, 'corrupt-repo-pause-record');
+  assert.equal(alert.repo, 'laceyenterprises/adversarial-review');
+});
+
 test('adapter memoizes the Linear client across triage calls', async () => {
   const { linear, updates, comments } = makeLinearFixture();
   let providerCalls = 0;
@@ -123,6 +218,7 @@ test('adapter memoizes the Linear client across triage calls', async () => {
       return linear;
     },
     logger: {},
+    rootDir: mkdtempSync(path.join(tmpdir(), 'adversarial-review-')),
   });
 
   await adapter.syncTriageStatus(subjectRef(), 'in-review');
@@ -134,6 +230,21 @@ test('adapter memoizes the Linear client across triage calls', async () => {
   assert.equal(providerCalls, 1);
   assert.equal(updates.length, 2);
   assert.equal(comments.length, 1);
+});
+
+test('adapter persists the resolved daemon pause root for operator CLI comparison', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  createLinearTriageAdapter({
+    rootDir,
+    env: { HQ_ROOT: hqRoot },
+    logger: {},
+  });
+
+  const statusPath = path.join(rootDir, 'data', 'ticket-pipeline-pauses', 'daemon-root-status.json');
+  assert.equal(existsSync(statusPath), true);
+  const status = JSON.parse(readFileSync(statusPath, 'utf8'));
+  assert.equal(status.pauseRootDir, resolveTicketPipelinePauseRoot(rootDir, { HQ_ROOT: hqRoot }));
 });
 
 test('adapter retries after a transient Linear client provider failure', async () => {
@@ -148,6 +259,7 @@ test('adapter retries after a transient Linear client provider failure', async (
       return linear;
     },
     logger: {},
+    rootDir: mkdtempSync(path.join(tmpdir(), 'adversarial-review-')),
   });
 
   await assert.rejects(
@@ -171,6 +283,7 @@ test('adapter does not memoize a null Linear client result', async () => {
       return providerCalls === 1 ? null : linear;
     },
     logger: {},
+    rootDir: mkdtempSync(path.join(tmpdir(), 'adversarial-review-')),
   });
 
   await adapter.syncTriageStatus(subjectRef(), 'in-review');

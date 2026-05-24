@@ -28,7 +28,8 @@ const execFileAsync = promisify(execFile);
 
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
-const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge']);
+const NO_MERGE_HOLD_LABEL = 'no-merge-hold';
+const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge', NO_MERGE_HOLD_LABEL]);
 const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
@@ -1645,7 +1646,9 @@ function pickMergeAgentDispatchDetail(job, {
     return { decision: 'skip-pr-not-open', trigger: null };
   }
 
-  const hasUnbypassableSkipLabel = labels.has('merge-agent-skip') || labels.has('do-not-merge');
+  const hasUnbypassableSkipLabel = labels.has('merge-agent-skip')
+    || labels.has('do-not-merge')
+    || labels.has(NO_MERGE_HOLD_LABEL);
   if (hasUnbypassableSkipLabel) {
     return { decision: 'skip-operator-skip', trigger: null };
   }
@@ -2973,6 +2976,7 @@ export {
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
   MERGE_AGENT_REQUESTED_LABEL,
+  NO_MERGE_HOLD_LABEL,
   OPERATOR_SKIP_LABELS,
   TERMINAL_WORKER_RUN_STATUSES,
   addMergeAgentDispatchedLabel,

@@ -981,6 +981,8 @@ async function main() {
     completedRemediationRounds,
     maxRemediationRounds,
     reviewerSessionUuid,
+    labels = [],
+    ticketPipelinePaused = false,
   } = args;
 
   if (!repo || !prNumber || !reviewerModel || !botTokenEnv) {
@@ -1027,6 +1029,8 @@ async function main() {
         subjectExternalId: `${repo}#${prNumber}`,
         revisionRef: reviewerHeadSha,
         linearTicketId,
+        labels,
+        ticketPipelinePaused,
       }, {
         startedAt: new Date().toISOString(),
       });
@@ -1184,6 +1188,8 @@ async function main() {
       subjectExternalId: `${repo}#${prNumber}`,
       revisionRef: reviewerHeadSha || null,
       linearTicketId,
+      labels,
+      ticketPipelinePaused,
     }, {
       critical,
       reviewSummary: reviewText,

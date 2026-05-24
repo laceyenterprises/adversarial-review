@@ -1484,7 +1484,11 @@ function shouldReconcileStaleReviewerSession(row, now, {
 } = {}) {
   const startedAtMs = Date.parse(row?.reviewer_started_at || '');
   if (!Number.isFinite(startedAtMs)) return true;
-  return (startedAtMs + reviewerTimeoutMs) <= now.getTime();
+  const persistedTimeoutMs = Number(row?.reviewer_timeout_ms);
+  const effectiveTimeoutMs = Number.isInteger(persistedTimeoutMs) && persistedTimeoutMs > 0
+    ? persistedTimeoutMs
+    : reviewerTimeoutMs;
+  return (startedAtMs + effectiveTimeoutMs) <= now.getTime();
 }
 
 function persistReviewerPgid({ pgid, reviewerSessionUuid, repoPath, prNumber, log = console }) {

@@ -61,7 +61,7 @@ function makeOctokit(reviews = []) {
       pulls: {
         listReviews: async (params) => {
           calls.push(params);
-          return { data: reviews };
+          return { data: typeof reviews === 'function' ? reviews(calls.length, params) : reviews };
         },
       },
     },
@@ -269,6 +269,41 @@ test('overdue orphan stays sticky when a late review appears during recovery', a
   assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGTERM' }]);
   assert.match(row.failure_message, /posted a GitHub review/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_deadline_posted_during_recovery/);
+});
+
+test('overdue orphan recovery force-refreshes the cached GitHub review probe before retrying', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewerTimeoutMs: 20 * 60 * 1000 });
+  const killed = [];
+  const log = makeLog();
+  let probeCount = 0;
+  const octokit = makeOctokit((callCount) => (
+    callCount === 1
+      ? []
+      : [{ user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:44:59.000Z' }]
+  ));
+
+  await reconcileReviewerSessions({
+    db,
+    octokit,
+    now: new Date('2026-05-11T05:45:00.000Z'),
+    log,
+    probeSession: () => {
+      probeCount += 1;
+      return probeCount < 2
+        ? { alive: true, matched: true }
+        : { alive: false, matched: false };
+    },
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    sleep: async () => {},
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed-orphan');
+  assert.equal(octokit.calls.length, 2, 'post-kill safety check must hit GitHub again');
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGTERM' }]);
+  assert.match(row.failure_message, /posted a GitHub review/);
 });
 
 test('overdue orphan stays sticky when recovery cannot prove the process died', async () => {

@@ -104,14 +104,14 @@ function killPgid(pgid, signal = 'SIGKILL') {
 function makeReviewPostedProbe(octokit, { log = console } = {}) {
   const cache = new Map();
 
-  return async function reviewPostedAfter(row) {
+  return async function reviewPostedAfter(row, { refresh = false } = {}) {
     const startedAtMs = parseTime(row.reviewer_started_at);
     if (startedAtMs === null) return null;
 
     const { owner, repo } = splitRepoPath(row.repo);
     const key = `${row.repo}#${row.pr_number}`;
     let reviews = cache.get(key);
-    if (!reviews) {
+    if (!reviews || refresh) {
       const params = {
         owner,
         repo,
@@ -292,9 +292,9 @@ async function reconcileReviewerSessions({
     );
     let postedReview = null;
 
-    async function probePostedReviewOrMarkSticky() {
+    async function probePostedReviewOrMarkSticky({ refresh = false } = {}) {
       try {
-        postedReview = await findPostedReview(row);
+        postedReview = await findPostedReview(row, { refresh });
         return true;
       } catch (err) {
         log.warn(
@@ -334,7 +334,7 @@ async function reconcileReviewerSessions({
             ? latestSessionProbe
             : latestSessionProbe?.alive === true;
           if (!stillAlive) {
-            if (!(await probePostedReviewOrMarkSticky())) return true;
+            if (!(await probePostedReviewOrMarkSticky({ refresh: true }))) return true;
             if (postedReview) {
               markStickyOrphan({
                 statements,

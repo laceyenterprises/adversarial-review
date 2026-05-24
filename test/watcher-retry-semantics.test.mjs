@@ -222,6 +222,35 @@ test('steady-state reattach only probes reviewer sessions older than the reviewe
   );
 });
 
+test('steady-state reattach selection uses persisted launch timeout before current env', () => {
+  const now = new Date('2026-05-11T05:20:00.000Z');
+
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        reviewer_started_at: '2026-05-11T05:05:00.000Z',
+        reviewer_timeout_ms: 10 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 60 * 60 * 1000 }
+    ),
+    true,
+    'row launched with a shorter timeout is stale even if current env is longer'
+  );
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        reviewer_started_at: '2026-05-11T04:30:00.000Z',
+        reviewer_timeout_ms: 60 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    false,
+    'row launched with a longer timeout is not stale just because current env is shorter'
+  );
+});
+
 test('steady-state reattach per-poll cap defaults small and accepts zero for disable', () => {
   assert.equal(resolveStaleReviewerReconcilePerPoll({}), 3);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '1' }), 1);

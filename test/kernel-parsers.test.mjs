@@ -103,24 +103,29 @@ test('kernel verdict parser fails closed on request-changes clauses before permi
     'Request changes: migration unsafe.',
     'Request changes - migration unsafe.',
     'Request changes needed for the migration.',
+    'Request changes -- the migration must be fixed.',
+    'Request changes - the migration needs to be addressed before merge.',
+    'Request changes because the data-loss bug should be resolved first.',
   ];
 
   for (const requestChangesLine of cases) {
-    const review = [
-      '## Summary',
-      'One blocking issue remains.',
-      '',
-      '## Verdict',
-      requestChangesLine,
-      'Comment only addresses the doc nit.',
-    ].join('\n');
+    for (const permissiveLine of ['Comment only addresses the doc nit.', 'Approved directionally after the fix.']) {
+      const review = [
+        '## Summary',
+        'One blocking issue remains.',
+        '',
+        '## Verdict',
+        requestChangesLine,
+        permissiveLine,
+      ].join('\n');
 
-    assert.equal(
-      extractReviewVerdict(review),
-      requestChangesLine,
-      `expected ${requestChangesLine} to win over trailing permissive prose`,
-    );
-    assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+      assert.equal(
+        extractReviewVerdict(review),
+        requestChangesLine,
+        `expected ${requestChangesLine} to win over trailing permissive prose`,
+      );
+      assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+    }
   }
 });
 

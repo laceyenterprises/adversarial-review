@@ -1259,15 +1259,34 @@ function isWatcherAutonomousRetryableRecordedDispatchStatus(status) {
 }
 
 function getRecordedMergeAgentLifecycleCleanup(rootDir, { repo, prNumber } = {}) {
-  try {
-    return JSON.parse(readFileSync(mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber }), 'utf8'));
-  } catch {
-    return null;
-  }
+  const detail = readJsonFileDetailed(mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber }));
+  return detail.ok ? detail.value : null;
 }
 
-function hasPendingDispatchedLabelAddCleanup(rootDir, job) {
-  const cleanup = getRecordedMergeAgentLifecycleCleanup(rootDir, job);
+function getRecordedMergeAgentLifecycleCleanupDetailed(rootDir, { repo, prNumber } = {}, { logger = console } = {}) {
+  const filePath = mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber });
+  const detail = readJsonFileDetailed(filePath);
+  if (detail.ok) return { ok: true, value: detail.value, filePath };
+  if (detail.error?.code === 'ENOENT') {
+    return { ok: true, value: null, filePath, missing: true };
+  }
+  logger?.error?.(
+    `[follow-up-merge-agent] failed to read merge-agent lifecycle cleanup record for ${repo}#${prNumber} at ${filePath}: ${detail.error?.message || String(detail.error)}`
+  );
+  mergeAgentLifecycleLog(logger, 'merge_agent.lifecycle_cleanup_read_failed', {
+    repo,
+    prNumber,
+    filePath,
+    error: detail.error?.message || String(detail.error),
+    code: detail.error?.code || null,
+  });
+  return { ok: false, error: detail.error, filePath };
+}
+
+function hasPendingDispatchedLabelAddCleanup(rootDir, job, { logger = console } = {}) {
+  const detail = getRecordedMergeAgentLifecycleCleanupDetailed(rootDir, job, { logger });
+  if (!detail.ok) return true;
+  const cleanup = detail.value;
   if (!isUnresolvedMergeAgentLifecycleCleanup(cleanup)) return false;
   if (cleanup.transition !== MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION) return false;
   if (cleanup.headSha && job?.headSha && cleanup.headSha !== job.headSha) return false;
@@ -2453,7 +2472,7 @@ async function dispatchMergeAgentForPR({
     && isScopedMergeAgentRequest(job);
   const ownerResolution = resolveHqOwner(resolveHqRoot(runtimeEnv));
   const statusProbeAsOwner = ownerResolution?.ownerUser || null;
-  const hasPendingLabelAddCleanup = hasPendingDispatchedLabelAddCleanup(rootDir, job);
+  const hasPendingLabelAddCleanup = hasPendingDispatchedLabelAddCleanup(rootDir, job, { logger });
 
   // Watcher owns its worker's outcome. Probe the recorded dispatch's REAL status
   // every tick (not only when an operator label is present) so a worker that

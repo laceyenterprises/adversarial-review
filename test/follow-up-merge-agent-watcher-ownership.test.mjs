@@ -265,3 +265,58 @@ test('failed worker is still reclaimed when dispatched-label add cleanup is pend
   const records = listMergeAgentDispatches(rootDir);
   assert.equal(records[0].watcherReDispatchCount, 1);
 });
+
+test('malformed dispatched-label cleanup state fails closed into watcher recovery ownership', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = makeHqRoot('airlock');
+  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  upsertMergeAgentLifecycleCleanup(rootDir, {
+    repo: makeJob().repo,
+    prNumber: makeJob().prNumber,
+    transition: 'dispatched-label-add',
+    headSha: makeJob().headSha,
+    queuedAt: '2026-05-24T00:00:01.000Z',
+  });
+  writeFileSync(
+    path.join(
+      rootDir,
+      'data',
+      'follow-up-jobs',
+      'merge-agent-lifecycle-cleanups',
+      'laceyenterprises__agent-os-pr-849.json',
+    ),
+    '{ malformed json',
+  );
+  const dispatchCalls = [];
+  const errors = [];
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      dispatchCalls.push(args);
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    logger: {
+      info() {},
+      error(message) {
+        errors.push(String(message));
+      },
+    },
+    now: '2026-05-24T04:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch', 'malformed cleanup state must not silently wedge on skip-already-dispatched');
+  assert.equal(dispatchCalls.length, 1);
+  assert.equal(listMergeAgentDispatches(rootDir)[0].watcherReDispatchCount, 1);
+  assert.ok(
+    errors.some((message) => message.includes('failed to read merge-agent lifecycle cleanup record')),
+    'malformed cleanup state must be logged loudly',
+  );
+});

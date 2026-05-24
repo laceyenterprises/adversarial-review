@@ -68,6 +68,21 @@ test('reviewer middle rereview uses the focused middle prompt', () => {
   assert.match(rendered.prompt, /This is a re-review after a remediation round/);
 });
 
+test('reviewer prompts default stale-doc findings to doc updates, not rollbacks', () => {
+  for (const stage of ['first', 'middle', 'last']) {
+    const prompt = loadStagePrompt({
+      rootDir: ROOT,
+      promptSet: 'code-pr',
+      actor: 'reviewer',
+      stage,
+    });
+
+    assert.match(prompt, /assume the operator intentionally drove that new behavior/);
+    assert.match(prompt, /Do not recommend rolling code back merely because an existing spec/);
+    assert.match(prompt, /the recommended fix is to update the governing spec\/runbook\/prompt/);
+  }
+});
+
 test('reviewer partial or invalid context defaults to first unless mid-cycle is proven', () => {
   assert.equal(pickReviewerStage({ maxRemediationRounds: 2 }), 'first');
   assert.equal(pickReviewerStage({ reviewAttemptNumber: 3, maxRemediationRounds: 2 }), 'first');

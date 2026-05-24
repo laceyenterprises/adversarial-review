@@ -22,3 +22,12 @@ test('reviewer prompt carries the shared spec-touch guidance block verbatim', {
   assert.match(section, /modules\/worker-pool\/lib\/hq-\*\.sh/);
   assert.match(section, /docs\/SPEC-session-ledger-control-plane\.md/);
 });
+
+test('spec-touch guidance defaults new behavior drift to spec updates', () => {
+  const section = buildSpecTouchPromptSection();
+
+  assert.match(section, /Assume new or changed behavior in a PR was operator-driven/);
+  assert.match(section, /Do not recommend rolling code back merely to match stale spec text/);
+  assert.match(section, /The default remediation is to update the governing spec to match the new behavior/);
+  assert.match(section, /revert the contract change only if it introduces a real regression/);
+});

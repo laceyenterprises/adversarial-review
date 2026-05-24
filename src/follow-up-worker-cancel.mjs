@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { readFollowUpJob } from './follow-up-jobs.mjs';
+import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -80,42 +81,47 @@ function workerCancelHandle(job) {
   return {
     processGroupId,
     processId,
+    spawnedAt: worker.spawnedAt || null,
     worker,
   };
 }
 
-function sendWorkerSignal({ processGroupId, processId, signal, processKill = process.kill } = {}) {
+async function sendWorkerSignal({
+  processGroupId,
+  processId,
+  spawnedAt,
+  signal,
+  processKill = process.kill,
+  execFileImpl,
+} = {}) {
   if (!processGroupId && !processId) {
     return { signalled: false, target: null, error: 'missing-worker-process-handle' };
   }
   if (processGroupId === process.pid || processId === process.pid) {
     return { signalled: false, target: null, error: 'refusing-to-signal-daemon-process' };
   }
-
-  if (processGroupId) {
-    try {
-      processKill(-processGroupId, signal);
-      return { signalled: true, target: { kind: 'process-group', id: processGroupId }, error: null };
-    } catch (err) {
-      if (err?.code !== 'ESRCH' && !processId) {
-        return { signalled: false, target: { kind: 'process-group', id: processGroupId }, error: err?.message || String(err) };
-      }
-    }
+  const targetPgid = processGroupId || processId;
+  if (!isPgidAlive(targetPgid, processKill)) {
+    return { signalled: false, target: { kind: 'process-group', id: targetPgid }, error: 'process-group-not-found' };
   }
-
-  if (processId) {
-    try {
-      processKill(processId, signal);
-      return { signalled: true, target: { kind: 'process', id: processId }, error: null };
-    } catch (err) {
-      if (err?.code === 'ESRCH') {
-        return { signalled: false, target: { kind: 'process', id: processId }, error: 'process-not-found' };
-      }
-      return { signalled: false, target: { kind: 'process', id: processId }, error: err?.message || String(err) };
-    }
+  const identity = await verifyPgidIdentity(targetPgid, spawnedAt, { execFileImpl });
+  if (!identity.match) {
+    return {
+      signalled: false,
+      target: { kind: 'process-group', id: targetPgid },
+      error: 'identity-unconfirmed',
+      identity,
+    };
   }
-
-  return { signalled: false, target: { kind: 'process-group', id: processGroupId }, error: 'process-group-not-found' };
+  try {
+    processKill(-targetPgid, signal);
+    return { signalled: true, target: { kind: 'process-group', id: targetPgid }, error: null, identity };
+  } catch (err) {
+    if (err?.code === 'ESRCH') {
+      return { signalled: false, target: { kind: 'process-group', id: targetPgid }, error: 'process-group-not-found' };
+    }
+    return { signalled: false, target: { kind: 'process-group', id: targetPgid }, error: err?.message || String(err) };
+  }
 }
 
 function sanitizePathSegment(value) {
@@ -145,7 +151,7 @@ function writeCancellationReceipt(rootDir, receipt) {
   throw new Error(`Unable to allocate worker-cancellation receipt for ${receipt.job?.jobId || '<unknown>'}`);
 }
 
-function cancelFollowUpWorker({
+async function cancelFollowUpWorker({
   rootDir = ROOT,
   jobPath,
   requestedAt = new Date().toISOString(),
@@ -153,6 +159,7 @@ function cancelFollowUpWorker({
   reason = 'Operator requested worker cancellation.',
   signal = 'SIGTERM',
   processKill = process.kill,
+  execFileImpl,
 } = {}) {
   const job = readFollowUpJob(jobPath);
   if (job.status !== 'in_progress') {
@@ -163,11 +170,13 @@ function cancelFollowUpWorker({
   }
 
   const handle = workerCancelHandle(job);
-  const signalResult = sendWorkerSignal({
+  const signalResult = await sendWorkerSignal({
     processGroupId: handle.processGroupId,
     processId: handle.processId,
+    spawnedAt: handle.spawnedAt,
     signal: parseSignal(signal),
     processKill,
+    execFileImpl,
   });
   const receipt = {
     kind: 'adversarial-review-follow-up-worker-cancellation',
@@ -202,11 +211,11 @@ function cancelFollowUpWorker({
   };
 }
 
-function main() {
+async function main() {
   try {
     const { jobPathArg, signal, reason } = parseArgs(process.argv.slice(2));
     const jobPath = resolveFollowUpJobPath(ROOT, jobPathArg);
-    const result = cancelFollowUpWorker({
+    const result = await cancelFollowUpWorker({
       rootDir: ROOT,
       jobPath,
       signal,

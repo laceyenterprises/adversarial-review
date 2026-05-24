@@ -43,7 +43,7 @@ function insertReviewingRow(rootDir, overrides = {}) {
   }
 }
 
-test('cancelActiveReview signals persisted reviewer process group without mutating review row', () => {
+test('cancelActiveReview signals persisted reviewer process group without mutating review row', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewingRow(rootDir);
   const db = openReviewStateDb(rootDir);
@@ -56,13 +56,14 @@ test('cancelActiveReview signals persisted reviewer process group without mutati
   }
   const signals = [];
 
-  const result = cancelActiveReview({
+  const result = await cancelActiveReview({
     rootDir,
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 149,
     requestedAt: '2026-05-24T15:03:00.000Z',
     requestedBy: 'placey',
     reason: 'duplicate reviewer',
+    execFileImpl: async () => ({ stdout: `${new Date('2026-05-24T15:01:00.000Z').toString()}\n` }),
     processKill: (pid, signal) => {
       signals.push({ pid, signal });
       return true;
@@ -71,7 +72,10 @@ test('cancelActiveReview signals persisted reviewer process group without mutati
 
   assert.equal(result.signalled, true);
   assert.deepEqual(result.target, { kind: 'process-group', id: 2468 });
-  assert.deepEqual(signals, [{ pid: -2468, signal: 'SIGTERM' }]);
+  assert.deepEqual(signals, [
+    { pid: -2468, signal: 0 },
+    { pid: -2468, signal: 'SIGTERM' },
+  ]);
   assert.ok(result.receiptPath.includes('/data/review-cancellations/'));
   assert.ok(existsSync(result.receiptPath));
   const receipt = JSON.parse(readFileSync(result.receiptPath, 'utf8'));
@@ -89,12 +93,12 @@ test('cancelActiveReview signals persisted reviewer process group without mutati
   }
 });
 
-test('cancelActiveReview refuses non-reviewing rows', () => {
+test('cancelActiveReview refuses non-reviewing rows', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewingRow(rootDir, { reviewStatus: 'posted' });
 
-  assert.throws(
-    () => cancelActiveReview({
+  await assert.rejects(
+    cancelActiveReview({
       rootDir,
       repo: 'laceyenterprises/adversarial-review',
       prNumber: 149,
@@ -104,9 +108,10 @@ test('cancelActiveReview refuses non-reviewing rows', () => {
   );
 });
 
-test('sendReviewerSignal reports missing process groups', () => {
-  const result = sendReviewerSignal({
+test('sendReviewerSignal reports missing process groups', async () => {
+  const result = await sendReviewerSignal({
     pgid: 1357,
+    startedAt: '2026-05-24T15:01:00.000Z',
     signal: 'SIGTERM',
     processKill: () => {
       const err = new Error('gone');
@@ -118,6 +123,24 @@ test('sendReviewerSignal reports missing process groups', () => {
   assert.equal(result.signalled, false);
   assert.deepEqual(result.target, { kind: 'process-group', id: 1357 });
   assert.equal(result.error, 'process-group-not-found');
+});
+
+test('sendReviewerSignal refuses recycled process groups when identity is unconfirmed', async () => {
+  const result = await sendReviewerSignal({
+    pgid: 2468,
+    startedAt: '2026-05-24T15:01:00.000Z',
+    signal: 'SIGKILL',
+    processKill: (pid, signal) => {
+      if (signal === 0 && pid === -2468) return true;
+      throw new Error(`unexpected signal ${signal} ${pid}`);
+    },
+    execFileImpl: async () => ({ stdout: 'Sat May 24 15:11:00 2026\n' }),
+  });
+
+  assert.equal(result.signalled, false);
+  assert.deepEqual(result.target, { kind: 'process-group', id: 2468 });
+  assert.equal(result.error, 'identity-unconfirmed');
+  assert.match(result.identity.reason, /start-time drift/);
 });
 
 test('reviewerCancelHandle and parseArgs expose reviewer cancel handle', () => {

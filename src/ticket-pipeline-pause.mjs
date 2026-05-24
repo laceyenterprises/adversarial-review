@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
+  resolveTicketPipelinePauseRoot,
+  TICKET_PIPELINE_PAUSE_ROOT_ENV,
   TICKET_PIPELINE_PAUSED_LABEL,
   repoPausePath,
 } from './adapters/operator/linear-triage/index.mjs';
@@ -121,13 +123,15 @@ function setRepoTicketPipelinePause({
   reason,
   requestedAt = new Date().toISOString(),
   requestedBy = process.env.USER || process.env.LOGNAME || 'operator',
+  env = process.env,
 } = {}) {
-  const filePath = repoPausePath(rootDir, repo);
+  const pauseRootDir = resolveTicketPipelinePauseRoot(rootDir, env);
+  const filePath = repoPausePath(pauseRootDir, repo);
   if (!paused) {
     if (existsSync(filePath)) {
       rmSync(filePath);
     }
-    return { paused: false, filePath };
+    return { paused: false, filePath, pauseRootDir };
   }
   const record = {
     kind: 'adversarial-review-ticket-pipeline-repo-pause',
@@ -139,7 +143,7 @@ function setRepoTicketPipelinePause({
     reason,
   };
   writeFileAtomic(filePath, `${JSON.stringify(record, null, 2)}\n`);
-  return { paused: true, filePath, record };
+  return { paused: true, filePath, pauseRootDir, record };
 }
 
 async function applyTicketPipelinePause({
@@ -152,6 +156,7 @@ async function applyTicketPipelinePause({
   requestedAt = new Date().toISOString(),
   requestedBy = process.env.USER || process.env.LOGNAME || 'operator',
   execFileImpl = execFileAsync,
+  env = process.env,
 } = {}) {
   const paused = !resume;
   const result = {
@@ -181,9 +186,11 @@ async function applyTicketPipelinePause({
       reason,
       requestedAt,
       requestedBy,
+      env,
     });
     result.repoPauseUpdated = true;
     result.repoPausePath = repoPause.filePath;
+    result.repoPauseRootDir = repoPause.pauseRootDir;
   }
   return result;
 }
@@ -201,6 +208,11 @@ async function main() {
       (result.repoPausePath ? ` repoPause=${result.repoPausePath}` : '') +
       ` label=${result.label}`
     );
+    if (result.repoPauseRootDir && result.repoPauseRootDir !== ROOT) {
+      console.warn(
+        `[ticket-pipeline-pause] repo pause root resolved outside this checkout via ${TICKET_PIPELINE_PAUSE_ROOT_ENV}/HQ_ROOT: ${result.repoPauseRootDir}`
+      );
+    }
   } catch (err) {
     console.error(`[ticket-pipeline-pause] Failed: ${err.message}`);
     process.exit(1);

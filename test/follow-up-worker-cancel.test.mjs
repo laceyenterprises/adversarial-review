@@ -27,6 +27,7 @@ function makeInProgressJob(rootDir, overrides = {}) {
       state: 'spawned',
       processId: 1234,
       processGroupId: 1234,
+      spawnedAt: '2026-05-24T14:55:00.000Z',
       workspaceDir: '/tmp/workspace',
       outputPath: '/tmp/workspace/.adversarial-follow-up/codex-last-message.md',
       logPath: '/tmp/workspace/.adversarial-follow-up/codex-worker.log',
@@ -38,18 +39,19 @@ function makeInProgressJob(rootDir, overrides = {}) {
   return { job, jobPath };
 }
 
-test('cancelFollowUpWorker signals the persisted process group and leaves job state untouched', () => {
+test('cancelFollowUpWorker signals the persisted process group and leaves job state untouched', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { jobPath } = makeInProgressJob(rootDir);
   const before = readFileSync(jobPath, 'utf8');
   const signals = [];
 
-  const result = cancelFollowUpWorker({
+  const result = await cancelFollowUpWorker({
     rootDir,
     jobPath,
     requestedAt: '2026-05-24T15:00:00.000Z',
     requestedBy: 'placey',
     reason: 'duplicate worker',
+    execFileImpl: async () => ({ stdout: `${new Date('2026-05-24T14:55:00.000Z').toString()}\n` }),
     processKill: (pid, signal) => {
       signals.push({ pid, signal });
       return true;
@@ -58,7 +60,10 @@ test('cancelFollowUpWorker signals the persisted process group and leaves job st
 
   assert.equal(result.signalled, true);
   assert.deepEqual(result.target, { kind: 'process-group', id: 1234 });
-  assert.deepEqual(signals, [{ pid: -1234, signal: 'SIGTERM' }]);
+  assert.deepEqual(signals, [
+    { pid: -1234, signal: 0 },
+    { pid: -1234, signal: 'SIGTERM' },
+  ]);
   assert.equal(readFileSync(jobPath, 'utf8'), before);
   assert.ok(result.receiptPath.includes('/data/follow-up-jobs/worker-cancellations/'));
   assert.ok(existsSync(result.receiptPath));
@@ -68,29 +73,24 @@ test('cancelFollowUpWorker signals the persisted process group and leaves job st
   assert.equal(receipt.reason, 'duplicate worker');
 });
 
-test('sendWorkerSignal falls back to process id when the group is already gone', () => {
+test('sendWorkerSignal refuses recycled process groups when identity is unconfirmed', async () => {
   const calls = [];
-  const result = sendWorkerSignal({
+  const result = await sendWorkerSignal({
     processGroupId: 4321,
     processId: 9876,
+    spawnedAt: '2026-05-24T15:00:00.000Z',
     signal: 'SIGKILL',
     processKill: (pid, signal) => {
       calls.push({ pid, signal });
-      if (pid < 0) {
-        const err = new Error('missing group');
-        err.code = 'ESRCH';
-        throw err;
-      }
       return true;
     },
+    execFileImpl: async () => ({ stdout: 'Sat May 24 15:10:00 2026\n' }),
   });
 
-  assert.equal(result.signalled, true);
-  assert.deepEqual(result.target, { kind: 'process', id: 9876 });
-  assert.deepEqual(calls, [
-    { pid: -4321, signal: 'SIGKILL' },
-    { pid: 9876, signal: 'SIGKILL' },
-  ]);
+  assert.equal(result.signalled, false);
+  assert.deepEqual(result.target, { kind: 'process-group', id: 4321 });
+  assert.equal(result.error, 'identity-unconfirmed');
+  assert.deepEqual(calls, [{ pid: -4321, signal: 0 }]);
 });
 
 test('workerCancelHandle accepts legacy jobs without explicit processGroupId', () => {

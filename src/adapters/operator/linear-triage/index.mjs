@@ -8,7 +8,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   extractLinearTicketId,
@@ -17,6 +17,7 @@ import {
 
 const DEFAULT_CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 const TICKET_PIPELINE_PAUSED_LABEL = 'ticket-pipeline-paused';
+const TICKET_PIPELINE_PAUSE_ROOT_ENV = 'ADVERSARIAL_TICKET_PIPELINE_ROOT';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = join(__dirname, '..', '..', '..', '..');
 
@@ -47,22 +48,31 @@ function repoPausePath(rootDir, repo) {
   return join(rootDir, 'data', 'ticket-pipeline-pauses', `${safeRepo}.json`);
 }
 
-function isRepoTicketPipelinePaused(rootDir, repo) {
+function resolveTicketPipelinePauseRoot(rootDir = DEFAULT_ROOT, env = process.env) {
+  const override = String(env?.[TICKET_PIPELINE_PAUSE_ROOT_ENV] || '').trim();
+  if (override) return resolve(override);
+  const hqRoot = String(env?.HQ_ROOT || '').trim();
+  if (hqRoot) return resolve(hqRoot, 'adversarial-review');
+  return resolve(rootDir);
+}
+
+function isRepoTicketPipelinePaused(rootDir, repo, { logger = null, env = process.env } = {}) {
   if (!repo) return false;
-  const filePath = repoPausePath(rootDir, repo);
+  const filePath = repoPausePath(resolveTicketPipelinePauseRoot(rootDir, env), repo);
   if (!existsSync(filePath)) return false;
   try {
     const record = JSON.parse(readFileSync(filePath, 'utf8'));
     return record?.paused !== false;
-  } catch {
+  } catch (err) {
+    logger?.error?.(`[linear-triage] invalid repo pause record at ${filePath}: ${err?.message || err}`);
     return true;
   }
 }
 
-function isTicketPipelinePaused(subjectRef, { rootDir = DEFAULT_ROOT } = {}) {
+function isTicketPipelinePaused(subjectRef, { rootDir = DEFAULT_ROOT, logger = null, env = process.env } = {}) {
   if (subjectRef?.ticketPipelinePaused) return true;
   if (hasTicketPipelinePauseLabel(subjectRef)) return true;
-  return isRepoTicketPipelinePaused(rootDir, repoFromSubjectRef(subjectRef));
+  return isRepoTicketPipelinePaused(rootDir, repoFromSubjectRef(subjectRef), { logger, env });
 }
 
 async function defaultLinearClientProvider() {
@@ -208,7 +218,7 @@ function createLinearTriageAdapter({
   }
 
   async function syncTriageStatus(subjectRef, status) {
-    if (isTicketPipelinePaused(subjectRef, { rootDir })) {
+    if (isTicketPipelinePaused(subjectRef, { rootDir, logger })) {
       logger.log?.(`[linear-triage] ticket pipeline paused for ${subjectRef?.subjectExternalId || subjectRef?.repo || '<unknown>'} - skipping ${status}`);
       return;
     }
@@ -240,7 +250,7 @@ function createLinearTriageAdapter({
     critical = false,
     reviewSummary = '',
   } = {}) {
-    if (isTicketPipelinePaused(subjectRef, { rootDir })) {
+    if (isTicketPipelinePaused(subjectRef, { rootDir, logger })) {
       logger.log?.(`[linear-triage] ticket pipeline paused for ${subjectRef?.subjectExternalId || subjectRef?.repo || '<unknown>'} - skipping review completion`);
       return;
     }
@@ -286,5 +296,7 @@ export {
   hasTicketPipelinePauseLabel,
   isTicketPipelinePaused,
   repoPausePath,
+  resolveTicketPipelinePauseRoot,
   routePR,
+  TICKET_PIPELINE_PAUSE_ROOT_ENV,
 };

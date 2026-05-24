@@ -2,8 +2,8 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
 import {
-  ensureReviewStateSchema,
   getReviewRow,
   openReviewStateDb,
 } from './review-state.mjs';
@@ -75,16 +75,34 @@ function reviewerCancelHandle(row) {
   return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
 }
 
-function sendReviewerSignal({ pgid, signal, processKill = process.kill } = {}) {
+async function sendReviewerSignal({
+  pgid,
+  startedAt,
+  signal,
+  processKill = process.kill,
+  execFileImpl,
+} = {}) {
   if (!pgid) {
     return { signalled: false, target: null, error: 'missing-reviewer-process-group' };
   }
   if (pgid === process.pid) {
     return { signalled: false, target: null, error: 'refusing-to-signal-daemon-process' };
   }
+  if (!isPgidAlive(pgid, processKill)) {
+    return { signalled: false, target: { kind: 'process-group', id: pgid }, error: 'process-group-not-found' };
+  }
+  const identity = await verifyPgidIdentity(pgid, startedAt, { execFileImpl });
+  if (!identity.match) {
+    return {
+      signalled: false,
+      target: { kind: 'process-group', id: pgid },
+      error: 'identity-unconfirmed',
+      identity,
+    };
+  }
   try {
     processKill(-pgid, parseSignal(signal));
-    return { signalled: true, target: { kind: 'process-group', id: pgid }, error: null };
+    return { signalled: true, target: { kind: 'process-group', id: pgid }, error: null, identity };
   } catch (err) {
     if (err?.code === 'ESRCH') {
       return { signalled: false, target: { kind: 'process-group', id: pgid }, error: 'process-group-not-found' };
@@ -122,7 +140,7 @@ function writeCancellationReceipt(rootDir, receipt) {
   throw new Error(`Unable to allocate review-cancellation receipt for ${receipt.repo}#${receipt.prNumber}`);
 }
 
-function cancelActiveReview({
+async function cancelActiveReview({
   rootDir = ROOT,
   repo,
   prNumber,
@@ -131,11 +149,12 @@ function cancelActiveReview({
   reason = 'Operator requested active review cancellation.',
   signal = 'SIGTERM',
   processKill = process.kill,
+  execFileImpl,
   db: dbOverride = null,
 } = {}) {
   const db = dbOverride || openReviewStateDb(rootDir);
   try {
-    ensureReviewStateSchema(db);
+    db.pragma('query_only = 1');
     const row = getReviewRow(db, { repo, prNumber });
     if (!row) {
       throw new Error(`No review row found for ${repo}#${prNumber}`);
@@ -145,10 +164,12 @@ function cancelActiveReview({
     }
 
     const pgid = reviewerCancelHandle(row);
-    const signalResult = sendReviewerSignal({
+    const signalResult = await sendReviewerSignal({
       pgid,
+      startedAt: row.reviewer_started_at || null,
       signal,
       processKill,
+      execFileImpl,
     });
     const receipt = {
       kind: 'adversarial-review-active-review-cancellation',
@@ -186,7 +207,7 @@ function cancelActiveReview({
 async function main() {
   try {
     const { repo, prNumber, signal, reason } = parseArgs(process.argv.slice(2));
-    const result = cancelActiveReview({
+    const result = await cancelActiveReview({
       rootDir: ROOT,
       repo,
       prNumber,

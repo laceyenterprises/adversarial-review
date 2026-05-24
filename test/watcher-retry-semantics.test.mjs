@@ -222,6 +222,39 @@ test('steady-state reattach only probes reviewer sessions older than the reviewe
   );
 });
 
+test('steady-state reattach does not touch a freshly claimed row before spawn callback lands', () => {
+  const now = new Date('2026-05-11T05:20:00.000Z');
+
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        last_attempted_at: '2026-05-11T05:19:30.000Z',
+        reviewer_started_at: null,
+        reviewer_pgid: null,
+        reviewer_timeout_ms: 20 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    false,
+    'claim-to-spawn window must not be marked stale just because reviewer_started_at has not been persisted yet'
+  );
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        last_attempted_at: '2026-05-11T04:50:00.000Z',
+        reviewer_started_at: null,
+        reviewer_pgid: null,
+        reviewer_timeout_ms: 20 * 60 * 1000,
+      },
+      now,
+      { reviewerTimeoutMs: 20 * 60 * 1000 }
+    ),
+    true,
+    'missing spawn metadata becomes reconcilable after the persisted claim timeout expires'
+  );
+});
+
 test('steady-state reattach selection uses persisted launch timeout before current env', () => {
   const now = new Date('2026-05-11T05:20:00.000Z');
 

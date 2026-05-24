@@ -312,6 +312,49 @@ test('overdue orphan recovery force-refreshes the cached GitHub review probe bef
   assert.match(row.failure_message, /posted a GitHub review/);
 });
 
+test('overdue orphan recovery waits through bounded late-review reprobes before retrying', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewerTimeoutMs: 20 * 60 * 1000 });
+  const killed = [];
+  const sleeps = [];
+  const log = makeLog();
+  let processProbeCount = 0;
+  let reviewProbeCount = 0;
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date('2026-05-11T05:45:00.000Z'),
+    log,
+    probeSession: () => {
+      processProbeCount += 1;
+      return processProbeCount < 2
+        ? { alive: true, matched: true }
+        : { alive: false, matched: false };
+    },
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    findPostedReview: async () => {
+      reviewProbeCount += 1;
+      return reviewProbeCount < 4
+        ? null
+        : { submitted_at: '2026-05-11T05:44:59.000Z' };
+    },
+    reviewerDeadlineMs: 20 * 60 * 1000,
+    postKillReviewReprobeDelaysMs: [25, 50, 75],
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed-orphan');
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGTERM' }]);
+  assert.deepEqual(sleeps, [200, 25, 50]);
+  assert.equal(reviewProbeCount, 4, 'late review must be checked after the delayed reprobe window');
+  assert.match(row.failure_message, /posted a GitHub review/);
+});
+
 test('overdue orphan stays sticky when recovery cannot prove the process died', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewerTimeoutMs: 20 * 60 * 1000 });

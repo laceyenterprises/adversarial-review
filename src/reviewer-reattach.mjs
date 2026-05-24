@@ -207,6 +207,7 @@ async function reconcileReviewerSessions({
   maxRows = Number.POSITIVE_INFINITY,
   reviewerDeadlineMs = resolveReviewerTimeoutMs(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  postKillReviewReprobeDelaysMs = [500, 1500, 3000],
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
     ? Number(maxRows)
@@ -314,6 +315,23 @@ async function reconcileReviewerSessions({
       }
     }
 
+    async function probePostedReviewAfterRecoveryDeath() {
+      const delays = Array.isArray(postKillReviewReprobeDelaysMs)
+        ? postKillReviewReprobeDelaysMs
+        : [];
+      for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+        if (attempt > 0) {
+          const delayMs = Number(delays[attempt - 1]);
+          if (Number.isFinite(delayMs) && delayMs > 0) {
+            await sleep(delayMs);
+          }
+        }
+        if (!(await probePostedReviewOrMarkSticky({ refresh: true }))) return false;
+        if (postedReview) return true;
+      }
+      return true;
+    }
+
     async function tryRecoverOverdueAliveSession({ launchTimeoutMs, orphanAgeMs }) {
       const recoverySignals = ['SIGTERM', 'SIGKILL'];
       let latestSessionProbe = { alive: true, matched: true };
@@ -335,7 +353,7 @@ async function reconcileReviewerSessions({
             ? latestSessionProbe
             : latestSessionProbe?.alive === true;
           if (!stillAlive) {
-            if (!(await probePostedReviewOrMarkSticky({ refresh: true }))) return true;
+            if (!(await probePostedReviewAfterRecoveryDeath())) return true;
             if (postedReview) {
               markStickyOrphan({
                 statements,

@@ -1492,12 +1492,18 @@ async function reconcileOrphanedReviewing(octokit) {
 function shouldReconcileStaleReviewerSession(row, now, {
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
 } = {}) {
-  const startedAtMs = Date.parse(row?.reviewer_started_at || '');
-  if (!Number.isFinite(startedAtMs)) return true;
   const persistedTimeoutMs = Number(row?.reviewer_timeout_ms);
   const effectiveTimeoutMs = Number.isInteger(persistedTimeoutMs) && persistedTimeoutMs > 0
     ? persistedTimeoutMs
     : reviewerTimeoutMs;
+  const startedAtMs = Date.parse(row?.reviewer_started_at || '');
+  if (!Number.isFinite(startedAtMs)) {
+    const claimedAtMs = Date.parse(row?.last_attempted_at || '');
+    if (Number.isFinite(claimedAtMs)) {
+      return (claimedAtMs + effectiveTimeoutMs) <= now.getTime();
+    }
+    return true;
+  }
   return (startedAtMs + effectiveTimeoutMs) <= now.getTime();
 }
 

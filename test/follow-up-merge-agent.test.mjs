@@ -712,7 +712,15 @@ test('merge-agent-requested still respects hard stops and active remediation', (
       mergeAgentRequest: makeMergeAgentRequest(),
       mergeable: 'CONFLICTING',
     })),
-    'skip-operator-skip'
+    'dispatch'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      labels: [{ name: 'merge-agent-requested' }, { name: 'merge-agent-stuck' }],
+      mergeAgentRequest: makeMergeAgentRequest({ headSha: 'old-sha' }),
+      mergeable: 'CONFLICTING',
+    })),
+    'skip-merge-agent-requested-stale'
   );
   assert.equal(
     pickMergeAgentDispatch(makeJob({
@@ -3080,6 +3088,70 @@ test('dispatchMergeAgentForPR retries a failed same-head dispatch when merge-age
   assert.equal(hqCalls[1].args[0], 'dispatch');
   const [recorded] = listMergeAgentDispatches(rootDir);
   assert.equal(recorded.launchRequestId, retryLrq);
+});
+
+test('dispatchMergeAgentForPR recovers a bound-exhausted stuck PR when merge-agent-requested is applied on the current head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const failedLrq = 'lrq_11111111-1111-1111-1111-111111111111';
+  const retryLrq = 'lrq_33333333-3333-3333-3333-333333333333';
+
+  recordMergeAgentDispatch(rootDir, makeJob({
+    labels: [{ name: 'merge-agent-stuck' }, { name: 'merge-agent-requested' }],
+    lastVerdict: 'Request changes',
+    mergeable: 'CONFLICTING',
+    checksConclusion: 'PENDING',
+    remediationCurrentRound: 2,
+    remediationMaxRounds: 2,
+  }), {
+    dispatchedAt: '2026-05-24T12:00:00.000Z',
+    prompt: 'seed',
+    dispatchId: failedLrq,
+    launchRequestId: failedLrq,
+    trigger: null,
+    watcherReDispatchCount: 2,
+  });
+
+  const hqCalls = [];
+  const ghCalls = [];
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      labels: [{ name: 'merge-agent-stuck' }, { name: 'merge-agent-requested' }],
+      mergeAgentRequest: makeMergeAgentRequest({ createdAt: '2026-05-24T12:05:00.000Z' }),
+      lastVerdict: 'Request changes',
+      mergeable: 'CONFLICTING',
+      checksConclusion: 'PENDING',
+      remediationCurrentRound: 2,
+      remediationMaxRounds: 2,
+    }),
+    execFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args });
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: '{"status":"failed"}\n', stderr: '' };
+      }
+      return { stdout: `{"dispatchId":"disp_retry","lrq":"${retryLrq}"}\n`, stderr: '' };
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    now: '2026-05-24T12:06:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.trigger, 'merge-agent-requested');
+  assert.equal(result.dispatchId, 'disp_retry');
+  assert.equal(hqCalls.length, 2);
+  assert.deepEqual(hqCalls[0].args.slice(0, 3), ['dispatch', 'status', failedLrq]);
+  assert.ok(
+    ghCalls.some(({ args }) => args.includes('--remove-label') && args.at(-1) === 'merge-agent-requested'),
+    'the consumed recovery label should be removed after dispatch'
+  );
+  const [recorded] = listMergeAgentDispatches(rootDir);
+  assert.equal(recorded.launchRequestId, retryLrq);
+  assert.equal(recorded.trigger, 'merge-agent-requested');
+  assert.equal(recorded.watcherReDispatchCount, 2);
 });
 
 test('dispatchMergeAgentForPR reconciles externally removed consumed labels on idempotency retry', async () => {

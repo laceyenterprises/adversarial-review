@@ -109,8 +109,9 @@ const MERGE_AGENT_STUCK_LABEL = 'merge-agent-stuck';
 // still set) for the same head SHA before handing the PR to the operator via
 // `merge-agent-stuck`. Bounded on purpose: an unbounded retry on a persistently
 // failing worker is exactly the loop shape that caused the 2026-05-24 reap
-// storm. The operator's `merge-agent-requested` label always forces a retry
-// past this bound.
+// storm. A scoped current-head `merge-agent-requested` label is the explicit
+// operator recovery action for that stuck state and forces one retry path past
+// this bound.
 const _WATCHER_REDISPATCH_BOUND = 2;
 
 function isFinalPassOnRequestChangesEnabled({
@@ -1617,14 +1618,23 @@ function pickMergeAgentDispatchDetail(job, {
   // but bypasses review/remediation-state gates for the current head.
   // `merge-agent-requested` is different: it asks the merge-agent to
   // clean/rebase the branch, so it can bypass current
-  // mergeability/check/verdict gates, but not hard stop labels, active
-  // remediation, or duplicate-dispatch protection.
+  // mergeability/check/verdict gates, the terminal `merge-agent-stuck`
+  // handoff marker for the current head, but not closed PRs, active
+  // remediation, other hard stop labels, or duplicate-dispatch
+  // protection.
   if (String(job?.prState ?? '').trim().toLowerCase() !== 'open' || Boolean(job?.merged)) {
     return { decision: 'skip-pr-not-open', trigger: null };
   }
 
-  if ([...OPERATOR_SKIP_LABELS].some((label) => labels.has(label))) {
-    // Skip-labels win even when approval/request labels are also present.
+  const hasUnbypassableSkipLabel = labels.has('merge-agent-skip') || labels.has('do-not-merge');
+  if (hasUnbypassableSkipLabel) {
+    return { decision: 'skip-operator-skip', trigger: null };
+  }
+  const hasMergeAgentStuckLabel = labels.has(MERGE_AGENT_STUCK_LABEL);
+  if (hasMergeAgentStuckLabel && hasMergeAgentRequestedLabel && !mergeAgentRequested) {
+    return { decision: 'skip-merge-agent-requested-stale', trigger: null };
+  }
+  if (hasMergeAgentStuckLabel && !mergeAgentRequested) {
     return { decision: 'skip-operator-skip', trigger: null };
   }
 

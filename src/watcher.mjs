@@ -79,7 +79,7 @@ import {
   deleteGateRecordsForPR,
   projectAdversarialGateStatus,
 } from './adversarial-gate-status.mjs';
-import { fastMergeAuditDir } from './fast-merge-audit-storage.mjs';
+import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
@@ -485,15 +485,6 @@ function evaluateFastMergeDiffShape(files, categories) {
   return { ok: true, reason: 'shape-ok', files: normalizedFiles };
 }
 
-function fastMergeAuditPath(rootDir, { repo, prNumber, action, at }) {
-  const safeRepo = String(repo || '').replace(/[^A-Za-z0-9._-]/g, '_');
-  const safeAt = String(at || new Date().toISOString()).replace(/[^0-9A-Za-z._-]/g, '-');
-  return join(
-    fastMergeAuditDir(rootDir),
-    `fast-merge-${action}-${safeRepo}-${prNumber}-${safeAt}-${randomUUID()}.json`
-  );
-}
-
 function buildFastMergeAuditEntry({
   action,
   repo,
@@ -512,6 +503,7 @@ function buildFastMergeAuditEntry({
   const entry = {
     kind: 'fast-merge-audit',
     schemaVersion: 1,
+    auditType: 'fast-merge-skip',
     sessionUuid,
     fast_merge: true,
     action,

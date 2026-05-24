@@ -39,7 +39,7 @@ function row(db, prNumber, repo = REPO) {
   return getReviewRow(db, { repo, prNumber });
 }
 
-function openView(head = 'sha-A', labels = []) {
+function openView(head = 'sha-A', labels = [{ name: 'fast-merge:docs' }]) {
   return {
     state: 'OPEN',
     isDraft: false,
@@ -80,6 +80,14 @@ function checksCliError(code, payload, message = `gh pr checks exited ${code}`) 
   err.code = code;
   err.stdout = JSON.stringify(payload);
   err.stderr = message;
+  return err;
+}
+
+function noChecksReportedError() {
+  const err = new Error("no checks reported on the 'sha-A' branch");
+  err.code = 1;
+  err.stdout = '';
+  err.stderr = "no checks reported on the 'sha-A' branch";
   return err;
 }
 
@@ -234,6 +242,28 @@ test('fast-merge veto racing before merge requeues and never merges', async () =
   assert.equal(row(db, 804).review_status, 'pending');
   assert.equal(audits.at(-1).veto_detected, true);
   assert.equal(claimWithWatcherCas(db, 804).changes, 1);
+});
+
+test('fast-merge removed authorization label requeues before merge', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8041);
+  const audits = [];
+  const gh = makeGhStub({ views: [openView('sha-A', [])] });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8041,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'requeued_label_removed');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(row(db, 8041).review_status, 'pending');
+  assert.equal(audits.at(-1).label_removed, true);
+  assert.equal(audits.at(-1).action, 'label-removed-requeued');
 });
 
 test('fast-merge pending CI leaves row unchanged and writes no audit', async () => {
@@ -395,6 +425,27 @@ test('fast-merge no CI configured still attempts merge', async () => {
   assert.equal(mergeCalls(gh).length, 1);
 });
 
+test('fast-merge no checks reported diagnostic is treated as empty checks', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8091);
+  const gh = makeGhStub({
+    views: [openView('sha-A'), openView('sha-A')],
+    checks: [noChecksReportedError(), noChecksReportedError()],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8091,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: () => {},
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(mergeCalls(gh).length, 1);
+});
+
 test('fast-merge per-poll cap defaults to 5 and next poll handles the sixth', async () => {
   const db = makeDb();
   for (let pr = 810; pr <= 815; pr += 1) seedFastMerge(db, pr);
@@ -412,6 +463,36 @@ test('fast-merge per-poll cap defaults to 5 and next poll handles the sixth', as
   assert.equal(second.processed, 1);
   assert.equal(second.merged, 1);
   assert.equal(row(db, 815).pr_state, 'fast_merge_merged');
+});
+
+test('fast-merge pending rows do not starve later mergeable rows behind the cap', async () => {
+  const db = makeDb();
+  for (let pr = 830; pr <= 835; pr += 1) seedFastMerge(db, pr);
+  const gh = async (_cmd, args) => {
+    const command = args.slice(0, 2).join(' ');
+    const prNumber = Number(args[2]);
+    if (command === 'pr view') {
+      if (args.includes('mergeCommit')) {
+        return {
+          stdout: JSON.stringify({ mergeCommit: { oid: 'feedfacefeedfacefeedfacefeedfacefeedface' } }),
+          stderr: '',
+        };
+      }
+      return { stdout: JSON.stringify(openView('sha-A')), stderr: '' };
+    }
+    if (command === 'pr checks') {
+      return { stdout: JSON.stringify(prNumber < 835 ? pendingChecks() : successChecks()), stderr: '' };
+    }
+    if (command === 'pr merge') return { stdout: 'Merged\n', stderr: '' };
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+
+  const summary = await pollFastMergeQueue({ db, ghClient: gh, perPollCap: 5, auditWriter: () => {} });
+
+  assert.equal(summary.processed, 6);
+  assert.equal(summary.skipped_still_pending, 5);
+  assert.equal(summary.merged, 1);
+  assert.equal(row(db, 835).pr_state, 'fast_merge_merged');
 });
 
 test('fast-merge per-poll cap resolves from env var', async () => {
@@ -506,6 +587,31 @@ test('fast-merge transient merge transport exhaustion leaves skipped', async () 
   assert.equal(row(db, 826).pr_state, 'fast_merge_skipped');
 });
 
+test('fast-merge CI failure in pre-merge recheck blocks and never merges', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8261);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [openView('sha-A'), openView('sha-A')],
+    checks: [successChecks(), failedChecks()],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8261,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'ci-failed-before-merge');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(row(db, 8261).pr_state, 'fast_merge_blocked');
+  assert.match(audits.at(-1).failure_reason, /ci failed/i);
+});
+
 test('fast-merge merge refusal that already landed records merged instead of blocked', async () => {
   const db = makeDb();
   seedFastMerge(db, 827);
@@ -589,4 +695,26 @@ test('fast-merge close audits write to dedicated fast-merge audit directory', ()
   assert.ok(existsSync(writtenPath));
   assert.equal(payload.kind, 'fast-merge-audit');
   assert.equal(payload.schemaVersion, 1);
+  assert.equal(payload.auditType, 'fast-merge-close');
+});
+
+test('fast-merge close audit write failure leaves retry sentinel on row', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8291);
+  const result = await processFastMergePR({
+    db,
+    ghClient: makeGhStub({ views: [openView('sha-A')], checks: [failedChecks()] }),
+    repo: REPO,
+    prNumber: 8291,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: () => {
+      throw new Error('audit disk full');
+    },
+  });
+  const updated = row(db, 8291);
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(updated.fast_merge_audit_status, 'pending');
+  assert.match(updated.fast_merge_audit_error, /audit disk full/);
+  assert.equal(JSON.parse(updated.fast_merge_audit_payload_json).action, 'blocked');
 });

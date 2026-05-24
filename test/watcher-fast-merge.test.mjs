@@ -316,6 +316,7 @@ test('fast-merge watcher: single category skips when flag is enabled and records
   assert.deepEqual(JSON.parse(summary.rows[0].labels_json), [{ name: 'fast-merge:docs' }]);
   assert.equal(summary.spawns.length, 0);
   assert.equal(summary.auditEntries[0].action, 'skipped');
+  assert.equal(summary.auditEntries[0].auditType, 'fast-merge-skip');
   assert.deepEqual(summary.auditEntries[0].categories, ['docs']);
   assert.equal(summary.auditEntries[0].fast_merge_authorized_head_sha, 'sha-live-802');
   assert.equal(summary.auditEntries[0].authorized_at, '2026-05-20T12:00:05.000Z');

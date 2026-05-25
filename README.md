@@ -104,11 +104,17 @@ CI runs both on Node 20 and Node 22 on every PR.
 The review loop is intentionally boring in its boundaries. The
 opinionated parts are:
 
-**1. The builder is never the reviewer.** Routing is by PR-title prefix
-(internal worker classes) for the GitHub-PR domain, and by `domains/<id>.json`
-wiring for other domains. The routing table is a flat enum, not a
-heuristic, because heuristic routing would re-introduce same-model review
-under load.
+**1. The builder is never the reviewer by default.** Routing is by PR-title
+prefix (internal worker classes) for the GitHub-PR domain, and by
+`domains/<id>.json` wiring for other domains. The routing table is a flat enum,
+not a heuristic, because heuristic routing would re-introduce same-model review
+under load. Operators can deliberately pin the first-pass reviewer with
+`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude`; when unset, Codex PRs route
+to Claude and Claude/Clio PRs route to Codex. Invalid override values fail at
+watcher startup with a `FATAL config` log line, and same-family override pins
+are stamped into the posted review body as an explicit waiver of the default
+cross-model guarantee. The waiver is audit-only: it does not change the merge
+gate or require an extra human approval by itself.
 
 **2. The reviewer prompt is adversarial, not consultative.** The standard
 reviewer prompt explicitly tells the model: *"You did NOT write this code.
@@ -207,8 +213,8 @@ daemons on the maintainer's host:
 │ ai.laceyenterprises.adversarial-watcher                        │
 │   - polls GitHub for new agent-built PRs                       │
 │   - validates worker-class title prefix                        │
-│   - dispatches first-pass reviewer (Codex for [claude-code]    │
-│     PRs; Claude for [codex] PRs)                               │
+│   - dispatches first-pass reviewer (opposite-agent by default, │
+│     or ADVERSARIAL_REVIEW_DEFAULT_REVIEWER when set)           │
 │   - posts the structured review to the PR                      │
 │   - parses the verdict, writes a durable state record          │
 └────────────────────────────────────────────────────────────────┘

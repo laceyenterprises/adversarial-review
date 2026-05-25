@@ -14,7 +14,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
-import { routeSubject } from './adapters/subject/github-pr/routing.mjs';
+import {
+  defaultReviewerRouteFromEnv,
+  describeCrossModelReviewWaiver,
+  routeSubject,
+} from './adapters/subject/github-pr/routing.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -1565,6 +1569,8 @@ async function spawnReviewer({
   reviewerSessionUuid,
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
   workspacePath = null,
+  crossModelReviewWaived = false,
+  crossModelReviewWaiverReason = null,
   onReviewerPgid = () => {},
 }) {
   const finalRound = (
@@ -1618,6 +1624,8 @@ async function spawnReviewer({
         reviewAttemptNumber,
         maxRemediationRounds,
         reviewerSessionUuid,
+        crossModelReviewWaived,
+        crossModelReviewWaiverReason,
       },
       timeoutMs: reviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
@@ -2859,6 +2867,7 @@ async function pollOnce(
         continue;
       }
 
+      let crossModelWaiverReason = null;
       const route = routeSubject(subject);
       if (!route) {
         if (!existing) {
@@ -2898,6 +2907,17 @@ async function pollOnce(
         stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
+      }
+
+      crossModelWaiverReason = describeCrossModelReviewWaiver(
+        route.builderClass,
+        route.reviewerModel,
+        process.env
+      );
+      if (crossModelWaiverReason) {
+        console.warn(
+          `[watcher] cross-model-review-waived repo=${repoPath} pr=${prNumber} ${crossModelWaiverReason}`
+        );
       }
 
       // (stale-drift check already ran at the top of the per-PR loop;
@@ -3247,6 +3267,8 @@ async function pollOnce(
         linearTicketId,
         labels: Array.isArray(subject.labels) ? subject.labels : [],
         builderTag: route.tag,
+        crossModelReviewWaived: Boolean(crossModelWaiverReason),
+        crossModelReviewWaiverReason: crossModelWaiverReason,
         reviewerHeadSha,
         reviewAttemptNumber,
         reviewDbAttemptNumber,
@@ -3347,6 +3369,12 @@ function requireEnv(name) {
 
 async function main() {
   requireEnv('GITHUB_TOKEN');
+  try {
+    defaultReviewerRouteFromEnv(process.env);
+  } catch (err) {
+    console.error(`[watcher] FATAL config: ${err?.message || err}`);
+    throw err;
+  }
 
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;

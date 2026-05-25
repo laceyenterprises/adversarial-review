@@ -131,12 +131,11 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
   },
 };
 
-// The remediation-worker class the consume path spawns today. Currently the
-// only spawn function is `spawnCodexRemediationWorker`, so the default class
-// is 'codex'. When a Claude Code remediation worker is added, callers (or a
-// per-job field) will pass the appropriate class through to
-// `prepareWorkspaceForJob` / `spawnCodexRemediationWorker`.
+// The remediation-worker class the consume path spawns by default. The
+// operator env override below can pin the worker class without changing
+// durable job records or PR-title routing.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
+const DEFAULT_REMEDIATOR_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
@@ -713,15 +712,99 @@ function spawnClaudeCodeRemediationWorker({
 
 // ── Worker-class dispatcher ────────────────────────────────────────────────
 
-// LAC-358 hard-switch: always route follow-up remediation through the
-// codex worker class, regardless of the original PR builderTag. Rationale:
-// feedback_prefer_codex_for_heavy_work.md documents claude-code silent-hang
-// failures and the current trust gap for unattended heavy work. Revisit
-// only after feedback memory is updated to remove that trust gap; until
-// then, builderTag remains durable job-ledger metadata while execution,
-// commit trailers, and reconcile-time bot identity all reflect codex.
-function pickRemediationWorkerClass(_job) {
-  return 'codex';
+function normalizeRemediationWorkerClass(workerClassInput) {
+  const workerClass = String(workerClassInput || '').trim().toLowerCase();
+  if (!workerClass) return null;
+  switch (workerClass) {
+    case 'codex':
+    case 'codex-remediation':
+      return 'codex';
+    case 'claude':
+    case 'claude-code':
+    case 'claude-code-remediation':
+      return 'claude-code';
+    default:
+      return null;
+  }
+}
+
+function defaultRemediatorWorkerClassFromEnv(env = process.env) {
+  const raw = env?.[DEFAULT_REMEDIATOR_ENV];
+  if (raw === undefined || String(raw).trim() === '') return null;
+  const workerClass = normalizeRemediationWorkerClass(raw);
+  if (!workerClass) {
+    const err = new Error(
+      `${DEFAULT_REMEDIATOR_ENV} must be one of: codex, claude-code; got ${JSON.stringify(raw)}`
+    );
+    err.isRemediationConfigError = true;
+    err.configKey = DEFAULT_REMEDIATOR_ENV;
+    err.requestedValue = raw;
+    throw err;
+  }
+  return workerClass;
+}
+
+function validateStartupRemediationConfig(env = process.env) {
+  defaultRemediatorWorkerClassFromEnv(env);
+  resolveRemediationMaxConcurrentJobs(env);
+}
+
+// LAC-358 default: route follow-up remediation through the codex worker
+// class, regardless of the original PR builderTag. Operators can override
+// this default with ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR when cost or
+// availability requires pinning remediation to a specific worker class.
+function pickRemediationWorkerClass(_job, { env = process.env } = {}) {
+  return defaultRemediatorWorkerClassFromEnv(env) || DEFAULT_REMEDIATION_WORKER_CLASS;
+}
+
+function requeueClaimedFollowUpJobAfterConfigFailure({
+  rootDir,
+  jobPath,
+  error,
+  requeuedAt = new Date().toISOString(),
+}) {
+  const currentJob = JSON.parse(readFileSync(jobPath, 'utf8'));
+  const currentPlan = currentJob.remediationPlan || {};
+  const currentRound = Number(currentPlan.currentRound || 0);
+  const rounds = Array.isArray(currentPlan.rounds) ? [...currentPlan.rounds] : [];
+  const lastRound = rounds.at(-1);
+  let nextCurrentRound = currentRound;
+
+  if (
+    lastRound
+    && Number(lastRound.round) === currentRound
+    && lastRound.state === 'claimed'
+  ) {
+    rounds.pop();
+    nextCurrentRound = Math.max(0, currentRound - 1);
+  }
+
+  const nextJob = {
+    ...currentJob,
+    status: 'pending',
+    pendingAt: requeuedAt,
+    claimedAt: null,
+    claimedBy: null,
+    remediationWorker: null,
+    failure: null,
+    lastConfigValidationFailure: {
+      code: 'config-validation-failure',
+      key: error.configKey || DEFAULT_REMEDIATOR_ENV,
+      message: error.message,
+      recoverable: true,
+      recordedAt: requeuedAt,
+    },
+    remediationPlan: {
+      ...currentPlan,
+      currentRound: nextCurrentRound,
+      rounds,
+      nextAction: null,
+    },
+  };
+  writeFollowUpJob(jobPath, nextJob);
+  const pendingPath = join(getFollowUpJobDir(rootDir, 'pending'), basename(jobPath));
+  renameSync(jobPath, pendingPath);
+  return { job: nextJob, jobPath: pendingPath };
 }
 
 async function assertRemediationWorkerOAuth(workerClass, { execFileImpl } = {}) {
@@ -3185,15 +3268,16 @@ async function consumeNextFollowUpJob({
     };
   }
 
-  const workerClass = pickRemediationWorkerClass(claimed.job);
   // Track whether spawn was actually attempted. If the catch below
   // fires before this flips to true, we mark the failed record as
   // never-spawned so the PR-wide ledger does not count this round —
   // an OAuth/workspace-prep failure burned no remediation budget.
+  let workerClass = null;
   let spawnAttempted = false;
   let spawnedWorker = null;
 
   try {
+    workerClass = pickRemediationWorkerClass(claimed.job);
     const baseReadyJob = await ensureJobBaseBranch({
       job: claimed.job,
       jobPath: claimed.jobPath,
@@ -3340,6 +3424,19 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
+    if (err.isRemediationConfigError) {
+      const requeued = requeueClaimedFollowUpJobAfterConfigFailure({
+        rootDir,
+        jobPath: claimed.jobPath,
+        error: err,
+        requeuedAt: now(),
+      });
+      err.followUpJobId = claimed.job?.jobId || null;
+      err.followUpJobPath = requeued.jobPath;
+      err.followUpJobRequeued = true;
+      throw err;
+    }
+
     let failure = {};
     let failureCode = 'worker-failure';
 
@@ -3567,6 +3664,7 @@ async function main() {
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }
+  validateStartupRemediationConfig(process.env);
   const mode = process.argv.includes('reconcile') ? 'reconcile' : 'consume';
 
   try {
@@ -3630,6 +3728,7 @@ async function main() {
 
 export {
   FOLLOW_UP_PROMPT_PATH,
+  DEFAULT_REMEDIATOR_ENV,
   REMEDIATION_WORKER_TRAILER_CLASS,
   DEFAULT_REPLIES_ROOT,
   DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
@@ -3680,6 +3779,9 @@ export {
   spawnRemediationWorker,
   assertClaudeCodeOAuth,
   assertRemediationWorkerOAuth,
+  defaultRemediatorWorkerClassFromEnv,
+  validateStartupRemediationConfig,
+  normalizeRemediationWorkerClass,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,

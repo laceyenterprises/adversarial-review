@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   createGitHubPRSubjectAdapter,
   makeSubjectExternalId,
@@ -9,7 +11,13 @@ import {
   revisionRefFromPR,
   stateFromSnapshot,
 } from '../../src/adapters/subject/github-pr/index.mjs';
-import { routeSubject } from '../../src/adapters/subject/github-pr/routing.mjs';
+import {
+  defaultReviewerRouteFromEnv,
+  describeCrossModelReviewWaiver,
+  isCrossModelReviewWaived,
+  routePR,
+  routeSubject,
+} from '../../src/adapters/subject/github-pr/routing.mjs';
 
 const fixture = JSON.parse(
   readFileSync(
@@ -17,6 +25,7 @@ const fixture = JSON.parse(
     'utf8'
   )
 );
+const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
 function makeOctokitSnapshot() {
   return {
@@ -75,6 +84,85 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
     reviewerModel: 'claude',
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   });
+});
+
+test('github-pr routing can force the default reviewer from env', () => {
+  const env = { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' };
+
+  assert.deepEqual(routeSubject({ builderClass: 'codex' }, { env }), {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  });
+
+  assert.deepEqual(routeSubject({ builderClass: 'claude-code' }, { env }), {
+    builderClass: 'claude-code',
+    tag: 'claude-code',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  });
+
+  assert.deepEqual(routePR('[codex] LAC-484 env default reviewer', null, {
+    env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'claude-code' },
+  }), {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
+});
+
+test('github-pr routing rejects unknown default reviewer env values', () => {
+  assert.throws(
+    () => routeSubject(
+      { builderClass: 'codex' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' } }
+    ),
+    /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
+  );
+});
+
+test('github-pr routing exposes same-family review waiver detection for override pins', () => {
+  assert.equal(isCrossModelReviewWaived('codex', 'codex'), true);
+  assert.equal(isCrossModelReviewWaived('claude-code', 'claude'), true);
+  assert.equal(isCrossModelReviewWaived('clio-agent', 'claude'), true);
+  assert.equal(isCrossModelReviewWaived('codex', 'claude'), false);
+
+  const reason = describeCrossModelReviewWaiver(
+    'codex',
+    'codex',
+    { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' }
+  );
+  assert.match(reason, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER="codex"/);
+  assert.match(reason, /cross-model review guarantee is waived/i);
+});
+
+test('github-pr routing startup validation rejects unknown default reviewer env values', () => {
+  assert.throws(
+    () => defaultReviewerRouteFromEnv({ ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' }),
+    /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
+  );
+});
+
+test('watcher startup prints a fatal config banner for invalid default reviewer env values', () => {
+  const result = spawnSync(
+    process.execPath,
+    ['src/watcher.mjs'],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        GITHUB_TOKEN: 'test-token',
+        ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+      },
+      encoding: 'utf8',
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /FATAL config: ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/);
 });
 
 test('github-pr subject adapter fetches diff content through the subject interface', async () => {

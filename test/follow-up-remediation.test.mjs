@@ -41,6 +41,7 @@ import {
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnRemediationWorker,
+  validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
 
 // The OAuth pre-flight caches its result at module scope so per-tick
@@ -1093,6 +1094,51 @@ test('pickRemediationWorkerClass routes empty jobs to codex during LAC-358 overr
 
 test('pickRemediationWorkerClass routes null jobs to codex during LAC-358 override', () => {
   assert.equal(pickRemediationWorkerClass(null), 'codex');
+});
+
+test('pickRemediationWorkerClass can force claude-code from env', () => {
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'claude-code' } }
+    ),
+    'claude-code'
+  );
+
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'clio-agent', reviewerModel: 'codex' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'claude' } }
+    ),
+    'claude-code'
+  );
+});
+
+test('pickRemediationWorkerClass can force codex from env aliases', () => {
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'claude-code', reviewerModel: 'codex' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'codex-remediation' } }
+    ),
+    'codex'
+  );
+});
+
+test('pickRemediationWorkerClass rejects unknown default remediator env values', () => {
+  assert.throws(
+    () => pickRemediationWorkerClass(
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini' } }
+    ),
+    /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+  );
+});
+
+test('validateStartupRemediationConfig rejects unknown default remediator env values', () => {
+  assert.throws(
+    () => validateStartupRemediationConfig({ ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini' }),
+    /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+  );
 });
 
 test('spawnRemediationWorker dispatches "codex" to spawnCodexRemediationWorker', () => {
@@ -3164,6 +3210,61 @@ test('integration: real git commit runs the chained pre-existing hook before our
 });
 
 // ── OAuth pre-flight queue semantics ───────────────────────────────────────
+
+test('consumeNextFollowUpJob requeues a claimed job when remediator override is invalid', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const prevDefaultRemediator = process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+
+  try {
+    process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'gemini';
+
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      reviewerModel: 'codex',
+      builderTag: 'claude-code',
+      linearTicketId: 'LAC-207',
+      reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: true,
+    });
+
+    await assert.rejects(
+      () => consumeNextFollowUpJob({
+        rootDir,
+        spawnImpl: () => { throw new Error('worker should not have spawned'); },
+        now: () => '2026-04-21T10:00:00.000Z',
+        promptTemplate: 'Remediation prompt template.',
+        resolvePRLifecycleImpl: async () => null,
+      }),
+      /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+    );
+
+    const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+    const stranded = readdirSync(inProgressDir).filter((name) => name.endsWith('.json'));
+    assert.deepEqual(stranded, [], 'invalid override must not leave a job stranded in in-progress/');
+
+    const failedDir = getFollowUpJobDir(rootDir, 'failed');
+    const failedFiles = readdirSync(failedDir).filter((name) => name.endsWith('.json'));
+    assert.equal(failedFiles.length, 0, 'invalid config is recoverable and must not terminal-fail the job');
+
+    const pendingDir = getFollowUpJobDir(rootDir, 'pending');
+    const pendingFiles = readdirSync(pendingDir).filter((name) => name.endsWith('.json'));
+    assert.equal(pendingFiles.length, 1, 'pending/ should contain the requeued config-blocked job');
+
+    const pendingJob = JSON.parse(readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8'));
+    assert.equal(pendingJob.status, 'pending');
+    assert.equal(pendingJob.failure, null);
+    assert.equal(pendingJob.remediationPlan.currentRound, 0);
+    assert.deepEqual(pendingJob.remediationPlan.rounds, []);
+    assert.equal(pendingJob.lastConfigValidationFailure.code, 'config-validation-failure');
+    assert.match(pendingJob.lastConfigValidationFailure.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/);
+  } finally {
+    if (prevDefaultRemediator === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+    else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = prevDefaultRemediator;
+  }
+});
 
 test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre-flight throws', async () => {
   // The bug this guards against: if OAuth pre-flight runs *outside* the

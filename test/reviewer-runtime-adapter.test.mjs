@@ -452,7 +452,7 @@ test('agent-os-hq polling uses 30s cadence plus jitter', async () => {
       model: 'codex',
       prompt: '',
       subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
-      timeoutMs: 100,
+      timeoutMs: 120_000,
       sessionUuid: 'agent-hq-polling',
       forbiddenFallbacks: ['api-key'],
     });
@@ -946,6 +946,46 @@ test('cli-direct returns Codex JSON token usage from reviewer stdout', async () 
       total: 129,
       source: 'codex-json',
     });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct threads cross-model waiver fields into reviewer process args', async () => {
+  const rootDir = makeRoot();
+  try {
+    let reviewerArgs = null;
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, args, options) => {
+        reviewerArgs = JSON.parse(args[1]);
+        options.onSpawn({ pgid: 5151 });
+        return { stdout: validReviewBody(), stderr: '' };
+      },
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'claude',
+      prompt: '',
+      subjectContext: {
+        domainId: 'code-pr',
+        repo: 'lacey/repo',
+        prNumber: 3,
+        crossModelReviewWaived: true,
+        crossModelReviewWaiverReason: 'operator pin forced same-family reviewer',
+      },
+      timeoutMs: 100,
+      sessionUuid: 'waiver-audit-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(reviewerArgs.crossModelReviewWaived, true);
+    assert.equal(
+      reviewerArgs.crossModelReviewWaiverReason,
+      'operator pin forced same-family reviewer',
+    );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

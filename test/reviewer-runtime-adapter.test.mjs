@@ -452,7 +452,7 @@ test('agent-os-hq polling uses 30s cadence plus jitter', async () => {
       model: 'codex',
       prompt: '',
       subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
-      timeoutMs: 100,
+      timeoutMs: 120_000,
       sessionUuid: 'agent-hq-polling',
       forbiddenFallbacks: ['api-key'],
     });

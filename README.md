@@ -111,8 +111,10 @@ not a heuristic, because heuristic routing would re-introduce same-model review
 under load. Operators can deliberately pin the first-pass reviewer with
 `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude`; when unset, Codex PRs route
 to Claude and Claude/Clio PRs route to Codex. Invalid override values fail at
-watcher startup, and same-family override pins are stamped into the posted
-review body as an explicit waiver of the default cross-model guarantee.
+watcher startup with a `FATAL config` log line, and same-family override pins
+are stamped into the posted review body as an explicit waiver of the default
+cross-model guarantee. The waiver is audit-only: it does not change the merge
+gate or require an extra human approval by itself.
 
 **2. The reviewer prompt is adversarial, not consultative.** The standard
 reviewer prompt explicitly tells the model: *"You did NOT write this code.

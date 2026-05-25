@@ -733,9 +733,13 @@ function defaultRemediatorWorkerClassFromEnv(env = process.env) {
   if (raw === undefined || String(raw).trim() === '') return null;
   const workerClass = normalizeRemediationWorkerClass(raw);
   if (!workerClass) {
-    throw new Error(
+    const err = new Error(
       `${DEFAULT_REMEDIATOR_ENV} must be one of: codex, claude-code; got ${JSON.stringify(raw)}`
     );
+    err.isRemediationConfigError = true;
+    err.configKey = DEFAULT_REMEDIATOR_ENV;
+    err.requestedValue = raw;
+    throw err;
   }
   return workerClass;
 }
@@ -751,6 +755,56 @@ function validateStartupRemediationConfig(env = process.env) {
 // availability requires pinning remediation to a specific worker class.
 function pickRemediationWorkerClass(_job, { env = process.env } = {}) {
   return defaultRemediatorWorkerClassFromEnv(env) || DEFAULT_REMEDIATION_WORKER_CLASS;
+}
+
+function requeueClaimedFollowUpJobAfterConfigFailure({
+  rootDir,
+  jobPath,
+  error,
+  requeuedAt = new Date().toISOString(),
+}) {
+  const currentJob = JSON.parse(readFileSync(jobPath, 'utf8'));
+  const currentPlan = currentJob.remediationPlan || {};
+  const currentRound = Number(currentPlan.currentRound || 0);
+  const rounds = Array.isArray(currentPlan.rounds) ? [...currentPlan.rounds] : [];
+  const lastRound = rounds.at(-1);
+  let nextCurrentRound = currentRound;
+
+  if (
+    lastRound
+    && Number(lastRound.round) === currentRound
+    && lastRound.state === 'claimed'
+  ) {
+    rounds.pop();
+    nextCurrentRound = Math.max(0, currentRound - 1);
+  }
+
+  const nextJob = {
+    ...currentJob,
+    status: 'pending',
+    pendingAt: requeuedAt,
+    claimedAt: null,
+    claimedBy: null,
+    remediationWorker: null,
+    failure: null,
+    lastConfigValidationFailure: {
+      code: 'config-validation-failure',
+      key: error.configKey || DEFAULT_REMEDIATOR_ENV,
+      message: error.message,
+      recoverable: true,
+      recordedAt: requeuedAt,
+    },
+    remediationPlan: {
+      ...currentPlan,
+      currentRound: nextCurrentRound,
+      rounds,
+      nextAction: null,
+    },
+  };
+  writeFollowUpJob(jobPath, nextJob);
+  const pendingPath = join(getFollowUpJobDir(rootDir, 'pending'), basename(jobPath));
+  renameSync(jobPath, pendingPath);
+  return { job: nextJob, jobPath: pendingPath };
 }
 
 async function assertRemediationWorkerOAuth(workerClass, { execFileImpl } = {}) {
@@ -3370,6 +3424,19 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
+    if (err.isRemediationConfigError) {
+      const requeued = requeueClaimedFollowUpJobAfterConfigFailure({
+        rootDir,
+        jobPath: claimed.jobPath,
+        error: err,
+        requeuedAt: now(),
+      });
+      err.followUpJobId = claimed.job?.jobId || null;
+      err.followUpJobPath = requeued.jobPath;
+      err.followUpJobRequeued = true;
+      throw err;
+    }
+
     let failure = {};
     let failureCode = 'worker-failure';
 

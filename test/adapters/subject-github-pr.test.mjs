@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   createGitHubPRSubjectAdapter,
   makeSubjectExternalId,
@@ -23,6 +25,7 @@ const fixture = JSON.parse(
     'utf8'
   )
 );
+const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
 function makeOctokitSnapshot() {
   return {
@@ -141,6 +144,25 @@ test('github-pr routing startup validation rejects unknown default reviewer env 
     () => defaultReviewerRouteFromEnv({ ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' }),
     /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
   );
+});
+
+test('watcher startup prints a fatal config banner for invalid default reviewer env values', () => {
+  const result = spawnSync(
+    process.execPath,
+    ['src/watcher.mjs'],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        GITHUB_TOKEN: 'test-token',
+        ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+      },
+      encoding: 'utf8',
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /FATAL config: ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/);
 });
 
 test('github-pr subject adapter fetches diff content through the subject interface', async () => {

@@ -112,7 +112,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
-    'fixture:routing': "export function routeSubject(subject) { return String(subject.title || '').startsWith('[codex]') || String(subject.title || '').startsWith('[claude-code]') ? { reviewerModel: 'claude', botTokenEnv: 'CLAUDE_TOKEN', tag: 'codex' } : null; }",
+    'fixture:routing': "export function routeSubject(subject) { return String(subject.title || '').startsWith('[codex]') || String(subject.title || '').startsWith('[claude-code]') ? { reviewerModel: 'claude', botTokenEnv: 'CLAUDE_TOKEN', tag: 'codex' } : null; } export function defaultReviewerRouteFromEnv() { return null; } export function describeCrossModelReviewWaiver() { return null; }",
     'fixture:operator-surface': "export function createCompositeOperatorSurface() { return { extractLinearTicketId() { return null; }, syncTriageStatus: async () => {}, observeOperatorApproved: async () => null, observeLabelControl: async () => null }; }",
     'fixture:reviewer-runtime': "globalThis.__fastMergeSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__fastMergeSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function warnForMissingAdversarialGateBranchProtection() {}",

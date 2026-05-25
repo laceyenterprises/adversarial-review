@@ -3211,7 +3211,7 @@ test('integration: real git commit runs the chained pre-existing hook before our
 
 // ── OAuth pre-flight queue semantics ───────────────────────────────────────
 
-test('consumeNextFollowUpJob moves a claimed job to failed/ when remediator override is invalid', async () => {
+test('consumeNextFollowUpJob requeues a claimed job when remediator override is invalid', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const prevDefaultRemediator = process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
 
@@ -3247,13 +3247,19 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when remediator over
 
     const failedDir = getFollowUpJobDir(rootDir, 'failed');
     const failedFiles = readdirSync(failedDir).filter((name) => name.endsWith('.json'));
-    assert.equal(failedFiles.length, 1, 'failed/ should contain the config-failed job');
+    assert.equal(failedFiles.length, 0, 'invalid config is recoverable and must not terminal-fail the job');
 
-    const failedJob = JSON.parse(readFileSync(path.join(failedDir, failedFiles[0]), 'utf8'));
-    assert.equal(failedJob.status, 'failed');
-    assert.equal(failedJob.failure.code, 'worker-failure');
-    assert.match(failedJob.failure.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/);
-    assert.equal(failedJob.remediationWorker?.state, 'never-spawned');
+    const pendingDir = getFollowUpJobDir(rootDir, 'pending');
+    const pendingFiles = readdirSync(pendingDir).filter((name) => name.endsWith('.json'));
+    assert.equal(pendingFiles.length, 1, 'pending/ should contain the requeued config-blocked job');
+
+    const pendingJob = JSON.parse(readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8'));
+    assert.equal(pendingJob.status, 'pending');
+    assert.equal(pendingJob.failure, null);
+    assert.equal(pendingJob.remediationPlan.currentRound, 0);
+    assert.deepEqual(pendingJob.remediationPlan.rounds, []);
+    assert.equal(pendingJob.lastConfigValidationFailure.code, 'config-validation-failure');
+    assert.match(pendingJob.lastConfigValidationFailure.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/);
   } finally {
     if (prevDefaultRemediator === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
     else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = prevDefaultRemediator;

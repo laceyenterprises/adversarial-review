@@ -2867,6 +2867,7 @@ async function pollOnce(
         continue;
       }
 
+      let crossModelWaiverReason = null;
       const route = routeSubject(subject);
       if (!route) {
         if (!existing) {
@@ -2908,7 +2909,7 @@ async function pollOnce(
         continue;
       }
 
-      const crossModelWaiverReason = describeCrossModelReviewWaiver(
+      crossModelWaiverReason = describeCrossModelReviewWaiver(
         route.builderClass,
         route.reviewerModel,
         process.env
@@ -3267,7 +3268,7 @@ async function pollOnce(
         labels: Array.isArray(subject.labels) ? subject.labels : [],
         builderTag: route.tag,
         crossModelReviewWaived: Boolean(crossModelWaiverReason),
-        crossModelReviewWaiverReason,
+        crossModelReviewWaiverReason: crossModelWaiverReason,
         reviewerHeadSha,
         reviewAttemptNumber,
         reviewDbAttemptNumber,
@@ -3368,7 +3369,12 @@ function requireEnv(name) {
 
 async function main() {
   requireEnv('GITHUB_TOKEN');
-  defaultReviewerRouteFromEnv(process.env);
+  try {
+    defaultReviewerRouteFromEnv(process.env);
+  } catch (err) {
+    console.error(`[watcher] FATAL config: ${err?.message || err}`);
+    throw err;
+  }
 
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;

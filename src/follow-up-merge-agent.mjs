@@ -20,6 +20,8 @@ import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storag
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
+  MERGE_AGENT_STUCK_LABEL,
+  NO_MERGE_HOLD_LABEL,
   OPERATOR_APPROVED_LABEL,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
@@ -31,8 +33,7 @@ const execFileAsync = promisify(execFile);
 
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
-const NO_MERGE_HOLD_LABEL = 'no-merge-hold';
-const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', 'merge-agent-stuck', 'do-not-merge', NO_MERGE_HOLD_LABEL]);
+const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', MERGE_AGENT_STUCK_LABEL, 'do-not-merge', NO_MERGE_HOLD_LABEL]);
 const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
@@ -107,7 +108,6 @@ const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
-const MERGE_AGENT_STUCK_LABEL = 'merge-agent-stuck';
 const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
 const FAST_MERGE_LABEL_PREFIX = 'fast-merge:';
 const FAST_MERGE_SKIPPED_STATE = 'fast_merge_skipped';

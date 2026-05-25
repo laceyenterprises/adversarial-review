@@ -24,6 +24,7 @@ import {
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_APPROVED_LABEL,
+  autoRereviewSuppressedByLabel,
   legacyLabelEventFromControlResult,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import {
@@ -2812,13 +2813,29 @@ async function pollOnce(
       // spawn. The retrigger only fires when `reviewer_head_sha` is
       // strictly different from the current `subject.headSha` and the
       // PR is non-terminal, so we don't thrash a PR whose head matches.
-      if (
+      // ...UNLESS the PR is under merge-agent control or an explicit hold.
+      // A merge-agent worker force-pushes light/medium fixes as it converges
+      // the branch (see follow-up-merge-agent dispatch prompt); auto-refreshing
+      // on those expected head moves re-arms a brand-new reviewer in a separate
+      // process, defeats the remediation round budget, and traps the PR in an
+      // infinite review<->remediation loop. The merge-agent admin-merges on its
+      // own (`gh pr merge --squash --admin`), so it does not need a head-current
+      // posted review to land. Suppress the auto-refresh for those PRs and let
+      // the merge-agent own convergence. (Root-caused 2026-05-25 on #877/#880/
+      // #884.)
+      const postedReviewHeadMoved =
         existing?.review_status === 'posted' &&
         existing.reviewer_head_sha &&
         subject.headSha &&
         existing.reviewer_head_sha !== subject.headSha &&
-        !subject.terminal
-      ) {
+        !subject.terminal;
+      if (postedReviewHeadMoved && autoRereviewSuppressedByLabel(prLabelNames)) {
+        console.log(
+          `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
+            `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
+            'but PR is merge-agent-owned/held; leaving posted review to the merge-agent'
+        );
+      } else if (postedReviewHeadMoved) {
         try {
           const refreshResult = requestReviewRereview({
             rootDir: ROOT,

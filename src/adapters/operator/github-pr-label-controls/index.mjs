@@ -26,6 +26,38 @@ const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
 //      labeled PR, the watcher cancels the in-flight pool worker so
 //      it doesn\'t waste budget remediating a now-closed PR.
 const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched';
+// Applied by the merge-agent backend when it gives up and escalates a PR to
+// the operator (max rounds reached with an unresolved blocker, or a merge it
+// could not complete). Re-reviewing a stuck PR only churns it further.
+const MERGE_AGENT_STUCK_LABEL = 'merge-agent-stuck';
+// Operator/maintainer hold: the PR must not be merged or otherwise advanced
+// by the autonomous pipeline until the label is cleared.
+const NO_MERGE_HOLD_LABEL = 'no-merge-hold';
+
+// Labels under which a PR HEAD moving is EXPECTED — a merge-agent worker is
+// actively converging the branch (it force-pushes light/medium fixes per its
+// dispatch prompt) — or under which a fresh review would only churn (the PR is
+// escalated or held). When any of these is present the watcher must NOT
+// auto-refresh a stale posted review into a re-review: re-arming a brand-new
+// reviewer on the merge-agent's own convergence push fights the merge-agent in
+// a separate process, defeats the remediation round budget, and traps the PR
+// in an infinite review<->remediation loop (observed 2026-05-25 on #877/#880/
+// #884; #877 reached review_attempts=4 + merge-agent-stuck without merging).
+const AUTO_REREVIEW_SUPPRESSING_LABELS = Object.freeze([
+  MERGE_AGENT_DISPATCHED_LABEL,
+  MERGE_AGENT_REQUESTED_LABEL,
+  MERGE_AGENT_STUCK_LABEL,
+  NO_MERGE_HOLD_LABEL,
+]);
+
+// True when the PR's current label set means the watcher should leave a stale
+// posted review alone instead of auto-refreshing it into a fresh review. Pure;
+// safe to import anywhere.
+function autoRereviewSuppressedByLabel(labelNames) {
+  if (!Array.isArray(labelNames)) return false;
+  const present = new Set(labelNames.filter((name) => typeof name === 'string'));
+  return AUTO_REREVIEW_SUPPRESSING_LABELS.some((label) => present.has(label));
+}
 
 function isoNow() {
   return new Date().toISOString();
@@ -247,13 +279,17 @@ function createGitHubPRLabelControlsAdapter({
 }
 
 export {
+  AUTO_REREVIEW_SUPPRESSING_LABELS,
   FORCE_REREVIEW_LABEL,
   HALTED_LOOP_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
+  MERGE_AGENT_STUCK_LABEL,
+  NO_MERGE_HOLD_LABEL,
   OPERATOR_APPROVED_LABEL,
   RAISED_ROUND_CAP_LABEL,
   applyRevisionScopedLabelEvent,
+  autoRereviewSuppressedByLabel,
   createGitHubPRLabelControlsAdapter,
   legacyLabelEventFromControlResult,
 };

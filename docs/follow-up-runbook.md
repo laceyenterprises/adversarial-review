@@ -75,9 +75,9 @@ ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex
 ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex
 ```
 
-Leave `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER` unset for the normal opposite-agent reviewer routing: `[codex]` PRs go to Claude, while `[claude-code]` and `[clio-agent]` PRs go to Codex. Set it to `codex` to lock Claude out of first-pass reviews, or to `claude` to force Claude reviews for every supported builder class. The forced reviewer also selects the matching reviewer bot token (`GH_CODEX_REVIEWER_TOKEN` or `GH_CLAUDE_REVIEWER_TOKEN`).
+Leave `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER` unset for the normal opposite-agent reviewer routing: `[codex]` PRs go to Claude, while `[claude-code]` and `[clio-agent]` PRs go to Codex. Set it to `codex` to lock Claude out of first-pass reviews, or to `claude` to force Claude reviews for every supported builder class. The forced reviewer also selects the matching reviewer bot token (`GH_CODEX_REVIEWER_TOKEN` or `GH_CLAUDE_REVIEWER_TOKEN`). The watcher validates this knob at startup and exits non-zero on invalid values. If the pin deliberately causes same-family review, the watcher logs a waiver and the posted review body includes a cross-model-waiver note for auditability.
 
-Leave `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` unset for the current LAC-358 codex remediation default. Set it to `claude-code` only when Claude Code is approved for unattended remediation again. Unknown non-empty values fail closed instead of silently falling back to an expensive or unintended agent.
+Leave `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` unset for the current LAC-358 codex remediation default. Set it to `claude-code` only when Claude Code is approved for unattended remediation again. Unknown non-empty values fail closed instead of silently falling back to an expensive or unintended agent. The follow-up daemon validates this knob at startup before consuming work, and the claimed-job failure path also traps invalid values so a direct helper call cannot strand a job in `in-progress/`.
 
 Workspace root:
 

@@ -41,6 +41,7 @@ import {
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnRemediationWorker,
+  validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
 
 // The OAuth pre-flight caches its result at module scope so per-tick
@@ -1129,6 +1130,13 @@ test('pickRemediationWorkerClass rejects unknown default remediator env values',
       { builderTag: 'codex', reviewerModel: 'claude' },
       { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini' } }
     ),
+    /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+  );
+});
+
+test('validateStartupRemediationConfig rejects unknown default remediator env values', () => {
+  assert.throws(
+    () => validateStartupRemediationConfig({ ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini' }),
     /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
   );
 });
@@ -3202,6 +3210,55 @@ test('integration: real git commit runs the chained pre-existing hook before our
 });
 
 // ── OAuth pre-flight queue semantics ───────────────────────────────────────
+
+test('consumeNextFollowUpJob moves a claimed job to failed/ when remediator override is invalid', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const prevDefaultRemediator = process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+
+  try {
+    process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'gemini';
+
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      reviewerModel: 'codex',
+      builderTag: 'claude-code',
+      linearTicketId: 'LAC-207',
+      reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: true,
+    });
+
+    await assert.rejects(
+      () => consumeNextFollowUpJob({
+        rootDir,
+        spawnImpl: () => { throw new Error('worker should not have spawned'); },
+        now: () => '2026-04-21T10:00:00.000Z',
+        promptTemplate: 'Remediation prompt template.',
+        resolvePRLifecycleImpl: async () => null,
+      }),
+      /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+    );
+
+    const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+    const stranded = readdirSync(inProgressDir).filter((name) => name.endsWith('.json'));
+    assert.deepEqual(stranded, [], 'invalid override must not leave a job stranded in in-progress/');
+
+    const failedDir = getFollowUpJobDir(rootDir, 'failed');
+    const failedFiles = readdirSync(failedDir).filter((name) => name.endsWith('.json'));
+    assert.equal(failedFiles.length, 1, 'failed/ should contain the config-failed job');
+
+    const failedJob = JSON.parse(readFileSync(path.join(failedDir, failedFiles[0]), 'utf8'));
+    assert.equal(failedJob.status, 'failed');
+    assert.equal(failedJob.failure.code, 'worker-failure');
+    assert.match(failedJob.failure.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/);
+    assert.equal(failedJob.remediationWorker?.state, 'never-spawned');
+  } finally {
+    if (prevDefaultRemediator === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+    else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = prevDefaultRemediator;
+  }
+});
 
 test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre-flight throws', async () => {
   // The bug this guards against: if OAuth pre-flight runs *outside* the

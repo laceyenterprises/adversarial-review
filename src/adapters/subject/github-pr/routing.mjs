@@ -38,6 +38,12 @@ const REVIEWER_ROUTE_BY_MODEL = {
   },
 };
 
+const REVIEWER_FAMILY_BY_BUILDER_CLASS = {
+  codex: 'codex',
+  'claude-code': 'claude',
+  'clio-agent': 'claude',
+};
+
 function normalizeBuilderClass(builderClassInput) {
   const builderClass = String(builderClassInput || '').trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(ROUTE_BY_BUILDER_CLASS, builderClass)
@@ -69,6 +75,33 @@ function defaultReviewerRouteFromEnv(env = process.env) {
     );
   }
   return REVIEWER_ROUTE_BY_MODEL[reviewerModel];
+}
+
+function validateDefaultReviewerRouteConfig(env = process.env) {
+  defaultReviewerRouteFromEnv(env);
+}
+
+function isCrossModelReviewWaived(builderClassInput, reviewerInput) {
+  const builderClass = normalizeBuilderClass(builderClassInput);
+  const reviewerModel = normalizeReviewerModel(reviewerInput);
+  if (!builderClass || !reviewerModel) return false;
+  return REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] === reviewerModel;
+}
+
+function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = process.env) {
+  if (!isCrossModelReviewWaived(builderClassInput, reviewerInput)) {
+    return null;
+  }
+  const configuredValue = env?.[DEFAULT_REVIEWER_ENV];
+  const normalizedValue = normalizeReviewerModel(configuredValue);
+  const renderedValue = configuredValue === undefined
+    ? '(unset)'
+    : JSON.stringify(String(configuredValue));
+  return (
+    `${DEFAULT_REVIEWER_ENV}=${renderedValue} pins reviewer=${reviewerInput} ` +
+    `for builder=${builderClassInput}; the default cross-model review guarantee is waived ` +
+    `for this pass${normalizedValue ? '' : ' by explicit routing state'}.`
+  );
 }
 
 function routeSubject(subject, { env = process.env } = {}) {
@@ -109,9 +142,12 @@ export {
   extractLinearTicketId,
   REVIEWER_ROUTE_BY_MODEL,
   ROUTE_BY_BUILDER_CLASS,
+  describeCrossModelReviewWaiver,
   defaultReviewerRouteFromEnv,
+  isCrossModelReviewWaived,
   normalizeBuilderClass,
   normalizeReviewerModel,
   routePR,
   routeSubject,
+  validateDefaultReviewerRouteConfig,
 };

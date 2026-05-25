@@ -9,7 +9,13 @@ import {
   revisionRefFromPR,
   stateFromSnapshot,
 } from '../../src/adapters/subject/github-pr/index.mjs';
-import { routePR, routeSubject } from '../../src/adapters/subject/github-pr/routing.mjs';
+import {
+  defaultReviewerRouteFromEnv,
+  describeCrossModelReviewWaiver,
+  isCrossModelReviewWaived,
+  routePR,
+  routeSubject,
+} from '../../src/adapters/subject/github-pr/routing.mjs';
 
 const fixture = JSON.parse(
   readFileSync(
@@ -111,6 +117,28 @@ test('github-pr routing rejects unknown default reviewer env values', () => {
       { builderClass: 'codex' },
       { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' } }
     ),
+    /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
+  );
+});
+
+test('github-pr routing exposes same-family review waiver detection for override pins', () => {
+  assert.equal(isCrossModelReviewWaived('codex', 'codex'), true);
+  assert.equal(isCrossModelReviewWaived('claude-code', 'claude'), true);
+  assert.equal(isCrossModelReviewWaived('clio-agent', 'claude'), true);
+  assert.equal(isCrossModelReviewWaived('codex', 'claude'), false);
+
+  const reason = describeCrossModelReviewWaiver(
+    'codex',
+    'codex',
+    { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' }
+  );
+  assert.match(reason, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER="codex"/);
+  assert.match(reason, /cross-model review guarantee is waived/i);
+});
+
+test('github-pr routing startup validation rejects unknown default reviewer env values', () => {
+  assert.throws(
+    () => defaultReviewerRouteFromEnv({ ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' }),
     /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
   );
 });

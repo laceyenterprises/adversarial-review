@@ -31,12 +31,21 @@ Operators may deliberately pin the reviewer with
 over the title-prefix route for every supported builder class and also selects
 the matching reviewer bot token. The alias `claude-code` is accepted for the
 Claude reviewer, but the canonical runtime reviewer model remains `claude`.
+Watcher startup validates this override once and exits non-zero on invalid
+values instead of discovering the typo mid-poll. When the override intentionally
+pins the same reviewer family as the builder, the posted review body carries an
+explicit cross-model-waiver note so the audit trail shows the guarantee was
+deliberately suspended.
 
 Follow-up remediation defaults to the `codex` worker class while the LAC-358
 codex override remains active. Operators may pin remediation with
 `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex|claude-code`; aliases
 `claude`, `codex-remediation`, and `claude-code-remediation` are accepted and
-normalized to the worker classes that the dispatcher can spawn.
+normalized to the worker classes that the dispatcher can spawn. The follow-up
+daemon validates the override during startup and exits before claiming work if
+the value is invalid. Consume-time worker selection also runs inside the
+claimed-job failure handler so direct/helper callers cannot strand a job in
+`in-progress/` on a bad override.
 
 Invalid non-empty override values are configuration errors. The runtime must
 not silently fall back from an invalid value because that can route work to an

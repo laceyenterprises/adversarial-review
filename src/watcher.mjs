@@ -14,7 +14,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
-import { routeSubject } from './adapters/subject/github-pr/routing.mjs';
+import {
+  defaultReviewerRouteFromEnv,
+  describeCrossModelReviewWaiver,
+  routeSubject,
+} from './adapters/subject/github-pr/routing.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -2900,6 +2904,17 @@ async function pollOnce(
         continue;
       }
 
+      const crossModelWaiverReason = describeCrossModelReviewWaiver(
+        route.builderClass,
+        route.reviewerModel,
+        process.env
+      );
+      if (crossModelWaiverReason) {
+        console.warn(
+          `[watcher] cross-model-review-waived repo=${repoPath} pr=${prNumber} ${crossModelWaiverReason}`
+        );
+      }
+
       // (stale-drift check already ran at the top of the per-PR loop;
       // duplicate block removed — caused SyntaxError on import per LAC-439.)
 
@@ -3247,6 +3262,8 @@ async function pollOnce(
         linearTicketId,
         labels: Array.isArray(subject.labels) ? subject.labels : [],
         builderTag: route.tag,
+        crossModelReviewWaived: Boolean(crossModelWaiverReason),
+        crossModelReviewWaiverReason,
         reviewerHeadSha,
         reviewAttemptNumber,
         reviewDbAttemptNumber,
@@ -3347,6 +3364,7 @@ function requireEnv(name) {
 
 async function main() {
   requireEnv('GITHUB_TOKEN');
+  defaultReviewerRouteFromEnv(process.env);
 
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;

@@ -983,6 +983,8 @@ async function main() {
     reviewerSessionUuid,
     labels = [],
     ticketPipelinePaused = false,
+    crossModelReviewWaived = false,
+    crossModelReviewWaiverReason = null,
   } = args;
 
   if (!repo || !prNumber || !reviewerModel || !botTokenEnv) {
@@ -1143,7 +1145,10 @@ async function main() {
     effectiveModel === 'claude'
       ? '## Adversarial Review — Claude (claude-reviewer-lacey)\n\n'
       : '## Adversarial Review — Codex (codex-reviewer-lacey)\n\n';
-  const fullComment = header + reviewText;
+  const waiverAuditBlock = crossModelReviewWaived
+    ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
+    : '';
+  const fullComment = header + waiverAuditBlock + reviewText;
 
   try {
     console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);

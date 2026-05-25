@@ -740,6 +740,11 @@ function defaultRemediatorWorkerClassFromEnv(env = process.env) {
   return workerClass;
 }
 
+function validateStartupRemediationConfig(env = process.env) {
+  defaultRemediatorWorkerClassFromEnv(env);
+  resolveRemediationMaxConcurrentJobs(env);
+}
+
 // LAC-358 default: route follow-up remediation through the codex worker
 // class, regardless of the original PR builderTag. Operators can override
 // this default with ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR when cost or
@@ -3209,15 +3214,16 @@ async function consumeNextFollowUpJob({
     };
   }
 
-  const workerClass = pickRemediationWorkerClass(claimed.job);
   // Track whether spawn was actually attempted. If the catch below
   // fires before this flips to true, we mark the failed record as
   // never-spawned so the PR-wide ledger does not count this round —
   // an OAuth/workspace-prep failure burned no remediation budget.
+  let workerClass = null;
   let spawnAttempted = false;
   let spawnedWorker = null;
 
   try {
+    workerClass = pickRemediationWorkerClass(claimed.job);
     const baseReadyJob = await ensureJobBaseBranch({
       job: claimed.job,
       jobPath: claimed.jobPath,
@@ -3591,6 +3597,7 @@ async function main() {
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }
+  validateStartupRemediationConfig(process.env);
   const mode = process.argv.includes('reconcile') ? 'reconcile' : 'consume';
 
   try {
@@ -3706,6 +3713,7 @@ export {
   assertClaudeCodeOAuth,
   assertRemediationWorkerOAuth,
   defaultRemediatorWorkerClassFromEnv,
+  validateStartupRemediationConfig,
   normalizeRemediationWorkerClass,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,

@@ -1095,6 +1095,44 @@ test('pickRemediationWorkerClass routes null jobs to codex during LAC-358 overri
   assert.equal(pickRemediationWorkerClass(null), 'codex');
 });
 
+test('pickRemediationWorkerClass can force claude-code from env', () => {
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'claude-code' } }
+    ),
+    'claude-code'
+  );
+
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'clio-agent', reviewerModel: 'codex' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'claude' } }
+    ),
+    'claude-code'
+  );
+});
+
+test('pickRemediationWorkerClass can force codex from env aliases', () => {
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'claude-code', reviewerModel: 'codex' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'codex-remediation' } }
+    ),
+    'codex'
+  );
+});
+
+test('pickRemediationWorkerClass rejects unknown default remediator env values', () => {
+  assert.throws(
+    () => pickRemediationWorkerClass(
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini' } }
+    ),
+    /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+  );
+});
+
 test('spawnRemediationWorker dispatches "codex" to spawnCodexRemediationWorker', () => {
   // Verify the dispatcher routes by class. Use a workspace minimal enough
   // that the codex spawn would succeed if it ran — we set up auth-readable

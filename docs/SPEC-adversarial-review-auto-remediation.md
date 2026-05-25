@@ -16,6 +16,32 @@ boundary, those modules should bind to these interfaces rather than fork new
 shapes. Until then, updates to the declaration file must keep the fixture and
 the runtime-bound JSDoc consumers in sync.
 
+## Default Agent Routing Overrides
+
+The GitHub-PR adapter preserves opposite-agent review routing when no override
+is configured:
+
+- `[codex]` PRs route first-pass review to Claude and use
+  `GH_CLAUDE_REVIEWER_TOKEN`.
+- `[claude-code]` and `[clio-agent]` PRs route first-pass review to Codex and
+  use `GH_CODEX_REVIEWER_TOKEN`.
+
+Operators may deliberately pin the reviewer with
+`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude`. A non-empty override wins
+over the title-prefix route for every supported builder class and also selects
+the matching reviewer bot token. The alias `claude-code` is accepted for the
+Claude reviewer, but the canonical runtime reviewer model remains `claude`.
+
+Follow-up remediation defaults to the `codex` worker class while the LAC-358
+codex override remains active. Operators may pin remediation with
+`ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex|claude-code`; aliases
+`claude`, `codex-remediation`, and `claude-code-remediation` are accepted and
+normalized to the worker classes that the dispatcher can spawn.
+
+Invalid non-empty override values are configuration errors. The runtime must
+not silently fall back from an invalid value because that can route work to an
+expensive, unavailable, or intentionally locked-out agent.
+
 ## Remediation Reply Contract
 
 The durable remediation reply schema is the public contract between the worker,

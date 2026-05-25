@@ -131,12 +131,11 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
   },
 };
 
-// The remediation-worker class the consume path spawns today. Currently the
-// only spawn function is `spawnCodexRemediationWorker`, so the default class
-// is 'codex'. When a Claude Code remediation worker is added, callers (or a
-// per-job field) will pass the appropriate class through to
-// `prepareWorkspaceForJob` / `spawnCodexRemediationWorker`.
+// The remediation-worker class the consume path spawns by default. The
+// operator env override below can pin the worker class without changing
+// durable job records or PR-title routing.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
+const DEFAULT_REMEDIATOR_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
@@ -713,15 +712,40 @@ function spawnClaudeCodeRemediationWorker({
 
 // ── Worker-class dispatcher ────────────────────────────────────────────────
 
-// LAC-358 hard-switch: always route follow-up remediation through the
-// codex worker class, regardless of the original PR builderTag. Rationale:
-// feedback_prefer_codex_for_heavy_work.md documents claude-code silent-hang
-// failures and the current trust gap for unattended heavy work. Revisit
-// only after feedback memory is updated to remove that trust gap; until
-// then, builderTag remains durable job-ledger metadata while execution,
-// commit trailers, and reconcile-time bot identity all reflect codex.
-function pickRemediationWorkerClass(_job) {
-  return 'codex';
+function normalizeRemediationWorkerClass(workerClassInput) {
+  const workerClass = String(workerClassInput || '').trim().toLowerCase();
+  if (!workerClass) return null;
+  switch (workerClass) {
+    case 'codex':
+    case 'codex-remediation':
+      return 'codex';
+    case 'claude':
+    case 'claude-code':
+    case 'claude-code-remediation':
+      return 'claude-code';
+    default:
+      return null;
+  }
+}
+
+function defaultRemediatorWorkerClassFromEnv(env = process.env) {
+  const raw = env?.[DEFAULT_REMEDIATOR_ENV];
+  if (raw === undefined || String(raw).trim() === '') return null;
+  const workerClass = normalizeRemediationWorkerClass(raw);
+  if (!workerClass) {
+    throw new Error(
+      `${DEFAULT_REMEDIATOR_ENV} must be one of: codex, claude-code; got ${JSON.stringify(raw)}`
+    );
+  }
+  return workerClass;
+}
+
+// LAC-358 default: route follow-up remediation through the codex worker
+// class, regardless of the original PR builderTag. Operators can override
+// this default with ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR when cost or
+// availability requires pinning remediation to a specific worker class.
+function pickRemediationWorkerClass(_job, { env = process.env } = {}) {
+  return defaultRemediatorWorkerClassFromEnv(env) || DEFAULT_REMEDIATION_WORKER_CLASS;
 }
 
 async function assertRemediationWorkerOAuth(workerClass, { execFileImpl } = {}) {
@@ -3630,6 +3654,7 @@ async function main() {
 
 export {
   FOLLOW_UP_PROMPT_PATH,
+  DEFAULT_REMEDIATOR_ENV,
   REMEDIATION_WORKER_TRAILER_CLASS,
   DEFAULT_REPLIES_ROOT,
   DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
@@ -3680,6 +3705,8 @@ export {
   spawnRemediationWorker,
   assertClaudeCodeOAuth,
   assertRemediationWorkerOAuth,
+  defaultRemediatorWorkerClassFromEnv,
+  normalizeRemediationWorkerClass,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,

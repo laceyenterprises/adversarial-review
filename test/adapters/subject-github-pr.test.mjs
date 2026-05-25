@@ -9,7 +9,7 @@ import {
   revisionRefFromPR,
   stateFromSnapshot,
 } from '../../src/adapters/subject/github-pr/index.mjs';
-import { routeSubject } from '../../src/adapters/subject/github-pr/routing.mjs';
+import { routePR, routeSubject } from '../../src/adapters/subject/github-pr/routing.mjs';
 
 const fixture = JSON.parse(
   readFileSync(
@@ -75,6 +75,44 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
     reviewerModel: 'claude',
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   });
+});
+
+test('github-pr routing can force the default reviewer from env', () => {
+  const env = { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' };
+
+  assert.deepEqual(routeSubject({ builderClass: 'codex' }, { env }), {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  });
+
+  assert.deepEqual(routeSubject({ builderClass: 'claude-code' }, { env }), {
+    builderClass: 'claude-code',
+    tag: 'claude-code',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  });
+
+  assert.deepEqual(routePR('[codex] LAC-484 env default reviewer', null, {
+    env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'claude-code' },
+  }), {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
+});
+
+test('github-pr routing rejects unknown default reviewer env values', () => {
+  assert.throws(
+    () => routeSubject(
+      { builderClass: 'codex' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' } }
+    ),
+    /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
+  );
 });
 
 test('github-pr subject adapter fetches diff content through the subject interface', async () => {

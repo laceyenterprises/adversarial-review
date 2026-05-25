@@ -2014,6 +2014,10 @@ function pickNormalMergeAgentDispatchDetail({
     // the reviewer's own categorization. operator-approved is handled earlier
     // (it bypasses this branch), so a human can still force a merge that accepts
     // the blockers.
+    const blockingFindingState = String(job?.blockingFindingState || 'known').trim().toLowerCase();
+    if (blockingFindingState === 'unknown') {
+      return { decision: 'skip-blocking-findings-unknown', trigger: null };
+    }
     const blockingFindingCount = Number(job?.blockingFindingCount) || 0;
     if (blockingFindingCount > 0) {
       return { decision: 'skip-blockers-present', trigger: null };
@@ -2157,6 +2161,8 @@ function recordMergeAgentSkippedDispatch(rootDir, job, {
   trigger = null,
   agentOsState = null,
   labelRemoval = null,
+  blockingFindingCount = undefined,
+  blockingFindingState = undefined,
 } = {}) {
   const dir = mergeAgentSkippedDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -2175,6 +2181,8 @@ function recordMergeAgentSkippedDispatch(rootDir, job, {
     skippedAt,
     decision,
     agentOsDetectionSource: agentOsState?.source || null,
+    ...(blockingFindingCount !== undefined ? { blockingFindingCount } : {}),
+    ...(blockingFindingState !== undefined ? { blockingFindingState } : {}),
   };
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   return filePath;
@@ -2633,6 +2641,8 @@ async function dispatchMergeAgentForPR({
   latestFollowUpJobStatus = null,
   remediationCurrentRound = null,
   remediationMaxRounds = null,
+  blockingFindingCount = 0,
+  blockingFindingState = 'known',
   prUpdatedAt = null,
   operatorApproval = null,
   mergeAgentRequest = null,
@@ -2664,6 +2674,8 @@ async function dispatchMergeAgentForPR({
     latestFollowUpJobStatus,
     remediationCurrentRound,
     remediationMaxRounds,
+    blockingFindingCount,
+    blockingFindingState,
     prUpdatedAt,
     operatorApproval,
     mergeAgentRequest,
@@ -2864,7 +2876,7 @@ async function dispatchMergeAgentForPR({
         stuckDetail,
       };
     }
-    if (decision === 'skip-blockers-present') {
+    if (decision === 'skip-blockers-present' || decision === 'skip-blocking-findings-unknown') {
       // Budget exhausted with standing blocking findings — the pipeline refuses
       // to auto-merge (root-cause gate for #901). Surface it as a durable,
       // queryable lifecycle event so the operator can see why automation parked
@@ -2872,14 +2884,31 @@ async function dispatchMergeAgentForPR({
       // and auto-resumes once the blockers clear (verdict → `Comment only`) or
       // the operator applies `operator-approved` to accept them.
       const blockingFindingCount = Number(job?.blockingFindingCount) || 0;
-      mergeAgentLifecycleLog(logger, 'merge_agent.blockers_present_handoff', {
+      const blockingFindingState = String(job?.blockingFindingState || 'known').trim().toLowerCase();
+      const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
+        skippedAt: now,
+        decision,
+        trigger: null,
+        blockingFindingCount,
+        blockingFindingState,
+      });
+      mergeAgentLifecycleLog(logger, decision === 'skip-blocking-findings-unknown'
+        ? 'merge_agent.blocking_findings_unknown_handoff'
+        : 'merge_agent.blockers_present_handoff', {
         repo,
         prNumber,
         headSha: job?.headSha || null,
         blockingFindingCount,
+        blockingFindingState,
+        skippedRecordPath,
         at: now,
       });
-      return { decision, blockingFindingCount };
+      return {
+        decision,
+        blockingFindingCount,
+        blockingFindingState,
+        skippedRecordPath,
+      };
     }
     return { decision };
   }
@@ -4099,26 +4128,40 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   };
 }
 
-// Number of standing blocking findings in a review body, used by the merge
-// gate to refuse final-pass auto-merge (PR #901). Primary signal is the
-// canonical structured parser; fail SAFE when the `## Blocking issues` section
-// is present and is NOT the `- None.` sentinel but the structured parse yields
-// nothing (e.g. a malformed/incomplete finding card) — treat it as one standing
+// Standing blocking-finding state in a review body, used by the merge gate to
+// refuse final-pass auto-merge (PR #901). Primary signal is the canonical
+// structured parser; fail SAFE when the `## Blocking issues` section is present
+// and is NOT the `- None.` sentinel but the structured parse yields nothing
+// (e.g. a malformed/incomplete finding card) — treat it as one standing
 // blocker so the gate refuses rather than auto-merging an unparseable section.
-function countBlockingFindings(reviewBody) {
+//
+// Legacy `Request changes` reviews that predate the structured issue sections
+// are different: blocker presence is unknowable, so the final-pass gate parks
+// with `skip-blocking-findings-unknown` until a fresh structured review exists
+// or an operator applies a scoped override.
+function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   const parsed = parseBlockingFindingsSection(reviewBody);
-  if (parsed && parsed.length > 0) return parsed.length;
+  if (parsed && parsed.length > 0) {
+    return { count: parsed.length, state: 'known' };
+  }
   const match = String(reviewBody ?? '').match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
-  if (!match) return 0;
+  const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
+  if (!match) {
+    return normalizedVerdict === 'request-changes'
+      ? { count: 0, state: 'unknown' }
+      : { count: 0, state: 'known' };
+  }
   const section = match[1].trim();
-  if (!section) return 0;
+  if (!section) return { count: 0, state: 'known' };
   const isNoneSentinelOnly = section
     .split('\n')
     .every((line) => {
       const trimmed = line.trim();
       return trimmed === '' || /^-\s+None\.?$/i.test(trimmed);
     });
-  return isNoneSentinelOnly ? 0 : 1;
+  return isNoneSentinelOnly
+    ? { count: 0, state: 'known' }
+    : { count: 1, state: 'known' };
 }
 
 function buildMergeAgentDispatchJob(rootDir, candidate) {
@@ -4127,14 +4170,17 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
     prNumber: candidate.prNumber,
     revisionRef: candidate.headSha,
   });
+  const lastVerdict = extractReviewVerdict(latestJob?.reviewBody);
+  const blockingFindings = classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
   return {
     ...candidate,
-    lastVerdict: extractReviewVerdict(latestJob?.reviewBody),
+    lastVerdict,
     // Count of standing blocking findings in the latest review (`- None.` → 0;
-    // missing section → 0; otherwise N, fail-safe ≥1 for an unparseable
-    // section). The merge gate refuses final-pass auto-merge when this is > 0
-    // (PR #901).
-    blockingFindingCount: countBlockingFindings(latestJob?.reviewBody),
+    // malformed non-None section → >=1; legacy Request changes body with no
+    // structured section → state unknown). The merge gate refuses final-pass
+    // auto-merge when the count is > 0 or the state is unknown (PR #901).
+    blockingFindingCount: blockingFindings.count,
+    blockingFindingState: blockingFindings.state,
     latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),

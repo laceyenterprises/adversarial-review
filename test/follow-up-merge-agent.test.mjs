@@ -4,7 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
+import {
+  claimNextFollowUpJob,
+  createFollowUpJob,
+} from '../src/follow-up-jobs.mjs';
 import {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
@@ -351,14 +354,18 @@ test('pickMergeAgentDispatch refuses dispatch while remediation is still active'
   // An in-progress follow-up job may be a live remediation worker mid-force-
   // push; block regardless of verdict to avoid racing it.
   assert.equal(
-    pickMergeAgentDispatch(makeJob({ latestFollowUpJobStatus: 'in-progress' })),
+    pickMergeAgentDispatch(makeJob({ latestFollowUpJobStatus: 'in_progress' })),
     'skip-remediation-active'
   );
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Request changes',
-      latestFollowUpJobStatus: 'in-progress',
+      latestFollowUpJobStatus: 'in_progress',
     })),
+    'skip-remediation-active'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({ latestFollowUpJobStatus: 'in-progress' })),
     'skip-remediation-active'
   );
 });
@@ -385,7 +392,7 @@ test('pickMergeAgentDispatch refuses dispatch while a clean-verdict follow-up jo
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Comment only',
-      latestFollowUpJobStatus: 'in-progress',
+      latestFollowUpJobStatus: 'in_progress',
     })),
     'skip-remediation-active'
   );
@@ -423,7 +430,7 @@ test('pickMergeAgentDispatch dispatches a clean comment-only verdict even with r
 test('pickMergeAgentDispatch surfaces active remediation before failed checks', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
-      latestFollowUpJobStatus: 'in-progress',
+      latestFollowUpJobStatus: 'in_progress',
       checksConclusion: 'FAILURE',
     })),
     'skip-remediation-active'
@@ -786,7 +793,7 @@ test('operator-approved bypasses active in-flight remediation', () => {
       lastVerdict: 'Request changes',
       labels: [{ name: 'operator-approved' }],
       operatorApproval: makeOperatorApproval(),
-      latestFollowUpJobStatus: 'in-progress',
+      latestFollowUpJobStatus: 'in_progress',
     })),
     'dispatch'
   );
@@ -870,7 +877,7 @@ test('merge-agent-requested still respects hard stops and active remediation', (
       labels: [{ name: 'merge-agent-requested' }],
       mergeAgentRequest: makeMergeAgentRequest(),
       mergeable: 'CONFLICTING',
-      latestFollowUpJobStatus: 'in-progress',
+      latestFollowUpJobStatus: 'in_progress',
     })),
     'skip-remediation-active'
   );
@@ -1025,6 +1032,7 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
     prNumber: 401,
     reviewerModel: 'codex',
     linearTicketId: null,
+    revisionRef: 'abc123',
     reviewBody: '## Summary\nx\n## Verdict\n\nComment only',
     reviewPostedAt: '2026-05-02T10:00:00.000Z',
     critical: false,
@@ -1061,6 +1069,93 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
   assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
   assert.equal(dispatchJob.operatorApproval.codeScopedAt, '2026-05-02T10:04:00.000Z');
+});
+
+test('buildMergeAgentDispatchJob normalizes real claimed follow-up job status', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'abc123',
+    reviewBody: '## Summary\nx\n## Verdict\n\nRequest changes',
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+  claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-05-02T10:01:00.000Z',
+    launcherPid: 4242,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'abc123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.latestFollowUpJobStatus, 'in-progress');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'skip-remediation-active');
+});
+
+test('buildMergeAgentDispatchJob ignores stale active remediation on an older head', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'new-head',
+    reviewBody: '## Summary\nx\n## Verdict\n\nComment only',
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+  claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-05-02T10:01:00.000Z',
+    launcherPid: 4242,
+    returnStopped: true,
+  });
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'old-head',
+    reviewBody: '## Summary\nx\n## Verdict\n\nRequest changes',
+    reviewPostedAt: '2026-05-02T10:05:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'new-head',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.lastVerdict, 'Comment only');
+  assert.equal(dispatchJob.latestFollowUpJobStatus, 'stopped');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
 });
 
 test('pickMergeAgentDispatch can dispatch zero-check PRs from an explicit empty rollup', () => {

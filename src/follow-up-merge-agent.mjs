@@ -870,6 +870,12 @@ function normalizeLogin(value) {
   return String(value ?? '').trim().toLowerCase();
 }
 
+function normalizeFollowUpJobStatus(status) {
+  const text = String(status ?? '').trim().toLowerCase();
+  if (text === 'in_progress') return 'in-progress';
+  return text;
+}
+
 function extractOperatorNotes(prBody) {
   const text = String(prBody ?? '').trim();
   if (!text) return null;
@@ -895,10 +901,16 @@ function adversarialOwnCheckContexts(env = process.env) {
   return contexts;
 }
 
-function isAdversarialOwnCheck(item, excludeContexts) {
-  // Only exclude the exact configured status-context aliases. CheckRun names
-  // are external CI surface area and must keep gating even if they happen to
-  // share an `agent-os/adversarial*` prefix.
+function isAdversarialOwnStatusContext(item, excludeContexts) {
+  // The watcher currently publishes its own gate as a legacy commit status,
+  // surfaced by GitHub GraphQL as `StatusContext.context`. CheckRun names are
+  // external CI surface area and must keep gating even if they exactly match
+  // the configured context or share an `agent-os/adversarial*` prefix. If the
+  // publisher migrates to CheckRun, this predicate and the branch-protection
+  // contract must change together.
+  if (item?.__typename && item.__typename !== 'StatusContext') {
+    return false;
+  }
   const ctx = String(item?.context || '').trim().toLowerCase();
   if (!ctx) return false;
   return excludeContexts.has(ctx);
@@ -918,7 +930,7 @@ function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}
   }
   const excludeContexts = adversarialOwnCheckContexts(env);
   const relevant = statusCheckRollup.filter(
-    (item) => !isAdversarialOwnCheck(item, excludeContexts)
+    (item) => !isAdversarialOwnStatusContext(item, excludeContexts)
   );
   if (relevant.length === 0) {
     // No checks at all, or only the review pipeline's own gate → nothing
@@ -1627,8 +1639,9 @@ function scanStuckMergeAgentDispatches({
   return stuckReports;
 }
 
-function findLatestFollowUpJobForPR(rootDir, { repo, prNumber }) {
+function findLatestFollowUpJobForPR(rootDir, { repo, prNumber, revisionRef = null, headSha = null }) {
   const keys = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
+  const wantedRevisionRef = String(revisionRef || headSha || '').trim();
   let latest = null;
   let latestTs = '';
   for (const key of keys) {
@@ -1637,6 +1650,7 @@ function findLatestFollowUpJobForPR(rootDir, { repo, prNumber }) {
       if (!job) continue;
       if (job.repo !== repo) continue;
       if (Number(job.prNumber) !== Number(prNumber)) continue;
+      if (wantedRevisionRef && String(job.revisionRef || '').trim() !== wantedRevisionRef) continue;
       const ts = job.completedAt || job.failedAt || job.stoppedAt || job.claimedAt || job.createdAt || '';
       if (ts > latestTs) {
         latestTs = ts;
@@ -1836,7 +1850,7 @@ function pickMergeAgentDispatchDetail(job, {
       : { decision: 'dispatch', trigger: OPERATOR_APPROVED_LABEL };
   }
 
-  const latestFollowUpJobStatus = String(job?.latestFollowUpJobStatus ?? '').trim().toLowerCase();
+  const latestFollowUpJobStatus = normalizeFollowUpJobStatus(job?.latestFollowUpJobStatus);
   if (
     latestFollowUpJobStatus === 'in-progress'
     || latestFollowUpJobStatus === 'pending'
@@ -4055,11 +4069,12 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
   const latestJob = findLatestFollowUpJobForPR(rootDir, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
+    revisionRef: candidate.headSha,
   });
   return {
     ...candidate,
     lastVerdict: extractReviewVerdict(latestJob?.reviewBody),
-    latestFollowUpJobStatus: latestJob?.status || null,
+    latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),
@@ -4105,6 +4120,7 @@ export {
   isMergeAgentDispatchActiveForHead,
   listMergeAgentLifecycleCleanups,
   listMergeAgentSkippedDispatches,
+  normalizeFollowUpJobStatus,
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,

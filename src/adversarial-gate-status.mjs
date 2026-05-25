@@ -9,6 +9,7 @@ import {
   buildScopedOperatorApproval,
   extractReviewVerdict,
   findLatestFollowUpJobForPR,
+  normalizeFollowUpJobStatus,
   normalizeReviewVerdict,
   OPERATOR_APPROVED_LABEL,
   OPERATOR_SKIP_LABELS,
@@ -125,12 +126,6 @@ function extractReviewBodyFromRow(reviewRow) {
   return reviewRow?.reviewBody ?? reviewRow?.review_body ?? reviewRow?.review_text ?? null;
 }
 
-function normalizeJobStatus(status) {
-  const text = String(status ?? '').trim().toLowerCase();
-  if (text === 'in_progress') return 'in-progress';
-  return text;
-}
-
 function truncateDescription(description) {
   const text = String(description ?? '').trim().replace(/\s+/g, ' ');
   if (text.length <= DESCRIPTION_MAX_CHARS) return text;
@@ -205,7 +200,7 @@ function pickAdversarialGateStatus({
   }
 
   const reviewStatus = normalizeReviewStatus(reviewRow.review_status);
-  const latestJobStatus = normalizeJobStatus(latestJob?.status);
+  const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
 
   if (reviewStatus === 'pending') {
     if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {

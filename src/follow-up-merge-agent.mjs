@@ -15,6 +15,10 @@ import { userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
+import {
+  DEFAULT_ADVERSARIAL_GATE_CONTEXT,
+  resolveGateStatusContext,
+} from './adversarial-gate-context.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
@@ -876,16 +880,55 @@ function extractOperatorNotes(prBody) {
   ].join('\n');
 }
 
-function summarizeChecksConclusion(statusCheckRollup) {
+// Identify a status-rollup item that belongs to the adversarial-review
+// pipeline's OWN gate (the commit status the watcher posts via
+// adversarial-gate-status.mjs, context `agent-os/adversarial-gate` by default,
+// overridable through ADV_GATE_STATUS_CONTEXT).
+function adversarialOwnCheckContexts(env = process.env) {
+  const contexts = new Set([DEFAULT_ADVERSARIAL_GATE_CONTEXT.toLowerCase()]);
+  try {
+    contexts.add(String(resolveGateStatusContext(env)).trim().toLowerCase());
+  } catch {
+    // A malformed ADV_GATE_STATUS_CONTEXT must not break the merge gate; the
+    // default constant is already in the set.
+  }
+  return contexts;
+}
+
+function isAdversarialOwnCheck(item, excludeContexts) {
+  // StatusContext rollup entries carry `context`; CheckRun entries carry `name`.
+  const ctx = String(item?.context || item?.name || '').trim().toLowerCase();
+  if (!ctx) return false;
+  if (excludeContexts.has(ctx)) return true;
+  // Defensive: anything the review pipeline namespaces under
+  // `agent-os/adversarial...` is its own check, never external CI.
+  return ctx.startsWith('agent-os/adversarial');
+}
+
+// The merge-agent must NOT gate on the adversarial-review pipeline's OWN
+// convergence check. It already receives the review verdict directly via
+// `job.lastVerdict`, and the merge-agent is the component that converges the
+// PR — waiting on the review's own gate-status is circular, and treating a
+// `Request changes` gate-status as a hard CI failure double-counts the verdict
+// (the verdict gates are handled separately, with the ultra-major/merge-by-
+// default contract). Real external CI still gates. (Operator directive
+// 2026-05-25.)
+function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}) {
   if (!Array.isArray(statusCheckRollup)) {
     return null;
   }
-  if (statusCheckRollup.length === 0) {
+  const excludeContexts = adversarialOwnCheckContexts(env);
+  const relevant = statusCheckRollup.filter(
+    (item) => !isAdversarialOwnCheck(item, excludeContexts)
+  );
+  if (relevant.length === 0) {
+    // No checks at all, or only the review pipeline's own gate → nothing
+    // external to wait on.
     return 'SUCCESS';
   }
 
   let sawPending = false;
-  for (const item of statusCheckRollup) {
+  for (const item of relevant) {
     const rawState = String(
       item?.conclusion
       || item?.status
@@ -1629,21 +1672,50 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   if (trigger) {
     lines.push(`- Dispatch trigger: ${trigger}`);
   }
-  if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+  // Both automated-convergence triggers get the same triage-and-merge
+  // contract: the budget-exhausted final pass (`Request changes` with the
+  // round budget consumed) AND a clean verdict (`null` trigger = `Comment
+  // only`/approved). They differ only in the final-pass safety-floor framing.
+  // Before 2026-05-25 only the final pass carried this block, so a clean
+  // verdict reached the merge-agent with NO instructions and the worker
+  // defaulted to requesting another review (PR #898). operator-approved and
+  // merge-agent-requested are operator-driven and keep their own label-scoped
+  // semantics — they do NOT get this block.
+  const isAutomatedConvergence = trigger === null
+    || trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER;
+  if (isAutomatedConvergence) {
     lines.push('');
-    lines.push('## Mode: final-pass-on-budget-exhausted');
+    if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+      lines.push('## Mode: final-pass-on-budget-exhausted');
+      lines.push('');
+      lines.push(
+        'The adversarial-review round budget for this PR is consumed and the'
+        + ' latest reviewer verdict is still `Request changes`. You are the'
+        + ' final automated pass before operator escalation.'
+      );
+    } else {
+      lines.push('## Mode: converge-and-merge');
+      lines.push('');
+      lines.push(
+        'The latest reviewer verdict is non-blocking (`Comment only`/'
+        + 'approved). The review pipeline has reached its natural end and this'
+        + ' PR is ready to land. Converge it NOW — do not wait for any'
+        + ' remaining review or remediation rounds.'
+      );
+    }
     lines.push('');
     lines.push(
-      'The adversarial-review round budget for this PR is consumed and the'
-      + ' latest reviewer verdict is still `Request changes`. You are the'
-      + ' final automated pass before operator escalation.'
+      'Default action: MERGE. Another review round is a rare exception'
+      + ' reserved for an ULTRA-MAJOR refactor (see step 2) — it is NOT the'
+      + ' cautious default. When in doubt, MERGE.'
     );
     lines.push('');
     lines.push('Required behavior:');
     lines.push(
       '1. Run `comment_only_followups.py` (your existing sub-worker triage'
       + ' step) against the latest review body. Apply every actionable'
-      + ' in-scope finding inline. Use `suggestions_unable_to_apply` only'
+      + ' in-scope finding inline — including non-blocking and suggested-fix'
+      + ' comments. Use `suggestions_unable_to_apply` only'
       + ' for findings that genuinely should not be completed inside this'
       + ' PR (multi-PR scope, cross-module refactors, or conflicts with PR'
       + ' intent). For each such follow-up, file a Linear ticket before'
@@ -1660,24 +1732,38 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' into PR comments, stdout/stderr summaries, or merge receipts.'
     );
     lines.push(
-      '2. Proceed to rebase + merge when triage returns'
-      + ' `no-followups-needed`, or when triage returns `addressed` after'
-      + ' making light-to-medium code/config fixes. For light-to-medium'
-      + ' fixes, force-push the updated head, wait for the required checks'
-      + ' on that pushed head, then merge; do not request another review.'
-      + ' Exit `awaiting-rereview` only when the in-PR fix is a major'
-      + ' refactor whose review risk deserves another adversarial pass.'
-      + ' If the remaining refactor work belongs across modules or future'
-      + ' PRs, file the Linear tickets described above and proceed with this'
-      + ' merge instead of using `awaiting-rereview` or stopping the PR.'
-      + ' A non-empty `blockers_observed` result must hard-refuse the merge.'
+      '2. Default to MERGE. When triage returns `no-followups-needed`, or'
+      + ' returns `addressed` after you make the fixes, rebase, force-push the'
+      + ' updated head, wait only for real external CI on that pushed head,'
+      + ' then MERGE (`gh pr merge --squash --admin`). Do NOT wait on or treat'
+      + ' the adversarial-review gate status (`agent-os/adversarial-gate`) as a'
+      + ' blocking check — it only mirrors the review verdict you already have,'
+      + ' not external CI, and the admin merge lands past it. Do NOT request'
+      + ' another'
+      + ' review for light, medium, or even substantial-but-bounded fixes —'
+      + ' force-push and merge those directly. Set `reReview.requested = true`'
+      + ' (exit `awaiting-rereview`) ONLY for an ULTRA-MAJOR refactor: a'
+      + " wholesale rewrite of the PR's core logic spanning many files whose"
+      + ' review risk genuinely demands a fresh adversarial pass. That is'
+      + ' rare. The following are NEVER ultra-major and MUST merge without'
+      + ' re-review — a single- or few-file change; any test or test-fixture'
+      + ' edit; a config, doc, or comment tweak; applying reviewer'
+      + ' suggestions; renames; small bugfixes; or any change confined to the'
+      + ' area the review already covered. When you are weighing whether a'
+      + ' change is "major enough" to re-review, it is not — MERGE it. If'
+      + ' remaining refactor work belongs across modules or future PRs, file'
+      + ' the Linear tickets described above and MERGE this PR instead of'
+      + ' using `awaiting-rereview` or stopping the PR. A non-empty'
+      + ' `blockers_observed` result must hard-refuse the merge.'
     );
-    lines.push(
-      '3. Treat this dispatch the same way you would treat an'
-      + ' `operator-approved` dispatch for review/remediation state, EXCEPT'
-      + ' that the safety floor (no blocker-class merges) is stricter:'
-      + ' the operator did not personally vouch for this head.'
-    );
+    if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+      lines.push(
+        '3. Treat this dispatch the same way you would treat an'
+        + ' `operator-approved` dispatch for review/remediation state, EXCEPT'
+        + ' that the safety floor (no blocker-class merges) is stricter:'
+        + ' the operator did not personally vouch for this head.'
+      );
+    }
   }
   if (job.operatorNotes) {
     lines.push('- Operator notes from PR body:');
@@ -1753,7 +1839,25 @@ function pickMergeAgentDispatchDetail(job, {
   }
 
   const latestFollowUpJobStatus = String(job?.latestFollowUpJobStatus ?? '').trim().toLowerCase();
-  if (latestFollowUpJobStatus === 'pending' || latestFollowUpJobStatus === 'in-progress') {
+  // A non-blocking verdict (`Comment only`/approved) means the review
+  // pipeline reached its natural end — there is nothing to remediate. A
+  // *pending* (unclaimed) follow-up job for such a verdict spawns NO
+  // remediation worker: the follow-up daemon settles it as `review-settled`
+  // (follow-up-jobs.mjs::isSettledReviewJob). Holding convergence on it just
+  // strands a clean PR behind the remediation pipeline — exactly the failure
+  // the operator flagged 2026-05-25 ("trigger on a comment-only review even
+  // if the remediation pipeline has more budget"). So converge now regardless
+  // of remaining remediation budget or a queued follow-up job.
+  //
+  // We still block on `in-progress` regardless of verdict: an in-progress job
+  // may be a live remediation worker mid-force-push, and racing it could merge
+  // a half-written head or fight the worker.
+  const verdictIsNonBlocking = normalizedVerdict === 'comment-only'
+    || normalizedVerdict === 'approved';
+  if (
+    latestFollowUpJobStatus === 'in-progress'
+    || (latestFollowUpJobStatus === 'pending' && !verdictIsNonBlocking)
+  ) {
     return { decision: 'skip-remediation-active', trigger: null };
   }
 

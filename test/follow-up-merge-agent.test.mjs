@@ -141,6 +141,54 @@ test('pickMergeAgentDispatchDetail dispatches with final-pass trigger when budge
   assert.equal(detail.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
 });
 
+test('ROOT-CAUSE GATE: final-pass does NOT merge when the final review has standing blocking findings', () => {
+  // The #901 regression: budget exhausted + Request changes + the reviewer's
+  // `## Blocking issues` section still has items. Auto-merge here shipped two
+  // blocking production bugs. The gate hands off instead of dispatching a
+  // merge-agent.
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 2,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: true,
+  });
+  assert.equal(detail.decision, 'skip-blockers-present');
+  assert.equal(detail.trigger, null);
+});
+
+test('final-pass STILL merges a budget-exhausted Request changes with NO blocking findings (deadlock case)', () => {
+  // reviewer.last policy: a final round with only NON-blocking nitpicks still
+  // reads `Request changes` (Comment only requires BOTH sections to be None).
+  // That is exactly what final-pass-on-budget-exhausted exists to land. The
+  // gate must not break it.
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 0,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: true,
+  });
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+});
+
+test('operator-approved overrides the blocking-findings gate (human accepts the blockers)', () => {
+  // operator-approved is resolved BEFORE the final-pass branch, so a human can
+  // still force a merge that accepts standing blockers.
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 2,
+    labels: [{ name: 'operator-approved' }],
+    operatorApproval: makeOperatorApproval(),
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: true,
+  });
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, 'operator-approved');
+});
+
 test('pickMergeAgentDispatchDetail still skips Request changes when budget is NOT exhausted, even with final-pass flag on', () => {
   // remediation can still progress → defer to the remediation loop instead
   // of fighting it with merge-agent. This preserves the existing
@@ -1066,9 +1114,110 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.remediationCurrentRound, 0);
   // Spec-less jobs fall back to medium risk, which has a 2-round cap.
   assert.equal(dispatchJob.remediationMaxRounds, 2);
+  // No `## Blocking issues` section → zero blocking findings → final-pass
+  // auto-merge is permitted (this clean body would not even reach that branch).
+  assert.equal(dispatchJob.blockingFindingCount, 0);
   assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
   assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
   assert.equal(dispatchJob.operatorApproval.codeScopedAt, '2026-05-02T10:04:00.000Z');
+});
+
+test('buildMergeAgentDispatchJob counts standing blocking findings from the latest review', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 402,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'def456',
+    reviewBody: [
+      '## Summary',
+      'Two blocking problems remain.',
+      '## Blocking issues',
+      '- **Status pre-probe stall**',
+      '  - **File:** drainer.mjs',
+      '  - **Lines:** 548-566',
+      '  - **Problem:** awaits a live probe on the intercept path',
+      '  - **Why it matters:** a hanging probe stalls /status',
+      '  - **Recommended fix:** read cached health instead',
+      '- **Non-durable reset sequencing**',
+      '  - **File:** drainer.mjs',
+      '  - **Lines:** 466-491',
+      '  - **Problem:** reset runs before the durable write',
+      '  - **Why it matters:** a crash repeats the reset',
+      '  - **Recommended fix:** write in_progress first',
+      '## Non-blocking issues',
+      '- None.',
+      '## Verdict',
+      '',
+      'Request changes',
+    ].join('\n'),
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 402,
+    branch: 'feature/pr-402',
+    baseBranch: 'main',
+    headSha: 'def456',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.lastVerdict, 'Request changes');
+  assert.equal(dispatchJob.blockingFindingCount, 2);
+});
+
+test('buildMergeAgentDispatchJob fails safe to >=1 for a non-None blocking section the parser cannot itemize', () => {
+  // Defense-in-depth: if the reviewer writes a malformed/incomplete blocking
+  // card the structured parser cannot itemize, we must NOT treat the section as
+  // empty and auto-merge. Any non-`None` Blocking issues content floors to 1.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 403,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'ghi789',
+    reviewBody: [
+      '## Summary',
+      'A blocker exists but the card is malformed.',
+      '## Blocking issues',
+      '- secret leakage in the new logging path (no structured sub-fields)',
+      '## Non-blocking issues',
+      '- None.',
+      '## Verdict',
+      '',
+      'Request changes',
+    ].join('\n'),
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 403,
+    branch: 'feature/pr-403',
+    baseBranch: 'main',
+    headSha: 'ghi789',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.lastVerdict, 'Request changes');
+  assert.ok(dispatchJob.blockingFindingCount >= 1);
 });
 
 test('buildMergeAgentDispatchJob normalizes real claimed follow-up job status', () => {

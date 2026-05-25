@@ -31,6 +31,7 @@ import {
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { requestReviewRereview } from './review-state.mjs';
+import { parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -2001,6 +2002,22 @@ function pickNormalMergeAgentDispatchDetail({
     && !operatorApproved
     && finalPassOnRequestChangesEnabled
   ) {
+    // ROOT-CAUSE GATE (PR #901): the final-pass-on-budget-exhausted merge is
+    // ONLY for the deadlock case — a `Request changes` verdict driven solely by
+    // NON-blocking nitpicks (reviewer.last policy: `Comment only` requires BOTH
+    // sections to be `None`, so a non-blocking-only final round still reads
+    // `Request changes`). When the `## Blocking issues` section has standing
+    // items, auto-merging is NEVER acceptable: that is exactly how #901 shipped
+    // two blocking production bugs. The previous design delegated the
+    // blocker-refusal to the dispatched worker's prompt/judgment, which is not
+    // enforcement — the worker merged anyway. Gate it deterministically here on
+    // the reviewer's own categorization. operator-approved is handled earlier
+    // (it bypasses this branch), so a human can still force a merge that accepts
+    // the blockers.
+    const blockingFindingCount = Number(job?.blockingFindingCount) || 0;
+    if (blockingFindingCount > 0) {
+      return { decision: 'skip-blockers-present', trigger: null };
+    }
     return {
       decision: 'dispatch',
       trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
@@ -2846,6 +2863,23 @@ async function dispatchMergeAgentForPR({
         labelRemovalErrors: labelRemoval.labelRemovalErrors,
         stuckDetail,
       };
+    }
+    if (decision === 'skip-blockers-present') {
+      // Budget exhausted with standing blocking findings — the pipeline refuses
+      // to auto-merge (root-cause gate for #901). Surface it as a durable,
+      // queryable lifecycle event so the operator can see why automation parked
+      // this PR. No sticky label is applied: the gate is recomputed every tick
+      // and auto-resumes once the blockers clear (verdict → `Comment only`) or
+      // the operator applies `operator-approved` to accept them.
+      const blockingFindingCount = Number(job?.blockingFindingCount) || 0;
+      mergeAgentLifecycleLog(logger, 'merge_agent.blockers_present_handoff', {
+        repo,
+        prNumber,
+        headSha: job?.headSha || null,
+        blockingFindingCount,
+        at: now,
+      });
+      return { decision, blockingFindingCount };
     }
     return { decision };
   }
@@ -4065,6 +4099,28 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   };
 }
 
+// Number of standing blocking findings in a review body, used by the merge
+// gate to refuse final-pass auto-merge (PR #901). Primary signal is the
+// canonical structured parser; fail SAFE when the `## Blocking issues` section
+// is present and is NOT the `- None.` sentinel but the structured parse yields
+// nothing (e.g. a malformed/incomplete finding card) — treat it as one standing
+// blocker so the gate refuses rather than auto-merging an unparseable section.
+function countBlockingFindings(reviewBody) {
+  const parsed = parseBlockingFindingsSection(reviewBody);
+  if (parsed && parsed.length > 0) return parsed.length;
+  const match = String(reviewBody ?? '').match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  if (!match) return 0;
+  const section = match[1].trim();
+  if (!section) return 0;
+  const isNoneSentinelOnly = section
+    .split('\n')
+    .every((line) => {
+      const trimmed = line.trim();
+      return trimmed === '' || /^-\s+None\.?$/i.test(trimmed);
+    });
+  return isNoneSentinelOnly ? 0 : 1;
+}
+
 function buildMergeAgentDispatchJob(rootDir, candidate) {
   const latestJob = findLatestFollowUpJobForPR(rootDir, {
     repo: candidate.repo,
@@ -4074,6 +4130,11 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
   return {
     ...candidate,
     lastVerdict: extractReviewVerdict(latestJob?.reviewBody),
+    // Count of standing blocking findings in the latest review (`- None.` → 0;
+    // missing section → 0; otherwise N, fail-safe ≥1 for an unparseable
+    // section). The merge gate refuses final-pass auto-merge when this is > 0
+    // (PR #901).
+    blockingFindingCount: countBlockingFindings(latestJob?.reviewBody),
     latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),

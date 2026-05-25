@@ -363,29 +363,25 @@ test('pickMergeAgentDispatch refuses dispatch while remediation is still active'
   );
 });
 
-test('pickMergeAgentDispatch converges a non-blocking verdict even with a pending follow-up job', () => {
-  // Operator directive 2026-05-25: "harden the main pr convergence path to
-  // trigger on a comment-only review even if the remediation pipeline has more
-  // budget." A pending (unclaimed) follow-up job for a clean verdict spawns NO
-  // remediation worker — the follow-up daemon settles it as `review-settled`.
-  // Holding convergence on it strands a clean PR behind a queued/wedged
-  // follow-up daemon. So a pending job must NOT block a clean-verdict merge.
+test('pickMergeAgentDispatch refuses dispatch while a clean-verdict follow-up job is still pending or in progress', () => {
+  // A pending clean-verdict follow-up job can represent an explicit
+  // retrigger-remediation operator override. With only `latestFollowUpJobStatus`
+  // on the merge candidate, merge-agent cannot prove the pending job is the
+  // auto-settled clean path, so `pending` remains a hard block.
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Comment only',
       latestFollowUpJobStatus: 'pending',
     })),
-    'dispatch'
+    'skip-remediation-active'
   );
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Approved',
       latestFollowUpJobStatus: 'pending',
     })),
-    'dispatch'
+    'skip-remediation-active'
   );
-  // ...but an in-progress job still blocks even on a clean verdict, since a
-  // live worker may be mid-force-push.
   assert.equal(
     pickMergeAgentDispatch(makeJob({
       lastVerdict: 'Comment only',
@@ -683,10 +679,19 @@ test('summarizeChecksConclusion ignores the adversarial-review pipeline\'s own g
   );
 
   // A non-adversarial check named to merely contain "adversarial" elsewhere is
-  // still gated — only the `agent-os/adversarial*` namespace is excluded.
+  // still gated.
   assert.equal(
     summarizeChecksConclusion([
       { __typename: 'CheckRun', name: 'my-adversarial-fuzzer', conclusion: 'FAILURE' },
+    ]),
+    'FAILURE'
+  );
+
+  // Prefix matches are also real external CI unless they are the exact
+  // configured status-context alias.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'CheckRun', name: 'agent-os/adversarial-fuzzer', conclusion: 'FAILURE' },
     ]),
     'FAILURE'
   );
@@ -2721,7 +2726,7 @@ test('prepareOriginalWorkerForMergeAgent converts thrown worker-run lookups into
   assert.match(logs[0].detail, /native sqlite panic/);
 });
 
-test('buildMergeAgentPrompt emits the converge-and-merge contract (merge-by-default, ultra-major-only re-review) when no trigger is passed', () => {
+test('buildMergeAgentPrompt emits the converge-and-merge contract (merge-by-default, major-refactor-only re-review) when no trigger is passed', () => {
   const prompt = buildMergeAgentPrompt(makeJob());
   // No final-pass framing on the clean-verdict path...
   assert.ok(!prompt.includes('Dispatch trigger:'));
@@ -2734,10 +2739,10 @@ test('buildMergeAgentPrompt emits the converge-and-merge contract (merge-by-defa
   assert.ok(prompt.includes('When in doubt, MERGE'));
   assert.ok(prompt.includes('comment_only_followups.py'));
   assert.ok(prompt.includes('including non-blocking and suggested-fix'));
-  assert.ok(prompt.includes('ONLY for an ULTRA-MAJOR refactor'));
-  assert.ok(prompt.includes('NEVER ultra-major and MUST merge without'));
+  assert.ok(prompt.includes('only for major in-PR refactors'));
+  assert.ok(prompt.includes('NEVER major in-PR refactors and MUST merge without'));
   assert.ok(prompt.includes('any test or test-fixture'));
-  assert.ok(prompt.includes('is "major enough" to re-review, it is not'));
+  assert.ok(prompt.includes('is "major enough" to re-review, it probably is not'));
   assert.ok(prompt.includes('file the Linear tickets described above and MERGE this PR'));
   // Don't wait on / gate the merge on the adversarial-review's own check.
   assert.ok(prompt.includes('wait only for real external CI'));
@@ -2763,10 +2768,9 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('agent-os/adversarial-gate'));
   assert.ok(prompt.includes('Do NOT request another'
     + ' review for light, medium, or even substantial-but-bounded fixes'));
-  // Re-review threshold raised to ULTRA-MAJOR (operator directive 2026-05-25).
-  assert.ok(prompt.includes('ONLY for an ULTRA-MAJOR refactor'));
-  assert.ok(prompt.includes('NEVER ultra-major and MUST merge without'));
-  assert.ok(prompt.includes('is "major enough" to re-review, it is not'));
+  assert.ok(prompt.includes('only for major in-PR refactors'));
+  assert.ok(prompt.includes('NEVER major in-PR refactors and MUST merge without'));
+  assert.ok(prompt.includes('is "major enough" to re-review, it probably is not'));
   assert.ok(!prompt.includes('only when the in-PR fix is a major'));
   assert.ok(prompt.includes('file a Linear ticket before'));
   assert.ok(prompt.includes('do not leave the work only as prose in a PR comment'));

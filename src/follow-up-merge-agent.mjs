@@ -896,13 +896,12 @@ function adversarialOwnCheckContexts(env = process.env) {
 }
 
 function isAdversarialOwnCheck(item, excludeContexts) {
-  // StatusContext rollup entries carry `context`; CheckRun entries carry `name`.
-  const ctx = String(item?.context || item?.name || '').trim().toLowerCase();
+  // Only exclude the exact configured status-context aliases. CheckRun names
+  // are external CI surface area and must keep gating even if they happen to
+  // share an `agent-os/adversarial*` prefix.
+  const ctx = String(item?.context || '').trim().toLowerCase();
   if (!ctx) return false;
-  if (excludeContexts.has(ctx)) return true;
-  // Defensive: anything the review pipeline namespaces under
-  // `agent-os/adversarial...` is its own check, never external CI.
-  return ctx.startsWith('agent-os/adversarial');
+  return excludeContexts.has(ctx);
 }
 
 // The merge-agent must NOT gate on the adversarial-review pipeline's OWN
@@ -1706,7 +1705,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     lines.push('');
     lines.push(
       'Default action: MERGE. Another review round is a rare exception'
-      + ' reserved for an ULTRA-MAJOR refactor (see step 2) — it is NOT the'
+      + ' reserved for major in-PR refactors (see step 2) — it is NOT the'
       + ' cautious default. When in doubt, MERGE.'
     );
     lines.push('');
@@ -1742,15 +1741,14 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' another'
       + ' review for light, medium, or even substantial-but-bounded fixes —'
       + ' force-push and merge those directly. Set `reReview.requested = true`'
-      + ' (exit `awaiting-rereview`) ONLY for an ULTRA-MAJOR refactor: a'
-      + " wholesale rewrite of the PR's core logic spanning many files whose"
+      + ' (exit `awaiting-rereview`) only for major in-PR refactors whose'
       + ' review risk genuinely demands a fresh adversarial pass. That is'
-      + ' rare. The following are NEVER ultra-major and MUST merge without'
+      + ' rare. The following are NEVER major in-PR refactors and MUST merge without'
       + ' re-review — a single- or few-file change; any test or test-fixture'
       + ' edit; a config, doc, or comment tweak; applying reviewer'
       + ' suggestions; renames; small bugfixes; or any change confined to the'
       + ' area the review already covered. When you are weighing whether a'
-      + ' change is "major enough" to re-review, it is not — MERGE it. If'
+      + ' change is "major enough" to re-review, it probably is not — MERGE it. If'
       + ' remaining refactor work belongs across modules or future PRs, file'
       + ' the Linear tickets described above and MERGE this PR instead of'
       + ' using `awaiting-rereview` or stopping the PR. A non-empty'
@@ -1839,24 +1837,9 @@ function pickMergeAgentDispatchDetail(job, {
   }
 
   const latestFollowUpJobStatus = String(job?.latestFollowUpJobStatus ?? '').trim().toLowerCase();
-  // A non-blocking verdict (`Comment only`/approved) means the review
-  // pipeline reached its natural end — there is nothing to remediate. A
-  // *pending* (unclaimed) follow-up job for such a verdict spawns NO
-  // remediation worker: the follow-up daemon settles it as `review-settled`
-  // (follow-up-jobs.mjs::isSettledReviewJob). Holding convergence on it just
-  // strands a clean PR behind the remediation pipeline — exactly the failure
-  // the operator flagged 2026-05-25 ("trigger on a comment-only review even
-  // if the remediation pipeline has more budget"). So converge now regardless
-  // of remaining remediation budget or a queued follow-up job.
-  //
-  // We still block on `in-progress` regardless of verdict: an in-progress job
-  // may be a live remediation worker mid-force-push, and racing it could merge
-  // a half-written head or fight the worker.
-  const verdictIsNonBlocking = normalizedVerdict === 'comment-only'
-    || normalizedVerdict === 'approved';
   if (
     latestFollowUpJobStatus === 'in-progress'
-    || (latestFollowUpJobStatus === 'pending' && !verdictIsNonBlocking)
+    || latestFollowUpJobStatus === 'pending'
   ) {
     return { decision: 'skip-remediation-active', trigger: null };
   }

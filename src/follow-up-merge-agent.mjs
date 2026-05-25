@@ -15,6 +15,10 @@ import { userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
+import {
+  DEFAULT_ADVERSARIAL_GATE_CONTEXT,
+  resolveGateStatusContext,
+} from './adversarial-gate-context.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
@@ -866,6 +870,12 @@ function normalizeLogin(value) {
   return String(value ?? '').trim().toLowerCase();
 }
 
+function normalizeFollowUpJobStatus(status) {
+  const text = String(status ?? '').trim().toLowerCase();
+  if (text === 'in_progress') return 'in-progress';
+  return text;
+}
+
 function extractOperatorNotes(prBody) {
   const text = String(prBody ?? '').trim();
   if (!text) return null;
@@ -876,16 +886,60 @@ function extractOperatorNotes(prBody) {
   ].join('\n');
 }
 
-function summarizeChecksConclusion(statusCheckRollup) {
+// Identify a status-rollup item that belongs to the adversarial-review
+// pipeline's OWN gate (the commit status the watcher posts via
+// adversarial-gate-status.mjs, context `agent-os/adversarial-gate` by default,
+// overridable through ADV_GATE_STATUS_CONTEXT).
+function adversarialOwnCheckContexts(env = process.env) {
+  const contexts = new Set([DEFAULT_ADVERSARIAL_GATE_CONTEXT.toLowerCase()]);
+  try {
+    contexts.add(String(resolveGateStatusContext(env)).trim().toLowerCase());
+  } catch {
+    // A malformed ADV_GATE_STATUS_CONTEXT must not break the merge gate; the
+    // default constant is already in the set.
+  }
+  return contexts;
+}
+
+function isAdversarialOwnStatusContext(item, excludeContexts) {
+  // The watcher currently publishes its own gate as a legacy commit status,
+  // surfaced by GitHub GraphQL as `StatusContext.context`. CheckRun names are
+  // external CI surface area and must keep gating even if they exactly match
+  // the configured context or share an `agent-os/adversarial*` prefix. If the
+  // publisher migrates to CheckRun, this predicate and the branch-protection
+  // contract must change together.
+  if (item?.__typename && item.__typename !== 'StatusContext') {
+    return false;
+  }
+  const ctx = String(item?.context || '').trim().toLowerCase();
+  if (!ctx) return false;
+  return excludeContexts.has(ctx);
+}
+
+// The merge-agent must NOT gate on the adversarial-review pipeline's OWN
+// convergence check. It already receives the review verdict directly via
+// `job.lastVerdict`, and the merge-agent is the component that converges the
+// PR — waiting on the review's own gate-status is circular, and treating a
+// `Request changes` gate-status as a hard CI failure double-counts the verdict
+// (the verdict gates are handled separately, with the ultra-major/merge-by-
+// default contract). Real external CI still gates. (Operator directive
+// 2026-05-25.)
+function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}) {
   if (!Array.isArray(statusCheckRollup)) {
     return null;
   }
-  if (statusCheckRollup.length === 0) {
+  const excludeContexts = adversarialOwnCheckContexts(env);
+  const relevant = statusCheckRollup.filter(
+    (item) => !isAdversarialOwnStatusContext(item, excludeContexts)
+  );
+  if (relevant.length === 0) {
+    // No checks at all, or only the review pipeline's own gate → nothing
+    // external to wait on.
     return 'SUCCESS';
   }
 
   let sawPending = false;
-  for (const item of statusCheckRollup) {
+  for (const item of relevant) {
     const rawState = String(
       item?.conclusion
       || item?.status
@@ -1585,8 +1639,9 @@ function scanStuckMergeAgentDispatches({
   return stuckReports;
 }
 
-function findLatestFollowUpJobForPR(rootDir, { repo, prNumber }) {
+function findLatestFollowUpJobForPR(rootDir, { repo, prNumber, revisionRef = null, headSha = null }) {
   const keys = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
+  const wantedRevisionRef = String(revisionRef || headSha || '').trim();
   let latest = null;
   let latestTs = '';
   for (const key of keys) {
@@ -1595,6 +1650,7 @@ function findLatestFollowUpJobForPR(rootDir, { repo, prNumber }) {
       if (!job) continue;
       if (job.repo !== repo) continue;
       if (Number(job.prNumber) !== Number(prNumber)) continue;
+      if (wantedRevisionRef && String(job.revisionRef || '').trim() !== wantedRevisionRef) continue;
       const ts = job.completedAt || job.failedAt || job.stoppedAt || job.claimedAt || job.createdAt || '';
       if (ts > latestTs) {
         latestTs = ts;
@@ -1629,21 +1685,50 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   if (trigger) {
     lines.push(`- Dispatch trigger: ${trigger}`);
   }
-  if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+  // Both automated-convergence triggers get the same triage-and-merge
+  // contract: the budget-exhausted final pass (`Request changes` with the
+  // round budget consumed) AND a clean verdict (`null` trigger = `Comment
+  // only`/approved). They differ only in the final-pass safety-floor framing.
+  // Before 2026-05-25 only the final pass carried this block, so a clean
+  // verdict reached the merge-agent with NO instructions and the worker
+  // defaulted to requesting another review (PR #898). operator-approved and
+  // merge-agent-requested are operator-driven and keep their own label-scoped
+  // semantics — they do NOT get this block.
+  const isAutomatedConvergence = trigger === null
+    || trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER;
+  if (isAutomatedConvergence) {
     lines.push('');
-    lines.push('## Mode: final-pass-on-budget-exhausted');
+    if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+      lines.push('## Mode: final-pass-on-budget-exhausted');
+      lines.push('');
+      lines.push(
+        'The adversarial-review round budget for this PR is consumed and the'
+        + ' latest reviewer verdict is still `Request changes`. You are the'
+        + ' final automated pass before operator escalation.'
+      );
+    } else {
+      lines.push('## Mode: converge-and-merge');
+      lines.push('');
+      lines.push(
+        'The latest reviewer verdict is non-blocking (`Comment only`/'
+        + 'approved). The review pipeline has reached its natural end and this'
+        + ' PR is ready to land. Converge it NOW — do not wait for any'
+        + ' remaining review or remediation rounds.'
+      );
+    }
     lines.push('');
     lines.push(
-      'The adversarial-review round budget for this PR is consumed and the'
-      + ' latest reviewer verdict is still `Request changes`. You are the'
-      + ' final automated pass before operator escalation.'
+      'Default action: MERGE. Another review round is a rare exception'
+      + ' reserved for major in-PR refactors (see step 2) — it is NOT the'
+      + ' cautious default. When in doubt, MERGE.'
     );
     lines.push('');
     lines.push('Required behavior:');
     lines.push(
       '1. Run `comment_only_followups.py` (your existing sub-worker triage'
       + ' step) against the latest review body. Apply every actionable'
-      + ' in-scope finding inline. Use `suggestions_unable_to_apply` only'
+      + ' in-scope finding inline — including non-blocking and suggested-fix'
+      + ' comments. Use `suggestions_unable_to_apply` only'
       + ' for findings that genuinely should not be completed inside this'
       + ' PR (multi-PR scope, cross-module refactors, or conflicts with PR'
       + ' intent). For each such follow-up, file a Linear ticket before'
@@ -1660,24 +1745,37 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' into PR comments, stdout/stderr summaries, or merge receipts.'
     );
     lines.push(
-      '2. Proceed to rebase + merge when triage returns'
-      + ' `no-followups-needed`, or when triage returns `addressed` after'
-      + ' making light-to-medium code/config fixes. For light-to-medium'
-      + ' fixes, force-push the updated head, wait for the required checks'
-      + ' on that pushed head, then merge; do not request another review.'
-      + ' Exit `awaiting-rereview` only when the in-PR fix is a major'
-      + ' refactor whose review risk deserves another adversarial pass.'
-      + ' If the remaining refactor work belongs across modules or future'
-      + ' PRs, file the Linear tickets described above and proceed with this'
-      + ' merge instead of using `awaiting-rereview` or stopping the PR.'
-      + ' A non-empty `blockers_observed` result must hard-refuse the merge.'
+      '2. Default to MERGE. When triage returns `no-followups-needed`, or'
+      + ' returns `addressed` after you make the fixes, rebase, force-push the'
+      + ' updated head, wait only for real external CI on that pushed head,'
+      + ' then MERGE (`gh pr merge --squash --admin`). Do NOT wait on or treat'
+      + ' the adversarial-review gate status (`agent-os/adversarial-gate`) as a'
+      + ' blocking check — it only mirrors the review verdict you already have,'
+      + ' not external CI, and the admin merge lands past it. Do NOT request'
+      + ' another'
+      + ' review for light, medium, or even substantial-but-bounded fixes —'
+      + ' force-push and merge those directly. Set `reReview.requested = true`'
+      + ' (exit `awaiting-rereview`) only for major in-PR refactors whose'
+      + ' review risk genuinely demands a fresh adversarial pass. That is'
+      + ' rare. The following are NEVER major in-PR refactors and MUST merge without'
+      + ' re-review — a single- or few-file change; any test or test-fixture'
+      + ' edit; a config, doc, or comment tweak; applying reviewer'
+      + ' suggestions; renames; small bugfixes; or any change confined to the'
+      + ' area the review already covered. When you are weighing whether a'
+      + ' change is "major enough" to re-review, it probably is not — MERGE it. If'
+      + ' remaining refactor work belongs across modules or future PRs, file'
+      + ' the Linear tickets described above and MERGE this PR instead of'
+      + ' using `awaiting-rereview` or stopping the PR. A non-empty'
+      + ' `blockers_observed` result must hard-refuse the merge.'
     );
-    lines.push(
-      '3. Treat this dispatch the same way you would treat an'
-      + ' `operator-approved` dispatch for review/remediation state, EXCEPT'
-      + ' that the safety floor (no blocker-class merges) is stricter:'
-      + ' the operator did not personally vouch for this head.'
-    );
+    if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+      lines.push(
+        '3. Treat this dispatch the same way you would treat an'
+        + ' `operator-approved` dispatch for review/remediation state, EXCEPT'
+        + ' that the safety floor (no blocker-class merges) is stricter:'
+        + ' the operator did not personally vouch for this head.'
+      );
+    }
   }
   if (job.operatorNotes) {
     lines.push('- Operator notes from PR body:');
@@ -1752,8 +1850,11 @@ function pickMergeAgentDispatchDetail(job, {
       : { decision: 'dispatch', trigger: OPERATOR_APPROVED_LABEL };
   }
 
-  const latestFollowUpJobStatus = String(job?.latestFollowUpJobStatus ?? '').trim().toLowerCase();
-  if (latestFollowUpJobStatus === 'pending' || latestFollowUpJobStatus === 'in-progress') {
+  const latestFollowUpJobStatus = normalizeFollowUpJobStatus(job?.latestFollowUpJobStatus);
+  if (
+    latestFollowUpJobStatus === 'in-progress'
+    || latestFollowUpJobStatus === 'pending'
+  ) {
     return { decision: 'skip-remediation-active', trigger: null };
   }
 
@@ -3968,11 +4069,12 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
   const latestJob = findLatestFollowUpJobForPR(rootDir, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
+    revisionRef: candidate.headSha,
   });
   return {
     ...candidate,
     lastVerdict: extractReviewVerdict(latestJob?.reviewBody),
-    latestFollowUpJobStatus: latestJob?.status || null,
+    latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),
@@ -4018,6 +4120,7 @@ export {
   isMergeAgentDispatchActiveForHead,
   listMergeAgentLifecycleCleanups,
   listMergeAgentSkippedDispatches,
+  normalizeFollowUpJobStatus,
   normalizeReviewVerdict,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,

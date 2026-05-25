@@ -4,7 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
+import {
+  claimNextFollowUpJob,
+  createFollowUpJob,
+} from '../src/follow-up-jobs.mjs';
 import {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
@@ -337,12 +340,60 @@ test('pickMergeAgentDispatch skips closed or merged PRs', () => {
 });
 
 test('pickMergeAgentDispatch refuses dispatch while remediation is still active', () => {
+  // A pending follow-up job on a request-changes verdict is genuine active
+  // remediation — a worker will claim it and remediate. Block convergence.
   assert.equal(
-    pickMergeAgentDispatch(makeJob({ latestFollowUpJobStatus: 'pending' })),
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      latestFollowUpJobStatus: 'pending',
+      remediationCurrentRound: 0,
+      remediationMaxRounds: 3,
+    })),
+    'skip-remediation-active'
+  );
+  // An in-progress follow-up job may be a live remediation worker mid-force-
+  // push; block regardless of verdict to avoid racing it.
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({ latestFollowUpJobStatus: 'in_progress' })),
+    'skip-remediation-active'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Request changes',
+      latestFollowUpJobStatus: 'in_progress',
+    })),
     'skip-remediation-active'
   );
   assert.equal(
     pickMergeAgentDispatch(makeJob({ latestFollowUpJobStatus: 'in-progress' })),
+    'skip-remediation-active'
+  );
+});
+
+test('pickMergeAgentDispatch refuses dispatch while a clean-verdict follow-up job is still pending or in progress', () => {
+  // A pending clean-verdict follow-up job can represent an explicit
+  // retrigger-remediation operator override. With only `latestFollowUpJobStatus`
+  // on the merge candidate, merge-agent cannot prove the pending job is the
+  // auto-settled clean path, so `pending` remains a hard block.
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Comment only',
+      latestFollowUpJobStatus: 'pending',
+    })),
+    'skip-remediation-active'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Approved',
+      latestFollowUpJobStatus: 'pending',
+    })),
+    'skip-remediation-active'
+  );
+  assert.equal(
+    pickMergeAgentDispatch(makeJob({
+      lastVerdict: 'Comment only',
+      latestFollowUpJobStatus: 'in_progress',
+    })),
     'skip-remediation-active'
   );
 });
@@ -379,7 +430,7 @@ test('pickMergeAgentDispatch dispatches a clean comment-only verdict even with r
 test('pickMergeAgentDispatch surfaces active remediation before failed checks', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
-      latestFollowUpJobStatus: 'in-progress',
+      latestFollowUpJobStatus: 'in_progress',
       checksConclusion: 'FAILURE',
     })),
     'skip-remediation-active'
@@ -574,6 +625,95 @@ test('summarizeChecksConclusion distinguishes missing and empty status check rol
   assert.equal(summarizeChecksConclusion([]), 'SUCCESS');
 });
 
+test('summarizeChecksConclusion ignores the adversarial-review pipeline\'s own gate check', () => {
+  // Operator directive 2026-05-25: do not wait for adversarial-review's own
+  // convergence check, and never treat it as a hard CI gate. The merge-agent
+  // already has the verdict via job.lastVerdict; the gate-status is circular.
+
+  // A PR whose ONLY check is the adversarial gate (pending) → no external CI
+  // to wait on → SUCCESS (was PENDING before the fix → merge-agent stalled).
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'PENDING' },
+    ]),
+    'SUCCESS'
+  );
+
+  // The adversarial gate reporting FAILURE/ERROR (e.g. a Request-changes
+  // verdict) must NOT hard-fail the merge gate.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'FAILURE' },
+    ]),
+    'SUCCESS'
+  );
+
+  // Real external CI still gates: a failing build alongside the (ignored)
+  // adversarial gate yields FAILURE.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'FAILURE' },
+      { __typename: 'CheckRun', name: 'build', conclusion: 'FAILURE' },
+    ]),
+    'FAILURE'
+  );
+
+  // Real external CI pending alongside the (ignored) adversarial gate → PENDING.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'SUCCESS' },
+      { __typename: 'CheckRun', name: 'unit-tests', status: 'IN_PROGRESS' },
+    ]),
+    'PENDING'
+  );
+
+  // Real external CI succeeding alongside the (ignored) adversarial gate → SUCCESS.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'FAILURE' },
+      { __typename: 'CheckRun', name: 'unit-tests', conclusion: 'SUCCESS' },
+    ]),
+    'SUCCESS'
+  );
+
+  // Honor a custom gate context via ADV_GATE_STATUS_CONTEXT-resolved env.
+  assert.equal(
+    summarizeChecksConclusion(
+      [{ __typename: 'StatusContext', context: 'galileo/adversarial-gate', state: 'FAILURE' }],
+      { env: { ADV_GATE_STATUS_CONTEXT: 'galileo/adversarial-gate' } }
+    ),
+    'SUCCESS'
+  );
+
+  // A non-adversarial check named to merely contain "adversarial" elsewhere is
+  // still gated.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'CheckRun', name: 'my-adversarial-fuzzer', conclusion: 'FAILURE' },
+    ]),
+    'FAILURE'
+  );
+
+  // Prefix matches are also real external CI unless they are the exact
+  // configured status-context alias.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'CheckRun', name: 'agent-os/adversarial-fuzzer', conclusion: 'FAILURE' },
+    ]),
+    'FAILURE'
+  );
+
+  // The self-gate exclusion is intentionally limited to StatusContext items.
+  // A CheckRun reusing the same string must still gate until the publisher
+  // contract changes deliberately.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'FAILURE' },
+    ]),
+    'FAILURE'
+  );
+});
+
 test('operator-approved does NOT bypass closed/merged PRs', () => {
   assert.equal(
     pickMergeAgentDispatch(makeJob({
@@ -653,7 +793,7 @@ test('operator-approved bypasses active in-flight remediation', () => {
       lastVerdict: 'Request changes',
       labels: [{ name: 'operator-approved' }],
       operatorApproval: makeOperatorApproval(),
-      latestFollowUpJobStatus: 'in-progress',
+      latestFollowUpJobStatus: 'in_progress',
     })),
     'dispatch'
   );
@@ -737,7 +877,7 @@ test('merge-agent-requested still respects hard stops and active remediation', (
       labels: [{ name: 'merge-agent-requested' }],
       mergeAgentRequest: makeMergeAgentRequest(),
       mergeable: 'CONFLICTING',
-      latestFollowUpJobStatus: 'in-progress',
+      latestFollowUpJobStatus: 'in_progress',
     })),
     'skip-remediation-active'
   );
@@ -892,6 +1032,7 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
     prNumber: 401,
     reviewerModel: 'codex',
     linearTicketId: null,
+    revisionRef: 'abc123',
     reviewBody: '## Summary\nx\n## Verdict\n\nComment only',
     reviewPostedAt: '2026-05-02T10:00:00.000Z',
     critical: false,
@@ -930,9 +1071,107 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.operatorApproval.codeScopedAt, '2026-05-02T10:04:00.000Z');
 });
 
+test('buildMergeAgentDispatchJob normalizes real claimed follow-up job status', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'abc123',
+    reviewBody: '## Summary\nx\n## Verdict\n\nRequest changes',
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+  claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-05-02T10:01:00.000Z',
+    launcherPid: 4242,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'abc123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.latestFollowUpJobStatus, 'in-progress');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'skip-remediation-active');
+});
+
+test('buildMergeAgentDispatchJob ignores stale active remediation on an older head', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'new-head',
+    reviewBody: '## Summary\nx\n## Verdict\n\nComment only',
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+  claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-05-02T10:01:00.000Z',
+    launcherPid: 4242,
+    returnStopped: true,
+  });
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'old-head',
+    reviewBody: '## Summary\nx\n## Verdict\n\nRequest changes',
+    reviewPostedAt: '2026-05-02T10:05:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'new-head',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.lastVerdict, 'Comment only');
+  assert.equal(dispatchJob.latestFollowUpJobStatus, 'stopped');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+});
+
 test('pickMergeAgentDispatch can dispatch zero-check PRs from an explicit empty rollup', () => {
   const dispatchJob = makeJob({
     checksConclusion: summarizeChecksConclusion([]),
+  });
+
+  assert.equal(dispatchJob.checksConclusion, 'SUCCESS');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+});
+
+test('pickMergeAgentDispatch can dispatch when the rollup contains only the adversarial gate status', () => {
+  const dispatchJob = makeJob({
+    checksConclusion: summarizeChecksConclusion([
+      { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'PENDING' },
+    ]),
   });
 
   assert.equal(dispatchJob.checksConclusion, 'SUCCESS');
@@ -2603,11 +2842,29 @@ test('prepareOriginalWorkerForMergeAgent converts thrown worker-run lookups into
   assert.match(logs[0].detail, /native sqlite panic/);
 });
 
-test('buildMergeAgentPrompt omits trigger header when no trigger is passed', () => {
+test('buildMergeAgentPrompt emits the converge-and-merge contract (merge-by-default, major-refactor-only re-review) when no trigger is passed', () => {
   const prompt = buildMergeAgentPrompt(makeJob());
+  // No final-pass framing on the clean-verdict path...
   assert.ok(!prompt.includes('Dispatch trigger:'));
   assert.ok(!prompt.includes('final-pass-on-budget-exhausted'));
   assert.ok(!prompt.includes('## Mode: final-pass-on-budget-exhausted'));
+  // ...but it MUST carry the converge-and-merge contract so the worker does
+  // not default to requesting another review (the PR #898 regression).
+  assert.ok(prompt.includes('## Mode: converge-and-merge'));
+  assert.ok(prompt.includes('Default action: MERGE'));
+  assert.ok(prompt.includes('When in doubt, MERGE'));
+  assert.ok(prompt.includes('comment_only_followups.py'));
+  assert.ok(prompt.includes('including non-blocking and suggested-fix'));
+  assert.ok(prompt.includes('only for major in-PR refactors'));
+  assert.ok(prompt.includes('NEVER major in-PR refactors and MUST merge without'));
+  assert.ok(prompt.includes('any test or test-fixture'));
+  assert.ok(prompt.includes('is "major enough" to re-review, it probably is not'));
+  assert.ok(prompt.includes('file the Linear tickets described above and MERGE this PR'));
+  // Don't wait on / gate the merge on the adversarial-review's own check.
+  assert.ok(prompt.includes('wait only for real external CI'));
+  assert.ok(prompt.includes('agent-os/adversarial-gate'));
+  // The clean-verdict path never carries the final-pass-only step 3 framing.
+  assert.ok(!prompt.includes('the operator did not personally vouch for this head'));
 });
 
 test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trigger is final-pass-on-budget-exhausted', () => {
@@ -2621,13 +2878,19 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('Apply every actionable in-scope finding inline'));
   assert.ok(prompt.includes('suggestions_unable_to_apply'));
   assert.ok(prompt.includes('blockers_observed'));
-  assert.ok(prompt.includes('light-to-medium code/config fixes'));
-  assert.ok(prompt.includes('wait for the required checks'));
-  assert.ok(prompt.includes('then merge; do not request another review'));
-  assert.ok(prompt.includes('Exit `awaiting-rereview` only when the in-PR fix is a major'));
+  assert.ok(prompt.includes('Default action: MERGE'));
+  assert.ok(prompt.includes('Default to MERGE'));
+  assert.ok(prompt.includes('wait only for real external CI'));
+  assert.ok(prompt.includes('agent-os/adversarial-gate'));
+  assert.ok(prompt.includes('Do NOT request another'
+    + ' review for light, medium, or even substantial-but-bounded fixes'));
+  assert.ok(prompt.includes('only for major in-PR refactors'));
+  assert.ok(prompt.includes('NEVER major in-PR refactors and MUST merge without'));
+  assert.ok(prompt.includes('is "major enough" to re-review, it probably is not'));
+  assert.ok(!prompt.includes('only when the in-PR fix is a major'));
   assert.ok(prompt.includes('file a Linear ticket before'));
   assert.ok(prompt.includes('do not leave the work only as prose in a PR comment'));
-  assert.ok(prompt.includes('file the Linear tickets described above and proceed with this'));
+  assert.ok(prompt.includes('file the Linear tickets described above and MERGE this PR'));
   assert.ok(prompt.includes('refusal receipt/log summary must include'));
   assert.ok(prompt.includes('only the blocker count plus normalized blocker kinds'));
   assert.ok(prompt.includes('workspace-local'));
@@ -2640,15 +2903,22 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(!prompt.includes('`suggestions_unable_to_apply` result must also exit `awaiting-rereview`'));
   assert.ok(!prompt.includes('the next review pass can evaluate the punt'));
   assert.ok(!prompt.includes('operator handoff instead of requesting a same-head rereview'));
+  // The stricter-safety-floor framing (step 3) is final-pass-only.
+  assert.ok(prompt.includes('the operator did not personally vouch for this head'));
+  // Final pass uses its own mode heading, not the clean-verdict one.
+  assert.ok(!prompt.includes('## Mode: converge-and-merge'));
 });
 
-test('buildMergeAgentPrompt records non-final-pass triggers without injecting the final-pass contract block', () => {
+test('buildMergeAgentPrompt records non-final-pass triggers without injecting either convergence contract block', () => {
   // operator-approved / merge-agent-requested triggers are surfaced for
-  // audit but must not get the budget-exhausted triage contract.
+  // audit but must not get the triage/merge contract — they are operator-
+  // driven and keep their own label-scoped semantics.
   const prompt = buildMergeAgentPrompt(makeJob(), { trigger: 'operator-approved' });
   assert.ok(prompt.includes('Dispatch trigger: operator-approved'));
   assert.ok(!prompt.includes('## Mode: final-pass-on-budget-exhausted'));
+  assert.ok(!prompt.includes('## Mode: converge-and-merge'));
   assert.ok(!prompt.includes('comment_only_followups.py'));
+  assert.ok(!prompt.includes('Default action: MERGE'));
 });
 
 test('dispatchMergeAgentForPR honors MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES from the per-call env', async () => {

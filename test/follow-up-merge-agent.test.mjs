@@ -695,6 +695,16 @@ test('summarizeChecksConclusion ignores the adversarial-review pipeline\'s own g
     ]),
     'FAILURE'
   );
+
+  // The self-gate exclusion is intentionally limited to StatusContext items.
+  // A CheckRun reusing the same string must still gate until the publisher
+  // contract changes deliberately.
+  assert.equal(
+    summarizeChecksConclusion([
+      { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'FAILURE' },
+    ]),
+    'FAILURE'
+  );
 });
 
 test('operator-approved does NOT bypass closed/merged PRs', () => {
@@ -1056,6 +1066,17 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
 test('pickMergeAgentDispatch can dispatch zero-check PRs from an explicit empty rollup', () => {
   const dispatchJob = makeJob({
     checksConclusion: summarizeChecksConclusion([]),
+  });
+
+  assert.equal(dispatchJob.checksConclusion, 'SUCCESS');
+  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+});
+
+test('pickMergeAgentDispatch can dispatch when the rollup contains only the adversarial gate status', () => {
+  const dispatchJob = makeJob({
+    checksConclusion: summarizeChecksConclusion([
+      { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'PENDING' },
+    ]),
   });
 
   assert.equal(dispatchJob.checksConclusion, 'SUCCESS');

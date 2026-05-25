@@ -69,6 +69,7 @@ import {
   clearMergeAgentLifecycleCleanup,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
+  isMergeAgentDispatchActiveForHead,
   listMergeAgentDispatches,
   listMergeAgentLifecycleCleanups,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
@@ -2511,6 +2512,62 @@ async function recoverFastMergeVetoes(octokit, { logger = console } = {}) {
   }
 }
 
+async function getStalePostedReviewAutoRereviewSuppression({
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  subjectRef,
+  currentRevisionRef,
+  currentHeadSha,
+  labelNames = [],
+  operatorSurface = null,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  logger = console,
+  isMergeAgentDispatchActiveForHeadImpl = isMergeAgentDispatchActiveForHead,
+} = {}) {
+  const normalizedLabelNames = new Set(
+    (Array.isArray(labelNames) ? labelNames : [])
+      .map((label) => String(label || '').trim())
+      .filter(Boolean)
+  );
+  const controlSubjectRef = subjectRef || {
+    domainId: 'code-pr',
+    subjectExternalId: `${repoPath}#${prNumber}`,
+    revisionRef: currentRevisionRef || currentHeadSha || null,
+  };
+  const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || currentHeadSha || null;
+
+  if (normalizedLabelNames.has(MERGE_AGENT_REQUESTED_LABEL) && operatorSurface) {
+    const mergeAgentRequest = await operatorSurface.observeMergeAgentOverride(
+      controlSubjectRef,
+      revisionRef,
+    );
+    if (mergeAgentRequest?.applied) {
+      return {
+        suppressed: true,
+        reason: 'scoped-current-head-merge-agent-requested',
+      };
+    }
+  }
+
+  if (normalizedLabelNames.has(MERGE_AGENT_DISPATCHED_LABEL)) {
+    const dispatch = await isMergeAgentDispatchActiveForHeadImpl(
+      rootDir,
+      { repo: repoPath, prNumber, headSha: currentHeadSha },
+      { execFileImpl, env, logger },
+    );
+    if (dispatch?.active) {
+      return {
+        suppressed: true,
+        reason: dispatch.reason || 'active-current-head-merge-agent-dispatch',
+      };
+    }
+  }
+
+  return { suppressed: false, reason: null };
+}
+
 /**
  * Poll for reviewable subjects once.
  *
@@ -2812,13 +2869,36 @@ async function pollOnce(
       // spawn. The retrigger only fires when `reviewer_head_sha` is
       // strictly different from the current `subject.headSha` and the
       // PR is non-terminal, so we don't thrash a PR whose head matches.
-      if (
+      // ...UNLESS the merge-agent is provably still converging for THIS head.
+      // That suppression is state-aware rather than raw-label-based so stale
+      // labels and `awaiting-rereview` handoffs still re-arm review.
+      const postedReviewHeadMoved =
         existing?.review_status === 'posted' &&
         existing.reviewer_head_sha &&
         subject.headSha &&
         existing.reviewer_head_sha !== subject.headSha &&
-        !subject.terminal
-      ) {
+        !subject.terminal;
+      const stalePostedReviewSuppression = postedReviewHeadMoved
+        ? await getStalePostedReviewAutoRereviewSuppression({
+          rootDir: ROOT,
+          repoPath,
+          prNumber,
+          subjectRef: subject.ref,
+          currentRevisionRef: subject.ref.revisionRef,
+          currentHeadSha: subject.headSha,
+          labelNames: prLabelNames,
+          operatorSurface,
+          execFileImpl: execFileAsync,
+          logger: console,
+        })
+        : { suppressed: false, reason: null };
+      if (postedReviewHeadMoved && stalePostedReviewSuppression.suppressed) {
+        console.log(
+          `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
+            `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
+            `because ${stalePostedReviewSuppression.reason}; leaving posted review to the merge-agent`
+        );
+      } else if (postedReviewHeadMoved) {
         try {
           const refreshResult = requestReviewRereview({
             rootDir: ROOT,
@@ -3485,6 +3565,7 @@ export {
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,
   fetchLivePRLabels,
+  getStalePostedReviewAutoRereviewSuppression,
   handlePostedReviewRow,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,

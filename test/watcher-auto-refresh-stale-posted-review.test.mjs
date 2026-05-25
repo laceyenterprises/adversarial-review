@@ -34,6 +34,13 @@ import {
   openReviewStateDb,
   requestReviewRereview,
 } from '../src/review-state.mjs';
+import {
+  MERGE_AGENT_DISPATCHED_LABEL,
+  MERGE_AGENT_REQUESTED_LABEL,
+  MERGE_AGENT_STUCK_LABEL,
+  NO_MERGE_HOLD_LABEL,
+} from '../src/adapters/operator/github-pr-label-controls/index.mjs';
+import { getStalePostedReviewAutoRereviewSuppression } from '../src/watcher.mjs';
 
 
 function makeTempRoot() {
@@ -263,5 +270,105 @@ test('idempotent: second invocation against same head is a no-op (status already
     assert.match(row.rereview_reason, /first call/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+// --- Merge-agent convergence suppresses stale-head auto-refresh only when the
+// watcher can prove it is still current-head state. ---
+//
+// Regression for the 2026-05-25 infinite review<->remediation loop: the
+// watcher's auto-refresh re-armed a fresh reviewer on every head move,
+// including the merge-agent's own convergence force-pushes, so PRs under a
+// merge-agent never merged. The watcher now suppresses only when the
+// merge-agent request/dispatch is still current-head and live.
+
+test('watcher suppresses stale-review auto-refresh for a scoped current-head merge-agent request', async () => {
+  const suppression = await getStalePostedReviewAutoRereviewSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 877,
+    currentHeadSha: 'head-new',
+    currentRevisionRef: 'head-new',
+    labelNames: [MERGE_AGENT_REQUESTED_LABEL],
+    operatorSurface: {
+      observeMergeAgentOverride: async () => ({ applied: true }),
+    },
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'scoped-current-head-merge-agent-requested',
+  });
+});
+
+test('watcher re-arms review after awaiting-rereview handoff when merge-agent-requested is stale', async () => {
+  const suppression = await getStalePostedReviewAutoRereviewSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 877,
+    currentHeadSha: 'head-new',
+    currentRevisionRef: 'head-new',
+    labelNames: [MERGE_AGENT_REQUESTED_LABEL],
+    operatorSurface: {
+      observeMergeAgentOverride: async () => ({ applied: false, reason: 'stale' }),
+    },
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+  });
+});
+
+test('watcher suppresses stale-review auto-refresh only for an active current-head merge-agent dispatch', async () => {
+  const suppression = await getStalePostedReviewAutoRereviewSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 877,
+    currentHeadSha: 'head-new',
+    labelNames: [MERGE_AGENT_DISPATCHED_LABEL],
+    isMergeAgentDispatchActiveForHeadImpl: async () => ({
+      active: true,
+      reason: 'dispatch-running',
+    }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'dispatch-running',
+  });
+});
+
+test('watcher ignores stranded merge-agent-dispatched labels once current-head dispatch state is gone', async () => {
+  const suppression = await getStalePostedReviewAutoRereviewSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 877,
+    currentHeadSha: 'head-new',
+    labelNames: [MERGE_AGENT_DISPATCHED_LABEL],
+    isMergeAgentDispatchActiveForHeadImpl: async () => ({
+      active: false,
+      reason: 'dispatch-failed',
+    }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+  });
+});
+
+test('watcher does not suppress rereview for raw hold/stuck labels without current-head merge-agent state', async () => {
+  for (const labels of [
+    [MERGE_AGENT_STUCK_LABEL],
+    [NO_MERGE_HOLD_LABEL],
+    [MERGE_AGENT_STUCK_LABEL, NO_MERGE_HOLD_LABEL],
+  ]) {
+    const suppression = await getStalePostedReviewAutoRereviewSuppression({
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 877,
+      currentHeadSha: 'head-new',
+      labelNames: labels,
+    });
+    assert.deepEqual(suppression, {
+      suppressed: false,
+      reason: null,
+    });
   }
 });

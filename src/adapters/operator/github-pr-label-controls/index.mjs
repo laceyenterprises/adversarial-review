@@ -26,6 +26,13 @@ const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
 //      labeled PR, the watcher cancels the in-flight pool worker so
 //      it doesn\'t waste budget remediating a now-closed PR.
 const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched';
+// Applied by the merge-agent backend when it gives up and escalates a PR to
+// the operator (max rounds reached with an unresolved blocker, or a merge it
+// could not complete). Re-reviewing a stuck PR only churns it further.
+const MERGE_AGENT_STUCK_LABEL = 'merge-agent-stuck';
+// Operator/maintainer hold: the PR must not be merged or otherwise advanced
+// by the autonomous pipeline until the label is cleared.
+const NO_MERGE_HOLD_LABEL = 'no-merge-hold';
 
 function isoNow() {
   return new Date().toISOString();
@@ -251,6 +258,8 @@ export {
   HALTED_LOOP_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
+  MERGE_AGENT_STUCK_LABEL,
+  NO_MERGE_HOLD_LABEL,
   OPERATOR_APPROVED_LABEL,
   RAISED_ROUND_CAP_LABEL,
   applyRevisionScopedLabelEvent,

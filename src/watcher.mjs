@@ -1569,6 +1569,8 @@ async function spawnReviewer({
   reviewerSessionUuid,
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
   workspacePath = null,
+  crossModelReviewWaived = false,
+  crossModelReviewWaiverReason = null,
   onReviewerPgid = () => {},
 }) {
   const finalRound = (
@@ -1622,6 +1624,8 @@ async function spawnReviewer({
         reviewAttemptNumber,
         maxRemediationRounds,
         reviewerSessionUuid,
+        crossModelReviewWaived,
+        crossModelReviewWaiverReason,
       },
       timeoutMs: reviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,

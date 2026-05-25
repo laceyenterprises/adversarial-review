@@ -141,6 +141,8 @@ export interface SubjectContext {
   reviewerSessionUuid?: string;
   labels?: readonly (string | { name?: string | null })[];
   ticketPipelinePaused?: boolean;
+  crossModelReviewWaived?: boolean;
+  crossModelReviewWaiverReason?: string | null;
 }
 
 export interface RemediationWorkspace {

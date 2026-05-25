@@ -35,13 +35,12 @@ import {
   requestReviewRereview,
 } from '../src/review-state.mjs';
 import {
-  AUTO_REREVIEW_SUPPRESSING_LABELS,
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   MERGE_AGENT_STUCK_LABEL,
   NO_MERGE_HOLD_LABEL,
-  autoRereviewSuppressedByLabel,
 } from '../src/adapters/operator/github-pr-label-controls/index.mjs';
+import { getStalePostedReviewAutoRereviewSuppression } from '../src/watcher.mjs';
 
 
 function makeTempRoot() {
@@ -274,65 +273,102 @@ test('idempotent: second invocation against same head is a no-op (status already
   }
 });
 
-// --- Merge-agent-owned PRs are exempt from stale-head auto-refresh ---
+// --- Merge-agent convergence suppresses stale-head auto-refresh only when the
+// watcher can prove it is still current-head state. ---
 //
 // Regression for the 2026-05-25 infinite review<->remediation loop: the
 // watcher's auto-refresh re-armed a fresh reviewer on every head move,
 // including the merge-agent's own convergence force-pushes, so PRs under a
-// merge-agent (or held) never merged (#877 hit review_attempts=4 +
-// merge-agent-stuck). The watcher now skips auto-refresh when
-// autoRereviewSuppressedByLabel() is true.
+// merge-agent never merged. The watcher now suppresses only when the
+// merge-agent request/dispatch is still current-head and live.
 
-test('autoRereviewSuppressedByLabel suppresses for each merge-agent / hold label', () => {
-  for (const label of [
-    MERGE_AGENT_DISPATCHED_LABEL,
-    MERGE_AGENT_REQUESTED_LABEL,
-    MERGE_AGENT_STUCK_LABEL,
-    NO_MERGE_HOLD_LABEL,
+test('watcher suppresses stale-review auto-refresh for a scoped current-head merge-agent request', async () => {
+  const suppression = await getStalePostedReviewAutoRereviewSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 877,
+    currentHeadSha: 'head-new',
+    currentRevisionRef: 'head-new',
+    labelNames: [MERGE_AGENT_REQUESTED_LABEL],
+    operatorSurface: {
+      observeMergeAgentOverride: async () => ({ applied: true }),
+    },
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'scoped-current-head-merge-agent-requested',
+  });
+});
+
+test('watcher re-arms review after awaiting-rereview handoff when merge-agent-requested is stale', async () => {
+  const suppression = await getStalePostedReviewAutoRereviewSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 877,
+    currentHeadSha: 'head-new',
+    currentRevisionRef: 'head-new',
+    labelNames: [MERGE_AGENT_REQUESTED_LABEL],
+    operatorSurface: {
+      observeMergeAgentOverride: async () => ({ applied: false, reason: 'stale' }),
+    },
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+  });
+});
+
+test('watcher suppresses stale-review auto-refresh only for an active current-head merge-agent dispatch', async () => {
+  const suppression = await getStalePostedReviewAutoRereviewSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 877,
+    currentHeadSha: 'head-new',
+    labelNames: [MERGE_AGENT_DISPATCHED_LABEL],
+    isMergeAgentDispatchActiveForHeadImpl: async () => ({
+      active: true,
+      reason: 'dispatch-running',
+    }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'dispatch-running',
+  });
+});
+
+test('watcher ignores stranded merge-agent-dispatched labels once current-head dispatch state is gone', async () => {
+  const suppression = await getStalePostedReviewAutoRereviewSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 877,
+    currentHeadSha: 'head-new',
+    labelNames: [MERGE_AGENT_DISPATCHED_LABEL],
+    isMergeAgentDispatchActiveForHeadImpl: async () => ({
+      active: false,
+      reason: 'dispatch-failed',
+    }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+  });
+});
+
+test('watcher does not suppress rereview for raw hold/stuck labels without current-head merge-agent state', async () => {
+  for (const labels of [
+    [MERGE_AGENT_STUCK_LABEL],
+    [NO_MERGE_HOLD_LABEL],
+    [MERGE_AGENT_STUCK_LABEL, NO_MERGE_HOLD_LABEL],
   ]) {
-    assert.equal(
-      autoRereviewSuppressedByLabel([label]),
-      true,
-      `expected ${label} to suppress auto-refresh`
-    );
-    // Still suppresses when mixed with unrelated labels.
-    assert.equal(autoRereviewSuppressedByLabel(['some-other', label, 'area/x']), true);
+    const suppression = await getStalePostedReviewAutoRereviewSuppression({
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 877,
+      currentHeadSha: 'head-new',
+      labelNames: labels,
+    });
+    assert.deepEqual(suppression, {
+      suppressed: false,
+      reason: null,
+    });
   }
-  // The exported set is the single source of truth for the predicate.
-  assert.deepEqual(
-    [...AUTO_REREVIEW_SUPPRESSING_LABELS].sort(),
-    [
-      MERGE_AGENT_DISPATCHED_LABEL,
-      MERGE_AGENT_REQUESTED_LABEL,
-      MERGE_AGENT_STUCK_LABEL,
-      NO_MERGE_HOLD_LABEL,
-    ].sort()
-  );
-});
-
-test('autoRereviewSuppressedByLabel does NOT suppress for unrelated / empty / malformed inputs', () => {
-  assert.equal(autoRereviewSuppressedByLabel([]), false);
-  assert.equal(autoRereviewSuppressedByLabel(['retrigger-review', 'area/worker-pool']), false);
-  // A non-array (defensive): must not throw and must not suppress.
-  assert.equal(autoRereviewSuppressedByLabel(null), false);
-  assert.equal(autoRereviewSuppressedByLabel(undefined), false);
-  assert.equal(autoRereviewSuppressedByLabel('merge-agent-stuck'), false);
-  // Mixed types in the array are filtered, not crashed on.
-  assert.equal(autoRereviewSuppressedByLabel([{ name: MERGE_AGENT_STUCK_LABEL }, 42]), false);
-});
-
-test('watcher auto-refresh decision: head-moved AND suppressed → no rereview', () => {
-  // Mirrors the exact boolean the watcher evaluates at the auto-refresh site:
-  //   postedReviewHeadMoved && !autoRereviewSuppressedByLabel(prLabelNames)
-  const postedReviewHeadMoved = true; // posted row, head SHA differs, non-terminal
-  const wouldRereview = (labels) =>
-    postedReviewHeadMoved && !autoRereviewSuppressedByLabel(labels);
-
-  assert.equal(wouldRereview([MERGE_AGENT_DISPATCHED_LABEL]), false);
-  assert.equal(wouldRereview([MERGE_AGENT_STUCK_LABEL]), false);
-  assert.equal(wouldRereview([NO_MERGE_HOLD_LABEL]), false);
-  // No ownership/hold label → auto-refresh still fires (preserves the original
-  // stale-review recovery behavior).
-  assert.equal(wouldRereview(['area/x']), true);
-  assert.equal(wouldRereview([]), true);
 });

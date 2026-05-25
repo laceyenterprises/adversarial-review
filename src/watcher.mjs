@@ -24,7 +24,6 @@ import {
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_APPROVED_LABEL,
-  autoRereviewSuppressedByLabel,
   legacyLabelEventFromControlResult,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import {
@@ -70,6 +69,7 @@ import {
   clearMergeAgentLifecycleCleanup,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
+  isMergeAgentDispatchActiveForHead,
   listMergeAgentDispatches,
   listMergeAgentLifecycleCleanups,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
@@ -2512,6 +2512,62 @@ async function recoverFastMergeVetoes(octokit, { logger = console } = {}) {
   }
 }
 
+async function getStalePostedReviewAutoRereviewSuppression({
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  subjectRef,
+  currentRevisionRef,
+  currentHeadSha,
+  labelNames = [],
+  operatorSurface = null,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  logger = console,
+  isMergeAgentDispatchActiveForHeadImpl = isMergeAgentDispatchActiveForHead,
+} = {}) {
+  const normalizedLabelNames = new Set(
+    (Array.isArray(labelNames) ? labelNames : [])
+      .map((label) => String(label || '').trim())
+      .filter(Boolean)
+  );
+  const controlSubjectRef = subjectRef || {
+    domainId: 'code-pr',
+    subjectExternalId: `${repoPath}#${prNumber}`,
+    revisionRef: currentRevisionRef || currentHeadSha || null,
+  };
+  const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || currentHeadSha || null;
+
+  if (normalizedLabelNames.has(MERGE_AGENT_REQUESTED_LABEL) && operatorSurface) {
+    const mergeAgentRequest = await operatorSurface.observeMergeAgentOverride(
+      controlSubjectRef,
+      revisionRef,
+    );
+    if (mergeAgentRequest?.applied) {
+      return {
+        suppressed: true,
+        reason: 'scoped-current-head-merge-agent-requested',
+      };
+    }
+  }
+
+  if (normalizedLabelNames.has(MERGE_AGENT_DISPATCHED_LABEL)) {
+    const dispatch = await isMergeAgentDispatchActiveForHeadImpl(
+      rootDir,
+      { repo: repoPath, prNumber, headSha: currentHeadSha },
+      { execFileImpl, env, logger },
+    );
+    if (dispatch?.active) {
+      return {
+        suppressed: true,
+        reason: dispatch.reason || 'active-current-head-merge-agent-dispatch',
+      };
+    }
+  }
+
+  return { suppressed: false, reason: null };
+}
+
 /**
  * Poll for reviewable subjects once.
  *
@@ -2813,27 +2869,34 @@ async function pollOnce(
       // spawn. The retrigger only fires when `reviewer_head_sha` is
       // strictly different from the current `subject.headSha` and the
       // PR is non-terminal, so we don't thrash a PR whose head matches.
-      // ...UNLESS the PR is under merge-agent control or an explicit hold.
-      // A merge-agent worker force-pushes light/medium fixes as it converges
-      // the branch (see follow-up-merge-agent dispatch prompt); auto-refreshing
-      // on those expected head moves re-arms a brand-new reviewer in a separate
-      // process, defeats the remediation round budget, and traps the PR in an
-      // infinite review<->remediation loop. The merge-agent admin-merges on its
-      // own (`gh pr merge --squash --admin`), so it does not need a head-current
-      // posted review to land. Suppress the auto-refresh for those PRs and let
-      // the merge-agent own convergence. (Root-caused 2026-05-25 on #877/#880/
-      // #884.)
+      // ...UNLESS the merge-agent is provably still converging for THIS head.
+      // That suppression is state-aware rather than raw-label-based so stale
+      // labels and `awaiting-rereview` handoffs still re-arm review.
       const postedReviewHeadMoved =
         existing?.review_status === 'posted' &&
         existing.reviewer_head_sha &&
         subject.headSha &&
         existing.reviewer_head_sha !== subject.headSha &&
         !subject.terminal;
-      if (postedReviewHeadMoved && autoRereviewSuppressedByLabel(prLabelNames)) {
+      const stalePostedReviewSuppression = postedReviewHeadMoved
+        ? await getStalePostedReviewAutoRereviewSuppression({
+          rootDir: ROOT,
+          repoPath,
+          prNumber,
+          subjectRef: subject.ref,
+          currentRevisionRef: subject.ref.revisionRef,
+          currentHeadSha: subject.headSha,
+          labelNames: prLabelNames,
+          operatorSurface,
+          execFileImpl: execFileAsync,
+          logger: console,
+        })
+        : { suppressed: false, reason: null };
+      if (postedReviewHeadMoved && stalePostedReviewSuppression.suppressed) {
         console.log(
           `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
             `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
-            'but PR is merge-agent-owned/held; leaving posted review to the merge-agent'
+            `because ${stalePostedReviewSuppression.reason}; leaving posted review to the merge-agent`
         );
       } else if (postedReviewHeadMoved) {
         try {
@@ -3502,6 +3565,7 @@ export {
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,
   fetchLivePRLabels,
+  getStalePostedReviewAutoRereviewSuppression,
   handlePostedReviewRow,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,

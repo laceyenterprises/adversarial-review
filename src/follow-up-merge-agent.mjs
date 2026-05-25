@@ -1044,6 +1044,72 @@ function getRecordedMergeAgentDispatchForHead(rootDir, {
   return getRecordedMergeAgentDispatch(rootDir, { repo, prNumber, headSha });
 }
 
+async function isMergeAgentDispatchActiveForHead(rootDir, {
+  repo,
+  prNumber,
+  headSha,
+} = {}, {
+  execFileImpl = execFileAsync,
+  env = process.env,
+  logger = console,
+  detectAgentOsPresenceImpl = detectAgentOsPresence,
+  getRecordedMergeAgentDispatchForHeadImpl = getRecordedMergeAgentDispatchForHead,
+  hasPendingDispatchedLabelAddCleanupImpl = hasPendingDispatchedLabelAddCleanup,
+  probeDispatchStatusViaHqImpl = probeDispatchStatusViaHq,
+} = {}) {
+  if (!repo || prNumber == null || !headSha) {
+    return { active: false, reason: 'missing-head-context' };
+  }
+
+  const recordedDispatch = getRecordedMergeAgentDispatchForHeadImpl(rootDir, {
+    repo,
+    prNumber,
+    headSha,
+  });
+  const hasPendingLabelAddCleanup = hasPendingDispatchedLabelAddCleanupImpl(
+    rootDir,
+    { repo, prNumber, headSha },
+    { logger }
+  );
+  if (!recordedDispatch?.launchRequestId && !hasPendingLabelAddCleanup) {
+    return { active: false, reason: 'no-current-head-dispatch' };
+  }
+
+  const agentOsState = detectAgentOsPresenceImpl({
+    env,
+    hqPath: env.HQ_BIN || DEFAULT_HQ_PATH,
+  });
+  const hqPath = agentOsState.present ? (agentOsState.path || env.HQ_BIN || DEFAULT_HQ_PATH) : null;
+  if (!hqPath || !recordedDispatch?.launchRequestId) {
+    return { active: false, reason: 'dispatch-status-unavailable' };
+  }
+
+  const ownerResolution = resolveHqOwner(resolveHqRoot(env));
+  const dispatchStatus = await probeDispatchStatusViaHqImpl({
+    hqPath,
+    lrq: recordedDispatch.launchRequestId,
+    asOwner: ownerResolution?.ownerUser || null,
+    execFileImpl,
+    env,
+    logger,
+  });
+  const status = typeof dispatchStatus?.status === 'string'
+    ? dispatchStatus.status.trim().toLowerCase()
+    : null;
+  const active = status === 'running'
+    || status === 'starting'
+    || status === 'blocked'
+    || status === 'stalled';
+
+  return {
+    active,
+    reason: active ? `dispatch-${status}` : (status ? `dispatch-${status}` : 'dispatch-status-unavailable'),
+    launchRequestId: recordedDispatch.launchRequestId,
+    status,
+    hasPendingLabelAddCleanup,
+  };
+}
+
 // LRQ identifiers come from the agent-os dispatch daemon and have the
 // shape `lrq_<8>-<4>-<4>-<4>-<12>` (UUID after the prefix). The watcher
 // runs as a long-lived operator daemon with broad fs access, so we
@@ -3949,6 +4015,7 @@ export {
   isScopedOperatorApproval,
   isScopedMergeAgentRequest,
   listMergeAgentDispatches,
+  isMergeAgentDispatchActiveForHead,
   listMergeAgentLifecycleCleanups,
   listMergeAgentSkippedDispatches,
   normalizeReviewVerdict,

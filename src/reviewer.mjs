@@ -742,6 +742,7 @@ function buildClaudeReviewArgs(prompt) {
 function buildCodexReviewArgs({ outputPath, prompt }) {
   return [
     'exec',
+    '--ignore-user-config',
     '--dangerously-bypass-approvals-and-sandbox',
     '--ephemeral',
     '--json',

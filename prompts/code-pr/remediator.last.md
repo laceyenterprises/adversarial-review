@@ -129,6 +129,12 @@ review you read above, add exactly one entry to one of these three
 lists in the reply JSON — they are not redundant, they encode
 **different decisions**:
 
+If you also fix non-blocking issues, you may include those fixes in
+`addressed[]` too, but only when you copy the non-blocking review
+finding title exactly from the `## Non-blocking issues` section. These
+extra entries do not count toward the one-entry-per-blocking-finding
+contract.
+
 - `addressed[]` → you fixed it. One entry per finding, with:
   - `title`: copy the review finding's title exactly. In current reviews,
     the title is the top-level bold bullet label

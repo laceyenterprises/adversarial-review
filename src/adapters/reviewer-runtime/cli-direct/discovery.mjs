@@ -139,6 +139,7 @@ async function probeCodexCli({
   cwd = process.cwd(),
   timeout = 30_000,
   execFileImpl = execFileAsync,
+  requireMcpOAuth = false,
 } = {}) {
   const codexCli = await resolveCliBinary({ binaryName: 'codex', envVar: 'CODEX_CLI', env });
   await runProbe(codexCli, ['--version'], {
@@ -171,15 +172,17 @@ async function probeCodexCli({
     });
   }
 
-  const mcpList = await runProbe(codexCli, ['mcp', 'list'], {
-    env,
-    cwd,
-    timeout,
-    execFileImpl,
-    layer: 'codex-mcp-oauth',
-    label: 'Codex MCP-server OAuth probe',
-  });
-  validateCodexMcpListOutput(mcpList?.stdout || '', mcpList?.stderr || '');
+  if (requireMcpOAuth) {
+    const mcpList = await runProbe(codexCli, ['mcp', 'list'], {
+      env,
+      cwd,
+      timeout,
+      execFileImpl,
+      layer: 'codex-mcp-oauth',
+      label: 'Codex MCP-server OAuth probe',
+    });
+    validateCodexMcpListOutput(mcpList?.stdout || '', mcpList?.stderr || '');
+  }
   return { codexCli };
 }
 
@@ -189,10 +192,11 @@ async function probeReviewerCliOAuth({
   cwd = process.cwd(),
   timeout = 30_000,
   execFileImpl = execFileAsync,
+  requireMcpOAuth = false,
 } = {}) {
   const normalized = String(model || '').toLowerCase();
   if (normalized.includes('codex')) {
-    return probeCodexCli({ env, cwd, timeout, execFileImpl });
+    return probeCodexCli({ env, cwd, timeout, execFileImpl, requireMcpOAuth });
   }
   return probeClaudeCli({ env, cwd, timeout, execFileImpl });
 }

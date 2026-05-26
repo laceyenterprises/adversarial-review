@@ -462,6 +462,7 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
   ]);
   assert.deepEqual(calls[0].args, [
     'exec',
+    '--ignore-user-config',
     '--dangerously-bypass-approvals-and-sandbox',
     '--ephemeral',
     '--json',

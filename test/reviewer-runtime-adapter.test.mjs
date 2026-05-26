@@ -25,8 +25,9 @@ import {
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import {
   CANONICAL_OAUTH_STRIP_ENV as CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV,
+  resolveProgressTimeoutForModel,
 } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
-import { resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
+import { probeCodexCli, resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import {
   readActiveReviewerRunRecords,
   readRecoverableReviewerRunRecords,
@@ -744,6 +745,48 @@ test('cli-direct delegates failure classification to the runtime adapter', async
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('cli-direct Codex preflight ignores ambient MCP OAuth unless the domain requires MCP', async () => {
+  const calls = [];
+  const execFileImpl = async (_command, args) => {
+    calls.push(args);
+    if (args[0] === '--version') return { stdout: 'codex 1.0.0\n', stderr: '' };
+    if (args[0] === 'sessions') return { stdout: '[]\n', stderr: '' };
+    if (args[0] === 'mcp') return { stdout: 'autok  Not logged in\n', stderr: '' };
+    throw new Error(`unexpected Codex probe: ${args.join(' ')}`);
+  };
+
+  await probeCodexCli({
+    env: { PATH: '/bin', CODEX_CLI: '/bin/codex' },
+    cwd: '/tmp',
+    execFileImpl,
+  });
+  assert.deepEqual(calls.map((args) => args.join(' ')), [
+    '--version',
+    'sessions list',
+  ]);
+
+  await assert.rejects(
+    () => probeCodexCli({
+      env: { PATH: '/bin', CODEX_CLI: '/bin/codex' },
+      cwd: '/tmp',
+      execFileImpl,
+      requireMcpOAuth: true,
+    }),
+    /Codex MCP-server OAuth state is broken/,
+  );
+});
+
+test('cli-direct disables the no-output progress watchdog for Codex reviewers', () => {
+  assert.equal(
+    resolveProgressTimeoutForModel('codex', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '900000' }),
+    0,
+  );
+  assert.equal(
+    resolveProgressTimeoutForModel('claude', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '1234' }),
+    1234,
+  );
 });
 
 test('cli-direct writes atomic reviewer run records and refuses double-spawn for a session', async () => {

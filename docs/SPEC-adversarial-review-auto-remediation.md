@@ -57,7 +57,10 @@ The durable remediation reply schema is the public contract between the worker,
 the validator, reconciliation, and the PR-comment renderer. `schemaVersion: 1`
 supports four accountability lanes:
 
-- `addressed[]` for blocking review findings that were fixed.
+- `addressed[]` for blocking review findings that were fixed. Workers may also
+  include additionally-fixed non-blocking findings here when they copy the
+  exact title from the review's `## Non-blocking issues` section; those extras
+  render publicly but do not satisfy blocking-finding coverage.
 - `pushback[]` for blocking review findings the worker deliberately left unchanged.
 - `blockers[]` for blocking review findings that hard-stop on required human input.
 - `operationalBlockers[]` for git/process failures that are not themselves review
@@ -91,9 +94,12 @@ stop, not as a missing-per-finding-accountability error.
 
 Validation keeps three invariants load-bearing:
 
-- Per-finding coverage is enforced only across actual review findings
-  (`addressed[]`, `pushback[]`, `blockers[]`), with operational-only early exits
-  exempt because no review finding was processed yet.
+- Per-finding coverage is enforced only across blocking review findings
+  recorded in `addressed[]`, `pushback[]`, and `blockers[]`, with
+  operational-only early exits exempt because no review finding was processed
+  yet. `addressed[]` entries whose titles match only the review's
+  `## Non-blocking issues` section are allowed as extras and are excluded from
+  the blocking-coverage count.
 - Cross-field contradictions (`reReview.requested=true` while blockers remain,
   `outcome="blocked"` without blockers, `outcome="completed"` with blockers)
   apply only to structured-schema replies so legacy persisted string-blocker

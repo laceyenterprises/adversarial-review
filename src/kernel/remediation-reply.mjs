@@ -603,6 +603,11 @@ function validateBlockingCoverage(reply, expectedJob) {
       .map((finding) => normalizeCoverageTitle(finding?.title))
       .filter(Boolean)
   );
+  const blockingTitleKeys = new Set(
+    findings
+      .map((finding) => normalizeCoverageTitle(finding?.title))
+      .filter(Boolean)
+  );
 
   const addressed = Array.isArray(reply.addressed) ? reply.addressed : [];
   const pushback = Array.isArray(reply.pushback) ? reply.pushback : [];
@@ -625,9 +630,12 @@ function validateBlockingCoverage(reply, expectedJob) {
     ...pushback.map((entry, index) => ({ field: 'pushback', index, entry })),
     ...blockers.map((entry, index) => ({ field: 'blockers', index, entry })),
   ];
-  const nonBlockingExtras = actualEntries.filter(({ entry }) => (
-    nonBlockingTitleKeys.has(normalizeCoverageTitle(entry?.title))
-  ));
+  const nonBlockingExtras = addressed
+    .map((entry, index) => ({ field: 'addressed', index, entry }))
+    .filter(({ entry }) => {
+      const key = normalizeCoverageTitle(entry?.title);
+      return key && nonBlockingTitleKeys.has(key) && !blockingTitleKeys.has(key);
+    });
   const blockingEntryTotal = total - nonBlockingExtras.length;
 
   if (blockingEntryTotal !== expected) {
@@ -685,7 +693,15 @@ function validateBlockingCoverage(reply, expectedJob) {
 
   const missing = [];
   const extra = [];
+  const misplacedNonBlocking = new Set();
   const allExpectedFindingsTitled = titledExpected.length === findings.length;
+  for (const { field, entry } of actualEntries) {
+    const key = normalizeCoverageTitle(entry?.title);
+    if (!key) continue;
+    if (field !== 'addressed' && nonBlockingTitleKeys.has(key) && !blockingTitleKeys.has(key)) {
+      misplacedNonBlocking.add(actualDisplay.get(key) || String(entry?.title || key).trim() || key);
+    }
+  }
   for (const [key, count] of expectedCounts.entries()) {
     const actual = actualCounts.get(key) || 0;
     if (actual < count) missing.push(expectedDisplay.get(key) || key);
@@ -699,6 +715,7 @@ function validateBlockingCoverage(reply, expectedJob) {
       extra.push(actualDisplay.get(key) || key);
     }
   }
+  for (const title of misplacedNonBlocking) extra.push(title);
   if (missing.length || extra.length) {
     throw new Error(
       `Remediation reply titles must match the blocking review bold bullet titles, H3 headings, or legacy Title fields exactly. ` +

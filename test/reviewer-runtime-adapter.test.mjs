@@ -778,6 +778,40 @@ test('cli-direct Codex preflight ignores ambient MCP OAuth unless the domain req
   );
 });
 
+test('cli-direct derives Codex MCP OAuth requirement from adapter domainConfig', async () => {
+  const calls = [];
+  const rootDir = makeRoot();
+
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr', requiredMcpServers: ['linear'] },
+      preflightImpl: async (input) => {
+        calls.push(input);
+        throw new Error('stop after preflight');
+      },
+      spawnCapturedImpl: async () => {
+        throw new Error('spawn should not run after preflight stub');
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 1 },
+      timeoutMs: 100,
+      sessionUuid: 'cli-direct-domain-config-mcp',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].requireMcpOAuth, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct disables the no-output progress watchdog for Codex reviewers', () => {
   assert.equal(
     resolveProgressTimeoutForModel('codex', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '900000' }),

@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
+import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
 
 const execFileAsync = promisify(execFile);
 import {
@@ -225,14 +226,6 @@ function isCodexModel(model) {
   return String(model || '').toLowerCase().includes('codex');
 }
 
-function cliDirectDomainRequiresMcpOAuth(req = {}) {
-  const domainConfig = req.domainConfig || req.subjectContext?.domainConfig || {};
-  if (domainConfig.requiresMcpOAuth === true) return true;
-  return [domainConfig.mcpServers, domainConfig.codexMcpServers].some((value) => (
-    Array.isArray(value) ? value.length > 0 : String(value || '').trim() !== ''
-  ));
-}
-
 function resolveProgressTimeoutForModel(model, env) {
   // Codex can spend a whole turn reasoning without emitting stdout. The hard
   // reviewer timeout still bounds runtime; the progress watchdog only kills
@@ -339,6 +332,7 @@ function readSideChannelTailsBestEffort(rootDir, sessionUuid) {
 
 function createCliDirectReviewerRuntimeAdapter({
   rootDir = process.cwd(),
+  domainConfig = {},
   reviewerProcessPath = DEFAULT_REVIEWER_PATH,
   spawnCapturedImpl = spawnCapturedProcessGroup,
   preflightImpl = probeReviewerCliOAuth,
@@ -379,7 +373,7 @@ function createCliDirectReviewerRuntimeAdapter({
           env: reviewerEnv,
           cwd: rootDir,
           timeout: req.preflightTimeoutMs || 30_000,
-          requireMcpOAuth: cliDirectDomainRequiresMcpOAuth(req),
+          requireMcpOAuth: domainRequiresMcpOAuth(domainConfig),
         });
         if (preflightResult?.claudeCli) reviewerEnv.CLAUDE_CLI = preflightResult.claudeCli;
         if (preflightResult?.codexCli) reviewerEnv.CODEX_CLI = preflightResult.codexCli;

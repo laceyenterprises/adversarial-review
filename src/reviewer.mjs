@@ -739,18 +739,62 @@ function buildClaudeReviewArgs(prompt) {
   return ['--print', '--permission-mode', 'bypassPermissions', prompt];
 }
 
-function buildCodexReviewArgs({ outputPath, prompt }) {
-  return [
+function parseCodexConfigLiteralString(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) return null;
+  const quote = value[0];
+  if ((quote === '"' || quote === '\'') && value.endsWith(quote)) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function readCodexConfigTomlValue(key, {
+  configPath = join(process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex'), 'config.toml'),
+} = {}) {
+  if (!existsSync(configPath)) return null;
+  let currentSection = null;
+  for (const rawLine of readFileSync(configPath, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const sectionMatch = line.match(/^\[(.+)\]$/);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1].trim() || null;
+      continue;
+    }
+    if (currentSection) continue;
+    const match = rawLine.match(new RegExp(`^\\s*${key}\\s*=\\s*(.+?)\\s*$`));
+    if (match) return parseCodexConfigLiteralString(match[1]);
+  }
+  return null;
+}
+
+function resolveCodexExecOverrides() {
+  const model = readCodexConfigTomlValue('model');
+  const modelProvider = readCodexConfigTomlValue('model_provider');
+  return {
+    model: model || null,
+    modelProvider: modelProvider || null,
+  };
+}
+
+function buildCodexReviewArgs({ outputPath, prompt, model = null, modelProvider = null }) {
+  const args = [
     'exec',
     '--ignore-user-config',
     '--dangerously-bypass-approvals-and-sandbox',
     '--ephemeral',
     '--json',
+  ];
+  if (model) args.push('--model', model);
+  if (modelProvider) args.push('--config', `model_provider="${String(modelProvider).replaceAll('"', '\\"')}"`);
+  args.push(
     '--output-last-message',
     outputPath,
     '--',
     prompt,
-  ];
+  );
+  return args;
 }
 
 function parseCodexJsonTokenUsage(stdout) {
@@ -787,6 +831,8 @@ async function spawnCodexReview({
   codexCli = CODEX_CLI,
   outputPath,
   prompt,
+  model = null,
+  modelProvider = null,
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
@@ -795,7 +841,7 @@ async function spawnCodexReview({
 }) {
   return spawnCapturedImpl(
     codexCli,
-    buildCodexReviewArgs({ outputPath, prompt }),
+    buildCodexReviewArgs({ outputPath, prompt, model, modelProvider }),
     {
       env,
       cwd,
@@ -827,6 +873,7 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const authPath = resolveCodexAuthPath();
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
+  const codexExecOverrides = resolveCodexExecOverrides();
 
   const { env } = scrubOAuthFallbackEnv({
     ...process.env,
@@ -844,6 +891,8 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
         codexCli: CODEX_CLI,
         outputPath,
         prompt,
+        model: codexExecOverrides.model,
+        modelProvider: codexExecOverrides.modelProvider,
         env,
         cwd: process.cwd(),
         timeout: resolveReviewerTimeoutMs(env),
@@ -1226,6 +1275,7 @@ const __test__ = {
   isClaudeLoggedOutStatus,
   resolveClaudeAuthProbeTimeoutMs,
   resolveCodexAuthPath,
+  resolveCodexExecOverrides,
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
   spawnCaptured,

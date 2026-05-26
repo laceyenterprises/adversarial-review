@@ -2764,6 +2764,53 @@ test('validateRemediationReply accepts titled non-blocking findings as extra add
   assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
 });
 
+test('validateRemediationReply does not exempt blocking coverage when blocking and non-blocking titles collide', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker and one note share a title.',
+    '',
+    '## Blocking Issues',
+    '- **Shared Title**',
+    '  - **Problem:** Blocking variant.',
+    '',
+    '## Non-blocking Issues',
+    '- **Shared Title**',
+    '  - **Problem:** Non-blocking variant.',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 100,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:10:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed the blocker.',
+    validation: ['npm test'],
+    addressed: [
+      {
+        title: 'Shared Title',
+        finding: 'Blocking variant.',
+        action: 'Fixed the blocking issue.',
+      },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Blocking finding is addressed.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
 test('validateRemediationReply does not split Title-led findings on prose File mentions', () => {
   const reviewBody = [
     '## Summary',

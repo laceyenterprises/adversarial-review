@@ -15,6 +15,7 @@ const {
   parseCodexJsonTokenUsage,
   queueFollowUpForPostedReview,
   resolveCodexAuthPath,
+  resolveCodexExecOverrides,
   resolveReviewerTimeoutMs,
   spawnCodexReview,
   spawnClaude,
@@ -438,6 +439,8 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
     codexCli: '/usr/local/bin/codex',
     outputPath,
     prompt,
+    model: 'gpt-5.4',
+    modelProvider: 'openai',
     env: { HOME: '/tmp/home', PATH: process.env.PATH },
     cwd: '/tmp/repo',
     timeout: 12_345,
@@ -451,7 +454,7 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
   assert.deepEqual(calls, [
     {
       command: '/usr/local/bin/codex',
-      args: buildCodexReviewArgs({ outputPath, prompt }),
+      args: buildCodexReviewArgs({ outputPath, prompt, model: 'gpt-5.4', modelProvider: 'openai' }),
       options: {
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
         cwd: '/tmp/repo',
@@ -466,11 +469,35 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
     '--dangerously-bypass-approvals-and-sandbox',
     '--ephemeral',
     '--json',
+    '--model',
+    'gpt-5.4',
+    '--config',
+    'model_provider="openai"',
     '--output-last-message',
     outputPath,
     '--',
     prompt,
   ]);
+});
+
+test('resolveCodexExecOverrides preserves top-level model settings when user config is ignored', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'codex-config-'));
+  const codexHome = join(rootDir, '.codex');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(
+    join(codexHome, 'config.toml'),
+    'model = "gpt-5.4"\nmodel_provider = "openai"\n[projects."/tmp/example"]\ntrust_level = "trusted"\n',
+  );
+
+  try {
+    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir }, () => resolveCodexExecOverrides());
+    assert.deepEqual(overrides, {
+      model: 'gpt-5.4',
+      modelProvider: 'openai',
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('Codex JSON token parser reads turn.completed usage from native stdout', () => {

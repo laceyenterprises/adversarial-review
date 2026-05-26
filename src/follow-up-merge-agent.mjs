@@ -136,6 +136,27 @@ const FAST_MERGE_SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped',
 // this bound.
 const _WATCHER_REDISPATCH_BOUND = 2;
 
+// Grace window before the watcher treats a terminal-failed dispatch whose
+// `merge-agent-dispatched` marker is already cleared as a PHANTOM HANDOFF.
+//
+// Both the per-tick retry path (dispatchMergeAgentForPR) and the proactive
+// scanStuckMergeAgentDispatches treat a cleared `merge-agent-dispatched` marker
+// as proof the merge-agent successfully handed off to a recovery worker or to
+// the operator (`recovery-first`). That proxy is wrong when the worker clears
+// the marker and then fails to establish recovery — e.g. a
+// `validation-upstream-failed` classification flattened to `worker_crashed`, so
+// merge_agent_failure_recovery never recognized it as baseline-scoped and never
+// dispatched a repair worker. The PR then sits invisibly behind
+// `skip-already-dispatched` forever (the #969-class orphan). A genuine
+// recovery, by contrast, either merges, pushes a new head (which produces a
+// fresh per-head record), or — for baseline waits — carries `merge-agent-stuck`
+// within this window. So after the grace window with none of those signals, the
+// watcher fails loud (applies `merge-agent-stuck` + a one-shot comment). It
+// never re-dispatches or merges here, so this cannot revive a CPA-08-class
+// premature merge. The window is generous so an in-flight delegated recovery is
+// never escalated out from under.
+const _PHANTOM_HANDOFF_GRACE_MINUTES = 60;
+
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
   logger = console,
@@ -1396,6 +1417,20 @@ function isWatcherAutonomousRetryableRecordedDispatchStatus(status) {
   return _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
+// True once a terminal-failed dispatch has been left orphaned (marker cleared,
+// no recovery established) longer than the phantom-handoff grace window. Reads
+// `dispatchedAt` off the recorded dispatch (always the most recent dispatch for
+// this head, since recordMergeAgentDispatch rewrites it). A still-running worker
+// never reaches here — the caller only enters this path for retryable terminal
+// statuses — so age alone is a safe trigger inside that guard.
+function isPhantomHandoffGraceElapsed(recordedDispatch, now) {
+  const dispatchedAtMs = Date.parse(String(recordedDispatch?.dispatchedAt || ''));
+  if (!Number.isFinite(dispatchedAtMs)) return false;
+  const nowMs = Date.parse(String(now || ''));
+  const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  return effectiveNowMs - dispatchedAtMs >= _PHANTOM_HANDOFF_GRACE_MINUTES * 60_000;
+}
+
 function getRecordedMergeAgentLifecycleCleanup(rootDir, { repo, prNumber } = {}) {
   const detail = readJsonFileDetailed(mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber }));
   return detail.ok ? detail.value : null;
@@ -2373,6 +2408,52 @@ async function applyMergeAgentStuckLabel({
   }
 }
 
+// One-shot operator comment explaining a phantom-handoff escalation. Gated by
+// the caller on a fresh `merge-agent-stuck` application (applyMergeAgentStuckLabel
+// returns false when the label is already present), so it posts exactly once on
+// the transition and never spams across watcher ticks. Best-effort: a comment
+// failure must not break the watcher loop — the label is the durable signal.
+async function postPhantomHandoffEscalationComment({
+  repo,
+  prNumber,
+  recordedDispatch,
+  dispatchStatus,
+  ghExecFileImpl = execFileAsync,
+  logger = console,
+} = {}) {
+  const lrq = recordedDispatch?.launchRequestId || 'unknown';
+  const body = [
+    '🛑 **merge-agent escalation — phantom handoff**',
+    '',
+    `The merge-agent dispatch \`${lrq}\` for this PR is terminal (\`${dispatchStatus}\`), but its`,
+    '`merge-agent-dispatched` marker was cleared without a recovery worker taking ownership and',
+    'without a `merge-agent-stuck` hand-off. So the automated merge path believed recovery owned',
+    'this PR when nothing did, and it would otherwise sit behind `skip-already-dispatched`',
+    'indefinitely. It has now been labeled `merge-agent-stuck` so it surfaces for operator action.',
+    '',
+    'To proceed: clear any standing review blockers, then either remove `merge-agent-stuck` and add',
+    '`merge-agent-requested` to retry the merge-agent, or merge manually if the PR is safe. The',
+    'watcher posts this once, on the tick that applies the label.',
+  ].join('\n');
+  try {
+    await ghExecFileImpl('gh', [
+      'pr',
+      'comment',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--body',
+      body,
+    ], { maxBuffer: 5 * 1024 * 1024 });
+    return true;
+  } catch (err) {
+    logger?.error?.(
+      `[follow-up-merge-agent] failed to post phantom-handoff escalation comment to ${repo}#${prNumber}: ${err?.message || err}`
+    );
+    return false;
+  }
+}
+
 async function removeConsumedTriggerLabel({
   repo,
   prNumber,
@@ -2773,6 +2854,53 @@ async function dispatchMergeAgentForPR({
         ghExecFileImpl,
         logger,
       });
+    } else if (
+      !diedWithoutHandoff
+      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)
+      && !labelNames.includes(MERGE_AGENT_STUCK_LABEL)
+      && isPhantomHandoffGraceElapsed(recordedDispatch, now)
+    ) {
+      // Phantom handoff (#969-class orphan). The `merge-agent-dispatched` marker
+      // is cleared — which the branches above and scanStuckMergeAgentDispatches
+      // both read as "recovery owns it now" — yet the recorded dispatch is
+      // terminal-failed, the PR is still open, there is no `merge-agent-stuck`
+      // marker (a genuine baseline-repair wait carries one), and the grace
+      // window for a real recovery to merge / push a new head / mark the PR has
+      // elapsed. The handoff never established recovery (e.g. a
+      // validation-upstream-failed classification was flattened to
+      // worker_crashed, so no baseline-repair worker was ever dispatched).
+      // Without this branch the PR sits invisibly behind skip-already-dispatched
+      // forever and only a hand-merge clears it. Fail loud: mark it
+      // merge-agent-stuck so it surfaces in the operator stuck queue, and post a
+      // one-shot explanatory comment. We deliberately do NOT re-dispatch or
+      // merge — escalation only — so recovery-first still holds within the grace
+      // window and the CPA-08 premature-merge guard stays intact.
+      mergeAgentLifecycleLog(logger, 'merge_agent.phantom_handoff_escalated', {
+        repo,
+        prNumber,
+        launchRequestId: recordedDispatch.launchRequestId,
+        previousStatus: recordedDispatchStatus.status,
+        dispatchedAt: recordedDispatch.dispatchedAt,
+        graceMinutes: _PHANTOM_HANDOFF_GRACE_MINUTES,
+        at: now,
+      });
+      const appliedStuck = await applyMergeAgentStuckLabel({
+        repo,
+        prNumber,
+        labels: labelNames,
+        ghExecFileImpl,
+        logger,
+      });
+      if (appliedStuck) {
+        await postPhantomHandoffEscalationComment({
+          repo,
+          prNumber,
+          recordedDispatch,
+          dispatchStatus: recordedDispatchStatus.status,
+          ghExecFileImpl,
+          logger,
+        });
+      }
     }
   }
   const dispatchDecision = pickMergeAgentDispatchDetail(job, {

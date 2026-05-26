@@ -33,7 +33,7 @@ Operator levers (still available, override the daemon):
 npm run follow-up:consume                         # claim + spawn one job (manual tick)
 npm run follow-up:reconcile                       # reconcile in-progress jobs (manual tick)
 npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
-npm run follow-up:stop -- <job-path> [reason]     # stop an in-progress job
+npm run follow-up:stop -- <job-path> [reason]     # stop a job; spawned workers are signalled first by default
 npm run follow-up:cancel-worker -- <job-path> [reason]  # signal spawned worker without moving job state
 npm run review:cancel -- --repo <slug> --pr <n> [reason]  # signal active reviewer without moving review state
 npm run merge-agent:cancel -- --repo <slug> --pr <n> [reason]  # cancel latest merge-agent LRQ + clear dispatched marker
@@ -455,12 +455,28 @@ Meaning:
 Operator action:
 - continue with manual handling
 
+Use `npm run follow-up:stop -- data/follow-up-jobs/<state>/<jobId>.json "<reason>"`
+when the durable follow-up job should move to `stopped/`. For in-progress jobs
+with `remediationWorker.state="spawned"`, stop first verifies the persisted
+process-group identity and sends `SIGTERM` to that worker group before moving
+the job file. The CLI output reports whether the signal was delivered and, when
+a signal landed, whether a bounded liveness probe observed the process group
+exit before the ledger transition. Signal delivery still does not prove every
+worker side effect has stopped, so inspect the cancellation receipt or retry
+with `--signal SIGKILL` if the process continues running.
+
+Use `--signal SIGKILL` only after graceful termination failed or the worker is
+known to ignore `SIGTERM`. Use `--no-cancel-worker` only after separately
+verifying the worker cannot mutate the branch anymore; that escape hatch moves
+the ledger state without signalling the process.
+
 ### Cancel a spawned worker without changing job state
 
 Use this when the remediation worker process itself needs to be interrupted but
 the follow-up job should remain in its current durable state for normal
 reconcile. This is the right handle for stopping a duplicate or runaway worker
-without moving the job to `stopped/` first:
+without moving the job to `stopped/`. When the job itself should become
+terminal, use `follow-up:stop` instead.
 
 ```bash
 npm run follow-up:cancel-worker -- data/follow-up-jobs/in-progress/<jobId>.json "Duplicate worker; operator is applying the remediation manually"

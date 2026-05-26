@@ -1,10 +1,20 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { stopFollowUpJob } from './follow-up-jobs.mjs';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { readFollowUpJob, stopFollowUpJob } from './follow-up-jobs.mjs';
+import { cancelFollowUpWorker, parseSignal } from './follow-up-worker-cancel.mjs';
+import { isPgidAlive } from './process-group-identity.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+const DEFAULT_WORKER_EXIT_WAIT_MS = 5_000;
+const DEFAULT_WORKER_EXIT_POLL_MS = 250;
+const SAFE_UNSIGNALLED_STOP_ERRORS = new Set([
+  'identity-unconfirmed',
+  'missing-worker-process-handle',
+  'process-group-not-found',
+  'worker-no-longer-spawned',
+]);
 
 function resolveFollowUpJobPath(rootDir, jobPathArg) {
   const candidate = isAbsolute(jobPathArg) ? resolve(jobPathArg) : resolve(rootDir, jobPathArg);
@@ -38,26 +48,181 @@ function resolveFollowUpJobPath(rootDir, jobPathArg) {
 }
 
 function parseArgs(argv) {
-  const [jobPathArg, ...rest] = argv;
+  const args = [...argv];
+  let signal = 'SIGTERM';
+  let cancelWorker = true;
+  const passthrough = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--signal') {
+      signal = parseSignal(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg?.startsWith('--signal=')) {
+      signal = parseSignal(arg.slice('--signal='.length));
+      continue;
+    }
+    if (arg === '--no-cancel-worker') {
+      cancelWorker = false;
+      continue;
+    }
+    passthrough.push(arg);
+  }
+
+  const [jobPathArg, ...rest] = passthrough;
   if (!jobPathArg) {
-    throw new Error('Usage: node src/follow-up-stop.mjs <job-path> [reason]');
+    throw new Error('Usage: node src/follow-up-stop.mjs [--signal SIGTERM] [--no-cancel-worker] <job-path> [reason]');
   }
 
   return {
     jobPath: resolveFollowUpJobPath(ROOT, jobPathArg),
     reason: rest.join(' ').trim() || 'Operator requested stop.',
+    signal,
+    cancelWorker,
   };
 }
 
-function main() {
+function shouldCancelSpawnedWorker(job) {
+  return job?.status === 'in_progress' && job?.remediationWorker?.state === 'spawned';
+}
+
+function followUpJobPathForState(rootDir, stateDir, jobPath) {
+  return join(rootDir, 'data', 'follow-up-jobs', stateDir, basename(jobPath));
+}
+
+function resolveCurrentJobPathAfterCancellationRace(rootDir, originalJobPath) {
+  const candidateDirs = ['in-progress', 'pending', 'completed', 'failed', 'stopped'];
+  for (const stateDir of candidateDirs) {
+    const candidate = followUpJobPathForState(rootDir, stateDir, originalJobPath);
+    if (existsSync(candidate)) return candidate;
+  }
+  return originalJobPath;
+}
+
+function isCancellationStateRaceError(err) {
+  const message = err?.message || '';
+  return message.includes('Cannot cancel worker for follow-up job')
+    && (
+      message.includes(' from status ')
+      || message.includes('remediationWorker.state is not spawned')
+    );
+}
+
+function buildCancellationRefusalMessage(job, cancellation) {
+  const error = cancellation?.error || 'unknown-error';
+  const identityReason = cancellation?.identity?.reason;
+  const retryGuidance = identityReason?.startsWith('ps probe failed:')
+    ? ' The process identity probe failed transiently; retry the stop command before overriding.'
+    : '';
+  return [
+    `Refusing to stop in-progress follow-up job ${job.jobId}: worker cancellation failed (${error}).`,
+    identityReason ? ` Identity check: ${identityReason}.` : '',
+    retryGuidance,
+    ' To force graceful/urgent signalling, retry with `--signal SIGKILL`; to move only the ledger after manual process verification, retry with `--no-cancel-worker`.',
+  ].join('');
+}
+
+async function waitForSignalledWorkerExit(cancellation, {
+  waitMs = DEFAULT_WORKER_EXIT_WAIT_MS,
+  pollMs = DEFAULT_WORKER_EXIT_POLL_MS,
+  processKill = process.kill,
+  sleep = (ms) => new Promise((resolveSleep) => { setTimeout(resolveSleep, ms); }),
+} = {}) {
+  const target = cancellation?.target;
+  if (!cancellation?.signalled || target?.kind !== 'process-group' || !Number.isInteger(target.id)) {
+    return { checked: false, exited: null };
+  }
+
+  const deadline = Date.now() + Math.max(0, waitMs);
+  do {
+    if (!isPgidAlive(target.id, processKill)) {
+      return { checked: true, exited: true, target };
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(Math.max(1, pollMs));
+  } while (true);
+
+  return { checked: true, exited: false, target };
+}
+
+async function stopFollowUpJobWithWorkerCancel({
+  rootDir = ROOT,
+  jobPath,
+  reason = 'Operator requested stop.',
+  requestedAt = new Date().toISOString(),
+  requestedBy = process.env.USER || process.env.LOGNAME || 'operator',
+  signal = 'SIGTERM',
+  cancelWorker = true,
+  cancelFollowUpWorkerImpl = cancelFollowUpWorker,
+  waitForWorkerExitImpl = waitForSignalledWorkerExit,
+} = {}) {
+  let currentJobPath = jobPath;
+  let job = readFollowUpJob(currentJobPath);
+  let cancellation = null;
+  let workerExit = null;
+
+  if (cancelWorker && shouldCancelSpawnedWorker(job)) {
+    try {
+      cancellation = await cancelFollowUpWorkerImpl({
+        rootDir,
+        jobPath: currentJobPath,
+        requestedAt,
+        requestedBy,
+        reason: `Stopping follow-up job: ${reason}`,
+        signal,
+      });
+    } catch (err) {
+      if (!isCancellationStateRaceError(err)) throw err;
+      currentJobPath = resolveCurrentJobPathAfterCancellationRace(rootDir, currentJobPath);
+      job = readFollowUpJob(currentJobPath);
+      cancellation = {
+        signalled: false,
+        error: 'worker-no-longer-spawned',
+        race: true,
+        message: err.message,
+      };
+    }
+
+    if (cancellation.signalled) {
+      workerExit = await waitForWorkerExitImpl(cancellation);
+    }
+    if (!cancellation.signalled && !SAFE_UNSIGNALLED_STOP_ERRORS.has(cancellation.error)) {
+      throw new Error(buildCancellationRefusalMessage(job, cancellation));
+    }
+  }
+
+  const stopped = stopFollowUpJob({
+    rootDir,
+    jobPath: currentJobPath,
+    requestedAt,
+    requestedBy,
+    reason,
+  });
+  return {
+    ...stopped,
+    cancellation,
+    workerExit,
+  };
+}
+
+async function main() {
   try {
-    const { jobPath, reason } = parseArgs(process.argv.slice(2));
-    const result = stopFollowUpJob({
+    const { jobPath, reason, signal, cancelWorker } = parseArgs(process.argv.slice(2));
+    const result = await stopFollowUpJobWithWorkerCancel({
       rootDir: ROOT,
       jobPath,
       reason,
+      signal,
+      cancelWorker,
     });
-    console.log(`[follow-up-stop] ${result.job.jobId}: ${result.job.status} -> ${result.jobPath}`);
+    const cancelSuffix = result.cancellation
+      ? ` workerSignalDelivered=${result.cancellation.signalled} receipt=${result.cancellation.receiptPath}`
+      : '';
+    const exitSuffix = result.workerExit?.checked
+      ? ` workerExitedAfterSignal=${result.workerExit.exited}`
+      : '';
+    console.log(`[follow-up-stop] ${result.job.jobId}: ${result.job.status} -> ${result.jobPath}${cancelSuffix}${exitSuffix}`);
   } catch (err) {
     console.error(`[follow-up-stop] Failed: ${err.message}`);
     process.exit(1);
@@ -70,5 +235,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
 export {
   parseArgs,
+  buildCancellationRefusalMessage,
+  isCancellationStateRaceError,
   resolveFollowUpJobPath,
+  waitForSignalledWorkerExit,
+  shouldCancelSpawnedWorker,
+  stopFollowUpJobWithWorkerCancel,
 };

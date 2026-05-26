@@ -286,6 +286,95 @@ test('phantom handoff comment failure is recorded and retried on a later tick', 
   assert.equal(commentAttempts, 2, 'the watcher must retry the owed phantom-handoff comment on later ticks');
 });
 
+test('phantom handoff persists owed comment before label add and later converges label plus comment', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = makeHqRoot('airlock');
+  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  const ghCalls = [];
+
+  await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: async () => ({ stdout: '' }),
+    now: '2026-05-24T04:00:00.000Z',
+  });
+
+  await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push(args);
+      if (args[0] === 'pr' && args[1] === 'edit') {
+        throw new Error('label add failed after ledger write');
+      }
+      return { stdout: '' };
+    },
+    now: '2026-05-24T05:05:00.000Z',
+  });
+
+  let recorded = listMergeAgentDispatches(rootDir)[0];
+  assert.equal(recorded.phantomHandoffCommentDelivery.posted, false);
+  assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 0);
+  assert.ok(
+    ghCalls.some((a) => a.includes('--add-label') && a.includes('merge-agent-stuck')),
+    'the watcher should still attempt the stuck label after writing the durable ledger'
+  );
+  assert.ok(
+    !ghCalls.some((a) => a[0] === 'pr' && a[1] === 'comment'),
+    'comment delivery must wait until the stuck label converges'
+  );
+
+  await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push(args);
+      if (args[0] === 'api') return { stdout: '' };
+      if (args[0] === 'pr' && args[1] === 'edit') return { stdout: '' };
+      if (args[0] === 'pr' && args[1] === 'comment') {
+        return { stdout: 'https://github.com/owner/repo/issues/1#issuecomment-2\n' };
+      }
+      return { stdout: '' };
+    },
+    now: '2026-05-24T05:10:00.000Z',
+  });
+
+  recorded = listMergeAgentDispatches(rootDir)[0];
+  assert.equal(recorded.phantomHandoffCommentDelivery.posted, true);
+  assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 1);
+  assert.ok(
+    ghCalls.some((a) => a[0] === 'pr' && a[1] === 'comment'),
+    'later ticks should finish the owed comment once the stuck label can be applied'
+  );
+});
+
 test('phantom handoff is idempotent: does not re-escalate when merge-agent-stuck is already present', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = makeHqRoot('airlock');

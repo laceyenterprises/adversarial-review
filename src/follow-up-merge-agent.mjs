@@ -1678,6 +1678,70 @@ function scanStuckMergeAgentDispatches({
   return stuckReports;
 }
 
+async function reconcileProactivePhantomHandoffs({
+  rootDir,
+  repo = null,
+  currentPRs = [],
+  hqPath = DEFAULT_HQ_PATH,
+  runtimeEnv = process.env,
+  ghExecFileImpl = execFileAsync,
+  execFileImpl = execFileAsync,
+  logger = console,
+  now = isoNow(),
+} = {}) {
+  const hqRoot = resolveHqRoot(runtimeEnv);
+  if (!hqRoot) return { inspected: 0, graceStarted: 0, escalated: 0 };
+  const ownerResolution = resolveHqOwner(hqRoot);
+  const statusProbeAsOwner = ownerResolution?.ownerUser || null;
+  let inspected = 0;
+  let graceStarted = 0;
+  let escalated = 0;
+  for (const currentPR of currentPRs) {
+    if (!currentPR?.repo || currentPR?.prNumber == null || !currentPR?.headSha) continue;
+    if (repo && currentPR.repo !== repo) continue;
+    const labelNames = normalizeLabelNames(currentPR.labels);
+    if (
+      labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)
+      || labelNames.includes(MERGE_AGENT_STUCK_LABEL)
+      || hasPendingDispatchedLabelAddCleanup(rootDir, currentPR, { logger })
+    ) {
+      continue;
+    }
+    const recordedDispatch = getRecordedMergeAgentDispatchForHead(rootDir, currentPR);
+    if (!recordedDispatch?.launchRequestId) continue;
+    const recordedDispatchStatus = await probeDispatchStatusViaHq({
+      hqPath: runtimeEnv.HQ_BIN || hqPath,
+      lrq: recordedDispatch.launchRequestId,
+      asOwner: statusProbeAsOwner,
+      execFileImpl,
+      env: runtimeEnv,
+    });
+    if (!isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) continue;
+    inspected += 1;
+    const beforeObservedAt = recordedDispatch.phantomHandoffObservedAt || null;
+    const beforePosted = recordedDispatch.phantomHandoffCommentDelivery?.posted;
+    const reconciled = await reconcilePhantomHandoffEscalation({
+      rootDir,
+      job: currentPR,
+      recordedDispatch,
+      dispatchStatus: recordedDispatchStatus.status,
+      labels: currentPR.labels,
+      ghExecFileImpl,
+      execFileImpl,
+      logger,
+      env: runtimeEnv,
+      now,
+    });
+    if (!beforeObservedAt && reconciled?.phantomHandoffObservedAt) {
+      graceStarted += 1;
+    }
+    if (beforePosted !== true && reconciled?.phantomHandoffCommentDelivery?.posted === true) {
+      escalated += 1;
+    }
+  }
+  return { inspected, graceStarted, escalated };
+}
+
 function findLatestFollowUpJobForPR(rootDir, { repo, prNumber, revisionRef = null, headSha = null }) {
   const keys = ['pending', 'inProgress', 'completed', 'failed', 'stopped'];
   const wantedRevisionRef = String(revisionRef || headSha || '').trim();
@@ -2254,6 +2318,24 @@ function buildPendingPhantomHandoffCommentDelivery({ recordedDispatch, dispatchS
   };
 }
 
+function persistPendingPhantomHandoffCommentDelivery({
+  rootDir,
+  job,
+  recordedDispatch,
+  dispatchStatus,
+  attemptedAt,
+} = {}) {
+  if (recordedDispatch?.phantomHandoffCommentDelivery) return recordedDispatch;
+  return updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({
+    ...doc,
+    phantomHandoffCommentDelivery: buildPendingPhantomHandoffCommentDelivery({
+      recordedDispatch: doc,
+      dispatchStatus,
+      attemptedAt,
+    }),
+  })) || recordedDispatch;
+}
+
 async function postPhantomHandoffEscalationComment({
   rootDir,
   recordedDispatch,
@@ -2367,6 +2449,84 @@ async function retryPendingPhantomHandoffComment({
       attemptedAt: now,
     },
   })) || recordedDispatch;
+}
+
+async function reconcilePhantomHandoffEscalation({
+  rootDir,
+  job,
+  recordedDispatch,
+  dispatchStatus,
+  labels,
+  ghExecFileImpl = execFileAsync,
+  logger = console,
+  env = process.env,
+  now = isoNow(),
+} = {}) {
+  if (!recordedDispatch || !isWatcherAutonomousRetryableRecordedDispatchStatus(dispatchStatus)) {
+    return recordedDispatch;
+  }
+  const labelNames = normalizeLabelNames(labels);
+  if (labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL) || labelNames.includes(MERGE_AGENT_STUCK_LABEL)) {
+    return recordedDispatch;
+  }
+  if (!recordedDispatch.phantomHandoffObservedAt) {
+    const observed = updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({
+      ...doc,
+      phantomHandoffObservedAt: now,
+    })) || recordedDispatch;
+    mergeAgentLifecycleLog(logger, 'merge_agent.phantom_handoff_grace_started', {
+      repo: job.repo,
+      prNumber: job.prNumber,
+      launchRequestId: observed.launchRequestId,
+      previousStatus: dispatchStatus,
+      phantomHandoffObservedAt: now,
+      graceMinutes: _PHANTOM_HANDOFF_GRACE_MINUTES,
+      at: now,
+    });
+    return observed;
+  }
+  if (!isPhantomHandoffGraceElapsed(recordedDispatch, now)) {
+    return recordedDispatch;
+  }
+  mergeAgentLifecycleLog(logger, 'merge_agent.phantom_handoff_escalated', {
+    repo: job.repo,
+    prNumber: job.prNumber,
+    launchRequestId: recordedDispatch.launchRequestId,
+    previousStatus: dispatchStatus,
+    phantomHandoffObservedAt: recordedDispatch.phantomHandoffObservedAt,
+    graceMinutes: _PHANTOM_HANDOFF_GRACE_MINUTES,
+    at: now,
+  });
+  let latestRecordedDispatch = persistPendingPhantomHandoffCommentDelivery({
+    rootDir,
+    job,
+    recordedDispatch,
+    dispatchStatus,
+    attemptedAt: now,
+  });
+  const currentLabelNames = normalizeLabelNames(labels);
+  const stuckPresent = currentLabelNames.includes(MERGE_AGENT_STUCK_LABEL);
+  const appliedStuck = stuckPresent || await applyMergeAgentStuckLabel({
+    repo: job.repo,
+    prNumber: job.prNumber,
+    labels: currentLabelNames,
+    ghExecFileImpl,
+    logger,
+  });
+  if (!appliedStuck) return latestRecordedDispatch;
+  if (latestRecordedDispatch?.phantomHandoffCommentDelivery?.posted === false) {
+    latestRecordedDispatch = await retryPendingPhantomHandoffComment({
+      rootDir,
+      job,
+      recordedDispatch: latestRecordedDispatch,
+      dispatchStatus,
+      execFileImpl: ghExecFileImpl,
+      env,
+      logger,
+      now,
+    });
+  }
+  return latestRecordedDispatch;
 }
 
 function recordMergeAgentSkippedDispatch(rootDir, job, {
@@ -2921,16 +3081,28 @@ async function dispatchMergeAgentForPR({
     : null;
   let latestRecordedDispatch = recordedDispatch;
   if (latestRecordedDispatch?.phantomHandoffCommentDelivery?.posted === false) {
-    latestRecordedDispatch = await retryPendingPhantomHandoffComment({
-      rootDir,
-      job,
-      recordedDispatch: latestRecordedDispatch,
-      dispatchStatus: recordedDispatchStatus?.status || latestRecordedDispatch?.phantomHandoffCommentDelivery?.context?.dispatchStatus || null,
-      execFileImpl: ghExecFileImpl,
-      env: runtimeEnv,
-      logger,
-      now,
-    });
+    let stuckReady = labelNames.includes(MERGE_AGENT_STUCK_LABEL);
+    if (!stuckReady) {
+      stuckReady = await applyMergeAgentStuckLabel({
+        repo,
+        prNumber,
+        labels: labelNames,
+        ghExecFileImpl,
+        logger,
+      });
+    }
+    if (stuckReady) {
+      latestRecordedDispatch = await retryPendingPhantomHandoffComment({
+        rootDir,
+        job,
+        recordedDispatch: latestRecordedDispatch,
+        dispatchStatus: recordedDispatchStatus?.status || latestRecordedDispatch?.phantomHandoffCommentDelivery?.context?.dispatchStatus || null,
+        execFileImpl: ghExecFileImpl,
+        env: runtimeEnv,
+        logger,
+        now,
+      });
+    }
   }
 
   // Threaded into recordMergeAgentDispatch so the per-(PR, head SHA) re-dispatch
@@ -3020,58 +3192,17 @@ async function dispatchMergeAgentForPR({
       // durable explanatory comment. We deliberately do NOT re-dispatch or
       // merge — escalation only — so recovery-first still holds within the grace
       // window and the CPA-08 premature-merge guard stays intact.
-      if (!latestRecordedDispatch.phantomHandoffObservedAt) {
-        latestRecordedDispatch = updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({
-          ...doc,
-          phantomHandoffObservedAt: now,
-        })) || latestRecordedDispatch;
-        mergeAgentLifecycleLog(logger, 'merge_agent.phantom_handoff_grace_started', {
-          repo,
-          prNumber,
-          launchRequestId: latestRecordedDispatch.launchRequestId,
-          previousStatus: recordedDispatchStatus.status,
-          phantomHandoffObservedAt: now,
-          graceMinutes: _PHANTOM_HANDOFF_GRACE_MINUTES,
-          at: now,
-        });
-      } else if (isPhantomHandoffGraceElapsed(latestRecordedDispatch, now)) {
-        mergeAgentLifecycleLog(logger, 'merge_agent.phantom_handoff_escalated', {
-          repo,
-          prNumber,
-          launchRequestId: latestRecordedDispatch.launchRequestId,
-          previousStatus: recordedDispatchStatus.status,
-          phantomHandoffObservedAt: latestRecordedDispatch.phantomHandoffObservedAt,
-          graceMinutes: _PHANTOM_HANDOFF_GRACE_MINUTES,
-          at: now,
-        });
-        const appliedStuck = await applyMergeAgentStuckLabel({
-          repo,
-          prNumber,
-          labels: labelNames,
-          ghExecFileImpl,
-          logger,
-        });
-        if (appliedStuck) {
-          latestRecordedDispatch = updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({
-            ...doc,
-            phantomHandoffCommentDelivery: buildPendingPhantomHandoffCommentDelivery({
-              recordedDispatch: doc,
-              dispatchStatus: recordedDispatchStatus.status,
-              attemptedAt: now,
-            }),
-          })) || latestRecordedDispatch;
-          latestRecordedDispatch = await retryPendingPhantomHandoffComment({
-            rootDir,
-            job,
-            recordedDispatch: latestRecordedDispatch,
-            dispatchStatus: recordedDispatchStatus.status,
-            execFileImpl: ghExecFileImpl,
-            env: runtimeEnv,
-            logger,
-            now,
-          });
-        }
-      }
+      latestRecordedDispatch = await reconcilePhantomHandoffEscalation({
+        rootDir,
+        job,
+        recordedDispatch: latestRecordedDispatch,
+        dispatchStatus: recordedDispatchStatus.status,
+        labels,
+        ghExecFileImpl,
+        logger,
+        env: runtimeEnv,
+        now,
+      });
     }
   }
   const recentDispatchesForDecision = duplicateDispatches.length === 0
@@ -4535,6 +4666,7 @@ export {
   pickMergeAgentDispatchDetail,
   pollFastMergeQueue,
   processFastMergePR,
+  reconcileProactivePhantomHandoffs,
   lookupOriginalWorkerRunStatus,
   prepareOriginalWorkerForMergeAgent,
   resolveFastMergePerPollCap,

@@ -22,9 +22,6 @@ const SUPPORTED_OPTIONS = new Set([
   'stdoutPath',
   'timeout',
 ]);
-const activeChildren = new Set();
-
-let installedExitCleanup = false;
 
 function tailText(value, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
   const text = String(value || '');
@@ -98,16 +95,6 @@ function signalProcessGroup(child, signal) {
   }
 }
 
-function installExitCleanup() {
-  if (installedExitCleanup) return;
-  installedExitCleanup = true;
-  process.on('exit', () => {
-    for (const child of activeChildren) {
-      signalProcessGroup(child, 'SIGKILL');
-    }
-  });
-}
-
 function validateOptions(options = {}) {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length > 0) {
@@ -133,7 +120,6 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
   } = options;
 
   return new Promise((resolve, reject) => {
-    installExitCleanup();
     const stdoutFd = stdoutPath ? openSync(stdoutPath, 'w') : null;
     const stderrFd = stderrPath ? openSync(stderrPath, 'w') : null;
     const child = spawn(command, args, {
@@ -146,7 +132,6 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         stderrFd === null ? 'pipe' : stderrFd,
       ],
     });
-    activeChildren.add(child);
 
     let stdout = '';
     let stderr = '';
@@ -176,7 +161,6 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         signal.removeEventListener('abort', onAbort);
         abortListenerAttached = false;
       }
-      activeChildren.delete(child);
       if (stdoutFd !== null) closeSync(stdoutFd);
       if (stderrFd !== null) closeSync(stderrFd);
     };

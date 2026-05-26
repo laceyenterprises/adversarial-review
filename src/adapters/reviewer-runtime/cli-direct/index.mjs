@@ -598,24 +598,27 @@ function createCliDirectReviewerRuntimeAdapter({
       // otherwise record as failed `daemon-bounce` without touching the
       // live PGID.
       const identity = await verifyPgidIdentity(pgid, normalized.spawnedAt, { execFileImpl });
-      let refusal;
-      let reaperFailure = null;
       if (identity.match) {
-        refusal = `cli-direct reaping reviewer process group ${pgid} after daemon bounce (start-time matches spawnedAt)`;
-        try {
-          await terminateProcessGroup(pgid, {
-            processKillImpl,
-            sleepImpl,
-            graceMs: cancelGraceMs,
-            pollIntervalMs: cancelPollIntervalMs,
-          });
-        } catch (err) {
-          reaperFailure = `failed to terminate live reviewer process group ${pgid}: ${err?.message || err}`;
-        }
-      } else {
-        refusal = `cli-direct refuses to reap pgid ${pgid}: PID has been recycled, NOT killing (${identity.reason || 'identity probe failed'})`;
-        logger.log?.(`[cli-direct] ${refusal}`);
+        const adoptedRecord = updateReviewerRunRecord(rootDir, normalized, {
+          state: 'heartbeating',
+          adoptedAfterBounce: true,
+          lastHeartbeatAt: now(),
+        });
+        logger.log?.(
+          `[cli-direct] adopted reviewer process group ${pgid} after daemon bounce ` +
+          `(start-time matches spawnedAt)`
+        );
+        return emptyResult({
+          ok: true,
+          spawnedAt: adoptedRecord.spawnedAt,
+          stderrTail: tails.stderrTail,
+          stdoutTail: tails.stdoutTail,
+          pgid,
+          reattachToken: adoptedRecord.reattachToken,
+        });
       }
+      const refusal = `cli-direct refuses to adopt pgid ${pgid}: PID has been recycled, NOT killing (${identity.reason || 'identity probe failed'})`;
+      logger.log?.(`[cli-direct] ${refusal}`);
       const failedRecord = updateReviewerRunRecord(rootDir, normalized, {
         state: 'failed',
         lastHeartbeatAt: now(),
@@ -624,7 +627,7 @@ function createCliDirectReviewerRuntimeAdapter({
         ok: false,
         spawnedAt: failedRecord.spawnedAt,
         failureClass: 'daemon-bounce',
-        stderrTail: [refusal, reaperFailure, tails.stderrTail].filter(Boolean).join('\n'),
+        stderrTail: [refusal, tails.stderrTail].filter(Boolean).join('\n'),
         stdoutTail: tails.stdoutTail,
         pgid,
         reattachToken: failedRecord.reattachToken,

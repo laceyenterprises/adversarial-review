@@ -398,6 +398,8 @@ test('stopFollowUpJobWithWorkerCancel cancels spawned worker before stopping', a
     requestedAt: '2026-04-21T08:05:00.000Z',
     reason: 'manual rescue',
     signal: 'SIGTERM',
+    waitMs: 123,
+    pollMs: 7,
     cancelFollowUpWorkerImpl: async (args) => {
       calls.push(args);
       assert.equal(readFileSync(jobPath, 'utf8').includes('"status": "in_progress"'), true);
@@ -406,15 +408,86 @@ test('stopFollowUpJobWithWorkerCancel cancels spawned worker before stopping', a
         receiptPath: path.join(ROOT, 'data', 'follow-up-jobs', 'worker-cancellations', 'receipt.json'),
       };
     },
+    waitForWorkerExitImpl: async (_cancellation, options) => ({
+      checked: true,
+      exited: true,
+      options,
+    }),
   });
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].signal, 'SIGTERM');
   assert.equal(calls[0].reason, 'Stopping follow-up job: manual rescue');
+  assert.deepEqual(result.workerExit.options, { waitMs: 123, pollMs: 7 });
   assert.equal(result.job.status, 'stopped');
   assert.equal(result.cancellation.signalled, true);
   const stopped = JSON.parse(readFileSync(stoppedPath, 'utf8'));
   assert.equal(stopped.remediationPlan.stop.reason, 'manual rescue');
+});
+
+test('stopFollowUpJobWithWorkerCancel can require confirmed worker exit before stopping', async (t) => {
+  const inProgressDir = path.join(ROOT, 'data', 'follow-up-jobs', 'in-progress');
+  const stoppedDir = path.join(ROOT, 'data', 'follow-up-jobs', 'stopped');
+  mkdirSync(inProgressDir, { recursive: true });
+  mkdirSync(stoppedDir, { recursive: true });
+  const jobPath = path.join(inProgressDir, 'survived-signal.json');
+  const stoppedPath = path.join(stoppedDir, 'survived-signal.json');
+  rmSync(jobPath, { force: true });
+  rmSync(stoppedPath, { force: true });
+  t.after(() => {
+    rmSync(jobPath, { force: true });
+    rmSync(stoppedPath, { force: true });
+  });
+
+  writeFileSync(jobPath, `${JSON.stringify({
+    schemaVersion: 2,
+    kind: 'adversarial-review-follow-up',
+    status: 'in_progress',
+    jobId: 'job-survived-signal',
+    createdAt: '2026-04-21T08:00:00.000Z',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'codex',
+    critical: false,
+    reviewSummary: 'Summary',
+    reviewBody: 'Body',
+    remediationWorker: {
+      state: 'spawned',
+      processId: 1234,
+      processGroupId: 1234,
+      spawnedAt: '2026-04-21T08:01:00.000Z',
+    },
+    remediationPlan: {
+      mode: 'bounded-manual-rounds',
+      maxRounds: 2,
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'spawned' }],
+      nextAction: { type: 'reconcile-worker', round: 1, operatorVisibility: 'explicit' },
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  await assert.rejects(
+    stopFollowUpJobWithWorkerCancel({
+      rootDir: ROOT,
+      jobPath,
+      reason: 'hard shutdown',
+      requireWorkerExit: true,
+      waitMs: 1,
+      cancelFollowUpWorkerImpl: async () => ({
+        signalled: true,
+        target: { kind: 'process-group', id: 1234 },
+      }),
+      waitForWorkerExitImpl: async () => ({
+        checked: true,
+        exited: false,
+        target: { kind: 'process-group', id: 1234 },
+      }),
+    }),
+    /remained alive after 1ms/
+  );
+
+  assert.equal(JSON.parse(readFileSync(jobPath, 'utf8')).status, 'in_progress');
+  assert.throws(() => readFileSync(stoppedPath, 'utf8'), /ENOENT/);
 });
 
 test('stopFollowUpJobWithWorkerCancel stops when stale worker identity is not verified', async (t) => {

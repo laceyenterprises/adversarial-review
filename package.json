@@ -33,7 +33,7 @@
     "typecheck:contracts": "node ./node_modules/typescript/bin/tsc -p tsconfig.contracts.json"
   },
   "dependencies": {
-    "@linear/sdk": "^84.0.0",
+    "@linear/sdk": "^86.0.0",
     "@octokit/rest": "^22.0.1",
     "better-sqlite3": "^12.10.0"
   },

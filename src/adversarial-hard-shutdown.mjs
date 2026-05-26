@@ -11,6 +11,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const DEFAULT_EXIT_WAIT_MS = 5_000;
 const DEFAULT_EXIT_POLL_MS = 250;
+const REVIEW_BENIGN_UNSIGNALLED_ERRORS = new Set([
+  'missing-reviewer-process-group',
+  'process-group-not-found',
+]);
+const FOLLOW_UP_BENIGN_UNSIGNALLED_ERRORS = new Set([
+  'missing-worker-process-handle',
+  'process-group-not-found',
+  'worker-no-longer-spawned',
+]);
 
 function parseArgs(argv) {
   const args = [...argv];
@@ -87,6 +96,11 @@ async function waitForProcessGroupExit(target, {
   return { checked: true, exited: false, target };
 }
 
+function isUnsignalledTeardownFailure(cancellation, benignErrors) {
+  if (!cancellation || cancellation.signalled) return false;
+  return !benignErrors.has(cancellation.error);
+}
+
 async function hardShutdownInFlightWorkers({
   rootDir = ROOT,
   requestedAt = new Date().toISOString(),
@@ -105,55 +119,82 @@ async function hardShutdownInFlightWorkers({
   const followUps = [];
   try {
     for (const row of listActiveReviewRows(db)) {
-      const cancellation = await cancelActiveReviewImpl({
-        rootDir,
-        db,
-        repo: row.repo,
-        prNumber: row.pr_number,
-        requestedAt,
-        requestedBy,
-        reason: `Hard shutdown: ${reason}`,
-        signal,
-      });
-      const reviewerExit = cancellation.signalled
-        ? await waitForProcessGroupExitImpl(cancellation.target, { waitMs })
-        : { checked: false, exited: null };
-      reviews.push({
-        repo: row.repo,
-        prNumber: row.pr_number,
-        cancellation,
-        workerExit: reviewerExit,
-      });
+      try {
+        const cancellation = await cancelActiveReviewImpl({
+          rootDir,
+          db,
+          repo: row.repo,
+          prNumber: row.pr_number,
+          requestedAt,
+          requestedBy,
+          reason: `Hard shutdown: ${reason}`,
+          signal,
+        });
+        const reviewerExit = cancellation.signalled
+          ? await waitForProcessGroupExitImpl(cancellation.target, { waitMs })
+          : { checked: false, exited: null };
+        reviews.push({
+          repo: row.repo,
+          prNumber: row.pr_number,
+          cancellation,
+          workerExit: reviewerExit,
+        });
+      } catch (err) {
+        reviews.push({
+          repo: row.repo,
+          prNumber: row.pr_number,
+          cancellation: {
+            signalled: false,
+            error: err?.message || String(err),
+          },
+          workerExit: { checked: false, exited: null },
+        });
+      }
     }
 
     for (const jobPath of listFollowUpJobPathsImpl(rootDir)) {
-      const stopped = await stopFollowUpJobImpl({
-        rootDir,
-        jobPath,
-        requestedAt,
-        requestedBy,
-        reason: `Hard shutdown: ${reason}`,
-        signal,
-        cancelWorker: true,
-      });
-      followUps.push({
-        jobPath,
-        jobId: stopped.job?.jobId || basename(jobPath, '.json'),
-        stopped,
-      });
+      try {
+        const stopped = await stopFollowUpJobImpl({
+          rootDir,
+          jobPath,
+          requestedAt,
+          requestedBy,
+          reason: `Hard shutdown: ${reason}`,
+          signal,
+          cancelWorker: true,
+        });
+        followUps.push({
+          jobPath,
+          jobId: stopped.job?.jobId || basename(jobPath, '.json'),
+          stopped,
+        });
+      } catch (err) {
+        followUps.push({
+          jobPath,
+          jobId: basename(jobPath, '.json'),
+          stopped: {
+            jobPath,
+            cancellation: {
+              signalled: false,
+              error: err?.message || String(err),
+            },
+            workerExit: { checked: false, exited: null },
+          },
+        });
+      }
     }
   } finally {
     if (!dbOverride) db.close();
   }
 
   const reviewFailures = reviews.filter((entry) => (
-    !entry.cancellation?.signalled ||
+    isUnsignalledTeardownFailure(entry.cancellation, REVIEW_BENIGN_UNSIGNALLED_ERRORS) ||
     (entry.workerExit?.checked && entry.workerExit.exited === false)
   ));
   const followUpFailures = followUps.filter((entry) => (
     entry.stopped?.cancellation &&
     (
-      !entry.stopped.cancellation.signalled ||
+      isUnsignalledTeardownFailure(entry.stopped.cancellation, FOLLOW_UP_BENIGN_UNSIGNALLED_ERRORS) ||
       (entry.stopped.workerExit?.checked && entry.stopped.workerExit.exited === false)
     )
   ));

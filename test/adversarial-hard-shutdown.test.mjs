@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { basename } from 'node:path';
 import Database from 'better-sqlite3';
 
 import {
@@ -106,6 +107,83 @@ test('hard shutdown reports failure when a live review cannot be signalled', asy
     });
     assert.equal(result.ok, false);
     assert.equal(result.reviews[0].cancellation.error, 'identity-unconfirmed');
+  } finally {
+    db.close();
+  }
+});
+
+test('hard shutdown continues after a follow-up stop throws and reports the batch as failed', async () => {
+  const db = setupDb();
+  try {
+    const attempts = [];
+    const result = await hardShutdownInFlightWorkers({
+      rootDir: '/tmp/adversarial-review-hard-shutdown-test',
+      db,
+      listFollowUpJobPathsImpl: () => [
+        '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-a.json',
+        '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-b.json',
+        '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-c.json',
+      ],
+      stopFollowUpJobImpl: async ({ jobPath }) => {
+        attempts.push(jobPath);
+        if (jobPath.endsWith('job-b.json')) {
+          throw new Error('refusing-to-signal-current-process');
+        }
+        return {
+          jobPath: jobPath.replace('/in-progress/', '/stopped/'),
+          job: { jobId: basename(jobPath, '.json') },
+          cancellation: { signalled: true },
+          workerExit: { checked: true, exited: true },
+        };
+      },
+    });
+
+    assert.deepEqual(
+      attempts,
+      [
+        '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-a.json',
+        '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-b.json',
+        '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-c.json',
+      ]
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.followUps.length, 3);
+    assert.equal(result.followUps[1].jobId, 'job-b');
+    assert.equal(result.followUps[1].stopped.cancellation.error, 'refusing-to-signal-current-process');
+  } finally {
+    db.close();
+  }
+});
+
+test('hard shutdown treats already-dead reviewers and follow-up workers as successful teardown', async () => {
+  const db = setupDb();
+  try {
+    seedReview(db, { repo: 'lacey/repo', prNumber: 5 });
+    const result = await hardShutdownInFlightWorkers({
+      rootDir: '/tmp/adversarial-review-hard-shutdown-test',
+      db,
+      cancelActiveReviewImpl: async () => ({
+        signalled: false,
+        target: { kind: 'process-group', id: 9005 },
+        error: 'process-group-not-found',
+      }),
+      listFollowUpJobPathsImpl: () => [
+        '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-dead.json',
+      ],
+      stopFollowUpJobImpl: async ({ jobPath }) => ({
+        jobPath: jobPath.replace('/in-progress/', '/stopped/'),
+        job: { jobId: basename(jobPath, '.json') },
+        cancellation: {
+          signalled: false,
+          error: 'worker-no-longer-spawned',
+        },
+        workerExit: { checked: false, exited: null },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.reviews[0].cancellation.error, 'process-group-not-found');
+    assert.equal(result.followUps[0].stopped.cancellation.error, 'worker-no-longer-spawned');
   } finally {
     db.close();
   }

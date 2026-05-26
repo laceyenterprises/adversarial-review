@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
+  buildCancellationRefusalMessage,
   parseArgs,
   resolveFollowUpJobPath,
   shouldCancelSpawnedWorker,
@@ -103,6 +104,20 @@ test('parseArgs supports signal override and explicit no-cancel escape hatch', (
   assert.equal(parsed.cancelWorker, false);
 });
 
+test('parseArgs rejects invalid signals before inspecting worker state', (t) => {
+  const jobPath = makeJobFile('data/follow-up-jobs/in-progress', 'parse-invalid-signal.json');
+  t.after(() => rmSync(jobPath, { force: true }));
+
+  assert.throws(
+    () => parseArgs([
+      '--signal=garbage',
+      '--no-cancel-worker',
+      'data/follow-up-jobs/in-progress/parse-invalid-signal.json',
+    ]),
+    /Unsupported signal "garbage"/
+  );
+});
+
 test('shouldCancelSpawnedWorker is limited to in-progress spawned remediation workers', () => {
   assert.equal(shouldCancelSpawnedWorker({
     status: 'in_progress',
@@ -167,6 +182,84 @@ test('follow-up-stop CLI moves an in-progress job into stopped with operator rea
   assert.equal(stopped.status, 'stopped');
   assert.equal(stopped.remediationPlan.stop.code, 'operator-stop');
   assert.equal(stopped.remediationPlan.stop.reason, 'Need manual operator handling.');
+});
+
+test('follow-up-stop CLI records cancellation receipt before stopping spawned jobs', (t) => {
+  const inProgressDir = path.join(ROOT, 'data', 'follow-up-jobs', 'in-progress');
+  const stoppedDir = path.join(ROOT, 'data', 'follow-up-jobs', 'stopped');
+  mkdirSync(inProgressDir, { recursive: true });
+  mkdirSync(stoppedDir, { recursive: true });
+  const jobPath = path.join(inProgressDir, 'cli-cancel-before-stop.json');
+  const stoppedPath = path.join(stoppedDir, 'cli-cancel-before-stop.json');
+  rmSync(jobPath, { force: true });
+  rmSync(stoppedPath, { force: true });
+  let receiptPath = null;
+  t.after(() => {
+    rmSync(jobPath, { force: true });
+    rmSync(stoppedPath, { force: true });
+    if (receiptPath) rmSync(receiptPath, { force: true });
+  });
+
+  writeFileSync(jobPath, `${JSON.stringify({
+    schemaVersion: 2,
+    kind: 'adversarial-review-follow-up',
+    status: 'in_progress',
+    jobId: 'job-cli-cancel-before-stop',
+    createdAt: '2026-04-21T08:00:00.000Z',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'codex',
+    critical: false,
+    reviewSummary: 'Summary',
+    reviewBody: 'Body',
+    remediationWorker: {
+      state: 'spawned',
+      processId: 999999999,
+      processGroupId: 999999999,
+      spawnedAt: '2026-04-21T08:01:00.000Z',
+    },
+    remediationPlan: {
+      mode: 'bounded-manual-rounds',
+      maxRounds: 2,
+      currentRound: 1,
+      rounds: [{ round: 1, state: 'spawned' }],
+      nextAction: { type: 'reconcile-worker', round: 1, operatorVisibility: 'explicit' },
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const stdout = execFileSync(
+    process.execPath,
+    [path.join(ROOT, 'src', 'follow-up-stop.mjs'), path.relative(ROOT, jobPath), 'Need manual operator handling.'],
+    { cwd: ROOT, encoding: 'utf8' }
+  );
+  receiptPath = stdout.match(/receipt=(\S+)/)?.[1] || null;
+
+  assert.match(stdout, /workerSignalDelivered=false/);
+  assert.ok(receiptPath);
+  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  assert.equal(receipt.result.error, 'process-group-not-found');
+  const stopped = JSON.parse(readFileSync(stoppedPath, 'utf8'));
+  assert.equal(stopped.status, 'stopped');
+  assert.equal(stopped.remediationPlan.stop.reason, 'Need manual operator handling.');
+});
+
+test('buildCancellationRefusalMessage includes retry and override guidance', () => {
+  const message = buildCancellationRefusalMessage(
+    { jobId: 'job-cancel-failed' },
+    {
+      signalled: false,
+      error: 'identity-unconfirmed',
+      identity: {
+        match: false,
+        reason: 'ps probe failed: command timed out',
+      },
+    }
+  );
+
+  assert.match(message, /worker cancellation failed \(identity-unconfirmed\)/);
+  assert.match(message, /retry the stop command/);
+  assert.match(message, /--signal SIGKILL/);
+  assert.match(message, /--no-cancel-worker/);
 });
 
 test('stopFollowUpJobWithWorkerCancel cancels spawned worker before stopping', async (t) => {
@@ -287,7 +380,7 @@ test('stopFollowUpJobWithWorkerCancel refuses to stop when live worker cancellat
         error: 'identity-unconfirmed',
       }),
     }),
-    /Refusing to stop in-progress follow-up job job-cancel-failed/
+    /Refusing to stop in-progress follow-up job job-cancel-failed: worker cancellation failed \(identity-unconfirmed\).*--no-cancel-worker/
   );
 
   assert.equal(JSON.parse(readFileSync(jobPath, 'utf8')).status, 'in_progress');

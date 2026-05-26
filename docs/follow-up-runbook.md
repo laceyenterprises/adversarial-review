@@ -459,9 +459,11 @@ Use `npm run follow-up:stop -- data/follow-up-jobs/<state>/<jobId>.json "<reason
 when the durable follow-up job should move to `stopped/`. For in-progress jobs
 with `remediationWorker.state="spawned"`, stop first verifies the persisted
 process-group identity and sends `SIGTERM` to that worker group before moving
-the job file. The CLI output reports whether the signal was delivered; delivery
-does not mean the worker has fully exited, so inspect the cancellation receipt
-or retry with `--signal SIGKILL` if the process continues running.
+the job file. The CLI output reports whether the signal was delivered and, when
+a signal landed, whether a bounded liveness probe observed the process group
+exit before the ledger transition. Signal delivery still does not prove every
+worker side effect has stopped, so inspect the cancellation receipt or retry
+with `--signal SIGKILL` if the process continues running.
 
 Use `--signal SIGKILL` only after graceful termination failed or the worker is
 known to ignore `SIGTERM`. Use `--no-cancel-worker` only after separately

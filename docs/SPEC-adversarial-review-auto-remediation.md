@@ -176,6 +176,27 @@ post-spawn invariant. Reconcile must not emit it merely because the remediation
 worker pushed commits and moved the PR head away from `job.revisionRef`; that
 head movement is the normal success path before rereview is requested.
 
+The operator `follow-up:stop` command is the terminal ledger transition for
+manual intervention. When it targets an in-progress job whose
+`remediationWorker.state` is `spawned`, it must first try to signal the
+persisted worker process group using the same identity verification as
+`follow-up:cancel-worker`. Stale worker handles are not allowed to strand the
+operator stop: `process-group-not-found`, `identity-unconfirmed`, and
+`missing-worker-process-handle` mean no signal was delivered to a verified live
+worker, so the command may proceed to the `operator-stop` transition while
+surfacing the cancellation result. Unexpected cancellation failures remain hard
+errors and must name the `--no-cancel-worker` escape hatch.
+
+Signal delivery is not the same thing as worker termination. After a successful
+signal, `follow-up:stop` must record whether a bounded post-signal liveness
+probe observed the process group exiting before moving the job to `stopped/`.
+Operators can use `--signal SIGKILL` for urgent termination and
+`--no-cancel-worker` only after independently proving the worker can no longer
+mutate the PR branch. A benign race with the follow-up daemon reconciling the
+job between the stop command's initial read and cancellation attempt must be
+treated as "nothing left to cancel"; the command should re-locate the current
+job record and continue the operator stop instead of failing.
+
 ## Adversarial Gate Commit Status
 
 The watcher projects the durable adversarial-review ledger onto the PR head SHA as a GitHub commit status with context `agent-os/adversarial-gate` by default.

@@ -116,7 +116,6 @@ const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHA
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
 const PHANTOM_HANDOFF_COMMENT_TIMEOUT_MS = 10_000;
-const PHANTOM_HANDOFF_COMMENT_MAX_ATTEMPTS = 5;
 const PHANTOM_HANDOFF_COMMENT_MARKER_PREFIX = 'adversarial-review-merge-agent-phantom-handoff';
 const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
 const FAST_MERGE_LABEL_PREFIX = 'fast-merge:';
@@ -2304,7 +2303,6 @@ function buildPendingPhantomHandoffCommentDelivery({ recordedDispatch, dispatchS
     posted: false,
     reason: 'pending',
     attempts: 0,
-    maxAttempts: PHANTOM_HANDOFF_COMMENT_MAX_ATTEMPTS,
     marker: buildPhantomHandoffCommentMarker(recordedDispatch),
     body,
     context: {
@@ -2421,8 +2419,6 @@ async function retryPendingPhantomHandoffComment({
   const delivery = recordedDispatch?.phantomHandoffCommentDelivery;
   if (!delivery || delivery.posted === true) return recordedDispatch;
   const previousAttempts = Number(delivery.attempts || 0);
-  const maxAttempts = Number(delivery.maxAttempts || PHANTOM_HANDOFF_COMMENT_MAX_ATTEMPTS);
-  if (previousAttempts >= maxAttempts) return recordedDispatch;
   const postResult = await postPhantomHandoffEscalationComment({
     rootDir,
     recordedDispatch,

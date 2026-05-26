@@ -256,6 +256,16 @@ test('phantom handoff comment failure is recorded and retried on a later tick', 
   let recorded = listMergeAgentDispatches(rootDir)[0];
   assert.equal(recorded.phantomHandoffCommentDelivery.posted, false);
   assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 1);
+  const dispatchPath = path.join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    'merge-agent-dispatches',
+    'laceyenterprises__agent-os-pr-849-head-sha-1.json'
+  );
+  recorded.phantomHandoffCommentDelivery.attempts = 5;
+  recorded.phantomHandoffCommentDelivery.maxAttempts = 5;
+  writeFileSync(dispatchPath, JSON.stringify(recorded, null, 2) + '\n');
 
   await dispatchMergeAgentForPR({
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
@@ -282,7 +292,7 @@ test('phantom handoff comment failure is recorded and retried on a later tick', 
 
   recorded = listMergeAgentDispatches(rootDir)[0];
   assert.equal(recorded.phantomHandoffCommentDelivery.posted, true);
-  assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 2);
+  assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 6);
   assert.equal(commentAttempts, 2, 'the watcher must retry the owed phantom-handoff comment on later ticks');
 });
 

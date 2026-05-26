@@ -211,21 +211,27 @@ test('onSpawn failures kill the detached process group and reject', async () => 
   );
 });
 
-test('exit-time cleanup kills detached grandchildren when the parent process exits abruptly', async () => {
+test('detached reviewer process group survives parent SIGTERM for daemon bounce adoption', async () => {
   const fixtureDir = mkdtempSync(path.join(tmpdir(), 'process-group-exit-'));
   const bashPidPath = path.join(fixtureDir, 'bash.pid');
   const sleepPidPath = path.join(fixtureDir, 'sleep.pid');
+  const stdoutPath = path.join(fixtureDir, 'stdout.log');
+  const stderrPath = path.join(fixtureDir, 'stderr.log');
+  let bashPid = null;
 
   try {
     const script = `
       import { spawnCapturedProcessGroup } from ${JSON.stringify(new URL('../src/process-group-spawn.mjs', import.meta.url).pathname)};
       import { existsSync } from 'node:fs';
-      const [bashPidPath, sleepPidPath] = process.argv.slice(-2);
-      spawnCapturedProcessGroup('bash', ['-c', \`sleep 30 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`]);
+      const [bashPidPath, sleepPidPath, stdoutPath, stderrPath] = process.argv.slice(-4);
+      spawnCapturedProcessGroup(
+        'bash',
+        ['-c', \`trap "" TERM; sleep 30 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`],
+        { stdoutPath, stderrPath, progressTimeout: 0, timeout: 0 }
+      );
       const ready = setInterval(() => {
         if (existsSync(bashPidPath) && existsSync(sleepPidPath)) {
           clearInterval(ready);
-          process.exit(0);
         }
       }, 10);
       setTimeout(() => {
@@ -233,27 +239,38 @@ test('exit-time cleanup kills detached grandchildren when the parent process exi
         process.exit(2);
       }, 2_000);
     `;
-    const child = spawn(process.execPath, ['--input-type=module', '-e', script, bashPidPath, sleepPidPath], {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, bashPidPath, sleepPidPath, stdoutPath, stderrPath], {
       stdio: 'ignore',
     });
 
+    await waitFor(() => {
+      assert.equal(existsSync(bashPidPath), true);
+      assert.equal(existsSync(sleepPidPath), true);
+    }, { timeoutMs: 5_000, intervalMs: 25 });
+
+    bashPid = Number.parseInt(readFileSync(bashPidPath, 'utf8').trim(), 10);
+    const sleepPid = Number.parseInt(readFileSync(sleepPidPath, 'utf8').trim(), 10);
+    assert.equal(Number.isInteger(bashPid), true);
+    assert.equal(Number.isInteger(sleepPid), true);
+
+    child.kill('SIGTERM');
     await new Promise((resolve, reject) => {
       child.once('exit', resolve);
       child.once('error', reject);
     });
 
-    assert.equal(child.exitCode, 0);
-
-    const bashPid = Number.parseInt(readFileSync(bashPidPath, 'utf8').trim(), 10);
-    const sleepPid = Number.parseInt(readFileSync(sleepPidPath, 'utf8').trim(), 10);
-    assert.equal(Number.isInteger(bashPid), true);
-    assert.equal(Number.isInteger(sleepPid), true);
-
     await waitFor(() => {
-      assert.equal(processExists(bashPid), false);
-      assert.equal(processExists(sleepPid), false);
+      assert.equal(processExists(bashPid), true);
+      assert.equal(processExists(sleepPid), true);
     }, { timeoutMs: 5_000, intervalMs: 50 });
   } finally {
+    if (Number.isInteger(bashPid)) {
+      try {
+        process.kill(-bashPid, 'SIGKILL');
+      } catch (err) {
+        if (err?.code !== 'ESRCH') throw err;
+      }
+    }
     rmSync(fixtureDir, { recursive: true, force: true });
   }
 });

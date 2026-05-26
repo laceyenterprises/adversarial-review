@@ -1155,11 +1155,10 @@ function handlePollError(err, source = 'pollOnce') {
   console.error(`[watcher] Poll error (source=${source}):`, err);
 }
 
-// Track durable reviewer runtime session UUIDs so every exit path can
-// ask the runtime adapter to cancel any in-flight reviewer before this
-// watcher process dies. Startup reattach/reconcile is the second half
-// of the same guard for the residual race where the child outlives the
-// watcher long enough to post anyway.
+// Track durable reviewer runtime session UUIDs for observability on exit.
+// Routine daemon bounces must not cancel these children: reviewer
+// subprocesses are launched as bounce survivors and startup reconciliation
+// re-adopts them via the durable review row plus PGID identity checks.
 const inFlightReviewerSessions = new Set();
 let exitInProgress = false;
 
@@ -1184,18 +1183,7 @@ function exitAfterReviewerCleanup({
   source,
   message,
   err = null,
-  // When the bounce comes from a planned deploy (main-catchup writes
-  // `watcher-drain.json` BEFORE sending SIGTERM via `launchctl bootout`),
-  // the reviewer subprocesses are bounce-survivable per
-  // `projects/daemon-bounce-safety/SPEC.md` — they're in their own pgrps
-  // and the next watcher's `reconcileReviewerSessions` will reattach
-  // them via the `reviewer_reattach_alive` path. Killing them on bounce
-  // throws away minutes of in-flight review work and was the reason
-  // main-catchup's drain wait blocked on every long-running review.
-  // Other exit paths (uncaughtException, poll deadline, SIGINT,
-  // SqliteError) still cancel — those are abnormal-exit signals where
-  // leaving zombie reviewers would compound the problem.
-  preserveInFlightReviewers = false,
+  preserveInFlightReviewers = true,
 } = {}) {
   if (exitInProgress) return;
   exitInProgress = true;
@@ -1233,7 +1221,7 @@ function exitForPollDeadline(err, source) {
     source,
     err,
     message:
-      'FATAL: poll deadline exceeded. Cancelling in-flight reviewer runtime sessions before exit so launchd can respawn a clean watcher',
+      'FATAL: poll deadline exceeded. Preserving in-flight reviewer runtime sessions so launchd can respawn and reattach',
   });
 }
 
@@ -1251,7 +1239,7 @@ process.on('uncaughtException', (err) => {
     reason: 'uncaughtException',
     source: 'uncaughtException',
     err,
-    message: 'uncaughtException; cancelling in-flight reviewer runtime sessions before exit',
+    message: 'uncaughtException; preserving in-flight reviewer runtime sessions before exit',
   });
 });
 process.on('unhandledRejection', (err) => {
@@ -1264,38 +1252,30 @@ process.on('unhandledRejection', (err) => {
     reason: 'unhandledRejection',
     source: 'unhandledRejection',
     err,
-    message: 'unhandledRejection; cancelling in-flight reviewer runtime sessions before exit',
+    message: 'unhandledRejection; preserving in-flight reviewer runtime sessions before exit',
   });
 });
 
-// Decision: does a SIGTERM during drain preserve in-flight reviewers?
+// Decision: does a SIGTERM preserve in-flight reviewers?
 // Pulled out as a pure function so tests can exercise the rule without
-// having to fork the watcher process and capture process.exit. The rule:
-// SIGTERM + active drain marker → preserve (planned bounce path);
-// SIGTERM without drain marker → cancel (operator stop / launchd hard stop).
+// having to fork the watcher process and capture process.exit. The rule is
+// now intentionally simple: every routine daemon SIGTERM preserves children.
+// Operators use `npm run hard-shutdown` for the distinct cancel-first path.
 //
 // See `projects/daemon-bounce-safety/SPEC.md` §6a for the contract.
-function shouldPreserveReviewersOnSigterm(drainState) {
-  return Boolean(drainState?.active);
+function shouldPreserveReviewersOnSigterm(_drainState) {
+  return true;
 }
 
 process.on('SIGTERM', () => {
-  // SIGTERM with an active drain marker is the planned-bounce path
-  // (main-catchup writes `watcher-drain.json` BEFORE bouncing this
-  // launchd service). Preserve in-flight reviewer subprocesses so the
-  // next watcher reattaches them via `reconcileReviewerSessions`
-  // (the `reviewer_reattach_alive` branch in src/reviewer-reattach.mjs).
-  // Without this, every routine deploy would kill in-flight reviews,
-  // which is exactly what made main-catchup's drain wait load-bearing
-  // for the bounce-survival contract.
   const drainState = readWatcherDrainState();
   const preserveInFlightReviewers = shouldPreserveReviewersOnSigterm(drainState);
   const message = preserveInFlightReviewers
-    ? `SIGTERM received during active drain (reason=${drainState?.reason || 'unknown'}); preserving in-flight reviewer subprocesses for the next watcher to reattach`
+    ? `SIGTERM received${drainState?.active ? ` during active drain (reason=${drainState?.reason || 'unknown'})` : ''}; preserving in-flight reviewer subprocesses for the next watcher to reattach`
     : 'SIGTERM received; cancelling active reviewer runtime sessions before exit';
   exitAfterReviewerCleanup({
     code: 143,
-    reason: preserveInFlightReviewers ? 'SIGTERM-during-drain' : 'SIGTERM',
+    reason: preserveInFlightReviewers ? 'SIGTERM-preserve-reviewers' : 'SIGTERM',
     source: 'SIGTERM',
     message,
     preserveInFlightReviewers,
@@ -1307,7 +1287,7 @@ process.on('SIGINT', () => {
     code: 130,
     reason: 'SIGINT',
     source: 'SIGINT',
-    message: 'SIGINT received; cancelling active reviewer runtime sessions before exit',
+    message: 'SIGINT received; preserving active reviewer runtime sessions before exit',
   });
 });
 

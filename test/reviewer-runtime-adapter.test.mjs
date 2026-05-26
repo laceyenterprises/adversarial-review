@@ -1366,7 +1366,7 @@ test('run-state pruning removes orphan stdout and stderr side-channel files', ()
   }
 });
 
-test('cli-direct reattach reaps an alive process group whose identity matches the record', async () => {
+test('cli-direct reattach adopts an alive process group whose identity matches the record', async () => {
   const rootDir = makeRoot();
   const reviewerPath = join(rootDir, 'fixture-reviewer.mjs');
   writeFileSync(
@@ -1411,7 +1411,7 @@ test('cli-direct reattach reaps an alive process group whose identity matches th
 
     // Inject a ps probe that returns an lstart matching the recorded
     // spawnedAt within tolerance, simulating "live PGID is the original
-    // reviewer." The new adapter contract reaps in this branch. Derive
+    // reviewer." The adapter must adopt in this branch. Derive
     // the lstart from `record.spawnedAt` so the assertion is host-TZ
     // independent: Date.toString round-trips through Date.parse to the
     // same UTC instant.
@@ -1426,14 +1426,18 @@ test('cli-direct reattach reaps an alive process group whose identity matches th
       now: () => '2026-05-11T20:00:01.000Z',
     });
     const reattached = await restartedAdapter.reattach(record);
-    const original = await run;
 
-    assert.equal(reattached.ok, false);
-    assert.equal(reattached.failureClass, 'daemon-bounce');
-    assert.match(reattached.stderrTail, /reaping reviewer process group .*start-time matches spawnedAt/);
-    assert.equal(original.ok, false);
+    assert.equal(reattached.ok, true);
+    assert.equal(reattached.failureClass, null);
     const finalRecord = readReviewerRunRecord(rootDir, 'alive-reattach-session');
-    assert.equal(finalRecord.state, 'failed');
+    assert.equal(finalRecord.state, 'heartbeating');
+    try {
+      process.kill(-record.pgid, 'SIGKILL');
+    } catch (err) {
+      if (err?.code !== 'ESRCH') throw err;
+    }
+    const original = await run;
+    assert.equal(original.ok, false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -2249,7 +2253,7 @@ test('settleReviewerRunRecord marks active runs terminal for steady-state recove
   }
 });
 
-test('bounce recovery reattaches active run records and requeues reviewing rows', async () => {
+test('bounce recovery adopts active run records and preserves reviewing claims', async () => {
   const rootDir = makeRoot();
   const db = new Database(':memory:');
   ensureReviewStateSchema(db);
@@ -2269,7 +2273,14 @@ test('bounce recovery reattaches active run records and requeues reviewing rows'
     '2026-05-11T20:00:00.000Z',
   );
   try {
-    const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir });
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      processKillImpl: (pid, signal) => {
+        if (pid === -6060 && signal === 0) return true;
+        return process.kill(pid, signal);
+      },
+      execFileImpl: async () => ({ stdout: `${new Date('2026-05-11T20:00:00.000Z').toString()}\n` }),
+    });
     writeReviewerRunRecord(rootDir, {
       sessionUuid: 'bounce-session',
       domain: 'code-pr',
@@ -2290,10 +2301,11 @@ test('bounce recovery reattaches active run records and requeues reviewing rows'
       log: { log() {} },
       now: new Date('2026-05-11T20:01:00.000Z'),
     });
-    assert.deepEqual(recovered, { recovered: 1, pruned: 0 });
+    assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
     const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE reviewer_session_uuid = ?').get('bounce-session');
-    assert.equal(row.review_status, 'failed');
-    assert.match(row.failure_message, /daemon-bounce/);
+    assert.equal(row.review_status, 'reviewing');
+    assert.equal(row.failure_message, null);
+    assert.equal(readReviewerRunRecord(rootDir, 'bounce-session').state, 'heartbeating');
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

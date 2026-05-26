@@ -1,11 +1,8 @@
-/* SIGTERM during an active drain marker must preserve in-flight reviewer
+/* Routine SIGTERM must preserve in-flight reviewer
  * subprocesses. The next watcher reattaches them via
  * `reconcileReviewerSessions` (the `reviewer_reattach_alive` branch).
  *
- * Without this, every routine deploy (main-catchup writes
- * `watcher-drain.json`, then `launchctl bootout` sends SIGTERM) would
- * kill in-flight reviews — which is exactly what made main-catchup's
- * drain wait block for the full duration of long-running code reviews.
+ * A separate hard-shutdown command owns the intentional cancel-first path.
  * See `projects/daemon-bounce-safety/SPEC.md` §6a for the contract.
  */
 import test from 'node:test';
@@ -38,20 +35,20 @@ test('preserves reviewers when drain marker is active', () => {
   }
 });
 
-test('cancels reviewers when no drain marker is present (default SIGTERM)', () => {
+test('preserves reviewers when no drain marker is present (default SIGTERM bounce)', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-sigterm-nodrain-'));
   try {
     const drainFile = path.join(rootDir, 'data', 'watcher-drain.json');
     // Marker absent.
     const drainState = readWatcherDrainState({ drainFile });
     assert.equal(drainState.active, false);
-    assert.equal(shouldPreserveReviewersOnSigterm(drainState), false);
+    assert.equal(shouldPreserveReviewersOnSigterm(drainState), true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
-test('cancels reviewers when drain marker has expired', () => {
+test('preserves reviewers when drain marker has expired', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-sigterm-expired-'));
   try {
     const drainFile = path.join(rootDir, 'data', 'watcher-drain.json');
@@ -65,19 +62,16 @@ test('cancels reviewers when drain marker has expired', () => {
 
     const drainState = readWatcherDrainState({ drainFile });
     assert.equal(drainState.active, false);
-    assert.equal(shouldPreserveReviewersOnSigterm(drainState), false);
+    assert.equal(shouldPreserveReviewersOnSigterm(drainState), true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
 test('shouldPreserveReviewersOnSigterm tolerates missing or partial drain state', () => {
-  // Defensive: future shape changes to readWatcherDrainState shouldn't
-  // turn an undefined return into "preserve" (which would silently leak
-  // zombie reviewers on every SIGTERM).
-  assert.equal(shouldPreserveReviewersOnSigterm(undefined), false);
-  assert.equal(shouldPreserveReviewersOnSigterm(null), false);
-  assert.equal(shouldPreserveReviewersOnSigterm({}), false);
-  assert.equal(shouldPreserveReviewersOnSigterm({ active: false }), false);
+  assert.equal(shouldPreserveReviewersOnSigterm(undefined), true);
+  assert.equal(shouldPreserveReviewersOnSigterm(null), true);
+  assert.equal(shouldPreserveReviewersOnSigterm({}), true);
+  assert.equal(shouldPreserveReviewersOnSigterm({ active: false }), true);
   assert.equal(shouldPreserveReviewersOnSigterm({ active: true }), true);
 });

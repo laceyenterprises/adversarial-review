@@ -24,8 +24,6 @@ const SUPPORTED_OPTIONS = new Set([
 ]);
 const activeChildren = new Set();
 
-let installedExitCleanup = false;
-
 function tailText(value, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
   const text = String(value || '');
   if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
@@ -98,16 +96,6 @@ function signalProcessGroup(child, signal) {
   }
 }
 
-function installExitCleanup() {
-  if (installedExitCleanup) return;
-  installedExitCleanup = true;
-  process.on('exit', () => {
-    for (const child of activeChildren) {
-      signalProcessGroup(child, 'SIGKILL');
-    }
-  });
-}
-
 function validateOptions(options = {}) {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length > 0) {
@@ -133,7 +121,6 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
   } = options;
 
   return new Promise((resolve, reject) => {
-    installExitCleanup();
     const stdoutFd = stdoutPath ? openSync(stdoutPath, 'w') : null;
     const stderrFd = stderrPath ? openSync(stderrPath, 'w') : null;
     const child = spawn(command, args, {

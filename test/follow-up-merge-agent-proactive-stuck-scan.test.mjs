@@ -8,13 +8,14 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
   scanStuckMergeAgentDispatches,
   recordMergeAgentDispatch,
+  reconcileProactivePhantomHandoffs,
 } from '../src/follow-up-merge-agent.mjs';
 
 const NOW = Date.parse('2026-05-19T03:30:00Z');
@@ -352,4 +353,129 @@ test('scanStuckMergeAgentDispatches returns empty when hqRoot is missing (OSS-sa
   });
 
   assert.equal(reports.length, 0, 'no hqRoot = no audit-log path; fail closed');
+});
+
+test('reconcileProactivePhantomHandoffs starts grace for a terminal current-head orphan outside the dispatched-label set', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  const result = await reconcileProactivePhantomHandoffs({
+    rootDir,
+    currentPRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 719,
+      headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+      labels: [],
+    }],
+    runtimeEnv: { HQ_ROOT: hqRoot },
+    hqPath: '/bin/hq-unused',
+    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    ghExecFileImpl: async () => {
+      throw new Error('grace start should not post or label');
+    },
+    now: '2026-05-19T03:30:00.000Z',
+  });
+
+  assert.equal(result.inspected, 1);
+  assert.equal(result.graceStarted, 1);
+  assert.equal(result.escalated, 0);
+  const dispatchPath = path.join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    'merge-agent-dispatches',
+    'laceyenterprises__agent-os-pr-719-c055d93d02abfb41fbab56c46ac631982f84fd66.json'
+  );
+  const recorded = JSON.parse(readFileSync(dispatchPath, 'utf8'));
+  assert.equal(recorded.phantomHandoffObservedAt, '2026-05-19T03:30:00.000Z');
+  assert.equal(recorded.phantomHandoffCommentDelivery, null);
+});
+
+test('reconcileProactivePhantomHandoffs can finish a phantom handoff after the label-add window failed earlier', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+  const dispatchPath = path.join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    'merge-agent-dispatches',
+    'laceyenterprises__agent-os-pr-719-c055d93d02abfb41fbab56c46ac631982f84fd66.json'
+  );
+  const existing = JSON.parse(readFileSync(dispatchPath, 'utf8'));
+  existing.phantomHandoffObservedAt = '2026-05-19T02:00:00.000Z';
+  existing.phantomHandoffCommentDelivery = {
+    posted: false,
+    reason: 'pending',
+    attempts: 0,
+    maxAttempts: 5,
+    marker: 'marker',
+    body: 'body',
+    context: {
+      repo: existing.repo,
+      prNumber: existing.prNumber,
+      revisionRef: existing.headSha,
+      launchRequestId: existing.launchRequestId,
+      dispatchStatus: 'failed',
+    },
+    attemptedAt: '2026-05-19T02:00:00.000Z',
+  };
+  writeFileSync(dispatchPath, JSON.stringify(existing, null, 2) + '\n');
+  let commentCalls = 0;
+  let labelCalls = 0;
+
+  const result = await reconcileProactivePhantomHandoffs({
+    rootDir,
+    currentPRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 719,
+      headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+      labels: [],
+    }],
+    runtimeEnv: { HQ_ROOT: hqRoot },
+    hqPath: '/bin/hq-unused',
+    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    ghExecFileImpl: async (cmd, args) => {
+      if (args[0] === 'api') return { stdout: '' };
+      if (args[0] === 'pr' && args[1] === 'edit') {
+        labelCalls += 1;
+        return { stdout: '' };
+      }
+      if (args[0] === 'pr' && args[1] === 'comment') {
+        commentCalls += 1;
+        return { stdout: 'https://github.com/owner/repo/issues/1#issuecomment-3\n' };
+      }
+      return { stdout: '' };
+    },
+    now: '2026-05-19T03:30:00.000Z',
+  });
+
+  assert.equal(result.inspected, 1);
+  assert.equal(result.escalated, 1);
+  assert.equal(labelCalls, 1);
+  assert.equal(commentCalls, 1);
+  const recorded = JSON.parse(readFileSync(dispatchPath, 'utf8'));
+  assert.equal(recorded.phantomHandoffCommentDelivery.posted, true);
+  assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 1);
 });

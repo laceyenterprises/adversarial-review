@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   constants as fsConstants,
   accessSync,
@@ -28,8 +28,10 @@ import {
   NO_MERGE_HOLD_LABEL,
   OPERATOR_APPROVED_LABEL,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
+import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-comments/index.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
+import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 import { requestReviewRereview } from './review-state.mjs';
 import { parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
@@ -113,6 +115,8 @@ const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
+const PHANTOM_HANDOFF_COMMENT_TIMEOUT_MS = 10_000;
+const PHANTOM_HANDOFF_COMMENT_MARKER_PREFIX = 'adversarial-review-merge-agent-phantom-handoff';
 const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
 const FAST_MERGE_LABEL_PREFIX = 'fast-merge:';
 const FAST_MERGE_SKIPPED_STATE = 'fast_merge_skipped';
@@ -135,6 +139,27 @@ const FAST_MERGE_SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped',
 // operator recovery action for that stuck state and forces one retry path past
 // this bound.
 const _WATCHER_REDISPATCH_BOUND = 2;
+
+// Grace window before the watcher treats a terminal-failed dispatch whose
+// `merge-agent-dispatched` marker is already cleared as a PHANTOM HANDOFF.
+//
+// Both the per-tick retry path (dispatchMergeAgentForPR) and the proactive
+// scanStuckMergeAgentDispatches treat a cleared `merge-agent-dispatched` marker
+// as proof the merge-agent successfully handed off to a recovery worker or to
+// the operator (`recovery-first`). That proxy is wrong when the worker clears
+// the marker and then fails to establish recovery — e.g. a
+// `validation-upstream-failed` classification flattened to `worker_crashed`, so
+// merge_agent_failure_recovery never recognized it as baseline-scoped and never
+// dispatched a repair worker. The PR then sits invisibly behind
+// `skip-already-dispatched` forever (the #969-class orphan). A genuine
+// recovery, by contrast, either merges, pushes a new head (which produces a
+// fresh per-head record), or — for baseline waits — carries `merge-agent-stuck`
+// within this window. So after the grace window with none of those signals, the
+// watcher fails loud (applies `merge-agent-stuck` + a one-shot comment). It
+// never re-dispatches or merges here, so this cannot revive a CPA-08-class
+// premature merge. The window is generous so an in-flight delegated recovery is
+// never escalated out from under.
+const _PHANTOM_HANDOFF_GRACE_MINUTES = 60;
 
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
@@ -1396,6 +1421,18 @@ function isWatcherAutonomousRetryableRecordedDispatchStatus(status) {
   return _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
+// True once a terminal-failed dispatch has been left orphaned (marker cleared,
+// no recovery established) longer than the phantom-handoff grace window. The
+// grace starts when the watcher first durably observes the handoff gap for this
+// head, not when the original merge-agent dispatch was created.
+function isPhantomHandoffGraceElapsed(recordedDispatch, now) {
+  const graceStartedAtMs = Date.parse(String(recordedDispatch?.phantomHandoffObservedAt || ''));
+  if (!Number.isFinite(graceStartedAtMs)) return false;
+  const nowMs = Date.parse(String(now || ''));
+  const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  return effectiveNowMs - graceStartedAtMs >= _PHANTOM_HANDOFF_GRACE_MINUTES * 60_000;
+}
+
 function getRecordedMergeAgentLifecycleCleanup(rootDir, { repo, prNumber } = {}) {
   const detail = readJsonFileDetailed(mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber }));
   return detail.ok ? detail.value : null;
@@ -1638,6 +1675,70 @@ function scanStuckMergeAgentDispatches({
     });
   }
   return stuckReports;
+}
+
+async function reconcileProactivePhantomHandoffs({
+  rootDir,
+  repo = null,
+  currentPRs = [],
+  hqPath = DEFAULT_HQ_PATH,
+  runtimeEnv = process.env,
+  ghExecFileImpl = execFileAsync,
+  execFileImpl = execFileAsync,
+  logger = console,
+  now = isoNow(),
+} = {}) {
+  const hqRoot = resolveHqRoot(runtimeEnv);
+  if (!hqRoot) return { inspected: 0, graceStarted: 0, escalated: 0 };
+  const ownerResolution = resolveHqOwner(hqRoot);
+  const statusProbeAsOwner = ownerResolution?.ownerUser || null;
+  let inspected = 0;
+  let graceStarted = 0;
+  let escalated = 0;
+  for (const currentPR of currentPRs) {
+    if (!currentPR?.repo || currentPR?.prNumber == null || !currentPR?.headSha) continue;
+    if (repo && currentPR.repo !== repo) continue;
+    const labelNames = normalizeLabelNames(currentPR.labels);
+    if (
+      labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)
+      || labelNames.includes(MERGE_AGENT_STUCK_LABEL)
+      || hasPendingDispatchedLabelAddCleanup(rootDir, currentPR, { logger })
+    ) {
+      continue;
+    }
+    const recordedDispatch = getRecordedMergeAgentDispatchForHead(rootDir, currentPR);
+    if (!recordedDispatch?.launchRequestId) continue;
+    const recordedDispatchStatus = await probeDispatchStatusViaHq({
+      hqPath: runtimeEnv.HQ_BIN || hqPath,
+      lrq: recordedDispatch.launchRequestId,
+      asOwner: statusProbeAsOwner,
+      execFileImpl,
+      env: runtimeEnv,
+    });
+    if (!isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) continue;
+    inspected += 1;
+    const beforeObservedAt = recordedDispatch.phantomHandoffObservedAt || null;
+    const beforePosted = recordedDispatch.phantomHandoffCommentDelivery?.posted;
+    const reconciled = await reconcilePhantomHandoffEscalation({
+      rootDir,
+      job: currentPR,
+      recordedDispatch,
+      dispatchStatus: recordedDispatchStatus.status,
+      labels: currentPR.labels,
+      ghExecFileImpl,
+      execFileImpl,
+      logger,
+      env: runtimeEnv,
+      now,
+    });
+    if (!beforeObservedAt && reconciled?.phantomHandoffObservedAt) {
+      graceStarted += 1;
+    }
+    if (beforePosted !== true && reconciled?.phantomHandoffCommentDelivery?.posted === true) {
+      escalated += 1;
+    }
+  }
+  return { inspected, graceStarted, escalated };
 }
 
 function findLatestFollowUpJobForPR(rootDir, { repo, prNumber, revisionRef = null, headSha = null }) {
@@ -2147,12 +2248,281 @@ function recordMergeAgentDispatch(rootDir, job, {
     // handoff worker. Bounds the auto-retry (see _WATCHER_REDISPATCH_BOUND).
     watcherReDispatchCount: Number(watcherReDispatchCount || 0),
     dispatchedAt,
+    phantomHandoffObservedAt: null,
+    phantomHandoffCommentDelivery: null,
     dispatchId,
     launchRequestId,
     prompt,
   };
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   return filePath;
+}
+
+function updateRecordedMergeAgentDispatch(rootDir, job, mutate) {
+  const filePath = mergeAgentDispatchFilePath(rootDir, job);
+  const existing = readJsonFileDetailed(filePath);
+  if (!existing.ok) return null;
+  const next = mutate({ ...existing.value });
+  if (!next) return existing.value;
+  writeFileAtomic(filePath, `${JSON.stringify(next, null, 2)}\n`);
+  return next;
+}
+
+function buildPhantomHandoffCommentMarker(recordedDispatch) {
+  const key = [
+    String(recordedDispatch?.repo || ''),
+    String(recordedDispatch?.prNumber || ''),
+    String(recordedDispatch?.headSha || ''),
+    String(recordedDispatch?.launchRequestId || ''),
+  ].join(':');
+  const digest = createHash('sha256').update(key).digest('hex');
+  return `${PHANTOM_HANDOFF_COMMENT_MARKER_PREFIX}:${digest}`;
+}
+
+function buildPhantomHandoffEscalationCommentBody({ recordedDispatch, dispatchStatus } = {}) {
+  const lrq = recordedDispatch?.launchRequestId || 'unknown';
+  const marker = buildPhantomHandoffCommentMarker(recordedDispatch);
+  return [
+    `<!-- ${marker} -->`,
+    '🛑 **merge-agent escalation — phantom handoff**',
+    '',
+    `The merge-agent dispatch \`${lrq}\` for this PR is terminal (\`${dispatchStatus}\`), but its`,
+    '`merge-agent-dispatched` marker was cleared without a recovery worker taking ownership and',
+    'without a `merge-agent-stuck` hand-off. So the automated merge path believed recovery owned',
+    'this PR when nothing did, and it would otherwise sit behind `skip-already-dispatched`',
+    'indefinitely. It has now been labeled `merge-agent-stuck` so it surfaces for operator action.',
+    '',
+    'To proceed: clear any standing review blockers, then either remove `merge-agent-stuck` and add',
+    '`merge-agent-requested` to retry the merge-agent, or merge manually if the PR is safe.',
+  ].join('\n');
+}
+
+function buildPendingPhantomHandoffCommentDelivery({ recordedDispatch, dispatchStatus, attemptedAt = null } = {}) {
+  const body = buildPhantomHandoffEscalationCommentBody({ recordedDispatch, dispatchStatus });
+  return {
+    posted: false,
+    reason: 'pending',
+    attempts: 0,
+    marker: buildPhantomHandoffCommentMarker(recordedDispatch),
+    body,
+    context: {
+      repo: recordedDispatch?.repo || null,
+      prNumber: Number(recordedDispatch?.prNumber) || null,
+      revisionRef: recordedDispatch?.headSha || null,
+      launchRequestId: recordedDispatch?.launchRequestId || null,
+      dispatchStatus: dispatchStatus || null,
+    },
+    attemptedAt: attemptedAt || null,
+  };
+}
+
+function persistPendingPhantomHandoffCommentDelivery({
+  rootDir,
+  job,
+  recordedDispatch,
+  dispatchStatus,
+  attemptedAt,
+} = {}) {
+  if (recordedDispatch?.phantomHandoffCommentDelivery) return recordedDispatch;
+  return updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({
+    ...doc,
+    phantomHandoffCommentDelivery: buildPendingPhantomHandoffCommentDelivery({
+      recordedDispatch: doc,
+      dispatchStatus,
+      attemptedAt,
+    }),
+  })) || recordedDispatch;
+}
+
+async function postPhantomHandoffEscalationComment({
+  rootDir,
+  recordedDispatch,
+  dispatchStatus,
+  execFileImpl = execFileAsync,
+  env = process.env,
+} = {}) {
+  const revisionRef = String(recordedDispatch?.headSha || '').trim();
+  if (!revisionRef) {
+    return {
+      posted: false,
+      reason: 'missing-revision-ref',
+      error: 'cannot post phantom-handoff escalation comment without a revisionRef',
+    };
+  }
+  const subjectIdentity = buildCodePrSubjectIdentity({
+    repo: recordedDispatch.repo,
+    prNumber: recordedDispatch.prNumber,
+    revisionRef,
+  });
+  const body = buildPhantomHandoffEscalationCommentBody({ recordedDispatch, dispatchStatus });
+  const adapter = createGitHubPRCommentsAdapter({
+    rootDir,
+    execFileImpl,
+    env,
+    commentTimeoutMs: PHANTOM_HANDOFF_COMMENT_TIMEOUT_MS,
+    resolveGhToken: () => ({
+      tokenEnvName: 'GITHUB_TOKEN',
+      fallbackTokenEnvNames: ['GH_TOKEN'],
+      allowGhAuthFallback: true,
+    }),
+  });
+  try {
+    const receipt = await adapter.postOperatorNotice(
+      {
+        type: 'merge-agent-phantom-handoff',
+        subjectRef: {
+          domainId: subjectIdentity.domainId,
+          subjectExternalId: subjectIdentity.subjectExternalId,
+          revisionRef: subjectIdentity.revisionRef,
+        },
+        revisionRef: subjectIdentity.revisionRef,
+        eventExternalId: buildPhantomHandoffCommentMarker(recordedDispatch),
+        observedAt: new Date().toISOString(),
+      },
+      body,
+      {
+        domainId: subjectIdentity.domainId,
+        subjectExternalId: subjectIdentity.subjectExternalId,
+        revisionRef: subjectIdentity.revisionRef,
+        round: 0,
+        kind: 'operator-notice',
+        noticeRef: buildPhantomHandoffCommentMarker(recordedDispatch),
+      }
+    );
+    return {
+      posted: true,
+      marker: buildPhantomHandoffCommentMarker(recordedDispatch),
+      commentId: receipt.deliveryExternalId,
+      body,
+    };
+  } catch (err) {
+    return {
+      posted: false,
+      reason: err?.killed === true ? 'gh-cli-timeout' : 'gh-cli-failure',
+      error: err?.message || String(err),
+      marker: buildPhantomHandoffCommentMarker(recordedDispatch),
+      body,
+    };
+  }
+}
+
+async function retryPendingPhantomHandoffComment({
+  rootDir,
+  job,
+  recordedDispatch,
+  dispatchStatus,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  logger = console,
+  now = isoNow(),
+} = {}) {
+  const delivery = recordedDispatch?.phantomHandoffCommentDelivery;
+  if (!delivery || delivery.posted === true) return recordedDispatch;
+  const previousAttempts = Number(delivery.attempts || 0);
+  const postResult = await postPhantomHandoffEscalationComment({
+    rootDir,
+    recordedDispatch,
+    dispatchStatus: dispatchStatus || delivery?.context?.dispatchStatus || null,
+    execFileImpl,
+    env,
+  });
+  if (!postResult.posted) {
+    logger?.error?.(
+      `[follow-up-merge-agent] failed to post phantom-handoff escalation comment to ${job.repo}#${job.prNumber}: ${postResult.error || postResult.reason || 'unknown'}`
+    );
+  }
+  return updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({
+    ...doc,
+    phantomHandoffCommentDelivery: {
+      ...delivery,
+      body: delivery.body || postResult.body,
+      marker: delivery.marker || postResult.marker,
+      posted: postResult.posted === true,
+      reason: postResult.posted ? null : (postResult.reason || 'unknown'),
+      error: postResult.posted ? null : (postResult.error || null),
+      commentId: postResult.commentId || delivery.commentId || null,
+      attempts: previousAttempts + 1,
+      attemptedAt: now,
+    },
+  })) || recordedDispatch;
+}
+
+async function reconcilePhantomHandoffEscalation({
+  rootDir,
+  job,
+  recordedDispatch,
+  dispatchStatus,
+  labels,
+  ghExecFileImpl = execFileAsync,
+  logger = console,
+  env = process.env,
+  now = isoNow(),
+} = {}) {
+  if (!recordedDispatch || !isWatcherAutonomousRetryableRecordedDispatchStatus(dispatchStatus)) {
+    return recordedDispatch;
+  }
+  const labelNames = normalizeLabelNames(labels);
+  if (labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL) || labelNames.includes(MERGE_AGENT_STUCK_LABEL)) {
+    return recordedDispatch;
+  }
+  if (!recordedDispatch.phantomHandoffObservedAt) {
+    const observed = updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({
+      ...doc,
+      phantomHandoffObservedAt: now,
+    })) || recordedDispatch;
+    mergeAgentLifecycleLog(logger, 'merge_agent.phantom_handoff_grace_started', {
+      repo: job.repo,
+      prNumber: job.prNumber,
+      launchRequestId: observed.launchRequestId,
+      previousStatus: dispatchStatus,
+      phantomHandoffObservedAt: now,
+      graceMinutes: _PHANTOM_HANDOFF_GRACE_MINUTES,
+      at: now,
+    });
+    return observed;
+  }
+  if (!isPhantomHandoffGraceElapsed(recordedDispatch, now)) {
+    return recordedDispatch;
+  }
+  mergeAgentLifecycleLog(logger, 'merge_agent.phantom_handoff_escalated', {
+    repo: job.repo,
+    prNumber: job.prNumber,
+    launchRequestId: recordedDispatch.launchRequestId,
+    previousStatus: dispatchStatus,
+    phantomHandoffObservedAt: recordedDispatch.phantomHandoffObservedAt,
+    graceMinutes: _PHANTOM_HANDOFF_GRACE_MINUTES,
+    at: now,
+  });
+  let latestRecordedDispatch = persistPendingPhantomHandoffCommentDelivery({
+    rootDir,
+    job,
+    recordedDispatch,
+    dispatchStatus,
+    attemptedAt: now,
+  });
+  const currentLabelNames = normalizeLabelNames(labels);
+  const stuckPresent = currentLabelNames.includes(MERGE_AGENT_STUCK_LABEL);
+  const appliedStuck = stuckPresent || await applyMergeAgentStuckLabel({
+    repo: job.repo,
+    prNumber: job.prNumber,
+    labels: currentLabelNames,
+    ghExecFileImpl,
+    logger,
+  });
+  if (!appliedStuck) return latestRecordedDispatch;
+  if (latestRecordedDispatch?.phantomHandoffCommentDelivery?.posted === false) {
+    latestRecordedDispatch = await retryPendingPhantomHandoffComment({
+      rootDir,
+      job,
+      recordedDispatch: latestRecordedDispatch,
+      dispatchStatus,
+      execFileImpl: ghExecFileImpl,
+      env,
+      logger,
+      now,
+    });
+  }
+  return latestRecordedDispatch;
 }
 
 function recordMergeAgentSkippedDispatch(rootDir, job, {
@@ -2705,11 +3075,36 @@ async function dispatchMergeAgentForPR({
         env: runtimeEnv,
       })
     : null;
+  let latestRecordedDispatch = recordedDispatch;
+  if (latestRecordedDispatch?.phantomHandoffCommentDelivery?.posted === false) {
+    let stuckReady = labelNames.includes(MERGE_AGENT_STUCK_LABEL);
+    if (!stuckReady) {
+      stuckReady = await applyMergeAgentStuckLabel({
+        repo,
+        prNumber,
+        labels: labelNames,
+        ghExecFileImpl,
+        logger,
+      });
+    }
+    if (stuckReady) {
+      latestRecordedDispatch = await retryPendingPhantomHandoffComment({
+        rootDir,
+        job,
+        recordedDispatch: latestRecordedDispatch,
+        dispatchStatus: recordedDispatchStatus?.status || latestRecordedDispatch?.phantomHandoffCommentDelivery?.context?.dispatchStatus || null,
+        execFileImpl: ghExecFileImpl,
+        env: runtimeEnv,
+        logger,
+        now,
+      });
+    }
+  }
 
   // Threaded into recordMergeAgentDispatch so the per-(PR, head SHA) re-dispatch
   // budget survives across watcher ticks.
   let watcherReDispatchCountForRecord = null;
-  if (recordedDispatch && isRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) {
+  if (latestRecordedDispatch && isRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) {
     // The merge-agent clears its own `merge-agent-dispatched` marker when it
     // hands off to a recovery worker or applies `merge-agent-stuck`. So if the
     // marker is STILL set while the dispatch reads terminal-failed, the worker
@@ -2718,7 +3113,7 @@ async function dispatchMergeAgentForPR({
     // own (recovery owns it, or operator-stuck) — recovery-first means do NOT
     // re-dispatch over that.
     const diedWithoutHandoff = labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL) || hasPendingLabelAddCleanup;
-    const priorReDispatches = Number(recordedDispatch.watcherReDispatchCount || 0);
+    const priorReDispatches = Number(latestRecordedDispatch.watcherReDispatchCount || 0);
     if (scopedMergeAgentRetryRequested) {
       // Operator escape-hatch: force a re-dispatch regardless of the bound.
       // Does not consume the auto-budget (operator intent is explicit).
@@ -2727,9 +3122,9 @@ async function dispatchMergeAgentForPR({
       mergeAgentLifecycleLog(logger, 'merge_agent.retrying_failed_dispatch', {
         repo,
         prNumber,
-        launchRequestId: recordedDispatch.launchRequestId,
+        launchRequestId: latestRecordedDispatch.launchRequestId,
         previousStatus: recordedDispatchStatus.status,
-        previousTrigger: recordedDispatch.trigger || null,
+        previousTrigger: latestRecordedDispatch.trigger || null,
         retryTrigger: MERGE_AGENT_REQUESTED_LABEL,
         reDispatchCount: priorReDispatches,
         at: now,
@@ -2745,9 +3140,9 @@ async function dispatchMergeAgentForPR({
       mergeAgentLifecycleLog(logger, 'merge_agent.watcher_owned_redispatch', {
         repo,
         prNumber,
-        launchRequestId: recordedDispatch.launchRequestId,
+        launchRequestId: latestRecordedDispatch.launchRequestId,
         previousStatus: recordedDispatchStatus.status,
-        previousTrigger: recordedDispatch.trigger || null,
+        previousTrigger: latestRecordedDispatch.trigger || null,
         reDispatchCount: priorReDispatches + 1,
         bound: _WATCHER_REDISPATCH_BOUND,
         at: now,
@@ -2760,7 +3155,7 @@ async function dispatchMergeAgentForPR({
       mergeAgentLifecycleLog(logger, 'merge_agent.watcher_redispatch_exhausted', {
         repo,
         prNumber,
-        launchRequestId: recordedDispatch.launchRequestId,
+        launchRequestId: latestRecordedDispatch.launchRequestId,
         previousStatus: recordedDispatchStatus.status,
         reDispatchCount: priorReDispatches,
         bound: _WATCHER_REDISPATCH_BOUND,
@@ -2773,10 +3168,44 @@ async function dispatchMergeAgentForPR({
         ghExecFileImpl,
         logger,
       });
+    } else if (
+      !diedWithoutHandoff
+      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)
+      && !labelNames.includes(MERGE_AGENT_STUCK_LABEL)
+    ) {
+      // Phantom handoff (#969-class orphan). The `merge-agent-dispatched` marker
+      // is cleared — which the branches above and scanStuckMergeAgentDispatches
+      // both read as "recovery owns it now" — yet the recorded dispatch is
+      // terminal-failed, the PR is still open, there is no `merge-agent-stuck`
+      // marker (a genuine baseline-repair wait carries one), and the grace
+      // window for a real recovery to merge / push a new head / mark the PR has
+      // elapsed. The handoff never established recovery (e.g. a
+      // validation-upstream-failed classification was flattened to
+      // worker_crashed, so no baseline-repair worker was ever dispatched).
+      // Without this branch the PR sits invisibly behind skip-already-dispatched
+      // forever and only a hand-merge clears it. Fail loud: mark it
+      // merge-agent-stuck so it surfaces in the operator stuck queue, and post a
+      // durable explanatory comment. We deliberately do NOT re-dispatch or
+      // merge — escalation only — so recovery-first still holds within the grace
+      // window and the CPA-08 premature-merge guard stays intact.
+      latestRecordedDispatch = await reconcilePhantomHandoffEscalation({
+        rootDir,
+        job,
+        recordedDispatch: latestRecordedDispatch,
+        dispatchStatus: recordedDispatchStatus.status,
+        labels,
+        ghExecFileImpl,
+        logger,
+        env: runtimeEnv,
+        now,
+      });
     }
   }
+  const recentDispatchesForDecision = duplicateDispatches.length === 0
+    ? []
+    : (latestRecordedDispatch ? [latestRecordedDispatch] : duplicateDispatches);
   const dispatchDecision = pickMergeAgentDispatchDetail(job, {
-    recentDispatches: duplicateDispatches,
+    recentDispatches: recentDispatchesForDecision,
     // Honor the merged runtime env so callers can opt-in per-invocation
     // without mutating process.env globally. This keeps the flag consistent
     // with the rest of dispatchMergeAgentForPR (agent-os detection, parent
@@ -2785,30 +3214,30 @@ async function dispatchMergeAgentForPR({
   });
   const { decision, trigger } = dispatchDecision;
   if (decision !== 'dispatch') {
-    if (decision === 'skip-already-dispatched' && recordedDispatch?.trigger) {
+    if (decision === 'skip-already-dispatched' && latestRecordedDispatch?.trigger) {
       const labelRemoval = await removeConsumedTriggerLabel({
         repo,
         prNumber,
         labels,
-        trigger: recordedDispatch.trigger,
+        trigger: latestRecordedDispatch.trigger,
         ghExecFileImpl,
         now,
       });
       if (labelRemoval.attempted) {
         updateMergeAgentDispatchLabelRemoval(rootDir, job, {
-          recordedDispatch,
-          trigger: recordedDispatch.trigger,
+          recordedDispatch: latestRecordedDispatch,
+          trigger: latestRecordedDispatch.trigger,
           attemptedAt: labelRemoval.labelRemovalAttempt.attemptedAt,
           removed: labelRemoval.labelRemovalAttempt.removed,
           error: labelRemoval.labelRemovalAttempt.error,
         });
       } else if (
-        recordedDispatch.labelRemoval?.removed !== true
-        && !normalizeLabelNames(labels).includes(recordedDispatch.trigger)
+        latestRecordedDispatch.labelRemoval?.removed !== true
+        && !normalizeLabelNames(labels).includes(latestRecordedDispatch.trigger)
       ) {
         updateMergeAgentDispatchLabelRemoval(rootDir, job, {
-          recordedDispatch,
-          trigger: recordedDispatch.trigger,
+          recordedDispatch: latestRecordedDispatch,
+          trigger: latestRecordedDispatch.trigger,
           attemptedAt: now,
           removed: true,
           observedExternally: true,
@@ -2840,10 +3269,10 @@ async function dispatchMergeAgentForPR({
       //     probe failure falls through to refusal-count-only
       //     classification (the OSS-safe behavior).
       const hqRootForAudit = resolveHqRoot(runtimeEnv);
-      const stuckDetail = describeStaleDispatch(recordedDispatch, {
+      const stuckDetail = describeStaleDispatch(latestRecordedDispatch, {
         hqRoot: hqRootForAudit || null,
         now: Date.parse(String(now)) || Date.now(),
-        dispatchStateProbe: hqPath && _isValidLrqId(recordedDispatch?.launchRequestId)
+        dispatchStateProbe: hqPath && _isValidLrqId(latestRecordedDispatch?.launchRequestId)
           ? (lrqArg) => _probeDispatchStatusViaHq({
               hqPath,
               lrq: lrqArg,
@@ -2857,9 +3286,9 @@ async function dispatchMergeAgentForPR({
         mergeAgentLifecycleLog(logger, 'merge_agent.stuck_pre_spawn', {
           repo,
           prNumber,
-          launchRequestId: recordedDispatch.launchRequestId,
-          dispatchedAt: recordedDispatch.dispatchedAt,
-          trigger: recordedDispatch.trigger,
+          launchRequestId: latestRecordedDispatch.launchRequestId,
+          dispatchedAt: latestRecordedDispatch.dispatchedAt,
+          trigger: latestRecordedDispatch.trigger,
           stuckForMinutes: stuckDetail.stuckForMinutes,
           refusalCount: stuckDetail.refusalCount,
           primaryReason: stuckDetail.primaryReason,
@@ -2868,7 +3297,7 @@ async function dispatchMergeAgentForPR({
       }
       return {
         decision,
-        trigger: recordedDispatch.trigger,
+        trigger: latestRecordedDispatch.trigger,
         labelRemovalRetried: labelRemoval.attempted,
         operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
         mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
@@ -4233,6 +4662,7 @@ export {
   pickMergeAgentDispatchDetail,
   pollFastMergeQueue,
   processFastMergePR,
+  reconcileProactivePhantomHandoffs,
   lookupOriginalWorkerRunStatus,
   prepareOriginalWorkerForMergeAgent,
   resolveFastMergePerPollCap,

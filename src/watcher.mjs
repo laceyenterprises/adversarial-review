@@ -77,6 +77,7 @@ import {
   listMergeAgentLifecycleCleanups,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
   pollFastMergeQueue,
+  reconcileProactivePhantomHandoffs,
   resolveFastMergePerPollCap,
   scanStuckMergeAgentDispatches,
   updateMergeAgentLifecycleCleanup,
@@ -2674,6 +2675,7 @@ async function pollOnce(
 
     let subjectRefs;
     const activeMergeAgentPRs = [];
+    const currentRepoPRs = [];
     try {
       subjectRefs = await subjectAdapter.discoverSubjects();
     } catch (err) {
@@ -2698,6 +2700,14 @@ async function pollOnce(
       const prLabelNames = (Array.isArray(subject.labels) ? subject.labels : [])
         .map((l) => (typeof l === 'string' ? l : l?.name || ''))
         .filter(Boolean);
+      if (subject.headSha) {
+        currentRepoPRs.push({
+          repo: repoPath,
+          prNumber,
+          headSha: subject.headSha,
+          labels: subject.labels,
+        });
+      }
       if (prLabelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) {
         activeMergeAgentPRs.push({ repo: repoPath, prNumber, headSha: subject.headSha || null });
       }
@@ -3431,6 +3441,28 @@ async function pollOnce(
     } catch (scanErr) {
       console.error(
         `[watcher] proactive-stuck-scan raised for ${repoPath}: ${scanErr?.message || scanErr}`
+      );
+    }
+    try {
+      const phantomResult = await reconcileProactivePhantomHandoffs({
+        rootDir: ROOT,
+        repo: repoPath,
+        currentPRs: currentRepoPRs,
+        runtimeEnv: process.env,
+        ghExecFileImpl: execFileAsync,
+        execFileImpl: execFileAsync,
+      });
+      if (phantomResult.inspected > 0) {
+        console.log(
+          `[watcher] proactive-phantom-handoff ${repoPath}: `
+          + `inspected=${phantomResult.inspected} `
+          + `grace_started=${phantomResult.graceStarted} `
+          + `escalated=${phantomResult.escalated}`
+        );
+      }
+    } catch (scanErr) {
+      console.error(
+        `[watcher] proactive-phantom-handoff raised for ${repoPath}: ${scanErr?.message || scanErr}`
       );
     }
   }

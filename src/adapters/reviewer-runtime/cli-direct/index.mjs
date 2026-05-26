@@ -222,16 +222,18 @@ function buildReviewerProcessArgs(subjectContext = {}) {
   };
 }
 
-function isCodexModel(model) {
-  return String(model || '').toLowerCase().includes('codex');
+function resolveProgressTimeoutForModel(model, env) {
+  // cli-direct reviewer processes are non-streaming: Claude `--print` and
+  // Codex `exec --json --output-last-message` can both spend an entire review
+  // turn without appending to stdout/stderr. The hard reviewer timeout still
+  // bounds runtime; the progress watchdog only kills quiet-but-healthy passes.
+  void model;
+  void env;
+  return 0;
 }
 
-function resolveProgressTimeoutForModel(model, env) {
-  // Codex can spend a whole turn reasoning without emitting stdout. The hard
-  // reviewer timeout still bounds runtime; the progress watchdog only kills
-  // quiet-but-healthy Codex passes.
-  if (isCodexModel(model)) return 0;
-  return resolveProgressTimeoutMs(env);
+function isCodexModel(model) {
+  return String(model || '').toLowerCase().includes('codex');
 }
 
 function resolveCodexReviewerEnv(reviewerEnv) {

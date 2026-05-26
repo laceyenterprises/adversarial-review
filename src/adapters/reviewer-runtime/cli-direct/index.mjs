@@ -3,7 +3,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
+import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';

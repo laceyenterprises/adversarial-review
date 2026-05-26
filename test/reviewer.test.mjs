@@ -440,7 +440,10 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
     outputPath,
     prompt,
     model: 'gpt-5.4',
-    modelProvider: 'openai',
+    configOverrides: [
+      { key: 'model_provider', value: 'openai' },
+      { key: 'model_reasoning_effort', value: 'high' },
+    ],
     env: { HOME: '/tmp/home', PATH: process.env.PATH },
     cwd: '/tmp/repo',
     timeout: 12_345,
@@ -454,7 +457,15 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
   assert.deepEqual(calls, [
     {
       command: '/usr/local/bin/codex',
-      args: buildCodexReviewArgs({ outputPath, prompt, model: 'gpt-5.4', modelProvider: 'openai' }),
+      args: buildCodexReviewArgs({
+        outputPath,
+        prompt,
+        model: 'gpt-5.4',
+        configOverrides: [
+          { key: 'model_provider', value: 'openai' },
+          { key: 'model_reasoning_effort', value: 'high' },
+        ],
+      }),
       options: {
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
         cwd: '/tmp/repo',
@@ -473,6 +484,8 @@ test('Codex review invocation passes prompt as argv in cli-direct shape', async 
     'gpt-5.4',
     '--config',
     'model_provider="openai"',
+    '--config',
+    'model_reasoning_effort="high"',
     '--output-last-message',
     outputPath,
     '--',
@@ -494,7 +507,51 @@ test('resolveCodexExecOverrides preserves top-level model settings when user con
     assert.deepEqual(overrides, {
       model: 'gpt-5.4',
       modelProvider: 'openai',
+      configOverrides: [
+        { key: 'model_provider', value: 'openai' },
+      ],
     });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveCodexExecOverrides preserves allowed scalar model tuning without forwarding project config', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'codex-config-inline-comments-'));
+  const codexHome = join(rootDir, '.codex');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(
+    join(codexHome, 'config.toml'),
+    [
+      'model = "gpt-5.5" # reviewer model',
+      'model_provider = "openai" # safe scalar',
+      'model_reasoning_effort = "high" # keep high-effort reviews',
+      '[projects."/tmp/example"]',
+      'trust_level = "trusted"',
+      'model_reasoning_effort = "low"',
+      '',
+    ].join('\n'),
+  );
+
+  try {
+    const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir }, () => resolveCodexExecOverrides());
+    assert.deepEqual(overrides, {
+      model: 'gpt-5.5',
+      modelProvider: 'openai',
+      configOverrides: [
+        { key: 'model_provider', value: 'openai' },
+        { key: 'model_reasoning_effort', value: 'high' },
+      ],
+    });
+    assert.deepEqual(
+      buildCodexReviewArgs({
+        outputPath: '/tmp/out.md',
+        prompt: 'review',
+        model: overrides.model,
+        configOverrides: overrides.configOverrides,
+      }).filter((value, index, args) => args[index - 1] === '--config'),
+      ['model_provider="openai"', 'model_reasoning_effort="high"'],
+    );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

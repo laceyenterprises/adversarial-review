@@ -739,20 +739,57 @@ function buildClaudeReviewArgs(prompt) {
   return ['--print', '--permission-mode', 'bypassPermissions', prompt];
 }
 
+const CODEX_EXEC_CONFIG_FORWARD_KEYS = [
+  'model',
+  'model_provider',
+  'model_reasoning_effort',
+];
+
+function stripTomlInlineComment(rawValue) {
+  const text = String(rawValue || '');
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote === '"' && char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if ((char === '"' || char === '\'') && !quote) {
+      quote = char;
+      continue;
+    }
+    if (char === quote) {
+      quote = null;
+      continue;
+    }
+    if (char === '#' && !quote) return text.slice(0, index);
+  }
+  return text;
+}
+
 function parseCodexConfigLiteralString(rawValue) {
   const value = String(rawValue || '').trim();
   if (!value) return null;
   const quote = value[0];
   if ((quote === '"' || quote === '\'') && value.endsWith(quote)) {
-    return value.slice(1, -1);
+    const unquoted = value.slice(1, -1);
+    if (quote === '"') return unquoted.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
+    return unquoted;
   }
   return value;
 }
 
-function readCodexConfigTomlValue(key, {
+function readCodexConfigTopLevelValues(keys, {
   configPath = join(process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex'), 'config.toml'),
 } = {}) {
-  if (!existsSync(configPath)) return null;
+  const keySet = new Set(keys);
+  const values = {};
+  if (!existsSync(configPath)) return values;
   let currentSection = null;
   for (const rawLine of readFileSync(configPath, 'utf8').split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -763,22 +800,37 @@ function readCodexConfigTomlValue(key, {
       continue;
     }
     if (currentSection) continue;
-    const match = rawLine.match(new RegExp(`^\\s*${key}\\s*=\\s*(.+?)\\s*$`));
-    if (match) return parseCodexConfigLiteralString(match[1]);
+    const match = rawLine.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$/);
+    if (!match || !keySet.has(match[1])) continue;
+    const parsed = parseCodexConfigLiteralString(stripTomlInlineComment(match[2]));
+    if (parsed !== null) values[match[1]] = parsed;
   }
-  return null;
+  return values;
 }
 
 function resolveCodexExecOverrides() {
-  const model = readCodexConfigTomlValue('model');
-  const modelProvider = readCodexConfigTomlValue('model_provider');
+  const values = readCodexConfigTopLevelValues(CODEX_EXEC_CONFIG_FORWARD_KEYS);
+  const configOverrides = Object.entries(values)
+    .filter(([key]) => key !== 'model')
+    .map(([key, value]) => ({ key, value }));
   return {
-    model: model || null,
-    modelProvider: modelProvider || null,
+    model: values.model || null,
+    modelProvider: values.model_provider || null,
+    configOverrides,
   };
 }
 
-function buildCodexReviewArgs({ outputPath, prompt, model = null, modelProvider = null }) {
+function formatCodexConfigOverride({ key, value }) {
+  return `${key}="${String(value).replaceAll('"', '\\"')}"`;
+}
+
+function buildCodexReviewArgs({
+  outputPath,
+  prompt,
+  model = null,
+  modelProvider = null,
+  configOverrides = null,
+}) {
   const args = [
     'exec',
     '--ignore-user-config',
@@ -787,7 +839,13 @@ function buildCodexReviewArgs({ outputPath, prompt, model = null, modelProvider 
     '--json',
   ];
   if (model) args.push('--model', model);
-  if (modelProvider) args.push('--config', `model_provider="${String(modelProvider).replaceAll('"', '\\"')}"`);
+  const overrides = Array.isArray(configOverrides)
+    ? configOverrides
+    : (modelProvider ? [{ key: 'model_provider', value: modelProvider }] : []);
+  for (const override of overrides) {
+    if (!override?.key) continue;
+    args.push('--config', formatCodexConfigOverride(override));
+  }
   args.push(
     '--output-last-message',
     outputPath,
@@ -833,6 +891,7 @@ async function spawnCodexReview({
   prompt,
   model = null,
   modelProvider = null,
+  configOverrides = null,
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
@@ -841,7 +900,7 @@ async function spawnCodexReview({
 }) {
   return spawnCapturedImpl(
     codexCli,
-    buildCodexReviewArgs({ outputPath, prompt, model, modelProvider }),
+    buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides }),
     {
       env,
       cwd,
@@ -893,6 +952,7 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
         prompt,
         model: codexExecOverrides.model,
         modelProvider: codexExecOverrides.modelProvider,
+        configOverrides: codexExecOverrides.configOverrides,
         env,
         cwd: process.cwd(),
         timeout: resolveReviewerTimeoutMs(env),

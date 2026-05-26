@@ -154,6 +154,9 @@ async function stopFollowUpJobWithWorkerCancel({
   requestedBy = process.env.USER || process.env.LOGNAME || 'operator',
   signal = 'SIGTERM',
   cancelWorker = true,
+  requireWorkerExit = false,
+  waitMs = DEFAULT_WORKER_EXIT_WAIT_MS,
+  pollMs = DEFAULT_WORKER_EXIT_POLL_MS,
   cancelFollowUpWorkerImpl = cancelFollowUpWorker,
   waitForWorkerExitImpl = waitForSignalledWorkerExit,
 } = {}) {
@@ -185,7 +188,13 @@ async function stopFollowUpJobWithWorkerCancel({
     }
 
     if (cancellation.signalled) {
-      workerExit = await waitForWorkerExitImpl(cancellation);
+      workerExit = await waitForWorkerExitImpl(cancellation, { waitMs, pollMs });
+    }
+    if (requireWorkerExit && workerExit?.checked && workerExit.exited === false) {
+      throw new Error(
+        `Refusing to stop in-progress follow-up job ${job.jobId}: worker process group ` +
+        `${workerExit.target?.id || 'unknown'} remained alive after ${waitMs}ms.`
+      );
     }
     if (!cancellation.signalled && !SAFE_UNSIGNALLED_STOP_ERRORS.has(cancellation.error)) {
       throw new Error(buildCancellationRefusalMessage(job, cancellation));

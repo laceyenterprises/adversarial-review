@@ -3,7 +3,7 @@
  * `reconcileReviewerSessions` (the `reviewer_reattach_alive` branch).
  *
  * A separate hard-shutdown command owns the intentional cancel-first path.
- * See `projects/daemon-bounce-safety/SPEC.md` §6a for the contract.
+ * See `docs/SPEC-adversarial-review-auto-remediation.md` for the contract.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,7 +13,9 @@ import path from 'node:path';
 import {
   shouldPreserveReviewersOnSigterm,
   readWatcherDrainState,
+  shouldReconcileReviewerSession,
 } from '../src/watcher.mjs';
+import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 
 test('preserves reviewers when drain marker is active', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-sigterm-drain-'));
@@ -74,4 +76,31 @@ test('shouldPreserveReviewersOnSigterm tolerates missing or partial drain state'
   assert.equal(shouldPreserveReviewersOnSigterm({}), true);
   assert.equal(shouldPreserveReviewersOnSigterm({ active: false }), true);
   assert.equal(shouldPreserveReviewersOnSigterm({ active: true }), true);
+});
+
+test('poll reconcile includes adopted reviewer sessions before timeout expiry', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-adopted-reviewer-'));
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'adopted-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      adoptedAfterBounce: true,
+      spawnedAt: '2026-05-26T10:00:00.000Z',
+      lastHeartbeatAt: '2026-05-26T10:01:00.000Z',
+    });
+
+    assert.equal(shouldReconcileReviewerSession(
+      {
+        reviewer_session_uuid: 'adopted-session',
+        reviewer_started_at: '2026-05-26T10:00:00.000Z',
+        reviewer_timeout_ms: 60 * 60 * 1000,
+      },
+      new Date('2026-05-26T10:05:00.000Z'),
+      { rootDir },
+    ), true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

@@ -22,7 +22,6 @@ const SUPPORTED_OPTIONS = new Set([
   'stdoutPath',
   'timeout',
 ]);
-const activeChildren = new Set();
 
 function tailText(value, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
   const text = String(value || '');
@@ -133,7 +132,6 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         stderrFd === null ? 'pipe' : stderrFd,
       ],
     });
-    activeChildren.add(child);
 
     let stdout = '';
     let stderr = '';
@@ -163,7 +161,6 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         signal.removeEventListener('abort', onAbort);
         abortListenerAttached = false;
       }
-      activeChildren.delete(child);
       if (stdoutFd !== null) closeSync(stdoutFd);
       if (stderrFd !== null) closeSync(stderrFd);
     };

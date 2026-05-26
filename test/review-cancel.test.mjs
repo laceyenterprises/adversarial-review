@@ -108,6 +108,38 @@ test('cancelActiveReview refuses non-reviewing rows', async () => {
   );
 });
 
+test('cancelActiveReview restores query_only on caller-owned database handles', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewingRow(rootDir, { prNumber: 150, reviewerPgid: 2469 });
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    assert.equal(db.pragma('query_only', { simple: true }), 0);
+
+    const result = await cancelActiveReview({
+      rootDir,
+      db,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 150,
+      requestedAt: '2026-05-24T15:04:00.000Z',
+      execFileImpl: async () => ({ stdout: `${new Date('2026-05-24T15:01:00.000Z').toString()}\n` }),
+      processKill: (pid, signal) => {
+        if (signal === 0 && pid === -2469) return true;
+        if (signal === 'SIGTERM' && pid === -2469) return true;
+        throw new Error(`unexpected signal ${signal} ${pid}`);
+      },
+    });
+
+    assert.equal(result.signalled, true);
+    assert.equal(db.pragma('query_only', { simple: true }), 0);
+    db.prepare(
+      "UPDATE reviewed_prs SET failure_message = ? WHERE repo = ? AND pr_number = ?"
+    ).run('caller can still write', 'laceyenterprises/adversarial-review', 150);
+  } finally {
+    db.close();
+  }
+});
+
 test('sendReviewerSignal reports missing process groups', async () => {
   const result = await sendReviewerSignal({
     pgid: 1357,

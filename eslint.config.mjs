@@ -1,17 +1,4 @@
-const nodeGlobals = {
-  AbortController: 'readonly',
-  Buffer: 'readonly',
-  clearInterval: 'readonly',
-  clearTimeout: 'readonly',
-  console: 'readonly',
-  fetch: 'readonly',
-  globalThis: 'readonly',
-  process: 'readonly',
-  setImmediate: 'readonly',
-  setInterval: 'readonly',
-  setTimeout: 'readonly',
-  URL: 'readonly',
-};
+import globals from 'globals';
 
 export default [
   {
@@ -19,7 +6,11 @@ export default [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
-      globals: nodeGlobals,
+      globals: {
+        ...globals.nodeBuiltin,
+        ...globals.node,
+        ...globals.es2022,
+      },
     },
     rules: {
       'no-undef': 'error',

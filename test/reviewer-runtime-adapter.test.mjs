@@ -1431,6 +1431,7 @@ test('cli-direct reattach adopts an alive process group whose identity matches t
     assert.equal(reattached.failureClass, null);
     const finalRecord = readReviewerRunRecord(rootDir, 'alive-reattach-session');
     assert.equal(finalRecord.state, 'heartbeating');
+    assert.equal(finalRecord.adoptedAfterBounce, true);
     try {
       process.kill(-record.pgid, 'SIGKILL');
     } catch (err) {
@@ -1438,6 +1439,41 @@ test('cli-direct reattach adopts an alive process group whose identity matches t
     }
     const original = await run;
     assert.equal(original.ok, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct reattach adopts a cancelled record only when its process identity still matches', async () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'cancelled-live-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'cancelled',
+      pgid: 4242,
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      lastHeartbeatAt: '2026-05-11T20:00:30.000Z',
+      reattachToken: 'cancelled-live-session',
+    });
+
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      processKillImpl: (pid, signal) => {
+        if (pid === -4242 && signal === 0) return true;
+        return process.kill(pid, signal);
+      },
+      execFileImpl: async () => ({ stdout: `${new Date('2026-05-11T20:00:00.000Z').toString()}\n` }),
+      now: () => '2026-05-11T20:01:00.000Z',
+    });
+
+    const reattached = await adapter.reattach(readReviewerRunRecord(rootDir, 'cancelled-live-session'));
+
+    assert.equal(reattached.ok, true);
+    const finalRecord = readReviewerRunRecord(rootDir, 'cancelled-live-session');
+    assert.equal(finalRecord.state, 'heartbeating');
+    assert.equal(finalRecord.adoptedAfterBounce, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -2305,7 +2341,9 @@ test('bounce recovery adopts active run records and preserves reviewing claims',
     const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE reviewer_session_uuid = ?').get('bounce-session');
     assert.equal(row.review_status, 'reviewing');
     assert.equal(row.failure_message, null);
-    assert.equal(readReviewerRunRecord(rootDir, 'bounce-session').state, 'heartbeating');
+    const record = readReviewerRunRecord(rootDir, 'bounce-session');
+    assert.equal(record.state, 'heartbeating');
+    assert.equal(record.adoptedAfterBounce, true);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

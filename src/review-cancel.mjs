@@ -153,6 +153,9 @@ async function cancelActiveReview({
   db: dbOverride = null,
 } = {}) {
   const db = dbOverride || openReviewStateDb(rootDir);
+  const restoreQueryOnly = dbOverride
+    ? db.pragma('query_only', { simple: true })
+    : null;
   try {
     db.pragma('query_only = 1');
     const row = getReviewRow(db, { repo, prNumber });
@@ -198,6 +201,9 @@ async function cancelActiveReview({
       receiptPath,
     };
   } finally {
+    if (dbOverride) {
+      db.pragma(`query_only = ${restoreQueryOnly ? 1 : 0}`);
+    }
     if (!dbOverride) {
       db.close();
     }

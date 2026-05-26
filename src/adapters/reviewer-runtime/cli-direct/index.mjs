@@ -587,23 +587,6 @@ function createCliDirectReviewerRuntimeAdapter({
   async function reattach(record) {
     const normalized = record || {};
     const spawnedAt = normalized.spawnedAt || now();
-    if (normalized.state === 'cancelled') {
-      const tails = normalized.sessionUuid ? readSideChannelTailsBestEffort(rootDir, normalized.sessionUuid) : {};
-      updateReviewerRunRecord(rootDir, normalized, {
-        state: 'failed',
-        lastHeartbeatAt: now(),
-      });
-      return emptyResult({
-        ok: false,
-        spawnedAt,
-        failureClass: 'daemon-bounce',
-        stderrTail: tails.stderrTail || 'cli-direct reviewer run was previously cancelled before startup recovery',
-        stdoutTail: tails.stdoutTail || null,
-        pgid: Number.isInteger(normalized.pgid) ? normalized.pgid : null,
-        reattachToken: normalized.reattachToken || normalized.sessionUuid || null,
-        error: 'cli-direct reviewer run was previously cancelled before startup recovery',
-      });
-    }
     const pgid = Number.isInteger(normalized.pgid) ? normalized.pgid : null;
     if (normalized.sessionUuid && pgid && isPgidAlive(pgid, processKillImpl)) {
       const tails = readSideChannelTailsBestEffort(rootDir, normalized.sessionUuid);
@@ -618,6 +601,7 @@ function createCliDirectReviewerRuntimeAdapter({
       if (identity.match) {
         const adoptedRecord = updateReviewerRunRecord(rootDir, normalized, {
           state: 'heartbeating',
+          adoptedAfterBounce: true,
           lastHeartbeatAt: now(),
         });
         logger.log?.(

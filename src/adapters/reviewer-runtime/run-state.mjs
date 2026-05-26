@@ -48,6 +48,7 @@ function normalizeReviewerRunRecord(record = {}) {
     spawnedAt: record.spawnedAt ? String(record.spawnedAt) : now,
     lastHeartbeatAt: record.lastHeartbeatAt ? String(record.lastHeartbeatAt) : null,
     reattachToken: record.reattachToken ? String(record.reattachToken) : null,
+    adoptedAfterBounce: record.adoptedAfterBounce === true,
     subjectContext: record.subjectContext || null,
   };
 }

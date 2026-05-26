@@ -49,7 +49,10 @@ import {
   createReviewerRuntimeAdapterForDomain,
   recoverReviewerRunRecords,
 } from './adapters/reviewer-runtime/index.mjs';
-import { settleReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
+import {
+  readReviewerRunRecord,
+  settleReviewerRunRecord,
+} from './adapters/reviewer-runtime/run-state.mjs';
 import {
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
@@ -1475,6 +1478,28 @@ function shouldReconcileStaleReviewerSession(row, now, {
   return (startedAtMs + effectiveTimeoutMs) <= now.getTime();
 }
 
+function shouldReconcileAdoptedReviewerSession(row, {
+  rootDir = ROOT,
+  log = console,
+} = {}) {
+  if (!row?.reviewer_session_uuid) return false;
+  try {
+    const record = readReviewerRunRecord(rootDir, row.reviewer_session_uuid);
+    return record?.adoptedAfterBounce === true;
+  } catch (err) {
+    log.warn?.(
+      `[watcher] reviewer_run_state_read_failed session=${row.reviewer_session_uuid} ` +
+      `error=${err?.message || err}`
+    );
+    return false;
+  }
+}
+
+function shouldReconcileReviewerSession(row, now, options = {}) {
+  return shouldReconcileStaleReviewerSession(row, now, options) ||
+    shouldReconcileAdoptedReviewerSession(row, options);
+}
+
 function settleDurableReviewerRunState({
   rootDir = ROOT,
   sessionUuid,
@@ -2572,7 +2597,7 @@ async function pollOnce(
     db,
     octokit,
     maxRows: resolveStaleReviewerReconcilePerPoll(),
-    shouldReconcileRow: (row, now) => shouldReconcileStaleReviewerSession(row, now),
+    shouldReconcileRow: (row, now) => shouldReconcileReviewerSession(row, now),
     onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
       sessionUuid: row?.reviewer_session_uuid,
       state,
@@ -3562,6 +3587,8 @@ export {
   shouldDeferReviewForActiveFollowUp,
   shouldRetryMergeAgentLifecycleCleanup,
   shouldPreserveReviewersOnSigterm,
+  shouldReconcileAdoptedReviewerSession,
+  shouldReconcileReviewerSession,
   shouldReconcileStaleReviewerSession,
   STUCK_DISPATCH_ALERT_DEBOUNCE_MS,
   STUCK_DISPATCH_ALERT_STATE_DIR,

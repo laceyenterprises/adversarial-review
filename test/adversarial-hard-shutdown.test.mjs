@@ -69,7 +69,9 @@ test('hard shutdown cancels active reviews and follow-up workers before returnin
         '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-a.json',
         '/tmp/adversarial-review-hard-shutdown-test/data/follow-up-jobs/in-progress/job-b.json',
       ],
-      stopFollowUpJobImpl: async ({ jobPath, reason, signal, cancelWorker }) => {
+      stopFollowUpJobImpl: async ({ jobPath, reason, signal, cancelWorker, requireWorkerExit, waitMs }) => {
+        assert.equal(requireWorkerExit, true);
+        assert.equal(waitMs, 25);
         events.push(`stop-follow-up:${jobPath}:${signal}:${cancelWorker}:${reason}`);
         return {
           jobPath: jobPath.replace('/in-progress/', '/stopped/'),

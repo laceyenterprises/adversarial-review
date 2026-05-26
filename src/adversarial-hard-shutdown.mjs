@@ -162,6 +162,8 @@ async function hardShutdownInFlightWorkers({
           reason: `Hard shutdown: ${reason}`,
           signal,
           cancelWorker: true,
+          requireWorkerExit: true,
+          waitMs,
         });
         followUps.push({
           jobPath,

@@ -389,9 +389,9 @@ function normalizeOperationalBlockers(reply, { expectedJob = null } = {}) {
 // empty or contains only the `- None.` sentinel. Returns one entry per
 // finding otherwise, with extracted `file` / `lines` / `problem` /
 // `whyItMatters` / `recommendedFix` fields preserved for diagnostics.
-function parseBlockingFindingsSection(reviewBody) {
+function parseReviewFindingsSection(reviewBody, sectionPattern) {
   if (typeof reviewBody !== 'string' || !reviewBody.trim()) return null;
-  const match = reviewBody.match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  const match = reviewBody.match(sectionPattern);
   if (!match) return null;
   const section = match[1].trim();
   if (!section) return [];
@@ -530,6 +530,14 @@ function parseBlockingFindingsSection(reviewBody) {
   return findings;
 }
 
+function parseBlockingFindingsSection(reviewBody) {
+  return parseReviewFindingsSection(reviewBody, /##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+}
+
+function parseNonBlockingFindingsSection(reviewBody) {
+  return parseReviewFindingsSection(reviewBody, /##\s+Non[-\s]+blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+}
+
 function normalizeCoverageTitle(title) {
   return String(title ?? '')
     .normalize('NFKC')
@@ -590,6 +598,16 @@ function validateBlockingCoverage(reply, expectedJob) {
   const findings = parseBlockingFindingsSection(expectedJob.reviewBody);
   if (findings === null || findings.length === 0) return;
   const expected = findings.length;
+  const nonBlockingTitleKeys = new Set(
+    (parseNonBlockingFindingsSection(expectedJob.reviewBody) || [])
+      .map((finding) => normalizeCoverageTitle(finding?.title))
+      .filter(Boolean)
+  );
+  const blockingTitleKeys = new Set(
+    findings
+      .map((finding) => normalizeCoverageTitle(finding?.title))
+      .filter(Boolean)
+  );
 
   const addressed = Array.isArray(reply.addressed) ? reply.addressed : [];
   const pushback = Array.isArray(reply.pushback) ? reply.pushback : [];
@@ -607,21 +625,27 @@ function validateBlockingCoverage(reply, expectedJob) {
     return;
   }
   const total = addressed.length + pushback.length + blockers.length;
-
-  if (total !== expected) {
-    throw new Error(
-      `Remediation reply does not account for every blocking finding: ` +
-        `review has ${expected} blocking issue(s), reply records ${total} ` +
-        `(addressed=${addressed.length}, pushback=${pushback.length}, blockers=${blockers.length}). ` +
-        `Each blocking issue must appear exactly once across addressed[], pushback[], or blockers[].`
-    );
-  }
-
   const actualEntries = [
     ...addressed.map((entry, index) => ({ field: 'addressed', index, entry })),
     ...pushback.map((entry, index) => ({ field: 'pushback', index, entry })),
     ...blockers.map((entry, index) => ({ field: 'blockers', index, entry })),
   ];
+  const nonBlockingExtras = addressed
+    .map((entry, index) => ({ field: 'addressed', index, entry }))
+    .filter(({ entry }) => {
+      const key = normalizeCoverageTitle(entry?.title);
+      return key && nonBlockingTitleKeys.has(key) && !blockingTitleKeys.has(key);
+    });
+  const blockingEntryTotal = total - nonBlockingExtras.length;
+
+  if (blockingEntryTotal !== expected) {
+    throw new Error(
+      `Remediation reply does not account for every blocking finding: ` +
+        `review has ${expected} blocking issue(s), reply records ${blockingEntryTotal} ` +
+        `(addressed=${addressed.length}, pushback=${pushback.length}, blockers=${blockers.length}). ` +
+        `Each blocking issue must appear exactly once across addressed[], pushback[], or blockers[].`
+    );
+  }
 
   const expectedTitleEntries = findings
     .map((finding) => ({
@@ -669,17 +693,29 @@ function validateBlockingCoverage(reply, expectedJob) {
 
   const missing = [];
   const extra = [];
+  const misplacedNonBlocking = new Set();
   const allExpectedFindingsTitled = titledExpected.length === findings.length;
+  for (const { field, entry } of actualEntries) {
+    const key = normalizeCoverageTitle(entry?.title);
+    if (!key) continue;
+    if (field !== 'addressed' && nonBlockingTitleKeys.has(key) && !blockingTitleKeys.has(key)) {
+      misplacedNonBlocking.add(actualDisplay.get(key) || String(entry?.title || key).trim() || key);
+    }
+  }
   for (const [key, count] of expectedCounts.entries()) {
     const actual = actualCounts.get(key) || 0;
     if (actual < count) missing.push(expectedDisplay.get(key) || key);
   }
   for (const [key, count] of actualCounts.entries()) {
     const expectedCount = expectedCounts.get(key) || 0;
-    if (expectedCount === 0 || (allExpectedFindingsTitled && count > expectedCount)) {
+    if (
+      (expectedCount === 0 && !nonBlockingTitleKeys.has(key))
+      || (allExpectedFindingsTitled && count > expectedCount && !nonBlockingTitleKeys.has(key))
+    ) {
       extra.push(actualDisplay.get(key) || key);
     }
   }
+  for (const title of misplacedNonBlocking) extra.push(title);
   if (missing.length || extra.length) {
     throw new Error(
       `Remediation reply titles must match the blocking review bold bullet titles, H3 headings, or legacy Title fields exactly. ` +

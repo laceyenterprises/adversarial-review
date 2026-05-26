@@ -57,7 +57,10 @@ The durable remediation reply schema is the public contract between the worker,
 the validator, reconciliation, and the PR-comment renderer. `schemaVersion: 1`
 supports four accountability lanes:
 
-- `addressed[]` for blocking review findings that were fixed.
+- `addressed[]` for blocking review findings that were fixed. Workers may also
+  include additionally-fixed non-blocking findings here when they copy the
+  exact title from the review's `## Non-blocking issues` section; those extras
+  render publicly but do not satisfy blocking-finding coverage.
 - `pushback[]` for blocking review findings the worker deliberately left unchanged.
 - `blockers[]` for blocking review findings that hard-stop on required human input.
 - `operationalBlockers[]` for git/process failures that are not themselves review
@@ -91,9 +94,12 @@ stop, not as a missing-per-finding-accountability error.
 
 Validation keeps three invariants load-bearing:
 
-- Per-finding coverage is enforced only across actual review findings
-  (`addressed[]`, `pushback[]`, `blockers[]`), with operational-only early exits
-  exempt because no review finding was processed yet.
+- Per-finding coverage is enforced only across blocking review findings
+  recorded in `addressed[]`, `pushback[]`, and `blockers[]`, with
+  operational-only early exits exempt because no review finding was processed
+  yet. `addressed[]` entries whose titles match only the review's
+  `## Non-blocking issues` section are allowed as extras and are excluded from
+  the blocking-coverage count.
 - Cross-field contradictions (`reReview.requested=true` while blockers remain,
   `outcome="blocked"` without blockers, `outcome="completed"` with blockers)
   apply only to structured-schema replies so legacy persisted string-blocker
@@ -245,6 +251,8 @@ The watcher's reviewer subprocess lifecycle is split across two durable ledgers:
 - `data/reviewer-runs/<sessionUuid>.json` keeps the runtime session record for that launch, including the adapter runtime id, process-group metadata, and the most recent lifecycle state observed by the runtime adapter.
 
 `src/adapters/reviewer-runtime/cli-direct/index.mjs` is the canonical OAuth-first runtime today. When it advertises `oauthStripEnforced: true`, it must strip the full canonical OAuth fallback env set before spawning the reviewer subprocess: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `AWS_BEARER_TOKEN_BEDROCK`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, and `GEMINI_API_KEY`. Partial stripping is a contract violation because downstream code trusts the adapter capability bit.
+
+The cli-direct reviewer subprocesses are non-streaming. Claude `--print` and Codex `exec --json --output-last-message` can spend a healthy full review turn without writing stdout or stderr, so cli-direct disables the no-output progress watchdog and relies on the hard reviewer timeout for bounding runtime. `ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS` remains the default for streaming subprocess helpers, but it does not apply to cli-direct reviewer launches.
 
 On watcher startup, `recoverReviewerRunRecords` must reconcile every recoverable reviewer-run record, not just records that still look actively heartbeating. Records in `spawned`, `heartbeating`, or `cancelled` state are all recoverable because a parent SIGTERM can cancel the child launch after the SQLite row has already moved to `review_status='reviewing'`. If reattach fails for one of those records, recovery must flip the matching SQLite row from `reviewing` to `failed` with a daemon-bounce message so the PR can be retried; it must not leave the row stuck waiting for a GitHub-side orphan reconciliation that may never exist.
 

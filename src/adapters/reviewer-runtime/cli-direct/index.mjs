@@ -3,9 +3,10 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
+import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
+import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
 
 const execFileAsync = promisify(execFile);
 import {
@@ -221,6 +222,20 @@ function buildReviewerProcessArgs(subjectContext = {}) {
   };
 }
 
+function resolveProgressTimeoutForModel(model, env) {
+  // cli-direct reviewer processes are non-streaming: Claude `--print` and
+  // Codex `exec --json --output-last-message` can both spend an entire review
+  // turn without appending to stdout/stderr. The hard reviewer timeout still
+  // bounds runtime; the progress watchdog only kills quiet-but-healthy passes.
+  void model;
+  void env;
+  return 0;
+}
+
+function isCodexModel(model) {
+  return String(model || '').toLowerCase().includes('codex');
+}
+
 function resolveCodexReviewerEnv(reviewerEnv) {
   const home = reviewerEnv.HOME || process.env.HOME || null;
   if (home) reviewerEnv.HOME = home;
@@ -319,6 +334,7 @@ function readSideChannelTailsBestEffort(rootDir, sessionUuid) {
 
 function createCliDirectReviewerRuntimeAdapter({
   rootDir = process.cwd(),
+  domainConfig = {},
   reviewerProcessPath = DEFAULT_REVIEWER_PATH,
   spawnCapturedImpl = spawnCapturedProcessGroup,
   preflightImpl = probeReviewerCliOAuth,
@@ -347,7 +363,7 @@ function createCliDirectReviewerRuntimeAdapter({
     let stripped = [];
     let preflightResult = null;
     try {
-      if (String(req.model || '').toLowerCase().includes('codex')) {
+      if (isCodexModel(req.model)) {
         const { authPath, home } = resolveCodexReviewerEnv(reviewerEnv);
         logger.log?.(`[watcher] Using Codex auth for reviewer at ${authPath} with HOME=${home || '<unset>'}`);
       }
@@ -359,6 +375,7 @@ function createCliDirectReviewerRuntimeAdapter({
           env: reviewerEnv,
           cwd: rootDir,
           timeout: req.preflightTimeoutMs || 30_000,
+          requireMcpOAuth: domainRequiresMcpOAuth(domainConfig),
         });
         if (preflightResult?.claudeCli) reviewerEnv.CLAUDE_CLI = preflightResult.claudeCli;
         if (preflightResult?.codexCli) reviewerEnv.CODEX_CLI = preflightResult.codexCli;
@@ -429,7 +446,7 @@ function createCliDirectReviewerRuntimeAdapter({
         {
           env: reviewerEnv,
           timeout: req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
-          progressTimeout: resolveProgressTimeoutMs(reviewerEnv),
+          progressTimeout: resolveProgressTimeoutForModel(req.model, reviewerEnv),
           signal: controller.signal,
           stdoutPath: sideChannels.stdoutPath,
           stderrPath: sideChannels.stderrPath,
@@ -462,7 +479,7 @@ function createCliDirectReviewerRuntimeAdapter({
           : tailText(stderr),
         pgid: record.pgid,
         reattachToken: record.reattachToken,
-        tokenUsage: String(req.model || '').toLowerCase().includes('codex')
+        tokenUsage: isCodexModel(req.model)
           ? parseCodexJsonTokenUsage(stdout)
           : null,
       });
@@ -662,5 +679,6 @@ export {
   classifyReviewerFailure,
   createCliDirectReviewerRuntimeAdapter,
   isReviewerSubprocessTimeout,
+  resolveProgressTimeoutForModel,
   stripForbiddenFallbackEnv,
 };

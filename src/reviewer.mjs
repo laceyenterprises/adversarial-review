@@ -739,17 +739,120 @@ function buildClaudeReviewArgs(prompt) {
   return ['--print', '--permission-mode', 'bypassPermissions', prompt];
 }
 
-function buildCodexReviewArgs({ outputPath, prompt }) {
-  return [
+const CODEX_EXEC_CONFIG_FORWARD_KEYS = [
+  'model',
+  'model_provider',
+  'model_reasoning_effort',
+];
+
+function stripTomlInlineComment(rawValue) {
+  const text = String(rawValue || '');
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote === '"' && char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if ((char === '"' || char === '\'') && !quote) {
+      quote = char;
+      continue;
+    }
+    if (char === quote) {
+      quote = null;
+      continue;
+    }
+    if (char === '#' && !quote) return text.slice(0, index);
+  }
+  return text;
+}
+
+function parseCodexConfigLiteralString(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) return null;
+  const quote = value[0];
+  if ((quote === '"' || quote === '\'') && value.endsWith(quote)) {
+    const unquoted = value.slice(1, -1);
+    if (quote === '"') return unquoted.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
+    return unquoted;
+  }
+  return value;
+}
+
+function readCodexConfigTopLevelValues(keys, {
+  configPath = join(process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex'), 'config.toml'),
+} = {}) {
+  const keySet = new Set(keys);
+  const values = {};
+  if (!existsSync(configPath)) return values;
+  let currentSection = null;
+  for (const rawLine of readFileSync(configPath, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const sectionMatch = line.match(/^\[(.+)\]$/);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1].trim() || null;
+      continue;
+    }
+    if (currentSection) continue;
+    const match = rawLine.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$/);
+    if (!match || !keySet.has(match[1])) continue;
+    const parsed = parseCodexConfigLiteralString(stripTomlInlineComment(match[2]));
+    if (parsed !== null) values[match[1]] = parsed;
+  }
+  return values;
+}
+
+function resolveCodexExecOverrides() {
+  const values = readCodexConfigTopLevelValues(CODEX_EXEC_CONFIG_FORWARD_KEYS);
+  const configOverrides = Object.entries(values)
+    .filter(([key]) => key !== 'model')
+    .map(([key, value]) => ({ key, value }));
+  return {
+    model: values.model || null,
+    modelProvider: values.model_provider || null,
+    configOverrides,
+  };
+}
+
+function formatCodexConfigOverride({ key, value }) {
+  return `${key}="${String(value).replaceAll('"', '\\"')}"`;
+}
+
+function buildCodexReviewArgs({
+  outputPath,
+  prompt,
+  model = null,
+  modelProvider = null,
+  configOverrides = null,
+}) {
+  const args = [
     'exec',
+    '--ignore-user-config',
     '--dangerously-bypass-approvals-and-sandbox',
     '--ephemeral',
     '--json',
+  ];
+  if (model) args.push('--model', model);
+  const overrides = Array.isArray(configOverrides)
+    ? configOverrides
+    : (modelProvider ? [{ key: 'model_provider', value: modelProvider }] : []);
+  for (const override of overrides) {
+    if (!override?.key) continue;
+    args.push('--config', formatCodexConfigOverride(override));
+  }
+  args.push(
     '--output-last-message',
     outputPath,
     '--',
     prompt,
-  ];
+  );
+  return args;
 }
 
 function parseCodexJsonTokenUsage(stdout) {
@@ -786,6 +889,9 @@ async function spawnCodexReview({
   codexCli = CODEX_CLI,
   outputPath,
   prompt,
+  model = null,
+  modelProvider = null,
+  configOverrides = null,
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
@@ -794,7 +900,7 @@ async function spawnCodexReview({
 }) {
   return spawnCapturedImpl(
     codexCli,
-    buildCodexReviewArgs({ outputPath, prompt }),
+    buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides }),
     {
       env,
       cwd,
@@ -826,6 +932,7 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const authPath = resolveCodexAuthPath();
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
+  const codexExecOverrides = resolveCodexExecOverrides();
 
   const { env } = scrubOAuthFallbackEnv({
     ...process.env,
@@ -843,6 +950,9 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
         codexCli: CODEX_CLI,
         outputPath,
         prompt,
+        model: codexExecOverrides.model,
+        modelProvider: codexExecOverrides.modelProvider,
+        configOverrides: codexExecOverrides.configOverrides,
         env,
         cwd: process.cwd(),
         timeout: resolveReviewerTimeoutMs(env),
@@ -1225,6 +1335,7 @@ const __test__ = {
   isClaudeLoggedOutStatus,
   resolveClaudeAuthProbeTimeoutMs,
   resolveCodexAuthPath,
+  resolveCodexExecOverrides,
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
   spawnCaptured,

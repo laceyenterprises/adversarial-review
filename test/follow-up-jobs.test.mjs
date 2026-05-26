@@ -2699,6 +2699,118 @@ test('validateRemediationReply rejects skipped coverage for Title-led blocking f
   );
 });
 
+test('validateRemediationReply accepts titled non-blocking findings as extra addressed entries', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker and two polish findings.',
+    '',
+    '## Blocking Issues',
+    '- **Migration registry diverges from spec**',
+    '  - **File:** docs/SPEC.md',
+    '  - **Lines:** 10-20',
+    '  - **Problem:** Spec omits the new migration.',
+    '',
+    '## Non-blocking Issues',
+    '- **Nullable owner_user weakens new uniqueness key**',
+    '  - **File:** platform/session-ledger/migration.sql',
+    '  - **Lines:** 8-13',
+    '  - **Problem:** NULL owner rows are not explicit in the index predicate.',
+    '- **Whitelist rejects MUC colon-delimited profile_identity**',
+    '  - **File:** modules/agent-runtime/browserfacade/profile_resolver.go',
+    '  - **Lines:** 106-112',
+    '  - **Problem:** The hardening rejects a known adjacent identity shape.',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 99,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:09:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed the blocker and handled the non-blocking findings too.',
+    validation: ['npm test'],
+    addressed: [
+      {
+        title: 'Migration registry diverges from spec',
+        finding: 'Spec omits the new migration.',
+        action: 'Updated the migration registry docs.',
+      },
+      {
+        title: 'Nullable owner_user weakens new uniqueness key',
+        finding: 'NULL owner rows are not explicit in the index predicate.',
+        action: 'Made the index predicate explicit.',
+      },
+      {
+        title: 'Whitelist rejects MUC colon-delimited profile_identity',
+        finding: 'The hardening rejects a known adjacent identity shape.',
+        action: 'Allowed the MUC identity delimiter for profile identities.',
+      },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Blocking and non-blocking findings are addressed.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
+test('validateRemediationReply does not exempt blocking coverage when blocking and non-blocking titles collide', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker and one note share a title.',
+    '',
+    '## Blocking Issues',
+    '- **Shared Title**',
+    '  - **Problem:** Blocking variant.',
+    '',
+    '## Non-blocking Issues',
+    '- **Shared Title**',
+    '  - **Problem:** Non-blocking variant.',
+  ].join('\n');
+
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 100,
+    reviewerModel: 'codex',
+    reviewBody,
+    reviewPostedAt: '2026-05-02T18:10:00.000Z',
+    critical: false,
+  });
+
+  const reply = {
+    kind: REMEDIATION_REPLY_KIND,
+    schemaVersion: REMEDIATION_REPLY_SCHEMA_VERSION,
+    jobId: job.jobId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    outcome: 'completed',
+    summary: 'Fixed the blocker.',
+    validation: ['npm test'],
+    addressed: [
+      {
+        title: 'Shared Title',
+        finding: 'Blocking variant.',
+        action: 'Fixed the blocking issue.',
+      },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Blocking finding is addressed.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob: job }), reply);
+});
+
 test('validateRemediationReply does not split Title-led findings on prose File mentions', () => {
   const reviewBody = [
     '## Summary',

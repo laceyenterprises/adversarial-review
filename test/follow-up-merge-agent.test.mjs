@@ -33,6 +33,7 @@ import {
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
   resolveSessionLedgerDbPath,
+  resolveSessionLedgerTarget,
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
 
@@ -2493,6 +2494,40 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   assert.equal(result.runId, 'run_lookup');
 });
 
+test('lookupOriginalWorkerRunStatus reads worker_runs from unified Postgres runtime target when enabled', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-slu-04pg');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-slu-04pg',
+    launchRequestId: 'lrq_pg_lookup',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_pg_lookup',
+  }));
+  const calls = [];
+  const result = await lookupOriginalWorkerRunStatus({
+    workerDir,
+    hqRoot,
+    env: {
+      AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+      AGENT_OS_SESSION_LEDGER_DSN: 'postgresql://runtime@127.0.0.1:6432/agent_os_ledger',
+    },
+    execFileImpl: async (bin, args) => {
+      calls.push({ bin, args });
+      return { stdout: 'run_pg_lookup\tlrq_pg_lookup\tSucceeded\n' };
+    },
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.launchRequestId, 'lrq_pg_lookup');
+  assert.equal(result.runId, 'run_pg_lookup');
+  assert.equal(calls[0].bin, 'psql');
+  assert.ok(calls[0].args.includes('-d'));
+  assert.equal(calls[0].args[calls[0].args.indexOf('-d') + 1], 'postgresql://runtime@127.0.0.1:6432/agent_os_ledger');
+});
+
 test('lookupOriginalWorkerRunStatus falls back to the canonical HOME session-ledger db', async () => {
   const { default: Database } = await import('better-sqlite3');
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -2633,6 +2668,27 @@ test('resolveSessionLedgerDbPath prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/sess
     'When both deploy-checkout DB and managed-service-root DB exist, the '
     + 'deploy-checkout DB must win — the dispatch daemon writes worker_runs '
     + 'there, and reading the managed-service-root DB returns a stale snapshot.');
+});
+
+test('resolveSessionLedgerTarget does not fall back to SQLite paths under unified Postgres runtime config', () => {
+  const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
+  const deployLedgerDir = path.join(deployCheckout, '.agent-os', 'session-ledger');
+  mkdirSync(deployLedgerDir, { recursive: true });
+  writeFileSync(path.join(deployLedgerDir, 'ledger.db'), '');
+
+  const target = resolveSessionLedgerTarget({
+    hqRoot: '/Users/airlock/agent-os-hq',
+    env: {
+      AGENT_OS_DEPLOY_CHECKOUT: deployCheckout,
+      AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+      AGENT_OS_SESSION_LEDGER_DSN: 'postgresql://runtime@127.0.0.1:6432/agent_os_ledger',
+    },
+  });
+
+  assert.equal(target.backend, 'postgres');
+  assert.equal(target.dsnRole, 'runtime');
+  assert.equal(target.dsn, 'postgresql://runtime@127.0.0.1:6432/agent_os_ledger');
+  assert.equal(Object.hasOwn(target, 'dbPath'), false);
 });
 
 test('resolveSessionLedgerDbPath falls back to HOME-based ledger.db when no deploy-checkout DB exists', () => {

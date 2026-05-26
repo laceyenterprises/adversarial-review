@@ -43,6 +43,9 @@ const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
 const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
+const SESSION_LEDGER_POSTGRES_RUNTIME_ENV = 'AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME';
+const SESSION_LEDGER_DSN_ENV = 'AGENT_OS_SESSION_LEDGER_DSN';
+const DEFAULT_SESSION_LEDGER_RUNTIME_DSN = 'postgresql://airlock@127.0.0.1:6432/agent_os_ledger';
 const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WORKER_ID_CLASS_PREFIXES = [
   'claude-code',
@@ -393,8 +396,78 @@ function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
   return null;
 }
 
+function resolveSessionLedgerTarget({ hqRoot, env = {} } = {}) {
+  if (String(env[SESSION_LEDGER_POSTGRES_RUNTIME_ENV] || '').trim().toLowerCase() === 'on') {
+    return {
+      backend: 'postgres',
+      dsn: String(env[SESSION_LEDGER_DSN_ENV] || DEFAULT_SESSION_LEDGER_RUNTIME_DSN).trim()
+        || DEFAULT_SESSION_LEDGER_RUNTIME_DSN,
+      dsnRole: 'runtime',
+    };
+  }
+  return {
+    backend: 'sqlite',
+    dbPath: resolveSessionLedgerDbPath({ hqRoot, env }),
+  };
+}
+
 function normalizeWorkerRunStatus(status) {
   return String(status || '').trim().toLowerCase();
+}
+
+async function lookupOriginalWorkerRunStatusPostgres({
+  target,
+  launchRequestId,
+  runId,
+  env,
+  execFileImpl = execFileAsync,
+  psqlPath = 'psql',
+} = {}) {
+  const sql = `
+    SELECT run_id, launch_request_id, status
+    FROM worker_runs
+    WHERE launch_request_id = :'launch_request_id'
+    ORDER BY updated_at DESC NULLS LAST, started_at DESC NULLS LAST, run_id DESC
+    LIMIT 1
+  `;
+  try {
+    const { stdout } = await execFileImpl(psqlPath, [
+      '-X',
+      '-A',
+      '-t',
+      '-F',
+      '\t',
+      '-v',
+      `launch_request_id=${launchRequestId}`,
+      '-d',
+      target.dsn,
+      '-c',
+      sql,
+    ], {
+      env,
+      timeout: 10_000,
+      maxBuffer: 1024 * 1024,
+    });
+    const line = String(stdout || '').split(/\r?\n/).find((candidate) => candidate.trim());
+    if (!line) {
+      return { found: false, reason: 'missing-worker-run-row', launchRequestId, runId };
+    }
+    const [rowRunId, rowLaunchRequestId, rowStatus] = line.split('\t');
+    return {
+      found: true,
+      status: normalizeWorkerRunStatus(rowStatus),
+      launchRequestId: rowLaunchRequestId || launchRequestId || null,
+      runId: rowRunId || runId || null,
+    };
+  } catch (err) {
+    return {
+      found: false,
+      reason: 'worker-run-lookup-failed',
+      detail: err?.message || String(err),
+      launchRequestId,
+      runId,
+    };
+  }
 }
 
 async function lookupOriginalWorkerRunStatus({
@@ -403,6 +476,8 @@ async function lookupOriginalWorkerRunStatus({
   env,
   workspace = undefined,
   runRecord = undefined,
+  execFileImpl = execFileAsync,
+  psqlPath = 'psql',
 } = {}) {
   const resolvedWorkspace = workspace === undefined
     ? readWorkerWorkspace(workerDir).workspace || null
@@ -420,7 +495,19 @@ async function lookupOriginalWorkerRunStatus({
     return { found: false, reason: 'missing-launch-request-id' };
   }
 
-  const dbPath = resolveSessionLedgerDbPath({ hqRoot, env });
+  const target = resolveSessionLedgerTarget({ hqRoot, env });
+  if (target.backend === 'postgres') {
+    return lookupOriginalWorkerRunStatusPostgres({
+      target,
+      launchRequestId,
+      runId,
+      env,
+      execFileImpl,
+      psqlPath,
+    });
+  }
+
+  const dbPath = target.dbPath;
   if (!dbPath || !existsSync(dbPath)) {
     return { found: false, reason: 'missing-ledger-db', launchRequestId, runId };
   }
@@ -4237,6 +4324,7 @@ export {
   prepareOriginalWorkerForMergeAgent,
   resolveFastMergePerPollCap,
   resolveSessionLedgerDbPath,
+  resolveSessionLedgerTarget,
   recordMergeAgentDispatch,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,

@@ -131,6 +131,11 @@ test('recovery-first within grace: does NOT re-dispatch or escalate while the ha
     !ghCalls.some((a) => a.includes('--add-label') && a.includes('merge-agent-stuck')),
     'within the grace window the watcher must NOT escalate to merge-agent-stuck',
   );
+  assert.equal(
+    listMergeAgentDispatches(rootDir)[0].phantomHandoffObservedAt,
+    '2026-05-24T00:30:00.000Z',
+    'the grace window must start from the first durable phantom-handoff observation, not dispatch creation time'
+  );
 });
 
 test('phantom handoff after grace: escalates an orphaned terminal-failed dispatch to merge-agent-stuck (does NOT re-dispatch)', async () => {
@@ -140,7 +145,7 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
   const dispatchCalls = [];
   const ghCalls = [];
 
-  const result = await dispatchMergeAgentForPR({
+  const firstResult = await dispatchMergeAgentForPR({
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
     rootDir,
@@ -159,8 +164,35 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
       ghCalls.push(args);
       return { stdout: '' };
     },
-    // 4 h after dispatch — well past the 60-min grace, no recovery materialized.
+    // First detection only starts the durable grace timer.
     now: '2026-05-24T04:00:00.000Z',
+  });
+
+  assert.equal(firstResult.decision, 'skip-already-dispatched');
+  assert.ok(
+    !ghCalls.some((a) => a.includes('--add-label') && a.includes('merge-agent-stuck')),
+    'the first phantom-handoff observation must not escalate immediately just because the original dispatch is old',
+  );
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      dispatchCalls.push(args);
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push(args);
+      return { stdout: '' };
+    },
+    // More than 60 minutes after the first durable observation, still no recovery.
+    now: '2026-05-24T05:05:00.000Z',
   });
 
   assert.equal(result.decision, 'skip-already-dispatched', 'escalation only — the watcher must NOT re-dispatch or merge an orphaned failed worker');
@@ -171,8 +203,87 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
   );
   assert.ok(
     ghCalls.some((a) => a[0] === 'pr' && a[1] === 'comment'),
-    'a one-shot operator comment must explain the phantom-handoff escalation',
+    'a durable operator comment must explain the phantom-handoff escalation',
   );
+});
+
+test('phantom handoff comment failure is recorded and retried on a later tick', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = makeHqRoot('airlock');
+  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  let commentAttempts = 0;
+
+  await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: async () => ({ stdout: '' }),
+    now: '2026-05-24T04:00:00.000Z',
+  });
+
+  await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      if (args[0] === 'api') return { stdout: '' };
+      if (args[0] === 'pr' && args[1] === 'edit') return { stdout: '' };
+      if (args[0] === 'pr' && args[1] === 'comment') {
+        commentAttempts += 1;
+        throw new Error('transient gh failure');
+      }
+      return { stdout: '' };
+    },
+    now: '2026-05-24T05:05:00.000Z',
+  });
+
+  let recorded = listMergeAgentDispatches(rootDir)[0];
+  assert.equal(recorded.phantomHandoffCommentDelivery.posted, false);
+  assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 1);
+
+  await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [{ name: 'merge-agent-stuck' }] }),
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      }
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      if (args[0] === 'api') return { stdout: '' };
+      if (args[0] === 'pr' && args[1] === 'comment') {
+        commentAttempts += 1;
+        return { stdout: 'https://github.com/owner/repo/issues/1#issuecomment-1\n' };
+      }
+      return { stdout: '' };
+    },
+    now: '2026-05-24T05:10:00.000Z',
+  });
+
+  recorded = listMergeAgentDispatches(rootDir)[0];
+  assert.equal(recorded.phantomHandoffCommentDelivery.posted, true);
+  assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 2);
+  assert.equal(commentAttempts, 2, 'the watcher must retry the owed phantom-handoff comment on later ticks');
 });
 
 test('phantom handoff is idempotent: does not re-escalate when merge-agent-stuck is already present', async () => {

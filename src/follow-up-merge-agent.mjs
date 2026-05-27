@@ -2066,6 +2066,10 @@ function pickNormalMergeAgentDispatchDetail({
     return { decision: 'skip-remediation-claimable', trigger: null };
   }
 
+  if (!operatorApproved && (Number(job?.blockingFindingCount) || 0) > 0) {
+    return { decision: 'skip-blockers-present', trigger: null };
+  }
+
   // Reaching this point means remediationCurrentRound >= remediationMaxRounds.
   // Verdict is one of: 'comment-only', 'request-changes', plus any normalized
   // verdict the kernel knows about. The legacy behavior was: refuse to

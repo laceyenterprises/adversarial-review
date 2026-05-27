@@ -15,10 +15,10 @@ const SWAP_FIELD_RE = /\b(total|used|free)\s*=\s*([0-9.]+)([KMG])/gi;
 
 const REVIEWER_PEAK_MEMORY_MB = Object.freeze({
   codex: 1024,
-  'claude-code': 256,
+  'claude-code': 512,
   'clio-agent': 512,
-  claude: 256,
-  gemini: 256,
+  claude: 512,
+  gemini: 512,
 });
 
 function utcNowIso() {

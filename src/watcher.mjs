@@ -153,7 +153,6 @@ const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
 };
-const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
 
 // Stuck-pre-spawn alert debounce. Once we've alerted on a particular
 // (repo, PR, dispatchedAt) tuple, suppress the next alert for this

@@ -11,6 +11,7 @@ import {
 import {
   PROJECTED_HEADROOM_FLOOR_MB,
   decideReviewerMemoryAdmission,
+  peakReviewerMemoryMbFor,
 } from '../src/watcher-memory-pressure.mjs';
 
 function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumber).padStart(2, '0')}.000Z`) {
@@ -96,6 +97,13 @@ test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', (
 
   assert.equal(decision.admit, false);
   assert.equal(decision.reason, 'memory_pressure_projected_headroom_low');
+});
+
+test('reviewer memory estimates keep browser-backed reviewers conservative', () => {
+  assert.equal(peakReviewerMemoryMbFor('claude-code'), 512);
+  assert.equal(peakReviewerMemoryMbFor('claude'), 512);
+  assert.equal(peakReviewerMemoryMbFor('gemini'), 512);
+  assert.equal(peakReviewerMemoryMbFor('codex'), 1024);
 });
 
 test('reviewer memory gate projected headroom uses available minus reserved minus estimate', () => {

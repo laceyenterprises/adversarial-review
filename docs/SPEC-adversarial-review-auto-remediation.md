@@ -93,7 +93,7 @@ The current thresholds and model estimates are:
 - `CRITICAL_SWAP_USED_PCT = 95`
 - `PROJECTED_HEADROOM_FLOOR_MB = 1024`
 - Peak reviewer RSS estimates: `codex=1024`, `clio-agent=512`,
-  `claude-code=256`, `claude=256`, `gemini=256`, unknown reviewers=`256`
+  `claude-code=512`, `claude=512`, `gemini=512`, unknown reviewers=`256`
 
 Admission refuses the spawn immediately on `pressureLevel=critical`, or when
 `availableMb - reservedMb - estimatedReviewerRssMb` would fall below

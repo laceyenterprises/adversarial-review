@@ -1937,7 +1937,7 @@ function resolveReviewerTimeoutFallbackThreshold(env = process.env) {
 }
 
 function resolveReviewerTimeoutFallbackModel(baseReviewerModel, env = process.env) {
-  const raw = String(env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || 'auto').trim().toLowerCase();
+  const raw = String(env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || 'off').trim().toLowerCase();
   if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'none') return null;
   if (raw === 'claude' || raw === 'codex') return raw;
   if (baseReviewerModel === 'claude') return 'codex';
@@ -2380,7 +2380,7 @@ async function handlePostedReviewRow({
       operatorApprovalEvent,
       mergeAgentRequestEvent,
     });
-    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate);
+    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,

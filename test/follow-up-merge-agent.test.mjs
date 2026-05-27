@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 
 import {
   claimNextFollowUpJob,
   createFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { CASCADE_FAILURE_CAP, recordCascadeFailure } from '../src/reviewer-cascade.mjs';
 import {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
@@ -431,6 +434,24 @@ test('pickMergeAgentDispatchDetail records mergeability blocker for timeout exha
   });
 
   assert.equal(detail.decision, 'skip-not-mergeable');
+  assert.equal(detail.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
+});
+
+test('pickMergeAgentDispatchDetail treats empty checks as unknown for timeout exhaustion handoff', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    checksConclusion: '',
+    latestFollowUpJobStatus: 'completed',
+    latestFollowUpReReviewRequested: true,
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+    reviewFailureClass: 'reviewer-timeout',
+    reviewFailureExhausted: true,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+  });
+
+  assert.equal(detail.decision, 'skip-checks-unknown');
   assert.equal(detail.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
 });
 
@@ -1362,6 +1383,69 @@ test('buildMergeAgentDispatchJob dispatches clean Comment only reviews with expl
   assert.equal(dispatchJob.blockingFindingState, 'known');
   assert.equal(detail.decision, 'dispatch');
   assert.equal(detail.trigger, null);
+});
+
+test('buildMergeAgentDispatchJob derives reviewer-timeout exhaustion from a real pending-upstream review row', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+  const db = new Database(path.join(rootDir, 'data', 'reviews.db'));
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, failed_at, failure_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(
+      'laceyenterprises/agent-os',
+      401,
+      '2026-05-02T10:00:00.000Z',
+      'claude',
+      'open',
+      'pending-upstream',
+      0,
+      '2026-05-02T10:02:00.000Z',
+      '[reviewer-timeout] Reviewer command timed out before posting; watcher backoff engaged.'
+    );
+    for (let i = 0; i < CASCADE_FAILURE_CAP; i += 1) {
+      recordCascadeFailure(rootDir, {
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 401,
+        failedAt: `2026-05-02T10:0${i}:00.000Z`,
+        failureClass: 'reviewer-timeout',
+      });
+    }
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 401,
+      reviewerModel: 'codex',
+      linearTicketId: null,
+      revisionRef: 'abc123',
+      reviewBody: '## Summary\nx\n## Verdict\n\nRequest changes',
+      reviewPostedAt: '2026-05-02T10:00:00.000Z',
+      critical: false,
+    });
+
+    const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 401,
+      branch: 'feature/pr-401',
+      baseBranch: 'main',
+      headSha: 'abc123',
+      mergeable: 'MERGEABLE',
+      checksConclusion: 'SUCCESS',
+      labels: [],
+      operatorNotes: null,
+      prState: 'open',
+      merged: false,
+    }, {
+      reviewStateDb: db,
+    });
+
+    assert.equal(dispatchJob.reviewFailureClass, 'reviewer-timeout');
+    assert.equal(dispatchJob.reviewFailureExhausted, true);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('buildMergeAgentDispatchJob marks legacy Request changes bodies without issue sections as unknown blocker state', () => {

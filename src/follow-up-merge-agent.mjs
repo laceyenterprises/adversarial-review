@@ -33,7 +33,6 @@ import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 import {
-  ensureReviewStateSchema,
   getReviewRow,
   openReviewStateDb,
   requestReviewRereview,
@@ -2045,7 +2044,7 @@ function pickReviewerTimeoutExhaustedMergeGate(job) {
   const checksConclusion = job?.checksConclusion == null
     ? null
     : String(job.checksConclusion).trim().toUpperCase();
-  if (checksConclusion === null) {
+  if (checksConclusion === null || checksConclusion === '') {
     return { decision: 'skip-checks-unknown', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
   }
   if (checksConclusion === 'PENDING') {
@@ -4689,14 +4688,33 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
 }
 
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber } = {}) {
+  return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber });
+}
+
+function reviewerFailureClassFromStoredRow(reviewRow) {
+  const rawMessage = String(reviewRow?.failure_message || '');
+  const message = rawMessage.toLowerCase();
+  const tagMatch = message.match(/^\[(reviewer-timeout|launchctl-bootstrap|cascade)\]/);
+  if (tagMatch) return tagMatch[1];
+  const legacyClass = classifyReviewerFailure(rawMessage, null);
+  if (legacyClass === 'cascade' || legacyClass === 'reviewer-timeout' || legacyClass === 'launchctl-bootstrap') {
+    return legacyClass;
+  }
+  if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
+    return 'launchctl-bootstrap';
+  }
+  if (/litellm\/upstream cascade|watcher backoff engaged/.test(message)) return 'cascade';
+  return null;
+}
+
+function readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, { repo, prNumber } = {}) {
   let db = null;
   try {
-    db = openReviewStateDb(rootDir);
-    ensureReviewStateSchema(db);
+    db = reviewStateDb || openReviewStateDb(rootDir);
     const row = getReviewRow(db, { repo, prNumber });
     const reviewStatus = String(row?.review_status || '').trim().toLowerCase();
-    const failureClass = reviewStatus === 'failed'
-      ? classifyReviewerFailure(row?.failure_message || '', null)
+    const failureClass = (reviewStatus === 'failed' || reviewStatus === 'pending-upstream')
+      ? reviewerFailureClassFromStoredRow(row)
       : null;
     const cascadeState = failureClass === 'reviewer-timeout'
       ? readCascadeState(rootDir, { repo, prNumber })
@@ -4715,12 +4733,12 @@ function readMergeAgentReviewFailureState(rootDir, { repo, prNumber } = {}) {
     };
   } finally {
     try {
-      db?.close?.();
+      if (!reviewStateDb) db?.close?.();
     } catch {}
   }
 }
 
-function buildMergeAgentDispatchJob(rootDir, candidate) {
+function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null } = {}) {
   const latestJob = findLatestFollowUpJobForPR(rootDir, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
@@ -4728,7 +4746,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
   });
   const lastVerdict = extractReviewVerdict(latestJob?.reviewBody);
   const blockingFindings = classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
-  const reviewFailureState = readMergeAgentReviewFailureState(rootDir, {
+  const reviewFailureState = readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
   });

@@ -389,6 +389,21 @@ function normalizeOperationalBlockers(reply, { expectedJob = null } = {}) {
 // empty or contains only the `- None.` sentinel. Returns one entry per
 // finding otherwise, with extracted `file` / `lines` / `problem` /
 // `whyItMatters` / `recommendedFix` fields preserved for diagnostics.
+function isNoneFindingsSentinelOnly(linesOrSection) {
+  const lines = Array.isArray(linesOrSection)
+    ? linesOrSection
+    : String(linesOrSection ?? '').split(/\n/);
+  const significant = lines
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (significant.length === 0) return true;
+  if (!/^-\s+None(?:\.|\b)(?:\s+.*)?$/i.test(significant[0])) return false;
+  return significant.slice(1).every((line) => (
+    /^-\s+None(?:\.|\b)(?:\s+.*)?$/i.test(line)
+    || !/^-\s+/.test(line)
+  ));
+}
+
 function parseReviewFindingsSection(reviewBody, sectionPattern) {
   if (typeof reviewBody !== 'string' || !reviewBody.trim()) return null;
   const match = reviewBody.match(sectionPattern);
@@ -396,15 +411,11 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
   const section = match[1].trim();
   if (!section) return [];
   // The review contract mandates `- None.` as the explicit empty
-  // sentinel. Recognize it (with or without trailing period; tolerate
-  // case variation) before the count step so an empty section is not
-  // miscounted as a finding.
+  // sentinel. Recognize it (with or without trailing period/prose and
+  // wrapped continuation lines; tolerate case variation) before the count
+  // step so an empty section is not miscounted as a finding.
   const lines = section.split(/\n/);
-  const isSentinelOnly = lines.every((l) => {
-    const t = l.trim();
-    return t === '' || /^-\s+None\.?$/i.test(t);
-  });
-  if (isSentinelOnly) return [];
+  if (isNoneFindingsSentinelOnly(lines)) return [];
 
   const parseBoldLabel = (raw) => {
     // Allows an optional `-[ \t]+` bullet prefix so nested-bullet card
@@ -859,6 +870,7 @@ export {
   REMEDIATION_REPLY_SCHEMA_VERSION,
   assertNoPlaceholderText,
   detectPublicReplyNoiseSignal,
+  isNoneFindingsSentinelOnly,
   parseBlockingFindingsSection,
   parseRemediationReply,
   validateRemediationReply,

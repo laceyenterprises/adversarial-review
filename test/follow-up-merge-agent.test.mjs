@@ -167,11 +167,9 @@ test('pickMergeAgentDispatchDetail dispatches with final-pass trigger when budge
   assert.equal(detail.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
 });
 
-test('ROOT-CAUSE GATE: final-pass does NOT merge when the final review has standing blocking findings', () => {
-  // The #901 regression: budget exhausted + Request changes + the reviewer's
-  // `## Blocking issues` section still has items. Auto-merge here shipped two
-  // blocking production bugs. The gate hands off instead of dispatching a
-  // merge-agent.
+test('final-pass dispatches once when the budget is exhausted with standing blocking findings', () => {
+  // Spec §11: the final-pass merge-agent applies blocking + non-blocking
+  // findings inline, then requests a fresh review before any merge decision.
   const detail = pickMergeAgentDispatchDetail(makeJob({
     lastVerdict: 'Request changes',
     blockingFindingCount: 2,
@@ -179,8 +177,8 @@ test('ROOT-CAUSE GATE: final-pass does NOT merge when the final review has stand
     recentDispatches: [],
     finalPassOnRequestChangesEnabled: true,
   });
-  assert.equal(detail.decision, 'skip-blockers-present');
-  assert.equal(detail.trigger, null);
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
 });
 
 test('ARP-06: current-head Comment only verdict launches exactly one merge-agent dispatch', async () => {
@@ -312,6 +310,38 @@ test('ROOT-CAUSE GATE: final-pass fails closed when Request changes blocker stat
   });
   assert.equal(detail.decision, 'skip-blocking-findings-unknown');
   assert.equal(detail.trigger, null);
+});
+
+test('post-remediation fresh review with blocking None resumes merge-agent final-pass', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 0,
+    blockingFindingState: 'known',
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: true,
+    blockingFinalPassAttempted: true,
+  });
+
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+});
+
+test('post-remediation fresh review with remaining blockers hard-stops instead of looping', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 1,
+    blockingFindingState: 'known',
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: true,
+    blockingFinalPassAttempted: true,
+  });
+
+  assert.equal(detail.decision, 'skip-blockers-present');
+  assert.equal(detail.trigger, null);
+  assert.equal(detail.handoffRequired, true);
+  assert.equal(detail.blockingFinalPassAttempted, true);
 });
 
 test('final-pass STILL merges a budget-exhausted Request changes with NO blocking findings (deadlock case)', () => {
@@ -1634,6 +1664,49 @@ test('buildMergeAgentDispatchJob treats timeout-exhausted post-remediation block
     db.close();
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('buildMergeAgentDispatchJob treats None sentinel with prose and wrapped continuation as zero blockers', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1020,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'none-prose-1020',
+    reviewBody: [
+      '## Summary',
+      'The current head is ready.',
+      '## Blocking Issues',
+      '- None. I looked specifically for a migration-idempotency problem in the touched files; none are present.',
+      '  The retry path remains idempotent with the existing migration guard.',
+      '## Non-blocking Issues',
+      '- None.',
+      '## Verdict',
+      '',
+      'Comment only',
+    ].join('\n'),
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1020,
+    branch: 'feature/pr-1020',
+    baseBranch: 'main',
+    headSha: 'none-prose-1020',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.blockingFindingCount, 0);
+  assert.equal(dispatchJob.blockingFindingState, 'known');
 });
 
 test('buildMergeAgentDispatchJob marks legacy Request changes bodies without issue sections as unknown blocker state', () => {
@@ -3616,6 +3689,26 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(!prompt.includes('## Mode: converge-and-merge'));
 });
 
+test('buildMergeAgentPrompt requires fresh re-review for final-pass with standing blockers', () => {
+  const prompt = buildMergeAgentPrompt(makeJob({
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 2,
+  }), {
+    trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
+  });
+
+  assert.ok(prompt.includes('Default action: REMEDIATE, PUSH, AND REQUEST A FRESH REVIEW'));
+  assert.ok(prompt.includes('blocking and non-blocking findings inline'));
+  assert.ok(prompt.includes('`reReview.requested = true` / `requires_rereview`'));
+  assert.ok(prompt.includes('exit `awaiting-rereview`'));
+  assert.ok(prompt.includes('Do NOT merge this invocation'));
+  assert.ok(prompt.includes('gated on the fresh review of the remediated head'));
+  assert.ok(prompt.includes('handoff_required=true'));
+  assert.ok(prompt.includes('single automatic blocker-remediation pass'));
+  assert.ok(!prompt.includes('Default action: MERGE'));
+  assert.ok(!prompt.includes('Default to MERGE'));
+});
+
 test('buildMergeAgentPrompt records non-final-pass triggers without injecting either convergence contract block', () => {
   // operator-approved / merge-agent-requested triggers are surfaced for
   // audit but must not get the triage/merge contract — they are operator-
@@ -3722,8 +3815,9 @@ test('dispatchMergeAgentForPR explicit opt-out preserves the legacy halt path', 
   assert.equal(result.decision, 'skip-request-changes');
 });
 
-test('dispatchMergeAgentForPR records a durable skip when blocking findings remain', async () => {
+test('dispatchMergeAgentForPR launches final-pass when blocking findings remain before the remediation attempt', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
   const result = await dispatchMergeAgentForPR({
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
@@ -3737,20 +3831,68 @@ test('dispatchMergeAgentForPR records a durable skip when blocking findings rema
       MERGE_AGENT_HQ_PROJECT: 'merge-project',
       [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1',
     },
+    execFileImpl: async (cmd, args, opts) => {
+      hqCalls.push({ cmd, args, env: opts?.env });
+      return { stdout: '{"dispatchId":"disp_blocker_pass","lrq":"lrq_blocker_pass"}\n' };
+    },
+    now: '2026-05-14T05:03:00.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(result.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+  assert.equal(hqCalls.length, 1);
+  const [dispatchRecord] = listMergeAgentDispatches(rootDir);
+  assert.equal(dispatchRecord.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+  assert.equal(dispatchRecord.blockingFindingCount, 2);
+  assert.equal(dispatchRecord.blockingFindingState, 'known');
+});
+
+test('dispatchMergeAgentForPR hard-stops when the fresh review still has blockers after one blocker final-pass', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({
+    headSha: 'pre-remediation-head',
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 2,
+    blockingFindingState: 'known',
+  }), {
+    dispatchedAt: '2026-05-14T05:02:00.000Z',
+    prompt: '# prompt\n',
+    dispatchId: 'disp_prior_blocker_pass',
+    trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
+  });
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      headSha: 'fresh-reviewed-head',
+      lastVerdict: 'Request changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    }),
+    env: {
+      MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+      MERGE_AGENT_HQ_PROJECT: 'merge-project',
+      [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1',
+    },
     execFileImpl: async () => {
-      throw new Error('execFileImpl should not be reached when blockers park dispatch');
+      throw new Error('execFileImpl should not be reached after the bounded blocker pass is consumed');
     },
     now: '2026-05-14T05:03:00.000Z',
   });
 
   assert.equal(result.decision, 'skip-blockers-present');
-  assert.equal(result.blockingFindingCount, 2);
+  assert.equal(result.blockingFindingCount, 1);
   assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.handoffRequired, true);
+  assert.equal(result.blockingFinalPassAttempted, true);
   assert.ok(result.skippedRecordPath);
   const [skipRecord] = listMergeAgentSkippedDispatches(rootDir);
   assert.equal(skipRecord.decision, 'skip-blockers-present');
-  assert.equal(skipRecord.blockingFindingCount, 2);
+  assert.equal(skipRecord.blockingFindingCount, 1);
   assert.equal(skipRecord.blockingFindingState, 'known');
+  assert.equal(skipRecord.handoffRequired, true);
+  assert.equal(skipRecord.blockingFinalPassAttempted, true);
 });
 
 test('dispatchMergeAgentForPR records a durable skip when blocking finding state is unknown', async () => {

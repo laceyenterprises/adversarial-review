@@ -663,6 +663,27 @@ test('parseBlockingFindingsSection ignores incidental `- **note**` bullets witho
   assert.equal(findings[0].title, 'Real finding with full fields');
 });
 
+test('parseBlockingFindingsSection treats None sentinel with prose and wrapped continuation as empty', () => {
+  const reviewBody = [
+    '## Summary',
+    'No blockers.',
+    '',
+    '## Blocking Issues',
+    '- None. I looked specifically for a migration-idempotency problem in the touched files; none are present.',
+    '  The existing guardrails still cover retry and re-entry behavior.',
+    '',
+    '## Non-blocking Issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.deepEqual(findings, []);
+});
+
 test('parseBlockingFindingsSection treats nested bold bullets as finding body content', () => {
   const reviewBody = [
     '## Summary',

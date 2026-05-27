@@ -42,7 +42,7 @@ import {
   readCascadeState,
 } from './reviewer-cascade.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
-import { parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
+import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -1071,6 +1071,16 @@ function listMergeAgentDispatches(rootDir, filter = {}) {
   }
 }
 
+function hasPriorBlockingFinalPassAttempt(dispatches, job) {
+  return dispatches.some((dispatch) => (
+    dispatch?.trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER
+    && Number(dispatch?.blockingFindingCount || 0) > 0
+    && String(dispatch?.repo ?? '') === String(job?.repo ?? '')
+    && Number(dispatch?.prNumber) === Number(job?.prNumber)
+    && String(dispatch?.headSha ?? '') !== String(job?.headSha ?? '')
+  ));
+}
+
 function listMergeAgentSkippedDispatches(rootDir) {
   const dir = mergeAgentSkippedDispatchDir(rootDir);
   try {
@@ -1809,6 +1819,8 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   const isAutomatedConvergence = trigger === null
     || trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER;
   if (isAutomatedConvergence) {
+    const finalPassHasStandingBlockingFindings = trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER
+      && (Number(job?.blockingFindingCount) || 0) > 0;
     lines.push('');
     if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
       lines.push('## Mode: final-pass-on-budget-exhausted');
@@ -1829,11 +1841,21 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       );
     }
     lines.push('');
-    lines.push(
-      'Default action: MERGE. Another review round is a rare exception'
-      + ' reserved for major in-PR refactors (see step 2) — it is NOT the'
-      + ' cautious default. When in doubt, MERGE.'
-    );
+    if (finalPassHasStandingBlockingFindings) {
+      lines.push(
+        'Default action: REMEDIATE, PUSH, AND REQUEST A FRESH REVIEW. The'
+        + ' latest review has standing blocking findings, so do not merge in'
+        + ' this invocation after applying fixes. Use the existing'
+        + ' `reReview.requested = true` / `requires_rereview` path and exit'
+        + ' `awaiting-rereview` after pushing the remediated head.'
+      );
+    } else {
+      lines.push(
+        'Default action: MERGE. Another review round is a rare exception'
+        + ' reserved for major in-PR refactors (see step 2) — it is NOT the'
+        + ' cautious default. When in doubt, MERGE.'
+      );
+    }
     lines.push('');
     lines.push('Required behavior:');
     lines.push(
@@ -1856,37 +1878,62 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' blocker summaries, reasoning, quoted secrets, or sample payloads'
       + ' into PR comments, stdout/stderr summaries, or merge receipts.'
     );
-    lines.push(
-      '2. Default to MERGE. When triage returns `no-followups-needed`, or'
-      + ' returns `addressed` after you make the fixes, rebase, force-push the'
-      + ' updated head, wait only for real external CI on that pushed head,'
-      + ' then MERGE (`gh pr merge --squash --admin`). Do NOT wait on or treat'
-      + ' the adversarial-review gate status (`agent-os/adversarial-gate`) as a'
-      + ' blocking check — it only mirrors the review verdict you already have,'
-      + ' not external CI, and the admin merge lands past it. Do NOT request'
-      + ' another'
-      + ' review for light, medium, or even substantial-but-bounded fixes —'
-      + ' force-push and merge those directly. Set `reReview.requested = true`'
-      + ' (exit `awaiting-rereview`) only for major in-PR refactors whose'
-      + ' review risk genuinely demands a fresh adversarial pass. That is'
-      + ' rare. The following are NEVER major in-PR refactors and MUST merge without'
-      + ' re-review — a single- or few-file change; any test or test-fixture'
-      + ' edit; a config, doc, or comment tweak; applying reviewer'
-      + ' suggestions; renames; small bugfixes; or any change confined to the'
-      + ' area the review already covered. When you are weighing whether a'
-      + ' change is "major enough" to re-review, it probably is not — MERGE it. If'
-      + ' remaining refactor work belongs across modules or future PRs, file'
-      + ' the Linear tickets described above and MERGE this PR instead of'
-      + ' using `awaiting-rereview` or stopping the PR. A non-empty'
-      + ' `blockers_observed` result must hard-refuse the merge.'
-    );
-    if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+    if (finalPassHasStandingBlockingFindings) {
       lines.push(
-        '3. Treat this dispatch the same way you would treat an'
-        + ' `operator-approved` dispatch for review/remediation state, EXCEPT'
-        + ' that the safety floor (no blocker-class merges) is stricter:'
-        + ' the operator did not personally vouch for this head.'
+        '2. Apply the blocking and non-blocking findings inline, rebase,'
+        + ' force-push the updated head, wait only for real external CI on'
+        + ' that pushed head, then request the fresh adversarial review using'
+        + ' the existing `reReview.requested = true` / `requires_rereview`'
+        + ' mechanism and exit `awaiting-rereview`. Do NOT merge this'
+        + ' invocation, even if triage returns `addressed` or'
+        + ' `no-followups-needed`; the next merge-agent decision must be'
+        + ' gated on the fresh review of the remediated head. If that review'
+        + ' reports `## Blocking Issues` as `None`, automation may merge; if'
+        + ' it still reports blocking items, automation must hard-stop with'
+        + ' handoff_required=true. A non-empty `blockers_observed` result in'
+        + ' this invocation must hard-refuse immediately.'
       );
+    } else {
+      lines.push(
+        '2. Default to MERGE. When triage returns `no-followups-needed`, or'
+        + ' returns `addressed` after you make the fixes, rebase, force-push the'
+        + ' updated head, wait only for real external CI on that pushed head,'
+        + ' then MERGE (`gh pr merge --squash --admin`). Do NOT wait on or treat'
+        + ' the adversarial-review gate status (`agent-os/adversarial-gate`) as a'
+        + ' blocking check — it only mirrors the review verdict you already have,'
+        + ' not external CI, and the admin merge lands past it. Do NOT request'
+        + ' another'
+        + ' review for light, medium, or even substantial-but-bounded fixes —'
+        + ' force-push and merge those directly. Set `reReview.requested = true`'
+        + ' (exit `awaiting-rereview`) only for major in-PR refactors whose'
+        + ' review risk genuinely demands a fresh adversarial pass. That is'
+        + ' rare. The following are NEVER major in-PR refactors and MUST merge without'
+        + ' re-review — a single- or few-file change; any test or test-fixture'
+        + ' edit; a config, doc, or comment tweak; applying reviewer'
+        + ' suggestions; renames; small bugfixes; or any change confined to the'
+        + ' area the review already covered. When you are weighing whether a'
+        + ' change is "major enough" to re-review, it probably is not — MERGE it. If'
+        + ' remaining refactor work belongs across modules or future PRs, file'
+        + ' the Linear tickets described above and MERGE this PR instead of'
+        + ' using `awaiting-rereview` or stopping the PR. A non-empty'
+        + ' `blockers_observed` result must hard-refuse the merge.'
+      );
+    }
+    if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+      if (finalPassHasStandingBlockingFindings) {
+        lines.push(
+          '3. This is the single automatic blocker-remediation pass for this'
+          + ' PR. Do not request another blocker-remediation loop after the'
+          + ' fresh review; the watcher will merge-or-handoff from that review.'
+        );
+      } else {
+        lines.push(
+          '3. Treat this dispatch the same way you would treat an'
+          + ' `operator-approved` dispatch for review/remediation state, EXCEPT'
+          + ' that the safety floor (no blocker-class merges) is stricter:'
+          + ' the operator did not personally vouch for this head.'
+        );
+      }
     }
     if (trigger === REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER) {
       lines.push(
@@ -1914,16 +1961,19 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
 function pickMergeAgentDispatch(job, {
   recentDispatches = [],
   finalPassOnRequestChangesEnabled = isFinalPassOnRequestChangesEnabled(),
+  blockingFinalPassAttempted = false,
 } = {}) {
   return pickMergeAgentDispatchDetail(job, {
     recentDispatches,
     finalPassOnRequestChangesEnabled,
+    blockingFinalPassAttempted,
   }).decision;
 }
 
 function pickMergeAgentDispatchDetail(job, {
   recentDispatches = [],
   finalPassOnRequestChangesEnabled = isFinalPassOnRequestChangesEnabled(),
+  blockingFinalPassAttempted = false,
 } = {}) {
   const normalizedVerdict = normalizeReviewVerdict(job?.lastVerdict);
   const labels = new Set(normalizeLabelNames(job?.labels));
@@ -1989,6 +2039,7 @@ function pickMergeAgentDispatchDetail(job, {
     operatorApproved,
     hasOperatorApprovedLabel,
     finalPassOnRequestChangesEnabled,
+    blockingFinalPassAttempted,
   });
   if (normalDecision.decision === 'dispatch') {
     const dispatchDecision = !normalDecision.trigger && mergeAgentRequested
@@ -2080,6 +2131,7 @@ function pickNormalMergeAgentDispatchDetail({
   operatorApproved,
   hasOperatorApprovedLabel,
   finalPassOnRequestChangesEnabled = false,
+  blockingFinalPassAttempted = false,
 }) {
   if (shouldUseReviewerTimeoutExhaustedMergeGate(job)) {
     return pickReviewerTimeoutExhaustedMergeGate(job, { operatorApproved });
@@ -2131,7 +2183,15 @@ function pickNormalMergeAgentDispatchDetail({
     return { decision: 'skip-remediation-claimable', trigger: null };
   }
 
-  if (!operatorApproved && (Number(job?.blockingFindingCount) || 0) > 0) {
+  const blockingFindingCount = Number(job?.blockingFindingCount) || 0;
+  const blockingFindingState = String(job?.blockingFindingState || 'known').trim().toLowerCase();
+  const finalPassRequestChangesCandidate = (
+    normalizedVerdict === 'request-changes'
+    && !operatorApproved
+    && finalPassOnRequestChangesEnabled
+  );
+
+  if (!operatorApproved && blockingFindingCount > 0 && !finalPassRequestChangesCandidate) {
     return { decision: 'skip-blockers-present', trigger: null };
   }
 
@@ -2172,21 +2232,22 @@ function pickNormalMergeAgentDispatchDetail({
     && !operatorApproved
     && finalPassOnRequestChangesEnabled
   ) {
-    // ROOT-CAUSE GATE (PR #901): the final-pass-on-budget-exhausted merge is
-    // ONLY for the deadlock case — a `Request changes` verdict driven solely by
-    // NON-blocking nitpicks (reviewer.last policy: `Comment only` requires BOTH
-    // sections to be `None`, so a non-blocking-only final round still reads
-    // `Request changes`). When the `## Blocking issues` section has standing
-    // items, auto-merging is NEVER acceptable: that is exactly how #901 shipped
-    // two blocking production bugs. The previous design delegated the
-    // blocker-refusal to the dispatched worker's prompt/judgment, which is not
-    // enforcement — the worker merged anyway. Gate it deterministically here on
-    // the reviewer's own categorization. operator-approved is handled earlier
-    // (it bypasses this branch), so a human can still force a merge that accepts
-    // the blockers.
-    const blockingFindingState = String(job?.blockingFindingState || 'known').trim().toLowerCase();
+    // ROOT-CAUSE GATE (PR #901): a budget-exhausted Request changes review may
+    // dispatch once even with standing blockers, but that worker must remediate
+    // and request a fresh adversarial review instead of merging. If the fresh
+    // post-remediation review still reports blockers, the one automatic
+    // blocker-remediation pass is consumed and the watcher hands off instead of
+    // looping or trusting worker self-judgment.
     if (blockingFindingState === 'unknown') {
       return { decision: 'skip-blocking-findings-unknown', trigger: null };
+    }
+    if (blockingFindingCount > 0 && blockingFinalPassAttempted) {
+      return {
+        decision: 'skip-blockers-present',
+        trigger: null,
+        handoffRequired: true,
+        blockingFinalPassAttempted: true,
+      };
     }
     return {
       decision: 'dispatch',
@@ -2306,6 +2367,8 @@ function recordMergeAgentDispatch(rootDir, job, {
     operatorApproval: job.operatorApproval || null,
     mergeAgentRequest: job.mergeAgentRequest || null,
     trigger,
+    blockingFindingCount: Number(job?.blockingFindingCount) || 0,
+    blockingFindingState: job?.blockingFindingState || 'known',
     priority,
     priorityFlagSupported,
     labelRemoval,
@@ -2600,6 +2663,8 @@ function recordMergeAgentSkippedDispatch(rootDir, job, {
   blockingFindingState = undefined,
   reviewerFailureClass = undefined,
   reviewerFailureExhausted = undefined,
+  handoffRequired = undefined,
+  blockingFinalPassAttempted = undefined,
 } = {}) {
   const dir = mergeAgentSkippedDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -2622,6 +2687,8 @@ function recordMergeAgentSkippedDispatch(rootDir, job, {
     ...(blockingFindingState !== undefined ? { blockingFindingState } : {}),
     ...(reviewerFailureClass !== undefined ? { reviewerFailureClass } : {}),
     ...(reviewerFailureExhausted !== undefined ? { reviewerFailureExhausted } : {}),
+    ...(handoffRequired !== undefined ? { handoffRequired: Boolean(handoffRequired) } : {}),
+    ...(blockingFinalPassAttempted !== undefined ? { blockingFinalPassAttempted: Boolean(blockingFinalPassAttempted) } : {}),
   };
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   return filePath;
@@ -3279,6 +3346,10 @@ async function dispatchMergeAgentForPR({
   const recentDispatchesForDecision = duplicateDispatches.length === 0
     ? []
     : (latestRecordedDispatch ? [latestRecordedDispatch] : duplicateDispatches);
+  const blockingFinalPassAttempted = hasPriorBlockingFinalPassAttempt(
+    listMergeAgentDispatches(rootDir, { repo, prNumber }),
+    job,
+  );
   const dispatchDecision = pickMergeAgentDispatchDetail(job, {
     recentDispatches: recentDispatchesForDecision,
     // Honor the merged runtime env so callers can opt-in per-invocation
@@ -3286,6 +3357,7 @@ async function dispatchMergeAgentForPR({
     // with the rest of dispatchMergeAgentForPR (agent-os detection, parent
     // session, project) which already routes through runtimeEnv.
     finalPassOnRequestChangesEnabled: isFinalPassOnRequestChangesEnabled({ env: runtimeEnv }),
+    blockingFinalPassAttempted,
   });
   const { decision, trigger } = dispatchDecision;
   if (decision !== 'dispatch') {
@@ -3402,6 +3474,8 @@ async function dispatchMergeAgentForPR({
               reviewerFailureExhausted: Boolean(job?.reviewFailureExhausted),
             }
           : {}),
+        handoffRequired: dispatchDecision.handoffRequired === true,
+        blockingFinalPassAttempted: dispatchDecision.blockingFinalPassAttempted === true,
       });
       mergeAgentLifecycleLog(logger, decision === 'skip-blocking-findings-unknown'
         ? 'merge_agent.blocking_findings_unknown_handoff'
@@ -3426,6 +3500,8 @@ async function dispatchMergeAgentForPR({
               reviewerFailureExhausted: Boolean(job?.reviewFailureExhausted),
             }
           : {}),
+        handoffRequired: dispatchDecision.handoffRequired === true,
+        blockingFinalPassAttempted: dispatchDecision.blockingFinalPassAttempted === true,
         skippedRecordPath,
       };
     }
@@ -4699,13 +4775,7 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   }
   const section = match[1].trim();
   if (!section) return { count: 0, state: 'known' };
-  const isNoneSentinelOnly = section
-    .split('\n')
-    .every((line) => {
-      const trimmed = line.trim();
-      return trimmed === '' || /^-\s+None\.?$/i.test(trimmed);
-    });
-  return isNoneSentinelOnly
+  return isNoneFindingsSentinelOnly(section)
     ? { count: 0, state: 'known' }
     : { count: 1, state: 'known' };
 }

@@ -4710,11 +4710,11 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
     : { count: 1, state: 'known' };
 }
 
-function readMergeAgentReviewFailureState(rootDir, { repo, prNumber } = {}) {
-  return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber });
+function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
+  return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber, headSha });
 }
 
-function readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, { repo, prNumber } = {}) {
+function readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, { repo, prNumber, headSha = null } = {}) {
   let db = null;
   try {
     db = reviewStateDb || openReviewStateDb(rootDir);
@@ -4723,6 +4723,15 @@ function readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, { repo, 
     const failureClass = (reviewStatus === 'failed' || reviewStatus === 'pending-upstream')
       ? reviewerFailureClassFromStoredRow(row)
       : null;
+    const reviewedHeadSha = String(row?.reviewer_head_sha || '').trim();
+    const currentHeadSha = String(headSha || '').trim();
+    if (failureClass === 'reviewer-timeout' && reviewedHeadSha && currentHeadSha && reviewedHeadSha !== currentHeadSha) {
+      return {
+        reviewFailureClass: failureClass,
+        reviewFailureExhausted: false,
+        reviewStatus: row?.review_status || null,
+      };
+    }
     const cascadeState = failureClass === 'reviewer-timeout'
       ? readCascadeState(rootDir, { repo, prNumber })
       : null;
@@ -4752,11 +4761,21 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     revisionRef: candidate.headSha,
   });
   const lastVerdict = extractReviewVerdict(latestJob?.reviewBody);
-  const blockingFindings = classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
   const reviewFailureState = readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
+    headSha: candidate.headSha,
   });
+  const blockingFindings = (
+    reviewFailureState.reviewFailureClass === 'reviewer-timeout'
+    && reviewFailureState.reviewFailureExhausted === true
+    && normalizeFollowUpJobStatus(latestJob?.status) === 'completed'
+    && latestJob?.reReview?.requested === true
+  )
+    // The timeout-exhausted path has no fresh review for the remediated head.
+    // Treat blocker state as unknown unless a scoped operator override accepts it.
+    ? { count: 0, state: 'unknown' }
+    : classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
   return {
     ...candidate,
     lastVerdict,

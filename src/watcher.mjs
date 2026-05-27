@@ -2476,7 +2476,11 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
   operatorSurface = null,
   logger = console,
 } = {}) {
-  if (!isReviewerTimeoutExhaustedRow(rootDir, existing, { repo: repoPath, prNumber })) {
+  if (!isReviewerTimeoutExhaustedRow(rootDir, existing, {
+    repo: repoPath,
+    prNumber,
+    headSha: currentRevisionRef,
+  })) {
     return { handled: false, reason: 'not-reviewer-timeout-exhausted' };
   }
 
@@ -2527,10 +2531,13 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
   }
 }
 
-function isReviewerTimeoutExhaustedRow(rootDir, reviewRow, { repo, prNumber } = {}) {
+function isReviewerTimeoutExhaustedRow(rootDir, reviewRow, { repo, prNumber, headSha = null } = {}) {
   const status = String(reviewRow?.review_status || '').trim().toLowerCase();
   if (status !== 'failed' && status !== 'pending-upstream') return false;
   if (reviewerFailureClassFromStoredRow(reviewRow) !== 'reviewer-timeout') return false;
+  const reviewedHeadSha = String(reviewRow?.reviewer_head_sha || '').trim();
+  const currentHeadSha = String(headSha || '').trim();
+  if (reviewedHeadSha && currentHeadSha && reviewedHeadSha !== currentHeadSha) return false;
   try {
     const cascadeState = readCascadeState(rootDir, { repo, prNumber });
     const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);

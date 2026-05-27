@@ -1,0 +1,104 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  resolveFirstPassReviewerPoolConfig,
+  runBoundedReviewerDispatchQueue,
+  sortReviewerDispatchCandidates,
+} from '../src/watcher.mjs';
+import { decideReviewerMemoryAdmission } from '../src/watcher-memory-pressure.mjs';
+
+function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumber).padStart(2, '0')}.000Z`) {
+  return {
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber,
+    subject: { createdAt },
+    current: null,
+    run,
+  };
+}
+
+test('reviewer pool respects the configured concurrency cap', async () => {
+  let active = 0;
+  let maxActive = 0;
+  const tasks = Array.from({ length: 6 }, (_unused, index) => candidate(index + 1, async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active -= 1;
+  }));
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 3,
+    logger: { error() {} },
+  });
+
+  assert.equal(summary.dispatched, 6);
+  assert.equal(summary.maxObservedConcurrency, 3);
+  assert.equal(maxActive, 3);
+});
+
+test('reviewer pool starts another PR while an older review is slow', async () => {
+  const events = [];
+  let releaseSlow;
+  const slowStarted = new Promise((resolve) => {
+    releaseSlow = resolve;
+  });
+  let runPromise;
+  const secondStarted = new Promise((resolve) => {
+    const tasks = [
+      candidate(1, async () => {
+        events.push('start:1');
+        await slowStarted;
+        events.push('done:1');
+      }, '2026-05-01T00:00:00.000Z'),
+      candidate(2, async () => {
+        events.push('start:2');
+        resolve();
+      }, '2026-05-01T00:00:01.000Z'),
+    ];
+    runPromise = runBoundedReviewerDispatchQueue(tasks, {
+      maxConcurrent: 2,
+      logger: { error() {} },
+    });
+  });
+
+  await secondStarted;
+  assert.deepEqual(events.slice(0, 2), ['start:1', 'start:2']);
+  releaseSlow();
+  await runPromise;
+});
+
+test('reviewer dispatch candidates sort oldest pending PR first', () => {
+  const sorted = sortReviewerDispatchCandidates([
+    candidate(20, async () => {}, '2026-05-03T00:00:00.000Z'),
+    candidate(10, async () => {}, '2026-05-01T00:00:00.000Z'),
+    candidate(15, async () => {}, '2026-05-02T00:00:00.000Z'),
+  ]);
+
+  assert.deepEqual(sorted.map((item) => item.prNumber), [10, 15, 20]);
+});
+
+test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', () => {
+  const decision = decideReviewerMemoryAdmission({
+    reviewerModel: 'codex',
+    sample: {
+      pressureLevel: 'nominal',
+      availableMb: 1500,
+      swapUsedPct: 10,
+    },
+  });
+
+  assert.equal(decision.admit, false);
+  assert.equal(decision.reason, 'memory_pressure_projected_headroom_low');
+});
+
+test('reviewer pool flag can fall back to serial mode', () => {
+  assert.deepEqual(
+    resolveFirstPassReviewerPoolConfig({
+      env: { ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_ENABLED: 'false' },
+      watcherConfig: { maxConcurrentFirstPassReviewers: 7 },
+    }),
+    { enabled: false, maxConcurrent: 1 }
+  );
+});

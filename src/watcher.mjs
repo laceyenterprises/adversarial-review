@@ -110,6 +110,10 @@ import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import {
+  checkReviewerMemoryAdmission,
+  peakReviewerMemoryMbFor,
+} from './watcher-memory-pressure.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -145,6 +149,7 @@ const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
 };
+const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
 
 // Stuck-pre-spawn alert debounce. Once we've alerted on a particular
 // (repo, PR, dispatchedAt) tuple, suppress the next alert for this
@@ -1921,6 +1926,120 @@ function subjectRefWithLinearTicket(subjectRef, linearTicketId, labels = []) {
   };
 }
 
+function parseBooleanFlag(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function parsePositiveInteger(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveFirstPassReviewerPoolConfig({
+  env = process.env,
+  watcherConfig = config,
+} = {}) {
+  const configuredEnabled = watcherConfig.firstPassReviewerPoolEnabled
+    ?? watcherConfig.reviewerPoolEnabled
+    ?? true;
+  const enabled = parseBooleanFlag(
+    env.ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_ENABLED
+      ?? env.ADVERSARIAL_REVIEWER_POOL_ENABLED,
+    Boolean(configuredEnabled)
+  );
+  const configuredMax = watcherConfig.maxConcurrentFirstPassReviewers
+    ?? watcherConfig.reviewerPoolMaxConcurrent
+    ?? DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX;
+  const maxConcurrent = parsePositiveInteger(
+    env.ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT
+      ?? env.ADVERSARIAL_REVIEWER_POOL_MAX_CONCURRENT,
+    parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX)
+  );
+  return {
+    enabled,
+    maxConcurrent: enabled ? maxConcurrent : 1,
+  };
+}
+
+function parseSortTimeMs(value) {
+  const ms = Date.parse(String(value || ''));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function reviewerDispatchSortTimeMs(candidate) {
+  const values = [
+    candidate?.subject?.createdAt,
+    candidate?.current?.reviewed_at,
+    candidate?.subject?.updatedAt,
+  ];
+  for (const value of values) {
+    const ms = parseSortTimeMs(value);
+    if (ms !== null) return ms;
+  }
+  return 0;
+}
+
+function compareReviewerDispatchCandidates(a, b) {
+  const timeDelta = reviewerDispatchSortTimeMs(a) - reviewerDispatchSortTimeMs(b);
+  if (timeDelta !== 0) return timeDelta;
+  const repoDelta = String(a?.repoPath || '').localeCompare(String(b?.repoPath || ''));
+  if (repoDelta !== 0) return repoDelta;
+  return Number(a?.prNumber || 0) - Number(b?.prNumber || 0);
+}
+
+function sortReviewerDispatchCandidates(candidates) {
+  return [...candidates].sort(compareReviewerDispatchCandidates);
+}
+
+async function runBoundedReviewerDispatchQueue(candidates, {
+  maxConcurrent = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  logger = console,
+} = {}) {
+  const queue = sortReviewerDispatchCandidates(candidates);
+  const active = new Set();
+  const errors = [];
+  let nextIndex = 0;
+  let maxObservedConcurrency = 0;
+
+  async function start(candidate) {
+    try {
+      await candidate.run();
+    } catch (err) {
+      errors.push(err);
+      logger?.error?.(
+        `[watcher] reviewer dispatch task failed for ${candidate.repoPath}#${candidate.prNumber}:`,
+        err?.message || err
+      );
+    }
+  }
+
+  while (nextIndex < queue.length || active.size > 0) {
+    while (nextIndex < queue.length && active.size < maxConcurrent) {
+      const promise = start(queue[nextIndex]);
+      nextIndex += 1;
+      active.add(promise);
+      promise.finally(() => active.delete(promise));
+      maxObservedConcurrency = Math.max(maxObservedConcurrency, active.size);
+    }
+    if (active.size > 0) {
+      await Promise.race(active);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw errors[0];
+  }
+  return {
+    dispatched: queue.length,
+    maxObservedConcurrency,
+  };
+}
+
 // ── Org repo discovery ───────────────────────────────────────────────────────
 
 let activeRepos = config.repos ?? [];
@@ -2815,6 +2934,10 @@ async function pollOnce(
     );
   }
 
+  const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig();
+  const reviewerDispatchCandidates = [];
+  let reviewerMemoryReservedMb = 0;
+
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
     const subjectAdapter = createGitHubPRSubjectAdapter({
@@ -2834,15 +2957,29 @@ async function pollOnce(
       continue;
     }
 
+    const subjectEntries = [];
     for (const subjectRef of subjectRefs) {
-      let subject;
       try {
-        subject = await subjectAdapter.fetchState(subjectRef);
+        const subject = await subjectAdapter.fetchState(subjectRef);
+        const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
+        subjectEntries.push({ subjectRef, subject, prNumber });
       } catch (err) {
         console.error(`[watcher] Failed to fetch subject state for ${subjectRef.subjectExternalId}:`, err.message);
-        continue;
       }
-      const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
+    }
+    subjectEntries.sort((a, b) => compareReviewerDispatchCandidates({
+      repoPath,
+      prNumber: a.prNumber,
+      subject: a.subject,
+      current: stmtGetReviewRow.get(repoPath, a.prNumber),
+    }, {
+      repoPath,
+      prNumber: b.prNumber,
+      subject: b.subject,
+      current: stmtGetReviewRow.get(repoPath, b.prNumber),
+    }));
+
+    for (const { subject, prNumber } of subjectEntries) {
       const prTitle = subject.title || '';
       const staleDriftSkip = shouldSkipReviewerForStaleDrift({
         number: prNumber,
@@ -3413,167 +3550,202 @@ async function pollOnce(
         continue;
       }
 
-      const attemptAt = new Date().toISOString();
-      const reviewerSessionUuid = randomUUID();
-      // After ARA-06's operator-surface carve, the per-PR loop iterates
-      // typed `subject` (SubjectState) values from the subject adapter
-      // — there is no `pr` GitHub-PR object in scope here. The handle
-      // we need to persist is the head SHA we observed at claim time,
-      // which is `subject.headSha`. (Was: `pr?.head?.sha`, which raised
-      // `ReferenceError: pr is not defined` on every poll cycle for any
-      // PR that reached the claim site, silently blocking review spawns.)
-      const reviewerHeadSha = subject?.headSha || null;
-      const reviewerTimeoutMs = resolveReviewerTimeoutMs();
-      const claim = stmtMarkAttemptStarted.run(
-        attemptAt,
-        reviewerSessionUuid,
-        reviewerHeadSha,
-        reviewerTimeoutMs,
+      const dispatchCandidate = {
         repoPath,
-        prNumber
-      );
-      if (claim.changes === 0) {
-        // Lost the cross-process compare-and-swap. Either another
-        // watcher just claimed this row, or the row's status moved to
-        // a non-claimable state (`reviewing`, `failed-orphan`, terminal)
-        // between the readback above and the UPDATE here. Either way,
-        // do NOT spawn a reviewer; the next poll will see fresh state.
-        console.log(
-          `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
-        );
-        continue;
-      }
-      if (afterClaim) {
-        try {
-          await afterClaim({
-            repoPath,
-            prNumber,
-            reviewerHeadSha,
-            reviewerSessionUuid,
-          });
-        } catch (err) {
-          console.warn(
-            `[watcher] afterClaim observer failed for ${repoPath}#${prNumber}; continuing reviewer spawn:`,
-            err?.message || err
-          );
-        }
-      }
-      await operatorSurface.syncTriageStatus(
-        subjectRefWithLinearTicket(subject.ref, linearTicketId, subject.labels),
-        'in-review'
-      );
-
-      // Freshness re-check (2026-05-18): `subject` was populated from the
-      // per-adapter snapshot cache that `discoverSubjects` warmed at the
-      // START of the tick. Long ticks (5-min reviewer timeouts × multiple
-      // PRs) can take 30+ min, by which time a PR may have been closed,
-      // merged, or admin-resolved by the operator. Spawning a reviewer
-      // for a PR that's no longer open is wasted work that also delays
-      // the next PR's spawn in the serial loop. Re-fetch state directly
-      // from GitHub right before the spawn and skip if no longer open.
-      try {
-        const { data: freshPR } = await octokit.rest.pulls.get({
-          owner,
-          repo,
-          pull_number: prNumber,
-        });
-        if (freshPR.merged_at) {
-          console.log(
-            `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
-          );
-          stmtMarkMerged.run(freshPR.merged_at, repoPath, prNumber);
-          continue;
-        }
-        if (freshPR.state !== 'open') {
-          console.log(
-            `[watcher] PR ${repoPath}#${prNumber} was closed since tick-start snapshot (state=${freshPR.state}) — marking row + skipping reviewer spawn`
-          );
-          stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
-          continue;
-        }
-      } catch (err) {
-        // Non-fatal — proceed with spawn rather than block. A failed
-        // freshness check is no worse than not having one at all.
-        console.warn(
-          `[watcher] freshness re-check failed for ${repoPath}#${prNumber}; proceeding with spawn:`,
-          err?.message || err
-        );
-      }
-
-      // Final-round inputs come from the durable per-PR follow-up ledger,
-      // not from `reviewed_prs.review_attempts`. Two reasons (reviewer
-      // blocking issues #1 and #2):
-      //
-      //   1. `review_attempts` is incremented for failed posts / OAuth
-      //      crashes / reviewer timeouts as well as successful posts. A
-      //      transient post failure should not count as a remediation
-      //      cycle and must not silently trip the lenient threshold.
-      //
-      //   2. An elevated legacy/operator cap must continue to describe
-      //      the active PR cycle when it is higher than the current
-      //      risk-class tier. Otherwise a PR that already consumed more
-      //      rounds than the new tier allows would be silently cut off.
-      //
-      // `summarizePRRemediationLedger` reads currentRound from terminal
-      // follow-up jobs (the only place a remediation cycle is actually
-      // recorded as completed) and the latest job's persisted maxRounds.
-      const ledger = summarizePRRemediationLedger(ROOT, {
-        repo: repoPath,
         prNumber,
-      });
-      const roundBudget = resolveRoundBudgetForJob({
-        linearTicketId,
-        riskClass: ledger.latestRiskClass,
-      }, { rootDir: ROOT });
-      const latestMaxRounds = Number(ledger.latestMaxRounds);
-      const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
-      const reviewDbAttemptNumber = Number(current?.review_attempts || 0) + 1;
-      const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
-        ? latestMaxRounds
-        : roundBudget.roundBudget;
-      const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
-        ? 'rereview'
-        : 'first-pass';
-
-      const result = await spawnReviewer({
-        repo: repoPath,
-        prNumber,
-        reviewerModel: route.reviewerModel,
-        botTokenEnv: route.botTokenEnv,
-        linearTicketId,
-        labels: Array.isArray(subject.labels) ? subject.labels : [],
-        builderTag: route.tag,
-        crossModelReviewWaived: Boolean(crossModelWaiverReason),
-        crossModelReviewWaiverReason: crossModelWaiverReason,
-        reviewerHeadSha,
-        reviewAttemptNumber,
-        reviewDbAttemptNumber,
-        passKind,
-        maxRemediationRounds,
-        reviewerSessionUuid,
-        reviewerTimeoutMs,
-        workspacePath: null,
-        onReviewerPgid: ({ pgid, spawnedAt }) => {
-          persistReviewerPgid({
-            pgid,
-            reviewerSessionUuid,
-            repoPath,
-            prNumber,
-            startedAt: spawnedAt,
+        subject,
+        current,
+        async run() {
+          const estimatedReviewerRssMb = peakReviewerMemoryMbFor(route.reviewerModel);
+          const memoryDecision = await checkReviewerMemoryAdmission({
+            reviewerModel: route.reviewerModel,
+            reservedMb: reviewerMemoryReservedMb,
+            logger: console,
           });
+          if (!memoryDecision.admit) {
+            console.log(
+              `[watcher] Deferring reviewer for ${repoPath}#${prNumber}: ${memoryDecision.reason} ` +
+                `available=${memoryDecision.availableMb ?? 'unknown'}MB ` +
+                `reserved=${reviewerMemoryReservedMb}MB ` +
+                `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
+                `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
+            );
+            return;
+          }
+
+          reviewerMemoryReservedMb += estimatedReviewerRssMb;
+          try {
+            const attemptAt = new Date().toISOString();
+            const reviewerSessionUuid = randomUUID();
+            // After ARA-06's operator-surface carve, the per-PR loop iterates
+            // typed `subject` (SubjectState) values from the subject adapter
+            // — there is no `pr` GitHub-PR object in scope here. The handle
+            // we need to persist is the head SHA we observed at claim time,
+            // which is `subject.headSha`. (Was: `pr?.head?.sha`, which raised
+            // `ReferenceError: pr is not defined` on every poll cycle for any
+            // PR that reached the claim site, silently blocking review spawns.)
+            const reviewerHeadSha = subject?.headSha || null;
+            const reviewerTimeoutMs = resolveReviewerTimeoutMs();
+            const claim = stmtMarkAttemptStarted.run(
+              attemptAt,
+              reviewerSessionUuid,
+              reviewerHeadSha,
+              reviewerTimeoutMs,
+              repoPath,
+              prNumber
+            );
+            if (claim.changes === 0) {
+              // Lost the cross-process compare-and-swap. Either another
+              // watcher just claimed this row, or the row's status moved to
+              // a non-claimable state (`reviewing`, `failed-orphan`, terminal)
+              // between the readback above and the UPDATE here. Either way,
+              // do NOT spawn a reviewer; the next poll will see fresh state.
+              console.log(
+                `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
+              );
+              return;
+            }
+            if (afterClaim) {
+              try {
+                await afterClaim({
+                  repoPath,
+                  prNumber,
+                  reviewerHeadSha,
+                  reviewerSessionUuid,
+                });
+              } catch (err) {
+                console.warn(
+                  `[watcher] afterClaim observer failed for ${repoPath}#${prNumber}; continuing reviewer spawn:`,
+                  err?.message || err
+                );
+              }
+            }
+            await operatorSurface.syncTriageStatus(
+              subjectRefWithLinearTicket(subject.ref, linearTicketId, subject.labels),
+              'in-review'
+            );
+
+            // Freshness re-check (2026-05-18): `subject` was populated from the
+            // per-adapter snapshot cache that `discoverSubjects` warmed at the
+            // START of the tick. Long ticks (5-min reviewer timeouts × multiple
+            // PRs) can take 30+ min, by which time a PR may have been closed,
+            // merged, or admin-resolved by the operator. Spawning a reviewer
+            // for a PR that's no longer open is wasted work that also delays
+            // the next PR's spawn in the serial loop. Re-fetch state directly
+            // from GitHub right before the spawn and skip if no longer open.
+            try {
+              const { data: freshPR } = await octokit.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: prNumber,
+              });
+              if (freshPR.merged_at) {
+                console.log(
+                  `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
+                );
+                stmtMarkMerged.run(freshPR.merged_at, repoPath, prNumber);
+                return;
+              }
+              if (freshPR.state !== 'open') {
+                console.log(
+                  `[watcher] PR ${repoPath}#${prNumber} was closed since tick-start snapshot (state=${freshPR.state}) — marking row + skipping reviewer spawn`
+                );
+                stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
+                return;
+              }
+            } catch (err) {
+              // Non-fatal — proceed with spawn rather than block. A failed
+              // freshness check is no worse than not having one at all.
+              console.warn(
+                `[watcher] freshness re-check failed for ${repoPath}#${prNumber}; proceeding with spawn:`,
+                err?.message || err
+              );
+            }
+
+            // Final-round inputs come from the durable per-PR follow-up ledger,
+            // not from `reviewed_prs.review_attempts`. Two reasons (reviewer
+            // blocking issues #1 and #2):
+            //
+            //   1. `review_attempts` is incremented for failed posts / OAuth
+            //      crashes / reviewer timeouts as well as successful posts. A
+            //      transient post failure should not count as a remediation
+            //      cycle and must not silently trip the lenient threshold.
+            //
+            //   2. An elevated legacy/operator cap must continue to describe
+            //      the active PR cycle when it is higher than the current
+            //      risk-class tier. Otherwise a PR that already consumed more
+            //      rounds than the new tier allows would be silently cut off.
+            //
+            // `summarizePRRemediationLedger` reads currentRound from terminal
+            // follow-up jobs (the only place a remediation cycle is actually
+            // recorded as completed) and the latest job's persisted maxRounds.
+            const ledger = summarizePRRemediationLedger(ROOT, {
+              repo: repoPath,
+              prNumber,
+            });
+            const roundBudget = resolveRoundBudgetForJob({
+              linearTicketId,
+              riskClass: ledger.latestRiskClass,
+            }, { rootDir: ROOT });
+            const latestMaxRounds = Number(ledger.latestMaxRounds);
+            const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
+            const reviewDbAttemptNumber = Number(current?.review_attempts || 0) + 1;
+            const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
+              ? latestMaxRounds
+              : roundBudget.roundBudget;
+            const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
+              ? 'rereview'
+              : 'first-pass';
+
+            const result = await spawnReviewer({
+              repo: repoPath,
+              prNumber,
+              reviewerModel: route.reviewerModel,
+              botTokenEnv: route.botTokenEnv,
+              linearTicketId,
+              labels: Array.isArray(subject.labels) ? subject.labels : [],
+              builderTag: route.tag,
+              crossModelReviewWaived: Boolean(crossModelWaiverReason),
+              crossModelReviewWaiverReason: crossModelWaiverReason,
+              reviewerHeadSha,
+              reviewAttemptNumber,
+              reviewDbAttemptNumber,
+              passKind,
+              maxRemediationRounds,
+              reviewerSessionUuid,
+              reviewerTimeoutMs,
+              workspacePath: null,
+              onReviewerPgid: ({ pgid, spawnedAt }) => {
+                persistReviewerPgid({
+                  pgid,
+                  reviewerSessionUuid,
+                  repoPath,
+                  prNumber,
+                  startedAt: spawnedAt,
+                });
+              },
+            });
+            if (result.ok) {
+              healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
+            }
+
+            settleReviewerAttempt({
+              rootDir: ROOT,
+              repoPath,
+              prNumber,
+              result,
+              maxRemediationRounds,
+            });
+          } finally {
+            reviewerMemoryReservedMb = Math.max(0, reviewerMemoryReservedMb - estimatedReviewerRssMb);
+          }
         },
-      });
-      if (result.ok) {
-        healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
+      };
+      if (reviewerPoolConfig.enabled) {
+        reviewerDispatchCandidates.push(dispatchCandidate);
+      } else {
+        await dispatchCandidate.run();
       }
-
-      settleReviewerAttempt({
-        rootDir: ROOT,
-        repoPath,
-        prNumber,
-        result,
-        maxRemediationRounds,
-      });
     }
 
     // Proactive stuck-merge-agent scan — independent of PR revisit timing.
@@ -3646,6 +3818,12 @@ async function pollOnce(
         `[watcher] proactive-phantom-handoff raised for ${repoPath}: ${scanErr?.message || scanErr}`
       );
     }
+  }
+  if (reviewerPoolConfig.enabled && reviewerDispatchCandidates.length > 0) {
+    await runBoundedReviewerDispatchQueue(reviewerDispatchCandidates, {
+      maxConcurrent: reviewerPoolConfig.maxConcurrent,
+      logger: console,
+    });
   }
   } finally {
     try {
@@ -3792,10 +3970,14 @@ export {
   readWatcherDrainState,
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
+  resolveFirstPassReviewerPoolConfig,
   runFastMergeClosePathIsolated,
+  runBoundedReviewerDispatchQueue,
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
   resolveStaleReviewerReconcilePerPoll,
+  resolveReviewerTimeoutFallbackThreshold,
+  sortReviewerDispatchCandidates,
   resolveReviewerTimeoutFallbackThreshold,
   retryPendingMergeAgentLifecycleCleanups,
   selectReviewerRouteForAttempt,

@@ -504,11 +504,54 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
     const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
 
     assert.equal(summary.pollError, 'fixture reviewer spawn failure');
+    assert.equal(summary.reviewerSpawns.length, 2);
+    assert.equal(summary.reviewerPassRows.length, 2);
+    assert.ok(summary.reviewerPassRows.every((row) => row.status === 'failed'));
+    assert.ok(summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT));
+    assert.ok(summary.reviewerPassRows.every((row) => /fixture reviewer spawn failure/.test(row.metadata_json)));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce serial fallback preserves stop-on-first-spawn-failure behavior', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_TOKEN: 'fixture-token',
+          ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_ENABLED: 'false',
+        },
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.pollError, 'fixture reviewer spawn failure');
     assert.equal(summary.reviewerSpawns.length, 1);
     assert.equal(summary.reviewerPassRows.length, 1);
     assert.equal(summary.reviewerPassRows[0].status, 'failed');
-    assert.equal(summary.reviewerPassRows[0].workspace_path, REPO_ROOT);
-    assert.match(summary.reviewerPassRows[0].metadata_json, /fixture reviewer spawn failure/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

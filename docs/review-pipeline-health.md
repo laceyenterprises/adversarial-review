@@ -19,7 +19,12 @@ The Grafana dashboard lives at
 ## Metrics
 
 - `review_pipeline_reviewer_attempts_total`: reviewer first-pass/rereview
-  attempts by `status`, `failure_class`, and `pass_kind`.
+  attempts by `status`, `failure_class`, and `pass_kind`. The Prometheus
+  output declares this as a gauge because it is a windowed snapshot, not a
+  cumulative counter.
+- `review_pipeline_health_collector_up`: 1 when the collector can open
+  `reviews.db` read-only, 0 when the review-state ledger is missing or
+  unreadable.
 - `review_pipeline_first_pass_queue_depth`: open PRs waiting in
   `reviewed_prs.review_status='pending'`.
 - `review_pipeline_first_pass_oldest_pending_age_seconds`: age of the oldest
@@ -31,6 +36,8 @@ The Grafana dashboard lives at
 - `review_pipeline_remediation_throughput_jobs`: terminal remediation jobs in
   the configured throughput window.
 - `review_pipeline_merge_outcomes_total`: `reviewed_prs.pr_state` counts.
+  The Prometheus output declares this as a gauge because rows can move between
+  states.
 - `review_pipeline_merge_stalled_jobs`: clean `review-settled` verdict jobs
   whose PR row remains open past the merge-stall tick threshold.
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently

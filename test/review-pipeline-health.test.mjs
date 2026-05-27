@@ -18,6 +18,7 @@ import {
   collectReviewPipelineHealth,
   renderReviewPipelinePrometheus,
 } from '../src/review-pipeline-health.mjs';
+import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
@@ -165,6 +166,50 @@ test('collector reads review state without mutating legacy or missing-schema dat
   }
 });
 
+test('collector emits a down signal when the review-state ledger is missing', () => {
+  const rootDir = tempRoot();
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.reviewStateLedger.exists, false);
+  assert.equal(snapshot.reviewStateLedger.readable, false);
+
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^# TYPE review_pipeline_health_collector_up gauge$/m);
+  assert.match(output, /^review_pipeline_health_collector_up 0$/m);
+});
+
+test('legacy fallback death-rate denominator counts only settled review rows', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 31,
+    reviewStatus: 'failed',
+    lastAttemptedAt: '2026-05-25T17:40:00.000Z',
+    failedAt: '2026-05-25T17:41:00.000Z',
+    failureMessage: 'timeout',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 32,
+    reviewStatus: 'posted',
+    lastAttemptedAt: '2026-05-25T17:42:00.000Z',
+    postedAt: '2026-05-25T17:43:00.000Z',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 33,
+    reviewStatus: 'pending',
+    lastAttemptedAt: '2026-05-25T17:44:00.000Z',
+  });
+  insertReviewRow(rootDir, {
+    prNumber: 34,
+    reviewStatus: 'reviewing',
+    lastAttemptedAt: '2026-05-25T17:45:00.000Z',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.reviewer.total, 4);
+  assert.equal(snapshot.reviewer.settled, 2);
+  assert.equal(snapshot.reviewer.failed, 1);
+  assert.equal(snapshot.reviewer.failureRatio, 0.5);
+});
+
 test('queue starvation finding fires on an old pending first-pass row and clears after posting', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
@@ -271,6 +316,32 @@ test('merge stalled finding fires on an old clean verdict and clears when the PR
   assert.ok(!findingCodes(cleared).includes('review:merge_stalled'));
 });
 
+test('merge stalled finding skips settled jobs with no review row', () => {
+  const rootDir = tempRoot();
+  openDb(rootDir).close();
+  writeJob(rootDir, 'stopped', 'clean-verdict-orphan', {
+    jobId: 'clean-verdict-orphan',
+    repo: REPO,
+    prNumber: 951,
+    status: 'stopped',
+    stoppedAt: '2026-05-25T17:15:00.000Z',
+    remediationPlan: {
+      stop: {
+        code: 'review-settled',
+        stoppedAt: '2026-05-25T17:15:00.000Z',
+      },
+    },
+  });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { mergeStalledMaxTicks: 1, pipelineTickIntervalMs: 5 * 60 * 1000 },
+  });
+  assert.ok(!findingCodes(snapshot).includes('review:merge_stalled'));
+  assert.equal(snapshot.mergeStalls.candidates.length, 0);
+});
+
 test('Grafana dashboard JSON references only exported review pipeline metric names', () => {
   const dashboard = JSON.parse(readFileSync('observability/grafana/review-pipeline-health.json', 'utf8'));
   const metricNames = new Set(REVIEW_PIPELINE_HEALTH_METRICS);
@@ -306,4 +377,19 @@ test('Prometheus renderer emits every dashboard metric at least once', () => {
   for (const metric of REVIEW_PIPELINE_HEALTH_METRICS) {
     assert.match(output, new RegExp(`^${metric}(?:\\{|\\s)`, 'm'));
   }
+});
+
+test('Prometheus renderer declares snapshot total metrics as gauges', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 1, reviewStatus: 'pending' });
+  const output = renderReviewPipelinePrometheus(
+    collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) })
+  );
+  assert.match(output, /^# TYPE review_pipeline_reviewer_attempts_total gauge$/m);
+  assert.match(output, /^# TYPE review_pipeline_merge_outcomes_total gauge$/m);
+});
+
+test('CLI parser rejects missing option values', () => {
+  assert.throws(() => parseArgs(['--root']), /--root requires a directory/);
+  assert.throws(() => parseArgs(['--now']), /--now requires an ISO timestamp/);
 });

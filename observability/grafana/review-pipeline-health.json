@@ -29,7 +29,7 @@
       "id": 1,
       "targets": [
         {
-          "expr": "sum by (failure_class) (review_pipeline_reviewer_attempts_total{status=\"failed\"}) / ignoring(failure_class) group_left sum(review_pipeline_reviewer_attempts_total)",
+          "expr": "sum by (failure_class) (review_pipeline_reviewer_attempts_total{status=\"failed\"}) / ignoring(failure_class) group_left sum(review_pipeline_reviewer_attempts_total{status=~\"completed|failed\"})",
           "refId": "A"
         }
       ],
@@ -224,6 +224,33 @@
       ],
       "title": "Active Sentinel Findings",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 22
+      },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "review_pipeline_health_collector_up",
+          "refId": "A"
+        }
+      ],
+      "title": "Collector Up",
+      "type": "stat"
     }
   ],
   "refresh": "30s",

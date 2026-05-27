@@ -20,6 +20,7 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
 });
 
 const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
+  'review_pipeline_health_collector_up',
   'review_pipeline_reviewer_attempts_total',
   'review_pipeline_first_pass_queue_depth',
   'review_pipeline_first_pass_oldest_pending_age_seconds',
@@ -30,6 +31,19 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_merge_stalled_jobs',
   'review_pipeline_sentinel_finding_active',
 ]);
+
+const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
+  review_pipeline_health_collector_up: 'Whether the collector could open the review-state ledger.',
+  review_pipeline_reviewer_attempts_total: 'Windowed reviewer attempt count by status, failure class, and pass kind.',
+  review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows.',
+  review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row.',
+  review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
+  review_pipeline_remediation_oldest_pending_age_seconds: 'Age in seconds of the oldest pending remediation job.',
+  review_pipeline_remediation_throughput_jobs: 'Terminal remediation jobs observed in the configured throughput window.',
+  review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
+  review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
+  review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
+});
 
 const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   {
@@ -191,11 +205,31 @@ function safeAll(db, sql, params = []) {
 
 function openReviewStateReadOnlyDb(rootDir) {
   const dbPath = join(rootDir, 'data', 'reviews.db');
-  if (!existsSync(dbPath)) return null;
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  db.pragma('busy_timeout = 5000');
-  db.pragma('query_only = 1');
-  return db;
+  if (!existsSync(dbPath)) {
+    return {
+      db: null,
+      status: { path: dbPath, exists: false, readable: false, error: 'missing' },
+    };
+  }
+  try {
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    db.pragma('busy_timeout = 5000');
+    db.pragma('query_only = 1');
+    return {
+      db,
+      status: { path: dbPath, exists: true, readable: true, error: null },
+    };
+  } catch (error) {
+    return {
+      db: null,
+      status: {
+        path: dbPath,
+        exists: true,
+        readable: false,
+        error: error?.code || error?.message || 'open-failed',
+      },
+    };
+  }
 }
 
 function summarizeReviewerAttempts(db, { nowMs, config }) {
@@ -244,20 +278,24 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
     );
     for (const row of fallbackRows) {
       total += 1;
-      const failed = row.review_status === 'failed' || row.review_status === 'failed-orphan';
-      const failureClass = failed ? classifyFailure(row.failure_message || row.review_status) : 'none';
+      const rowFailed = row.review_status === 'failed' || row.review_status === 'failed-orphan';
+      const failureClass = rowFailed ? classifyFailure(row.failure_message || row.review_status) : 'none';
       const key = JSON.stringify({
-        status: failed ? 'failed' : row.review_status || 'unknown',
+        status: rowFailed ? 'failed' : row.review_status || 'unknown',
         failure_class: failureClass,
         pass_kind: 'first-pass',
       });
       attempts.set(key, (attempts.get(key) || 0) + 1);
-      if (failed) {
+      if (rowFailed) {
         failuresByClass.set(failureClass, (failuresByClass.get(failureClass) || 0) + 1);
       }
     }
     failed = fallbackRows.filter((row) => row.review_status === 'failed' || row.review_status === 'failed-orphan').length;
-    settled = fallbackRows.length;
+    settled = fallbackRows.filter((row) => (
+      row.review_status === 'posted'
+      || row.review_status === 'failed'
+      || row.review_status === 'failed-orphan'
+    )).length;
   }
 
   return {
@@ -418,7 +456,7 @@ function summarizeMergeStalls({ followUpJobs, reviewRows, nowMs, config }) {
     const prNumber = Number(entry.job.prNumber);
     if (!repo || !Number.isInteger(prNumber)) continue;
     const reviewRow = reviewRows.get(`${repo}#${prNumber}`);
-    if (reviewRow && reviewRow.pr_state !== 'open') continue;
+    if (!reviewRow || reviewRow.pr_state !== 'open') continue;
     const stoppedAt = entry.job.stoppedAt
       || entry.job.remediationPlan?.stop?.stoppedAt
       || new Date(entry.stat.mtimeMs).toISOString();
@@ -547,7 +585,7 @@ function collectReviewPipelineHealth({
   const observedAt = toIso(now);
   const nowMs = Date.parse(observedAt);
   const config = resolveReviewPipelineHealthConfig(env, configOverrides);
-  const db = openReviewStateReadOnlyDb(rootDir);
+  const { db, status: reviewStateLedger } = openReviewStateReadOnlyDb(rootDir);
   try {
     const reviewer = db
       ? summarizeReviewerAttempts(db, { nowMs, config })
@@ -574,6 +612,7 @@ function collectReviewPipelineHealth({
         throughput: followUpQueues.throughput,
         oldestPending: followUpQueues.oldestPending,
       },
+      reviewStateLedger,
       mergeOutcomes,
       mergeStalls,
     };
@@ -599,49 +638,59 @@ function metricLine(name, labels, value) {
 
 function renderReviewPipelinePrometheus(snapshot) {
   const lines = [];
+  const emittedMetricMetadata = new Set();
+  const pushMetric = (name, labels, value) => {
+    if (!emittedMetricMetadata.has(name)) {
+      emittedMetricMetadata.add(name);
+      lines.push(`# HELP ${name} ${REVIEW_PIPELINE_HEALTH_METRIC_HELP[name] || 'Review pipeline health metric.'}`);
+      lines.push(`# TYPE ${name} gauge`);
+    }
+    lines.push(metricLine(name, labels, value));
+  };
+  pushMetric('review_pipeline_health_collector_up', {}, snapshot.reviewStateLedger?.readable ? 1 : 0);
   const reviewerAttempts = snapshot.reviewer.attempts.length
     ? snapshot.reviewer.attempts
     : [{ status: 'none', failure_class: 'none', pass_kind: 'first-pass', value: 0 }];
   for (const row of reviewerAttempts) {
-    lines.push(metricLine('review_pipeline_reviewer_attempts_total', {
+    pushMetric('review_pipeline_reviewer_attempts_total', {
       status: row.status,
       failure_class: row.failure_class,
       pass_kind: row.pass_kind,
-    }, row.value));
+    }, row.value);
   }
-  lines.push(metricLine('review_pipeline_first_pass_queue_depth', {}, snapshot.firstPassQueue.depth));
-  lines.push(metricLine(
+  pushMetric('review_pipeline_first_pass_queue_depth', {}, snapshot.firstPassQueue.depth);
+  pushMetric(
     'review_pipeline_first_pass_oldest_pending_age_seconds',
     {},
     Math.round((snapshot.firstPassQueue.oldest?.ageMs || 0) / 1000)
-  ));
+  );
   for (const [state, count] of Object.entries(snapshot.followUpQueues.states)) {
-    lines.push(metricLine('review_pipeline_remediation_backlog_jobs', { state }, count));
+    pushMetric('review_pipeline_remediation_backlog_jobs', { state }, count);
   }
-  lines.push(metricLine(
+  pushMetric(
     'review_pipeline_remediation_oldest_pending_age_seconds',
     {},
     Math.round((snapshot.followUpQueues.oldestPending?.ageMs || 0) / 1000)
-  ));
+  );
   for (const [state, count] of Object.entries(snapshot.followUpQueues.throughput)) {
-    lines.push(metricLine('review_pipeline_remediation_throughput_jobs', {
+    pushMetric('review_pipeline_remediation_throughput_jobs', {
       state,
       window: `${snapshot.config.remediationThroughputWindowMs}ms`,
-    }, count));
+    }, count);
   }
   const mergeOutcomes = snapshot.mergeOutcomes.length
     ? snapshot.mergeOutcomes
     : [{ outcome: 'none', count: 0 }];
   for (const outcome of mergeOutcomes) {
-    lines.push(metricLine('review_pipeline_merge_outcomes_total', { outcome: outcome.outcome }, outcome.count));
+    pushMetric('review_pipeline_merge_outcomes_total', { outcome: outcome.outcome }, outcome.count);
   }
-  lines.push(metricLine('review_pipeline_merge_stalled_jobs', {}, snapshot.mergeStalls.candidates.length));
+  pushMetric('review_pipeline_merge_stalled_jobs', {}, snapshot.mergeStalls.candidates.length);
   for (const definition of REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS) {
     const active = snapshot.findings.some((finding) => finding.code === definition.code);
-    lines.push(metricLine('review_pipeline_sentinel_finding_active', {
+    pushMetric('review_pipeline_sentinel_finding_active', {
       code: definition.code,
       tier: definition.tier,
-    }, active ? 1 : 0));
+    }, active ? 1 : 0);
   }
   return `${lines.join('\n')}\n`;
 }

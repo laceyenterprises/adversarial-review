@@ -21,6 +21,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--root') {
+      if (!argv[i + 1]) throw new Error('--root requires a directory');
       options.rootDir = argv[++i];
     } else if (arg === '--json') {
       options.format = 'json';
@@ -29,6 +30,7 @@ function parseArgs(argv) {
     } else if (arg === '--sentinel') {
       options.format = 'sentinel';
     } else if (arg === '--now') {
+      if (!argv[i + 1]) throw new Error('--now requires an ISO timestamp');
       options.now = argv[++i];
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;

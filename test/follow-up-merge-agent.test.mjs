@@ -3260,6 +3260,10 @@ test('buildMergeAgentPrompt emits the converge-and-merge contract (merge-by-defa
   // Don't wait on / gate the merge on the adversarial-review's own check.
   assert.ok(prompt.includes('wait only for real external CI'));
   assert.ok(prompt.includes('agent-os/adversarial-gate'));
+  assert.ok(prompt.includes('exhausted GraphQL quota'));
+  assert.ok(prompt.includes('base branch policy prohibits'));
+  assert.ok(prompt.includes('REST PR reviews endpoint'));
+  assert.ok(prompt.includes('REST PR merge endpoint'));
   // The clean-verdict path never carries the final-pass-only step 3 framing.
   assert.ok(!prompt.includes('the operator did not personally vouch for this head'));
 });
@@ -3279,6 +3283,10 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('Default to MERGE'));
   assert.ok(prompt.includes('wait only for real external CI'));
   assert.ok(prompt.includes('agent-os/adversarial-gate'));
+  assert.ok(prompt.includes('exhausted GraphQL quota'));
+  assert.ok(prompt.includes('base branch policy prohibits'));
+  assert.ok(prompt.includes('REST PR reviews endpoint'));
+  assert.ok(prompt.includes('REST PR merge endpoint'));
   assert.ok(prompt.includes('Do NOT request another'
     + ' review for light, medium, or even substantial-but-bounded fixes'));
   assert.ok(prompt.includes('only for major in-PR refactors'));

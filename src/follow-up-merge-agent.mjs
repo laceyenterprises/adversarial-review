@@ -32,7 +32,16 @@ import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-commen
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
-import { requestReviewRereview } from './review-state.mjs';
+import {
+  getReviewRow,
+  openReviewStateDb,
+  requestReviewRereview,
+} from './review-state.mjs';
+import {
+  CASCADE_FAILURE_CAP,
+  readCascadeState,
+} from './reviewer-cascade.mjs';
+import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 
@@ -112,6 +121,7 @@ const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPEC
 // merge-agent backend). Set MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=0
 // to disable.
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
+const REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER = 'reviewer-timeout-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
@@ -1878,6 +1888,19 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         + ' the operator did not personally vouch for this head.'
       );
     }
+    if (trigger === REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER) {
+      lines.push(
+        '3. This dispatch is a reviewer-timeout exhaustion recovery. A'
+        + ' remediation round completed and requested re-review, but the'
+        + ' reviewer timed out before posting after the retry budget. Do not'
+        + ' treat the missing fresh review as approval. Rebase/resolve the'
+        + ' branch, run the relevant validation, address any still-actionable'
+        + ' findings from the last posted review if they remain true, and'
+        + ' merge only when the PR is clean. If the branch cannot be made'
+        + ' mergeable inside this pass, stop with a clear blocker instead of'
+        + ' leaving the PR behind a green-ish timeout gate.'
+      );
+    }
   }
   if (job.operatorNotes) {
     lines.push('- Operator notes from PR body:');
@@ -2013,6 +2036,44 @@ function pickOperatorApprovedMergeGate(job) {
   return { decision: 'dispatch', trigger: OPERATOR_APPROVED_LABEL };
 }
 
+function pickReviewerTimeoutExhaustedMergeGate(job, { operatorApproved = false } = {}) {
+  if (String(job?.mergeable ?? '').trim().toUpperCase() !== 'MERGEABLE') {
+    return { decision: 'skip-not-mergeable', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+  }
+
+  const checksConclusion = job?.checksConclusion == null
+    ? null
+    : String(job.checksConclusion).trim().toUpperCase();
+  if (checksConclusion === null || checksConclusion === '') {
+    return { decision: 'skip-checks-unknown', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+  }
+  if (checksConclusion === 'PENDING') {
+    return { decision: 'skip-checks-pending', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+  }
+  if (checksConclusion !== 'SUCCESS') {
+    return { decision: 'skip-checks-failed', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+  }
+
+  if (!operatorApproved && (Number(job?.blockingFindingCount) || 0) > 0) {
+    return { decision: 'skip-blockers-present', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+  }
+  const blockingFindingState = String(job?.blockingFindingState || 'known').trim().toLowerCase();
+  if (!operatorApproved && blockingFindingState === 'unknown') {
+    return { decision: 'skip-blocking-findings-unknown', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+  }
+
+  return { decision: 'dispatch', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+}
+
+function shouldUseReviewerTimeoutExhaustedMergeGate(job) {
+  return (
+    job?.reviewFailureClass === 'reviewer-timeout'
+    && job?.reviewFailureExhausted === true
+    && normalizeFollowUpJobStatus(job?.latestFollowUpJobStatus) === 'completed'
+    && job?.latestFollowUpReReviewRequested === true
+  );
+}
+
 function pickNormalMergeAgentDispatchDetail({
   job,
   normalizedVerdict,
@@ -2020,6 +2081,10 @@ function pickNormalMergeAgentDispatchDetail({
   hasOperatorApprovedLabel,
   finalPassOnRequestChangesEnabled = false,
 }) {
+  if (shouldUseReviewerTimeoutExhaustedMergeGate(job)) {
+    return pickReviewerTimeoutExhaustedMergeGate(job, { operatorApproved });
+  }
+
   if (normalizedVerdict === null) {
     return { decision: 'skip-no-verdict', trigger: null };
   }
@@ -2533,6 +2598,8 @@ function recordMergeAgentSkippedDispatch(rootDir, job, {
   labelRemoval = null,
   blockingFindingCount = undefined,
   blockingFindingState = undefined,
+  reviewerFailureClass = undefined,
+  reviewerFailureExhausted = undefined,
 } = {}) {
   const dir = mergeAgentSkippedDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -2553,6 +2620,8 @@ function recordMergeAgentSkippedDispatch(rootDir, job, {
     agentOsDetectionSource: agentOsState?.source || null,
     ...(blockingFindingCount !== undefined ? { blockingFindingCount } : {}),
     ...(blockingFindingState !== undefined ? { blockingFindingState } : {}),
+    ...(reviewerFailureClass !== undefined ? { reviewerFailureClass } : {}),
+    ...(reviewerFailureExhausted !== undefined ? { reviewerFailureExhausted } : {}),
   };
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   return filePath;
@@ -3009,10 +3078,13 @@ async function dispatchMergeAgentForPR({
   merged = false,
   prAuthor = null,
   latestFollowUpJobStatus = null,
+  latestFollowUpReReviewRequested = false,
   remediationCurrentRound = null,
   remediationMaxRounds = null,
   blockingFindingCount = 0,
   blockingFindingState = 'known',
+  reviewFailureClass = null,
+  reviewFailureExhausted = false,
   prUpdatedAt = null,
   operatorApproval = null,
   mergeAgentRequest = null,
@@ -3042,10 +3114,13 @@ async function dispatchMergeAgentForPR({
     merged,
     prAuthor,
     latestFollowUpJobStatus,
+    latestFollowUpReReviewRequested,
     remediationCurrentRound,
     remediationMaxRounds,
     blockingFindingCount,
     blockingFindingState,
+    reviewFailureClass,
+    reviewFailureExhausted,
     prUpdatedAt,
     operatorApproval,
     mergeAgentRequest,
@@ -3306,8 +3381,9 @@ async function dispatchMergeAgentForPR({
       };
     }
     if (decision === 'skip-blockers-present' || decision === 'skip-blocking-findings-unknown') {
-      // Budget exhausted with standing blocking findings — the pipeline refuses
-      // to auto-merge (root-cause gate for #901). Surface it as a durable,
+      // Standing blocking findings — the pipeline refuses to auto-merge
+      // (root-cause gate for #901, shared by final-pass and timeout-exhaustion
+      // handoffs). Surface it as a durable,
       // queryable lifecycle event so the operator can see why automation parked
       // this PR. No sticky label is applied: the gate is recomputed every tick
       // and auto-resumes once the blockers clear (verdict → `Comment only`) or
@@ -3317,9 +3393,15 @@ async function dispatchMergeAgentForPR({
       const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
         skippedAt: now,
         decision,
-        trigger: null,
+        trigger: trigger || null,
         blockingFindingCount,
         blockingFindingState,
+        ...(trigger === REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER
+          ? {
+              reviewerFailureClass: job?.reviewFailureClass || null,
+              reviewerFailureExhausted: Boolean(job?.reviewFailureExhausted),
+            }
+          : {}),
       });
       mergeAgentLifecycleLog(logger, decision === 'skip-blocking-findings-unknown'
         ? 'merge_agent.blocking_findings_unknown_handoff'
@@ -3327,6 +3409,7 @@ async function dispatchMergeAgentForPR({
         repo,
         prNumber,
         headSha: job?.headSha || null,
+        trigger: trigger || null,
         blockingFindingCount,
         blockingFindingState,
         skippedRecordPath,
@@ -3334,8 +3417,42 @@ async function dispatchMergeAgentForPR({
       });
       return {
         decision,
+        trigger: trigger || null,
         blockingFindingCount,
         blockingFindingState,
+        ...(trigger === REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER
+          ? {
+              reviewerFailureClass: job?.reviewFailureClass || null,
+              reviewerFailureExhausted: Boolean(job?.reviewFailureExhausted),
+            }
+          : {}),
+        skippedRecordPath,
+      };
+    }
+    if (trigger === REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER) {
+      const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
+        skippedAt: now,
+        decision,
+        trigger,
+        reviewerFailureClass: job?.reviewFailureClass || null,
+        reviewerFailureExhausted: Boolean(job?.reviewFailureExhausted),
+      });
+      mergeAgentLifecycleLog(logger, 'merge_agent.reviewer_timeout_handoff_blocked', {
+        repo,
+        prNumber,
+        headSha: job?.headSha || null,
+        decision,
+        trigger,
+        mergeable: job?.mergeable || null,
+        checksConclusion: job?.checksConclusion || null,
+        skippedRecordPath,
+        at: now,
+      });
+      return {
+        decision,
+        trigger,
+        reviewerFailureClass: job?.reviewFailureClass || null,
+        reviewerFailureExhausted: Boolean(job?.reviewFailureExhausted),
         skippedRecordPath,
       };
     }
@@ -4593,14 +4710,72 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
     : { count: 1, state: 'known' };
 }
 
-function buildMergeAgentDispatchJob(rootDir, candidate) {
+function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
+  return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber, headSha });
+}
+
+function readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, { repo, prNumber, headSha = null } = {}) {
+  let db = null;
+  try {
+    db = reviewStateDb || openReviewStateDb(rootDir);
+    const row = getReviewRow(db, { repo, prNumber });
+    const reviewStatus = String(row?.review_status || '').trim().toLowerCase();
+    const failureClass = (reviewStatus === 'failed' || reviewStatus === 'pending-upstream')
+      ? reviewerFailureClassFromStoredRow(row)
+      : null;
+    const reviewedHeadSha = String(row?.reviewer_head_sha || '').trim();
+    const currentHeadSha = String(headSha || '').trim();
+    if (failureClass === 'reviewer-timeout' && reviewedHeadSha && currentHeadSha && reviewedHeadSha !== currentHeadSha) {
+      return {
+        reviewFailureClass: failureClass,
+        reviewFailureExhausted: false,
+        reviewStatus: row?.review_status || null,
+      };
+    }
+    const cascadeState = failureClass === 'reviewer-timeout'
+      ? readCascadeState(rootDir, { repo, prNumber })
+      : null;
+    const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
+    return {
+      reviewFailureClass: failureClass || null,
+      reviewFailureExhausted: failureClass === 'reviewer-timeout' && timeoutFailures >= CASCADE_FAILURE_CAP,
+      reviewStatus: row?.review_status || null,
+    };
+  } catch {
+    return {
+      reviewFailureClass: null,
+      reviewFailureExhausted: false,
+      reviewStatus: null,
+    };
+  } finally {
+    try {
+      if (!reviewStateDb) db?.close?.();
+    } catch {}
+  }
+}
+
+function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null } = {}) {
   const latestJob = findLatestFollowUpJobForPR(rootDir, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
     revisionRef: candidate.headSha,
   });
   const lastVerdict = extractReviewVerdict(latestJob?.reviewBody);
-  const blockingFindings = classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
+  const reviewFailureState = readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, {
+    repo: candidate.repo,
+    prNumber: candidate.prNumber,
+    headSha: candidate.headSha,
+  });
+  const blockingFindings = (
+    reviewFailureState.reviewFailureClass === 'reviewer-timeout'
+    && reviewFailureState.reviewFailureExhausted === true
+    && normalizeFollowUpJobStatus(latestJob?.status) === 'completed'
+    && latestJob?.reReview?.requested === true
+  )
+    // The timeout-exhausted path has no fresh review for the remediated head.
+    // Treat blocker state as unknown unless a scoped operator override accepts it.
+    ? { count: 0, state: 'unknown' }
+    : classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
   return {
     ...candidate,
     lastVerdict,
@@ -4611,8 +4786,11 @@ function buildMergeAgentDispatchJob(rootDir, candidate) {
     blockingFindingCount: blockingFindings.count,
     blockingFindingState: blockingFindings.state,
     latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
+    latestFollowUpReReviewRequested: latestJob?.reReview?.requested === true,
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
+    reviewFailureClass: reviewFailureState.reviewFailureClass,
+    reviewFailureExhausted: reviewFailureState.reviewFailureExhausted,
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),
     mergeAgentRequest: buildScopedMergeAgentRequest(candidate),
   };
@@ -4623,6 +4801,7 @@ export {
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
   HQ_DISPATCH_TIMEOUT_MS,
   HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
+  REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER,
   OPERATOR_APPROVED_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
@@ -4674,6 +4853,7 @@ export {
   resolveMergeAgentProject,
   summarizeChecksConclusion,
   summarizeFastMergeChecks,
+  shouldUseReviewerTimeoutExhaustedMergeGate,
   writeFastMergeCloseAuditEntry,
   writeMergeAgentPrompt,
 };

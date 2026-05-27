@@ -19,7 +19,7 @@ import {
   getReviewRow,
   openReviewStateDb,
 } from './review-state.mjs';
-import { classifyReviewerFailure } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -142,19 +142,7 @@ function makeDecision(state, description, reason, context) {
 }
 
 function reviewerFailureClass(reviewRow) {
-  const rawMessage = String(reviewRow?.failure_message || '');
-  const message = rawMessage.toLowerCase();
-  const tagMatch = message.match(/^\[(reviewer-timeout|launchctl-bootstrap|cascade)\]/);
-  if (tagMatch) return tagMatch[1];
-  const legacyClass = classifyReviewerFailure(rawMessage, null);
-  if (legacyClass === 'cascade' || legacyClass === 'reviewer-timeout' || legacyClass === 'launchctl-bootstrap') {
-    return legacyClass;
-  }
-  if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
-    return 'launchctl-bootstrap';
-  }
-  if (/litellm\/upstream cascade|watcher backoff engaged/.test(message)) return 'cascade';
-  return null;
+  return reviewerFailureClassFromStoredRow(reviewRow);
 }
 
 function hasMinimumOperatorApprovalFields(operatorApproval, currentHeadSha = null) {

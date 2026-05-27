@@ -17,6 +17,7 @@ import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters
 import {
   defaultReviewerRouteFromEnv,
   describeCrossModelReviewWaiver,
+  isCrossModelReviewWaived,
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
@@ -42,9 +43,11 @@ import {
   CASCADE_FAILURE_CAP,
   clearCascadeState,
   formatTransientFailureBreakdown,
+  readCascadeState,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
+import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import {
   createReviewerRuntimeAdapterForDomain,
   recoverReviewerRunRecords,
@@ -80,6 +83,7 @@ import {
   reconcileProactivePhantomHandoffs,
   resolveFastMergePerPollCap,
   scanStuckMergeAgentDispatches,
+  shouldUseReviewerTimeoutExhaustedMergeGate,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
 } from './follow-up-merge-agent.mjs';
@@ -131,6 +135,16 @@ const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
+const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
+  claude: {
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+  },
+  codex: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
+};
 
 // Stuck-pre-spawn alert debounce. Once we've alerted on a particular
 // (repo, PR, dispatchedAt) tuple, suppress the next alert for this
@@ -1915,6 +1929,57 @@ const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
   execFileImpl: execFileAsync,
 });
 const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 3;
+const DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD = 2;
+
+function resolveReviewerTimeoutFallbackThreshold(env = process.env) {
+  const raw = env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD;
+  return parsed;
+}
+
+function resolveReviewerTimeoutFallbackModel(env = process.env) {
+  const raw = String(env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || 'off').trim().toLowerCase();
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'none') return null;
+  if (raw === 'claude' || raw === 'codex') return raw;
+  return null;
+}
+
+function selectReviewerRouteForAttempt({
+  subject,
+  baseRoute,
+  rootDir,
+  repoPath,
+  prNumber,
+  env = process.env,
+}) {
+  const threshold = resolveReviewerTimeoutFallbackThreshold(env);
+  if (threshold <= 0) return baseRoute;
+  const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
+  const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
+  if (cascadeState?.lastFailureClass !== 'reviewer-timeout' || timeoutFailures < threshold) {
+    return baseRoute;
+  }
+  const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
+  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return baseRoute;
+  const fallbackRoute = REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL[fallbackModel];
+  if (!fallbackRoute) return baseRoute;
+  const builderClass = subject?.builderClass || baseRoute.builderClass || null;
+  return {
+    ...baseRoute,
+    reviewerModel: fallbackRoute.reviewerModel,
+    botTokenEnv: fallbackRoute.botTokenEnv,
+    timeoutFallback: {
+      fromReviewerModel: baseRoute.reviewerModel,
+      toReviewerModel: fallbackRoute.reviewerModel,
+      timeoutFailures,
+      threshold,
+      builderClass,
+      sameModelAsBuilder: isCrossModelReviewWaived(builderClass, fallbackRoute.reviewerModel),
+    },
+  };
+}
 
 function resolveStaleReviewerReconcilePerPoll(env = process.env) {
   const raw = env.ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL;
@@ -2318,7 +2383,7 @@ async function handlePostedReviewRow({
       operatorApprovalEvent,
       mergeAgentRequestEvent,
     });
-    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate);
+    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
@@ -2393,6 +2458,92 @@ async function handlePostedReviewRow({
     logger.error(
       `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:\n${detail}`
     );
+  }
+}
+
+async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  existing,
+  subjectRef,
+  currentRevisionRef,
+  labelNames = [],
+  execFileImpl = execFileAsync,
+  fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
+  buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
+  dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
+  operatorSurface = null,
+  logger = console,
+} = {}) {
+  if (!isReviewerTimeoutExhaustedRow(rootDir, existing, {
+    repo: repoPath,
+    prNumber,
+    headSha: currentRevisionRef,
+  })) {
+    return { handled: false, reason: 'not-reviewer-timeout-exhausted' };
+  }
+
+  try {
+    let operatorApprovalEvent;
+    let mergeAgentRequestEvent;
+    if (operatorSurface) {
+      const controlSubjectRef = subjectRef || {
+        domainId: 'code-pr',
+        subjectExternalId: `${repoPath}#${prNumber}`,
+        revisionRef: currentRevisionRef || null,
+      };
+      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
+      const [operatorApproval, mergeAgentRequest] = await Promise.all([
+        labelNames.includes(OPERATOR_APPROVED_LABEL)
+          ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
+          : null,
+        labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
+          ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
+          : null,
+      ]);
+      operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
+      mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
+    }
+    const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+      execFileImpl,
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
+    });
+    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
+    if (!shouldUseReviewerTimeoutExhaustedMergeGate(dispatchJob)) {
+      return { handled: false, dispatchJob };
+    }
+    const dispatched = await dispatchMergeAgentForPRImpl({
+      rootDir,
+      ...dispatchJob,
+    });
+    logger.log(
+      `[watcher] reviewer-timeout exhaustion handoff for ${repoPath}#${prNumber}: ${dispatched.decision}`
+    );
+    return { handled: true, dispatchJob, dispatched };
+  } catch (err) {
+    const detail = err?.message || String(err);
+    logger.error(
+      `[watcher] reviewer-timeout exhaustion handoff failed for ${repoPath}#${prNumber}: ${detail}`
+    );
+    return { handled: false, error: err };
+  }
+}
+
+function isReviewerTimeoutExhaustedRow(rootDir, reviewRow, { repo, prNumber, headSha = null } = {}) {
+  const status = String(reviewRow?.review_status || '').trim().toLowerCase();
+  if (status !== 'failed' && status !== 'pending-upstream') return false;
+  if (reviewerFailureClassFromStoredRow(reviewRow) !== 'reviewer-timeout') return false;
+  const reviewedHeadSha = String(reviewRow?.reviewer_head_sha || '').trim();
+  const currentHeadSha = String(headSha || '').trim();
+  if (reviewedHeadSha && currentHeadSha && reviewedHeadSha !== currentHeadSha) return false;
+  try {
+    const cascadeState = readCascadeState(rootDir, { repo, prNumber });
+    const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
+    return timeoutFailures >= CASCADE_FAILURE_CAP;
+  } catch {
+    return false;
   }
 }
 
@@ -2963,8 +3114,8 @@ async function pollOnce(
       }
 
       let crossModelWaiverReason = null;
-      const route = routeSubject(subject);
-      if (!route) {
+      const baseRoute = routeSubject(subject);
+      if (!baseRoute) {
         if (!existing) {
           stmtCreateReviewRow.run(
             repoPath,
@@ -3003,12 +3154,28 @@ async function pollOnce(
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
       }
+      const route = selectReviewerRouteForAttempt({
+        subject,
+        baseRoute,
+        rootDir: ROOT,
+        repoPath,
+        prNumber,
+      });
 
-      crossModelWaiverReason = describeCrossModelReviewWaiver(
-        route.builderClass,
-        route.reviewerModel,
-        process.env
-      );
+      crossModelWaiverReason = route.timeoutFallback
+        ? (
+            `reviewer-timeout fallback switched reviewer=${route.timeoutFallback.fromReviewerModel} ` +
+            `to reviewer=${route.timeoutFallback.toReviewerModel} after ` +
+            `${route.timeoutFallback.timeoutFailures} timeout failures; ` +
+            (route.timeoutFallback.sameModelAsBuilder
+              ? `reviewer=${route.timeoutFallback.toReviewerModel} matches builder=${route.timeoutFallback.builderClass}, so cross-model guarantee is waived for this recovery pass.`
+              : 'cross-model guarantee remains intact for this recovery pass.')
+          )
+        : describeCrossModelReviewWaiver(
+            route.builderClass,
+            route.reviewerModel,
+            process.env
+          );
       if (crossModelWaiverReason) {
         console.warn(
           `[watcher] cross-model-review-waived repo=${repoPath} pr=${prNumber} ${crossModelWaiverReason}`
@@ -3201,6 +3368,20 @@ async function pollOnce(
         prNumber,
       });
       if (cascadeGate.shouldBackoff) {
+        continue;
+      }
+      const timeoutExhaustionHandoff = await maybeDispatchReviewerTimeoutExhaustedMergeAgent({
+        rootDir: ROOT,
+        repoPath,
+        prNumber,
+        existing: current,
+        subjectRef: subject.ref,
+        currentRevisionRef: subject.ref.revisionRef,
+        labelNames: prLabelNames,
+        execFileImpl: execFileAsync,
+        operatorSurface,
+      });
+      if (timeoutExhaustionHandoff.handled) {
         continue;
       }
 
@@ -3615,7 +3796,9 @@ export {
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
   resolveStaleReviewerReconcilePerPoll,
+  resolveReviewerTimeoutFallbackThreshold,
   retryPendingMergeAgentLifecycleCleanups,
+  selectReviewerRouteForAttempt,
   shouldDeferReviewForActiveFollowUp,
   shouldRetryMergeAgentLifecycleCleanup,
   shouldPreserveReviewersOnSigterm,

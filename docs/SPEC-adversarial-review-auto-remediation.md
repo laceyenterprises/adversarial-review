@@ -212,8 +212,8 @@ State mapping:
 | State | Meaning |
 |---|---|
 | `pending` | Review has not posted, review is queued/in progress, a posted review is waiting for the follow-up ledger to appear, remediation is queued/in progress, or a requested re-review has not posted yet. |
-| `success` | The latest posted review settled as `Comment only` or `Approved` in its durable follow-up verdict carrier with no standing structured blocking findings, or a current scoped `operator-approved` label accepts the PR head regardless of review/remediation state and no explicit skip label is present. |
-| `failure` | Review/remediation is malformed, failed, orphaned, stopped, missing a verdict, still blocked by `Request changes`, explicitly skip-labeled, or in an unknown state. |
+| `success` | The latest posted review settled as `Comment only` or `Approved` in its durable follow-up verdict carrier with no standing structured blocking findings; an infrastructure failure (timeout/bootstrap/cascade/failed/orphaned reviewer) has been surfaced for operator handling without implying a substantive review verdict; or a current scoped `operator-approved` label accepts the PR head regardless of review/remediation state and no explicit skip label is present. |
+| `failure` | Review/remediation is malformed, stopped, missing a verdict, still blocked by `Request changes`, explicitly skip-labeled, or in an unknown state. |
 
 Reason mapping:
 
@@ -233,11 +233,11 @@ Reason mapping:
 | `review-settled` | `success` | The latest review verdict is non-blocking. |
 | `operator-approved` | `success` | A scoped operator approval accepts the current PR head regardless of review/remediation state. |
 | `review-malformed` | `failure` | The durable review row is in a malformed terminal state, including but not limited to malformed-title. |
-| `reviewer-timeout` | `failure` | The reviewer timed out before posting. |
-| `reviewer-launchctl-bootstrap` | `failure` | The Claude launchctl/bootstrap path failed before posting. |
-| `reviewer-cascade` | `failure` | The reviewer hit a LiteLLM/upstream cascade before posting. |
-| `review-failed` | `failure` | The adversarial review failed before posting and no more specific class is known. |
-| `review-failed-orphan` | `failure` | The watcher needs operator verification for a possible orphan review post. |
+| `reviewer-timeout` | `success` | The reviewer timed out before posting after retry handling; the gate must not imply a substantive review passed. The watcher must make the operator action visible and, when the timeout follows a completed remediation that requested re-review, hand the PR to the merge-agent decision path. |
+| `reviewer-launchctl-bootstrap` | `success` | The Claude launchctl/bootstrap path failed before posting; the gate reflects an operator-visible automation failure, not a substantive review verdict. |
+| `reviewer-cascade` | `success` | The reviewer hit a LiteLLM/upstream cascade before posting; the gate reflects an operator-visible automation failure, not a substantive review verdict. |
+| `review-failed` | `success` | The adversarial review failed before posting and no more specific class is known; the gate reflects an operator-visible automation failure, not a substantive review verdict. |
+| `review-failed-orphan` | `success` | The watcher needs operator verification for a possible orphan review post; the gate reflects an operator-visible automation anomaly, not a substantive review verdict. |
 | `review-state-unknown` | `failure` | The durable review row contains an unexpected state. |
 | `blocking-review` | `failure` | The latest review verdict still requests changes. |
 | `missing-verdict` | `failure` | The latest review body does not contain a usable verdict. |
@@ -405,6 +405,8 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 - `merge-agent-skip`, `do-not-merge`, `no-merge-hold` — hard skips that even an operator-approved or merge-agent-requested label does not bypass. `merge-agent-stuck` is a hard skip by default, but a scoped current-head `merge-agent-requested` label may bypass it for explicit operator recovery.
 
 The `final-pass-on-budget-exhausted` trigger is **not** a label — it is selected automatically by the dispatch decision tree when the env flag is set and the round budget is consumed. There is no GitHub-visible label for it; the audit trail is the dispatch record (`data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`, `trigger`, `priority`, and `priorityFlagSupported` fields) plus the `MERGE_AGENT_DISPATCH_TRIGGER` env var passed to the worker.
+
+Repeated reviewer no-output timeouts are infrastructure failures, not substantive review rounds. They must not increment the remediation round counter or make the next reviewer pass "final" by themselves. After two timeout-class failures for the same PR head, the watcher may switch to the alternate reviewer model for the next retry only when an operator explicitly opts in (`ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL=claude|codex`; the default is `off`). Timeout exhaustion is scoped to the head SHA that the timed-out reviewer attempted; a new PR head must not inherit the previous head's timeout budget. If the timeout budget is exhausted after a remediation round completed with `reReview.requested=true`, the watcher must not strand the PR behind a green-ish timeout gate: it routes the head through the merge-agent decision path with trigger `reviewer-timeout-exhausted`. Because that path has no fresh review of the post-remediation diff, it parks at `skip-blocking-findings-unknown` unless a scoped `operator-approved` override explicitly accepts the head; standing blockers still park at `skip-blockers-present`. A non-mergeable or checks-blocked PR records a durable skip under `data/follow-up-jobs/merge-agent-skips/` with the timeout trigger so operators see a concrete mergeability/check blocker instead of an ambiguous stalled review.
 
 ### Dispatch state
 

@@ -556,7 +556,11 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
   const fallbackTitle = (
     fallbackLines.find((line) => !/^-\s+None(?:\.(?:\s+.*)?|\s*)$/i.test(line))
     ?? fallbackLines[0]
-  ).replace(/^-\s+/, '').trim();
+  )
+    .replace(/^-\s+/, '')
+    .trim()
+    .replace(/^\*\*(.+?)\*\*[ \t]*:?.*$/, '$1')
+    .trim();
   return fallbackTitle ? [{ title: fallbackTitle }] : findings;
 }
 

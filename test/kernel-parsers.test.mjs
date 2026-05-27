@@ -196,6 +196,59 @@ test('kernel remediation-reply validator rejects blocked outcome with empty bloc
   );
 });
 
+test('kernel remediation-reply validator counts malformed non-empty non-blocking sections via synthesized fallback', () => {
+  const expectedJob = {
+    jobId: 'job-malformed-nonblocking',
+    reviewBody: [
+      '## Summary',
+      'One blocking issue and one malformed non-blocking note remain.',
+      '',
+      '## Blocking Issues',
+      '- **Primary gate bug**',
+      '  - **File:** `src/follow-up-merge-agent.mjs`',
+      '  - **Problem:** The watcher still needs the machine-readable blocker-pass split.',
+      '',
+      '## Non-blocking Issues',
+      'Reviewer note without a parseable card heading.',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n'),
+  };
+  const replyMissingCoverage = {
+    ...remediationReply,
+    jobId: expectedJob.jobId,
+    addressed: [{
+      title: 'Reviewer note without a parseable card heading.',
+      finding: 'Malformed non-blocking section still carries one synthesized finding.',
+      action: 'Recorded the synthesized fallback item so coverage validation stays fail-closed.',
+    }],
+    pushback: [],
+    blockers: [],
+    operationalBlockers: [],
+    reReview: { requested: true, reason: 'Ready for re-review after accounting for the malformed section.' },
+  };
+
+  assert.throws(
+    () => validateRemediationReply(replyMissingCoverage, { expectedJob }),
+    /does not account for every blocking finding/
+  );
+
+  const replyWithCoverage = {
+    ...replyMissingCoverage,
+    addressed: [
+      ...replyMissingCoverage.addressed,
+      {
+        title: 'Primary gate bug',
+        finding: 'The blocking finding still needs an explicit accountability entry.',
+        action: 'Added the blocking entry alongside the synthesized non-blocking fallback.',
+      },
+    ],
+  };
+
+  assert.doesNotThrow(() => validateRemediationReply(replyWithCoverage, { expectedJob }));
+});
+
 // Sanitizer "actual cleaning paths" coverage. The pre-normalized fixture
 // tests above only prove idempotency on already-clean input. This test
 // drives messy input through the transforms the sanitizer actually

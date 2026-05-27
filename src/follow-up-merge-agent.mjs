@@ -121,6 +121,7 @@ const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPEC
 // merge-agent backend). Set MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=0
 // to disable.
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
+const FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER = 'final-pass-blocker-remediation';
 const REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER = 'reviewer-timeout-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
@@ -1073,8 +1074,13 @@ function listMergeAgentDispatches(rootDir, filter = {}) {
 
 function hasPriorBlockingFinalPassAttempt(dispatches, job) {
   return dispatches.some((dispatch) => (
-    dispatch?.trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER
-    && Number(dispatch?.blockingFindingCount || 0) > 0
+    (
+      dispatch?.trigger === FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER
+      || (
+        dispatch?.trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER
+        && Number(dispatch?.blockingFindingCount || 0) > 0
+      )
+    )
     && String(dispatch?.repo ?? '') === String(job?.repo ?? '')
     && Number(dispatch?.prNumber) === Number(job?.prNumber)
     && String(dispatch?.headSha ?? '') !== String(job?.headSha ?? '')
@@ -1816,13 +1822,24 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   // defaulted to requesting another review (PR #898). operator-approved and
   // merge-agent-requested are operator-driven and keep their own label-scoped
   // semantics — they do NOT get this block.
+  const isBlockerRemediationFinalPass = trigger === FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER;
+  const isZeroBlockerFinalPass = trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER;
   const isAutomatedConvergence = trigger === null
-    || trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER;
+    || isBlockerRemediationFinalPass
+    || isZeroBlockerFinalPass;
   if (isAutomatedConvergence) {
-    const finalPassHasStandingBlockingFindings = trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER
-      && (Number(job?.blockingFindingCount) || 0) > 0;
+    const finalPassHasStandingBlockingFindings = isBlockerRemediationFinalPass;
     lines.push('');
-    if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+    if (isBlockerRemediationFinalPass) {
+      lines.push('## Mode: final-pass-blocker-remediation');
+      lines.push('');
+      lines.push(
+        'The adversarial-review round budget for this PR is consumed and the'
+        + ' latest reviewer verdict is still `Request changes` with standing'
+        + ' blocking findings. This is the single automated blocker-remediation'
+        + ' pass before operator escalation.'
+      );
+    } else if (isZeroBlockerFinalPass) {
       lines.push('## Mode: final-pass-on-budget-exhausted');
       lines.push('');
       lines.push(
@@ -1919,7 +1936,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         + ' `blockers_observed` result must hard-refuse the merge.'
       );
     }
-    if (trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER) {
+    if (isBlockerRemediationFinalPass || isZeroBlockerFinalPass) {
       if (finalPassHasStandingBlockingFindings) {
         lines.push(
           '3. This is the single automatic blocker-remediation pass for this'
@@ -2251,7 +2268,9 @@ function pickNormalMergeAgentDispatchDetail({
     }
     return {
       decision: 'dispatch',
-      trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
+      trigger: blockingFindingCount > 0
+        ? FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER
+        : FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
     };
   }
 
@@ -3457,9 +3476,9 @@ async function dispatchMergeAgentForPR({
       // (root-cause gate for #901, shared by final-pass and timeout-exhaustion
       // handoffs). Surface it as a durable,
       // queryable lifecycle event so the operator can see why automation parked
-      // this PR. No sticky label is applied: the gate is recomputed every tick
-      // and auto-resumes once the blockers clear (verdict → `Comment only`) or
-      // the operator applies `operator-approved` to accept them.
+      // this PR. A consumed blocker-remediation pass also applies
+      // `merge-agent-stuck` so the explicit `handoffRequired=true` terminal
+      // state shows up in the normal operator stuck queue.
       const blockingFindingCount = Number(job?.blockingFindingCount) || 0;
       const blockingFindingState = String(job?.blockingFindingState || 'known').trim().toLowerCase();
       const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
@@ -3477,6 +3496,15 @@ async function dispatchMergeAgentForPR({
         handoffRequired: dispatchDecision.handoffRequired === true,
         blockingFinalPassAttempted: dispatchDecision.blockingFinalPassAttempted === true,
       });
+      if (dispatchDecision.handoffRequired === true) {
+        await applyMergeAgentStuckLabel({
+          repo,
+          prNumber,
+          labels,
+          ghExecFileImpl,
+          logger,
+        });
+      }
       mergeAgentLifecycleLog(logger, decision === 'skip-blocking-findings-unknown'
         ? 'merge_agent.blocking_findings_unknown_handoff'
         : 'merge_agent.blockers_present_handoff', {
@@ -3638,7 +3666,16 @@ async function dispatchMergeAgentForPR({
   // for human/agent readability, but adapters that branch on dispatch mode
   // should read the env var rather than parsing markdown.
   const dispatchEnv = trigger
-    ? { ...runtimeEnv, MERGE_AGENT_DISPATCH_TRIGGER: trigger }
+    ? {
+        ...runtimeEnv,
+        MERGE_AGENT_DISPATCH_TRIGGER: trigger,
+        ...((trigger === FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER || trigger === FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER)
+          ? { MERGE_AGENT_BLOCKING_FINDING_COUNT: String(Number(job?.blockingFindingCount) || 0) }
+          : {}),
+        ...(trigger === FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER
+          ? { MERGE_AGENT_BLOCKER_REMEDIATION_REQUIRED: '1' }
+          : {}),
+      }
     : runtimeEnv;
   // Capture stderr + stdout on failure so callers can surface the
   // actionable diagnostic in their log. Without this, watcher.mjs's
@@ -4867,6 +4904,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
 }
 
 export {
+  FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
   HQ_DISPATCH_TIMEOUT_MS,

@@ -1851,6 +1851,50 @@ test('buildMergeAgentDispatchJob fails safe to >=1 for a non-None blocking secti
   assert.equal(dispatchJob.blockingFindingState, 'known');
 });
 
+test('buildMergeAgentDispatchJob fails closed on flush-left prose after None sentinel', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 404,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'none-prose-flush-left-404',
+    reviewBody: [
+      '## Summary',
+      'The section is malformed.',
+      '## Blocking Issues',
+      '- None.',
+      'The migration is not idempotent and can corrupt reopened rows.',
+      '## Non-blocking Issues',
+      '- None.',
+      '## Verdict',
+      '',
+      'Request changes',
+    ].join('\n'),
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 404,
+    branch: 'feature/pr-404',
+    baseBranch: 'main',
+    headSha: 'none-prose-flush-left-404',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+
+  assert.equal(dispatchJob.lastVerdict, 'Request changes');
+  assert.equal(dispatchJob.blockingFindingCount, 1);
+  assert.equal(dispatchJob.blockingFindingState, 'known');
+});
+
 test('buildMergeAgentDispatchJob normalizes real claimed follow-up job status', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({

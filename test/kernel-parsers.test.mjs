@@ -684,6 +684,24 @@ test('parseBlockingFindingsSection treats None sentinel with prose and wrapped c
   assert.deepEqual(findings, []);
 });
 
+test('parseBlockingFindingsSection does not swallow flush-left prose after None sentinel', () => {
+  const reviewBody = [
+    '## Summary',
+    'The section is malformed.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    'The migration is not idempotent and can corrupt reopened rows.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.equal(findings.length, 1);
+});
+
 test('parseBlockingFindingsSection treats nested bold bullets as finding body content', () => {
   const reviewBody = [
     '## Summary',

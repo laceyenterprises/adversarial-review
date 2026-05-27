@@ -455,6 +455,46 @@ test('pickMergeAgentDispatchDetail treats empty checks as unknown for timeout ex
   assert.equal(detail.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
 });
 
+test('pickMergeAgentDispatchDetail refuses timeout exhaustion handoff when blockers remain', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    latestFollowUpJobStatus: 'completed',
+    latestFollowUpReReviewRequested: true,
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+    reviewFailureClass: 'reviewer-timeout',
+    reviewFailureExhausted: true,
+    blockingFindingCount: 1,
+    blockingFindingState: 'known',
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+  });
+
+  assert.equal(detail.decision, 'skip-blockers-present');
+  assert.equal(detail.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
+});
+
+test('pickMergeAgentDispatchDetail refuses timeout exhaustion handoff with unknown blocker state', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    latestFollowUpJobStatus: 'completed',
+    latestFollowUpReReviewRequested: true,
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+    reviewFailureClass: 'reviewer-timeout',
+    reviewFailureExhausted: true,
+    blockingFindingCount: 0,
+    blockingFindingState: 'unknown',
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+  });
+
+  assert.equal(detail.decision, 'skip-blocking-findings-unknown');
+  assert.equal(detail.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
+});
+
 test('isFinalPassOnRequestChangesEnabled defaults ON for unset/empty, off for explicit disable, fail-CLOSED on unknown', () => {
   // Silent stub so the warn() call on unknown values doesn't noise up
   // the test output.
@@ -3631,6 +3671,44 @@ test('dispatchMergeAgentForPR records a durable skip when timeout handoff is not
   assert.equal(skipRecord.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
   assert.equal(skipRecord.reviewerFailureClass, 'reviewer-timeout');
   assert.equal(skipRecord.reviewerFailureExhausted, true);
+});
+
+test('dispatchMergeAgentForPR records blocker skip with timeout handoff trigger', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      lastVerdict: 'Request changes',
+      latestFollowUpJobStatus: 'completed',
+      latestFollowUpReReviewRequested: true,
+      remediationCurrentRound: 1,
+      remediationMaxRounds: 2,
+      reviewFailureClass: 'reviewer-timeout',
+      reviewFailureExhausted: true,
+      blockingFindingCount: 2,
+      blockingFindingState: 'known',
+    }),
+    env: {
+      MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+      MERGE_AGENT_HQ_PROJECT: 'merge-project',
+      [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0',
+    },
+    execFileImpl: async () => {
+      throw new Error('execFileImpl should not be reached when timeout blockers park dispatch');
+    },
+    now: '2026-05-27T02:45:00.000Z',
+  });
+
+  assert.equal(result.decision, 'skip-blockers-present');
+  assert.equal(result.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
+  assert.equal(result.reviewerFailureClass, 'reviewer-timeout');
+  assert.equal(result.reviewerFailureExhausted, true);
+  const [skipRecord] = listMergeAgentSkippedDispatches(rootDir);
+  assert.equal(skipRecord.decision, 'skip-blockers-present');
+  assert.equal(skipRecord.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
+  assert.equal(skipRecord.blockingFindingCount, 2);
+  assert.equal(skipRecord.reviewerFailureClass, 'reviewer-timeout');
 });
 
 test('dispatchMergeAgentForPR omits MERGE_AGENT_DISPATCH_TRIGGER from worker env when trigger is null', async () => {

@@ -17,6 +17,7 @@ import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters
 import {
   defaultReviewerRouteFromEnv,
   describeCrossModelReviewWaiver,
+  isCrossModelReviewWaived,
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
@@ -46,6 +47,7 @@ import {
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
+import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import {
   createReviewerRuntimeAdapterForDomain,
   recoverReviewerRunRecords,
@@ -1937,7 +1939,7 @@ function resolveReviewerTimeoutFallbackThreshold(env = process.env) {
   return parsed;
 }
 
-function resolveReviewerTimeoutFallbackModel(baseReviewerModel, env = process.env) {
+function resolveReviewerTimeoutFallbackModel(env = process.env) {
   const raw = String(env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || 'off').trim().toLowerCase();
   if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'none') return null;
   if (raw === 'claude' || raw === 'codex') return raw;
@@ -1959,10 +1961,11 @@ function selectReviewerRouteForAttempt({
   if (cascadeState?.lastFailureClass !== 'reviewer-timeout' || timeoutFailures < threshold) {
     return baseRoute;
   }
-  const fallbackModel = resolveReviewerTimeoutFallbackModel(baseRoute?.reviewerModel, env);
+  const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
   if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return baseRoute;
   const fallbackRoute = REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL[fallbackModel];
   if (!fallbackRoute) return baseRoute;
+  const builderClass = subject?.builderClass || baseRoute.builderClass || null;
   return {
     ...baseRoute,
     reviewerModel: fallbackRoute.reviewerModel,
@@ -1972,7 +1975,8 @@ function selectReviewerRouteForAttempt({
       toReviewerModel: fallbackRoute.reviewerModel,
       timeoutFailures,
       threshold,
-      builderClass: subject?.builderClass || baseRoute.builderClass || null,
+      builderClass,
+      sameModelAsBuilder: isCrossModelReviewWaived(builderClass, fallbackRoute.reviewerModel),
     },
   };
 }
@@ -2472,6 +2476,10 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
   operatorSurface = null,
   logger = console,
 } = {}) {
+  if (!isReviewerTimeoutExhaustedRow(rootDir, existing, { repo: repoPath, prNumber })) {
+    return { handled: false, reason: 'not-reviewer-timeout-exhausted' };
+  }
+
   try {
     let operatorApprovalEvent;
     let mergeAgentRequestEvent;
@@ -2515,7 +2523,20 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
     logger.error(
       `[watcher] reviewer-timeout exhaustion handoff failed for ${repoPath}#${prNumber}: ${detail}`
     );
-    return { handled: true, error: err };
+    return { handled: false, error: err };
+  }
+}
+
+function isReviewerTimeoutExhaustedRow(rootDir, reviewRow, { repo, prNumber } = {}) {
+  const status = String(reviewRow?.review_status || '').trim().toLowerCase();
+  if (status !== 'failed' && status !== 'pending-upstream') return false;
+  if (reviewerFailureClassFromStoredRow(reviewRow) !== 'reviewer-timeout') return false;
+  try {
+    const cascadeState = readCascadeState(rootDir, { repo, prNumber });
+    const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
+    return timeoutFailures >= CASCADE_FAILURE_CAP;
+  } catch {
+    return false;
   }
 }
 
@@ -3138,7 +3159,10 @@ async function pollOnce(
         ? (
             `reviewer-timeout fallback switched reviewer=${route.timeoutFallback.fromReviewerModel} ` +
             `to reviewer=${route.timeoutFallback.toReviewerModel} after ` +
-            `${route.timeoutFallback.timeoutFailures} timeout failures; cross-model guarantee may be waived for this recovery pass.`
+            `${route.timeoutFallback.timeoutFailures} timeout failures; ` +
+            (route.timeoutFallback.sameModelAsBuilder
+              ? `reviewer=${route.timeoutFallback.toReviewerModel} matches builder=${route.timeoutFallback.builderClass}, so cross-model guarantee is waived for this recovery pass.`
+              : 'cross-model guarantee remains intact for this recovery pass.')
           )
         : describeCrossModelReviewWaiver(
             route.builderClass,

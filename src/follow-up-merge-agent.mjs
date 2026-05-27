@@ -41,7 +41,7 @@ import {
   CASCADE_FAILURE_CAP,
   readCascadeState,
 } from './reviewer-cascade.mjs';
-import { classifyReviewerFailure } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 
@@ -2036,7 +2036,7 @@ function pickOperatorApprovedMergeGate(job) {
   return { decision: 'dispatch', trigger: OPERATOR_APPROVED_LABEL };
 }
 
-function pickReviewerTimeoutExhaustedMergeGate(job) {
+function pickReviewerTimeoutExhaustedMergeGate(job, { operatorApproved = false } = {}) {
   if (String(job?.mergeable ?? '').trim().toUpperCase() !== 'MERGEABLE') {
     return { decision: 'skip-not-mergeable', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
   }
@@ -2052,6 +2052,14 @@ function pickReviewerTimeoutExhaustedMergeGate(job) {
   }
   if (checksConclusion !== 'SUCCESS') {
     return { decision: 'skip-checks-failed', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+  }
+
+  if (!operatorApproved && (Number(job?.blockingFindingCount) || 0) > 0) {
+    return { decision: 'skip-blockers-present', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
+  }
+  const blockingFindingState = String(job?.blockingFindingState || 'known').trim().toLowerCase();
+  if (!operatorApproved && blockingFindingState === 'unknown') {
+    return { decision: 'skip-blocking-findings-unknown', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
   }
 
   return { decision: 'dispatch', trigger: REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER };
@@ -2074,7 +2082,7 @@ function pickNormalMergeAgentDispatchDetail({
   finalPassOnRequestChangesEnabled = false,
 }) {
   if (shouldUseReviewerTimeoutExhaustedMergeGate(job)) {
-    return pickReviewerTimeoutExhaustedMergeGate(job);
+    return pickReviewerTimeoutExhaustedMergeGate(job, { operatorApproved });
   }
 
   if (normalizedVerdict === null) {
@@ -3373,8 +3381,9 @@ async function dispatchMergeAgentForPR({
       };
     }
     if (decision === 'skip-blockers-present' || decision === 'skip-blocking-findings-unknown') {
-      // Budget exhausted with standing blocking findings — the pipeline refuses
-      // to auto-merge (root-cause gate for #901). Surface it as a durable,
+      // Standing blocking findings — the pipeline refuses to auto-merge
+      // (root-cause gate for #901, shared by final-pass and timeout-exhaustion
+      // handoffs). Surface it as a durable,
       // queryable lifecycle event so the operator can see why automation parked
       // this PR. No sticky label is applied: the gate is recomputed every tick
       // and auto-resumes once the blockers clear (verdict → `Comment only`) or
@@ -3384,9 +3393,15 @@ async function dispatchMergeAgentForPR({
       const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
         skippedAt: now,
         decision,
-        trigger: null,
+        trigger: trigger || null,
         blockingFindingCount,
         blockingFindingState,
+        ...(trigger === REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER
+          ? {
+              reviewerFailureClass: job?.reviewFailureClass || null,
+              reviewerFailureExhausted: Boolean(job?.reviewFailureExhausted),
+            }
+          : {}),
       });
       mergeAgentLifecycleLog(logger, decision === 'skip-blocking-findings-unknown'
         ? 'merge_agent.blocking_findings_unknown_handoff'
@@ -3394,6 +3409,7 @@ async function dispatchMergeAgentForPR({
         repo,
         prNumber,
         headSha: job?.headSha || null,
+        trigger: trigger || null,
         blockingFindingCount,
         blockingFindingState,
         skippedRecordPath,
@@ -3401,8 +3417,15 @@ async function dispatchMergeAgentForPR({
       });
       return {
         decision,
+        trigger: trigger || null,
         blockingFindingCount,
         blockingFindingState,
+        ...(trigger === REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER
+          ? {
+              reviewerFailureClass: job?.reviewFailureClass || null,
+              reviewerFailureExhausted: Boolean(job?.reviewFailureExhausted),
+            }
+          : {}),
         skippedRecordPath,
       };
     }
@@ -4689,22 +4712,6 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
 
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber } = {}) {
   return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber });
-}
-
-function reviewerFailureClassFromStoredRow(reviewRow) {
-  const rawMessage = String(reviewRow?.failure_message || '');
-  const message = rawMessage.toLowerCase();
-  const tagMatch = message.match(/^\[(reviewer-timeout|launchctl-bootstrap|cascade)\]/);
-  if (tagMatch) return tagMatch[1];
-  const legacyClass = classifyReviewerFailure(rawMessage, null);
-  if (legacyClass === 'cascade' || legacyClass === 'reviewer-timeout' || legacyClass === 'launchctl-bootstrap') {
-    return legacyClass;
-  }
-  if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
-    return 'launchctl-bootstrap';
-  }
-  if (/litellm\/upstream cascade|watcher backoff engaged/.test(message)) return 'cascade';
-  return null;
 }
 
 function readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, { repo, prNumber } = {}) {

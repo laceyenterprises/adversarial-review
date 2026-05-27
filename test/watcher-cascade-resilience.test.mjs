@@ -499,6 +499,9 @@ test('reviewer-timeout fallback switches reviewer model after threshold only wit
     assert.equal(selected.reviewerModel, 'codex');
     assert.equal(selected.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
     assert.equal(selected.timeoutFallback.fromReviewerModel, 'claude');
+    assert.equal(selected.timeoutFallback.toReviewerModel, 'codex');
+    assert.equal(selected.timeoutFallback.builderClass, 'codex');
+    assert.equal(selected.timeoutFallback.sameModelAsBuilder, true);
     assert.equal(selected.timeoutFallback.timeoutFailures, 2);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

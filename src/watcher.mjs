@@ -81,6 +81,7 @@ import {
   reconcileProactivePhantomHandoffs,
   resolveFastMergePerPollCap,
   scanStuckMergeAgentDispatches,
+  shouldUseReviewerTimeoutExhaustedMergeGate,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
 } from './follow-up-merge-agent.mjs';
@@ -1940,8 +1941,6 @@ function resolveReviewerTimeoutFallbackModel(baseReviewerModel, env = process.en
   const raw = String(env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || 'off').trim().toLowerCase();
   if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'none') return null;
   if (raw === 'claude' || raw === 'codex') return raw;
-  if (baseReviewerModel === 'claude') return 'codex';
-  if (baseReviewerModel === 'codex') return 'claude';
   return null;
 }
 
@@ -2455,6 +2454,68 @@ async function handlePostedReviewRow({
     logger.error(
       `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:\n${detail}`
     );
+  }
+}
+
+async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  existing,
+  subjectRef,
+  currentRevisionRef,
+  labelNames = [],
+  execFileImpl = execFileAsync,
+  fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
+  buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
+  dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
+  operatorSurface = null,
+  logger = console,
+} = {}) {
+  try {
+    let operatorApprovalEvent;
+    let mergeAgentRequestEvent;
+    if (operatorSurface) {
+      const controlSubjectRef = subjectRef || {
+        domainId: 'code-pr',
+        subjectExternalId: `${repoPath}#${prNumber}`,
+        revisionRef: currentRevisionRef || null,
+      };
+      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
+      const [operatorApproval, mergeAgentRequest] = await Promise.all([
+        labelNames.includes(OPERATOR_APPROVED_LABEL)
+          ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
+          : null,
+        labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
+          ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
+          : null,
+      ]);
+      operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
+      mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
+    }
+    const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+      execFileImpl,
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
+    });
+    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
+    if (!shouldUseReviewerTimeoutExhaustedMergeGate(dispatchJob)) {
+      return { handled: false, dispatchJob };
+    }
+    const dispatched = await dispatchMergeAgentForPRImpl({
+      rootDir,
+      ...dispatchJob,
+    });
+    logger.log(
+      `[watcher] reviewer-timeout exhaustion handoff for ${repoPath}#${prNumber}: ${dispatched.decision}`
+    );
+    return { handled: true, dispatchJob, dispatched };
+  } catch (err) {
+    const detail = err?.message || String(err);
+    logger.error(
+      `[watcher] reviewer-timeout exhaustion handoff failed for ${repoPath}#${prNumber}: ${detail}`
+    );
+    return { handled: true, error: err };
   }
 }
 
@@ -3276,6 +3337,20 @@ async function pollOnce(
         prNumber,
       });
       if (cascadeGate.shouldBackoff) {
+        continue;
+      }
+      const timeoutExhaustionHandoff = await maybeDispatchReviewerTimeoutExhaustedMergeAgent({
+        rootDir: ROOT,
+        repoPath,
+        prNumber,
+        existing: current,
+        subjectRef: subject.ref,
+        currentRevisionRef: subject.ref.revisionRef,
+        labelNames: prLabelNames,
+        execFileImpl: execFileAsync,
+        operatorSurface,
+      });
+      if (timeoutExhaustionHandoff.handled) {
         continue;
       }
 

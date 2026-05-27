@@ -4827,6 +4827,7 @@ export {
   resolveMergeAgentProject,
   summarizeChecksConclusion,
   summarizeFastMergeChecks,
+  shouldUseReviewerTimeoutExhaustedMergeGate,
   writeFastMergeCloseAuditEntry,
   writeMergeAgentPrompt,
 };

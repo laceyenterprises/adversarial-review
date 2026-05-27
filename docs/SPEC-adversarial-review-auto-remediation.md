@@ -234,9 +234,9 @@ Reason mapping:
 | `operator-approved` | `success` | A scoped operator approval accepts the current PR head regardless of review/remediation state. |
 | `review-malformed` | `failure` | The durable review row is in a malformed terminal state, including but not limited to malformed-title. |
 | `reviewer-timeout` | `success` | The reviewer timed out before posting after retry handling; the gate must not imply a substantive review passed. The watcher must make the operator action visible and, when the timeout follows a completed remediation that requested re-review, hand the PR to the merge-agent decision path. |
-| `reviewer-launchctl-bootstrap` | `failure` | The Claude launchctl/bootstrap path failed before posting. |
-| `reviewer-cascade` | `failure` | The reviewer hit a LiteLLM/upstream cascade before posting. |
-| `review-failed` | `failure` | The adversarial review failed before posting and no more specific class is known. |
+| `reviewer-launchctl-bootstrap` | `success` | The Claude launchctl/bootstrap path failed before posting; the gate reflects an operator-visible automation failure, not a substantive review verdict. |
+| `reviewer-cascade` | `success` | The reviewer hit a LiteLLM/upstream cascade before posting; the gate reflects an operator-visible automation failure, not a substantive review verdict. |
+| `review-failed` | `success` | The adversarial review failed before posting and no more specific class is known; the gate reflects an operator-visible automation failure, not a substantive review verdict. |
 | `review-failed-orphan` | `failure` | The watcher needs operator verification for a possible orphan review post. |
 | `review-state-unknown` | `failure` | The durable review row contains an unexpected state. |
 | `blocking-review` | `failure` | The latest review verdict still requests changes. |

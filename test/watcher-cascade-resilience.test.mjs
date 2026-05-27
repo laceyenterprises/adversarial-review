@@ -505,6 +505,47 @@ test('reviewer-timeout fallback switches reviewer model after threshold only wit
   }
 });
 
+test('reviewer-timeout fallback fails closed on unrecognized opt-in values', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-timeout-fallback-'));
+  const repo = 'laceyenterprises/agent-os';
+  const prNumber = 1007;
+  try {
+    recordCascadeFailure(rootDir, {
+      repo,
+      prNumber,
+      failedAt: '2026-05-27T01:20:00.000Z',
+      failureClass: 'reviewer-timeout',
+    });
+    recordCascadeFailure(rootDir, {
+      repo,
+      prNumber,
+      failedAt: '2026-05-27T01:40:00.000Z',
+      failureClass: 'reviewer-timeout',
+    });
+
+    const selected = selectReviewerRouteForAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      subject: { builderClass: 'codex' },
+      baseRoute: {
+        builderClass: 'codex',
+        tag: 'codex',
+        reviewerModel: 'claude',
+        botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+      },
+      env: {
+        ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL: 'cluade',
+      },
+    });
+
+    assert.equal(selected.reviewerModel, 'claude');
+    assert.equal(selected.timeoutFallback, undefined);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('pending-upstream engages after five consecutive cascades and further retries stay capped', () => {
   const { rootDir, db } = setupFixture();
   try {

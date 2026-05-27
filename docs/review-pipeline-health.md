@@ -2,7 +2,9 @@
 
 `src/review-pipeline-health.mjs` reads the live `data/reviews.db` ledger plus
 `data/follow-up-jobs/` and emits both Prometheus metrics and Sentinel-shaped
-findings.
+findings. The collector opens `reviews.db` read-only, never runs schema
+convergence from the metrics path, and treats missing review-state tables or
+columns as an empty snapshot instead of mutating the watcher-owned database.
 
 Run locally:
 
@@ -38,7 +40,7 @@ The Grafana dashboard lives at
 
 | Code | Default threshold | Tier | Clears when |
 |---|---:|---|---|
-| `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of attempts over 1h, with at least 3 attempts | page | the window falls below threshold or the minimum-attempt guard |
+| `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | page | the settled-attempt window falls below threshold or the minimum-attempt guard |
 | `review:queue_starvation` | oldest pending first-pass row is >30m old | page | no pending row exceeds the age threshold |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | page | the PR is merged/closed or the settled job is no longer past threshold |

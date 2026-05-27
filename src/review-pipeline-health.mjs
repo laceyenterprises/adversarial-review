@@ -1,7 +1,6 @@
+import Database from 'better-sqlite3';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-
-import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -161,26 +160,59 @@ function classifyFailure(value) {
 
 function failureClassForPass(row) {
   const metadata = parseJson(row?.metadata_json, {});
-  return metadata.failureClass
+  return classifyFailure(
+    metadata.failureClass
     || metadata.failure_class
     || metadata.errorClass
     || metadata.error_class
     || metadata.failureCode
     || metadata.failure_code
-    || classifyFailure(metadata.failureMessage || metadata.message || metadata.error || row?.status);
+    || metadata.failureMessage
+    || metadata.message
+    || metadata.error
+    || row?.status
+  );
+}
+
+function isMissingSchemaError(error) {
+  const message = String(error?.message || '');
+  return error?.code === 'SQLITE_ERROR'
+    && (message.includes('no such table') || message.includes('no such column'));
+}
+
+function safeAll(db, sql, params = []) {
+  try {
+    return db.prepare(sql).all(...params);
+  } catch (error) {
+    if (isMissingSchemaError(error)) return [];
+    throw error;
+  }
+}
+
+function openReviewStateReadOnlyDb(rootDir) {
+  const dbPath = join(rootDir, 'data', 'reviews.db');
+  if (!existsSync(dbPath)) return null;
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma('busy_timeout = 5000');
+  db.pragma('query_only = 1');
+  return db;
 }
 
 function summarizeReviewerAttempts(db, { nowMs, config }) {
   const cutoff = new Date(nowMs - config.reviewerDeathRateWindowMs).toISOString();
-  const rows = db.prepare(
+  const rows = safeAll(
+    db,
     `SELECT repo, pr_number, pass_kind, status, started_at, ended_at, metadata_json
        FROM reviewer_passes
       WHERE started_at >= ?
-        AND pass_kind IN ('first-pass', 'rereview')`
-  ).all(cutoff);
+        AND pass_kind IN ('first-pass', 'rereview')`,
+    [cutoff]
+  );
 
   const attempts = new Map();
   let total = 0;
+  let settled = 0;
+  let failed = 0;
   const failuresByClass = new Map();
 
   for (const row of rows) {
@@ -193,17 +225,23 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
     });
     attempts.set(key, (attempts.get(key) || 0) + 1);
     if (row.status === 'failed') {
+      failed += 1;
+      settled += 1;
       failuresByClass.set(failureClass, (failuresByClass.get(failureClass) || 0) + 1);
+    } else if (row.status === 'completed') {
+      settled += 1;
     }
   }
 
   if (total === 0) {
-    const fallbackRows = db.prepare(
+    const fallbackRows = safeAll(
+      db,
       `SELECT review_status, failure_message, last_attempted_at, failed_at
          FROM reviewed_prs
         WHERE last_attempted_at >= ?
-           OR failed_at >= ?`
-    ).all(cutoff, cutoff);
+           OR failed_at >= ?`,
+      [cutoff, cutoff]
+    );
     for (const row of fallbackRows) {
       total += 1;
       const failed = row.review_status === 'failed' || row.review_status === 'failed-orphan';
@@ -214,29 +252,37 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
         pass_kind: 'first-pass',
       });
       attempts.set(key, (attempts.get(key) || 0) + 1);
-      if (failed) failuresByClass.set(failureClass, (failuresByClass.get(failureClass) || 0) + 1);
+      if (failed) {
+        failuresByClass.set(failureClass, (failuresByClass.get(failureClass) || 0) + 1);
+      }
     }
+    failed = fallbackRows.filter((row) => row.review_status === 'failed' || row.review_status === 'failed-orphan').length;
+    settled = fallbackRows.length;
   }
 
   return {
     total,
+    settled,
+    failed,
+    failureRatio: settled > 0 ? failed / settled : 0,
     attempts: Array.from(attempts, ([key, value]) => ({ ...JSON.parse(key), value })),
     failureRatios: Array.from(failuresByClass, ([failureClass, failed]) => ({
       failureClass,
       failed,
-      attempted: total,
-      ratio: total > 0 ? failed / total : 0,
+      attempted: settled,
+      ratio: settled > 0 ? failed / settled : 0,
     })),
   };
 }
 
 function summarizeFirstPassQueue(db, { nowMs }) {
-  const rows = db.prepare(
+  const rows = safeAll(
+    db,
     `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at
        FROM reviewed_prs
       WHERE pr_state = 'open'
         AND review_status = 'pending'`
-  ).all();
+  );
   let oldest = null;
   for (const row of rows) {
     const pendingSince = row.rereview_requested_at || row.reviewed_at || row.last_attempted_at;
@@ -258,11 +304,12 @@ function summarizeFirstPassQueue(db, { nowMs }) {
 }
 
 function summarizeMergeOutcomes(db) {
-  const rows = db.prepare(
+  const rows = safeAll(
+    db,
     `SELECT COALESCE(pr_state, 'unknown') AS outcome, COUNT(*) AS count
        FROM reviewed_prs
       GROUP BY COALESCE(pr_state, 'unknown')`
-  ).all();
+  );
   return rows.map((row) => ({ outcome: row.outcome, count: row.count }));
 }
 
@@ -344,10 +391,11 @@ function summarizeFollowUpQueues(rootDir, { nowMs, config }) {
 }
 
 function reviewRowsByRepoPr(db) {
-  const rows = db.prepare(
+  const rows = safeAll(
+    db,
     `SELECT repo, pr_number, pr_state, merged_at, closed_at, labels_json
        FROM reviewed_prs`
-  ).all();
+  );
   const map = new Map();
   for (const row of rows) {
     map.set(`${row.repo}#${row.pr_number}`, row);
@@ -410,22 +458,26 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const findings = [];
   const { config } = snapshot;
 
-  for (const ratio of snapshot.reviewer.failureRatios) {
-    if (
-      ratio.attempted >= config.reviewerDeathRateMinAttempts
-      && ratio.ratio > config.reviewerDeathRateThreshold
-    ) {
-      findings.push(buildFinding({
-        code: 'review:reviewer_death_rate_high',
-        tier: 'page',
-        subject: `Reviewer failure class ${ratio.failureClass} is ${Math.round(ratio.ratio * 100)}% of recent attempts`,
-        message: `${ratio.failed}/${ratio.attempted} reviewer attempts failed as ${ratio.failureClass}.`,
-        evidence: [`reviews.db reviewer_passes window=${config.reviewerDeathRateWindowMs}ms`],
-        recommendedAction: 'Inspect reviewer_passes metadata and the watcher logs for the dominant failure class before the queue starves.',
-        observedAt,
-        details: ratio,
-      }));
-    }
+  if (
+    snapshot.reviewer.settled >= config.reviewerDeathRateMinAttempts
+    && snapshot.reviewer.failureRatio > config.reviewerDeathRateThreshold
+  ) {
+    findings.push(buildFinding({
+      code: 'review:reviewer_death_rate_high',
+      tier: 'page',
+      subject: `Reviewer failures are ${Math.round(snapshot.reviewer.failureRatio * 100)}% of recent settled attempts`,
+      message: `${snapshot.reviewer.failed}/${snapshot.reviewer.settled} completed or failed reviewer attempts ended in failure.`,
+      evidence: [`reviews.db reviewer_passes window=${config.reviewerDeathRateWindowMs}ms`],
+      recommendedAction: 'Inspect reviewer_passes metadata and the watcher logs for the failure breakdown before the queue starves.',
+      observedAt,
+      details: {
+        failed: snapshot.reviewer.failed,
+        attempted: snapshot.reviewer.settled,
+        ratio: snapshot.reviewer.failureRatio,
+        excludedStatuses: ['running', 'cancelled'],
+        failureRatios: snapshot.reviewer.failureRatios,
+      },
+    }));
   }
 
   const oldest = snapshot.firstPassQueue.oldest;
@@ -495,16 +547,19 @@ function collectReviewPipelineHealth({
   const observedAt = toIso(now);
   const nowMs = Date.parse(observedAt);
   const config = resolveReviewPipelineHealthConfig(env, configOverrides);
-  const db = openReviewStateDb(rootDir);
+  const db = openReviewStateReadOnlyDb(rootDir);
   try {
-    ensureReviewStateSchema(db);
-    const reviewer = summarizeReviewerAttempts(db, { nowMs, config });
-    const firstPassQueue = summarizeFirstPassQueue(db, { nowMs });
+    const reviewer = db
+      ? summarizeReviewerAttempts(db, { nowMs, config })
+      : { total: 0, settled: 0, failed: 0, failureRatio: 0, attempts: [], failureRatios: [] };
+    const firstPassQueue = db
+      ? summarizeFirstPassQueue(db, { nowMs })
+      : { depth: 0, oldest: null };
     const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
-    const mergeOutcomes = summarizeMergeOutcomes(db);
+    const mergeOutcomes = db ? summarizeMergeOutcomes(db) : [];
     const mergeStalls = summarizeMergeStalls({
       followUpJobs: followUpQueues.jobs,
-      reviewRows: reviewRowsByRepoPr(db),
+      reviewRows: db ? reviewRowsByRepoPr(db) : new Map(),
       nowMs,
       config,
     });
@@ -527,7 +582,7 @@ function collectReviewPipelineHealth({
       findings: evaluateReviewPipelineFindings(snapshot, { observedAt }),
     };
   } finally {
-    db.close();
+    db?.close();
   }
 }
 

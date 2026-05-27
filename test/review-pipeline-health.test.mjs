@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 import {
   mkdirSync,
   mkdtempSync,
@@ -115,6 +116,53 @@ test('reviewer death-rate finding fires on a high failed/attempted ratio and cle
 
   const cleared = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.ok(!findingCodes(cleared).includes('review:reviewer_death_rate_high'));
+});
+
+test('reviewer death-rate finding aggregates mixed failure classes over settled attempts only', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 2, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewerPass(rootDir, { prNumber: 2, attemptNumber: 1, status: 'failed', metadata: { failureClass: 'timeout' } });
+  insertReviewerPass(rootDir, { prNumber: 2, attemptNumber: 2, status: 'failed', metadata: { failureClass: 'oauth refresh failed' } });
+  insertReviewerPass(rootDir, { prNumber: 2, attemptNumber: 3, status: 'failed', metadata: { failureClass: 'upstream 502' } });
+  insertReviewerPass(rootDir, { prNumber: 2, attemptNumber: 4, status: 'failed', metadata: { failureClass: 'token expired' } });
+  insertReviewerPass(rootDir, { prNumber: 2, attemptNumber: 5, status: 'completed', metadata: {} });
+  insertReviewerPass(rootDir, { prNumber: 2, attemptNumber: 6, status: 'completed', metadata: {} });
+  insertReviewerPass(rootDir, { prNumber: 2, attemptNumber: 7, status: 'running', endedAt: null, metadata: {} });
+  insertReviewerPass(rootDir, { prNumber: 2, attemptNumber: 8, status: 'cancelled', metadata: {} });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(findingCodes(snapshot).includes('review:reviewer_death_rate_high'));
+  assert.equal(snapshot.reviewer.failed, 4);
+  assert.equal(snapshot.reviewer.settled, 6);
+  assert.equal(snapshot.reviewer.failureRatios.find((row) => row.failureClass === 'auth')?.failed, 2);
+  assert.equal(snapshot.findings[0].details.excludedStatuses.join(','), 'running,cancelled');
+});
+
+test('collector reads review state without mutating legacy or missing-schema databases', () => {
+  const rootDir = tempRoot();
+  const dataDir = path.join(rootDir, 'data');
+  mkdirSync(dataDir, { recursive: true });
+  const dbPath = path.join(dataDir, 'reviews.db');
+  const seedDb = new Database(dbPath);
+  try {
+    seedDb.exec('CREATE TABLE placeholder(id INTEGER PRIMARY KEY, note TEXT);');
+  } finally {
+    seedDb.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.deepEqual(findingCodes(snapshot), []);
+  assert.equal(snapshot.reviewer.total, 0);
+  assert.equal(snapshot.firstPassQueue.depth, 0);
+
+  const verifyDb = new Database(dbPath, { readonly: true });
+  try {
+    const tableNames = verifyDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all();
+    assert.deepEqual(tableNames.map((row) => row.name), ['placeholder']);
+    assert.equal(verifyDb.pragma('user_version', { simple: true }), 0);
+  } finally {
+    verifyDb.close();
+  }
 });
 
 test('queue starvation finding fires on an old pending first-pass row and clears after posting', () => {

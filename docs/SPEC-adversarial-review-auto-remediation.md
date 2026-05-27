@@ -74,13 +74,16 @@ configured positive integer, and the exported queue helper must still clamp any
 direct caller to at least one worker so a bad test/helper call cannot busy-loop
 the watcher tick.
 
-On Darwin, pool admission is further gated by live memory-pressure sampling
-from `vm_stat` plus `sysctl vm.swapusage`. The watcher computes a projected
-headroom check per admission attempt using the already-reserved reviewer budget
-plus the next reviewer's estimated peak RSS. The shared reservation must be
-recorded before the async sample is awaited so concurrent admissions observe
-each other's in-flight reservations rather than all admitting against a stale
-zero baseline.
+On Darwin, first-pass reviewer admission is further gated by live
+memory-pressure sampling from `vm_stat` plus `sysctl vm.swapusage`. This gate
+applies in both bounded-pool mode and serial fallback mode; disabling the pool
+reduces concurrency to one but does not force reviewer spawns through critical
+host pressure. The watcher samples host pressure once per poll tick and
+computes a projected headroom check per admission attempt using the
+already-reserved reviewer budget plus the next reviewer's estimated peak RSS.
+The shared reservation must be recorded before the async sample is awaited so
+concurrent admissions observe each other's in-flight reservations rather than
+all admitting against a stale zero baseline.
 
 The current thresholds and model estimates are:
 
@@ -97,6 +100,11 @@ Admission refuses the spawn immediately on `pressureLevel=critical`, or when
 `PROJECTED_HEADROOM_FLOOR_MB`. A denied admission releases its optimistic
 reservation before returning so later candidates can retry against current
 memory state on a future tick.
+
+The SQLite `review_attempts` counter captured during candidate discovery is a
+best-effort diagnostic for the DB row being claimed. The remediation ledger is
+the source of truth for reviewer round budgeting; the claim compare-and-swap
+and GitHub freshness checks remain the load-bearing concurrency protections.
 
 ## Remediation Reply Contract
 

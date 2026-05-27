@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  createReviewerMemoryAdmissionSampler,
   resolveFirstPassReviewerPoolConfig,
   reserveReviewerMemoryAdmission,
   runBoundedReviewerDispatchQueue,
@@ -109,6 +110,7 @@ test('reviewer memory gate projected headroom uses available minus reserved minu
   });
 
   assert.equal(decision.projectedHeadroomMb, 2300 - 256 - 1024);
+  assert.equal(decision.reservedMb, 256);
   assert.equal(decision.projectedHeadroomMb < PROJECTED_HEADROOM_FLOOR_MB, true);
   assert.equal(decision.admit, false);
   assert.equal(decision.reason, 'memory_pressure_projected_headroom_low');
@@ -141,6 +143,74 @@ test('reviewer memory reservations are visible across concurrent admissions', as
     attempt.release?.();
   }
   assert.equal(reservationState.reservedMb, 0);
+});
+
+test('reviewer memory sampler reuses one host sample within a poll tick', async () => {
+  let samples = 0;
+  const sampleForTick = createReviewerMemoryAdmissionSampler({
+    readSample: async () => {
+      samples += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return {
+        pressureLevel: 'nominal',
+        availableMb: 5000,
+        swapUsedPct: 10,
+      };
+    },
+    logger: { warn() {} },
+  });
+  const seenSamples = [];
+  const checkAdmission = async ({ reviewerModel, reservedMb, sample }) => {
+    seenSamples.push(sample);
+    return decideReviewerMemoryAdmission({ reviewerModel, reservedMb, sample });
+  };
+  const reservationState = { reservedMb: 0 };
+
+  const attempts = await Promise.all([
+    reserveReviewerMemoryAdmission({
+      reviewerModel: 'codex',
+      reservationState,
+      checkAdmission,
+      getMemoryPressureSample: sampleForTick,
+    }),
+    reserveReviewerMemoryAdmission({
+      reviewerModel: 'claude',
+      reservationState,
+      checkAdmission,
+      getMemoryPressureSample: sampleForTick,
+    }),
+  ]);
+
+  assert.equal(samples, 1);
+  assert.equal(seenSamples.length, 2);
+  assert.equal(seenSamples[0], seenSamples[1]);
+  assert.equal(attempts.every((attempt) => attempt.admit), true);
+  for (const attempt of attempts) {
+    attempt.release?.();
+  }
+  assert.equal(reservationState.reservedMb, 0);
+});
+
+test('denied reviewer reservation reports the reservation used for the decision', async () => {
+  const reservationState = { reservedMb: 1024 };
+  const attempt = await reserveReviewerMemoryAdmission({
+    reviewerModel: 'codex',
+    reservationState,
+    checkAdmission: async ({ reviewerModel, reservedMb }) => decideReviewerMemoryAdmission({
+      reviewerModel,
+      reservedMb,
+      sample: {
+        pressureLevel: 'nominal',
+        availableMb: 2500,
+        swapUsedPct: 10,
+      },
+    }),
+  });
+
+  assert.equal(attempt.admit, false);
+  assert.equal(attempt.reservedMbBeforeAdmission, 1024);
+  assert.equal(attempt.memoryDecision.reservedMb, 1024);
+  assert.equal(reservationState.reservedMb, 1024);
 });
 
 test('reviewer pool clamps non-positive concurrency to one worker', async () => {

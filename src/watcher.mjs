@@ -112,6 +112,7 @@ import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
   compareReviewerDispatchCandidates,
+  createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission,
   resolveFirstPassReviewerPoolConfig,
   runBoundedReviewerDispatchQueue,
@@ -2826,6 +2827,7 @@ async function pollOnce(
   const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config });
   const reviewerDispatchCandidates = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
+  const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({ logger: console });
 
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
@@ -3450,14 +3452,15 @@ async function pollOnce(
           const reservation = await reserveReviewerMemoryAdmission({
             reviewerModel: route.reviewerModel,
             reservationState: reviewerMemoryReservationState,
+            getMemoryPressureSample: reviewerMemoryAdmissionSampleForTick,
             logger: console,
           });
-          const { estimatedReviewerRssMb, memoryDecision } = reservation;
+          const { estimatedReviewerRssMb, memoryDecision, reservedMbBeforeAdmission } = reservation;
           if (!memoryDecision.admit) {
             console.log(
               `[watcher] Deferring reviewer for ${repoPath}#${prNumber}: ${memoryDecision.reason} ` +
                 `available=${memoryDecision.availableMb ?? 'unknown'}MB ` +
-                `reserved=${reviewerMemoryReservationState.reservedMb}MB ` +
+                `reserved=${memoryDecision.reservedMb ?? reservedMbBeforeAdmission}MB ` +
                 `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
                 `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
             );
@@ -3869,7 +3872,6 @@ export {
   resolveStaleReviewerReconcilePerPoll,
   resolveReviewerTimeoutFallbackThreshold,
   sortReviewerDispatchCandidates,
-  resolveReviewerTimeoutFallbackThreshold,
   retryPendingMergeAgentLifecycleCleanups,
   selectReviewerRouteForAttempt,
   shouldDeferReviewForActiveFollowUp,

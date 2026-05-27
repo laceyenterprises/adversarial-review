@@ -1,6 +1,7 @@
 import {
   checkReviewerMemoryAdmission,
   peakReviewerMemoryMbFor,
+  readMemoryPressureSample,
 } from './watcher-memory-pressure.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
@@ -76,26 +77,52 @@ function sortReviewerDispatchCandidates(candidates) {
   return [...candidates].sort(compareReviewerDispatchCandidates);
 }
 
+function createReviewerMemoryAdmissionSampler({
+  readSample = readMemoryPressureSample,
+  logger = console,
+} = {}) {
+  let samplePromise = null;
+  return async function reviewerMemoryAdmissionSampleForTick() {
+    if (!samplePromise) {
+      samplePromise = readSample().catch((err) => {
+        logger?.warn?.(
+          `[watcher] memory pressure gate unavailable; admitting by legacy policy: ${err?.message || err}`
+        );
+        return null;
+      });
+    }
+    return samplePromise;
+  };
+}
+
 async function reserveReviewerMemoryAdmission({
   reviewerModel,
   reservationState,
   checkAdmission = checkReviewerMemoryAdmission,
+  getMemoryPressureSample = null,
   logger = console,
 } = {}) {
   const estimatedReviewerRssMb = peakReviewerMemoryMbFor(reviewerModel);
   reservationState.reservedMb += estimatedReviewerRssMb;
   const reservedMbBeforeAdmission = Math.max(0, reservationState.reservedMb - estimatedReviewerRssMb);
   try {
-    const memoryDecision = await checkAdmission({
+    const admissionOptions = {
       reviewerModel,
       reservedMb: reservedMbBeforeAdmission,
       logger,
+    };
+    if (getMemoryPressureSample) {
+      admissionOptions.sample = await getMemoryPressureSample();
+    }
+    const memoryDecision = await checkAdmission({
+      ...admissionOptions,
     });
     if (!memoryDecision.admit) {
       reservationState.reservedMb = Math.max(0, reservationState.reservedMb - estimatedReviewerRssMb);
       return {
         admit: false,
         estimatedReviewerRssMb,
+        reservedMbBeforeAdmission,
         memoryDecision,
       };
     }
@@ -103,6 +130,7 @@ async function reserveReviewerMemoryAdmission({
     return {
       admit: true,
       estimatedReviewerRssMb,
+      reservedMbBeforeAdmission,
       memoryDecision,
       release() {
         if (released) return;
@@ -172,6 +200,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 export {
   DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   compareReviewerDispatchCandidates,
+  createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission,
   resolveFirstPassReviewerPoolConfig,
   runBoundedReviewerDispatchQueue,

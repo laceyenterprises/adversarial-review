@@ -140,7 +140,13 @@ function decideReviewerMemoryAdmission({
   projectedHeadroomFloorMb = PROJECTED_HEADROOM_FLOOR_MB,
 } = {}) {
   if (!sample) {
-    return { admit: true, reason: null, sample: null, projectedHeadroomMb: null };
+    return {
+      admit: true,
+      reason: null,
+      sample: null,
+      projectedHeadroomMb: null,
+      reservedMb: Math.max(0, Number(reservedMb) || 0),
+    };
   }
   const availableMb = Number.isFinite(Number(sample.availableMb))
     ? Math.trunc(Number(sample.availableMb))
@@ -156,6 +162,7 @@ function decideReviewerMemoryAdmission({
       availableMb,
       swapUsedPct,
       estimatedReviewerRssMb,
+      reservedMb: Math.max(0, Number(reservedMb) || 0),
     };
   }
   const projectedHeadroomMb = availableMb - Math.max(0, Number(reservedMb) || 0) - estimatedReviewerRssMb;
@@ -168,6 +175,7 @@ function decideReviewerMemoryAdmission({
       availableMb,
       swapUsedPct,
       estimatedReviewerRssMb,
+      reservedMb: Math.max(0, Number(reservedMb) || 0),
     };
   }
   return {
@@ -178,19 +186,24 @@ function decideReviewerMemoryAdmission({
     availableMb,
     swapUsedPct,
     estimatedReviewerRssMb,
+    reservedMb: Math.max(0, Number(reservedMb) || 0),
   };
 }
 
-async function checkReviewerMemoryAdmission({
+async function checkReviewerMemoryAdmission(options = {}) {
+  const {
   reviewerModel,
   reservedMb = 0,
   execFileImpl = execFileAsync,
   platform = process.platform,
   logger = console,
   sample = null,
-} = {}) {
+  } = options;
+  const hasInjectedSample = Object.prototype.hasOwnProperty.call(options, 'sample');
   try {
-    const pressureSample = sample || await readMemoryPressureSample({ execFileImpl, platform });
+    const pressureSample = hasInjectedSample
+      ? sample
+      : await readMemoryPressureSample({ execFileImpl, platform });
     return decideReviewerMemoryAdmission({
       sample: pressureSample,
       reviewerModel,

@@ -196,6 +196,59 @@ test('kernel remediation-reply validator rejects blocked outcome with empty bloc
   );
 });
 
+test('kernel remediation-reply validator counts malformed non-empty non-blocking sections via synthesized fallback', () => {
+  const expectedJob = {
+    jobId: 'job-malformed-nonblocking',
+    reviewBody: [
+      '## Summary',
+      'One blocking issue and one malformed non-blocking note remain.',
+      '',
+      '## Blocking Issues',
+      '- **Primary gate bug**',
+      '  - **File:** `src/follow-up-merge-agent.mjs`',
+      '  - **Problem:** The watcher still needs the machine-readable blocker-pass split.',
+      '',
+      '## Non-blocking Issues',
+      'Reviewer note without a parseable card heading.',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n'),
+  };
+  const replyMissingCoverage = {
+    ...remediationReply,
+    jobId: expectedJob.jobId,
+    addressed: [{
+      title: 'Reviewer note without a parseable card heading.',
+      finding: 'Malformed non-blocking section still carries one synthesized finding.',
+      action: 'Recorded the synthesized fallback item so coverage validation stays fail-closed.',
+    }],
+    pushback: [],
+    blockers: [],
+    operationalBlockers: [],
+    reReview: { requested: true, reason: 'Ready for re-review after accounting for the malformed section.' },
+  };
+
+  assert.throws(
+    () => validateRemediationReply(replyMissingCoverage, { expectedJob }),
+    /does not account for every blocking finding/
+  );
+
+  const replyWithCoverage = {
+    ...replyMissingCoverage,
+    addressed: [
+      ...replyMissingCoverage.addressed,
+      {
+        title: 'Primary gate bug',
+        finding: 'The blocking finding still needs an explicit accountability entry.',
+        action: 'Added the blocking entry alongside the synthesized non-blocking fallback.',
+      },
+    ],
+  };
+
+  assert.doesNotThrow(() => validateRemediationReply(replyWithCoverage, { expectedJob }));
+});
+
 // Sanitizer "actual cleaning paths" coverage. The pre-normalized fixture
 // tests above only prove idempotency on already-clean input. This test
 // drives messy input through the transforms the sanitizer actually
@@ -661,6 +714,45 @@ test('parseBlockingFindingsSection ignores incidental `- **note**` bullets witho
 
   assert.equal(findings.length, 1);
   assert.equal(findings[0].title, 'Real finding with full fields');
+});
+
+test('parseBlockingFindingsSection treats None sentinel with prose and wrapped continuation as empty', () => {
+  const reviewBody = [
+    '## Summary',
+    'No blockers.',
+    '',
+    '## Blocking Issues',
+    '- None. I looked specifically for a migration-idempotency problem in the touched files; none are present.',
+    '  The existing guardrails still cover retry and re-entry behavior.',
+    '',
+    '## Non-blocking Issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.deepEqual(findings, []);
+});
+
+test('parseBlockingFindingsSection does not swallow flush-left prose after None sentinel', () => {
+  const reviewBody = [
+    '## Summary',
+    'The section is malformed.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    'The migration is not idempotent and can corrupt reopened rows.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  const findings = parseBlockingFindingsSection(reviewBody);
+
+  assert.equal(findings.length, 1);
 });
 
 test('parseBlockingFindingsSection treats nested bold bullets as finding body content', () => {

@@ -389,6 +389,28 @@ function normalizeOperationalBlockers(reply, { expectedJob = null } = {}) {
 // empty or contains only the `- None.` sentinel. Returns one entry per
 // finding otherwise, with extracted `file` / `lines` / `problem` /
 // `whyItMatters` / `recommendedFix` fields preserved for diagnostics.
+function isNoneFindingsSentinelOnly(linesOrSection) {
+  const lines = Array.isArray(linesOrSection)
+    ? linesOrSection
+    : String(linesOrSection ?? '').split(/\n/);
+  const significant = lines.filter((line) => line.trim());
+  const sentinelPattern = /^-\s+None(?:\.(?:\s+.*)?|\s*)$/i;
+  const fieldMarkerPattern = /\*\*(File|Lines|Problem|Why it matters|Recommended fix)(?::\*\*|\*\*[ \t]*:)/i;
+  if (significant.length === 0) return true;
+  const firstLine = significant[0];
+  const firstTrimmed = firstLine.trim();
+  if (!sentinelPattern.test(firstTrimmed)) return false;
+  const firstIndent = firstLine.match(/^\s*/)?.[0].length ?? 0;
+  return significant.slice(1).every((line) => {
+    const trimmed = line.trim();
+    if (sentinelPattern.test(trimmed)) return true;
+    if (fieldMarkerPattern.test(trimmed)) return false;
+    if (/^(?:[-*+]\s+|\d+\.\s+)/.test(trimmed)) return false;
+    const indent = line.match(/^\s*/)?.[0].length ?? 0;
+    return indent > firstIndent;
+  });
+}
+
 function parseReviewFindingsSection(reviewBody, sectionPattern) {
   if (typeof reviewBody !== 'string' || !reviewBody.trim()) return null;
   const match = reviewBody.match(sectionPattern);
@@ -396,15 +418,13 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
   const section = match[1].trim();
   if (!section) return [];
   // The review contract mandates `- None.` as the explicit empty
-  // sentinel. Recognize it (with or without trailing period; tolerate
-  // case variation) before the count step so an empty section is not
-  // miscounted as a finding.
+  // sentinel. Recognize it (with or without same-line prose and with
+  // indented wrapped continuation lines; tolerate case variation)
+  // before the count step so an empty section is not miscounted as a
+  // finding, but fail closed when extra prose is flush-left or looks
+  // like finding-card content.
   const lines = section.split(/\n/);
-  const isSentinelOnly = lines.every((l) => {
-    const t = l.trim();
-    return t === '' || /^-\s+None\.?$/i.test(t);
-  });
-  if (isSentinelOnly) return [];
+  if (isNoneFindingsSentinelOnly(lines)) return [];
 
   const parseBoldLabel = (raw) => {
     // Allows an optional `-[ \t]+` bullet prefix so nested-bullet card
@@ -527,7 +547,21 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
     }
   }
   if (current) findings.push(current);
-  return findings;
+  if (findings.length > 0) return findings;
+
+  const fallbackLines = lines
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (fallbackLines.length === 0) return findings;
+  const fallbackTitle = (
+    fallbackLines.find((line) => !/^-\s+None(?:\.(?:\s+.*)?|\s*)$/i.test(line))
+    ?? fallbackLines[0]
+  )
+    .replace(/^-\s+/, '')
+    .trim()
+    .replace(/^\*\*(.+?)\*\*[ \t]*:?.*$/, '$1')
+    .trim();
+  return fallbackTitle ? [{ title: fallbackTitle }] : findings;
 }
 
 function parseBlockingFindingsSection(reviewBody) {
@@ -859,6 +893,7 @@ export {
   REMEDIATION_REPLY_SCHEMA_VERSION,
   assertNoPlaceholderText,
   detectPublicReplyNoiseSignal,
+  isNoneFindingsSentinelOnly,
   parseBlockingFindingsSection,
   parseRemediationReply,
   validateRemediationReply,

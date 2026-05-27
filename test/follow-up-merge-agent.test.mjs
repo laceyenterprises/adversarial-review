@@ -1275,6 +1275,57 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.operatorApproval.codeScopedAt, '2026-05-02T10:04:00.000Z');
 });
 
+test('buildMergeAgentDispatchJob dispatches clean Comment only reviews with explicit no blockers', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 405,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'clean123',
+    reviewBody: [
+      '## Summary',
+      'The current head is ready.',
+      '## Blocking issues',
+      '- None.',
+      '## Non-blocking issues',
+      '- None.',
+      '## Verdict',
+      '',
+      'Comment only',
+    ].join('\n'),
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 405,
+    branch: 'feature/pr-405',
+    baseBranch: 'main',
+    headSha: 'clean123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+  const detail = pickMergeAgentDispatchDetail({
+    ...dispatchJob,
+    latestFollowUpJobStatus: 'completed',
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+  });
+
+  assert.equal(dispatchJob.lastVerdict, 'Comment only');
+  assert.equal(dispatchJob.blockingFindingCount, 0);
+  assert.equal(dispatchJob.blockingFindingState, 'known');
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, null);
+});
+
 test('buildMergeAgentDispatchJob marks legacy Request changes bodies without issue sections as unknown blocker state', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({

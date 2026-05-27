@@ -2123,10 +2123,6 @@ function pickNormalMergeAgentDispatchDetail({
     if (blockingFindingState === 'unknown') {
       return { decision: 'skip-blocking-findings-unknown', trigger: null };
     }
-    const blockingFindingCount = Number(job?.blockingFindingCount) || 0;
-    if (blockingFindingCount > 0) {
-      return { decision: 'skip-blockers-present', trigger: null };
-    }
     return {
       decision: 'dispatch',
       trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,

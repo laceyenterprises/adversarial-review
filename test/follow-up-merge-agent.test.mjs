@@ -89,6 +89,25 @@ function makeMergeAgentRequest(overrides = {}) {
   };
 }
 
+async function dispatchWithTrackedHqCalls(overrides = {}) {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqCalls = [];
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob(overrides),
+    execFileImpl: async (cmd, args) => {
+      hqCalls.push({ cmd, args: [...args] });
+      return {
+        stdout: `{"dispatchId":"disp_${hqCalls.length}","lrq":"lrq_${hqCalls.length}"}\n`,
+      };
+    },
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    now: '2026-05-26T12:00:00.000Z',
+  });
+  return { rootDir, hqCalls, result };
+}
+
 test('pickMergeAgentDispatch returns dispatch for green open PRs after remediation budget is exhausted', () => {
   const decision = pickMergeAgentDispatch(makeJob(), {
     recentDispatches: [],
@@ -155,6 +174,121 @@ test('ROOT-CAUSE GATE: final-pass does NOT merge when the final review has stand
     recentDispatches: [],
     finalPassOnRequestChangesEnabled: true,
   });
+  assert.equal(detail.decision, 'skip-blockers-present');
+  assert.equal(detail.trigger, null);
+});
+
+test('ARP-06: current-head Comment only verdict launches exactly one merge-agent dispatch', async () => {
+  const { rootDir, hqCalls, result } = await dispatchWithTrackedHqCalls({
+    headSha: 'current-comment-only',
+    lastVerdict: 'Comment only',
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(hqCalls.filter(call => call.args[0] === 'dispatch').length, 1);
+  assert.equal(listMergeAgentDispatches(rootDir).length, 1);
+  assert.equal(listMergeAgentDispatches(rootDir)[0].headSha, 'current-comment-only');
+});
+
+test('ARP-06: current-head Approved verdict launches exactly one merge-agent dispatch', async () => {
+  const { rootDir, hqCalls, result } = await dispatchWithTrackedHqCalls({
+    headSha: 'current-approved',
+    lastVerdict: 'Approved',
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+  });
+
+  assert.equal(result.decision, 'dispatch');
+  assert.equal(hqCalls.filter(call => call.args[0] === 'dispatch').length, 1);
+  assert.equal(listMergeAgentDispatches(rootDir).length, 1);
+  assert.equal(listMergeAgentDispatches(rootDir)[0].headSha, 'current-approved');
+});
+
+test('ARP-06: Request changes before budget exhaustion does not launch merge-agent', async () => {
+  const { rootDir, hqCalls, result } = await dispatchWithTrackedHqCalls({
+    lastVerdict: 'Request changes',
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+  });
+
+  assert.equal(result.decision, 'skip-remediation-claimable');
+  assert.equal(hqCalls.length, 0);
+  assert.equal(listMergeAgentDispatches(rootDir).length, 0);
+});
+
+test('ARP-06: stale-head clean review is not used to dispatch merge-agent for the moved branch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'old-clean-head',
+    reviewBody: '## Summary\nOld head was clean.\n## Verdict\n\nComment only',
+    reviewPostedAt: '2026-05-26T11:00:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 401,
+    branch: 'feature/pr-401',
+    baseBranch: 'main',
+    headSha: 'new-unreviewed-head',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...dispatchJob,
+    execFileImpl: async () => {
+      throw new Error('stale review must not dispatch hq');
+    },
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+  });
+
+  assert.equal(dispatchJob.lastVerdict, null);
+  assert.equal(result.decision, 'skip-no-verdict');
+  assert.equal(listMergeAgentDispatches(rootDir).length, 0);
+});
+
+test('ARP-06: existing same-head merge-agent dispatch prevents duplicate launch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ headSha: 'already-dispatched-head' }), {
+    dispatchedAt: '2026-05-26T11:30:00.000Z',
+    prompt: '# prompt\n',
+    dispatchId: 'disp_existing',
+  });
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({ headSha: 'already-dispatched-head' }),
+    execFileImpl: async () => {
+      throw new Error('duplicate same-head dispatch must not call hq');
+    },
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+  });
+
+  assert.equal(result.decision, 'skip-already-dispatched');
+  assert.equal(listMergeAgentDispatches(rootDir).length, 1);
+});
+
+test('ARP-06/#157: non-None Blocking issues refuses auto-merge even with a settled-success verdict', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Approved',
+    blockingFindingCount: 1,
+    blockingFindingState: 'known',
+  }));
+
   assert.equal(detail.decision, 'skip-blockers-present');
   assert.equal(detail.trigger, null);
 });
@@ -1139,6 +1273,57 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
   assert.equal(dispatchJob.operatorApproval.headSha, 'abc123');
   assert.equal(dispatchJob.operatorApproval.codeScopedAt, '2026-05-02T10:04:00.000Z');
+});
+
+test('buildMergeAgentDispatchJob dispatches clean Comment only reviews with explicit no blockers', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 405,
+    reviewerModel: 'codex',
+    linearTicketId: null,
+    revisionRef: 'clean123',
+    reviewBody: [
+      '## Summary',
+      'The current head is ready.',
+      '## Blocking issues',
+      '- None.',
+      '## Non-blocking issues',
+      '- None.',
+      '## Verdict',
+      '',
+      'Comment only',
+    ].join('\n'),
+    reviewPostedAt: '2026-05-02T10:00:00.000Z',
+    critical: false,
+  });
+
+  const dispatchJob = buildMergeAgentDispatchJob(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 405,
+    branch: 'feature/pr-405',
+    baseBranch: 'main',
+    headSha: 'clean123',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    operatorNotes: null,
+    prState: 'open',
+    merged: false,
+  });
+  const detail = pickMergeAgentDispatchDetail({
+    ...dispatchJob,
+    latestFollowUpJobStatus: 'completed',
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+  });
+
+  assert.equal(dispatchJob.lastVerdict, 'Comment only');
+  assert.equal(dispatchJob.blockingFindingCount, 0);
+  assert.equal(dispatchJob.blockingFindingState, 'known');
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, null);
 });
 
 test('buildMergeAgentDispatchJob marks legacy Request changes bodies without issue sections as unknown blocker state', () => {

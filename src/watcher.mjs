@@ -1956,7 +1956,8 @@ function resolveFirstPassReviewerPoolConfig({
     ?? watcherConfig.reviewerPoolMaxConcurrent
     ?? DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX;
   const maxConcurrent = parsePositiveInteger(
-    env.ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT
+    env.ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT
+      ?? env.ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT
       ?? env.ADVERSARIAL_REVIEWER_POOL_MAX_CONCURRENT,
     parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX)
   );
@@ -1996,10 +1997,51 @@ function sortReviewerDispatchCandidates(candidates) {
   return [...candidates].sort(compareReviewerDispatchCandidates);
 }
 
+async function reserveReviewerMemoryAdmission({
+  reviewerModel,
+  reservationState,
+  checkAdmission = checkReviewerMemoryAdmission,
+  logger = console,
+} = {}) {
+  const estimatedReviewerRssMb = peakReviewerMemoryMbFor(reviewerModel);
+  reservationState.reservedMb += estimatedReviewerRssMb;
+  const reservedMbBeforeAdmission = Math.max(0, reservationState.reservedMb - estimatedReviewerRssMb);
+  try {
+    const memoryDecision = await checkAdmission({
+      reviewerModel,
+      reservedMb: reservedMbBeforeAdmission,
+      logger,
+    });
+    if (!memoryDecision.admit) {
+      reservationState.reservedMb = Math.max(0, reservationState.reservedMb - estimatedReviewerRssMb);
+      return {
+        admit: false,
+        estimatedReviewerRssMb,
+        memoryDecision,
+      };
+    }
+    let released = false;
+    return {
+      admit: true,
+      estimatedReviewerRssMb,
+      memoryDecision,
+      release() {
+        if (released) return;
+        released = true;
+        reservationState.reservedMb = Math.max(0, reservationState.reservedMb - estimatedReviewerRssMb);
+      },
+    };
+  } catch (err) {
+    reservationState.reservedMb = Math.max(0, reservationState.reservedMb - estimatedReviewerRssMb);
+    throw err;
+  }
+}
+
 async function runBoundedReviewerDispatchQueue(candidates, {
   maxConcurrent = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   logger = console,
 } = {}) {
+  const concurrencyLimit = Math.max(1, Number.parseInt(String(maxConcurrent), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
   const active = new Set();
   const errors = [];
@@ -2019,7 +2061,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   }
 
   while (nextIndex < queue.length || active.size > 0) {
-    while (nextIndex < queue.length && active.size < maxConcurrent) {
+    while (nextIndex < queue.length && active.size < concurrencyLimit) {
       const promise = start(queue[nextIndex]);
       nextIndex += 1;
       active.add(promise);
@@ -2936,7 +2978,7 @@ async function pollOnce(
 
   const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig();
   const reviewerDispatchCandidates = [];
-  let reviewerMemoryReservedMb = 0;
+  const reviewerMemoryReservationState = { reservedMb: 0 };
 
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
@@ -2967,17 +3009,19 @@ async function pollOnce(
         console.error(`[watcher] Failed to fetch subject state for ${subjectRef.subjectExternalId}:`, err.message);
       }
     }
-    subjectEntries.sort((a, b) => compareReviewerDispatchCandidates({
-      repoPath,
-      prNumber: a.prNumber,
-      subject: a.subject,
-      current: stmtGetReviewRow.get(repoPath, a.prNumber),
-    }, {
-      repoPath,
-      prNumber: b.prNumber,
-      subject: b.subject,
-      current: stmtGetReviewRow.get(repoPath, b.prNumber),
-    }));
+    if (!reviewerPoolConfig.enabled) {
+      subjectEntries.sort((a, b) => compareReviewerDispatchCandidates({
+        repoPath,
+        prNumber: a.prNumber,
+        subject: a.subject,
+        current: stmtGetReviewRow.get(repoPath, a.prNumber),
+      }, {
+        repoPath,
+        prNumber: b.prNumber,
+        subject: b.subject,
+        current: stmtGetReviewRow.get(repoPath, b.prNumber),
+      }));
+    }
 
     for (const { subject, prNumber } of subjectEntries) {
       const prTitle = subject.title || '';
@@ -3556,24 +3600,23 @@ async function pollOnce(
         subject,
         current,
         async run() {
-          const estimatedReviewerRssMb = peakReviewerMemoryMbFor(route.reviewerModel);
-          const memoryDecision = await checkReviewerMemoryAdmission({
+          const reservation = await reserveReviewerMemoryAdmission({
             reviewerModel: route.reviewerModel,
-            reservedMb: reviewerMemoryReservedMb,
+            reservationState: reviewerMemoryReservationState,
             logger: console,
           });
+          const { estimatedReviewerRssMb, memoryDecision } = reservation;
           if (!memoryDecision.admit) {
             console.log(
               `[watcher] Deferring reviewer for ${repoPath}#${prNumber}: ${memoryDecision.reason} ` +
                 `available=${memoryDecision.availableMb ?? 'unknown'}MB ` +
-                `reserved=${reviewerMemoryReservedMb}MB ` +
+                `reserved=${reviewerMemoryReservationState.reservedMb}MB ` +
                 `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
                 `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
             );
             return;
           }
 
-          reviewerMemoryReservedMb += estimatedReviewerRssMb;
           try {
             const attemptAt = new Date().toISOString();
             const reviewerSessionUuid = randomUUID();
@@ -3737,7 +3780,7 @@ async function pollOnce(
               maxRemediationRounds,
             });
           } finally {
-            reviewerMemoryReservedMb = Math.max(0, reviewerMemoryReservedMb - estimatedReviewerRssMb);
+            reservation.release();
           }
         },
       };
@@ -3973,6 +4016,7 @@ export {
   resolveFirstPassReviewerPoolConfig,
   runFastMergeClosePathIsolated,
   runBoundedReviewerDispatchQueue,
+  reserveReviewerMemoryAdmission,
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
   resolveStaleReviewerReconcilePerPoll,

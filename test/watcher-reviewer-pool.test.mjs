@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   resolveFirstPassReviewerPoolConfig,
+  reserveReviewerMemoryAdmission,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
 } from '../src/watcher.mjs';
@@ -93,6 +94,51 @@ test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', (
   assert.equal(decision.reason, 'memory_pressure_projected_headroom_low');
 });
 
+test('reviewer memory reservations are visible across concurrent admissions', async () => {
+  const reservationState = { reservedMb: 0 };
+  const checkAdmission = async ({ reviewerModel, reservedMb }) => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return decideReviewerMemoryAdmission({
+      reviewerModel,
+      reservedMb,
+      sample: {
+        pressureLevel: 'nominal',
+        availableMb: 2500,
+        swapUsedPct: 10,
+      },
+    });
+  };
+
+  const attempts = await Promise.all([
+    reserveReviewerMemoryAdmission({ reviewerModel: 'codex', reservationState, checkAdmission }),
+    reserveReviewerMemoryAdmission({ reviewerModel: 'codex', reservationState, checkAdmission }),
+    reserveReviewerMemoryAdmission({ reviewerModel: 'codex', reservationState, checkAdmission }),
+  ]);
+
+  assert.equal(attempts.filter((attempt) => attempt.admit).length, 1);
+  assert.equal(reservationState.reservedMb, 1024);
+  for (const attempt of attempts) {
+    attempt.release?.();
+  }
+  assert.equal(reservationState.reservedMb, 0);
+});
+
+test('reviewer pool clamps non-positive concurrency to one worker', async () => {
+  let runs = 0;
+  const tasks = Array.from({ length: 2 }, (_unused, index) => candidate(index + 1, async () => {
+    runs += 1;
+  }));
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 0,
+    logger: { error() {} },
+  });
+
+  assert.equal(summary.dispatched, 2);
+  assert.equal(summary.maxObservedConcurrency, 1);
+  assert.equal(runs, 2);
+});
+
 test('reviewer pool flag can fall back to serial mode', () => {
   assert.deepEqual(
     resolveFirstPassReviewerPoolConfig({
@@ -100,5 +146,15 @@ test('reviewer pool flag can fall back to serial mode', () => {
       watcherConfig: { maxConcurrentFirstPassReviewers: 7 },
     }),
     { enabled: false, maxConcurrent: 1 }
+  );
+});
+
+test('reviewer pool config accepts the first-pass pool concurrency alias', () => {
+  assert.deepEqual(
+    resolveFirstPassReviewerPoolConfig({
+      env: { ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT: '5' },
+      watcherConfig: {},
+    }),
+    { enabled: true, maxConcurrent: 5 }
   );
 });

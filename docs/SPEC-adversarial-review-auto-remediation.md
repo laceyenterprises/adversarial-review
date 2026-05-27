@@ -233,7 +233,7 @@ Reason mapping:
 | `review-settled` | `success` | The latest review verdict is non-blocking. |
 | `operator-approved` | `success` | A scoped operator approval accepts the current PR head regardless of review/remediation state. |
 | `review-malformed` | `failure` | The durable review row is in a malformed terminal state, including but not limited to malformed-title. |
-| `reviewer-timeout` | `failure` | The reviewer timed out before posting. |
+| `reviewer-timeout` | `success` | The reviewer timed out before posting after retry handling; the gate must not imply a substantive review passed. The watcher must make the operator action visible and, when the timeout follows a completed remediation that requested re-review, hand the PR to the merge-agent decision path. |
 | `reviewer-launchctl-bootstrap` | `failure` | The Claude launchctl/bootstrap path failed before posting. |
 | `reviewer-cascade` | `failure` | The reviewer hit a LiteLLM/upstream cascade before posting. |
 | `review-failed` | `failure` | The adversarial review failed before posting and no more specific class is known. |
@@ -405,6 +405,8 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 - `merge-agent-skip`, `do-not-merge`, `no-merge-hold` — hard skips that even an operator-approved or merge-agent-requested label does not bypass. `merge-agent-stuck` is a hard skip by default, but a scoped current-head `merge-agent-requested` label may bypass it for explicit operator recovery.
 
 The `final-pass-on-budget-exhausted` trigger is **not** a label — it is selected automatically by the dispatch decision tree when the env flag is set and the round budget is consumed. There is no GitHub-visible label for it; the audit trail is the dispatch record (`data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`, `trigger`, `priority`, and `priorityFlagSupported` fields) plus the `MERGE_AGENT_DISPATCH_TRIGGER` env var passed to the worker.
+
+Repeated reviewer no-output timeouts are infrastructure failures, not substantive review rounds. They must not increment the remediation round counter or make the next reviewer pass "final" by themselves. After two timeout-class failures for the same PR head, the watcher may switch to the alternate reviewer model for the next retry (`ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL=auto`, or explicitly `claude`/`codex`; `off` disables the switch). If the timeout budget is exhausted after a remediation round completed with `reReview.requested=true`, the watcher must not strand the PR behind a green-ish timeout gate: it routes the head through the merge-agent decision path with trigger `reviewer-timeout-exhausted`. A mergeable PR with green external checks can then be cleaned/merged by merge-agent policy; a non-mergeable or checks-blocked PR records a durable skip under `data/follow-up-jobs/merge-agent-skips/` with the timeout trigger so operators see a concrete mergeability/check blocker instead of an ambiguous stalled review.
 
 ### Dispatch state
 

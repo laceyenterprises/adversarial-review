@@ -14,6 +14,7 @@ import {
   HQ_DISPATCH_TIMEOUT_MS,
   HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
   NO_MERGE_HOLD_LABEL,
+  REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER,
   TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
@@ -394,6 +395,43 @@ test('pickMergeAgentDispatchDetail does NOT override non-mergeable state with fi
   });
   assert.equal(detail.decision, 'skip-not-mergeable');
   assert.equal(detail.trigger, null);
+});
+
+test('pickMergeAgentDispatchDetail hands completed-remediation timeout exhaustion to merge-agent', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    latestFollowUpJobStatus: 'completed',
+    latestFollowUpReReviewRequested: true,
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+    reviewFailureClass: 'reviewer-timeout',
+    reviewFailureExhausted: true,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+  });
+
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
+});
+
+test('pickMergeAgentDispatchDetail records mergeability blocker for timeout exhaustion handoff', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    mergeable: 'CONFLICTING',
+    latestFollowUpJobStatus: 'completed',
+    latestFollowUpReReviewRequested: true,
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 2,
+    reviewFailureClass: 'reviewer-timeout',
+    reviewFailureExhausted: true,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+  });
+
+  assert.equal(detail.decision, 'skip-not-mergeable');
+  assert.equal(detail.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
 });
 
 test('isFinalPassOnRequestChangesEnabled defaults ON for unset/empty, off for explicit disable, fail-CLOSED on unknown', () => {
@@ -3471,6 +3509,44 @@ test('dispatchMergeAgentForPR records a durable skip when blocking finding state
   assert.equal(skipRecord.decision, 'skip-blocking-findings-unknown');
   assert.equal(skipRecord.blockingFindingCount, 0);
   assert.equal(skipRecord.blockingFindingState, 'unknown');
+});
+
+test('dispatchMergeAgentForPR records a durable skip when timeout handoff is not mergeable', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({
+      lastVerdict: 'Request changes',
+      mergeable: 'CONFLICTING',
+      latestFollowUpJobStatus: 'completed',
+      latestFollowUpReReviewRequested: true,
+      remediationCurrentRound: 1,
+      remediationMaxRounds: 2,
+      reviewFailureClass: 'reviewer-timeout',
+      reviewFailureExhausted: true,
+    }),
+    env: {
+      MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+      MERGE_AGENT_HQ_PROJECT: 'merge-project',
+      [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0',
+    },
+    execFileImpl: async () => {
+      throw new Error('execFileImpl should not be reached when mergeability parks timeout handoff');
+    },
+    now: '2026-05-27T02:30:00.000Z',
+  });
+
+  assert.equal(result.decision, 'skip-not-mergeable');
+  assert.equal(result.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
+  assert.equal(result.reviewerFailureClass, 'reviewer-timeout');
+  assert.equal(result.reviewerFailureExhausted, true);
+  assert.ok(result.skippedRecordPath);
+  const [skipRecord] = listMergeAgentSkippedDispatches(rootDir);
+  assert.equal(skipRecord.decision, 'skip-not-mergeable');
+  assert.equal(skipRecord.trigger, REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER);
+  assert.equal(skipRecord.reviewerFailureClass, 'reviewer-timeout');
+  assert.equal(skipRecord.reviewerFailureExhausted, true);
 });
 
 test('dispatchMergeAgentForPR omits MERGE_AGENT_DISPATCH_TRIGGER from worker env when trigger is null', async () => {

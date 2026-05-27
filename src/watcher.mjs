@@ -42,6 +42,7 @@ import {
   CASCADE_FAILURE_CAP,
   clearCascadeState,
   formatTransientFailureBreakdown,
+  readCascadeState,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
@@ -131,6 +132,16 @@ const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
+const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
+  claude: {
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+  },
+  codex: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
+};
 
 // Stuck-pre-spawn alert debounce. Once we've alerted on a particular
 // (repo, PR, dispatchedAt) tuple, suppress the next alert for this
@@ -1915,6 +1926,57 @@ const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
   execFileImpl: execFileAsync,
 });
 const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 3;
+const DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD = 2;
+
+function resolveReviewerTimeoutFallbackThreshold(env = process.env) {
+  const raw = env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD;
+  return parsed;
+}
+
+function resolveReviewerTimeoutFallbackModel(baseReviewerModel, env = process.env) {
+  const raw = String(env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || 'auto').trim().toLowerCase();
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'none') return null;
+  if (raw === 'claude' || raw === 'codex') return raw;
+  if (baseReviewerModel === 'claude') return 'codex';
+  if (baseReviewerModel === 'codex') return 'claude';
+  return null;
+}
+
+function selectReviewerRouteForAttempt({
+  subject,
+  baseRoute,
+  rootDir,
+  repoPath,
+  prNumber,
+  env = process.env,
+}) {
+  const threshold = resolveReviewerTimeoutFallbackThreshold(env);
+  if (threshold <= 0) return baseRoute;
+  const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
+  const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
+  if (cascadeState?.lastFailureClass !== 'reviewer-timeout' || timeoutFailures < threshold) {
+    return baseRoute;
+  }
+  const fallbackModel = resolveReviewerTimeoutFallbackModel(baseRoute?.reviewerModel, env);
+  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return baseRoute;
+  const fallbackRoute = REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL[fallbackModel];
+  if (!fallbackRoute) return baseRoute;
+  return {
+    ...baseRoute,
+    reviewerModel: fallbackRoute.reviewerModel,
+    botTokenEnv: fallbackRoute.botTokenEnv,
+    timeoutFallback: {
+      fromReviewerModel: baseRoute.reviewerModel,
+      toReviewerModel: fallbackRoute.reviewerModel,
+      timeoutFailures,
+      threshold,
+      builderClass: subject?.builderClass || baseRoute.builderClass || null,
+    },
+  };
+}
 
 function resolveStaleReviewerReconcilePerPoll(env = process.env) {
   const raw = env.ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL;
@@ -2963,8 +3025,8 @@ async function pollOnce(
       }
 
       let crossModelWaiverReason = null;
-      const route = routeSubject(subject);
-      if (!route) {
+      const baseRoute = routeSubject(subject);
+      if (!baseRoute) {
         if (!existing) {
           stmtCreateReviewRow.run(
             repoPath,
@@ -3003,12 +3065,25 @@ async function pollOnce(
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
       }
+      const route = selectReviewerRouteForAttempt({
+        subject,
+        baseRoute,
+        rootDir: ROOT,
+        repoPath,
+        prNumber,
+      });
 
-      crossModelWaiverReason = describeCrossModelReviewWaiver(
-        route.builderClass,
-        route.reviewerModel,
-        process.env
-      );
+      crossModelWaiverReason = route.timeoutFallback
+        ? (
+            `reviewer-timeout fallback switched reviewer=${route.timeoutFallback.fromReviewerModel} ` +
+            `to reviewer=${route.timeoutFallback.toReviewerModel} after ` +
+            `${route.timeoutFallback.timeoutFailures} timeout failures; cross-model guarantee may be waived for this recovery pass.`
+          )
+        : describeCrossModelReviewWaiver(
+            route.builderClass,
+            route.reviewerModel,
+            process.env
+          );
       if (crossModelWaiverReason) {
         console.warn(
           `[watcher] cross-model-review-waived repo=${repoPath} pr=${prNumber} ${crossModelWaiverReason}`
@@ -3615,7 +3690,9 @@ export {
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
   resolveStaleReviewerReconcilePerPoll,
+  resolveReviewerTimeoutFallbackThreshold,
   retryPendingMergeAgentLifecycleCleanups,
+  selectReviewerRouteForAttempt,
   shouldDeferReviewForActiveFollowUp,
   shouldRetryMergeAgentLifecycleCleanup,
   shouldPreserveReviewersOnSigterm,

@@ -6,8 +6,11 @@ import {
   reserveReviewerMemoryAdmission,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
-} from '../src/watcher.mjs';
-import { decideReviewerMemoryAdmission } from '../src/watcher-memory-pressure.mjs';
+} from '../src/watcher-reviewer-pool.mjs';
+import {
+  PROJECTED_HEADROOM_FLOOR_MB,
+  decideReviewerMemoryAdmission,
+} from '../src/watcher-memory-pressure.mjs';
 
 function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumber).padStart(2, '0')}.000Z`) {
   return {
@@ -94,6 +97,23 @@ test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', (
   assert.equal(decision.reason, 'memory_pressure_projected_headroom_low');
 });
 
+test('reviewer memory gate projected headroom uses available minus reserved minus estimate', () => {
+  const decision = decideReviewerMemoryAdmission({
+    reviewerModel: 'codex',
+    reservedMb: 256,
+    sample: {
+      pressureLevel: 'nominal',
+      availableMb: 2300,
+      swapUsedPct: 10,
+    },
+  });
+
+  assert.equal(decision.projectedHeadroomMb, 2300 - 256 - 1024);
+  assert.equal(decision.projectedHeadroomMb < PROJECTED_HEADROOM_FLOOR_MB, true);
+  assert.equal(decision.admit, false);
+  assert.equal(decision.reason, 'memory_pressure_projected_headroom_low');
+});
+
 test('reviewer memory reservations are visible across concurrent admissions', async () => {
   const reservationState = { reservedMb: 0 };
   const checkAdmission = async ({ reviewerModel, reservedMb }) => {
@@ -137,6 +157,37 @@ test('reviewer pool clamps non-positive concurrency to one worker', async () => 
   assert.equal(summary.dispatched, 2);
   assert.equal(summary.maxObservedConcurrency, 1);
   assert.equal(runs, 2);
+});
+
+test('reviewer pool stops admitting new work after a thrown spawn failure', async () => {
+  let started = 0;
+  let releaseSecond;
+  const secondCanFinish = new Promise((resolve) => {
+    releaseSecond = resolve;
+  });
+  const tasks = [
+    candidate(1, async () => {
+      started += 1;
+      throw new Error('spawn path broken');
+    }),
+    candidate(2, async () => {
+      started += 1;
+      await secondCanFinish;
+    }),
+    candidate(3, async () => {
+      started += 1;
+    }),
+  ];
+
+  const runPromise = runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 2,
+    logger: { error() {} },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  releaseSecond();
+
+  await assert.rejects(runPromise, /spawn path broken/);
+  assert.equal(started, 2);
 });
 
 test('reviewer pool flag can fall back to serial mode', () => {

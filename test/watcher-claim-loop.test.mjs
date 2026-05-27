@@ -39,6 +39,7 @@ function buildLoaderSource({
     [fileUrl('src', 'reviewer-timeout.mjs')]: 'fixture:reviewer-timeout',
     [fileUrl('src', 'stale-drift.mjs')]: 'fixture:stale-drift',
     [fileUrl('src', 'watcher-fail-loud.mjs')]: 'fixture:watcher-fail-loud',
+    [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
   };
 
@@ -208,6 +209,7 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-timeout': "export function resolveReviewerTimeoutMs() { return 300000; } export function resolveProgressTimeoutMs() { return 300000; }",
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed-title path'); }",
+    'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
   };
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
@@ -394,7 +396,9 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     assert.equal(summary.rows['102'].review_status, 'posted');
     assert.equal(summary.rows['102'].reviewer_head_sha, null);
     assert.deepEqual(
-      summary.claims.map((claim) => [claim.prNumber, claim.reviewerHeadSha]),
+      summary.claims
+        .map((claim) => [claim.prNumber, claim.reviewerHeadSha])
+        .sort((a, b) => a[0] - b[0]),
       [
         [101, 'sha-happy-101'],
         [102, null],
@@ -408,7 +412,9 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     assert.deepEqual(summary.fetchCalls, []);
     assert.equal(summary.operatorWrites.length, 2);
     assert.deepEqual(
-      summary.operatorWrites.map(([subjectRef, status]) => [subjectRef.subjectExternalId, status]),
+      summary.operatorWrites
+        .map(([subjectRef, status]) => [subjectRef.subjectExternalId, status])
+        .sort((a, b) => a[0].localeCompare(b[0])),
       [
         ['laceyenterprises/adversarial-review#101', 'in-review'],
         ['laceyenterprises/adversarial-review#102', 'in-review'],

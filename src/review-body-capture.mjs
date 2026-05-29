@@ -5,6 +5,14 @@ import { openReviewStateDb, ensureReviewStateSchema } from './review-state.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_CAPTURE_LOOKBACK_MS = 2 * 60 * 1000;
+// Symmetric forward bound: GitHub artifact `submitted_at`/`created_at` is
+// set after our `gh pr review` / comment post returns, so propagation lag
+// puts the artifact strictly after our recorded `postedAt`. We default to
+// 5 minutes forward to absorb slow runners and GH side delay; the upstream
+// caller is expected to capture `postedAt` AFTER the post call returns so
+// most of this window is unused on normal latency.
+const REVIEW_CAPTURE_FORWARD_MS = 5 * 60 * 1000;
+const REVIEW_LOOKUP_TIMEOUT_MS = 8_000;
 const REVIEWER_BOT_LOGINS = Object.freeze({
   claude: 'claude-reviewer-lacey',
   codex: 'codex-reviewer-lacey',
@@ -12,6 +20,7 @@ const REVIEWER_BOT_LOGINS = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
 });
+const REVIEWER_PASS_KINDS = new Set(['first-pass', 'rereview', 'remediation']);
 
 function normalizeBotLoginKey(value) {
   return String(value ?? '').trim();
@@ -28,11 +37,25 @@ function toEpochMs(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function withinCaptureWindow(candidateAt, postedAt, lookbackMs = REVIEW_CAPTURE_LOOKBACK_MS) {
+function withinCaptureWindow(
+  candidateAt,
+  postedAt,
+  lookbackMs = REVIEW_CAPTURE_LOOKBACK_MS,
+  forwardMs = REVIEW_CAPTURE_FORWARD_MS,
+) {
   const candidateMs = toEpochMs(candidateAt);
   const postedMs = toEpochMs(postedAt);
   if (candidateMs === null || postedMs === null) return false;
-  return candidateMs >= (postedMs - lookbackMs) && candidateMs <= postedMs + 15_000;
+  return candidateMs >= (postedMs - lookbackMs) && candidateMs <= postedMs + forwardMs;
+}
+
+// GitHub may normalize whitespace (in particular CRLF→LF) on review and
+// comment bodies. Normalize both sides before equality to keep the
+// exact-match contract robust to those rewrites without falling back to
+// "newest comment in window," which produced wrong gh_comment_id values.
+function normalizeBodyForMatch(body) {
+  if (body == null) return '';
+  return String(body).replace(/\r\n/g, '\n');
 }
 
 function parseJsonLines(stdout) {
@@ -59,9 +82,10 @@ function sortNewestFirst(items, timestampField) {
 }
 
 function pickBestBodyMatch(items, body, timestampField) {
-  const exactMatches = items.filter((item) => String(item?.body || '') === String(body || ''));
-  const pool = exactMatches.length > 0 ? exactMatches : items;
-  return sortNewestFirst(pool, timestampField)[0] || null;
+  const target = normalizeBodyForMatch(body);
+  const exactMatches = items.filter((item) => normalizeBodyForMatch(item?.body) === target);
+  if (exactMatches.length === 0) return null;
+  return sortNewestFirst(exactMatches, timestampField)[0] || null;
 }
 
 async function lookupRecentReviewArtifact({
@@ -73,7 +97,7 @@ async function lookupRecentReviewArtifact({
   body,
   execFileImpl = execFileAsync,
   env = process.env,
-  timeoutMs = 30_000,
+  timeoutMs = REVIEW_LOOKUP_TIMEOUT_MS,
   timestampField = 'created_at',
 } = {}) {
   if (!repo || !prNumber || !endpoint || !login || !postedAt) return null;
@@ -105,7 +129,7 @@ function updateReviewerPassBodyCapture(rootDir, {
   repo,
   prNumber,
   attemptNumber,
-  passKinds,
+  passKind,
   verdict = null,
   bodyMd,
   ghCommentId = null,
@@ -114,12 +138,12 @@ function updateReviewerPassBodyCapture(rootDir, {
   if (!repo || !Number.isInteger(Number(prNumber)) || !Number.isInteger(Number(attemptNumber)) || !bodyMd) {
     throw new TypeError('Missing required reviewer-pass capture fields');
   }
-  const kinds = Array.isArray(passKinds) ? passKinds.filter(Boolean) : [];
-  if (kinds.length === 0) throw new TypeError('passKinds is required');
+  const kind = typeof passKind === 'string' ? passKind.trim() : '';
+  if (!kind) throw new TypeError('passKind is required');
+  if (!REVIEWER_PASS_KINDS.has(kind)) throw new TypeError(`Invalid reviewer pass_kind: ${passKind}`);
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
-    const placeholders = kinds.map(() => '?').join(', ');
     const result = db.prepare(
       `UPDATE reviewer_passes
           SET verdict = ?,
@@ -129,7 +153,7 @@ function updateReviewerPassBodyCapture(rootDir, {
         WHERE repo = ?
           AND pr_number = ?
           AND attempt_number = ?
-          AND pass_kind IN (${placeholders})
+          AND pass_kind = ?
           AND body_md IS NULL`
     ).run(
       verdict,
@@ -139,12 +163,34 @@ function updateReviewerPassBodyCapture(rootDir, {
       repo,
       Number(prNumber),
       Number(attemptNumber),
-      ...kinds,
+      kind,
     );
     return result;
   } finally {
     db.close();
   }
+}
+
+// Build the env override used for the lookup gh subprocess. If a token is
+// resolved (preferred reviewer-bot token, then inherited GH_TOKEN), set it
+// on the lookup env. If neither is present, omit GH_TOKEN entirely — the
+// gh subprocess would otherwise treat the literal string `"null"` as a
+// token and fail with an opaque auth error.
+function buildLookupEnv(env, preferredToken) {
+  const out = { ...env };
+  delete out.GH_TOKEN;
+  const token = preferredToken || env?.GH_TOKEN;
+  if (token) out.GH_TOKEN = token;
+  return out;
+}
+
+function resolvePassKindForReviewer(passKind, { attemptNumber } = {}) {
+  if (typeof passKind === 'string') {
+    const trimmed = passKind.trim();
+    if (trimmed === 'first-pass' || trimmed === 'rereview') return trimmed;
+  }
+  const attempt = Number(attemptNumber);
+  return Number.isFinite(attempt) && attempt > 1 ? 'rereview' : 'first-pass';
 }
 
 async function captureReviewerBodyAfterPost(rootDir, {
@@ -155,6 +201,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
   botTokenEnv,
   reviewBody,
   verdict,
+  passKind,
   postedAt = new Date().toISOString(),
   execFileImpl = execFileAsync,
   env = process.env,
@@ -165,6 +212,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
     let ghCommentId = null;
     if (login) {
       try {
+        const lookupEnv = buildLookupEnv(env, botTokenEnv ? env?.[botTokenEnv] : null);
         const artifact = await lookupRecentReviewArtifact({
           repo,
           prNumber,
@@ -173,7 +221,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
           postedAt,
           body: reviewBody,
           execFileImpl,
-          env: { ...env, GH_TOKEN: env[botTokenEnv] || env.GH_TOKEN },
+          env: lookupEnv,
         });
         ghCommentId = artifact?.id ?? null;
         if (!artifact) {
@@ -187,7 +235,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
       repo,
       prNumber,
       attemptNumber: Number(attemptNumber),
-      passKinds: ['first-pass', 'rereview'],
+      passKind: resolvePassKindForReviewer(passKind, { attemptNumber }),
       verdict,
       bodyMd: reviewBody,
       ghCommentId,
@@ -214,6 +262,7 @@ async function captureRemediationBodyAfterPost(rootDir, {
     let ghCommentId = null;
     if (login) {
       try {
+        const lookupEnv = buildLookupEnv(env, null);
         const artifact = await lookupRecentReviewArtifact({
           repo,
           prNumber,
@@ -222,7 +271,7 @@ async function captureRemediationBodyAfterPost(rootDir, {
           postedAt,
           body,
           execFileImpl,
-          env: { ...env, GH_TOKEN: env.GH_TOKEN || null },
+          env: lookupEnv,
         });
         ghCommentId = artifact?.id ?? null;
         if (!artifact) {
@@ -236,7 +285,7 @@ async function captureRemediationBodyAfterPost(rootDir, {
       repo,
       prNumber,
       attemptNumber: Number(attemptNumber),
-      passKinds: ['remediation'],
+      passKind: 'remediation',
       verdict: null,
       bodyMd: body,
       ghCommentId,
@@ -248,7 +297,9 @@ async function captureRemediationBodyAfterPost(rootDir, {
 }
 
 export {
+  REVIEW_CAPTURE_FORWARD_MS,
   REVIEW_CAPTURE_LOOKBACK_MS,
+  REVIEW_LOOKUP_TIMEOUT_MS,
   captureRemediationBodyAfterPost,
   captureReviewerBodyAfterPost,
   lookupRecentReviewArtifact,

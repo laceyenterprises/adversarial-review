@@ -1652,6 +1652,7 @@ async function spawnReviewer({
         reviewerHeadSha,
         reviewAttemptNumber,
         maxRemediationRounds,
+        passKind,
         reviewerSessionUuid,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,

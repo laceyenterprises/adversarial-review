@@ -2243,7 +2243,7 @@ async function postRemediationCommentWithCapture({
   body,
   postCommentImpl = postRemediationOutcomeComment,
   captureImpl = captureRemediationBodyAfterPost,
-  postedAt = new Date().toISOString(),
+  postedAt = null,
   log = console,
 } = {}) {
   const result = await postCommentImpl({
@@ -2254,13 +2254,17 @@ async function postRemediationCommentWithCapture({
     log,
   });
   if (result?.posted) {
+    // Capture postedAt AFTER the post returns so the lookup window
+    // brackets the GitHub-assigned `created_at` (set by GH during post
+    // handling), not the pre-post call time.
+    const effectivePostedAt = postedAt || new Date().toISOString();
     await captureImpl(rootDir, {
       repo,
       prNumber,
       attemptNumber: Number(attemptNumber),
       workerClass,
       body,
-      postedAt,
+      postedAt: effectivePostedAt,
       log,
     });
   }

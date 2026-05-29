@@ -1034,7 +1034,8 @@ async function postGitHubReviewWithCapture({
   reviewerModel,
   reviewBody,
   botTokenEnv,
-  postedAt = new Date().toISOString(),
+  passKind,
+  postedAt = null,
   execFileImpl = execFileAsync,
   log = console,
 } = {}) {
@@ -1045,6 +1046,11 @@ async function postGitHubReviewWithCapture({
 
   await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl);
 
+  // Capture postedAt AFTER the gh post returns so the candidate window
+  // bounds the artifact's GitHub-assigned timestamp, which is set during
+  // post handling — not before the request leaves.
+  const effectivePostedAt = postedAt || new Date().toISOString();
+
   await captureReviewerBodyAfterPost(rootDir, {
     repo,
     prNumber,
@@ -1053,7 +1059,8 @@ async function postGitHubReviewWithCapture({
     botTokenEnv,
     reviewBody,
     verdict: normalizeReviewVerdict(extractReviewVerdict(reviewBody)),
-    postedAt,
+    passKind,
+    postedAt: effectivePostedAt,
     execFileImpl,
     env: { ...process.env, [botTokenEnv]: token },
     log,
@@ -1125,6 +1132,7 @@ async function main() {
     reviewAttemptNumber,
     completedRemediationRounds,
     maxRemediationRounds,
+    passKind,
     reviewerSessionUuid,
     labels = [],
     ticketPipelinePaused = false,
@@ -1305,6 +1313,7 @@ async function main() {
       reviewerModel: effectiveModel,
       reviewBody: fullComment,
       botTokenEnv,
+      passKind,
       execFileImpl: execFileAsync,
       log: console,
     });

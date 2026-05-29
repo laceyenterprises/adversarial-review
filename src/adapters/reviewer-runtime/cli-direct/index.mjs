@@ -216,6 +216,7 @@ function buildReviewerProcessArgs(subjectContext = {}) {
     reviewAttemptNumber: subjectContext.reviewAttemptNumber,
     completedRemediationRounds: subjectContext.completedRemediationRounds,
     maxRemediationRounds: subjectContext.maxRemediationRounds,
+    passKind: subjectContext.passKind,
     reviewerSessionUuid: subjectContext.reviewerSessionUuid || subjectContext.sessionUuid,
     crossModelReviewWaived: subjectContext.crossModelReviewWaived,
     crossModelReviewWaiverReason: subjectContext.crossModelReviewWaiverReason,

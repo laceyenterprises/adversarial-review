@@ -80,6 +80,7 @@ function normalizePRSnapshot(repoPath, pr) {
         .filter((label) => typeof label === 'string' && label.trim())
         .map((label) => label.trim())
       : [],
+    createdAt: pr?.created_at ? String(pr.created_at) : undefined,
     updatedAt: pr?.updated_at ? String(pr.updated_at) : undefined,
     authorRef: pr?.user?.login ? String(pr.user.login) : undefined,
     builderClass,
@@ -104,6 +105,7 @@ function stateFromSnapshot(snapshot, {
     authorRef: snapshot.authorRef,
     builderClass: snapshot.builderClass || undefined,
     labels: snapshot.labels,
+    createdAt: snapshot.createdAt,
     updatedAt: snapshot.updatedAt,
     headSha: snapshot.headSha,
     currentRound,

@@ -51,6 +51,69 @@ Invalid non-empty override values are configuration errors. The runtime must
 not silently fall back from an invalid value because that can route work to an
 expensive, unavailable, or intentionally locked-out agent.
 
+## First-Pass Reviewer Pool And Memory Admission
+
+The watcher may dispatch first-pass reviewers through a bounded global pool
+instead of a strict per-PR serial loop. Pool mode is enabled by default and
+uses a default cap of `3` concurrent first-pass reviewer spawns across the
+watcher's entire claimable set.
+
+Operators can control that behavior with:
+
+- `ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_ENABLED`
+- `ADVERSARIAL_REVIEWER_POOL_ENABLED` as the compatibility alias for the same
+  enable/disable switch
+- `ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT`
+- `ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT` as the legacy first-pass
+  concurrency alias
+- `ADVERSARIAL_REVIEWER_POOL_MAX_CONCURRENT` as the compatibility alias for
+  the concurrency cap
+
+Non-positive or malformed concurrency values are clamped back to the default
+configured positive integer, and the exported queue helper must still clamp any
+direct caller to at least one worker so a bad test/helper call cannot busy-loop
+the watcher tick.
+
+On Darwin, first-pass reviewer admission is further gated by live
+memory-pressure sampling from `vm_stat` plus `sysctl vm.swapusage`. This gate
+applies in both bounded-pool mode and serial fallback mode; disabling the pool
+reduces concurrency to one but does not force reviewer spawns through critical
+host pressure. The watcher deduplicates concurrent host-pressure reads, then
+refreshes the cached sample during long poll ticks after a bounded TTL so later
+admissions see memory consumed by other pipelines. Each admission computes a
+projected headroom check using the already-reserved reviewer budget plus the
+next reviewer's estimated peak RSS. The shared reservation must be recorded
+before the async sample is awaited so concurrent admissions observe each
+other's in-flight reservations rather than all admitting against a stale zero
+baseline.
+
+The current thresholds and model estimates are:
+
+- `ELEVATED_AVAILABLE_MB = 2048`
+- `CRITICAL_AVAILABLE_MB = 1024`
+- `ELEVATED_SWAP_USED_PCT = 85`
+- `CRITICAL_SWAP_USED_PCT = 95`
+- `PROJECTED_HEADROOM_FLOOR_MB = 1024`
+- Peak reviewer RSS estimates: `codex=1024`, `clio-agent=512`,
+  `claude-code=512`, `claude=512`, `gemini=512`, unknown reviewers=`256`
+
+Admission refuses the spawn immediately on `pressureLevel=critical`, or when
+`availableMb - reservedMb - estimatedReviewerRssMb` would fall below
+`PROJECTED_HEADROOM_FLOOR_MB`. A denied admission releases its optimistic
+reservation before returning so later candidates can retry against current
+memory state on a future tick.
+
+In pool mode operators should expect multiple first-pass reviewer log streams
+from one watcher tick. Interleaved `[watcher] Spawning reviewer for ...` and
+`[reviewer:<n>] ...` lines are normal when several PRs are claimable; set
+`ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_ENABLED=false` to return to the old
+single-reviewer serial behavior for diagnosis.
+
+The SQLite `review_attempts` counter captured during candidate discovery is a
+best-effort diagnostic for the DB row being claimed. The remediation ledger is
+the source of truth for reviewer round budgeting; the claim compare-and-swap
+and GitHub freshness checks remain the load-bearing concurrency protections.
+
 ## Remediation Reply Contract
 
 The durable remediation reply schema is the public contract between the worker,

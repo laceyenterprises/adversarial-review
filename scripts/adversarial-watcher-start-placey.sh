@@ -66,14 +66,39 @@ export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvx
 ALERT_TO_OP_REF='op://Cliovault/adversarial-watcher-alert-to/credential'
 ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
 
+resolve_op_bin() {
+  local op_bin
+  if op_bin="$(command -v op 2>/dev/null)" && [[ -n "$op_bin" ]]; then
+    printf '%s' "$op_bin"
+    return 0
+  fi
+  for op_bin in /opt/homebrew/bin/op /usr/local/bin/op; do
+    if [[ -x "$op_bin" ]]; then
+      printf '%s' "$op_bin"
+      return 0
+    fi
+  done
+  return 1
+}
+
 resolve_alert_to_optional() {
   local attempt=1
   local max_attempts=3
   local stderr_path
   local alert_to_value
+  local op_bin
   stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-alert-to.${UID}.$$.$RANDOM.err"
+  if ! op_bin="$(resolve_op_bin)"; then
+    echo "[adversarial-watcher] ERROR: 1Password CLI 'op' not found on PATH and not present at /opt/homebrew/bin/op or /usr/local/bin/op." >&2
+    return 2
+  fi
   while (( attempt <= max_attempts )); do
-    if alert_to_value=$(/opt/homebrew/bin/op read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
+    if alert_to_value=$("$op_bin" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
+      if [[ -z "${alert_to_value//[[:space:]]/}" ]]; then
+        echo "[adversarial-watcher] ERROR: ALERT_TO at $ALERT_TO_OP_REF resolved to an empty value." >&2
+        rm -f "$stderr_path"
+        return 3
+      fi
       rm -f "$stderr_path"
       printf '%s' "$alert_to_value"
       return 0

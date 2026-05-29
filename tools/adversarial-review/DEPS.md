@@ -79,11 +79,22 @@ uses PATH and per-user defaults.
   - Discovery: environment variable or secret-source injection. If absent,
     Linear updates are skipped.
 
-- Telegram/OpenClaw alerts, optional
+- Telegram/OpenClaw alerts, required by default for watcher startup unless the
+  operator explicitly opts into degraded mode
   - Relevant env vars: `ALERT_TO`, `ALERT_CHANNEL`, `ALERT_AGENT_ID`,
     `ALERT_NAME`, `OPENCLAW_AGENT_HOOKS_URL`, `OPENCLAW_HOOKS_TOKEN_FILE`,
     `HOOKS_TOKEN_FILE`, `GATEWAY_DELIVERY_TOKEN`, `OPENCLAW_GATEWAY_TOKEN`,
     `OPENCLAW_HOOKS_TOKEN`, `HOOKS_TOKEN`.
+  - Startup contract: the launch wrapper now refuses to start when `ALERT_TO`
+    is absent unless `ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1` is set.
+    Operators can satisfy the requirement by setting `ALERT_TO` directly or by
+    providing `OP_SERVICE_ACCOUNT_TOKEN` so the wrapper can read
+    `op://Cliovault/adversarial-watcher-alert-to/credential` via the 1Password
+    CLI. Blank 1Password values are treated as misprovisioned and fail startup
+    the same way a missing item does.
+  - Degraded override: `ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1` keeps the
+    watcher bootable without alert routing, but watcher-health and
+    proactive-stuck-scan alerts will not page until `ALERT_TO` is provisioned.
   - Secret root discovery: `ADV_SECRETS_ROOT`, then `LITELLM_SECRETS_ROOT`,
     then `$HOME/.config/adversarial-review/secrets`. Each root is only used if
     its `litellm-alert-bridge.token` file exists. If the new default token file

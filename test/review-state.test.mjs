@@ -41,6 +41,10 @@ function tableInfoByName(db, tableName) {
   );
 }
 
+function indexNames(db, tableName) {
+  return db.prepare(`PRAGMA index_list(${tableName})`).all().map((row) => row.name);
+}
+
 test('openReviewStateDb applies a busy timeout and shared schema adds reviewer handle columns', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const db = openReviewStateDb(rootDir);
@@ -71,6 +75,8 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     assert.equal(closeoutColumns.repo.pk, 1);
     assert.equal(closeoutColumns.pr_number.type, 'INTEGER');
     assert.equal(closeoutColumns.pr_number.pk, 2);
+    assert.equal(closeoutColumns.created_at.type, 'TEXT');
+    assert.equal(closeoutColumns.created_at.notnull, 1);
     assert.equal(closeoutColumns.closeout_body_md.type, 'TEXT');
     assert.equal(closeoutColumns.closeout_authors_json.type, 'TEXT');
     assert.equal(closeoutColumns.closeout_posted_at.type, 'TEXT');
@@ -79,6 +85,9 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     assert.equal(closeoutColumns.empty_confirmed_at.type, 'TEXT');
     assert.equal(closeoutColumns.merged_at.type, 'TEXT');
     assert.equal(closeoutColumns.gh_artifact_refs.type, 'TEXT');
+    assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_gh_comment_id'));
+    assert.ok(indexNames(db, 'pr_merge_closeouts').includes('idx_pr_merge_closeouts_scrape_pending'));
+    assert.ok(indexNames(db, 'pr_merge_closeouts').includes('idx_pr_merge_closeouts_merged_at'));
     const migration = db.prepare('SELECT id FROM schema_migrations WHERE id = ?').get('20260518_reviewer_passes.sql');
     assert.equal(migration.id, '20260518_reviewer_passes.sql');
     const bodyCaptureMigration = db.prepare('SELECT id FROM schema_migrations WHERE id = ?').get(
@@ -125,6 +134,46 @@ test('review-state migrations upgrade old reviewer_passes schema idempotently', 
     assert.equal(passColumns.gh_comment_id.type, 'TEXT');
     assert.equal(passColumns.body_captured_at.type, 'TEXT');
     assert.ok(tableInfoByName(db, 'pr_merge_closeouts').repo);
+  } finally {
+    db.close();
+  }
+});
+
+test('review-state migrations tolerate partial reviewer_pass body columns without migration stamp', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const db = openReviewStateDb(rootDir);
+
+  try {
+    db.exec(`
+      CREATE TABLE reviewer_passes (
+        pass_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        reviewer_class TEXT NOT NULL,
+        pass_kind TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        verdict TEXT,
+        body_md TEXT,
+        UNIQUE(repo, pr_number, attempt_number, pass_kind)
+      );
+    `);
+
+    ensureReviewStateSchema(db);
+    ensureReviewStateSchema(db);
+
+    const migrationRows = db.prepare(
+      'SELECT id FROM schema_migrations WHERE id = ?'
+    ).all('20260529_reviewer_passes_body_capture_and_closeouts.sql');
+    assert.equal(migrationRows.length, 1);
+
+    const passColumns = tableInfoByName(db, 'reviewer_passes');
+    assert.equal(passColumns.verdict.type, 'TEXT');
+    assert.equal(passColumns.body_md.type, 'TEXT');
+    assert.equal(passColumns.gh_comment_id.type, 'TEXT');
+    assert.equal(passColumns.body_captured_at.type, 'TEXT');
   } finally {
     db.close();
   }
@@ -267,6 +316,7 @@ test('review-state migrations support closeout round-trips and reviewer_pass bod
     assert.equal(populated.empty_confirmed_at, '2026-05-29T00:08:00.000Z');
     assert.equal(populated.merged_at, '2026-05-29T00:04:00.000Z');
     assert.equal(populated.gh_artifact_refs, '[{"kind":"comment","id":"IC_kwDO"}]');
+    assert.ok(populated.created_at);
 
     const sparse = db.prepare(
       'SELECT * FROM pr_merge_closeouts WHERE repo = ? AND pr_number = ?'
@@ -279,6 +329,66 @@ test('review-state migrations support closeout round-trips and reviewer_pass bod
     assert.equal(sparse.empty_confirmed_at, null);
     assert.equal(sparse.merged_at, '2026-05-29T00:03:00.000Z');
     assert.equal(sparse.gh_artifact_refs, null);
+  } finally {
+    db.close();
+  }
+});
+
+test('review-state schema rejects invalid closeout JSON, duplicate artifact ids, and unknown verdicts', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const db = openReviewStateDb(rootDir);
+
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+         started_at, status, metadata_json, gh_comment_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'laceyenterprises/adversarial-review',
+      90,
+      1,
+      'claude',
+      'claude-sonnet',
+      'review',
+      '2026-05-29T00:00:00.000Z',
+      'completed',
+      '{}',
+      'IC_unique'
+    );
+    assert.throws(
+      () => db.prepare(
+        `INSERT INTO reviewer_passes (
+           repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+           started_at, status, metadata_json, gh_comment_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'laceyenterprises/adversarial-review',
+        91,
+        1,
+        'claude',
+        'claude-sonnet',
+        'review',
+        '2026-05-29T00:00:00.000Z',
+        'completed',
+        '{}',
+        'IC_unique'
+      ),
+      /UNIQUE constraint failed: reviewer_passes\.gh_comment_id/
+    );
+    assert.throws(
+      () => db.prepare(
+        'UPDATE reviewer_passes SET verdict = ? WHERE repo = ? AND pr_number = ?'
+      ).run('maybe', 'laceyenterprises/adversarial-review', 90),
+      /CHECK constraint failed/
+    );
+    assert.throws(
+      () => db.prepare(
+        'INSERT INTO pr_merge_closeouts (repo, pr_number, closeout_authors_json) VALUES (?, ?, ?)'
+      ).run('laceyenterprises/adversarial-review', 92, 'not-json'),
+      /CHECK constraint failed/
+    );
   } finally {
     db.close();
   }

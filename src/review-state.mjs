@@ -100,6 +100,13 @@ function ensureReviewStateSchema(db) {
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);
+  addColumnIfMissing(
+    db,
+    `ALTER TABLE reviewer_passes ADD COLUMN verdict TEXT CHECK (verdict IS NULL OR verdict IN ('approved', 'comment-only', 'request-changes'))`
+  );
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN body_md TEXT`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN gh_comment_id TEXT`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN body_captured_at TEXT`);
 
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
@@ -107,6 +114,17 @@ function ensureReviewStateSchema(db) {
 
     CREATE INDEX IF NOT EXISTS reviewed_prs_identity_lookup_idx
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_reviewer_passes_gh_comment_id
+      ON reviewer_passes(gh_comment_id)
+      WHERE gh_comment_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_pr_merge_closeouts_scrape_pending
+      ON pr_merge_closeouts(scrape_last_checked_at)
+      WHERE empty_confirmed_at IS NULL AND closeout_posted_at IS NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_pr_merge_closeouts_merged_at
+      ON pr_merge_closeouts(merged_at);
 
     PRAGMA user_version = ${REVIEW_STATE_SCHEMA_VERSION};
   `);

@@ -313,6 +313,56 @@ can re-emit the audit.
 
 ---
 
+## 4) Reviewer body capture and merge closeouts
+
+Source of truth:
+
+```text
+data/reviews.db.reviewer_passes
+data/reviews.db.pr_merge_closeouts
+```
+
+Reviewer-pass body capture is additive state on `reviewer_passes`:
+
+| Field | Meaning |
+|---|---|
+| `verdict` | Normalized reviewer verdict: `approved`, `comment-only`, or `request-changes` |
+| `body_md` | Markdown body captured from the GitHub review/comment artifact |
+| `gh_comment_id` | GitHub comment or review artifact identifier; non-null values are unique |
+| `body_captured_at` | Time the body scraper captured `body_md` for that pass |
+
+`pr_merge_closeouts` tracks the post-merge closeout scrape/post lifecycle for a
+single `(repo, pr_number)`:
+
+| Field | Meaning |
+|---|---|
+| `created_at` | Row creation time for age-based triage before any stage timestamp is set |
+| `closeout_body_md` | Markdown body that will be, or was, posted as the merge closeout |
+| `closeout_authors_json` | JSON array of GitHub authors attributed in the closeout |
+| `closeout_posted_at` | Time the closeout comment was posted |
+| `body_captured_at` | Time the merge-closeout body was scraped/captured |
+| `scrape_last_checked_at` | Last time the scraper checked the PR closeout state |
+| `empty_confirmed_at` | Time the scraper confirmed no closeout body was available |
+| `merged_at` | GitHub `mergedAt` observed by the closeout scraper, not a replacement for `reviewed_prs.merged_at` |
+| `gh_artifact_refs` | JSON array of GitHub artifacts used by the closeout, e.g. comment references |
+
+Lifecycle:
+
+1. A row is created when a merged PR becomes eligible for closeout capture.
+2. The scraper records `scrape_last_checked_at` on every poll.
+3. If a body is available, it records `closeout_body_md`,
+   `closeout_authors_json`, `gh_artifact_refs`, and `body_captured_at`.
+4. If no body is available and the scraper reaches its empty-result threshold,
+   it records `empty_confirmed_at`.
+5. When the closeout is posted, the poster records `closeout_posted_at`.
+
+`closeout_authors_json` and `gh_artifact_refs` must be valid JSON when present.
+The scrape-pending index is keyed by `scrape_last_checked_at` for rows whose
+`empty_confirmed_at` and `closeout_posted_at` are both unset; consumers must use
+that state instead of table-scanning all historical merged PRs.
+
+---
+
 ## Failure/stop codes worth remembering
 
 ### Queue stop reasons

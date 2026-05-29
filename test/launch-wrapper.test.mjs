@@ -40,5 +40,7 @@ test('watcher launchers require explicit opt-in before running without ALERT_TO'
     const script = readScript(scriptName);
     assert.match(script, /ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1/);
     assert.match(script, /resolve_alert_to_optional/);
+    assert.match(script, /unset ALERT_TO/);
+    assert.match(script, /status -eq 4/);
   }
 });

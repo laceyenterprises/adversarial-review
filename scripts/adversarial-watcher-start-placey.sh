@@ -90,7 +90,7 @@ resolve_alert_to_optional() {
   stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-alert-to.${UID}.$$.$RANDOM.err"
   if ! op_bin="$(resolve_op_bin)"; then
     echo "[adversarial-watcher] ERROR: 1Password CLI 'op' not found on PATH and not present at /opt/homebrew/bin/op or /usr/local/bin/op." >&2
-    return 2
+    return 4
   fi
   while (( attempt <= max_attempts )); do
     if alert_to_value=$("$op_bin" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
@@ -133,6 +133,9 @@ if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from 1Password" >&2
   exit 1
 fi
+if [[ -n "${ALERT_TO:-}" && -z "${ALERT_TO//[[:space:]]/}" ]]; then
+  unset ALERT_TO
+fi
 if [[ -z "${ALERT_TO:-}" ]]; then
   if alert_to_value="$(resolve_alert_to_optional)"; then
     export ALERT_TO="$alert_to_value"
@@ -144,6 +147,15 @@ if [[ -z "${ALERT_TO:-}" ]]; then
       else
         echo "[adversarial-watcher] ERROR: ALERT_TO is not provisioned at $ALERT_TO_OP_REF and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
         echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; provision ALERT_TO or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
+        sleep 3600
+        exit 1
+      fi
+    elif [[ $status -eq 4 ]]; then
+      if [[ "$ALLOW_MISSING_ALERT_TO" == "1" ]]; then
+        echo "[adversarial-watcher] WARN: ALERT_TO cannot be resolved because 1Password CLI 'op' is unavailable, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup." >&2
+      else
+        echo "[adversarial-watcher] ERROR: ALERT_TO cannot be resolved because 1Password CLI 'op' is unavailable and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
+        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; install op, set ALERT_TO directly, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
         sleep 3600
         exit 1
       fi

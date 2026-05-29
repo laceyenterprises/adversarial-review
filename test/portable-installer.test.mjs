@@ -283,6 +283,27 @@ test('rendered watcher wrapper starts successfully when ALERT_TO is set directly
   assert.doesNotMatch(result.stderr, /ERROR:/);
 });
 
+test('rendered watcher wrapper treats whitespace-only direct ALERT_TO as unset', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: '   \t ',
+    opServiceAccountToken: 'token',
+    opMode: 'missing',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /ALERT_TO is not provisioned/);
+});
+
+test('rendered watcher wrapper allows whitespace-only direct ALERT_TO only with degraded override', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: '   \t ',
+    opServiceAccountToken: 'token',
+    opMode: 'missing',
+    allowMissing: true,
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
+});
+
 test('rendered watcher wrapper resolves ALERT_TO through PATH-discovered op', async () => {
   const result = await runRenderedWatcherWrapper({
     opServiceAccountToken: 'token',

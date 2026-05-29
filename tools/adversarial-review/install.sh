@@ -326,6 +326,10 @@ else
   mark_warn "operator dotenv not present at $SECRETS_ROOT/adversarial-review.env — wrapper will rely on inherited GITHUB_TOKEN / gh auth token"
 fi
 
+if [[ -n "${ALERT_TO:-}" && -z "${ALERT_TO//[[:space:]]/}" ]]; then
+  unset ALERT_TO
+fi
+
 if [[ -n "${ALERT_TO:-}" ]]; then
   mark_ok "ALERT_TO configured directly in operator env"
 elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then

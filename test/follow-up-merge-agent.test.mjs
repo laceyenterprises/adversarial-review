@@ -18,6 +18,10 @@ import {
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
   HQ_DISPATCH_TIMEOUT_MS,
   HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
+  MERGE_AGENT_WORKER_CLASS_ENV,
+  DEFAULT_MERGE_AGENT_WORKER_CLASS,
+  ALLOWED_MERGE_AGENT_WORKER_CLASSES,
+  resolveMergeAgentWorkerClass,
   NO_MERGE_HOLD_LABEL,
   REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER,
   TERMINAL_WORKER_RUN_STATUSES,
@@ -5474,4 +5478,37 @@ test('cancelMergeAgentDispatchOnMerge removes label even when no dispatch record
   assert.equal(result.labelRemoved, true);
   assert.equal(ghCalls.length, 1);
   assert.deepEqual(ghCalls[0].args.slice(-2), ['--remove-label', 'merge-agent-dispatched']);
+});
+
+// ── merge-agent worker-class override (operator pinning) ──────────────────
+
+test('resolveMergeAgentWorkerClass defaults to merge-agent when env unset', () => {
+  assert.equal(resolveMergeAgentWorkerClass({}), 'merge-agent');
+  assert.equal(resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: '' }), 'merge-agent');
+  assert.equal(resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: '   ' }), 'merge-agent');
+});
+
+test('resolveMergeAgentWorkerClass honors codex pin', () => {
+  assert.equal(
+    resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'codex' }),
+    'codex'
+  );
+});
+
+test('resolveMergeAgentWorkerClass honors claude-code pin', () => {
+  assert.equal(
+    resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'claude-code' }),
+    'claude-code'
+  );
+});
+
+test('resolveMergeAgentWorkerClass rejects unknown worker class', () => {
+  assert.throws(
+    () => resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'gemini' }),
+    /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS must be one of: merge-agent, codex, claude-code/
+  );
+});
+
+test('DEFAULT_MERGE_AGENT_WORKER_CLASS is in the allowlist', () => {
+  assert.ok(ALLOWED_MERGE_AGENT_WORKER_CLASSES.includes(DEFAULT_MERGE_AGENT_WORKER_CLASS));
 });

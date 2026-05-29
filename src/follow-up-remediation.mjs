@@ -140,24 +140,25 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 const DEFAULT_REMEDIATOR_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
 
-// Same-model remediator routing. The model that wrote the code knows its
-// own conventions, structure, and the intent behind decisions best, so the
-// remediation worker class is the same as the PR's writer:
+// Cross-model (adversarial) remediator routing. The remediator runs as
+// the OPPOSITE model from the writer, so a second model both reviews AND
+// fixes — the writer's blind spots don't get reinforced by a same-model
+// fix that pattern-matches on the same wrong intuitions:
 //
-//   [codex]       → codex remediates (writer is codex)
-//   [claude-code] → claude-code remediates (writer is claude)
-//   [clio-agent]  → codex remediates (Clio dispatches codex workers)
+//   [codex]       → claude-code remediates (writer is codex)
+//   [claude-code] → codex remediates       (writer is claude)
+//   [clio-agent]  → claude-code remediates (Clio dispatches codex writers)
 //
-// This pairs with cross-model REVIEW: reviewer catches blind spots the
-// writer can't see; remediator (same model) knows the codebase context to
-// implement the fix coherently.
+// Pairs with cross-model REVIEW (adapters/subject/github-pr/routing.mjs):
+// reviewer and remediator are both adversarial-by-default.
 //
-// Operators override via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost
-// or availability requires pinning to a specific worker class.
+// Operators pin globally via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex`
+// or `=claude-code` — the env override wins over per-tag routing for
+// budget-squeeze or model-availability scenarios.
 const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
-  codex: 'codex',
-  'claude-code': 'claude-code',
-  'clio-agent': 'codex',
+  codex: 'claude-code',
+  'claude-code': 'codex',
+  'clio-agent': 'claude-code',
 });
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';

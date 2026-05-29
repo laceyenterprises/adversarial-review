@@ -92,6 +92,39 @@ const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
 //   - `pr-not-open` / `merged` (trivially N/A)
 const DEFAULT_MERGE_AGENT_PARENT_SESSION = 'session:adversarial-review:watcher';
 const DEFAULT_MERGE_AGENT_PROJECT = 'pr-merge-orchestration';
+
+// Worker class used for merge-orchestration dispatch. Default is the
+// `merge-agent` stub adapter; operators pin to a real model class
+// (`codex`, `claude-code`) via env when the merge-agent surface is being
+// validated against live models, or during a budget-squeeze where the
+// stub's behavior needs to be substituted by a known-working coding
+// worker class.
+const DEFAULT_MERGE_AGENT_WORKER_CLASS = 'merge-agent';
+const MERGE_AGENT_WORKER_CLASS_ENV = 'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS';
+const ALLOWED_MERGE_AGENT_WORKER_CLASSES = Object.freeze([
+  'merge-agent',
+  'codex',
+  'claude-code',
+]);
+
+function resolveMergeAgentWorkerClass(env = process.env) {
+  const raw = env?.[MERGE_AGENT_WORKER_CLASS_ENV];
+  if (raw === undefined || String(raw).trim() === '') {
+    return DEFAULT_MERGE_AGENT_WORKER_CLASS;
+  }
+  const value = String(raw).trim();
+  if (!ALLOWED_MERGE_AGENT_WORKER_CLASSES.includes(value)) {
+    const err = new Error(
+      `${MERGE_AGENT_WORKER_CLASS_ENV} must be one of: ${ALLOWED_MERGE_AGENT_WORKER_CLASSES.join(', ')}; ` +
+      `got ${JSON.stringify(raw)}`
+    );
+    err.isMergeAgentConfigError = true;
+    err.configKey = MERGE_AGENT_WORKER_CLASS_ENV;
+    err.requestedValue = raw;
+    throw err;
+  }
+  return value;
+}
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED', 'WAITING', 'REQUESTED']);
 
@@ -3648,9 +3681,10 @@ async function dispatchMergeAgentForPR({
   // operator-requested stuck-branch path is the load-bearing case that needs
   // bypass semantics; broadening that escape hatch to every merge-agent launch
   // is not.
+  const mergeAgentWorkerClass = resolveMergeAgentWorkerClass(runtimeEnv);
   const hqDispatchHeadArgs = [
     'dispatch',
-    '--worker-class', 'merge-agent',
+    '--worker-class', mergeAgentWorkerClass,
     '--task-kind', 'merge',
   ];
   const hqDispatchTailArgs = [
@@ -4917,6 +4951,10 @@ export {
   NO_MERGE_HOLD_LABEL,
   OPERATOR_SKIP_LABELS,
   FML_MERGE_AGENT_PER_POLL_CAP_ENV,
+  MERGE_AGENT_WORKER_CLASS_ENV,
+  DEFAULT_MERGE_AGENT_WORKER_CLASS,
+  ALLOWED_MERGE_AGENT_WORKER_CLASSES,
+  resolveMergeAgentWorkerClass,
   TERMINAL_WORKER_RUN_STATUSES,
   addMergeAgentDispatchedLabel,
   buildFastMergeCloseAuditEntry,

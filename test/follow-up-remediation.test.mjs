@@ -1044,55 +1044,61 @@ test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided'
   assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'WORKER_JOB_ID'), false);
 });
 
-// ── worker-class dispatcher (LAC-358 hard-switch) ──────────────────────────
+// ── worker-class dispatcher (cross-model symmetry; LAC-358 revert) ─────────
 
-test('pickRemediationWorkerClass routes builderTag=codex to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes builderTag=codex to claude-code (cross-model)', () => {
   assert.equal(
     pickRemediationWorkerClass({ builderTag: 'codex', reviewerModel: 'claude' }),
-    'codex'
+    'claude-code'
   );
 });
 
-test('pickRemediationWorkerClass routes builderTag=claude-code to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes builderTag=claude-code to codex (cross-model)', () => {
   assert.equal(
     pickRemediationWorkerClass({ builderTag: 'claude-code', reviewerModel: 'codex' }),
     'codex'
   );
 });
 
-test.skip('pickRemediationWorkerClass routes builderTag=clio-agent to codex remediator (not claude-code)', () => {
-  // Preserve the historical bug shape for the eventual LAC-358 revert:
-  // do not reverse-map reviewerModel='codex' back to claude-code for
-  // [clio-agent] jobs. While the global codex override is active, the
-  // assertion stays skipped rather than deleted.
-  const job = { builderTag: 'clio-agent', reviewerModel: 'codex' };
-  assert.equal(pickRemediationWorkerClass(job), 'codex');
-});
-
-test('pickRemediationWorkerClass routes builderTag=clio-agent to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes builderTag=clio-agent to codex (mirrors reviewer family)', () => {
+  // Cross-model symmetry: [clio-agent] reviewer is codex (same as
+  // [claude-code]) so the remediator is codex too. This is the test that
+  // was previously test.skip()'d while the LAC-358 codex-only override
+  // was active.
   assert.equal(
     pickRemediationWorkerClass({ builderTag: 'clio-agent', reviewerModel: 'codex' }),
     'codex'
   );
 });
 
-test('pickRemediationWorkerClass routes legacy reviewerModel=claude to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes legacy reviewerModel=claude to codex (no usable builderTag → fallback)', () => {
+  // No builderTag set → fall back to DEFAULT_REMEDIATION_WORKER_CLASS=codex.
   assert.equal(pickRemediationWorkerClass({ reviewerModel: 'claude' }), 'codex');
 });
 
-test('pickRemediationWorkerClass routes legacy reviewerModel=codex to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes legacy reviewerModel=codex to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass({ reviewerModel: 'codex' }), 'codex');
 });
 
-test('pickRemediationWorkerClass routes legacy reviewerModel=unknown to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes legacy reviewerModel=unknown to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass({ reviewerModel: 'unknown' }), 'codex');
 });
 
-test('pickRemediationWorkerClass routes empty jobs to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes builderTag=unknown to codex (unknown tag → fallback)', () => {
+  // Tags outside REMEDIATION_WORKER_BY_BUILDER_TAG fall back to codex
+  // rather than throwing — defensive against future tag additions
+  // before the routing table is updated.
+  assert.equal(
+    pickRemediationWorkerClass({ builderTag: 'experimental-other', reviewerModel: 'codex' }),
+    'codex'
+  );
+});
+
+test('pickRemediationWorkerClass routes empty jobs to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass({}), 'codex');
 });
 
-test('pickRemediationWorkerClass routes null jobs to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes null jobs to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass(null), 'codex');
 });
 

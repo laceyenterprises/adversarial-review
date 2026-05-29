@@ -131,11 +131,26 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
   },
 };
 
-// The remediation-worker class the consume path spawns by default. The
-// operator env override below can pin the worker class without changing
-// durable job records or PR-title routing.
+// The remediation-worker class the consume path spawns by default when
+// nothing else applies. With cross-model symmetry restored (see
+// `pickRemediationWorkerClass` below), this constant is the fallback for
+// jobs missing a usable `builderTag`. The operator env override below can
+// still pin the worker class globally without changing durable job records
+// or PR-title routing.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 const DEFAULT_REMEDIATOR_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
+
+// Cross-model remediator routing (mirrors `REVIEWER_FAMILY_BY_BUILDER_CLASS`
+// in the GitHub-PR subject routing module): a PR authored by one model is
+// remediated by the OTHER model so the cross-model review/remediation
+// guarantee survives end-to-end. Operators override via
+// `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost or availability requires
+// pinning to a specific worker class.
+const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
+  codex: 'claude-code',
+  'claude-code': 'codex',
+  'clio-agent': 'codex',
+});
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
@@ -749,12 +764,34 @@ function validateStartupRemediationConfig(env = process.env) {
   resolveRemediationMaxConcurrentJobs(env);
 }
 
-// LAC-358 default: route follow-up remediation through the codex worker
-// class, regardless of the original PR builderTag. Operators can override
-// this default with ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR when cost or
-// availability requires pinning remediation to a specific worker class.
-function pickRemediationWorkerClass(_job, { env = process.env } = {}) {
-  return defaultRemediatorWorkerClassFromEnv(env) || DEFAULT_REMEDIATION_WORKER_CLASS;
+// Cross-model symmetry with the reviewer routing (see
+// `adapters/subject/github-pr/routing.mjs` REVIEWER_FAMILY_BY_BUILDER_CLASS):
+//
+//   [codex]       PR → reviewed by claude → remediated by claude-code
+//   [claude-code] PR → reviewed by codex  → remediated by codex
+//   [clio-agent]  PR → reviewed by codex  → remediated by codex
+//
+// Operators can override the per-PR derivation via
+// `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost or availability requires
+// pinning remediation to a specific worker class — e.g. during a codex
+// weekly-budget squeeze, set `=claude-code` to force all remediation through
+// claude regardless of the original PR's builderTag.
+//
+// Historical note: LAC-358 previously hard-routed all remediation to codex
+// regardless of builderTag. The cross-model symmetry was restored on
+// 2026-05-29 after codex weekly-budget pressure made the codex-only default
+// operator-unworkable; the env override provides the same operator escape
+// hatch in the other direction.
+function pickRemediationWorkerClass(job, { env = process.env } = {}) {
+  const envOverride = defaultRemediatorWorkerClassFromEnv(env);
+  if (envOverride) return envOverride;
+  const builderTag = String(job?.builderTag || '').trim().toLowerCase();
+  if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
+    return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
+  }
+  // No usable builderTag — fall back to codex per historical default; operator
+  // can still override via the env var above.
+  return DEFAULT_REMEDIATION_WORKER_CLASS;
 }
 
 function requeueClaimedFollowUpJobAfterConfigFailure({

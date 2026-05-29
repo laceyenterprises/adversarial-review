@@ -77,6 +77,7 @@ warnings=()
 mark_ok()   { printf '  ✓ %s\n' "$1"; }
 mark_fail() { printf '  ✗ %s\n' "$1"; failures+=("$1"); }
 mark_warn() { printf '  ! %s\n' "$1"; warnings+=("$1"); }
+ALERT_TO_OP_REF='op://Cliovault/adversarial-watcher-alert-to/credential'
 
 prompt_with_default() {
   local var_name="$1"
@@ -308,6 +309,26 @@ if [[ -r "$SECRETS_ROOT/adversarial-review.env" ]]; then
   set +a
 else
   mark_warn "operator dotenv not present at $SECRETS_ROOT/adversarial-review.env — wrapper will rely on inherited GITHUB_TOKEN / gh auth token"
+fi
+
+if [[ -n "${ALERT_TO:-}" ]]; then
+  mark_ok "ALERT_TO configured directly in operator env"
+elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  if output="$(/opt/homebrew/bin/op read "$ALERT_TO_OP_REF" 2>&1)"; then
+    mark_ok "ALERT_TO resolves from $ALERT_TO_OP_REF"
+  elif printf '%s' "$output" | grep -Eiq "not found|does not exist|isn't an item|unknown object type|no item|no field"; then
+    if [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
+      mark_warn "ALERT_TO missing at $ALERT_TO_OP_REF, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
+    else
+      mark_fail "ALERT_TO missing at $ALERT_TO_OP_REF; provision it or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
+    fi
+  else
+    mark_fail "ALERT_TO probe failed against $ALERT_TO_OP_REF: ${output//$'\n'/ }"
+  fi
+elif [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
+  mark_warn "ALERT_TO not configured and OP_SERVICE_ACCOUNT_TOKEN unavailable, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
+else
+  mark_fail "ALERT_TO not configured. Set ALERT_TO in $SECRETS_ROOT/adversarial-review.env, provide OP_SERVICE_ACCOUNT_TOKEN so the wrapper can read $ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
 fi
 
 if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" missing-bot-tokens 2>&1)"; then

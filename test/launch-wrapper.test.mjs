@@ -31,3 +31,14 @@ test('wrapper launchers pass ADV_OP_TOKEN_TAG into the resolver subprocess', () 
     );
   }
 });
+
+test('watcher launchers require explicit opt-in before running without ALERT_TO', () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const script = readScript(scriptName);
+    assert.match(script, /ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1/);
+    assert.match(script, /resolve_alert_to_optional/);
+  }
+});

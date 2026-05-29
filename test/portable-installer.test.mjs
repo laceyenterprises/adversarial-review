@@ -165,6 +165,8 @@ test('the four shipped templates render with sample bindings and leave no placeh
     assert.ok(rendered.includes(bindings.REPO_ROOT), `${name} did not bake REPO_ROOT`);
     if (name === 'adversarial-watcher-start.sh.template') {
       assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
+      assert.match(rendered, /ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1/);
+      assert.match(rendered, /ALERT_TO_OP_REF='op:\/\/Cliovault\/adversarial-watcher-alert-to\/credential'/);
     }
   }
 });

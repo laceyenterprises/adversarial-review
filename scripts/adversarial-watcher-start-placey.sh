@@ -63,6 +63,38 @@ fi
 export LINEAR_API_KEY=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
 export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
 export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+ALERT_TO_OP_REF='op://Cliovault/adversarial-watcher-alert-to/credential'
+ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
+
+resolve_alert_to_optional() {
+  local attempt=1
+  local max_attempts=3
+  local stderr_path
+  local alert_to_value
+  stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-alert-to.${UID}.$$.$RANDOM.err"
+  while (( attempt <= max_attempts )); do
+    if alert_to_value=$(/opt/homebrew/bin/op read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
+      rm -f "$stderr_path"
+      printf '%s' "$alert_to_value"
+      return 0
+    fi
+    if grep -Eiq "not found|does not exist|isn't an item|unknown object type|no item|no field" "$stderr_path"; then
+      rm -f "$stderr_path"
+      return 3
+    fi
+    if (( attempt < max_attempts )); then
+      echo "[adversarial-watcher] WARN: failed to resolve ALERT_TO from 1Password (attempt $attempt/$max_attempts); retrying in 5s." >&2
+      sed 's/^/  /' "$stderr_path" >&2
+      attempt=$((attempt + 1))
+      sleep 5
+      continue
+    fi
+    echo "[adversarial-watcher] ERROR: failed to resolve ALERT_TO from 1Password after $max_attempts attempts." >&2
+    sed 's/^/  /' "$stderr_path" >&2
+    rm -f "$stderr_path"
+    return 2
+  done
+}
 
 if [[ -z "${LINEAR_API_KEY:-}" ]]; then
   echo "[adversarial-watcher] ERROR: failed to resolve LINEAR_API_KEY from 1Password" >&2
@@ -75,6 +107,27 @@ fi
 if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from 1Password" >&2
   exit 1
+fi
+if [[ -z "${ALERT_TO:-}" ]]; then
+  if alert_to_value="$(resolve_alert_to_optional)"; then
+    export ALERT_TO="$alert_to_value"
+  else
+    status=$?
+    if [[ $status -eq 3 ]]; then
+      if [[ "$ALLOW_MISSING_ALERT_TO" == "1" ]]; then
+        echo "[adversarial-watcher] WARN: ALERT_TO is unset by explicit operator override (ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1). Watcher-health and proactive-stuck-scan alerts will not page until $ALERT_TO_OP_REF is provisioned." >&2
+      else
+        echo "[adversarial-watcher] ERROR: ALERT_TO is not provisioned at $ALERT_TO_OP_REF and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
+        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; provision ALERT_TO or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
+        sleep 3600
+        exit 1
+      fi
+    else
+      echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the ALERT_TO secret-source and bootout the agent to recover sooner." >&2
+      sleep 3600
+      exit 1
+    fi
+  fi
 fi
 
 # Scrub direct-provider API/provider fallbacks — reviewers must use OAuth only.

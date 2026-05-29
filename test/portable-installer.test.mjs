@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, statSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -36,6 +36,128 @@ function makeBindings(overrides = {}) {
     WATCHER_USER_LABEL: 'local',
     ...overrides,
   };
+}
+
+function writeExecutable(filePath, body) {
+  writeFileSync(filePath, body, 'utf8');
+  chmodSync(filePath, 0o755);
+}
+
+async function runRenderedWatcherWrapper({
+  alertTo = '',
+  alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
+  allowMissing = false,
+  opServiceAccountToken = '',
+  tokenResolverMode = 'missing',
+  tokenResolverValue = 'resolved-token',
+  opCliPath,
+  opMode = 'ok',
+  opValue = 'alerts@example.com',
+} = {}) {
+  const root = mkdtempSync(path.join(tmpdir(), 'portable-installer-wrapper-'));
+  const fakeBin = path.join(root, 'bin');
+  const fakeRepo = path.join(root, 'repo');
+  const fakeSecrets = path.join(root, 'secrets');
+  const fakeLogs = path.join(root, 'logs');
+  const fakeTmp = path.join(root, 'tmp');
+  mkdirSync(fakeBin, { recursive: true });
+  mkdirSync(path.join(fakeRepo, 'src'), { recursive: true });
+  mkdirSync(fakeSecrets, { recursive: true });
+  mkdirSync(fakeLogs, { recursive: true });
+  mkdirSync(fakeTmp, { recursive: true });
+  writeFileSync(path.join(fakeRepo, 'src', 'watcher.mjs'), 'process.exit(0);\n', 'utf8');
+
+  const wrapper = withHeader(
+    renderTemplate(
+      readFileSync(path.join(templateDir, 'adversarial-watcher-start.sh.template'), 'utf8'),
+      makeBindings({
+        REPO_ROOT: fakeRepo,
+        SECRETS_ROOT: fakeSecrets,
+        LOG_ROOT: fakeLogs,
+      }),
+      { format: 'shell' },
+    ),
+    '# test wrapper\n',
+  );
+  const wrapperPath = path.join(root, 'adversarial-watcher-start.sh');
+  writeExecutable(wrapperPath, wrapper);
+
+  writeExecutable(
+    path.join(fakeBin, 'node'),
+    '#!/bin/bash\n'
+      + 'if [[ "$1" == "-e" ]]; then\n'
+      + '  exit 0\n'
+      + 'fi\n'
+      + 'if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then\n'
+      + '  if [[ "${TEST_OP_TOKEN_RESOLVER_MODE:-missing}" == "ok" ]]; then\n'
+      + '    printf "%s" "${TEST_OP_TOKEN_RESOLVER_VALUE:-resolved-token}"\n'
+      + '    exit 0\n'
+      + '  fi\n'
+      + '  echo "token missing" >&2\n'
+      + '  exit 1\n'
+      + 'fi\n'
+      + 'exit 0\n',
+  );
+  writeExecutable(
+    path.join(fakeBin, 'gh'),
+    '#!/bin/bash\n'
+      + 'if [[ "$1" == "auth" && "$2" == "token" ]]; then\n'
+      + '  echo "gh-token"\n'
+      + '  exit 0\n'
+      + 'fi\n'
+      + 'exit 1\n',
+  );
+  writeExecutable(path.join(fakeBin, 'sleep'), '#!/bin/bash\nexit 0\n');
+  writeExecutable(
+    path.join(fakeBin, 'op'),
+    '#!/bin/bash\n'
+      + 'case "${TEST_OP_MODE:-ok}" in\n'
+      + '  ok)\n'
+      + '    printf "%s" "${TEST_OP_VALUE:-alerts@example.com}"\n'
+      + '    exit 0\n'
+      + '    ;;\n'
+      + '  blank)\n'
+      + '    printf "   \\n"\n'
+      + '    exit 0\n'
+      + '    ;;\n'
+      + '  missing)\n'
+      + '    echo "not found" >&2\n'
+      + '    exit 1\n'
+      + '    ;;\n'
+      + '  fail)\n'
+      + '    echo "op failure" >&2\n'
+      + '    exit 1\n'
+      + '    ;;\n'
+      + 'esac\n'
+      + 'echo "unexpected mode" >&2\n'
+      + 'exit 1\n',
+  );
+
+  const env = {
+    ...process.env,
+    PATH: `${fakeBin}:/usr/bin:/bin`,
+    TMPDIR: fakeTmp,
+    ALERT_TO: alertTo,
+    ADVERSARIAL_REVIEW_ALERT_TO_OP_REF: alertToOpRef,
+    OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken,
+    ADVERSARIAL_REVIEW_OP_CLI: opCliPath ?? path.join(fakeBin, 'op'),
+    ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO: allowMissing ? '1' : '',
+    TEST_OP_TOKEN_RESOLVER_MODE: tokenResolverMode,
+    TEST_OP_TOKEN_RESOLVER_VALUE: tokenResolverValue,
+    TEST_OP_MODE: opMode,
+    TEST_OP_VALUE: opValue,
+  };
+
+  try {
+    const result = await execFileAsync('/bin/bash', [wrapperPath], { env, cwd: root });
+    return { code: 0, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    return {
+      code: error.code ?? 1,
+      stdout: error.stdout ?? '',
+      stderr: error.stderr ?? '',
+    };
+  }
 }
 
 test('renderTemplate substitutes only the well-known placeholder set, leaving shell expansions intact', () => {
@@ -165,8 +287,119 @@ test('the four shipped templates render with sample bindings and leave no placeh
     assert.ok(rendered.includes(bindings.REPO_ROOT), `${name} did not bake REPO_ROOT`);
     if (name === 'adversarial-watcher-start.sh.template') {
       assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
+      assert.match(rendered, /resolve_op_bin/);
+      assert.match(rendered, /\/usr\/local\/bin\/op/);
     }
   }
+});
+
+test('rendered watcher wrapper starts successfully when ALERT_TO is set directly', async () => {
+  const result = await runRenderedWatcherWrapper({ alertTo: 'direct-alert@example.com' });
+  assert.equal(result.code, 0);
+  assert.doesNotMatch(result.stderr, /ERROR:/);
+});
+
+test('rendered watcher wrapper treats whitespace-only direct ALERT_TO as unset', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: '   \t ',
+    opServiceAccountToken: 'token',
+    opMode: 'missing',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /ALERT_TO is not provisioned/);
+});
+
+test('rendered watcher wrapper allows whitespace-only direct ALERT_TO only with degraded override', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: '   \t ',
+    opServiceAccountToken: 'token',
+    opMode: 'missing',
+    allowMissing: true,
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
+});
+
+test('rendered watcher wrapper resolves ALERT_TO through explicit op override', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opMode: 'ok',
+    opValue: 'path-alert@example.com',
+  });
+  assert.equal(result.code, 0);
+  assert.doesNotMatch(result.stderr, /1Password CLI 'op' not found/);
+});
+
+test('rendered watcher wrapper requires configured ALERT_TO op ref for 1Password lookup', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertToOpRef: '',
+    opServiceAccountToken: 'token',
+    opMode: 'ok',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /ALERT_TO 1Password ref is not configured/);
+  assert.doesNotMatch(result.stderr, /Cliovault/);
+});
+
+test('rendered watcher wrapper falls back to PATH when op override is stale', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opCliPath: '/missing/op',
+    opMode: 'ok',
+    opValue: 'path-alert@example.com',
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stderr, /WARN: configured 1Password CLI '\/missing\/op' is not executable/);
+  assert.doesNotMatch(result.stderr, /1Password CLI 'op' not found/);
+});
+
+test('rendered watcher wrapper resolves OP token through canonical resolver before ALERT_TO', async () => {
+  const result = await runRenderedWatcherWrapper({
+    tokenResolverMode: 'ok',
+    tokenResolverValue: 'token-from-file',
+    opMode: 'ok',
+    opValue: 'resolved-alert@example.com',
+  });
+  assert.equal(result.code, 0);
+  assert.doesNotMatch(result.stderr, /OP_SERVICE_ACCOUNT_TOKEN could not be resolved/);
+});
+
+test('rendered watcher wrapper fails startup when ALERT_TO is absent and override is unset', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opMode: 'missing',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /ALERT_TO is not provisioned/);
+});
+
+test('rendered watcher wrapper warns but starts when missing ALERT_TO is explicitly allowed', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opMode: 'missing',
+    allowMissing: true,
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
+});
+
+test('rendered watcher wrapper rejects blank ALERT_TO values from 1Password', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opMode: 'blank',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /resolved to an empty value/);
+});
+
+test('rendered watcher wrapper allows blank ALERT_TO values from 1Password with degraded override', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opMode: 'blank',
+    allowMissing: true,
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
 });
 
 test('resolveRenderedCodexAuthPath matches the installer contract for default and override layouts', () => {

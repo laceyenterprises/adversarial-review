@@ -77,6 +77,64 @@ warnings=()
 mark_ok()   { printf '  ✓ %s\n' "$1"; }
 mark_fail() { printf '  ✗ %s\n' "$1"; failures+=("$1"); }
 mark_warn() { printf '  ! %s\n' "$1"; warnings+=("$1"); }
+ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
+ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
+ALERT_TO_PROBE_OUTPUT=""
+
+resolve_op_bin() {
+  local op_bin
+  op_bin="${ADVERSARIAL_REVIEW_OP_CLI:-${OP_CLI_PATH:-}}"
+  if [[ -n "$op_bin" ]]; then
+    if [[ -x "$op_bin" ]]; then
+      printf '%s' "$op_bin"
+      return 0
+    fi
+    mark_warn "configured 1Password CLI '$op_bin' is not executable; falling back to PATH/Homebrew discovery" >&2
+  fi
+  if op_bin="$(command -v op 2>/dev/null)" && [[ -n "$op_bin" && -x "$op_bin" ]]; then
+    printf '%s' "$op_bin"
+    return 0
+  fi
+  for op_bin in /opt/homebrew/bin/op /usr/local/bin/op; do
+    if [[ -x "$op_bin" ]]; then
+      printf '%s' "$op_bin"
+      return 0
+    fi
+  done
+  return 1
+}
+
+probe_alert_to_ref() {
+  local op_bin="$1"
+  local attempt=1
+  local max_attempts=3
+  local output
+  ALERT_TO_PROBE_OUTPUT=""
+  if [[ -z "${ALERT_TO_OP_REF:-}" ]]; then
+    ALERT_TO_PROBE_OUTPUT="ALERT_TO 1Password ref is not configured; set ADVERSARIAL_REVIEW_ALERT_TO_OP_REF or ALERT_TO_OP_REF"
+    return 3
+  fi
+  while (( attempt <= max_attempts )); do
+    if output="$("$op_bin" read "$ALERT_TO_OP_REF" 2>&1)"; then
+      ALERT_TO_PROBE_OUTPUT="$output"
+      if [[ -n "${output//[[:space:]]/}" ]]; then
+        return 0
+      fi
+      return 3
+    fi
+    ALERT_TO_PROBE_OUTPUT="$output"
+    if printf '%s' "$output" | grep -Eiq "not found|does not exist|isn't an item|unknown object type|no item|no field"; then
+      return 3
+    fi
+    if (( attempt < max_attempts )); then
+      printf '  ! ALERT_TO probe failed transiently (attempt %s/%s); retrying in 5s\n' "$attempt" "$max_attempts"
+      sleep 5
+      attempt=$((attempt + 1))
+      continue
+    fi
+    return 2
+  done
+}
 
 prompt_with_default() {
   local var_name="$1"
@@ -308,6 +366,51 @@ if [[ -r "$SECRETS_ROOT/adversarial-review.env" ]]; then
   set +a
 else
   mark_warn "operator dotenv not present at $SECRETS_ROOT/adversarial-review.env — wrapper will rely on inherited GITHUB_TOKEN / gh auth token"
+fi
+
+if [[ -n "${ALERT_TO:-}" && -z "${ALERT_TO//[[:space:]]/}" ]]; then
+  unset ALERT_TO
+fi
+
+if [[ -z "${ALERT_TO:-}" && -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  TOKEN_RESOLVER="$REPO_ROOT/src/secret-source/resolve-op-token-cli.mjs"
+  if [[ -f "$TOKEN_RESOLVER" ]] \
+     && output="$(env ADV_OP_TOKEN_TAG="adversarial-watcher" ADV_SECRETS_ROOT="$SECRETS_ROOT" node "$TOKEN_RESOLVER" 2>&1)"; then
+    export OP_SERVICE_ACCOUNT_TOKEN="$output"
+    mark_ok "OP_SERVICE_ACCOUNT_TOKEN resolved through canonical secret-source contract"
+  else
+    mark_warn "OP_SERVICE_ACCOUNT_TOKEN could not be resolved through canonical secret-source contract; ALERT_TO must be direct or degraded startup must be explicit"
+  fi
+fi
+
+if [[ -n "${ALERT_TO:-}" ]]; then
+  mark_ok "ALERT_TO configured directly in operator env"
+elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  if op_bin="$(resolve_op_bin)"; then
+    if probe_alert_to_ref "$op_bin"; then
+      mark_ok "ALERT_TO resolves from $ALERT_TO_REF_LABEL"
+    else
+      alert_probe_status=$?
+      output="$ALERT_TO_PROBE_OUTPUT"
+      if [[ "$alert_probe_status" -eq 3 ]]; then
+        if [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
+          mark_warn "ALERT_TO missing or blank at $ALERT_TO_REF_LABEL, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
+        else
+          mark_fail "ALERT_TO missing or blank at $ALERT_TO_REF_LABEL; set ALERT_TO directly, configure ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
+        fi
+      else
+        mark_warn "ALERT_TO probe failed transiently against $ALERT_TO_REF_LABEL after retries; rendered wrapper will retry at runtime: ${output//$'\n'/ }"
+      fi
+    fi
+  elif [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
+    mark_warn "1Password CLI 'op' not found on PATH or at /opt/homebrew/bin/op or /usr/local/bin/op, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
+  else
+    mark_fail "1Password CLI 'op' not found on PATH or at /opt/homebrew/bin/op or /usr/local/bin/op; install it or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
+  fi
+elif [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
+  mark_warn "ALERT_TO not configured and OP_SERVICE_ACCOUNT_TOKEN unavailable, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
+else
+  mark_fail "ALERT_TO not configured. Set ALERT_TO in $SECRETS_ROOT/adversarial-review.env, provide OP_SERVICE_ACCOUNT_TOKEN plus ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
 fi
 
 if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" missing-bot-tokens 2>&1)"; then

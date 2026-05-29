@@ -95,6 +95,9 @@ After rendering, the installer runs a postflight validator that checks:
 - The secret-source dotenv at `$SECRETS_ROOT/adversarial-review.env` is
   readable (warning if missing; the wrapper still falls back to
   `gh auth token` for `GITHUB_TOKEN`).
+- Watcher alert routing is configured either directly via `ALERT_TO` or
+  indirectly via `OP_SERVICE_ACCOUNT_TOKEN` +
+  `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF=op://<vault>/<item>/credential`.
 - The required reviewer bot PATs (`GH_CLAUDE_REVIEWER_TOKEN`,
   `GH_CODEX_REVIEWER_TOKEN`) are present in the install environment.
 - The optional `$REVIEWER_AUTH_ROOT` is readable when set; when it is
@@ -150,9 +153,17 @@ GH_CODEX_REVIEWER_TOKEN=ghp_...
 # Linear, optional. Absent means Linear updates are skipped.
 LINEAR_API_KEY=lin_api_...
 
+# Operator alert routing. This should be present unless you are
+# deliberately opting into a degraded first boot.
+ALERT_TO=123456789
+
 # 1Password service-account token, optional. Only relevant if you wire
 # `op read` into your own secret-management flow on top of this file.
 OP_SERVICE_ACCOUNT_TOKEN=ops_eyJ...
+
+# Optional explicit degraded mode for fresh-machine bring-up before the
+# alert route exists.
+# ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1
 ```
 
 Keep the file mode at `0600` inside `$SECRETS_ROOT` (which itself is
@@ -171,6 +182,20 @@ readable, but it does not exit. If you see the warning, either drop a
 dotenv at that path (see above) or leave `OP_SERVICE_ACCOUNT_TOKEN`
 out — the watcher and follow-up daemon do not require it on hosts that
 aren't using 1Password resolution.
+
+### `ALERT_TO` missing
+
+Watcher-health and proactive stuck-scan alerts are part of the supported
+deployment contract. Configure one of:
+
+- `ALERT_TO=<telegram-chat-id>` directly in `$SECRETS_ROOT/adversarial-review.env`
+- `OP_SERVICE_ACCOUNT_TOKEN=...` plus
+  `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF=op://<vault>/<item>/credential`
+
+If you need a degraded first boot before alert routing exists, set
+`ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1` explicitly. The installer
+and wrapper both surface that state as degraded; missing alert routing
+is no longer treated as an implicit best-effort condition.
 
 ### `gh auth status` not authenticated
 

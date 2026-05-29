@@ -312,7 +312,7 @@ Reviews are posted by dedicated bot accounts — not Clio's personal account —
 - Create two GitHub accounts: `codex-reviewer` and `claude-reviewer`  
 - Add both as members of the `laceyenterprises` org with write access to covered repos  
 - Generate a personal access token (PAT) for each with `pull_requests: write` scope  
-- Store tokens in 1Password (Cliovault): items `"GitHub Bot — codex-reviewer"` and `"GitHub Bot — claude-reviewer"`  
+- Store tokens in the operator's configured 1Password vault: items `"GitHub Bot - codex-reviewer"` and `"GitHub Bot - claude-reviewer"`
 - Wire tokens into the reviewer agent config via `op://` references
 
 ---

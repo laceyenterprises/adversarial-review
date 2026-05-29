@@ -174,6 +174,24 @@ test('review-state migrations tolerate partial reviewer_pass body columns withou
     assert.equal(passColumns.body_md.type, 'TEXT');
     assert.equal(passColumns.gh_comment_id.type, 'TEXT');
     assert.equal(passColumns.body_captured_at.type, 'TEXT');
+    assert.throws(
+      () => db.prepare(
+        `INSERT INTO reviewer_passes (
+           repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json, verdict
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'laceyenterprises/adversarial-review',
+        66,
+        1,
+        'claude',
+        'review',
+        '2026-05-29T00:00:00.000Z',
+        'completed',
+        '{}',
+        'maybe'
+      ),
+      /reviewer_passes verdict must be/
+    );
   } finally {
     db.close();
   }
@@ -277,7 +295,7 @@ test('review-state migrations support closeout round-trips and reviewer_pass bod
       '2026-05-29T00:05:00.000Z',
       '2026-05-29T00:06:00.000Z',
       '2026-05-29T00:07:00.000Z',
-      '2026-05-29T00:08:00.000Z',
+      null,
       '2026-05-29T00:04:00.000Z',
       '[{"kind":"comment","id":"IC_kwDO"}]'
     );
@@ -313,7 +331,7 @@ test('review-state migrations support closeout round-trips and reviewer_pass bod
     assert.equal(populated.closeout_posted_at, '2026-05-29T00:05:00.000Z');
     assert.equal(populated.body_captured_at, '2026-05-29T00:06:00.000Z');
     assert.equal(populated.scrape_last_checked_at, '2026-05-29T00:07:00.000Z');
-    assert.equal(populated.empty_confirmed_at, '2026-05-29T00:08:00.000Z');
+    assert.equal(populated.empty_confirmed_at, null);
     assert.equal(populated.merged_at, '2026-05-29T00:04:00.000Z');
     assert.equal(populated.gh_artifact_refs, '[{"kind":"comment","id":"IC_kwDO"}]');
     assert.ok(populated.created_at);
@@ -381,12 +399,39 @@ test('review-state schema rejects invalid closeout JSON, duplicate artifact ids,
       () => db.prepare(
         'UPDATE reviewer_passes SET verdict = ? WHERE repo = ? AND pr_number = ?'
       ).run('maybe', 'laceyenterprises/adversarial-review', 90),
+      /reviewer_passes verdict must be|CHECK constraint failed/
+    );
+    db.prepare(
+      'UPDATE reviewer_passes SET verdict = ? WHERE repo = ? AND pr_number = ?'
+    ).run('dismissed', 'laceyenterprises/adversarial-review', 90);
+    assert.throws(
+      () => db.prepare(
+        'INSERT INTO pr_merge_closeouts (repo, pr_number, closeout_authors_json) VALUES (?, ?, ?)'
+      ).run('laceyenterprises/adversarial-review', 92, 'not-json'),
+      /CHECK constraint failed/
+    );
+    assert.throws(
+      () => db.prepare(
+        'INSERT INTO pr_merge_closeouts (repo, pr_number, closeout_body_md, closeout_authors_json) VALUES (?, ?, ?, ?)'
+      ).run('laceyenterprises/adversarial-review', 93, 'body', '{"oops":true}'),
+      /CHECK constraint failed/
+    );
+    assert.throws(
+      () => db.prepare(
+        'INSERT INTO pr_merge_closeouts (repo, pr_number, closeout_posted_at) VALUES (?, ?, ?)'
+      ).run('laceyenterprises/adversarial-review', 94, '2026-05-29T00:00:00.000Z'),
+      /CHECK constraint failed/
+    );
+    assert.throws(
+      () => db.prepare(
+        'INSERT INTO pr_merge_closeouts (repo, pr_number, closeout_body_md, empty_confirmed_at) VALUES (?, ?, ?, ?)'
+      ).run('laceyenterprises/adversarial-review', 95, 'body', '2026-05-29T00:00:00.000Z'),
       /CHECK constraint failed/
     );
     assert.throws(
       () => db.prepare(
         'INSERT INTO pr_merge_closeouts (repo, pr_number, closeout_authors_json) VALUES (?, ?, ?)'
-      ).run('laceyenterprises/adversarial-review', 92, 'not-json'),
+      ).run('laceyenterprises/adversarial-review', 96, '["alice"]'),
       /CHECK constraint failed/
     );
   } finally {

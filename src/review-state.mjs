@@ -8,7 +8,7 @@ import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shape
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 6;
+const REVIEW_STATE_SCHEMA_VERSION = 7;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
 const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries', 'reviewer_passes']);
@@ -100,31 +100,12 @@ function ensureReviewStateSchema(db) {
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);
-  addColumnIfMissing(
-    db,
-    `ALTER TABLE reviewer_passes ADD COLUMN verdict TEXT CHECK (verdict IS NULL OR verdict IN ('approved', 'comment-only', 'request-changes'))`
-  );
-  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN body_md TEXT`);
-  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN gh_comment_id TEXT`);
-  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN body_captured_at TEXT`);
-
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);
 
     CREATE INDEX IF NOT EXISTS reviewed_prs_identity_lookup_idx
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);
-
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_reviewer_passes_gh_comment_id
-      ON reviewer_passes(gh_comment_id)
-      WHERE gh_comment_id IS NOT NULL;
-
-    CREATE INDEX IF NOT EXISTS idx_pr_merge_closeouts_scrape_pending
-      ON pr_merge_closeouts(scrape_last_checked_at)
-      WHERE empty_confirmed_at IS NULL AND closeout_posted_at IS NULL;
-
-    CREATE INDEX IF NOT EXISTS idx_pr_merge_closeouts_merged_at
-      ON pr_merge_closeouts(merged_at);
 
     PRAGMA user_version = ${REVIEW_STATE_SCHEMA_VERSION};
   `);
@@ -156,11 +137,77 @@ function runReviewStateMigrations(db, { migrationsDir = REVIEW_STATE_MIGRATIONS_
     if (hasMigration.get(name)) continue;
     const sql = readFileSync(join(migrationsDir, name), 'utf8');
     const applyMigration = db.transaction(() => {
-      db.exec(sql);
+      execIdempotentMigrationSql(db, sql);
       recordMigration.run(name);
     });
     applyMigration();
   }
+}
+
+function execIdempotentMigrationSql(db, sql) {
+  try {
+    db.exec(sql);
+    return;
+  } catch (err) {
+    if (!(err?.code === 'SQLITE_ERROR' && /duplicate column name/i.test(err.message || ''))) throw err;
+  }
+  for (const statement of splitSqlStatements(sql)) {
+    try {
+      db.exec(statement);
+    } catch (err) {
+      if (err?.code === 'SQLITE_ERROR' && /duplicate column name/i.test(err.message || '')) continue;
+      throw err;
+    }
+  }
+}
+
+function splitSqlStatements(sql) {
+  const statements = [];
+  let current = '';
+  let quote = null;
+  let inTrigger = false;
+  for (const char of stripSqlComments(sql)) {
+    if (quote) {
+      current += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char !== ';') {
+      current += char;
+      continue;
+    }
+    const statement = current.trim();
+    if (!statement) {
+      current = '';
+      continue;
+    }
+    if (!inTrigger && /^CREATE\s+TRIGGER\b/i.test(statement) && !/\bEND\s*$/i.test(statement)) {
+      inTrigger = true;
+      current += char;
+      continue;
+    }
+    if (inTrigger && !/\bEND\s*$/i.test(statement)) {
+      current += char;
+      continue;
+    }
+    statements.push(`${statement};`);
+    current = '';
+    inTrigger = false;
+  }
+  const trailing = current.trim();
+  if (trailing) statements.push(trailing);
+  return statements;
+}
+
+function stripSqlComments(sql) {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*--.*$/gm, '');
 }
 
 function addReviewedPRsColumnIfMissing(db, sql) {

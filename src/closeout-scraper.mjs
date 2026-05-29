@@ -1,27 +1,12 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import {
+  GH_LOOKUP_TIMEOUT_MS,
+  execGhWithRetry,
+  parseDate,
+  parseJsonLines,
+} from './gh-cli.mjs';
 
 const CLOSEOUT_MARKER = 'hq:closeout:pr';
 const CLOSEOUT_SETTLE_DELAY_MS = 10 * 60 * 1000;
-const GH_CLOSEOUT_LOOKUP_TIMEOUT_MS = 30_000;
-
-function buildAllowlistedGhEnv(env = process.env) {
-  const token = env.GITHUB_TOKEN || env.GH_TOKEN || null;
-  const allowlisted = {
-    PATH: env.PATH ?? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
-    HOME: env.HOME ?? '',
-  };
-  if (token) allowlisted.GH_TOKEN = token;
-  return allowlisted;
-}
-
-function parseDate(value) {
-  if (!value) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
 
 function isMergeCloseoutMarked(body) {
   return String(body || '').includes(CLOSEOUT_MARKER);
@@ -31,21 +16,6 @@ function stripMergeCloseoutMarker(body) {
   return String(body || '')
     .replace(/<!--\s*hq:closeout:pr\s*-->\s*/gi, '')
     .trim();
-}
-
-function parseJsonLines(stdout) {
-  return String(stdout || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
 }
 
 function normalizeIssueComment(raw = {}) {
@@ -63,26 +33,24 @@ function normalizeIssueComment(raw = {}) {
 async function fetchIssueComments({
   repo,
   prNumber,
-  execFileImpl = execFileAsync,
+  execFileImpl,
   env = process.env,
-  timeoutMs = GH_CLOSEOUT_LOOKUP_TIMEOUT_MS,
+  timeoutMs = GH_LOOKUP_TIMEOUT_MS,
+  retries,
 } = {}) {
-  const { stdout } = await execFileImpl(
-    'gh',
-    [
+  const { stdout } = await execGhWithRetry({
+    execFileImpl,
+    env,
+    timeoutMs,
+    retries,
+    args: [
       'api',
       '--paginate',
       `repos/${repo}/issues/${encodeURIComponent(prNumber)}/comments`,
       '-q',
       '.[] | {id: .id, node_id: .node_id, body: .body, created_at: .created_at, updated_at: .updated_at, html_url: .html_url, user: {login: .user.login}}',
     ],
-    {
-      env: buildAllowlistedGhEnv(env),
-      maxBuffer: 25 * 1024 * 1024,
-      timeout: timeoutMs,
-      killSignal: 'SIGTERM',
-    }
-  );
+  });
   return parseJsonLines(stdout).map(normalizeIssueComment);
 }
 
@@ -112,19 +80,30 @@ function composeMergeCloseoutFromComments({ comments = [] } = {}) {
     const rightMs = right.createdAtDate?.getTime() ?? 0;
     return leftMs - rightMs;
   });
+  // Body: last marked comment wins (most recent operator/agent intent).
+  // Authors: deduplicated across all marked comments so multi-author
+  // closeouts are not silently discarded; column is structurally a JSON
+  // array of distinct authors in first-seen order.
   const selected = marked.at(-1);
+  const closeoutAuthors = [];
+  const seenAuthors = new Set();
+  for (const comment of marked) {
+    const author = comment.authorLogin;
+    if (!author || seenAuthors.has(author)) continue;
+    seenAuthors.add(author);
+    closeoutAuthors.push(author);
+  }
+  const ghArtifactRefs = marked.map((comment) => ({
+    kind: 'comment',
+    id: comment.nodeId || comment.id || null,
+    url: comment.url || null,
+  }));
   return {
     closeoutBodyMd: selected.strippedBody,
-    closeoutAuthors: selected.authorLogin ? [selected.authorLogin] : [],
+    closeoutAuthors,
     closeoutPostedAt: selected.createdAt || selected.updatedAt || null,
-    ghArtifactRefs: [
-      {
-        kind: 'comment',
-        id: selected.nodeId || selected.id || null,
-        url: selected.url || null,
-      },
-    ],
-    artifactCount: 1,
+    ghArtifactRefs,
+    artifactCount: ghArtifactRefs.length,
   };
 }
 

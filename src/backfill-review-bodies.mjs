@@ -1,6 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
 import { normalizeReviewVerdict } from './kernel/verdict.mjs';
 import { REMEDIATION_COMMENT_MARKER_PREFIX } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
@@ -9,8 +6,12 @@ import {
   fetchIssueComments,
   shouldConfirmEmptyCloseout,
 } from './closeout-scraper.mjs';
-
-const execFileAsync = promisify(execFile);
+import {
+  GH_LOOKUP_TIMEOUT_MS,
+  execGhWithRetry,
+  parseDate,
+  parseJsonLines,
+} from './gh-cli.mjs';
 
 const REVIEWER_LOGIN_BY_CLASS = new Map([
   ['claude', 'claude-reviewer-lacey'],
@@ -19,42 +20,10 @@ const REVIEWER_LOGIN_BY_CLASS = new Map([
 ]);
 const BODY_CAPTURE_GRACE_MS = 5 * 60 * 1000;
 const REMEDIATION_MARKER_REQUIRED_FROM = '2026-05-04T00:00:00.000Z';
-const GH_LOOKUP_TIMEOUT_MS = 30_000;
 
 function closeOwnedReviewDb(db) {
   if (db?.name === ':memory:') return;
   db?.close();
-}
-
-function parseDate(value) {
-  if (!value) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function buildAllowlistedGhEnv(env = process.env) {
-  const token = env.GITHUB_TOKEN || env.GH_TOKEN || null;
-  const allowlisted = {
-    PATH: env.PATH ?? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
-    HOME: env.HOME ?? '',
-  };
-  if (token) allowlisted.GH_TOKEN = token;
-  return allowlisted;
-}
-
-function parseJsonLines(stdout) {
-  return String(stdout || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
 }
 
 function reviewerLoginForClass(value) {
@@ -84,26 +53,24 @@ function normalizeReviewArtifact(raw = {}) {
 async function fetchPullReviews({
   repo,
   prNumber,
-  execFileImpl = execFileAsync,
+  execFileImpl,
   env = process.env,
   timeoutMs = GH_LOOKUP_TIMEOUT_MS,
+  retries,
 } = {}) {
-  const { stdout } = await execFileImpl(
-    'gh',
-    [
+  const { stdout } = await execGhWithRetry({
+    execFileImpl,
+    env,
+    timeoutMs,
+    retries,
+    args: [
       'api',
       '--paginate',
       `repos/${repo}/pulls/${encodeURIComponent(prNumber)}/reviews`,
       '-q',
       '.[] | {node_id: .node_id, submitted_at: .submitted_at, state: .state, body: .body, user: {login: .user.login}}',
     ],
-    {
-      env: buildAllowlistedGhEnv(env),
-      maxBuffer: 25 * 1024 * 1024,
-      timeout: timeoutMs,
-      killSignal: 'SIGTERM',
-    }
-  );
+  });
   return parseJsonLines(stdout).map(normalizeReviewArtifact);
 }
 
@@ -116,8 +83,8 @@ function parsePassMode(value) {
 function parseLimit(value) {
   if (value == null) return null;
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(`invalid --limit value: ${value}`);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`invalid --limit value: ${value} (must be a positive integer)`);
   }
   return parsed;
 }
@@ -140,6 +107,8 @@ function formatSummary(summary, { apply = false } = {}) {
   const bodyReasonLines = Object.entries(summary.reviewerPasses.unmatchedByReason)
     .filter(([, count]) => count > 0)
     .map(([reason, count]) => `    ${reason}: ${String(count).padStart(6)}`);
+  const closeouts = summary.closeouts;
+  const advanced = closeouts.bodyCaptured + closeouts.emptyConfirmed;
   return [
     `backfill-review-bodies — ${apply ? 'apply' : 'dry-run'} complete`,
     '=======================================',
@@ -150,9 +119,12 @@ function formatSummary(summary, { apply = false } = {}) {
     ...bodyReasonLines,
     '',
     'pr_merge_closeouts:',
-    `  merged PRs scanned:   ${String(summary.closeouts.scanned).padStart(8)}`,
-    `  closeout rows advanced:${String(summary.closeouts.advanced).padStart(8)}  (${formatPercent(summary.closeouts.advanced, summary.closeouts.scanned)})`,
-    `  unmatched (gh fetch error):${String(summary.closeouts.fetchErrors).padStart(4)}`,
+    `  merged PRs scanned:   ${String(closeouts.scanned).padStart(8)}`,
+    `  closeout rows advanced:${String(advanced).padStart(8)}  (${formatPercent(advanced, closeouts.scanned)})`,
+    `    body captured:       ${String(closeouts.bodyCaptured).padStart(6)}`,
+    `    empty confirmed:     ${String(closeouts.emptyConfirmed).padStart(6)}`,
+    `    empty retryable:     ${String(closeouts.emptyRetryable).padStart(6)}`,
+    `  unmatched (gh fetch error):${String(closeouts.fetchErrors).padStart(4)}`,
   ].join('\n');
 }
 
@@ -304,22 +276,40 @@ function matchReviewerPassArtifact(row, { reviews, comments }) {
   return { matched: null, reason: 'multiple_candidates' };
 }
 
-function upsertCloseoutRow(db, row) {
-  return db.prepare(
-    `INSERT INTO pr_merge_closeouts (
-       repo, pr_number, closeout_body_md, closeout_authors_json, closeout_posted_at, body_captured_at,
-       scrape_last_checked_at, empty_confirmed_at, merged_at, gh_artifact_refs
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(repo, pr_number) DO UPDATE SET
-       closeout_body_md = excluded.closeout_body_md,
-       closeout_authors_json = excluded.closeout_authors_json,
-       closeout_posted_at = excluded.closeout_posted_at,
-       body_captured_at = excluded.body_captured_at,
-       scrape_last_checked_at = excluded.scrape_last_checked_at,
-       empty_confirmed_at = excluded.empty_confirmed_at,
-       merged_at = excluded.merged_at,
-       gh_artifact_refs = excluded.gh_artifact_refs`
-  ).run(
+function buildCloseoutUpsertStatements(db) {
+  return {
+    upsertCloseout: db.prepare(
+      `INSERT INTO pr_merge_closeouts (
+         repo, pr_number, closeout_body_md, closeout_authors_json, closeout_posted_at, body_captured_at,
+         scrape_last_checked_at, empty_confirmed_at, merged_at, gh_artifact_refs
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(repo, pr_number) DO UPDATE SET
+         closeout_body_md = excluded.closeout_body_md,
+         closeout_authors_json = excluded.closeout_authors_json,
+         closeout_posted_at = excluded.closeout_posted_at,
+         body_captured_at = excluded.body_captured_at,
+         scrape_last_checked_at = excluded.scrape_last_checked_at,
+         empty_confirmed_at = excluded.empty_confirmed_at,
+         merged_at = excluded.merged_at,
+         gh_artifact_refs = excluded.gh_artifact_refs`
+    ),
+    upsertEmptyCloseout: db.prepare(
+      `INSERT INTO pr_merge_closeouts (
+         repo, pr_number, scrape_last_checked_at, empty_confirmed_at, merged_at
+       ) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(repo, pr_number) DO UPDATE SET
+         scrape_last_checked_at = excluded.scrape_last_checked_at,
+         empty_confirmed_at = CASE
+           WHEN pr_merge_closeouts.closeout_body_md IS NULL THEN COALESCE(excluded.empty_confirmed_at, pr_merge_closeouts.empty_confirmed_at)
+           ELSE pr_merge_closeouts.empty_confirmed_at
+         END,
+         merged_at = COALESCE(excluded.merged_at, pr_merge_closeouts.merged_at)`
+    ),
+  };
+}
+
+function runUpsertCloseout(statement, row) {
+  return statement.run(
     row.repo,
     row.prNumber,
     row.closeoutBodyMd,
@@ -333,19 +323,8 @@ function upsertCloseoutRow(db, row) {
   );
 }
 
-function upsertEmptyCloseoutRow(db, row) {
-  return db.prepare(
-    `INSERT INTO pr_merge_closeouts (
-       repo, pr_number, scrape_last_checked_at, empty_confirmed_at, merged_at
-     ) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(repo, pr_number) DO UPDATE SET
-       scrape_last_checked_at = excluded.scrape_last_checked_at,
-       empty_confirmed_at = CASE
-         WHEN pr_merge_closeouts.closeout_body_md IS NULL THEN COALESCE(excluded.empty_confirmed_at, pr_merge_closeouts.empty_confirmed_at)
-         ELSE pr_merge_closeouts.empty_confirmed_at
-       END,
-       merged_at = COALESCE(excluded.merged_at, pr_merge_closeouts.merged_at)`
-  ).run(
+function runUpsertEmptyCloseout(statement, row) {
+  return statement.run(
     row.repo,
     row.prNumber,
     row.scrapeLastCheckedAt,
@@ -354,13 +333,19 @@ function upsertEmptyCloseoutRow(db, row) {
   );
 }
 
+function ghErrorMessage(err) {
+  if (!err) return 'unknown';
+  const code = err.code ? `${err.code}: ` : '';
+  return `${code}${String(err.message || err).slice(0, 500)}`;
+}
+
 async function backfillReviewerPassBodies(rootDir, {
   repo = null,
   since = null,
   limit = null,
   apply = false,
   now = () => new Date().toISOString(),
-  execFileImpl = execFileAsync,
+  execFileImpl,
   env = process.env,
   log = console,
 } = {}) {
@@ -374,6 +359,9 @@ async function backfillReviewerPassBodies(rootDir, {
       multiple_candidates: 0,
       login_mismatch: 0,
       marker_missing: 0,
+      gh_fetch_error: 0,
+      duplicate_artifact_claim: 0,
+      apply_constraint_violation: 0,
     },
   };
   try {
@@ -387,18 +375,43 @@ async function backfillReviewerPassBodies(rootDir, {
         WHERE pass_id = ?`
     );
     for (const group of groups) {
-      const reviews = await fetchPullReviews({
-        repo: group.repo,
-        prNumber: group.prNumber,
-        execFileImpl,
-        env,
-      });
-      const comments = await fetchIssueComments({
-        repo: group.repo,
-        prNumber: group.prNumber,
-        execFileImpl,
-        env,
-      });
+      let reviews;
+      let comments;
+      try {
+        reviews = await fetchPullReviews({
+          repo: group.repo,
+          prNumber: group.prNumber,
+          execFileImpl,
+          env,
+        });
+        comments = await fetchIssueComments({
+          repo: group.repo,
+          prNumber: group.prNumber,
+          execFileImpl,
+          env,
+        });
+      } catch (err) {
+        // Mirror the closeout pass: a transient gh failure on one group
+        // must not abort the entire run. Charge every row in the group as
+        // unmatched/gh_fetch_error so the operator sees the regression and
+        // we can rerun the script to pick up just those rows on retry.
+        for (const row of group.rows) {
+          summary.considered += 1;
+          summary.unmatched += 1;
+          summary.unmatchedByReason.gh_fetch_error += 1;
+          logLine(
+            log,
+            `unmatched pass_id=${row.pass_id} repo=${row.repo} pr=${row.pr_number} attempt=${row.attempt_number} pass_kind=${row.pass_kind} reason=gh_fetch_error error=${JSON.stringify(ghErrorMessage(err))}`
+          );
+        }
+        continue;
+      }
+      // Per-group dedupe: the (login, time-window+grace) match can pick the
+      // same review/comment for two overlapping passes by the same reviewer.
+      // The UNIQUE index on gh_comment_id would crash an --apply mid-flight
+      // and leave a partial write. Fail the loser deterministically with
+      // duplicate_artifact_claim instead.
+      const claimedNodeIds = new Set();
       for (const row of group.rows) {
         summary.considered += 1;
         const match = matchReviewerPassArtifact(row, { reviews, comments });
@@ -412,23 +425,52 @@ async function backfillReviewerPassBodies(rootDir, {
           continue;
         }
 
+        const nodeId = match.matched.nodeId || null;
+        if (nodeId && claimedNodeIds.has(nodeId)) {
+          summary.unmatched += 1;
+          summary.unmatchedByReason.duplicate_artifact_claim += 1;
+          logLine(
+            log,
+            `unmatched pass_id=${row.pass_id} repo=${row.repo} pr=${row.pr_number} attempt=${row.attempt_number} pass_kind=${row.pass_kind} reason=duplicate_artifact_claim gh_comment_id=${nodeId}`
+          );
+          continue;
+        }
+
         const verdict = row.pass_kind === 'remediation'
           ? null
           : normalizeReviewVerdict(ghReviewStateToVerdictInput(match.matched.state));
         const capturedAt = now();
-        summary.populated += 1;
         logLine(
           log,
-          `matched pass_id=${row.pass_id} repo=${row.repo} pr=${row.pr_number} attempt=${row.attempt_number} pass_kind=${row.pass_kind} gh_comment_id=${match.matched.nodeId || 'null'} dry_run=${apply ? 'false' : 'true'}${match.reason ? ` reason=${match.reason}` : ''}`
+          `matched pass_id=${row.pass_id} repo=${row.repo} pr=${row.pr_number} attempt=${row.attempt_number} pass_kind=${row.pass_kind} gh_comment_id=${nodeId || 'null'} dry_run=${apply ? 'false' : 'true'}${match.reason ? ` reason=${match.reason}` : ''}`
         );
-        if (!apply) continue;
-        updateStatement.run(
-          verdict,
-          match.matched.body,
-          match.matched.nodeId || null,
-          capturedAt,
-          row.pass_id
-        );
+        if (!apply) {
+          summary.populated += 1;
+          if (nodeId) claimedNodeIds.add(nodeId);
+          continue;
+        }
+        try {
+          updateStatement.run(
+            verdict,
+            match.matched.body,
+            nodeId,
+            capturedAt,
+            row.pass_id
+          );
+          summary.populated += 1;
+          if (nodeId) claimedNodeIds.add(nodeId);
+        } catch (err) {
+          // Last-ditch safety: per-group dedupe should already block the
+          // SQLITE_CONSTRAINT_UNIQUE path, but another worker (or a row
+          // populated since the SELECT) can still race the index. Record
+          // the per-row diagnostic instead of letting the run die.
+          summary.unmatched += 1;
+          summary.unmatchedByReason.apply_constraint_violation += 1;
+          logLine(
+            log,
+            `unmatched pass_id=${row.pass_id} repo=${row.repo} pr=${row.pr_number} attempt=${row.attempt_number} pass_kind=${row.pass_kind} reason=apply_constraint_violation gh_comment_id=${nodeId || 'null'} error=${JSON.stringify(ghErrorMessage(err))}`
+          );
+        }
       }
     }
     return summary;
@@ -443,18 +485,21 @@ async function backfillMergeCloseouts(rootDir, {
   limit = null,
   apply = false,
   now = () => new Date().toISOString(),
-  execFileImpl = execFileAsync,
+  execFileImpl,
   env = process.env,
   log = console,
 } = {}) {
   const db = openReviewStateDb(rootDir);
   const summary = {
     scanned: 0,
-    advanced: 0,
+    bodyCaptured: 0,
+    emptyConfirmed: 0,
+    emptyRetryable: 0,
     fetchErrors: 0,
   };
   try {
     ensureReviewStateSchema(db);
+    const { upsertCloseout, upsertEmptyCloseout } = buildCloseoutUpsertStatements(db);
     const { sql, params } = buildCloseoutQuery({ repo, since, limit });
     const rows = db.prepare(sql).all(params);
     for (const row of rows) {
@@ -471,7 +516,7 @@ async function backfillMergeCloseouts(rootDir, {
         summary.fetchErrors += 1;
         logLine(
           log,
-          `closeout repo=${row.repo} pr=${row.pr_number} outcome=gh_fetch_error error=${JSON.stringify(err?.message || String(err))}`
+          `closeout repo=${row.repo} pr=${row.pr_number} outcome=gh_fetch_error error=${JSON.stringify(ghErrorMessage(err))}`
         );
         continue;
       }
@@ -479,13 +524,13 @@ async function backfillMergeCloseouts(rootDir, {
       const observedAt = now();
       const closeout = composeMergeCloseoutFromComments({ comments });
       if (closeout.closeoutBodyMd) {
-        summary.advanced += 1;
+        summary.bodyCaptured += 1;
         logLine(
           log,
           `closeout repo=${row.repo} pr=${row.pr_number} outcome=body_captured dry_run=${apply ? 'false' : 'true'}`
         );
         if (!apply) continue;
-        upsertCloseoutRow(db, {
+        runUpsertCloseout(upsertCloseout, {
           repo: row.repo,
           prNumber: row.pr_number,
           closeoutBodyMd: closeout.closeoutBodyMd,
@@ -500,17 +545,18 @@ async function backfillMergeCloseouts(rootDir, {
         continue;
       }
 
-      summary.advanced += 1;
       const emptyConfirmedAt = shouldConfirmEmptyCloseout({
         mergedAt: row.merged_at,
         observedAt,
       }) ? observedAt : null;
+      if (emptyConfirmedAt) summary.emptyConfirmed += 1;
+      else summary.emptyRetryable += 1;
       logLine(
         log,
         `closeout repo=${row.repo} pr=${row.pr_number} outcome=${emptyConfirmedAt ? 'empty_confirmed' : 'empty_retryable'} dry_run=${apply ? 'false' : 'true'}`
       );
       if (!apply) continue;
-      upsertEmptyCloseoutRow(db, {
+      runUpsertEmptyCloseout(upsertEmptyCloseout, {
         repo: row.repo,
         prNumber: row.pr_number,
         scrapeLastCheckedAt: observedAt,
@@ -531,7 +577,7 @@ async function backfillReviewBodies(rootDir, {
   pass = 'all',
   apply = false,
   now = () => new Date().toISOString(),
-  execFileImpl = execFileAsync,
+  execFileImpl,
   env = process.env,
   log = console,
 } = {}) {
@@ -548,11 +594,16 @@ async function backfillReviewBodies(rootDir, {
         multiple_candidates: 0,
         login_mismatch: 0,
         marker_missing: 0,
+        gh_fetch_error: 0,
+        duplicate_artifact_claim: 0,
+        apply_constraint_violation: 0,
       },
     },
     closeouts: {
       scanned: 0,
-      advanced: 0,
+      bodyCaptured: 0,
+      emptyConfirmed: 0,
+      emptyRetryable: 0,
       fetchErrors: 0,
     },
   };

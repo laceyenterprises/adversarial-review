@@ -554,3 +554,199 @@ test('--pass independence and coverage summary correctness', async () => {
   assert.match(closeoutsOnly.stdout, /candidates considered:\s+0/);
   assert.match(closeoutsOnly.stdout, /merged PRs scanned:\s+3/);
 });
+
+test('body-pass gh fetch error charges the group as unmatched and keeps the run alive', async () => {
+  const rootDir = makeRootDir();
+  withDb(rootDir, (db) => {
+    seedReviewedPr(db, { prNumber: 701 });
+    seedReviewerPass(db, {
+      prNumber: 701,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      passKind: 'first-pass',
+      startedAt: '2026-05-29T10:00:00.000Z',
+      endedAt: '2026-05-29T10:10:00.000Z',
+      status: 'completed',
+    });
+    seedReviewedPr(db, { prNumber: 702 });
+    seedReviewerPass(db, {
+      prNumber: 702,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      passKind: 'first-pass',
+      startedAt: '2026-05-29T10:30:00.000Z',
+      endedAt: '2026-05-29T10:40:00.000Z',
+      status: 'completed',
+    });
+  });
+  // First group raises a transient gh error; second group must still complete.
+  const execFileImpl = async (_cmd, args) => {
+    const endpoint = args[2];
+    if (endpoint === 'repos/laceyenterprises/adversarial-review/pulls/701/reviews') {
+      const err = new Error('gh request timed out');
+      err.code = 'ETIMEDOUT';
+      throw err;
+    }
+    if (endpoint === 'repos/laceyenterprises/adversarial-review/pulls/702/reviews') {
+      return {
+        stdout: jsonLines([
+          {
+            node_id: 'RV_702',
+            submitted_at: '2026-05-29T10:35:00.000Z',
+            state: 'COMMENTED',
+            body: 'body 702',
+            user: { login: 'codex-reviewer-lacey' },
+          },
+        ]),
+        stderr: '',
+      };
+    }
+    if (endpoint.endsWith('/issues/702/comments')) {
+      return { stdout: '\n', stderr: '' };
+    }
+    throw new Error(`unexpected gh endpoint: ${endpoint}`);
+  };
+
+  const result = await runCli(rootDir, ['--apply', '--pass', 'bodies'], {
+    execFileImpl,
+    now: () => '2026-05-29T12:30:00.000Z',
+  });
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /unmatched .*pr=701 .*reason=gh_fetch_error/);
+  assert.match(result.stdout, /bodies populated:\s+1/);
+  assert.match(result.stdout, /gh_fetch_error:\s+1/);
+
+  withDb(rootDir, (db) => {
+    const populated = db.prepare(
+      'SELECT pr_number FROM reviewer_passes WHERE body_md IS NOT NULL ORDER BY pr_number'
+    ).all();
+    assert.deepEqual(populated.map((row) => row.pr_number), [702]);
+  });
+});
+
+test('overlapping same-reviewer passes do not crash on the gh_comment_id UNIQUE index', async () => {
+  const rootDir = makeRootDir();
+  withDb(rootDir, (db) => {
+    seedReviewedPr(db, { prNumber: 801 });
+    // Two passes by the same reviewer with windows overlapping inside the 5min grace.
+    // First pass: 10:00 - 10:10 (grace -> 10:15)
+    // Second pass: 10:14 - 10:20 (grace -> 10:25)
+    // Single review artifact submitted at 10:14:30 sits in both windows.
+    seedReviewerPass(db, {
+      prNumber: 801,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      passKind: 'first-pass',
+      startedAt: '2026-05-29T10:00:00.000Z',
+      endedAt: '2026-05-29T10:10:00.000Z',
+      status: 'completed',
+    });
+    seedReviewerPass(db, {
+      prNumber: 801,
+      attemptNumber: 2,
+      reviewerClass: 'codex',
+      passKind: 'rereview',
+      startedAt: '2026-05-29T10:14:00.000Z',
+      endedAt: '2026-05-29T10:20:00.000Z',
+      status: 'completed',
+    });
+  });
+  const execFileImpl = makeExecFileStub({
+    'repos/laceyenterprises/adversarial-review/pulls/801/reviews': jsonLines([
+      {
+        node_id: 'RV_801_shared',
+        submitted_at: '2026-05-29T10:14:30.000Z',
+        state: 'COMMENTED',
+        body: 'shared artifact',
+        user: { login: 'codex-reviewer-lacey' },
+      },
+    ]),
+    'repos/laceyenterprises/adversarial-review/issues/801/comments': '\n',
+  });
+
+  const result = await runCli(rootDir, ['--apply', '--pass', 'bodies'], {
+    execFileImpl,
+    now: () => '2026-05-29T12:30:00.000Z',
+  });
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /reason=duplicate_artifact_claim/);
+  assert.match(result.stdout, /duplicate_artifact_claim:\s+1/);
+
+  withDb(rootDir, (db) => {
+    const populated = db.prepare(
+      'SELECT COUNT(*) AS count FROM reviewer_passes WHERE pr_number = 801 AND gh_comment_id IS NOT NULL'
+    ).get();
+    assert.equal(populated.count, 1);
+  });
+});
+
+test('--limit rejects 0 with a clear error', async () => {
+  const rootDir = makeRootDir();
+  const execFileImpl = makeExecFileStub({});
+  const result = await runCli(rootDir, ['--dry-run', '--pass', 'bodies', '--limit', '0'], {
+    execFileImpl,
+    now: () => '2026-05-29T12:30:00.000Z',
+  });
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /invalid --limit value: 0/);
+});
+
+test('closeout multi-author collection writes a deduped array, last marked body wins', async () => {
+  const rootDir = makeRootDir();
+  withDb(rootDir, (db) => {
+    seedReviewedPr(db, { prNumber: 901, mergedAt: '2026-05-29T12:00:00.000Z' });
+  });
+  const execFileImpl = makeExecFileStub({
+    'repos/laceyenterprises/adversarial-review/issues/901/comments': jsonLines([
+      { node_id: 'CO_a', created_at: '2026-05-29T12:01:00.000Z', body: '<!-- hq:closeout:pr -->\nfirst', user: { login: 'alice' } },
+      { node_id: 'CO_b', created_at: '2026-05-29T12:02:00.000Z', body: '<!-- hq:closeout:pr -->\nsecond', user: { login: 'bob' } },
+      { node_id: 'CO_c', created_at: '2026-05-29T12:03:00.000Z', body: '<!-- hq:closeout:pr -->\nfinal', user: { login: 'alice' } },
+    ]),
+  });
+
+  await runCli(rootDir, ['--apply', '--pass', 'closeouts'], {
+    execFileImpl,
+    now: () => '2026-05-29T12:30:00.000Z',
+  });
+
+  withDb(rootDir, (db) => {
+    const row = db.prepare(
+      'SELECT closeout_body_md, closeout_authors_json, gh_artifact_refs FROM pr_merge_closeouts WHERE pr_number = 901'
+    ).get();
+    assert.equal(row.closeout_body_md, 'final');
+    assert.deepEqual(JSON.parse(row.closeout_authors_json), ['alice', 'bob']);
+    const refs = JSON.parse(row.gh_artifact_refs);
+    assert.equal(refs.length, 3);
+    assert.deepEqual(refs.map((ref) => ref.id), ['CO_a', 'CO_b', 'CO_c']);
+  });
+});
+
+test('closeout summary splits body captured, empty confirmed, and empty retryable', async () => {
+  const rootDir = makeRootDir();
+  withDb(rootDir, (db) => {
+    seedReviewedPr(db, { prNumber: 1001, mergedAt: '2026-05-29T12:00:00.000Z' });
+    seedReviewedPr(db, { prNumber: 1002, mergedAt: '2026-05-29T11:00:00.000Z' });
+    seedReviewedPr(db, { prNumber: 1003, mergedAt: '2026-05-29T12:25:00.000Z' });
+  });
+  const execFileImpl = makeExecFileStub({
+    'repos/laceyenterprises/adversarial-review/issues/1001/comments': jsonLines([
+      { node_id: 'CO_1001', created_at: '2026-05-29T12:05:00.000Z', body: '<!-- hq:closeout:pr -->\nbody', user: { login: 'alice' } },
+    ]),
+    'repos/laceyenterprises/adversarial-review/issues/1002/comments': '\n',
+    'repos/laceyenterprises/adversarial-review/issues/1003/comments': '\n',
+  });
+
+  const result = await runCli(rootDir, ['--dry-run', '--pass', 'closeouts'], {
+    execFileImpl,
+    now: () => '2026-05-29T12:30:00.000Z',
+  });
+
+  assert.match(result.stdout, /body captured:\s+1/);
+  assert.match(result.stdout, /empty confirmed:\s+1/);
+  assert.match(result.stdout, /empty retryable:\s+1/);
+  // advanced reports bodyCaptured + emptyConfirmed only — the retryable
+  // closeout no longer inflates the "advanced" counter.
+  assert.match(result.stdout, /closeout rows advanced:\s+2\s+\(66\.7%\)/);
+});

@@ -13,7 +13,7 @@
 - `closeout_body_md`, `closeout_authors_json`, `closeout_posted_at`, `body_captured_at`
 - `scrape_last_checked_at`, `empty_confirmed_at`, `merged_at`, `gh_artifact_refs`
 
-`closeout_authors_json` and `gh_artifact_refs` are JSON arrays when present. `empty_confirmed_at` is the terminal no-body outcome and is mutually exclusive with `closeout_body_md`.
+`closeout_authors_json` and `gh_artifact_refs` are JSON arrays when present. `closeout_body_md` carries the most recent marked comment's stripped body (last marked comment wins); `closeout_authors_json` holds the deduplicated set of authors across every marked comment in first-seen order so multi-author closeouts are not silently discarded. `empty_confirmed_at` is the terminal no-body outcome and is mutually exclusive with `closeout_body_md`.
 
 Remediation verdicts stay `NULL` by design. Only `pass_kind IN ('first-pass', 'rereview')` rows carry a normalized reviewer verdict. `pass_kind = 'remediation'` rows capture the public reply body and GitHub artifact id, but `verdict IS NULL`.
 
@@ -89,7 +89,7 @@ FROM (
 );
 ```
 
-Backfill is handled by `scripts/backfill-review-bodies.mjs`. It defaults to `--dry-run`; use `--apply` to write. Re-running is safe: pass-body rows with `body_md IS NOT NULL` are skipped, and empty closeout checks never erase a previously captured closeout body. Operators can redirect the structured stdout logs to a file when running against a copied DB, for example:
+Backfill is handled by `scripts/backfill-review-bodies.mjs`. It defaults to `--dry-run`; use `--apply` to write. Re-running is safe: pass-body rows with `body_md IS NOT NULL` are skipped, and empty closeout checks never erase a previously captured closeout body. Transient `gh` failures (timeouts, 5xx, TLS/DNS hiccups) are retried with bounded backoff inside `src/gh-cli.mjs`; the body pass mirrors the closeout pass and charges any group whose retries exhaust as `unmatched/gh_fetch_error` so a single PR cannot abort the entire run. The closeout summary splits the previously-conflated `advanced` counter into `body captured`, `empty confirmed`, and `empty retryable` lines. Overlapping same-reviewer passes are deduplicated per group: the second pass to claim a given `gh_comment_id` records `reason=duplicate_artifact_claim` so the `UNIQUE` index cannot crash an `--apply` run mid-flight. `--limit` requires a positive integer; `--limit 0` is rejected. Operators can redirect the structured stdout logs to a file when running against a copied DB, for example:
 
 ```sh
 node scripts/backfill-review-bodies.mjs --dry-run --pass all > backfill-review-bodies.log

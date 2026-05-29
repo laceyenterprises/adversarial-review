@@ -1044,55 +1044,63 @@ test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided'
   assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'WORKER_JOB_ID'), false);
 });
 
-// ── worker-class dispatcher (LAC-358 hard-switch) ──────────────────────────
+// ── worker-class dispatcher (same-model remediation; LAC-358 revert) ───────
 
-test('pickRemediationWorkerClass routes builderTag=codex to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes builderTag=codex to codex (same-model)', () => {
+  // Same-model remediation: codex wrote the PR → codex remediates.
   assert.equal(
     pickRemediationWorkerClass({ builderTag: 'codex', reviewerModel: 'claude' }),
     'codex'
   );
 });
 
-test('pickRemediationWorkerClass routes builderTag=claude-code to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes builderTag=claude-code to claude-code (same-model)', () => {
+  // Same-model remediation: claude wrote the PR → claude-code remediates.
   assert.equal(
     pickRemediationWorkerClass({ builderTag: 'claude-code', reviewerModel: 'codex' }),
-    'codex'
+    'claude-code'
   );
 });
 
-test.skip('pickRemediationWorkerClass routes builderTag=clio-agent to codex remediator (not claude-code)', () => {
-  // Preserve the historical bug shape for the eventual LAC-358 revert:
-  // do not reverse-map reviewerModel='codex' back to claude-code for
-  // [clio-agent] jobs. While the global codex override is active, the
-  // assertion stays skipped rather than deleted.
-  const job = { builderTag: 'clio-agent', reviewerModel: 'codex' };
-  assert.equal(pickRemediationWorkerClass(job), 'codex');
-});
-
-test('pickRemediationWorkerClass routes builderTag=clio-agent to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes builderTag=clio-agent to codex (Clio writer is codex)', () => {
+  // Same-model remediation: Clio dispatches codex workers; the writer of
+  // a [clio-agent] PR is codex, so the remediator is codex too. This is
+  // the test that was previously test.skip()'d while the LAC-358
+  // codex-only override was active.
   assert.equal(
-    pickRemediationWorkerClass({ builderTag: 'clio-agent', reviewerModel: 'codex' }),
+    pickRemediationWorkerClass({ builderTag: 'clio-agent', reviewerModel: 'claude' }),
     'codex'
   );
 });
 
-test('pickRemediationWorkerClass routes legacy reviewerModel=claude to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes legacy reviewerModel=claude to codex (no usable builderTag → fallback)', () => {
+  // No builderTag set → fall back to DEFAULT_REMEDIATION_WORKER_CLASS=codex.
   assert.equal(pickRemediationWorkerClass({ reviewerModel: 'claude' }), 'codex');
 });
 
-test('pickRemediationWorkerClass routes legacy reviewerModel=codex to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes legacy reviewerModel=codex to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass({ reviewerModel: 'codex' }), 'codex');
 });
 
-test('pickRemediationWorkerClass routes legacy reviewerModel=unknown to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes legacy reviewerModel=unknown to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass({ reviewerModel: 'unknown' }), 'codex');
 });
 
-test('pickRemediationWorkerClass routes empty jobs to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes builderTag=unknown to codex (unknown tag → fallback)', () => {
+  // Tags outside REMEDIATION_WORKER_BY_BUILDER_TAG fall back to codex
+  // rather than throwing — defensive against future tag additions
+  // before the routing table is updated.
+  assert.equal(
+    pickRemediationWorkerClass({ builderTag: 'experimental-other', reviewerModel: 'codex' }),
+    'codex'
+  );
+});
+
+test('pickRemediationWorkerClass routes empty jobs to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass({}), 'codex');
 });
 
-test('pickRemediationWorkerClass routes null jobs to codex during LAC-358 override', () => {
+test('pickRemediationWorkerClass routes null jobs to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass(null), 'codex');
 });
 
@@ -3273,9 +3281,11 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
   // exits with code 2. The runbook contract is that launch-preparation
   // failures become terminal queue state (failed/), not orphaned claims.
   //
-  // LAC-358 hard-switches consume-time remediation through the codex
-  // worker class, so this regression test must exercise codex OAuth,
-  // not the dormant claude-code launch path.
+  // This regression test exercises the codex OAuth pre-flight path. With
+  // same-model remediation (LAC-358 revert, 2026-05-29), a [codex] PR
+  // routes to the codex remediator; the fixture uses builderTag='codex'
+  // and CODEX_* env to drive that path. The dormant claude-code launch
+  // path is covered by separate tests.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const prevAuthPath = process.env.CODEX_AUTH_PATH;
   const prevCodexHome = process.env.CODEX_HOME;
@@ -3290,8 +3300,8 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
-      reviewerModel: 'codex',
-      builderTag: 'claude-code',
+      reviewerModel: 'claude',
+      builderTag: 'codex',
       linearTicketId: 'LAC-207',
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
       reviewPostedAt: '2026-04-21T08:00:00.000Z',
@@ -3373,8 +3383,8 @@ test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral wh
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
-      reviewerModel: 'codex',
-      builderTag: 'claude-code',
+      reviewerModel: 'claude',
+      builderTag: 'codex',
       linearTicketId: 'LAC-207',
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
       reviewPostedAt: '2026-04-21T08:00:00.000Z',

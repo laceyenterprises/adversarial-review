@@ -131,11 +131,34 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
   },
 };
 
-// The remediation-worker class the consume path spawns by default. The
-// operator env override below can pin the worker class without changing
-// durable job records or PR-title routing.
+// The remediation-worker class the consume path spawns by default when
+// nothing else applies. With cross-model symmetry restored (see
+// `pickRemediationWorkerClass` below), this constant is the fallback for
+// jobs missing a usable `builderTag`. The operator env override below can
+// still pin the worker class globally without changing durable job records
+// or PR-title routing.
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 const DEFAULT_REMEDIATOR_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
+
+// Same-model remediator routing. The model that wrote the code knows its
+// own conventions, structure, and the intent behind decisions best, so the
+// remediation worker class is the same as the PR's writer:
+//
+//   [codex]       → codex remediates (writer is codex)
+//   [claude-code] → claude-code remediates (writer is claude)
+//   [clio-agent]  → codex remediates (Clio dispatches codex workers)
+//
+// This pairs with cross-model REVIEW: reviewer catches blind spots the
+// writer can't see; remediator (same model) knows the codebase context to
+// implement the fix coherently.
+//
+// Operators override via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost
+// or availability requires pinning to a specific worker class.
+const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
+  codex: 'codex',
+  'claude-code': 'claude-code',
+  'clio-agent': 'codex',
+});
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
@@ -749,12 +772,32 @@ function validateStartupRemediationConfig(env = process.env) {
   resolveRemediationMaxConcurrentJobs(env);
 }
 
-// LAC-358 default: route follow-up remediation through the codex worker
-// class, regardless of the original PR builderTag. Operators can override
-// this default with ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR when cost or
-// availability requires pinning remediation to a specific worker class.
-function pickRemediationWorkerClass(_job, { env = process.env } = {}) {
-  return defaultRemediatorWorkerClassFromEnv(env) || DEFAULT_REMEDIATION_WORKER_CLASS;
+// Per-PR remediator routing: pair the writer model with itself so the
+// remediator inherits the writer's codebase context and conventions. See
+// `REMEDIATION_WORKER_BY_BUILDER_TAG` above for the mapping. The reviewer
+// stays cross-model (see `adapters/subject/github-pr/routing.mjs`).
+//
+// Operators can override the per-PR derivation via
+// `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost or availability requires
+// pinning remediation to a specific worker class — e.g. during a codex
+// weekly-budget squeeze, set `=claude-code` to force all remediation through
+// claude regardless of the original PR's builderTag.
+//
+// Historical note: LAC-358 previously hard-routed all remediation to codex
+// regardless of builderTag. The per-PR same-model derivation was restored
+// on 2026-05-29 after codex weekly-budget pressure made the codex-only
+// default operator-unworkable; the env override provides the same operator
+// escape hatch in the other direction.
+function pickRemediationWorkerClass(job, { env = process.env } = {}) {
+  const envOverride = defaultRemediatorWorkerClassFromEnv(env);
+  if (envOverride) return envOverride;
+  const builderTag = String(job?.builderTag || '').trim().toLowerCase();
+  if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
+    return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
+  }
+  // No usable builderTag — fall back to codex per historical default; operator
+  // can still override via the env var above.
+  return DEFAULT_REMEDIATION_WORKER_CLASS;
 }
 
 function requeueClaimedFollowUpJobAfterConfigFailure({

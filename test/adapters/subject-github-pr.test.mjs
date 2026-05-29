@@ -127,7 +127,11 @@ test('github-pr routing rejects unknown default reviewer env values', () => {
 test('github-pr routing exposes same-family review waiver detection for override pins', () => {
   assert.equal(isCrossModelReviewWaived('codex', 'codex'), true);
   assert.equal(isCrossModelReviewWaived('claude-code', 'claude'), true);
-  assert.equal(isCrossModelReviewWaived('clio-agent', 'claude'), true);
+  // Clio dispatches codex workers, so its writer-family is codex. A codex
+  // reviewer on a [clio-agent] PR is same-model (waived); a claude
+  // reviewer is genuine cross-model (not waived).
+  assert.equal(isCrossModelReviewWaived('clio-agent', 'codex'), true);
+  assert.equal(isCrossModelReviewWaived('clio-agent', 'claude'), false);
   assert.equal(isCrossModelReviewWaived('codex', 'claude'), false);
 
   const reason = describeCrossModelReviewWaiver(

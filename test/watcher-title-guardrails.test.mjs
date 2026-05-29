@@ -22,10 +22,14 @@ test('routePR maps known title prefixes to opposite-model reviewers', () => {
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   });
 
+  // Clio dispatches codex workers; cross-model review means a [clio-agent]
+  // PR is reviewed by claude (the opposite model from the writer). Was
+  // previously codex-reviewer, which was same-model and broke the
+  // cross-model guarantee for Clio.
   assert.deepEqual(routePR('[clio-agent] LAC-181: tighten watcher'), {
     tag: 'clio-agent',
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   });
 });
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -10,6 +10,18 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const execFileAsync = promisify(execFile);
+
+// The watcher LaunchAgent wrappers are zsh scripts (production is macOS,
+// where zsh is the operator's login shell). On CI runners that lack zsh
+// (Ubuntu defaults to bash), the launcher-execution tests cannot run and
+// would fail with ENOENT. Detect zsh once at module load and skip those
+// tests when it's missing — the script-parsing tests above the skip
+// barrier still run on every platform.
+const ZSH_PATH = '/bin/zsh';
+const ZSH_AVAILABLE = existsSync(ZSH_PATH);
+const SKIP_REASON_NO_ZSH =
+  `zsh not available at ${ZSH_PATH}; LaunchAgent wrappers are zsh-only ` +
+  `(production is macOS). Test skipped on this platform.`;
 
 function readScript(name) {
   return readFileSync(join(REPO_ROOT, 'scripts', name), 'utf8');
@@ -141,7 +153,9 @@ test('watcher launchers require explicit opt-in before running without ALERT_TO'
   }
 });
 
-test('maintainer watcher launchers resolve ALERT_TO through configured op ref', async () => {
+test('maintainer watcher launchers resolve ALERT_TO through configured op ref', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
   for (const scriptName of [
     'adversarial-watcher-start.sh',
     'adversarial-watcher-start-placey.sh',
@@ -153,7 +167,9 @@ test('maintainer watcher launchers resolve ALERT_TO through configured op ref', 
   }
 });
 
-test('maintainer watcher launchers retry transient ALERT_TO op failures', async () => {
+test('maintainer watcher launchers retry transient ALERT_TO op failures', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
   for (const scriptName of [
     'adversarial-watcher-start.sh',
     'adversarial-watcher-start-placey.sh',

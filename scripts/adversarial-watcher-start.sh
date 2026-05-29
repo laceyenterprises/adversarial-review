@@ -70,15 +70,6 @@ fi
 # Force Codex CLI to use the shared OAuth auth file rather than airlock's default ~/.codex/auth.json
 export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json
 
-# Resolve only the 1Password-backed secrets needed by watcher.mjs + reviewer.mjs.
-# `--cache=false` was dropped on 2026-05-01: forcing a fresh auth on every
-# call turned a transient watcher crash-loop (Node ABI mismatch) into a
-# 1Password popup storm. The service-account token in the env makes these
-# calls non-interactive; the cache only memoizes the resolution and does
-# not change auth strength.
-export LINEAR_API_KEY=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
-export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
-export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
 ALERT_TO_OP_REF='op://Cliovault/adversarial-watcher-alert-to/credential'
 ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
 
@@ -90,7 +81,11 @@ resolve_op_bin() {
       printf '%s' "$op_bin"
       return 0
     fi
-    return 1
+    echo "[adversarial-watcher] WARN: configured 1Password CLI '$op_bin' is not executable; falling back to PATH/Homebrew discovery." >&2
+  fi
+  if op_bin="$(command -v op 2>/dev/null)" && [[ -n "$op_bin" && -x "$op_bin" ]]; then
+    printf '%s' "$op_bin"
+    return 0
   fi
   for op_bin in /opt/homebrew/bin/op /usr/local/bin/op; do
     if [[ -x "$op_bin" ]]; then
@@ -101,19 +96,31 @@ resolve_op_bin() {
   return 1
 }
 
+if ! OP_BIN="$(resolve_op_bin)"; then
+  echo "[adversarial-watcher] ERROR: 1Password CLI 'op' not found on PATH and not present at /opt/homebrew/bin/op or /usr/local/bin/op." >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; install op or set ADVERSARIAL_REVIEW_OP_CLI/OP_CLI_PATH to an executable." >&2
+  sleep 3600
+  exit 1
+fi
+
+# Resolve only the 1Password-backed secrets needed by watcher.mjs + reviewer.mjs.
+# `--cache=false` was dropped on 2026-05-01: forcing a fresh auth on every
+# call turned a transient watcher crash-loop (Node ABI mismatch) into a
+# 1Password popup storm. The service-account token in the env makes these
+# calls non-interactive; the cache only memoizes the resolution and does
+# not change auth strength.
+export LINEAR_API_KEY=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
+export GH_CLAUDE_REVIEWER_TOKEN=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
+export GH_CODEX_REVIEWER_TOKEN=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+
 resolve_alert_to_optional() {
   local attempt=1
   local max_attempts=3
   local stderr_path
   local alert_to_value
-  local op_bin
   stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-alert-to.${UID}.$$.$RANDOM.err"
-  if ! op_bin="$(resolve_op_bin)"; then
-    echo "[adversarial-watcher] ERROR: 1Password CLI 'op' not found on PATH and not present at /opt/homebrew/bin/op or /usr/local/bin/op." >&2
-    return 4
-  fi
   while (( attempt <= max_attempts )); do
-    if alert_to_value=$("$op_bin" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
+    if alert_to_value=$("$OP_BIN" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
       if [[ -z "${alert_to_value//[[:space:]]/}" ]]; then
         echo "[adversarial-watcher] ERROR: ALERT_TO at $ALERT_TO_OP_REF resolved to an empty value." >&2
         rm -f "$stderr_path"

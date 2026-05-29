@@ -328,6 +328,18 @@ test('rendered watcher wrapper resolves ALERT_TO through explicit op override', 
   assert.doesNotMatch(result.stderr, /1Password CLI 'op' not found/);
 });
 
+test('rendered watcher wrapper falls back to PATH when op override is stale', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opCliPath: '/missing/op',
+    opMode: 'ok',
+    opValue: 'path-alert@example.com',
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stderr, /WARN: configured 1Password CLI '\/missing\/op' is not executable/);
+  assert.doesNotMatch(result.stderr, /1Password CLI 'op' not found/);
+});
+
 test('rendered watcher wrapper resolves OP token through canonical resolver before ALERT_TO', async () => {
   const result = await runRenderedWatcherWrapper({
     tokenResolverMode: 'ok',

@@ -43,6 +43,9 @@ test('watcher launchers require explicit opt-in before running without ALERT_TO'
     assert.match(script, /unset ALERT_TO/);
     assert.match(script, /status -eq 4/);
     assert.match(script, /ADVERSARIAL_REVIEW_OP_CLI/);
-    assert.doesNotMatch(script, /command -v op/);
+    assert.match(script, /command -v op/);
+    assert.match(script, /OP_BIN="\$\(resolve_op_bin\)"/);
+    assert.match(script, /"\$OP_BIN" read/);
+    assert.doesNotMatch(script, /\/opt\/homebrew\/bin\/op read/);
   }
 });

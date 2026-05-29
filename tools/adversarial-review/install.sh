@@ -87,7 +87,11 @@ resolve_op_bin() {
       printf '%s' "$op_bin"
       return 0
     fi
-    return 1
+    mark_warn "configured 1Password CLI '$op_bin' is not executable; falling back to PATH/Homebrew discovery" >&2
+  fi
+  if op_bin="$(command -v op 2>/dev/null)" && [[ -n "$op_bin" && -x "$op_bin" ]]; then
+    printf '%s' "$op_bin"
+    return 0
   fi
   for op_bin in /opt/homebrew/bin/op /usr/local/bin/op; do
     if [[ -x "$op_bin" ]]; then

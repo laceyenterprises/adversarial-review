@@ -31,6 +31,7 @@ import {
 } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { redactSensitiveText } from './adapters/comms/github-pr-comments/redaction.mjs';
+import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
 import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
@@ -58,6 +59,11 @@ function normalizeBaseBranch(baseBranch) {
   if (typeof baseBranch !== 'string') return null;
   const trimmed = baseBranch.trim();
   return trimmed || null;
+}
+
+function remediationAttemptNumber(job) {
+  const parsed = Number(job?.remediationPlan?.currentRound || job?.currentRound || 1);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 1;
 }
 
 async function fetchPRBaseBranch({
@@ -2190,7 +2196,13 @@ async function postReconcileOutcomeCommentSafe({
         revisionRef: job?.revisionRef || null,
         round: job?.remediationPlan?.currentRound || null,
         kind: 'remediation-reply',
-        postCommentImpl: (args) => postCommentImpl(args),
+        postCommentImpl: (args) => postRemediationCommentWithCapture({
+          rootDir,
+          ...args,
+          attemptNumber: remediationAttemptNumber(job),
+          postCommentImpl,
+          log,
+        }),
         postCommentArgs: {
           repo: job?.repo,
           prNumber: job?.prNumber,
@@ -2206,17 +2218,53 @@ async function postReconcileOutcomeCommentSafe({
       // means we can't stamp delivery state durably. Still attempt
       // the post for operator visibility, but log the gap.
       log.error?.('[follow-up-remediation] posting comment without a jobPath — no durable delivery record');
-      await postCommentImpl({
+      await postRemediationCommentWithCapture({
+        rootDir,
         repo: job?.repo,
         prNumber: job?.prNumber,
+        attemptNumber: remediationAttemptNumber(job),
         workerClass,
         body,
+        postCommentImpl,
         log,
       });
     }
   } catch (err) {
     log.error?.(`[follow-up-remediation] PR comment post threw (non-fatal): ${err.message}`);
   }
+}
+
+async function postRemediationCommentWithCapture({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  attemptNumber,
+  workerClass,
+  body,
+  postCommentImpl = postRemediationOutcomeComment,
+  captureImpl = captureRemediationBodyAfterPost,
+  postedAt = new Date().toISOString(),
+  log = console,
+} = {}) {
+  const result = await postCommentImpl({
+    repo,
+    prNumber,
+    workerClass,
+    body,
+    log,
+  });
+  if (result?.posted) {
+    await captureImpl(rootDir, {
+      repo,
+      prNumber,
+      attemptNumber: Number(attemptNumber),
+      workerClass,
+      body,
+      postedAt,
+      log,
+    });
+  }
+  return result;
 }
 
 // Resolve the live PR lifecycle for a job, swallowing any errors so the
@@ -3830,6 +3878,7 @@ export {
   resolveClaudeCodeCliPath,
   REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
   WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
+  postRemediationCommentWithCapture,
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

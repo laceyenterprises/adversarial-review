@@ -79,6 +79,21 @@ export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json
 export LINEAR_API_KEY=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
 export GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
 export GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+# ALERT_TO is the operator Telegram chat ID used by alert-delivery.mjs
+# (src/alert-delivery.mjs → resolveAlertDefaults). When unset, every
+# call into deliverWatcherHealthAlert / proactive-stuck-scan alert
+# delivery raises "ALERT_TO must be configured for alert delivery"
+# and is swallowed by the watcher's try/catch — alerts silently fail.
+# The 2026-05-29 incident: six codex builder workers died OOM in a
+# 21-min window and the operator was not paged because ALERT_TO was
+# not set. Resolving it here makes alert delivery work for every
+# subsequent stuck-scan tick.
+#
+# 1Password contract: vault `Cliovault`, item `adversarial-watcher-alert-to`,
+# field `credential`. Operator creates this once; value is the numeric
+# Telegram chat ID. To bootstrap on a fresh machine:
+#   op item create --vault=Cliovault --title='adversarial-watcher-alert-to' credential=<chat-id>
+export ALERT_TO=$(/opt/homebrew/bin/op read 'op://Cliovault/adversarial-watcher-alert-to/credential' 2>/dev/null || true)
 
 # Secret-resolution failures (most commonly: 1Password CLI rate-limit "Too
 # many requests") MUST sleep before exit. Without the sleep, launchd
@@ -106,6 +121,17 @@ if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
   sleep 3600
   exit 1
+fi
+# ALERT_TO resolution is best-effort. When the 1Password item does not
+# exist (`op read` returned empty above), we emit a one-line warning so
+# the operator can SEE in the launchd log that alerts are disabled and
+# then continue — failing the watcher on missing ALERT_TO would break
+# every fresh-machine bring-up before the operator has created the
+# 1Password item. The trade-off is intentional: the warning is the
+# operator's prompt to provision the item; alerts being noisy-broken
+# is preferable to the watcher being silently dead.
+if [[ -z "${ALERT_TO:-}" ]]; then
+  echo "[adversarial-watcher] WARN: ALERT_TO is unset — proactive-stuck-scan and watcher-health alerts will silently fail. Provision op://Cliovault/adversarial-watcher-alert-to/credential to enable." >&2
 fi
 
 # Scrub direct-provider API/provider fallbacks — reviewers must use OAuth only.

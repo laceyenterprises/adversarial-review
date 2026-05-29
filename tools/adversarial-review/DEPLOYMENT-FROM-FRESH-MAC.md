@@ -96,7 +96,8 @@ After rendering, the installer runs a postflight validator that checks:
   readable (warning if missing; the wrapper still falls back to
   `gh auth token` for `GITHUB_TOKEN`).
 - Watcher alert routing is configured either directly via `ALERT_TO` or
-  indirectly via `OP_SERVICE_ACCOUNT_TOKEN` + `op://Cliovault/adversarial-watcher-alert-to/credential`.
+  indirectly via `OP_SERVICE_ACCOUNT_TOKEN` +
+  `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF=op://<vault>/<item>/credential`.
 - The required reviewer bot PATs (`GH_CLAUDE_REVIEWER_TOKEN`,
   `GH_CODEX_REVIEWER_TOKEN`) are present in the install environment.
 - The optional `$REVIEWER_AUTH_ROOT` is readable when set; when it is
@@ -188,7 +189,8 @@ Watcher-health and proactive stuck-scan alerts are part of the supported
 deployment contract. Configure one of:
 
 - `ALERT_TO=<telegram-chat-id>` directly in `$SECRETS_ROOT/adversarial-review.env`
-- `OP_SERVICE_ACCOUNT_TOKEN=...` plus the 1Password item `op://Cliovault/adversarial-watcher-alert-to/credential`
+- `OP_SERVICE_ACCOUNT_TOKEN=...` plus
+  `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF=op://<vault>/<item>/credential`
 
 If you need a degraded first boot before alert routing exists, set
 `ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1` explicitly. The installer

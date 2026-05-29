@@ -88,10 +88,11 @@ uses PATH and per-user defaults.
   - Startup contract: the launch wrapper now refuses to start when `ALERT_TO`
     is absent unless `ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1` is set.
     Operators can satisfy the requirement by setting `ALERT_TO` directly or by
-    providing `OP_SERVICE_ACCOUNT_TOKEN` so the wrapper can read
-    `op://Cliovault/adversarial-watcher-alert-to/credential` via the 1Password
-    CLI. Blank 1Password values are treated as misprovisioned and fail startup
-    the same way a missing item does.
+    providing `OP_SERVICE_ACCOUNT_TOKEN` plus
+    `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` (or `ALERT_TO_OP_REF`) so the wrapper
+    can read a configured 1Password reference such as
+    `op://<vault>/<item>/credential`. Blank 1Password values are treated as
+    misprovisioned and fail startup the same way a missing item does.
   - Degraded override: `ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1` keeps the
     watcher bootable without alert routing, but watcher-health and
     proactive-stuck-scan alerts will not page until `ALERT_TO` is provisioned.

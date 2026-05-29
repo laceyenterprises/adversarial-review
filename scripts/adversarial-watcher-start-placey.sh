@@ -54,7 +54,8 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   exit 1
 fi
 
-ALERT_TO_OP_REF='op://Cliovault/adversarial-watcher-alert-to/credential'
+ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
+ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
 ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
 
 resolve_op_bin() {
@@ -102,6 +103,10 @@ resolve_alert_to_optional() {
   local max_attempts=3
   local stderr_path
   local alert_to_value
+  if [[ -z "${ALERT_TO_OP_REF:-}" ]]; then
+    echo "[adversarial-watcher] ERROR: ALERT_TO 1Password ref is not configured; set ADVERSARIAL_REVIEW_ALERT_TO_OP_REF or ALERT_TO_OP_REF." >&2
+    return 3
+  fi
   stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-alert-to.${UID}.$$.$RANDOM.err"
   while (( attempt <= max_attempts )); do
     if alert_to_value=$("$OP_BIN" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
@@ -154,10 +159,10 @@ if [[ -z "${ALERT_TO:-}" ]]; then
     status=$?
     if [[ $status -eq 3 ]]; then
       if [[ "$ALLOW_MISSING_ALERT_TO" == "1" ]]; then
-        echo "[adversarial-watcher] WARN: ALERT_TO is unset by explicit operator override (ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1). Watcher-health and proactive-stuck-scan alerts will not page until $ALERT_TO_OP_REF is provisioned." >&2
+        echo "[adversarial-watcher] WARN: ALERT_TO is unset by explicit operator override (ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1). Watcher-health and proactive-stuck-scan alerts will not page until $ALERT_TO_REF_LABEL is provisioned." >&2
       else
-        echo "[adversarial-watcher] ERROR: ALERT_TO is not provisioned at $ALERT_TO_OP_REF and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
-        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; provision ALERT_TO or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
+        echo "[adversarial-watcher] ERROR: ALERT_TO is not provisioned at $ALERT_TO_REF_LABEL and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
+        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; set ALERT_TO directly, configure ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
         sleep 3600
         exit 1
       fi

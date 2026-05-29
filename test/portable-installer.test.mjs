@@ -45,6 +45,7 @@ function writeExecutable(filePath, body) {
 
 async function runRenderedWatcherWrapper({
   alertTo = '',
+  alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
   allowMissing = false,
   opServiceAccountToken = '',
   tokenResolverMode = 'missing',
@@ -137,6 +138,7 @@ async function runRenderedWatcherWrapper({
     PATH: `${fakeBin}:/usr/bin:/bin`,
     TMPDIR: fakeTmp,
     ALERT_TO: alertTo,
+    ADVERSARIAL_REVIEW_ALERT_TO_OP_REF: alertToOpRef,
     OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken,
     ADVERSARIAL_REVIEW_OP_CLI: opCliPath ?? path.join(fakeBin, 'op'),
     ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO: allowMissing ? '1' : '',
@@ -326,6 +328,17 @@ test('rendered watcher wrapper resolves ALERT_TO through explicit op override', 
   });
   assert.equal(result.code, 0);
   assert.doesNotMatch(result.stderr, /1Password CLI 'op' not found/);
+});
+
+test('rendered watcher wrapper requires configured ALERT_TO op ref for 1Password lookup', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertToOpRef: '',
+    opServiceAccountToken: 'token',
+    opMode: 'ok',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /ALERT_TO 1Password ref is not configured/);
+  assert.doesNotMatch(result.stderr, /Cliovault/);
 });
 
 test('rendered watcher wrapper falls back to PATH when op override is stale', async () => {

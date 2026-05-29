@@ -77,7 +77,9 @@ warnings=()
 mark_ok()   { printf '  ✓ %s\n' "$1"; }
 mark_fail() { printf '  ✗ %s\n' "$1"; failures+=("$1"); }
 mark_warn() { printf '  ! %s\n' "$1"; warnings+=("$1"); }
-ALERT_TO_OP_REF='op://Cliovault/adversarial-watcher-alert-to/credential'
+ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
+ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
+ALERT_TO_PROBE_OUTPUT=""
 
 resolve_op_bin() {
   local op_bin
@@ -100,6 +102,38 @@ resolve_op_bin() {
     fi
   done
   return 1
+}
+
+probe_alert_to_ref() {
+  local op_bin="$1"
+  local attempt=1
+  local max_attempts=3
+  local output
+  ALERT_TO_PROBE_OUTPUT=""
+  if [[ -z "${ALERT_TO_OP_REF:-}" ]]; then
+    ALERT_TO_PROBE_OUTPUT="ALERT_TO 1Password ref is not configured; set ADVERSARIAL_REVIEW_ALERT_TO_OP_REF or ALERT_TO_OP_REF"
+    return 3
+  fi
+  while (( attempt <= max_attempts )); do
+    if output="$("$op_bin" read "$ALERT_TO_OP_REF" 2>&1)"; then
+      ALERT_TO_PROBE_OUTPUT="$output"
+      if [[ -n "${output//[[:space:]]/}" ]]; then
+        return 0
+      fi
+      return 3
+    fi
+    ALERT_TO_PROBE_OUTPUT="$output"
+    if printf '%s' "$output" | grep -Eiq "not found|does not exist|isn't an item|unknown object type|no item|no field"; then
+      return 3
+    fi
+    if (( attempt < max_attempts )); then
+      printf '  ! ALERT_TO probe failed transiently (attempt %s/%s); retrying in 5s\n' "$attempt" "$max_attempts"
+      sleep 5
+      attempt=$((attempt + 1))
+      continue
+    fi
+    return 2
+  done
 }
 
 prompt_with_default() {
@@ -353,22 +387,20 @@ if [[ -n "${ALERT_TO:-}" ]]; then
   mark_ok "ALERT_TO configured directly in operator env"
 elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   if op_bin="$(resolve_op_bin)"; then
-    if output="$("$op_bin" read "$ALERT_TO_OP_REF" 2>&1)"; then
-      if [[ -n "${output//[[:space:]]/}" ]]; then
-        mark_ok "ALERT_TO resolves from $ALERT_TO_OP_REF"
-      elif [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
-        mark_warn "ALERT_TO at $ALERT_TO_OP_REF resolves to a blank value, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
-      else
-        mark_fail "ALERT_TO at $ALERT_TO_OP_REF resolves to a blank value; populate the credential or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
-      fi
-    elif printf '%s' "$output" | grep -Eiq "not found|does not exist|isn't an item|unknown object type|no item|no field"; then
-      if [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
-        mark_warn "ALERT_TO missing at $ALERT_TO_OP_REF, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
-      else
-        mark_fail "ALERT_TO missing at $ALERT_TO_OP_REF; provision it or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
-      fi
+    if probe_alert_to_ref "$op_bin"; then
+      mark_ok "ALERT_TO resolves from $ALERT_TO_REF_LABEL"
     else
-      mark_fail "ALERT_TO probe failed against $ALERT_TO_OP_REF: ${output//$'\n'/ }"
+      alert_probe_status=$?
+      output="$ALERT_TO_PROBE_OUTPUT"
+      if [[ "$alert_probe_status" -eq 3 ]]; then
+        if [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
+          mark_warn "ALERT_TO missing or blank at $ALERT_TO_REF_LABEL, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
+        else
+          mark_fail "ALERT_TO missing or blank at $ALERT_TO_REF_LABEL; set ALERT_TO directly, configure ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
+        fi
+      else
+        mark_warn "ALERT_TO probe failed transiently against $ALERT_TO_REF_LABEL after retries; rendered wrapper will retry at runtime: ${output//$'\n'/ }"
+      fi
     fi
   elif [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
     mark_warn "1Password CLI 'op' not found on PATH or at /opt/homebrew/bin/op or /usr/local/bin/op, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
@@ -378,7 +410,7 @@ elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
 elif [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
   mark_warn "ALERT_TO not configured and OP_SERVICE_ACCOUNT_TOKEN unavailable, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
 else
-  mark_fail "ALERT_TO not configured. Set ALERT_TO in $SECRETS_ROOT/adversarial-review.env, provide OP_SERVICE_ACCOUNT_TOKEN so the wrapper can read $ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
+  mark_fail "ALERT_TO not configured. Set ALERT_TO in $SECRETS_ROOT/adversarial-review.env, provide OP_SERVICE_ACCOUNT_TOKEN plus ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
 fi
 
 if output="$(cd "$REPO_ROOT" && node "$POSTFLIGHT_LIB" missing-bot-tokens 2>&1)"; then

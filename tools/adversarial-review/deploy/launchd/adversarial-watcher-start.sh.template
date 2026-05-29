@@ -66,7 +66,8 @@ else
   echo "[adversarial-watcher] WARN: $OPERATOR_ENV_FILE not found; relying on inherited env for tokens" >&2
 fi
 
-ALERT_TO_OP_REF='op://Cliovault/adversarial-watcher-alert-to/credential'
+ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
+ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
 ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
 
 resolve_op_bin() {
@@ -98,6 +99,10 @@ resolve_alert_to_optional() {
   local stderr_path
   local alert_to_value
   local op_bin
+  if [ -z "${ALERT_TO_OP_REF:-}" ]; then
+    echo "[adversarial-watcher] ERROR: ALERT_TO 1Password ref is not configured; set ADVERSARIAL_REVIEW_ALERT_TO_OP_REF or ALERT_TO_OP_REF." >&2
+    return 3
+  fi
   stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-alert-to.${UID}.$$.$RANDOM.err"
   if ! op_bin="$(resolve_op_bin)"; then
     echo "[adversarial-watcher] ERROR: 1Password CLI 'op' not found on PATH and not present at /opt/homebrew/bin/op or /usr/local/bin/op." >&2
@@ -163,10 +168,10 @@ if [ -z "${ALERT_TO:-}" ] && [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
     status=$?
     if [ "$status" -eq 3 ]; then
       if [ "$ALLOW_MISSING_ALERT_TO" = "1" ]; then
-        echo "[adversarial-watcher] WARN: ALERT_TO is unset by explicit operator override (ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1). Watcher-health and proactive-stuck-scan alerts will not page until $ALERT_TO_OP_REF is provisioned." >&2
+        echo "[adversarial-watcher] WARN: ALERT_TO is unset by explicit operator override (ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1). Watcher-health and proactive-stuck-scan alerts will not page until $ALERT_TO_REF_LABEL is provisioned." >&2
       else
-        echo "[adversarial-watcher] ERROR: ALERT_TO is not provisioned at $ALERT_TO_OP_REF and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
-        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; provision ALERT_TO or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
+        echo "[adversarial-watcher] ERROR: ALERT_TO is not provisioned at $ALERT_TO_REF_LABEL and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
+        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; set ALERT_TO directly, configure ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
         sleep 3600
         exit 1
       fi
@@ -191,7 +196,7 @@ if [ -z "${ALERT_TO:-}" ] && [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
     echo "[adversarial-watcher] WARN: ALERT_TO is unset by explicit operator override (ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1). Watcher-health and proactive-stuck-scan alerts will not page." >&2
   else
     echo "[adversarial-watcher] ERROR: ALERT_TO is unset and OP_SERVICE_ACCOUNT_TOKEN is unavailable, so alert routing cannot be resolved." >&2
-    echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; set ALERT_TO directly, provide OP_SERVICE_ACCOUNT_TOKEN, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
+    echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; set ALERT_TO directly, configure ADVERSARIAL_REVIEW_ALERT_TO_OP_REF with OP_SERVICE_ACCOUNT_TOKEN, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
     sleep 3600
     exit 1
   fi

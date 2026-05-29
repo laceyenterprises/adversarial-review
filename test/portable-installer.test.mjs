@@ -47,6 +47,9 @@ async function runRenderedWatcherWrapper({
   alertTo = '',
   allowMissing = false,
   opServiceAccountToken = '',
+  tokenResolverMode = 'missing',
+  tokenResolverValue = 'resolved-token',
+  opCliPath,
   opMode = 'ok',
   opValue = 'alerts@example.com',
 } = {}) {
@@ -83,6 +86,14 @@ async function runRenderedWatcherWrapper({
     '#!/bin/bash\n'
       + 'if [[ "$1" == "-e" ]]; then\n'
       + '  exit 0\n'
+      + 'fi\n'
+      + 'if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then\n'
+      + '  if [[ "${TEST_OP_TOKEN_RESOLVER_MODE:-missing}" == "ok" ]]; then\n'
+      + '    printf "%s" "${TEST_OP_TOKEN_RESOLVER_VALUE:-resolved-token}"\n'
+      + '    exit 0\n'
+      + '  fi\n'
+      + '  echo "token missing" >&2\n'
+      + '  exit 1\n'
       + 'fi\n'
       + 'exit 0\n',
   );
@@ -127,7 +138,10 @@ async function runRenderedWatcherWrapper({
     TMPDIR: fakeTmp,
     ALERT_TO: alertTo,
     OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken,
+    ADVERSARIAL_REVIEW_OP_CLI: opCliPath ?? path.join(fakeBin, 'op'),
     ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO: allowMissing ? '1' : '',
+    TEST_OP_TOKEN_RESOLVER_MODE: tokenResolverMode,
+    TEST_OP_TOKEN_RESOLVER_VALUE: tokenResolverValue,
     TEST_OP_MODE: opMode,
     TEST_OP_VALUE: opValue,
   };
@@ -304,7 +318,7 @@ test('rendered watcher wrapper allows whitespace-only direct ALERT_TO only with 
   assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
 });
 
-test('rendered watcher wrapper resolves ALERT_TO through PATH-discovered op', async () => {
+test('rendered watcher wrapper resolves ALERT_TO through explicit op override', async () => {
   const result = await runRenderedWatcherWrapper({
     opServiceAccountToken: 'token',
     opMode: 'ok',
@@ -312,6 +326,17 @@ test('rendered watcher wrapper resolves ALERT_TO through PATH-discovered op', as
   });
   assert.equal(result.code, 0);
   assert.doesNotMatch(result.stderr, /1Password CLI 'op' not found/);
+});
+
+test('rendered watcher wrapper resolves OP token through canonical resolver before ALERT_TO', async () => {
+  const result = await runRenderedWatcherWrapper({
+    tokenResolverMode: 'ok',
+    tokenResolverValue: 'token-from-file',
+    opMode: 'ok',
+    opValue: 'resolved-alert@example.com',
+  });
+  assert.equal(result.code, 0);
+  assert.doesNotMatch(result.stderr, /OP_SERVICE_ACCOUNT_TOKEN could not be resolved/);
 });
 
 test('rendered watcher wrapper fails startup when ALERT_TO is absent and override is unset', async () => {
@@ -340,6 +365,16 @@ test('rendered watcher wrapper rejects blank ALERT_TO values from 1Password', as
   });
   assert.equal(result.code, 1);
   assert.match(result.stderr, /resolved to an empty value/);
+});
+
+test('rendered watcher wrapper allows blank ALERT_TO values from 1Password with degraded override', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opMode: 'blank',
+    allowMissing: true,
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
 });
 
 test('resolveRenderedCodexAuthPath matches the installer contract for default and override layouts', () => {

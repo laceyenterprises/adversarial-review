@@ -71,9 +71,13 @@ ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
 
 resolve_op_bin() {
   local op_bin
-  if op_bin="$(command -v op 2>/dev/null)" && [ -n "$op_bin" ]; then
-    printf '%s' "$op_bin"
-    return 0
+  op_bin="${ADVERSARIAL_REVIEW_OP_CLI:-${OP_CLI_PATH:-}}"
+  if [ -n "$op_bin" ]; then
+    if [ -x "$op_bin" ]; then
+      printf '%s' "$op_bin"
+      return 0
+    fi
+    return 1
   fi
   for op_bin in /opt/homebrew/bin/op /usr/local/bin/op; do
     if [ -x "$op_bin" ]; then
@@ -138,6 +142,14 @@ fi
 
 if [ -n "${ALERT_TO:-}" ] && [ -z "${ALERT_TO//[[:space:]]/}" ]; then
   unset ALERT_TO
+fi
+
+if [ -z "${ALERT_TO:-}" ] && [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
+  if token_value="$(env ADV_OP_TOKEN_TAG="adversarial-watcher" ADV_SECRETS_ROOT="${ADV_SECRETS_ROOT:-$REPO_RENDER_SECRETS_ROOT}" "$NODE_BIN" "$REPO_RENDER_REPO_ROOT/src/secret-source/resolve-op-token-cli.mjs")"; then
+    export OP_SERVICE_ACCOUNT_TOKEN="$token_value"
+  elif [ "$ALLOW_MISSING_ALERT_TO" != "1" ]; then
+    echo "[adversarial-watcher] ERROR: OP_SERVICE_ACCOUNT_TOKEN could not be resolved through the canonical secret-source contract." >&2
+  fi
 fi
 
 if [ -z "${ALERT_TO:-}" ] && [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then

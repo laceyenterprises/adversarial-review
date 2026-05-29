@@ -81,9 +81,13 @@ ALERT_TO_OP_REF='op://Cliovault/adversarial-watcher-alert-to/credential'
 
 resolve_op_bin() {
   local op_bin
-  if op_bin="$(command -v op 2>/dev/null)" && [[ -n "$op_bin" ]]; then
-    printf '%s' "$op_bin"
-    return 0
+  op_bin="${ADVERSARIAL_REVIEW_OP_CLI:-${OP_CLI_PATH:-}}"
+  if [[ -n "$op_bin" ]]; then
+    if [[ -x "$op_bin" ]]; then
+      printf '%s' "$op_bin"
+      return 0
+    fi
+    return 1
   fi
   for op_bin in /opt/homebrew/bin/op /usr/local/bin/op; do
     if [[ -x "$op_bin" ]]; then
@@ -330,6 +334,17 @@ if [[ -n "${ALERT_TO:-}" && -z "${ALERT_TO//[[:space:]]/}" ]]; then
   unset ALERT_TO
 fi
 
+if [[ -z "${ALERT_TO:-}" && -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  TOKEN_RESOLVER="$REPO_ROOT/src/secret-source/resolve-op-token-cli.mjs"
+  if [[ -f "$TOKEN_RESOLVER" ]] \
+     && output="$(env ADV_OP_TOKEN_TAG="adversarial-watcher" ADV_SECRETS_ROOT="$SECRETS_ROOT" node "$TOKEN_RESOLVER" 2>&1)"; then
+    export OP_SERVICE_ACCOUNT_TOKEN="$output"
+    mark_ok "OP_SERVICE_ACCOUNT_TOKEN resolved through canonical secret-source contract"
+  else
+    mark_warn "OP_SERVICE_ACCOUNT_TOKEN could not be resolved through canonical secret-source contract; ALERT_TO must be direct or degraded startup must be explicit"
+  fi
+fi
+
 if [[ -n "${ALERT_TO:-}" ]]; then
   mark_ok "ALERT_TO configured directly in operator env"
 elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
@@ -337,6 +352,8 @@ elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
     if output="$("$op_bin" read "$ALERT_TO_OP_REF" 2>&1)"; then
       if [[ -n "${output//[[:space:]]/}" ]]; then
         mark_ok "ALERT_TO resolves from $ALERT_TO_OP_REF"
+      elif [[ "${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}" == "1" ]]; then
+        mark_warn "ALERT_TO at $ALERT_TO_OP_REF resolves to a blank value, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup"
       else
         mark_fail "ALERT_TO at $ALERT_TO_OP_REF resolves to a blank value; populate the credential or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up"
       fi

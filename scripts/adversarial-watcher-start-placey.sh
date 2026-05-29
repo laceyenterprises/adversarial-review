@@ -68,9 +68,13 @@ ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
 
 resolve_op_bin() {
   local op_bin
-  if op_bin="$(command -v op 2>/dev/null)" && [[ -n "$op_bin" ]]; then
-    printf '%s' "$op_bin"
-    return 0
+  op_bin="${ADVERSARIAL_REVIEW_OP_CLI:-${OP_CLI_PATH:-}}"
+  if [[ -n "$op_bin" ]]; then
+    if [[ -x "$op_bin" ]]; then
+      printf '%s' "$op_bin"
+      return 0
+    fi
+    return 1
   fi
   for op_bin in /opt/homebrew/bin/op /usr/local/bin/op; do
     if [[ -x "$op_bin" ]]; then

@@ -2847,31 +2847,36 @@ async function pollOnce(
       continue;
     }
 
-    const subjectEntries = [];
-    for (const subjectRef of subjectRefs) {
+    let subjectEntries = (await Promise.all(subjectRefs.map(async (subjectRef) => {
       try {
         const subject = await subjectAdapter.fetchState(subjectRef);
         const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
-        subjectEntries.push({ subjectRef, subject, prNumber });
+        return { subjectRef, subject, prNumber };
       } catch (err) {
         console.error(`[watcher] Failed to fetch subject state for ${subjectRef.subjectExternalId}:`, err.message);
+        return null;
       }
-    }
+    }))).filter(Boolean);
     if (!reviewerPoolConfig.enabled) {
-      subjectEntries.sort((a, b) => compareReviewerDispatchCandidates({
-        repoPath,
-        prNumber: a.prNumber,
-        subject: a.subject,
-        current: stmtGetReviewRow.get(repoPath, a.prNumber),
-      }, {
-        repoPath,
-        prNumber: b.prNumber,
-        subject: b.subject,
-        current: stmtGetReviewRow.get(repoPath, b.prNumber),
-      }));
+      subjectEntries = subjectEntries
+        .map((entry) => ({
+          ...entry,
+          current: stmtGetReviewRow.get(repoPath, entry.prNumber),
+        }))
+        .sort((a, b) => compareReviewerDispatchCandidates({
+          repoPath,
+          prNumber: a.prNumber,
+          subject: a.subject,
+          current: a.current,
+        }, {
+          repoPath,
+          prNumber: b.prNumber,
+          subject: b.subject,
+          current: b.current,
+        }));
     }
 
-    for (const { subject, prNumber } of subjectEntries) {
+    for (const { subject, prNumber, current: cachedCurrent } of subjectEntries) {
       const prTitle = subject.title || '';
       const staleDriftSkip = shouldSkipReviewerForStaleDrift({
         number: prNumber,
@@ -2895,7 +2900,7 @@ async function pollOnce(
         console.log(staleDriftSkip.message);
         continue;
       }
-      let existing = stmtGetReviewRow.get(repoPath, prNumber);
+      let existing = cachedCurrent ?? stmtGetReviewRow.get(repoPath, prNumber);
       if (!subject.terminal && existing?.review_status === 'pending') {
         healthProbe?.recordOpenPending?.(healthTick, {
           repo: repoPath,

@@ -199,6 +199,56 @@ test('reviewer memory sampler reuses one host sample within a poll tick', async 
   assert.equal(reservationState.reservedMb, 0);
 });
 
+test('reviewer memory sampler refreshes stale samples during long poll ticks', async () => {
+  let samples = 0;
+  let nowMs = 0;
+  const sampleForTick = createReviewerMemoryAdmissionSampler({
+    sampleTtlMs: 1000,
+    now: () => nowMs,
+    readSample: async () => {
+      samples += 1;
+      return {
+        pressureLevel: 'nominal',
+        availableMb: 5000 + samples,
+        swapUsedPct: 10,
+      };
+    },
+    logger: { warn() {} },
+  });
+
+  const first = await sampleForTick();
+  nowMs = 999;
+  const stillFresh = await sampleForTick();
+  nowMs = 1000;
+  const refreshed = await sampleForTick();
+
+  assert.equal(samples, 2);
+  assert.equal(first, stillFresh);
+  assert.notEqual(refreshed, first);
+  assert.equal(refreshed.availableMb, 5002);
+});
+
+test('reviewer memory sampler can be pinned to one sample with zero ttl', async () => {
+  let samples = 0;
+  let nowMs = 0;
+  const sampleForTick = createReviewerMemoryAdmissionSampler({
+    sampleTtlMs: 0,
+    now: () => nowMs,
+    readSample: async () => {
+      samples += 1;
+      return { pressureLevel: 'nominal', availableMb: 5000, swapUsedPct: 10 };
+    },
+    logger: { warn() {} },
+  });
+
+  const first = await sampleForTick();
+  nowMs = 60_000;
+  const second = await sampleForTick();
+
+  assert.equal(samples, 1);
+  assert.equal(first, second);
+});
+
 test('denied reviewer reservation reports the reservation used for the decision', async () => {
   const reservationState = { reservedMb: 1024 };
   const attempt = await reserveReviewerMemoryAdmission({
@@ -266,6 +316,28 @@ test('reviewer pool stops admitting new work after a thrown spawn failure', asyn
 
   await assert.rejects(runPromise, /spawn path broken/);
   assert.equal(started, 2);
+});
+
+test('reviewer pool surfaces every concurrent task failure', async () => {
+  const tasks = [
+    candidate(1, async () => { throw new Error('first failure'); }),
+    candidate(2, async () => { throw new Error('second failure'); }),
+  ];
+
+  await assert.rejects(
+    () => runBoundedReviewerDispatchQueue(tasks, {
+      maxConcurrent: 2,
+      maxThrownFailures: 2,
+      logger: { error() {} },
+    }),
+    (err) => {
+      assert.equal(err instanceof AggregateError, true);
+      assert.equal(err.errors.length, 2);
+      assert.match(err.errors[0].message, /first failure/);
+      assert.match(err.errors[1].message, /second failure/);
+      return true;
+    }
+  );
 });
 
 test('reviewer pool flag can fall back to serial mode', () => {

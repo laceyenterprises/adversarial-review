@@ -509,7 +509,7 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
     assert.ok(summaryLine, output);
     const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
 
-    assert.equal(summary.pollError, 'fixture reviewer spawn failure');
+    assert.equal(summary.pollError, '2 reviewer dispatch tasks failed');
     assert.equal(summary.reviewerSpawns.length, 2);
     assert.equal(summary.reviewerPassRows.length, 2);
     assert.ok(summary.reviewerPassRows.every((row) => row.status === 'failed'));

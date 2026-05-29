@@ -5,6 +5,7 @@ import {
 } from './watcher-memory-pressure.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
+const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
 
 function parseBooleanFlag(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -80,10 +81,16 @@ function sortReviewerDispatchCandidates(candidates) {
 function createReviewerMemoryAdmissionSampler({
   readSample = readMemoryPressureSample,
   logger = console,
+  sampleTtlMs = DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
+  now = () => Date.now(),
 } = {}) {
   let samplePromise = null;
+  let sampledAtMs = 0;
   return async function reviewerMemoryAdmissionSampleForTick() {
-    if (!samplePromise) {
+    const nowMs = Number(now()) || 0;
+    const ttlMs = Math.max(0, Number(sampleTtlMs) || 0);
+    if (!samplePromise || (ttlMs > 0 && nowMs - sampledAtMs >= ttlMs)) {
+      sampledAtMs = nowMs;
       samplePromise = readSample().catch((err) => {
         logger?.warn?.(
           `[watcher] memory pressure gate unavailable; admitting by legacy policy: ${err?.message || err}`
@@ -189,7 +196,8 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   }
 
   if (errors.length > 0) {
-    throw errors[0];
+    if (errors.length === 1) throw errors[0];
+    throw new AggregateError(errors, `${errors.length} reviewer dispatch tasks failed`);
   }
   return {
     dispatched: started,
@@ -199,6 +207,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 
 export {
   DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission,

@@ -20,8 +20,12 @@ const ROUTE_BY_BUILDER_CLASS = {
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
   'clio-agent': {
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    // Clio dispatches codex workers; per cross-model review, the reviewer
+    // is the OPPOSITE model from the writer — so clio-agent PRs go to
+    // claude, not codex. (Today's value used to be 'codex', which was a
+    // same-model assignment masquerading as cross-model.)
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   },
 };
 
@@ -38,10 +42,15 @@ const REVIEWER_ROUTE_BY_MODEL = {
   },
 };
 
+// Map each builder tag to the *writer* model it represents. Used by
+// `isCrossModelReviewWaived` to detect when an env-pinned reviewer matches
+// the writer (same-model = cross-model review guarantee waived).
+// clio-agent's writer is codex (Clio dispatches codex workers), so its
+// family is codex, not claude.
 const REVIEWER_FAMILY_BY_BUILDER_CLASS = {
   codex: 'codex',
   'claude-code': 'claude',
-  'clio-agent': 'claude',
+  'clio-agent': 'codex',
 };
 
 function normalizeBuilderClass(builderClassInput) {

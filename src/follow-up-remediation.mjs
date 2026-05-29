@@ -140,15 +140,23 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 const DEFAULT_REMEDIATOR_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
 
-// Cross-model remediator routing (mirrors `REVIEWER_FAMILY_BY_BUILDER_CLASS`
-// in the GitHub-PR subject routing module): a PR authored by one model is
-// remediated by the OTHER model so the cross-model review/remediation
-// guarantee survives end-to-end. Operators override via
-// `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost or availability requires
-// pinning to a specific worker class.
+// Same-model remediator routing. The model that wrote the code knows its
+// own conventions, structure, and the intent behind decisions best, so the
+// remediation worker class is the same as the PR's writer:
+//
+//   [codex]       → codex remediates (writer is codex)
+//   [claude-code] → claude-code remediates (writer is claude)
+//   [clio-agent]  → codex remediates (Clio dispatches codex workers)
+//
+// This pairs with cross-model REVIEW: reviewer catches blind spots the
+// writer can't see; remediator (same model) knows the codebase context to
+// implement the fix coherently.
+//
+// Operators override via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost
+// or availability requires pinning to a specific worker class.
 const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
-  codex: 'claude-code',
-  'claude-code': 'codex',
+  codex: 'codex',
+  'claude-code': 'claude-code',
   'clio-agent': 'codex',
 });
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
@@ -764,12 +772,10 @@ function validateStartupRemediationConfig(env = process.env) {
   resolveRemediationMaxConcurrentJobs(env);
 }
 
-// Cross-model symmetry with the reviewer routing (see
-// `adapters/subject/github-pr/routing.mjs` REVIEWER_FAMILY_BY_BUILDER_CLASS):
-//
-//   [codex]       PR → reviewed by claude → remediated by claude-code
-//   [claude-code] PR → reviewed by codex  → remediated by codex
-//   [clio-agent]  PR → reviewed by codex  → remediated by codex
+// Per-PR remediator routing: pair the writer model with itself so the
+// remediator inherits the writer's codebase context and conventions. See
+// `REMEDIATION_WORKER_BY_BUILDER_TAG` above for the mapping. The reviewer
+// stays cross-model (see `adapters/subject/github-pr/routing.mjs`).
 //
 // Operators can override the per-PR derivation via
 // `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost or availability requires
@@ -778,10 +784,10 @@ function validateStartupRemediationConfig(env = process.env) {
 // claude regardless of the original PR's builderTag.
 //
 // Historical note: LAC-358 previously hard-routed all remediation to codex
-// regardless of builderTag. The cross-model symmetry was restored on
-// 2026-05-29 after codex weekly-budget pressure made the codex-only default
-// operator-unworkable; the env override provides the same operator escape
-// hatch in the other direction.
+// regardless of builderTag. The per-PR same-model derivation was restored
+// on 2026-05-29 after codex weekly-budget pressure made the codex-only
+// default operator-unworkable; the env override provides the same operator
+// escape hatch in the other direction.
 function pickRemediationWorkerClass(job, { env = process.env } = {}) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(env);
   if (envOverride) return envOverride;

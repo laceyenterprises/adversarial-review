@@ -86,6 +86,7 @@ import {
   shouldUseReviewerTimeoutExhaustedMergeGate,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
+  validateStartupMergeAgentConfig,
 } from './follow-up-merge-agent.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
@@ -3744,6 +3745,12 @@ async function main() {
   requireEnv('GITHUB_TOKEN');
   try {
     defaultReviewerRouteFromEnv(process.env);
+  } catch (err) {
+    console.error(`[watcher] FATAL config: ${err?.message || err}`);
+    throw err;
+  }
+  try {
+    validateStartupMergeAgentConfig(process.env);
   } catch (err) {
     console.error(`[watcher] FATAL config: ${err?.message || err}`);
     throw err;

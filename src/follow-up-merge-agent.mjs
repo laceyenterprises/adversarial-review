@@ -125,6 +125,19 @@ function resolveMergeAgentWorkerClass(env = process.env) {
   }
   return value;
 }
+
+// Boot-time validator. Call this from the watcher's startup path next to
+// `validateStartupRemediationConfig` so a typo in
+// `ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS` (`condex`, `claude_code`,
+// etc.) crashes the daemon at boot with a `FATAL config:` banner instead
+// of failing silently at the first merge-agent dispatch hours later. The
+// resolver itself throws the same error shape mid-flight; this helper just
+// makes the failure visible at boot the way the reviewer/remediator env
+// validators do.
+function validateStartupMergeAgentConfig(env = process.env) {
+  resolveMergeAgentWorkerClass(env);
+}
+
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED', 'WAITING', 'REQUESTED']);
 
@@ -4955,6 +4968,7 @@ export {
   DEFAULT_MERGE_AGENT_WORKER_CLASS,
   ALLOWED_MERGE_AGENT_WORKER_CLASSES,
   resolveMergeAgentWorkerClass,
+  validateStartupMergeAgentConfig,
   TERMINAL_WORKER_RUN_STATUSES,
   addMergeAgentDispatchedLabel,
   buildFastMergeCloseAuditEntry,

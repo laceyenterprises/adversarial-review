@@ -22,6 +22,7 @@ import {
   DEFAULT_MERGE_AGENT_WORKER_CLASS,
   ALLOWED_MERGE_AGENT_WORKER_CLASSES,
   resolveMergeAgentWorkerClass,
+  validateStartupMergeAgentConfig,
   NO_MERGE_HOLD_LABEL,
   REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER,
   TERMINAL_WORKER_RUN_STATUSES,
@@ -5511,4 +5512,21 @@ test('resolveMergeAgentWorkerClass rejects unknown worker class', () => {
 
 test('DEFAULT_MERGE_AGENT_WORKER_CLASS is in the allowlist', () => {
   assert.ok(ALLOWED_MERGE_AGENT_WORKER_CLASSES.includes(DEFAULT_MERGE_AGENT_WORKER_CLASS));
+});
+
+test('validateStartupMergeAgentConfig passes when env is unset', () => {
+  assert.doesNotThrow(() => validateStartupMergeAgentConfig({}));
+});
+
+test('validateStartupMergeAgentConfig passes when env is a known value', () => {
+  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'codex' }));
+  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'claude-code' }));
+  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'merge-agent' }));
+});
+
+test('validateStartupMergeAgentConfig throws on unknown env (boot-time fail-loud)', () => {
+  assert.throws(
+    () => validateStartupMergeAgentConfig({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'condex' }),
+    /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS must be one of: merge-agent, codex, claude-code/
+  );
 });

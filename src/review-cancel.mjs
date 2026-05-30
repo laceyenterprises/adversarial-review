@@ -12,6 +12,46 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const VALID_SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL']);
 
+// Default cancellable statuses: only `reviewing` is in-flight by definition.
+// Operators can extend this set via `--allow-status` to handle two real
+// post-merge race shapes (documented in STATE-MACHINE.md):
+//   - row already transitioned to `posted` (a prior attempt completed) but
+//     the watcher subsequently re-spawned a retry whose subprocess is still
+//     alive when the PR merges. The retry's review is now wasted work.
+//   - row landed in `failed` after a subprocess error but the subprocess
+//     itself is still draining (timeout / cleanup path) and worth signalling.
+// The default behavior is unchanged: passing no `--allow-status` flag keeps
+// the strict `reviewing`-only guard.
+const DEFAULT_CANCELLABLE_STATUSES = new Set(['reviewing']);
+// Statuses that may be added via --allow-status. Excludes `pending`
+// (nothing to signal — no subprocess) and the sticky terminal states
+// (`failed-orphan`, `malformed`) where cancel semantics don't apply.
+const ALLOW_STATUS_OPTIONS = new Set([
+  'reviewing',
+  'posted',
+  'failed',
+]);
+
+function parseAllowStatus(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    throw new Error('--allow-status requires a non-empty comma-separated list of statuses');
+  }
+  const statuses = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (statuses.length === 0) {
+    throw new Error('--allow-status requires a non-empty comma-separated list of statuses');
+  }
+  for (const status of statuses) {
+    if (!ALLOW_STATUS_OPTIONS.has(status)) {
+      throw new Error(
+        `Unsupported status ${JSON.stringify(status)} for --allow-status. ` +
+        `Supported: ${[...ALLOW_STATUS_OPTIONS].sort().join(', ')}.`,
+      );
+    }
+  }
+  return new Set(statuses);
+}
+
 function parseSignal(value) {
   const signal = String(value || 'SIGTERM').trim().toUpperCase();
   if (!VALID_SIGNALS.has(signal)) {
@@ -25,6 +65,7 @@ function parseArgs(argv) {
   let repo = null;
   let prNumber = null;
   let signal = 'SIGTERM';
+  let allowStatus = null;
   const reasonParts = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -55,17 +96,27 @@ function parseArgs(argv) {
       signal = parseSignal(arg.slice('--signal='.length));
       continue;
     }
+    if (arg === '--allow-status') {
+      allowStatus = parseAllowStatus(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg?.startsWith('--allow-status=')) {
+      allowStatus = parseAllowStatus(arg.slice('--allow-status='.length));
+      continue;
+    }
     reasonParts.push(arg);
   }
 
   if (!repo || !Number.isInteger(prNumber) || prNumber <= 0) {
-    throw new Error('Usage: node src/review-cancel.mjs --repo <owner/repo> --pr <number> [--signal SIGTERM] [reason]');
+    throw new Error('Usage: node src/review-cancel.mjs --repo <owner/repo> --pr <number> [--signal SIGTERM] [--allow-status posted,failed] [reason]');
   }
 
   return {
     repo,
     prNumber,
     signal,
+    allowStatus,
     reason: reasonParts.join(' ').trim() || 'Operator requested active review cancellation.',
   };
 }
@@ -148,10 +199,18 @@ async function cancelActiveReview({
   requestedBy = process.env.USER || process.env.LOGNAME || 'operator',
   reason = 'Operator requested active review cancellation.',
   signal = 'SIGTERM',
+  // Optional Set<string> of allowed source statuses. When unset, the
+  // default `reviewing`-only guard applies. See DEFAULT_CANCELLABLE_STATUSES
+  // and ALLOW_STATUS_OPTIONS above for the rationale (post-merge race +
+  // failed-with-draining-subprocess shapes from 2026-05-30 incident).
+  allowStatus = null,
   processKill = process.kill,
   execFileImpl,
   db: dbOverride = null,
 } = {}) {
+  const cancellableStatuses = allowStatus
+    ? new Set([...DEFAULT_CANCELLABLE_STATUSES, ...allowStatus])
+    : DEFAULT_CANCELLABLE_STATUSES;
   const db = dbOverride || openReviewStateDb(rootDir);
   const restoreQueryOnly = dbOverride
     ? db.pragma('query_only', { simple: true })
@@ -162,8 +221,13 @@ async function cancelActiveReview({
     if (!row) {
       throw new Error(`No review row found for ${repo}#${prNumber}`);
     }
-    if (row.review_status !== 'reviewing') {
-      throw new Error(`Cannot cancel review for ${repo}#${prNumber} from status ${row.review_status}`);
+    if (!cancellableStatuses.has(row.review_status)) {
+      const allowed = [...cancellableStatuses].sort().join(', ');
+      throw new Error(
+        `Cannot cancel review for ${repo}#${prNumber} from status ` +
+        `${row.review_status} (cancellable: ${allowed}; pass ` +
+        `--allow-status <comma-list> to extend).`,
+      );
     }
 
     const pgid = reviewerCancelHandle(row);
@@ -212,12 +276,13 @@ async function cancelActiveReview({
 
 async function main() {
   try {
-    const { repo, prNumber, signal, reason } = parseArgs(process.argv.slice(2));
+    const { repo, prNumber, signal, allowStatus, reason } = parseArgs(process.argv.slice(2));
     const result = await cancelActiveReview({
       rootDir: ROOT,
       repo,
       prNumber,
       signal,
+      allowStatus,
       reason,
     });
     const target = result.target ? `${result.target.kind}:${result.target.id}` : 'none';

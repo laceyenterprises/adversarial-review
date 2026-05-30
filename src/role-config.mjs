@@ -59,9 +59,16 @@ function reshapeLoaderError(err, contextKey) {
   if (!source.startsWith('env:')) return err;
   const envName = source.slice('env:'.length);
   const canonicalKey = err.key || contextKey;
-  const allowed = err.expected && /^one of /.test(err.expected)
-    ? err.expected.slice('one of '.length)
-    : err.expected;
+  // CFG-02 round-1 review B4 fix: prefer structured `err.allowed`
+  // (an array; future loader shape) over parsing `err.expected`
+  // (a human-display string). When neither shape works, the
+  // allowedForLegacyMessage helper falls through to a marker token
+  // so operators see the format mismatch instead of garbage.
+  const allowed = Array.isArray(err.allowed)
+    ? err.allowed
+    : (err.expected && /^one of /.test(err.expected)
+      ? err.expected.slice('one of '.length)
+      : err.expected);
   const got = err.got !== null && err.got !== undefined
     ? JSON.stringify(err.got)
     : '<unset>';
@@ -77,17 +84,49 @@ function reshapeLoaderError(err, contextKey) {
   return wrapped;
 }
 
-// The loader's enum is JSON-formatted (e.g. `["claude-code", "codex", ...]`);
-// flatten to the bare comma-separated form that existing error-message
-// regexes expect (e.g. `merge-agent, codex, claude-code`).
+// CFG-02 round-1 review B4 fix (2026-05-30): make
+// allowedForLegacyMessage resilient to (a) the loader passing a
+// structured array via `err.allowed` (preferred future shape) and
+// (b) the legacy string form changing format. Previously this
+// function silently produced garbage (e.g. `'"claude-code'` or
+// `claude-code,codex`) when the loader's `fmtEnum` output drifted
+// from the exact `["a", "b"]` shape it assumed.
+//
+// Resolution order:
+// 1. If allowedRaw is an array → join directly.
+// 2. If allowedRaw is a string matching the canonical
+//    `["a", "b", "c"]` shape → parse via JSON, fall through on
+//    parse failure.
+// 3. Defensive bracket/quote strip → comma split (legacy form).
+// 4. Last resort: render `<format-unrecognized>` so operators
+//    immediately see something is wrong, instead of a half-mangled
+//    string that looks correct.
 function allowedForLegacyMessage(canonicalKey, allowedRaw) {
   if (!allowedRaw) return '<unknown>';
+  if (Array.isArray(allowedRaw)) {
+    return allowedRaw.map((entry) => String(entry)).join(', ');
+  }
   if (typeof allowedRaw !== 'string') return String(allowedRaw);
-  const stripped = allowedRaw.replace(/^\[/, '').replace(/\]$/, '');
-  return stripped
+  // Try canonical JSON form first.
+  const trimmed = allowedRaw.trim();
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.map((entry) => String(entry)).join(', ');
+      }
+    } catch {
+      // Fall through to legacy parser.
+    }
+  }
+  // Legacy form: strip outer brackets + per-token quotes.
+  const stripped = trimmed.replace(/^\[/, '').replace(/\]$/, '');
+  const tokens = stripped
     .split(',')
     .map((entry) => entry.trim().replace(/^"|"$/g, ''))
-    .join(', ');
+    .filter(Boolean);
+  if (tokens.length === 0) return '<format-unrecognized>';
+  return tokens.join(', ');
 }
 
 // The role-pin env vars (both canonical and legacy aliases) treat empty
@@ -127,6 +166,15 @@ function pruneBlankRoleEnvVars(env) {
 // `topPath: '/dev/null'` to bypass `~/agent-os/config.yaml` on the host.
 // `contextKey` is the canonical key the caller cares about — used only
 // for error-shaping when the loader rejects an env-sourced value.
+// CFG-02 round-1 review N2 (per-call file I/O): deferred to follow-up.
+// The reviewer's recommended cache lives in `_ensureFreshConfig` in
+// `config-loader.mjs` and only invalidates on top-level mtime/inode
+// changes; for the per-watcher-tick hot path here we'd need either
+// (a) explicit per-tick cache invalidation wired through `loadRoleConfig`,
+// or (b) an env-content fingerprint that doesn't break test isolation.
+// The naive cache attempted in the round-1 fix poisoned tests across
+// process.env mutations. Tracked separately.
+
 export function loadRoleConfig({
   env = process.env,
   topPath,

@@ -33,27 +33,18 @@ roles:
 # both with different values — the loader fails loud on conflict).
 merge_agent:
   worker_class: merge-agent         # enum: merge-agent / codex / claude-code
-  # ON: dispatch the merge-agent on the final pass even when the reviewer
-  # is still Request changes (the comment_only_followups sub-worker becomes
-  # the final substance gate). Track: future ticket wires this through the
-  # file→env cascade; the env var MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES
-  # remains the operator override today.
-  final_pass_on_request_changes: true
 
-# Remediation concurrency cap. Future ticket wires through cascade; env var
-# ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS remains operator override.
-remediation:
-  max_concurrent_jobs: 1
-
-# Reviewer timing knobs. Future ticket wires through cascade; env vars
-# (REVIEWER_TIMEOUT_MS, REVIEWER_FALLBACK_THRESHOLD) remain operator
-# overrides for now.
-reviewer:
-  timeout_ms: 1200000
-  fallback_threshold: 2
-
-# Watcher alert routing. null = no default; operator MUST set in
-# config.local.yaml or env (ALERT_TO_OP_REF, or the ALLOW_MISSING escape
-# hatch) — secrets stay env-only per SPEC §2.
-watcher:
-  alert_to_op_ref: null
+# CFG-02 round-1 review B5 fix (2026-05-30): the previously-shipped
+# `merge_agent.final_pass_on_request_changes`, `remediation.max_concurrent_jobs`,
+# `reviewer.timeout_ms`, `reviewer.fallback_threshold`, and
+# `watcher.alert_to_op_ref` sections were declared in this file and
+# schema-enforced, but no resolver code read them — the corresponding env
+# vars (MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES, ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS,
+# REVIEWER_TIMEOUT_MS, REVIEWER_FALLBACK_THRESHOLD, ALERT_TO_OP_REF) were
+# still the only operator surface. Reviewer flagged this as a footgun: an
+# operator editing `config.local.yaml` would silently see their change
+# ignored. Per the reviewer's suggested fix, drop the unwired sections
+# until a follow-up CFG ticket wires the file→env cascade for each
+# section. The schemaV1 dropdown still accepts these keys (so this file
+# can re-introduce them once a resolver consumes them) but they no longer
+# appear in the shipped defaults to avoid the footgun.

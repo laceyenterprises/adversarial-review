@@ -768,15 +768,28 @@ function normalizeRemediationWorkerClass(workerClassInput) {
 // delegates to the file-cascade resolver. The `_workerClass` flag on the
 // error is preserved for the existing
 // `consumeNextFollowUpJob` requeue path.
+// CFG-02 round-1 review B6 fix (2026-05-30): do not blindly copy
+// `err.got` to `requestedValue`. For env-alias conflicts the loader
+// puts a multi-value diagnostic string (e.g.
+// `'AGENT_OS_X="a", LEGACY_Y="b"'`) into `err.got` — templating that
+// into operator-visible messages produces nonsense. Default to null
+// and let downstream code use the loader's structured `err.got`
+// directly if it wants the raw diagnostic.
+//
+// CFG-02 round-1 review B1 (mislabel) is deferred to a follow-up
+// CFG ticket: gating on `err.key === 'roles.remediator'` /
+// `err.envName ∈ ALIASES` breaks back-compat with downstream
+// consumeNextFollowUpJob requeue tests. The gate needs paired
+// loader changes (consistent err.key/envName population across all
+// throw sites) to be safe; track separately.
 function defaultRemediatorWorkerClassFromEnv(env = process.env, opts = {}) {
   try {
     return resolveDefaultRemediator({ env, ...opts });
   } catch (err) {
     if (err && err.name === 'AgentOSConfigError') {
       err.isRemediationConfigError = true;
-      err.configKey = DEFAULT_REMEDIATOR_ENV;
-      if (err.envName) err.configKey = err.envName;
-      err.requestedValue = err.got;
+      err.configKey = err.envName || DEFAULT_REMEDIATOR_ENV;
+      err.requestedValue = null;
     }
     throw err;
   }

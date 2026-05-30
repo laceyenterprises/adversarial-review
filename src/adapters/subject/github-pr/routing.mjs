@@ -118,11 +118,39 @@ function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = 
   );
 }
 
+// CFG-02 round-1 review B3 fix (2026-05-30): catch AgentOSConfigError
+// so a runtime edit to `config.yaml` (or `~/agent-os/config.yaml`) that
+// violates the strict schema cannot blow up the per-PR processing loop
+// in `watcher.mjs`. Returns a sentinel `{ configBroken: true, error,
+// builderClass }` instead of throwing. Callers that want the legacy
+// throw-on-bad-config behavior should use the explicit boot-time
+// validator (`validateDefaultReviewerRouteConfig`) at startup, which is
+// already wired in `watcher.mjs:main()`.
 function routeSubject(subject, { env = process.env, topPath, loaderImpl } = {}) {
   const builderClass = normalizeBuilderClass(subject?.builderClass);
   if (!builderClass) return null;
-  const route = defaultReviewerRouteFromEnv(env, { topPath, loaderImpl })
-    || ROUTE_BY_BUILDER_CLASS[builderClass];
+  let route;
+  try {
+    route = defaultReviewerRouteFromEnv(env, { topPath, loaderImpl })
+      || ROUTE_BY_BUILDER_CLASS[builderClass];
+  } catch (err) {
+    if (err && err.name === 'AgentOSConfigError') {
+      // Surface a tagged sentinel so the watcher's per-PR loop can
+      // route to a dedicated "config-broken" disposition + back off,
+      // without losing the in-progress batch. The boot-time validator
+      // is the legitimate fail-loud path; runtime edits should not
+      // abort a tick.
+      return {
+        configBroken: true,
+        error: err,
+        builderClass,
+        tag: tagFromBuilderClass(builderClass),
+        reviewerModel: null,
+        botTokenEnv: null,
+      };
+    }
+    throw err;
+  }
   return {
     builderClass,
     tag: tagFromBuilderClass(builderClass),
@@ -143,6 +171,10 @@ function routePR(prTitle, subject = null, options = {}) {
   if (!builderClass) return null;
   const route = routeSubject({ builderClass }, options);
   if (!route) return null;
+  // CFG-02 round-1 review B3 fix: propagate the config-broken sentinel
+  // so the caller can route to a dedicated disposition instead of
+  // dereferencing null reviewerModel/botTokenEnv.
+  if (route.configBroken) return route;
   return {
     builderClass,
     tag: route.tag,

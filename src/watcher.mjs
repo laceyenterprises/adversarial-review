@@ -3241,6 +3241,22 @@ async function pollOnce(
 
       let crossModelWaiverReason = null;
       const baseRoute = routeSubject(subject);
+      // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject can now
+      // return a tagged `configBroken: true` sentinel when a runtime
+      // edit to config.yaml violates the strict schema (instead of
+      // throwing and aborting the whole tick). Skip this PR with a
+      // loud log so the operator sees the bad config and fixes it;
+      // the boot-time validator (validateDefaultReviewerRouteConfig)
+      // would have caught the same edit at daemon restart, so this
+      // path is the runtime-edit-during-tick fallback.
+      if (baseRoute && baseRoute.configBroken) {
+        console.warn(
+          `[watcher] routeSubject returned config-broken for ${repoPath}#${prNumber}: ` +
+          `${baseRoute.error?.message || baseRoute.error || 'unknown config error'} — ` +
+          `skipping this PR for the tick; fix the config and restart the watcher to recover`
+        );
+        continue;
+      }
       if (!baseRoute) {
         if (!existing) {
           stmtCreateReviewRow.run(

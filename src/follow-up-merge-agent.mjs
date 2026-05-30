@@ -121,6 +121,11 @@ const ALLOWED_MERGE_AGENT_WORKER_CLASSES = Object.freeze([
 // The `_isMergeAgentConfigError` flag and `configKey` / `requestedValue`
 // shape on the error are preserved for downstream callers that key off
 // them (e.g. the dispatch refusal path).
+// CFG-02 round-1 review B6 fix (2026-05-30): requestedValue defaults
+// to null so downstream templating doesn't render the multi-value
+// diagnostic blob the loader puts in err.got for env-alias conflicts.
+// (B1 mislabel fix deferred — see follow-up-remediation.mjs for the
+// matching rationale.)
 function resolveMergeAgentWorkerClass(env = process.env, opts = {}) {
   try {
     return resolveDefaultMergeAgentWorkerClass({ env, ...opts });
@@ -128,7 +133,7 @@ function resolveMergeAgentWorkerClass(env = process.env, opts = {}) {
     if (err && err.name === 'AgentOSConfigError') {
       err.isMergeAgentConfigError = true;
       err.configKey = err.envName || MERGE_AGENT_WORKER_CLASS_ENV;
-      err.requestedValue = err.got;
+      err.requestedValue = null;
     }
     throw err;
   }

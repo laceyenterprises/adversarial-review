@@ -306,3 +306,59 @@ test('cancelActiveReview still refuses statuses outside the allowed set', async 
     /from status pending.*cancellable: posted, reviewing/s,
   );
 });
+
+test('cancelActiveReview re-fetches and surfaces hint when failed row promotes mid-cancel', async () => {
+  // Simulate the watcher's stmtMarkAttemptStarted promoting a `failed`
+  // row to `reviewing` between the CLI's snapshot read and the identity
+  // check. The CLI's identity check refuses to signal the stale pgid
+  // (start-time mismatch); we expect cancelActiveReview to re-fetch the
+  // row and surface the new pgid via result.hint + receipt.postSignalState.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewingRow(rootDir, {
+    prNumber: 151,
+    reviewStatus: 'failed',
+    reviewerPgid: 3100,
+    reviewerStartedAt: '2026-05-30T07:00:00.000Z',
+  });
+
+  // The race interleaving: execFileImpl is invoked between isPgidAlive
+  // and the actual signal, which is when verifyPgidIdentity stat-reads
+  // the process start time. Drive the watcher's promote from inside
+  // execFileImpl so the post-signal re-fetch sees the new state.
+  const result = await cancelActiveReview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 151,
+    requestedAt: '2026-05-30T07:06:00.000Z',
+    allowStatus: new Set(['failed']),
+    execFileImpl: async () => {
+      const promoteDb = openReviewStateDb(rootDir);
+      try {
+        ensureReviewStateSchema(promoteDb);
+        promoteDb.prepare(
+          "UPDATE reviewed_prs SET review_status='reviewing', reviewer_pgid=?, reviewer_started_at=? WHERE pr_number=?"
+        ).run(3200, '2026-05-30T07:05:00.000Z', 151);
+      } finally {
+        promoteDb.close();
+      }
+      // Return a start time that drifts from the snapshot's started_at,
+      // forcing verifyPgidIdentity → match=false.
+      return { stdout: `${new Date('2026-05-30T07:05:00.000Z').toString()}\n` };
+    },
+    processKill: (pid, signal) => {
+      if (signal === 0 && pid === -3100) return true;
+      throw new Error(`unexpected signal ${signal} ${pid}`);
+    },
+  });
+
+  assert.equal(result.signalled, false);
+  assert.equal(result.error, 'identity-unconfirmed');
+  assert.ok(result.hint, 'expected hint when row transitions mid-cancel');
+  assert.match(result.hint, /reviewing/);
+  assert.match(result.hint, /3200/);
+  assert.equal(result.postSignalState.status, 'reviewing');
+  assert.equal(result.postSignalState.reviewerPgid, 3200);
+  const receipt = JSON.parse(readFileSync(result.receiptPath, 'utf8'));
+  assert.equal(receipt.postSignalState.status, 'reviewing');
+  assert.equal(receipt.postSignalState.reviewerPgid, 3200);
+});

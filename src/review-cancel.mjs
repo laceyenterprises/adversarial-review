@@ -109,7 +109,7 @@ function parseArgs(argv) {
   }
 
   if (!repo || !Number.isInteger(prNumber) || prNumber <= 0) {
-    throw new Error('Usage: node src/review-cancel.mjs --repo <owner/repo> --pr <number> [--signal SIGTERM] [--allow-status posted,failed] [reason]');
+    throw new Error('Usage: node src/review-cancel.mjs --repo <owner/repo> --pr <number> [--signal SIGTERM] [--allow-status reviewing,posted,failed] [reason]');
   }
 
   return {
@@ -208,9 +208,12 @@ async function cancelActiveReview({
   execFileImpl,
   db: dbOverride = null,
 } = {}) {
+  // Defensive copy on both branches: callers (and any future mutation of
+  // `cancellableStatuses` inside this scope) must never leak through to the
+  // module-level DEFAULT_CANCELLABLE_STATUSES constant.
   const cancellableStatuses = allowStatus
     ? new Set([...DEFAULT_CANCELLABLE_STATUSES, ...allowStatus])
-    : DEFAULT_CANCELLABLE_STATUSES;
+    : new Set(DEFAULT_CANCELLABLE_STATUSES);
   const db = dbOverride || openReviewStateDb(rootDir);
   const restoreQueryOnly = dbOverride
     ? db.pragma('query_only', { simple: true })
@@ -238,6 +241,37 @@ async function cancelActiveReview({
       processKill,
       execFileImpl,
     });
+    // Watcher can promote `failed → reviewing` via stmtMarkAttemptStarted
+    // between the operator's snapshot and our signal attempt. If the
+    // identity check refused (start-time drift, pgid recycled), re-fetch
+    // the row so the receipt + return value carry the post-promote state
+    // and the operator gets actionable feedback instead of just
+    // "identity-unconfirmed".
+    let postSignalRow = null;
+    if (
+      signalResult.error === 'identity-unconfirmed'
+      && row.review_status === 'failed'
+    ) {
+      const fresh = getReviewRow(db, { repo, prNumber });
+      if (
+        fresh
+        && (
+          fresh.review_status !== row.review_status
+          || Number(fresh.reviewer_pgid) !== Number(row.reviewer_pgid)
+          || fresh.reviewer_started_at !== row.reviewer_started_at
+        )
+      ) {
+        postSignalRow = {
+          status: fresh.review_status,
+          reviewerPgid: reviewerCancelHandle(fresh),
+          reviewerStartedAt: fresh.reviewer_started_at || null,
+        };
+        signalResult.postSignalState = postSignalRow;
+        signalResult.hint =
+          `row transitioned to ${fresh.review_status} mid-cancel (pgid=${reviewerCancelHandle(fresh) ?? 'null'}); ` +
+          `re-run without --allow-status to target the live reviewer.`;
+      }
+    }
     const receipt = {
       kind: 'adversarial-review-active-review-cancellation',
       schemaVersion: 1,
@@ -257,6 +291,7 @@ async function cancelActiveReview({
         linearTicketId: row.linear_ticket || null,
       },
       result: signalResult,
+      postSignalState: postSignalRow,
     };
     const receiptPath = writeCancellationReceipt(rootDir, receipt);
     return {
@@ -287,6 +322,9 @@ async function main() {
     });
     const target = result.target ? `${result.target.kind}:${result.target.id}` : 'none';
     console.log(`[review-cancel] signalled=${result.signalled} target=${target} receipt=${result.receiptPath}`);
+    if (result.hint) {
+      console.log(`[review-cancel] hint: ${result.hint}`);
+    }
     if (!result.signalled) {
       process.exitCode = 1;
     }

@@ -26,8 +26,9 @@ function seedReviewing(db, overrides = {}) {
     `INSERT INTO reviewed_prs
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
         review_attempts, last_attempted_at, reviewer_session_uuid,
-        reviewer_pgid, reviewer_started_at, reviewer_head_sha, reviewer_timeout_ms)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        reviewer_pgid, reviewer_started_at, reviewer_head_sha, reviewer_timeout_ms,
+        reviewer_lease_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     overrides.repo || REPO,
     overrides.prNumber || PR,
@@ -45,6 +46,9 @@ function seedReviewing(db, overrides = {}) {
     Object.prototype.hasOwnProperty.call(overrides, 'headSha') ? overrides.headSha : HEAD_SHA,
     Object.prototype.hasOwnProperty.call(overrides, 'reviewerTimeoutMs')
       ? overrides.reviewerTimeoutMs
+      : null,
+    Object.prototype.hasOwnProperty.call(overrides, 'reviewerLeaseExpiresAt')
+      ? overrides.reviewerLeaseExpiresAt
       : null
   );
 }
@@ -189,6 +193,48 @@ test('kills and fails (retryably) an overdue orphan only after proving exit and 
   );
   assert.match(row.failure_message, /exceeded its persisted launch timeout/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_deadline_exceeded/);
+}, { timeout: 10_000 });
+
+test('kills and requeues an overdue orphan to pending when lease recovery is enabled', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    reviewerTimeoutMs: 20 * 60 * 1000,
+    reviewerLeaseExpiresAt: '2026-05-11T05:30:00.000Z',
+  });
+  const killed = [];
+  const log = makeLog();
+  const settled = [];
+  let probeCount = 0;
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date('2026-05-11T05:45:00.000Z'),
+    log,
+    probeSession: () => {
+      probeCount += 1;
+      return probeCount < 2
+        ? { alive: true, matched: true }
+        : { alive: false, matched: false };
+    },
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    onTerminalDeadSession: async (event) => settled.push(event),
+    leaseRecoveryEnabled: true,
+    reviewerDeadlineMs: 20 * 60 * 1000,
+    sleep: async () => {},
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.review_attempts, 3);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGTERM' }]);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'deadline-exceeded' }]
+  );
+  assert.match(row.failure_message, /^\[reviewer-timeout\]/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_deadline_requeued/);
 }, { timeout: 10_000 });
 
 test('does not kill a within-deadline reattached orphan', async () => {
@@ -509,6 +555,38 @@ test('marks a dead reviewer without a GitHub review as retryable failed', async 
   );
   assert.match(row.failure_message, /no GitHub review was found from claude-reviewer-lacey/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_dead/);
+});
+
+test('requeues a dead reviewer without a GitHub review when lease recovery is enabled', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    reviewer: 'claude',
+    reviewerLeaseExpiresAt: '2026-05-11T05:15:00.000Z',
+  });
+  const log = makeLog();
+  const settled = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    onTerminalDeadSession: async (event) => settled.push(event),
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+    leaseRecoveryEnabled: true,
+    shouldReconcileRow: (row, now) => Date.parse(row.reviewer_lease_expires_at) <= now.getTime(),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.review_attempts, 3);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'dead-no-review' }]
+  );
+  assert.match(row.failure_message, /no GitHub review was found from claude-reviewer-lacey/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_requeued/);
 });
 
 test('pre-existing reviewing rows without reviewer_session_uuid use legacy failed-orphan marking', async () => {

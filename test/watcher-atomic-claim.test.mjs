@@ -22,6 +22,7 @@ const CLAIM_SQL = `UPDATE reviewed_prs
          reviewer_started_at = NULL,
          reviewer_head_sha = ?,
          reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
          reviewer_pgid = NULL,
          failed_at = CASE
            WHEN review_status = 'pending-upstream' THEN failed_at
@@ -34,6 +35,8 @@ const CLAIM_SQL = `UPDATE reviewed_prs
    WHERE repo = ?
      AND pr_number = ?
      AND review_status IN ('pending', 'failed', 'pending-upstream')`;
+const RELEASE_TO_PENDING_SQL =
+  "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'";
 
 function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
   sessionUuid = 'session-999',
@@ -45,6 +48,7 @@ function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
     sessionUuid,
     headSha,
     reviewerTimeoutMs,
+    '2026-05-02T18:30:00.000Z',
     repo,
     prNumber
   );
@@ -96,6 +100,7 @@ test('atomic claim succeeds for a pending row and flips status to reviewing', ()
   assert.equal(row.reviewer_started_at, null);
   assert.equal(row.reviewer_head_sha, 'head-999');
   assert.equal(row.reviewer_timeout_ms, 20 * 60 * 1000);
+  assert.equal(row.reviewer_lease_expires_at, '2026-05-02T18:30:00.000Z');
   assert.equal(row.reviewer_pgid, null);
   assert.equal(row.failed_at, null);
   assert.equal(row.failure_message, null);
@@ -180,6 +185,33 @@ test('atomic claim simulates a real two-process race — only one wins', () => {
   assert.equal(row.review_status, 'reviewing');
   assert.equal(row.last_attempted_at, '2026-05-02T18:10:00.000Z', 'winner timestamp persists');
   assert.equal(row.reviewer_session_uuid, 'session-a', 'winner session persists');
+});
+
+test('lease recovery release and a fresh tick still admit only one replacement reviewer', () => {
+  const db = setupDb();
+  seedReviewRow(db, { reviewStatus: 'reviewing' });
+
+  const release = db.prepare(RELEASE_TO_PENDING_SQL).run(
+    '2026-05-02T18:09:30.000Z',
+    '[daemon-bounce] reviewer bounced',
+    REPO,
+    PR
+  );
+  assert.equal(release.changes, 1, 'expired reviewer lease is released back to pending once');
+
+  const claimA = runClaim(db, '2026-05-02T18:10:00.000Z', REPO, PR, {
+    sessionUuid: 'session-recovered-a',
+  });
+  const claimB = runClaim(db, '2026-05-02T18:10:00.001Z', REPO, PR, {
+    sessionUuid: 'session-recovered-b',
+  });
+
+  assert.equal(claimA.changes, 1);
+  assert.equal(claimB.changes, 0);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 1, 'release consumes one failed attempt before the next spawn');
+  assert.equal(row.reviewer_session_uuid, 'session-recovered-a');
 });
 
 test('atomic claim refuses pending row from a different PR — repo/pr scoping is correct', () => {

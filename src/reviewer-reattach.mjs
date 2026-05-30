@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 
+import { resolveReviewerLeaseRecoveryEnabled } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
@@ -158,7 +159,7 @@ function prepareStatements(db) {
     listReviewing: db.prepare(
       `SELECT repo, pr_number, reviewer, review_attempts, last_attempted_at,
               reviewer_session_uuid, reviewer_pgid, reviewer_started_at,
-              reviewer_head_sha, reviewer_timeout_ms
+              reviewer_head_sha, reviewer_timeout_ms, reviewer_lease_expires_at
          FROM reviewed_prs
         WHERE review_status = 'reviewing'`
     ),
@@ -166,10 +167,13 @@ function prepareStatements(db) {
       "UPDATE reviewed_prs SET review_status = 'failed-orphan', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
     markFailed: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+    ),
+    releasePending: db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
     ),
     markPosted: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
     ),
   };
 }
@@ -206,6 +210,7 @@ async function reconcileReviewerSessions({
   onTerminalDeadSession = async () => {},
   maxRows = Number.POSITIVE_INFINITY,
   reviewerDeadlineMs = resolveReviewerTimeoutMs(),
+  leaseRecoveryEnabled = resolveReviewerLeaseRecoveryEnabled(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
 } = {}) {
@@ -370,23 +375,39 @@ async function reconcileReviewerSessions({
 
             await onTerminalDeadSession({
               row,
-              state: 'failed',
+              state: leaseRecoveryEnabled ? 'cancelled' : 'failed',
               settledAt: failureAt,
               reason: 'deadline-exceeded',
             });
-            statements.markFailed.run(
-              failureAt,
+            const message =
               `Reviewer session ${row.reviewer_session_uuid} (pgid ${row.reviewer_pgid}) was orphaned by a ` +
               `supervisor restart, exceeded its persisted launch timeout (age ${orphanAgeMs}ms > ${launchTimeoutMs}ms), ` +
-              `and was confirmed dead before automatic re-review.`,
-              row.repo,
-              row.pr_number
-            );
-            log.warn(
-              `[watcher] reviewer_reattach_deadline_exceeded repo=${row.repo} pr=${row.pr_number} ` +
-              `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} age_ms=${orphanAgeMs} ` +
-              `deadline_ms=${launchTimeoutMs} final_signal=${signal}`
-            );
+              `and was confirmed dead before automatic re-review.`;
+            if (leaseRecoveryEnabled) {
+              statements.releasePending.run(
+                failureAt,
+                `[reviewer-timeout] ${message}`,
+                row.repo,
+                row.pr_number
+              );
+              log.warn(
+                `[watcher] reviewer_reattach_deadline_requeued repo=${row.repo} pr=${row.pr_number} ` +
+                `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} age_ms=${orphanAgeMs} ` +
+                `deadline_ms=${launchTimeoutMs} final_signal=${signal}`
+              );
+            } else {
+              statements.markFailed.run(
+                failureAt,
+                message,
+                row.repo,
+                row.pr_number
+              );
+              log.warn(
+                `[watcher] reviewer_reattach_deadline_exceeded repo=${row.repo} pr=${row.pr_number} ` +
+                `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} age_ms=${orphanAgeMs} ` +
+                `deadline_ms=${launchTimeoutMs} final_signal=${signal}`
+              );
+            }
             return true;
           }
         }
@@ -519,20 +540,36 @@ async function reconcileReviewerSessions({
 
     await onTerminalDeadSession({
       row,
-      state: 'failed',
+      state: leaseRecoveryEnabled ? 'cancelled' : 'failed',
       settledAt: failureAt,
       reason: 'dead-no-review',
     });
-    statements.markFailed.run(
-      failureAt,
-      `Reviewer session ${row.reviewer_session_uuid} is no longer alive and no GitHub review was found from ${reviewerBotLogin(row.reviewer)} since ${row.reviewer_started_at || 'unknown start time'}.`,
-      row.repo,
-      row.pr_number
-    );
-    log.warn(
-      `[watcher] reviewer_reattach_dead repo=${row.repo} pr=${row.pr_number} ` +
-      `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'}`
-    );
+    const deadNoReviewMessage =
+      `Reviewer session ${row.reviewer_session_uuid} is no longer alive and no GitHub review was found from ` +
+      `${reviewerBotLogin(row.reviewer)} since ${row.reviewer_started_at || 'unknown start time'}.`;
+    if (leaseRecoveryEnabled) {
+      statements.releasePending.run(
+        failureAt,
+        deadNoReviewMessage,
+        row.repo,
+        row.pr_number
+      );
+      log.warn(
+        `[watcher] reviewer_reattach_requeued repo=${row.repo} pr=${row.pr_number} ` +
+        `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'}`
+      );
+    } else {
+      statements.markFailed.run(
+        failureAt,
+        deadNoReviewMessage,
+        row.repo,
+        row.pr_number
+      );
+      log.warn(
+        `[watcher] reviewer_reattach_dead repo=${row.repo} pr=${row.pr_number} ` +
+        `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'}`
+      );
+    }
   }
 
   return { reconciled: rows.length, skipped: Math.max(0, matchingRows.length - rows.length) };

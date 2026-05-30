@@ -5,6 +5,7 @@ import { createAcpxReviewerRuntimeAdapter } from './acpx/index.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from './cli-direct/index.mjs';
 import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mjs';
 import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './run-state.mjs';
+import { resolveReviewerLeaseRecoveryEnabled } from '../../reviewer-lease.mjs';
 
 function loadDomainConfig(rootDir, domainId) {
   return JSON.parse(readFileSync(join(rootDir, 'domains', `${domainId}.json`), 'utf8'));
@@ -50,6 +51,7 @@ async function recoverReviewerRunRecords({
   log = console,
   now = new Date(),
   ttlMs = 24 * 60 * 60 * 1000,
+  leaseRecoveryEnabled = resolveReviewerLeaseRecoveryEnabled(),
 } = {}) {
   const pruned = pruneReviewerRunRecords(rootDir, { now, ttlMs });
   const prunedTotal = typeof pruned === 'number' ? pruned : pruned.total;
@@ -66,7 +68,9 @@ async function recoverReviewerRunRecords({
     const result = await adapter.reattach(record);
     if (result.failureClass === 'daemon-bounce' && db) {
       const outcome = db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ? WHERE reviewer_session_uuid = ? AND review_status = 'reviewing'"
+        leaseRecoveryEnabled
+          ? "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE reviewer_session_uuid = ? AND review_status = 'reviewing'"
+          : "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE reviewer_session_uuid = ? AND review_status = 'reviewing'"
       ).run(
         now.toISOString(),
         '[daemon-bounce] Reviewer runtime could not reattach after kernel restart; re-queueing review.',

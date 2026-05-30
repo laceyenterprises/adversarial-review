@@ -8,7 +8,7 @@ import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shape
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 7;
+const REVIEW_STATE_SCHEMA_VERSION = 8;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
 const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries', 'reviewer_passes', 'pr_merge_closeouts']);
@@ -59,6 +59,7 @@ function ensureReviewStateSchema(db) {
       reviewer_started_at TEXT,
       reviewer_head_sha TEXT,
       reviewer_timeout_ms INTEGER,
+      reviewer_lease_expires_at TEXT,
       UNIQUE(repo, pr_number)
     )
   `);
@@ -89,6 +90,7 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_started_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_head_sha TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_timeout_ms INTEGER`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_lease_expires_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN domain_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN subject_external_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN revision_ref TEXT`);

@@ -11,7 +11,7 @@ const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
 const REVIEW_STATE_SCHEMA_VERSION = 7;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
-const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries', 'reviewer_passes']);
+const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries', 'reviewer_passes', 'pr_merge_closeouts']);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
   'head_sha',
@@ -113,6 +113,229 @@ function ensureReviewStateSchema(db) {
 
 function getReviewRow(db, { repo, prNumber }) {
   return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber) || null;
+}
+
+function readLatestCompletedReviewerPassEndedAt(db, { repo, prNumber }) {
+  return db.prepare(
+    `SELECT MAX(ended_at) AS ended_at
+       FROM reviewer_passes
+      WHERE repo = ?
+        AND pr_number = ?
+        AND pass_kind IN ('first-pass', 'rereview')
+        AND ended_at IS NOT NULL`
+  ).get(repo, prNumber)?.ended_at || null;
+}
+
+function readReviewerPassLogins(db, { repo, prNumber, reviewerLoginResolver = () => null } = {}) {
+  const rows = db.prepare(
+    `SELECT reviewer_class, reviewer_model
+       FROM reviewer_passes
+      WHERE repo = ?
+        AND pr_number = ?
+        AND pass_kind IN ('first-pass', 'rereview')`
+  ).all(repo, prNumber);
+  const logins = [];
+  const seen = new Set();
+  for (const row of rows) {
+    for (const candidate of [row?.reviewer_model, row?.reviewer_class]) {
+      const login = reviewerLoginResolver(candidate);
+      const normalized = String(login || '').trim().toLowerCase();
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      logins.push(login);
+    }
+  }
+  return logins;
+}
+
+// Settled-empty rows are re-scraped on a slower cadence (default 1 hour)
+// so a late closeout that lands past the 10-minute settle window still
+// has a path to be observed and upgrade the row. Without this, the
+// terminal-empty decision is permanent the first time it fires.
+const SETTLED_EMPTY_RESCRAPE_AFTER_MS = 60 * 60 * 1000;
+// Stop re-scraping settled-empty rows once they are this old past merge.
+// Matches the scraper's post-merge comment-window cap (24h) so the
+// pending list does not grow unboundedly over the lifetime of the daemon
+// and we don't keep paying for `gh api` calls against month-old PRs.
+const SETTLED_EMPTY_RESCRAPE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function listPendingMergeCloseouts(db, {
+  limit = Number.POSITIVE_INFINITY,
+  settledEmptyRescrapeAfterMs = SETTLED_EMPTY_RESCRAPE_AFTER_MS,
+  settledEmptyRescrapeMaxAgeMs = SETTLED_EMPTY_RESCRAPE_MAX_AGE_MS,
+  now = new Date(),
+} = {}) {
+  const rescrapeBeforeIso = new Date(now.getTime() - settledEmptyRescrapeAfterMs).toISOString();
+  const maxAgeCutoffIso = new Date(now.getTime() - settledEmptyRescrapeMaxAgeMs).toISOString();
+  // Fresh-debt first (never scraped or scraped but not settled), then
+  // settled-empty rows that have aged past the rescrape threshold.
+  // Within fresh debt, lower attempt counts win so chronic failures do
+  // not monopolize the per-tick batch. Newest-merged first as a final
+  // tiebreaker to prioritize the just-merged tail after a watcher
+  // outage or gh blip.
+  const rows = db.prepare(
+    `SELECT reviewed_prs.repo,
+            reviewed_prs.pr_number,
+            reviewed_prs.merged_at,
+            COALESCE(pr_merge_closeouts.scrape_attempt_count, 0) AS scrape_attempt_count,
+            pr_merge_closeouts.empty_confirmed_at AS empty_confirmed_at,
+            pr_merge_closeouts.scrape_last_checked_at AS scrape_last_checked_at
+       FROM reviewed_prs
+       LEFT JOIN pr_merge_closeouts
+         ON pr_merge_closeouts.repo = reviewed_prs.repo
+        AND pr_merge_closeouts.pr_number = reviewed_prs.pr_number
+      WHERE reviewed_prs.pr_state = 'merged'
+        AND (pr_merge_closeouts.closeout_body_md IS NULL)
+        AND (
+          pr_merge_closeouts.repo IS NULL
+          OR pr_merge_closeouts.empty_confirmed_at IS NULL
+          OR (
+            (
+              pr_merge_closeouts.scrape_last_checked_at IS NULL
+              OR pr_merge_closeouts.scrape_last_checked_at <= ?
+            )
+            AND (
+              reviewed_prs.merged_at IS NULL
+              OR reviewed_prs.merged_at >= ?
+            )
+          )
+        )
+      ORDER BY
+        CASE WHEN pr_merge_closeouts.empty_confirmed_at IS NULL THEN 0 ELSE 1 END ASC,
+        COALESCE(pr_merge_closeouts.scrape_attempt_count, 0) ASC,
+        reviewed_prs.merged_at DESC,
+        reviewed_prs.id DESC`
+  ).all(rescrapeBeforeIso, maxAgeCutoffIso);
+  if (!Number.isFinite(limit)) return rows;
+  return rows.slice(0, Math.max(0, Number(limit) || 0));
+}
+
+function recordMergeCloseoutScrapeFailure(db, {
+  repo,
+  prNumber,
+  mergedAt = null,
+  scrapeLastCheckedAt = new Date().toISOString(),
+  errorMessage = null,
+} = {}) {
+  const truncatedError = errorMessage
+    ? String(errorMessage).slice(0, 2000)
+    : null;
+  // gh_artifact_refs left NULL on the failure path. The 20260529 CHECK
+  // forbids non-NULL refs when closeout_body_md is NULL, and a failed
+  // scrape has neither a body nor artifacts to attribute — NULL is the
+  // correct value regardless of whether 20260530 has rebuilt the table
+  // to drop that CHECK.
+  db.prepare(
+    `INSERT INTO pr_merge_closeouts (
+       repo,
+       pr_number,
+       scrape_last_checked_at,
+       merged_at,
+       scrape_attempt_count,
+       scrape_last_error
+     ) VALUES (?, ?, ?, ?, 1, ?)
+     ON CONFLICT(repo, pr_number) DO UPDATE SET
+       scrape_last_checked_at = excluded.scrape_last_checked_at,
+       merged_at = COALESCE(pr_merge_closeouts.merged_at, excluded.merged_at),
+       scrape_attempt_count = COALESCE(pr_merge_closeouts.scrape_attempt_count, 0) + 1,
+       scrape_last_error = excluded.scrape_last_error`
+  ).run(
+    repo,
+    prNumber,
+    scrapeLastCheckedAt,
+    mergedAt || null,
+    truncatedError
+  );
+  return db.prepare(
+    'SELECT * FROM pr_merge_closeouts WHERE repo = ? AND pr_number = ?'
+  ).get(repo, prNumber) || null;
+}
+
+function recordMergeCloseout(db, {
+  repo,
+  prNumber,
+  mergedAt,
+  scrapeLastCheckedAt = new Date().toISOString(),
+  closeoutBodyMd = null,
+  closeoutAuthors = null,
+  closeoutPostedAt = null,
+  bodyCapturedAt = null,
+  emptyConfirmedAt = null,
+  ghArtifactRefs = null,
+} = {}) {
+  const hasBody = typeof closeoutBodyMd === 'string' && closeoutBodyMd.length > 0;
+  const authorsJson = hasBody && Array.isArray(closeoutAuthors)
+    ? JSON.stringify(closeoutAuthors)
+    : null;
+  const artifactRefsJson = JSON.stringify(Array.isArray(ghArtifactRefs) ? ghArtifactRefs : []);
+
+  db.prepare(
+    `INSERT INTO pr_merge_closeouts (
+       repo,
+       pr_number,
+       closeout_body_md,
+       closeout_authors_json,
+       closeout_posted_at,
+       body_captured_at,
+       scrape_last_checked_at,
+       empty_confirmed_at,
+       merged_at,
+       gh_artifact_refs
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(repo, pr_number) DO UPDATE SET
+       scrape_last_checked_at = excluded.scrape_last_checked_at,
+       merged_at = COALESCE(pr_merge_closeouts.merged_at, excluded.merged_at),
+       closeout_body_md = CASE
+         WHEN excluded.closeout_body_md IS NOT NULL THEN excluded.closeout_body_md
+         ELSE pr_merge_closeouts.closeout_body_md
+       END,
+       closeout_authors_json = CASE
+         WHEN excluded.closeout_body_md IS NOT NULL THEN excluded.closeout_authors_json
+         ELSE pr_merge_closeouts.closeout_authors_json
+       END,
+       closeout_posted_at = CASE
+         WHEN excluded.closeout_body_md IS NOT NULL THEN excluded.closeout_posted_at
+         ELSE pr_merge_closeouts.closeout_posted_at
+       END,
+       body_captured_at = CASE
+         WHEN excluded.closeout_body_md IS NOT NULL THEN excluded.body_captured_at
+         ELSE pr_merge_closeouts.body_captured_at
+       END,
+       empty_confirmed_at = CASE
+         WHEN excluded.closeout_body_md IS NOT NULL THEN NULL
+         WHEN pr_merge_closeouts.closeout_body_md IS NOT NULL THEN NULL
+         WHEN excluded.empty_confirmed_at IS NOT NULL THEN COALESCE(pr_merge_closeouts.empty_confirmed_at, excluded.empty_confirmed_at)
+         ELSE pr_merge_closeouts.empty_confirmed_at
+       END,
+       gh_artifact_refs = CASE
+         WHEN excluded.closeout_body_md IS NOT NULL THEN excluded.gh_artifact_refs
+         WHEN pr_merge_closeouts.gh_artifact_refs IS NOT NULL THEN pr_merge_closeouts.gh_artifact_refs
+         ELSE excluded.gh_artifact_refs
+       END,
+       scrape_attempt_count = CASE
+         WHEN excluded.closeout_body_md IS NOT NULL THEN 0
+         ELSE pr_merge_closeouts.scrape_attempt_count
+       END,
+       scrape_last_error = CASE
+         WHEN excluded.closeout_body_md IS NOT NULL THEN NULL
+         ELSE pr_merge_closeouts.scrape_last_error
+       END`
+  ).run(
+    repo,
+    prNumber,
+    hasBody ? closeoutBodyMd : null,
+    authorsJson,
+    hasBody ? closeoutPostedAt : null,
+    hasBody ? (bodyCapturedAt || scrapeLastCheckedAt) : null,
+    scrapeLastCheckedAt,
+    hasBody ? null : emptyConfirmedAt,
+    mergedAt || null,
+    artifactRefsJson
+  );
+
+  return db.prepare(
+    'SELECT * FROM pr_merge_closeouts WHERE repo = ? AND pr_number = ?'
+  ).get(repo, prNumber) || null;
 }
 
 function runReviewStateMigrations(db, { migrationsDir = REVIEW_STATE_MIGRATIONS_DIR } = {}) {
@@ -647,8 +870,14 @@ function requestReviewRereview({
 
 export {
   REVIEW_STATE_SCHEMA_VERSION,
+  SETTLED_EMPTY_RESCRAPE_AFTER_MS,
   ensureReviewStateSchema,
+  listPendingMergeCloseouts,
   openReviewStateDb,
+  readLatestCompletedReviewerPassEndedAt,
+  readReviewerPassLogins,
+  recordMergeCloseout,
+  recordMergeCloseoutScrapeFailure,
   getReviewRow,
   getReviewRowBySubjectIdentity,
   lookupReviewRowDualRead,

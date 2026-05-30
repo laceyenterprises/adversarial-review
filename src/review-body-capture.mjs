@@ -134,6 +134,7 @@ function updateReviewerPassBodyCapture(rootDir, {
   bodyMd,
   ghCommentId = null,
   capturedAt = new Date().toISOString(),
+  log = console,
 } = {}) {
   if (!repo || !Number.isInteger(Number(prNumber)) || !Number.isInteger(Number(attemptNumber)) || !bodyMd) {
     throw new TypeError('Missing required reviewer-pass capture fields');
@@ -165,6 +166,19 @@ function updateReviewerPassBodyCapture(rootDir, {
       Number(attemptNumber),
       kind,
     );
+    // Surface silent misses: a 0-row UPDATE means the row we expected to
+    // stamp (created by beginReviewerPass / recordRemediationPassStartedSafe)
+    // does not exist for this (repo, pr, attempt, pass_kind). The GitHub
+    // comment is real and posted; the local mirror has no row to link it
+    // to. Without this warn, attempt-number / passKind drift between the
+    // row creator and the capture call is invisible.
+    if (result?.changes === 0) {
+      log.warn?.(
+        `[review-body-capture] capture matched 0 rows for ${repo}#${prNumber} ` +
+        `attempt=${Number(attemptNumber)} pass_kind=${kind}; ` +
+        `body and gh_comment_id were NOT linked to any reviewer_passes row`
+      );
+    }
     return result;
   } finally {
     db.close();
@@ -240,6 +254,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
       bodyMd: reviewBody,
       ghCommentId,
       capturedAt: postedAt,
+      log,
     });
   } catch (err) {
     log.warn?.(`[reviewer] review body capture failed for ${repo}#${prNumber}: ${err.message}`);
@@ -290,6 +305,7 @@ async function captureRemediationBodyAfterPost(rootDir, {
       bodyMd: body,
       ghCommentId,
       capturedAt: postedAt,
+      log,
     });
   } catch (err) {
     log.warn?.(`[follow-up-remediation] remediation body capture failed for ${repo}#${prNumber}: ${err.message}`);

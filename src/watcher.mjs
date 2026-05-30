@@ -1651,6 +1651,7 @@ async function spawnReviewer({
         builderTag,
         reviewerHeadSha,
         reviewAttemptNumber,
+        reviewDbAttemptNumber,
         maxRemediationRounds,
         passKind,
         reviewerSessionUuid,

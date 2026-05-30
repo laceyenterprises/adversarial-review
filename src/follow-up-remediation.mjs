@@ -15,6 +15,7 @@ import {
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
+  remediationAttemptNumber,
   salvagePartialRemediationReply,
   resolveRoundBudgetForJob,
   writeFollowUpJob,
@@ -59,11 +60,6 @@ function normalizeBaseBranch(baseBranch) {
   if (typeof baseBranch !== 'string') return null;
   const trimmed = baseBranch.trim();
   return trimmed || null;
-}
-
-function remediationAttemptNumber(job) {
-  const parsed = Number(job?.remediationPlan?.currentRound || job?.currentRound || 1);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 1;
 }
 
 async function fetchPRBaseBranch({

@@ -1051,6 +1051,14 @@ async function postGitHubReviewWithCapture({
   // post handling — not before the request leaves.
   const effectivePostedAt = postedAt || new Date().toISOString();
 
+  // Normalize 'unknown' to null so the reviewer_passes.verdict CHECK
+  // constraint (approved / comment-only / request-changes / dismissed / NULL)
+  // does not abort the body-capture UPDATE when a reviewer goes off-script.
+  // Losing the parsed-verdict shortcut is preferable to losing body capture
+  // entirely; downstream consumers already treat NULL as "verdict unknown".
+  const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(reviewBody));
+  const persistedVerdict = normalizedVerdict === 'unknown' ? null : normalizedVerdict;
+
   await captureReviewerBodyAfterPost(rootDir, {
     repo,
     prNumber,
@@ -1058,7 +1066,7 @@ async function postGitHubReviewWithCapture({
     reviewerModel,
     botTokenEnv,
     reviewBody,
-    verdict: normalizeReviewVerdict(extractReviewVerdict(reviewBody)),
+    verdict: persistedVerdict,
     passKind,
     postedAt: effectivePostedAt,
     execFileImpl,
@@ -1130,6 +1138,7 @@ async function main() {
     builderTag,
     reviewerHeadSha,
     reviewAttemptNumber,
+    reviewDbAttemptNumber,
     completedRemediationRounds,
     maxRemediationRounds,
     passKind,
@@ -1305,11 +1314,19 @@ async function main() {
 
   try {
     console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);
+    // Use reviewDbAttemptNumber to match the row beginReviewerPass created
+    // in watcher.spawnReviewer. reviewAttemptNumber (ledger.completedRoundsForPR + 1)
+    // only advances on round completion, while reviewDbAttemptNumber
+    // (review_attempts + 1) advances on every launch attempt — they diverge
+    // on retry-within-round, and the row key is the launch-attempt counter.
+    const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
+      ? Number(reviewDbAttemptNumber)
+      : Number(reviewAttemptNumber);
     await postGitHubReviewWithCapture({
       rootDir: ROOT,
       repo,
       prNumber,
-      attemptNumber: Number(reviewAttemptNumber),
+      attemptNumber: captureAttemptNumber,
       reviewerModel: effectiveModel,
       reviewBody: fullComment,
       botTokenEnv,

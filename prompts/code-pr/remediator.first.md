@@ -129,11 +129,19 @@ The validator counts `addressed.length + pushback.length + blockers.length`
 and rejects the reply unless that sum equals the number of findings in
 the review's `## Blocking Issues` section, exactly once each. Non-blocking
 findings (from the review's `## Non-blocking Issues` section) do NOT
-belong in those three arrays. If you over-count by even one, the entire
-remediation round is rejected as `invalid-remediation-reply`, the
-public PR comment never goes up, and an operator has to triage the
-failure. This is the single most common cause of remediation-round
-failures; treat it as load-bearing.
+belong in those three arrays for any new code. If you over-count by
+even one, the entire remediation round is rejected as
+`invalid-remediation-reply`, the public PR comment never goes up, and
+an operator has to triage the failure. This is the single most common
+cause of remediation-round failures; treat it as load-bearing.
+
+There is a narrow back-compat tolerance — entries in `addressed[]`
+whose `title` exactly matches a finding in the review's
+`## Non-blocking Issues` section are excluded from the blocking-coverage
+count (see the runbook). That tolerance exists only so legacy producers
+that pre-date `nonBlocking[]` keep validating; it is NOT an invitation
+to route new non-blocking fixes through `addressed[]`. Use
+`nonBlocking[]` for new code.
 
 Non-blocking fixes you made go in the dedicated `nonBlocking[]` array
 (same shape as `addressed[]`: `{ title?, finding, action, files? }`).

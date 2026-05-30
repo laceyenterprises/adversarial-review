@@ -1093,11 +1093,13 @@ test('validateRemediationReply rejects nonBlocking[] entries with empty finding 
   );
 });
 
-test('claude remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', async () => {
+test('remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', async () => {
   // LAC-893: pin the load-bearing semantic ("blocking-only") so a
   // well-meaning future edit that softens the language back to "you
   // may include non-blocking findings in addressed[]" fails CI before
-  // it lands.
+  // it lands. The prompts are model-agnostic (codex is the default
+  // cross-model remediator; claude only remediates same-model) so the
+  // assertion is not tied to a specific reviewer model.
   const { readFile } = await import('node:fs/promises');
   const promptRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'code-pr');
   const files = ['remediator.first.md', 'remediator.middle.md', 'remediator.last.md'];

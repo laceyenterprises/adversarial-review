@@ -597,6 +597,13 @@ function normalizeCoverageTitle(title) {
 
 function usesPerFindingReplyContract(reply) {
   if (!reply || typeof reply !== 'object') return false;
+  // nonBlocking[] qualifies as a new-schema signal even when the worker
+  // emitted ONLY nonBlocking[] (no addressed/pushback/blockers). That's
+  // intentional: a reply that ships non-blocking polish while leaving
+  // every blocking finding unaccounted-for is the exact failure shape
+  // we want validateBlockingCoverage to reject loudly. Letting an empty
+  // addressed[] silently fall back to the legacy contract would mask
+  // that bug.
   if (
     reply.addressed !== undefined
     || reply.pushback !== undefined
@@ -690,7 +697,8 @@ function validateBlockingCoverage(reply, expectedJob) {
       `Remediation reply does not account for every blocking finding: ` +
         `review has ${expected} blocking issue(s), reply records ${blockingEntryTotal} ` +
         `(addressed=${addressed.length}, pushback=${pushback.length}, blockers=${blockers.length}). ` +
-        `Each blocking issue must appear exactly once across addressed[], pushback[], or blockers[].`
+        `Each blocking issue must appear exactly once across addressed[], pushback[], or blockers[]. ` +
+        `If you fixed non-blocking findings too, put them in nonBlocking[] (not addressed[]).`
     );
   }
 

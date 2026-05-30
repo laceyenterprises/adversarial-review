@@ -207,6 +207,15 @@ function safeEntryTitle(entry, fallback = 'Finding') {
   return normalizeEntryTitleText(redactPublicSafeText(title, PER_ENTRY_TITLE_MAX_CHARS)) || fallback;
 }
 
+// Coarse title-key used for render-time dedupe across addressed[] and
+// nonBlocking[]. Mirrors the validator's coverage-title normalization
+// shape: trim + collapse whitespace + lowercase. Returns '' for nullish
+// titles so untitled entries never collide on the empty key.
+function normalizeRenderTitleKey(title) {
+  if (typeof title !== 'string') return '';
+  return title.replace(/\s+/g, ' ').trim().toLocaleLowerCase('en-US');
+}
+
 function sanitizePerFindingText(text) {
   const raw = String(text ?? '').trim();
   if (!raw) return '';
@@ -281,12 +290,27 @@ function indentNestedBulletContent(text) {
 // so worker output stays inert; Files paths are inline-coded with
 // backticks stripped so a worker-injected ` cannot break out of the
 // inline-code wrapper.
-function formatAddressedList(items, emptyText = '_(none reported)_') {
+function formatAddressedList(items, emptyText = '_(none reported)_', options = {}) {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
+  // `untitledFallback` lets callers pin a section-appropriate label for
+  // entries without a title (nonBlocking[] uses "Non-blocking
+  // improvement N" so two untitled entries don't both render as
+  // "**Finding**"). Numbering is per-section and reflects the worker's
+  // entry order.
+  const untitledFallback = typeof options?.untitledFallback === 'string' && options.untitledFallback.trim()
+    ? options.untitledFallback.trim()
+    : null;
+  let untitledCounter = 0;
   const entries = items
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
-      const title = safeEntryTitle(entry);
+      let title;
+      if (untitledFallback && !normalizeEntryTitleText(entry?.title)) {
+        untitledCounter += 1;
+        title = `${untitledFallback} ${untitledCounter}`;
+      } else {
+        title = safeEntryTitle(entry);
+      }
       const finding = sanitizePerFindingText(entry.finding);
       const action = sanitizePerFindingText(entry.action);
       if (!finding || !action) return null;
@@ -727,21 +751,6 @@ function buildRemediationOutcomeCommentBody({
     }
   }
 
-  // Non-blocking improvements the worker chose to ship in this round.
-  // Rendered separately from `## Addressed findings` so the public
-  // comment never conflates blocking-finding accountability (the
-  // load-bearing count check the validator enforces) with optional
-  // non-blocking polish. Same nested-bullet card shape as addressed[].
-  if (reply?.nonBlocking?.length) {
-    const nonBlocking = formatAddressedList(reply.nonBlocking, '');
-    if (nonBlocking) {
-      lines.push('');
-      lines.push('## Non-blocking improvements');
-      lines.push('');
-      lines.push(nonBlocking);
-    }
-  }
-
   if (reply?.blockers?.length) {
     const blockers = formatBlockersList(reply.blockers, '');
     if (blockers) {
@@ -759,6 +768,39 @@ function buildRemediationOutcomeCommentBody({
       lines.push('## Operational blockers');
       lines.push('');
       lines.push(blockers);
+    }
+  }
+
+  // Non-blocking improvements the worker chose to ship in this round.
+  // Rendered LAST among the per-finding sections so an operator skimming
+  // the comment hits the operationally-urgent surfaces (Addressed →
+  // Pushback → Blockers → Operational blockers) before optional polish.
+  // Same nested-bullet card shape as addressed[]. Entries whose
+  // normalized title already appears in addressed[] are dropped at
+  // render time to defang the transition-window double-print race where
+  // a confused worker hedges by listing the same finding in both arrays
+  // — the validator's title-match tolerance path lets that pass, so the
+  // renderer is the right place to enforce no-double-print.
+  if (reply?.nonBlocking?.length) {
+    const addressedTitleKeys = new Set(
+      (Array.isArray(reply.addressed) ? reply.addressed : [])
+        .map((entry) => normalizeRenderTitleKey(entry?.title))
+        .filter(Boolean)
+    );
+    const dedupedNonBlocking = reply.nonBlocking.filter((entry) => {
+      const key = normalizeRenderTitleKey(entry?.title);
+      return !(key && addressedTitleKeys.has(key));
+    });
+    if (dedupedNonBlocking.length) {
+      const nonBlocking = formatAddressedList(dedupedNonBlocking, '', {
+        untitledFallback: 'Non-blocking improvement',
+      });
+      if (nonBlocking) {
+        lines.push('');
+        lines.push('## Non-blocking improvements');
+        lines.push('');
+        lines.push(nonBlocking);
+      }
     }
   }
 

@@ -270,6 +270,29 @@ the next watcher tick retries. Successful cleanup logs
 id, and launch request id. The `hq worker tear-down` call is bounded to the
 watcher tick budget and logs `merge_agent.tear_down_timeout` on timeout.
 
+That merge path is watcher-owned, not an inline branch inside
+`src/follow-up-jobs.mjs`. For the current PR head, clean `Comment only` /
+`Approved` verdicts dispatch merge-agent immediately unless the latest
+structured `## Blocking issues` section still contains a real finding, in
+which case the watcher refuses with `skip-blockers-present` (the ARP-06 / #157
+safety gate). Successful launches are audited under
+`data/follow-up-jobs/merge-agent-dispatches/`, and duplicate same-head launches
+are suppressed by that ledger plus the live `merge-agent-dispatched` lifecycle
+state. A current-head scoped `merge-agent-requested` label is the operator's
+explicit recovery override, but it still does not bypass duplicate-dispatch
+protection or hard skip labels.
+
+Concrete example: if review round 2 posts `Comment only` for head `abc123`,
+the watcher dispatches merge-agent for `abc123` and records the handoff under
+`merge-agent-dispatches/`. If the operator had applied
+`merge-agent-requested` to the previous head `def456`, that label is stale and
+does not authorize the new head. If `abc123` already has a dispatch record or
+still carries a live `merge-agent-dispatched` handoff, the watcher returns
+`skip-already-dispatched` instead of launching a duplicate worker. If the same
+`Comment only` review body still lists a real blocking issue instead of
+`- None.`, the watcher returns `skip-blockers-present` and leaves the PR out of
+the merge path until a fresh clean review or a scoped operator override exists.
+
 Operator surface, when something needs intervention:
 
 ```bash

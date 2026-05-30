@@ -445,6 +445,15 @@ The four stable prep outcomes are therefore:
 
 A clean (`comment-only`) verdict triggers the merge-agent immediately on the first review pass that returns clean — the dispatch path does NOT wait for the round budget to exhaust. Waiting for the budget cap on a clean verdict was the gate that left PR #90 stuck in May 2026 burning unused remediation rounds with nothing to remediate. Once dispatched on that clean verdict, the merge-agent follows the same merge-by-default convergence contract as the final-pass trigger, except without the budget-exhausted framing: it should finish bounded in-PR follow-ups, wait only for real external CI, and merge unless the work turns into a genuinely major in-PR refactor that merits re-review. Rounds-available remains a gate for `request-changes` verdicts so the merge-agent does not race an in-flight remediation cycle.
 
+Concrete contract example used by operator docs and regression tests:
+
+1. Review round 2 posts `Comment only` for current head `abc123`.
+2. The watcher, not `follow-up-jobs.mjs`, evaluates merge dispatch for `abc123`.
+3. If the latest structured `## Blocking issues` section is `- None.`, the watcher dispatches merge-agent and records the handoff under `data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-abc123.json`.
+4. If the PR still carries a `merge-agent-requested` label from older head `def456`, that label is stale and does not authorize anything for `abc123`.
+5. If `abc123` already has a dispatch record or a live `merge-agent-dispatched` handoff, the watcher returns `skip-already-dispatched` instead of launching a duplicate worker.
+6. If the same `Comment only` review still lists a real blocking issue, the watcher returns `skip-blockers-present` (ARP-06 / #157) and keeps the PR out of the merge path until a fresh structured clean review or a scoped current-head operator override exists.
+
 #### Why a fifth dispatch path exists
 
 Without the final-pass path, every PR whose verdict never converges to `Comment only` halts at `max-rounds-reached` and waits for the operator. In practice the codex reviewer almost always returns `Request changes` because the reviewer prompt is adversarial by design; the lenient final-round addendum relaxes *categorization* but keeps the *verdict* at `Request changes` whenever any finding remains. Result: the auto-merge daemon never auto-merged a single PR in the observed window leading up to 2026-05-14. The final-pass dispatch path closes that loop by giving the merge-agent itself the responsibility for the final substance check — the merge-agent's `comment_only_followups.py` is the right place to decide whether reviewer findings warrant blocking a merge or warrant another review round on a freshly-pushed head.

@@ -1010,11 +1010,110 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
 
 // ── GitHub review posting ────────────────────────────────────────────────────
 
-async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync) {
+// GitHub's GraphQL `addPullRequestReview` mutation refuses to create a second
+// pending review per (user, PR) tuple. If a previous reviewer subprocess was
+// SIGTERM'd between `gh pr review --comment` initiating the review and the
+// body submission completing, GitHub may have already accepted the review
+// CREATION but not the body submission — leaving a PENDING review draft
+// scoped to the bot, invisible to other accounts via the standard reviews
+// list. Every subsequent reviewer attempt then dies with:
+//
+//   GraphQL: User can only have one pending review per pull request (addPullRequestReview)
+//
+// The watcher's failure classifier returns `failure-class=unknown` (no pattern
+// match), so it schedules another retry, which fails the same way. Indefinite
+// loop, never recovers without operator manual DELETE.
+//
+// Bot-self-housekeeping: before each post, list the bot's own reviews on the
+// PR via the REST API (which DOES surface our own pending drafts), and DELETE
+// any with state=PENDING. The bot is the only writer of its own reviews, so
+// this is race-free against itself. Best-effort: if the list/delete calls
+// fail, log and continue — the post may still succeed, and a failure here is
+// strictly less bad than the leak it's trying to prevent.
+async function clearPendingReviewsForSelf({
+  repo,
+  prNumber,
+  token,
+  fetchImpl = globalThis.fetch,
+  log = console,
+} = {}) {
+  if (!token) return { cleared: 0, listed: 0 };
+  const [owner, repoName] = String(repo).split('/');
+  if (!owner || !repoName) return { cleared: 0, listed: 0 };
+
+  // Resolve self login from the token.
+  let selfLogin = null;
+  try {
+    const userRes = await fetchImpl('https://api.github.com/user', {
+      headers: { Authorization: `token ${token}`, 'User-Agent': 'adversarial-review-reviewer' },
+    });
+    if (userRes.ok) {
+      const userJson = await userRes.json();
+      selfLogin = String(userJson?.login || '').trim() || null;
+    }
+  } catch (err) {
+    log.warn?.(`[reviewer] clearPendingReviewsForSelf: self-login probe failed: ${err?.message || err}`);
+    return { cleared: 0, listed: 0 };
+  }
+  if (!selfLogin) return { cleared: 0, listed: 0 };
+
+  let reviews;
+  try {
+    const listRes = await fetchImpl(
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${prNumber}/reviews`,
+      { headers: { Authorization: `token ${token}`, 'User-Agent': 'adversarial-review-reviewer' } }
+    );
+    if (!listRes.ok) {
+      log.warn?.(`[reviewer] clearPendingReviewsForSelf: list returned ${listRes.status}`);
+      return { cleared: 0, listed: 0 };
+    }
+    reviews = await listRes.json();
+  } catch (err) {
+    log.warn?.(`[reviewer] clearPendingReviewsForSelf: list failed: ${err?.message || err}`);
+    return { cleared: 0, listed: 0 };
+  }
+  const listed = Array.isArray(reviews) ? reviews.length : 0;
+  const pendingMine = (Array.isArray(reviews) ? reviews : []).filter(
+    (r) => r?.state === 'PENDING' && r?.user?.login === selfLogin
+  );
+  let cleared = 0;
+  for (const pending of pendingMine) {
+    try {
+      const delRes = await fetchImpl(
+        `https://api.github.com/repos/${owner}/${repoName}/pulls/${prNumber}/reviews/${pending.id}`,
+        {
+          method: 'DELETE',
+          headers: { Authorization: `token ${token}`, 'User-Agent': 'adversarial-review-reviewer' },
+        }
+      );
+      if (delRes.ok) {
+        cleared += 1;
+        log.log?.(`[reviewer] cleared leaked pending review ${pending.id} on ${repo}#${prNumber}`);
+      } else {
+        log.warn?.(`[reviewer] failed to clear pending review ${pending.id}: HTTP ${delRes.status}`);
+      }
+    } catch (err) {
+      log.warn?.(`[reviewer] failed to clear pending review ${pending.id}: ${err?.message || err}`);
+    }
+  }
+  return { cleared, listed, selfLogin };
+}
+
+async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync, opts = {}) {
   const token = process.env[botTokenEnv];
   if (!token) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
+
+  // Pre-post cleanup: drop any leaked PENDING drafts the bot owns on this PR
+  // from a previously-killed reviewer subprocess. Best-effort; logged.
+  await clearPendingReviewsForSelf({
+    repo,
+    prNumber,
+    token,
+    fetchImpl: opts.fetchImpl,
+    log: opts.log || console,
+  });
 
   await execFileImpl(
     'gh',
@@ -1428,6 +1527,7 @@ export {
   resolveReviewerTimeoutMs,
   isFinalReviewRound,
   detectSpecTouchViolations,
+  clearPendingReviewsForSelf,
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
   __test__,

@@ -93,6 +93,20 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'bug';
   }
 
+  // GitHub's GraphQL mutation refuses to create a second pending review per
+  // (user, PR) tuple. A leak from a SIGTERM'd post step earlier makes every
+  // subsequent attempt fail with this message. Surface as a distinct class
+  // so the watcher's retry path can target the cleanup helper instead of
+  // blind-retrying the same broken state. The reviewer.mjs pre-post helper
+  // (clearPendingReviewsForSelf) prevents new leaks; this class catches
+  // existing-leak recovery on the next attempt.
+  if (
+    /user can only have one pending review per pull request/.test(lower)
+    || /addpullrequestreview.*pending review/.test(lower)
+  ) {
+    return 'pending-review-leak';
+  }
+
   return 'unknown';
 }
 

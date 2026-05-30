@@ -2419,10 +2419,12 @@ test('bounce recovery requeues reviewing rows for cancelled reviewer run records
       db,
       log: { log() {} },
       now: new Date('2026-05-11T20:01:00.000Z'),
+      leaseRecoveryEnabled: true,
     });
     assert.deepEqual(recovered, { recovered: 1, pruned: 0 });
-    const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE reviewer_session_uuid = ?').get('cancelled-recovery-session');
-    assert.equal(row.review_status, 'failed');
+    const row = db.prepare('SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE reviewer_session_uuid = ?').get('cancelled-recovery-session');
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.review_attempts, 1);
     assert.match(row.failure_message, /daemon-bounce/);
   } finally {
     db.close();

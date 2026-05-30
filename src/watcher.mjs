@@ -126,6 +126,11 @@ import {
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
 } from './watcher-reviewer-pool.mjs';
+import {
+  computeReviewerLeaseExpiryAt,
+  isReviewerLeaseExpired,
+  resolveReviewerLeaseRecoveryEnabled,
+} from './reviewer-lease.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -151,6 +156,7 @@ const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
+const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({ watcherConfig: config });
 const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
   claude: {
     reviewerModel: 'claude',
@@ -1409,6 +1415,7 @@ const stmtMarkAttemptStarted = db.prepare(
          reviewer_started_at = NULL,
          reviewer_head_sha = ?,
          reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
          reviewer_pgid = NULL,
          failed_at = CASE
            WHEN review_status = 'pending-upstream' THEN failed_at
@@ -1425,23 +1432,27 @@ const stmtMarkAttemptStarted = db.prepare(
 const stmtMarkReviewerPgid = db.prepare(
   `UPDATE reviewed_prs
       SET reviewer_pgid = ?,
-          reviewer_started_at = ?
+          reviewer_started_at = ?,
+          reviewer_lease_expires_at = ?
     WHERE reviewer_session_uuid = ?
       AND repo = ?
       AND pr_number = ?
       AND review_status = 'reviewing'`
 );
 const stmtMarkPosted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkFailed = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+);
+const stmtReleaseReviewLease = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );
 const stmtMarkCascadeFailed = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkPendingUpstream = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
 const stmtGetOpenPRs = db.prepare(
   "SELECT repo, pr_number, linear_ticket, labels_json FROM reviewed_prs WHERE pr_state = 'open'"
@@ -1483,6 +1494,7 @@ async function reconcileOrphanedReviewing(octokit) {
   return reconcileReviewerSessions({
     db,
     octokit,
+    leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
     onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
       sessionUuid: row?.reviewer_session_uuid,
       state,
@@ -1493,7 +1505,11 @@ async function reconcileOrphanedReviewing(octokit) {
 
 function shouldReconcileStaleReviewerSession(row, now, {
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
+  leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
 } = {}) {
+  if (leaseRecoveryEnabled && isReviewerLeaseExpired(row, now, { reviewerTimeoutMs })) {
+    return true;
+  }
   const persistedTimeoutMs = Number(row?.reviewer_timeout_ms);
   const effectiveTimeoutMs = Number.isInteger(persistedTimeoutMs) && persistedTimeoutMs > 0
     ? persistedTimeoutMs
@@ -1556,12 +1572,15 @@ function persistReviewerPgid({
   repoPath,
   prNumber,
   startedAt = new Date().toISOString(),
+  reviewerTimeoutMs = resolveReviewerTimeoutMs(),
   log = console,
 }) {
   try {
+    const leaseExpiresAt = computeReviewerLeaseExpiryAt(startedAt, reviewerTimeoutMs);
     const result = stmtMarkReviewerPgid.run(
       pgid,
       startedAt,
+      leaseExpiresAt,
       reviewerSessionUuid,
       repoPath,
       prNumber
@@ -1742,9 +1761,11 @@ function settleReviewerAttempt({
   result,
   failureAt = new Date().toISOString(),
   maxRemediationRounds,
+  leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
   statements = {
     markPosted: stmtMarkPosted,
     markFailed: stmtMarkFailed,
+    releaseReviewLease: stmtReleaseReviewLease,
     markCascadeFailed: stmtMarkCascadeFailed,
     markPendingUpstream: stmtMarkPendingUpstream,
     getReviewRow: stmtGetReviewRow,
@@ -1808,7 +1829,10 @@ function settleReviewerAttempt({
         `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); will resume when the reviewer lane recovers`
       );
     } else {
-      statements.markCascadeFailed.run(failureAt, classifiedMessage, repoPath, prNumber);
+      const transientSettleStatement = leaseRecoveryEnabled
+        ? statements.releaseReviewLease
+        : statements.markCascadeFailed;
+      transientSettleStatement.run(failureAt, classifiedMessage, repoPath, prNumber);
     }
     log.warn(
       `[watcher] Reviewer ${failureClass} failure on #${prNumber} (consecutiveTransient=${cascadeState.consecutiveTransientFailures}); backing off ${cascadeState.backoffMinutes}m`
@@ -1817,7 +1841,10 @@ function settleReviewerAttempt({
   }
 
   clearCascadeState(rootDir, { repo: repoPath, prNumber });
-  statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber);
+  const terminalFailureStatement = leaseRecoveryEnabled
+    ? statements.releaseReviewLease
+    : statements.markFailed;
+  terminalFailureStatement.run(failureAt, classifiedMessage, repoPath, prNumber);
   const updatedRow = statements.getReviewRow.get(repoPath, prNumber);
   if (failureClass === 'bug') {
     log.warn(
@@ -2857,6 +2884,7 @@ async function pollOnce(
     octokit,
     maxRows: resolveStaleReviewerReconcilePerPoll(),
     shouldReconcileRow: (row, now) => shouldReconcileReviewerSession(row, now),
+    leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
     onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
       sessionUuid: row?.reviewer_session_uuid,
       state,
@@ -3599,11 +3627,13 @@ async function pollOnce(
             // PR that reached the claim site, silently blocking review spawns.)
             const reviewerHeadSha = subject?.headSha || null;
             const reviewerTimeoutMs = resolveReviewerTimeoutMs();
+            const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
             const claim = stmtMarkAttemptStarted.run(
               attemptAt,
               reviewerSessionUuid,
               reviewerHeadSha,
               reviewerTimeoutMs,
+              reviewerLeaseExpiresAt,
               repoPath,
               prNumber
             );
@@ -3735,6 +3765,7 @@ async function pollOnce(
                   repoPath,
                   prNumber,
                   startedAt: spawnedAt,
+                  reviewerTimeoutMs,
                 });
               },
             });
@@ -3891,6 +3922,7 @@ async function main() {
     adapter: reviewerRuntimeAdapter,
     db,
     log: console,
+    leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
   });
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped

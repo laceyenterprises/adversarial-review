@@ -220,6 +220,20 @@ test('steady-state reattach only probes reviewer sessions older than the reviewe
     ),
     true
   );
+  assert.equal(
+    shouldReconcileStaleReviewerSession(
+      {
+        reviewer_started_at: '2026-05-11T05:19:00.000Z',
+        reviewer_lease_expires_at: '2026-05-11T05:19:59.000Z',
+      },
+      now,
+      {
+        reviewerTimeoutMs: 20 * 60 * 1000,
+        leaseRecoveryEnabled: true,
+      }
+    ),
+    true
+  );
 });
 
 test('steady-state reattach does not touch a freshly claimed row before spawn callback lands', () => {

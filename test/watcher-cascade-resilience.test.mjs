@@ -631,6 +631,9 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
         "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
       ),
       markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
       markCascadeFailed: stmtMarkCascadeFailed(db),
       markPendingUpstream: stmtMarkPendingUpstream(db),
       getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
@@ -654,6 +657,7 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
               reviewer_started_at = NULL,
               reviewer_head_sha = ?,
               reviewer_timeout_ms = ?,
+              reviewer_lease_expires_at = ?,
               reviewer_pgid = NULL,
               failed_at = CASE
                 WHEN review_status = 'pending-upstream' THEN failed_at
@@ -671,6 +675,7 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
       'session-cascade',
       'head-cascade',
       20 * 60 * 1000,
+      '2026-05-04T07:50:00.000Z',
       repo,
       prNumber
     );
@@ -714,6 +719,9 @@ test('settleReviewerAttempt records cascade failures and marks pending-upstream 
         "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
       ),
       markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
       markCascadeFailed: stmtMarkCascadeFailed(db),
       markPendingUpstream: stmtMarkPendingUpstream(db),
       getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
@@ -764,6 +772,9 @@ test('settleReviewerAttempt keeps contextual defaults for empty transient errors
         "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
       ),
       markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
       markCascadeFailed: stmtMarkCascadeFailed(db),
       markPendingUpstream: stmtMarkPendingUpstream(db),
       getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
@@ -811,6 +822,9 @@ test('settleReviewerAttempt records reviewer timeout class without burning attem
         "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
       ),
       markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
       markCascadeFailed: stmtMarkCascadeFailed(db),
       markPendingUpstream: stmtMarkPendingUpstream(db),
       getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
@@ -840,6 +854,106 @@ test('settleReviewerAttempt records reviewer timeout class without burning attem
     assert.match(row.failure_message, /^\[reviewer-timeout\]/);
     assert.match(warnings.join('\n'), /Reviewer reviewer-timeout failure/);
     assert.equal(readCascadeState(rootDir, { repo, prNumber }).consecutiveTransientFailures, 1);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt requeues reviewer-timeout failures to pending when lease recovery is enabled', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing' WHERE repo = ? AND pr_number = ?").run(repo, prNumber);
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'Command failed after reviewer timeout',
+        failureClass: 'reviewer-timeout',
+      },
+      failureAt: '2026-05-04T07:10:00.000Z',
+      maxRemediationRounds: 1,
+      leaseRecoveryEnabled: true,
+      statements,
+      log: { warn() {} },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message, reviewer_lease_expires_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.review_attempts, 1);
+    assert.equal(row.reviewer_lease_expires_at, null);
+    assert.match(row.failure_message, /^\[reviewer-timeout\]/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt requeues non-zero reviewer exits to pending when lease recovery is enabled', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing' WHERE repo = ? AND pr_number = ?").run(repo, prNumber);
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'Reviewer subprocess exited 17 with no GitHub post',
+        failureClass: 'bug',
+      },
+      failureAt: '2026-05-04T07:10:00.000Z',
+      maxRemediationRounds: 1,
+      leaseRecoveryEnabled: true,
+      statements,
+      log: { warn() {} },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.review_attempts, 1);
+    assert.match(row.failure_message, /^\[bug\]/);
+    assert.match(row.failure_message, /Reviewer subprocess exited 17/);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

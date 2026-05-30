@@ -26,7 +26,7 @@ const DEFAULT_WORKER_CLASS_BY_MODEL = new Map([
   ['claude-code', 'claude-code'],
   ['codex', 'codex'],
 ]);
-const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded', 'reaped_stuck_requested']);
 const SUCCESS_STATUSES = new Set(['succeeded']);
 const ACTIVE_RECORD_STATES = new Set(['spawned', 'heartbeating']);
 const DEFAULT_POLL_BASE_MS = 30_000;

@@ -692,6 +692,49 @@ test('agent-os-hq reattaches by polling persisted launch request id', async () =
   }
 });
 
+test('agent-os-hq polling treats reaped_stuck_requested as terminal', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  const sleeps = [];
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      jitterImpl: () => 0,
+      sleepImpl: async (ms) => { sleeps.push(ms); },
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_reaped' }), stderr: '' };
+        }
+        return {
+          stdout: JSON.stringify({
+            status: 'reaped_stuck_requested',
+            failureClass: 'stuck-requested-reaped',
+            failureDetail: 'reaped by stuck-requested maintenance',
+          }),
+          stderr: '',
+        };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 120_000,
+      sessionUuid: 'agent-hq-reaped-terminal',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'stuck-requested-reaped');
+    assert.equal(result.reattachToken, 'lrq_reaped');
+    assert.deepEqual(sleeps, []);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq reattach classifies never-dispatched records as daemon-bounce', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');

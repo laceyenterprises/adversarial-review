@@ -8,10 +8,15 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, basename, join } from 'node:path';
+import { homedir } from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
 import yaml from 'js-yaml';
 
 export const SCHEMA_VERSION = 1;
-export const DEFAULT_TOP_LEVEL_PATH = '/Users/airlock/agent-os/config.yaml';
+// Default top-level path resolves relative to the current user's home dir so
+// the loader works on any host. Operators can override with topPath= or the
+// AGENT_OS_CONFIG_PATH env var.
+export const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
 
 // -------- AgentOSConfigError ------------------------------------------------
 
@@ -236,7 +241,10 @@ function checkLeaf(value, schema, keyPath, source) {
   const expected = schema.__type;
   if (value === null || value === undefined) {
     if (schema.__nullable) return null;
-    if (Object.prototype.hasOwnProperty.call(schema, '__default')) return null;
+    // Explicit null/undefined (i.e. user wrote `key: ~` or `key:`) must
+    // fail loud — it is NOT the same as "key omitted, use default".
+    // Defaults are seeded from buildDefaultsDict and never flow through
+    // checkLeaf; reaching here means the value was set in YAML/env/CLI.
     throw new AgentOSConfigError(
       `${keyPath}: expected ${expected}, got null`,
       { key: keyPath, expected, got: null, source },
@@ -395,7 +403,13 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
   const out = {};
   for (const [childKey, raw] of Object.entries(doc)) {
     if (childKey.startsWith('__')) continue;
-    if (!(childKey in allowed)) continue;
+    if (!(childKey in allowed)) {
+      // Non-strict dict (e.g. `submodules`) is an extension point:
+      // pass arbitrary subtrees through verbatim instead of silently
+      // dropping them. Strict dicts would have thrown above.
+      if (!strict) out[childKey] = raw;
+      continue;
+    }
     const childSchema = allowed[childKey];
     const full = keyPath ? `${keyPath}.${childKey}` : childKey;
     const childSource = annotateLine(source, lineMap, childKey);
@@ -504,11 +518,23 @@ function validateModuleDoc(doc, source, rawText) {
     );
   }
   const aliases = {};
+  const schemaForAliasCheck = schemaV1();
   for (const [moduleKey, canonicalKey] of Object.entries(aliasesRaw)) {
     if (typeof moduleKey !== 'string' || typeof canonicalKey !== 'string') {
       throw new AgentOSConfigError(
         `${source}: __aliases entries must map string→string (${JSON.stringify(moduleKey)}→${JSON.stringify(canonicalKey)})`,
         { source },
+      );
+    }
+    if (!isValidSchemaPath(schemaForAliasCheck, canonicalKey)) {
+      throw new AgentOSConfigError(
+        `${source}: __aliases canonical key ${JSON.stringify(canonicalKey)} (target of ${JSON.stringify(moduleKey)}) is not in the schema`,
+        {
+          key: canonicalKey,
+          expected: 'known canonical schema key',
+          got: canonicalKey,
+          source,
+        },
       );
     }
     aliases[moduleKey] = canonicalKey;
@@ -564,10 +590,9 @@ function validateModuleDoc(doc, source, rawText) {
 }
 
 function sameValue(a, b) {
-  if (a === b) return true;
-  if (a === null || b === null) return false;
-  if (typeof a !== typeof b) return false;
-  return JSON.stringify(a) === JSON.stringify(b);
+  // Order-independent deep equality so dict-typed alias values don't trigger
+  // spurious "same-file alias conflict" errors on key-order coincidence.
+  return isDeepStrictEqual(a, b);
 }
 
 // -------- Defaults builder -------------------------------------------------
@@ -581,22 +606,6 @@ function buildDefaultsDict(schema) {
       out[key] = nested;
     } else if (Object.prototype.hasOwnProperty.call(child, '__default')) {
       out[key] = child.__default;
-    }
-  }
-  return out;
-}
-
-function flattenWithEmptyDicts(doc, prefix = '') {
-  const out = {};
-  for (const [key, value] of Object.entries(doc)) {
-    if (key.startsWith('__')) continue;
-    const full = prefix ? `${prefix}.${key}` : key;
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      if (Object.keys(value).length > 0) {
-        Object.assign(out, flattenWithEmptyDicts(value, full));
-      }
-    } else {
-      out[full] = value;
     }
   }
   return out;
@@ -635,9 +644,12 @@ function coerceEnvValue(key, value, schemaLeaf) {
   if (expected === TYPE_BOOL) {
     const lower = value.trim().toLowerCase();
     if (lower === 'true' || lower === '1') return true;
-    if (lower === 'false' || lower === '0' || lower === '') return false;
+    if (lower === 'false' || lower === '0') return false;
+    // Empty string is rejected (was previously silently coerced to false);
+    // operators "unsetting" a security-relevant flag by setting it empty
+    // must do so by removing the env var, not blanking it.
     throw new AgentOSConfigError(
-      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false' or '1'/'0')`,
+      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false' or '1'/'0'; unset the env var instead of blanking it)`,
       { key, expected: 'bool', got: value },
     );
   }
@@ -674,6 +686,24 @@ function schemaLeaf(schema, key) {
     cursor = keys[part];
   }
   return cursor;
+}
+
+// True iff `key` is a path the schema accepts. Walks like schemaLeaf, but
+// also accepts paths that descend into a non-strict dict (extension point,
+// e.g. `submodules.X.Y`) where no further leaf is declared. Used by
+// __aliases validation so canonical-key typos fail loud while legitimate
+// pass-through targets are allowed.
+function isValidSchemaPath(schema, key) {
+  const parts = key.split('.');
+  let cursor = schema;
+  for (let i = 0; i < parts.length; i++) {
+    if (!cursor || cursor.__type !== TYPE_DICT) return false;
+    const keys = cursor.__keys || {};
+    const part = parts[i];
+    if (!(part in keys)) return cursor.__strict === false;
+    cursor = keys[part];
+  }
+  return cursor !== null && cursor !== undefined;
 }
 
 // -------- File reading helpers ---------------------------------------------
@@ -745,7 +775,7 @@ export function loadConfig({
   const defaults = buildDefaultsDict(schema);
   const merged = {};
   const trace = {};
-  for (const [dotted, value] of Object.entries(flattenWithEmptyDicts(defaults))) {
+  for (const [dotted, value] of Object.entries(flatten(defaults))) {
     setLeaf(merged, dotted, value);
     (trace[dotted] = trace[dotted] || []).push({
       source: 'code-default',
@@ -897,6 +927,13 @@ function isEmptyDoc(doc) {
 
 // -------- Convenience wrapper ----------------------------------------------
 
+// `getConfig` lazily caches the first `loadConfig()` for the lifetime of the
+// process. That is fine for short-lived CLIs but NOT safe in long-running
+// daemons (e.g. the adversarial-watcher and follow-up daemons): env-var
+// rotations and live config edits will not be reflected until the cache is
+// invalidated. Long-lived processes must either call `resetConfigCache()`
+// on SIGHUP / on a known reconfigure boundary, or call `loadConfig()`
+// directly per-tick instead of using `getConfig()`.
 let _cachedConfig = null;
 
 export function getConfig(key, defaultValue = null) {

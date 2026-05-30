@@ -618,3 +618,172 @@ test('validateSchema strict at top-level', () => {
     },
   );
 });
+
+// -------- Null-handling: explicit null must NOT bypass the schema ---------
+
+test('explicit null on non-nullable enum fails loud (does not silently revert to default)', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        reviewer: ~
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /roles\.reviewer/);
+        assert.match(err.message, /null/);
+        assert.match(err.message, /string/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('explicit null on nullable field is accepted', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: ~
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), null);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('explicit null on merge_agent_worker_class fails (non-nullable enum)', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        merge_agent_worker_class: null
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /merge_agent_worker_class/);
+        assert.match(err.message, /null/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// -------- submodules pass-through (__strict: false) -----------------------
+
+test('submodules subtree round-trips through merged config', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      submodules:
+        worker_pool:
+          foo: 1
+          bar:
+            baz: hello
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('submodules.worker_pool.foo'), 1);
+    assert.equal(cfg.get('submodules.worker_pool.bar.baz'), 'hello');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('submodules accepts arbitrary keys through validateSchema', () => {
+  const validated = validateSchema({
+    version: 1,
+    submodules: { anything_goes: { nested: true } },
+  });
+  assert.deepEqual(validated.submodules, { anything_goes: { nested: true } });
+});
+
+// -------- Empty env-string for booleans must fail loud --------------------
+
+test('empty-string env var for bool fails loud (does not silently coerce to false)', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      feature_flags:
+        claude_code_ambient_auth_fallback: true
+    `);
+    assert.throws(
+      () =>
+        loadConfig({
+          topPath: top,
+          env: { AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK: '' },
+        }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /claude_code_ambient_auth_fallback/);
+        assert.match(err.message, /not a recognized boolean/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// -------- __aliases canonical key must exist in schema --------------------
+
+test('module __aliases targeting unknown canonical key fails loud', () => {
+  const tmp = freshTmp();
+  try {
+    const mod = join(tmp, 'mod.yaml');
+    writeFile(mod, `
+      __aliases:
+        foo.bar: roles.nonexistent
+      foo:
+        bar: codex
+    `);
+    const top = join(tmp, 'no_top.yaml');
+    assert.throws(
+      () => loadConfig({ topPath: top, modulePaths: [mod], env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /roles\.nonexistent/);
+        assert.match(err.message, /__aliases/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('module __aliases targeting submodules subtree is accepted (non-strict)', () => {
+  const tmp = freshTmp();
+  try {
+    const mod = join(tmp, 'mod.yaml');
+    writeFile(mod, `
+      __aliases:
+        worker_pool.size: submodules.worker_pool.size
+      worker_pool:
+        size: 4
+    `);
+    const top = join(tmp, 'no_top.yaml');
+    const cfg = loadConfig({ topPath: top, modulePaths: [mod], env: {} });
+    assert.equal(cfg.get('submodules.worker_pool.size'), 4);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

@@ -200,6 +200,165 @@ test('reviewerCancelHandle and parseArgs expose reviewer cancel handle', () => {
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 149,
     signal: 'SIGKILL',
+    allowStatus: null,
     reason: 'duplicate review',
   });
+});
+
+test('parseArgs accepts --allow-status as comma-separated list', () => {
+  const parsed = parseArgs([
+    '--repo=laceyenterprises/adversarial-review',
+    '--pr=149',
+    '--allow-status=posted,failed',
+  ]);
+  assert.equal(parsed.repo, 'laceyenterprises/adversarial-review');
+  assert.equal(parsed.prNumber, 149);
+  assert.ok(parsed.allowStatus instanceof Set);
+  assert.deepEqual([...parsed.allowStatus].sort(), ['failed', 'posted']);
+});
+
+test('parseArgs rejects unsupported --allow-status values', () => {
+  // The supported allowlist intentionally excludes `pending` (no subprocess
+  // to signal), `failed-orphan` (sticky operator-only), and `malformed`
+  // (terminal-by-design).
+  assert.throws(
+    () => parseArgs(['--repo=x/y', '--pr=1', '--allow-status=pending']),
+    /Unsupported status "pending"/,
+  );
+  assert.throws(
+    () => parseArgs(['--repo=x/y', '--pr=1', '--allow-status=failed-orphan']),
+    /Unsupported status "failed-orphan"/,
+  );
+  assert.throws(
+    () => parseArgs(['--repo=x/y', '--pr=1', '--allow-status=']),
+    /requires a non-empty comma-separated list/,
+  );
+});
+
+test('cancelActiveReview accepts posted rows when --allow-status posted is passed', async () => {
+  // Reproduces the 2026-05-30 post-merge race: a reviewer subprocess is
+  // still alive after the row already transitioned to `posted` (a prior
+  // attempt completed; the watcher re-spawned a retry that's now in
+  // flight; or the PR merged in the gap between row-update and
+  // subprocess teardown). Without --allow-status, the canonical CLI
+  // refuses and operators have to fall back to direct `kill -KILL` or
+  // hand-editing the row. The flag is the canonical surface.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewingRow(rootDir, { reviewStatus: 'posted', reviewerPgid: 4242 });
+
+  const result = await cancelActiveReview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 149,
+    signal: 'SIGTERM',
+    allowStatus: new Set(['posted']),
+    requestedAt: '2026-05-30T07:18:24.650Z',
+    execFileImpl: async () => ({
+      stdout: `${new Date('2026-05-24T15:01:00.000Z').toString()}\n`,
+    }),
+    processKill: (pid, signal) => {
+      if (signal === 0 && pid === -4242) return true;
+      if (signal === 'SIGTERM' && pid === -4242) return true;
+      throw new Error(`unexpected signal ${signal} ${pid}`);
+    },
+  });
+
+  assert.equal(result.signalled, true);
+  assert.equal(result.target.id, 4242);
+  // Receipt still records the source status (`posted`) so the audit
+  // trail explains why the cancel was allowed.
+  assert.equal(result.receipt.review.status, 'posted');
+});
+
+test('cancelActiveReview still refuses non-allowed statuses without --allow-status', async () => {
+  // The default behavior MUST be unchanged: a `posted` row without
+  // explicit --allow-status is refused. Regression guard against
+  // accidentally widening the default cancellable set.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewingRow(rootDir, { reviewStatus: 'posted' });
+
+  await assert.rejects(
+    cancelActiveReview({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 149,
+      processKill: () => true,
+    }),
+    /from status posted.*cancellable: reviewing.*--allow-status/s,
+  );
+});
+
+test('cancelActiveReview still refuses statuses outside the allowed set', async () => {
+  // Passing `--allow-status posted` MUST NOT silently widen to other
+  // statuses like `pending`. The guard is enforced per-row at cancel
+  // time, not just at parse time.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewingRow(rootDir, { reviewStatus: 'pending' });
+
+  await assert.rejects(
+    cancelActiveReview({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 149,
+      allowStatus: new Set(['posted']),
+      processKill: () => true,
+    }),
+    /from status pending.*cancellable: posted, reviewing/s,
+  );
+});
+
+test('cancelActiveReview re-fetches and surfaces hint when failed row promotes mid-cancel', async () => {
+  // Simulate the watcher's stmtMarkAttemptStarted promoting a `failed`
+  // row to `reviewing` between the CLI's snapshot read and the identity
+  // check. The CLI's identity check refuses to signal the stale pgid
+  // (start-time mismatch); we expect cancelActiveReview to re-fetch the
+  // row and surface the new pgid via result.hint + receipt.postSignalState.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewingRow(rootDir, {
+    prNumber: 151,
+    reviewStatus: 'failed',
+    reviewerPgid: 3100,
+    reviewerStartedAt: '2026-05-30T07:00:00.000Z',
+  });
+
+  // The race interleaving: execFileImpl is invoked between isPgidAlive
+  // and the actual signal, which is when verifyPgidIdentity stat-reads
+  // the process start time. Drive the watcher's promote from inside
+  // execFileImpl so the post-signal re-fetch sees the new state.
+  const result = await cancelActiveReview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 151,
+    requestedAt: '2026-05-30T07:06:00.000Z',
+    allowStatus: new Set(['failed']),
+    execFileImpl: async () => {
+      const promoteDb = openReviewStateDb(rootDir);
+      try {
+        ensureReviewStateSchema(promoteDb);
+        promoteDb.prepare(
+          "UPDATE reviewed_prs SET review_status='reviewing', reviewer_pgid=?, reviewer_started_at=? WHERE pr_number=?"
+        ).run(3200, '2026-05-30T07:05:00.000Z', 151);
+      } finally {
+        promoteDb.close();
+      }
+      // Return a start time that drifts from the snapshot's started_at,
+      // forcing verifyPgidIdentity → match=false.
+      return { stdout: `${new Date('2026-05-30T07:05:00.000Z').toString()}\n` };
+    },
+    processKill: (pid, signal) => {
+      if (signal === 0 && pid === -3100) return true;
+      throw new Error(`unexpected signal ${signal} ${pid}`);
+    },
+  });
+
+  assert.equal(result.signalled, false);
+  assert.equal(result.error, 'identity-unconfirmed');
+  assert.ok(result.hint, 'expected hint when row transitions mid-cancel');
+  assert.match(result.hint, /reviewing/);
+  assert.match(result.hint, /3200/);
+  assert.equal(result.postSignalState.status, 'reviewing');
+  assert.equal(result.postSignalState.reviewerPgid, 3200);
+  const receipt = JSON.parse(readFileSync(result.receiptPath, 'utf8'));
+  assert.equal(receipt.postSignalState.status, 'reviewing');
+  assert.equal(receipt.postSignalState.reviewerPgid, 3200);
 });

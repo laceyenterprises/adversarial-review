@@ -9,6 +9,7 @@
  */
 
 import { builderClassFromTitle, tagFromBuilderClass } from './title-tagging.mjs';
+import { resolveDefaultReviewer as resolveDefaultReviewerFromConfig } from '../../../role-config.mjs';
 
 const ROUTE_BY_BUILDER_CLASS = {
   codex: {
@@ -74,20 +75,24 @@ function normalizeReviewerModel(reviewerInput) {
   }
 }
 
-function defaultReviewerRouteFromEnv(env = process.env) {
-  const raw = env?.[DEFAULT_REVIEWER_ENV];
-  if (raw === undefined || String(raw).trim() === '') return null;
-  const reviewerModel = normalizeReviewerModel(raw);
-  if (!reviewerModel) {
-    throw new Error(
-      `${DEFAULT_REVIEWER_ENV} must be one of: codex, claude; got ${JSON.stringify(raw)}`
-    );
-  }
-  return REVIEWER_ROUTE_BY_MODEL[reviewerModel];
+// Cascade-aware reviewer route resolver. Consults config.yaml FIRST
+// (module → top → *.local) and env LAST per SPEC §3. Returns null when
+// no pin is in effect (the per-tag cross-model routing in
+// ROUTE_BY_BUILDER_CLASS then applies).
+//
+// `defaultReviewerRouteFromEnv` is preserved as the public name; the body
+// delegates to the file-cascade resolver. `routeSubject` and the watcher's
+// boot validator both consume this without changes.
+function defaultReviewerRouteFromEnv(env = process.env, opts = {}) {
+  return resolveDefaultReviewerFromConfig({
+    env,
+    reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+    ...opts,
+  });
 }
 
-function validateDefaultReviewerRouteConfig(env = process.env) {
-  defaultReviewerRouteFromEnv(env);
+function validateDefaultReviewerRouteConfig(env = process.env, opts = {}) {
+  defaultReviewerRouteFromEnv(env, opts);
 }
 
 function isCrossModelReviewWaived(builderClassInput, reviewerInput) {
@@ -113,10 +118,39 @@ function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = 
   );
 }
 
-function routeSubject(subject, { env = process.env } = {}) {
+// CFG-02 round-1 review B3 fix (2026-05-30): catch AgentOSConfigError
+// so a runtime edit to `config.yaml` (or `~/agent-os/config.yaml`) that
+// violates the strict schema cannot blow up the per-PR processing loop
+// in `watcher.mjs`. Returns a sentinel `{ configBroken: true, error,
+// builderClass }` instead of throwing. Callers that want the legacy
+// throw-on-bad-config behavior should use the explicit boot-time
+// validator (`validateDefaultReviewerRouteConfig`) at startup, which is
+// already wired in `watcher.mjs:main()`.
+function routeSubject(subject, { env = process.env, topPath, loaderImpl } = {}) {
   const builderClass = normalizeBuilderClass(subject?.builderClass);
   if (!builderClass) return null;
-  const route = defaultReviewerRouteFromEnv(env) || ROUTE_BY_BUILDER_CLASS[builderClass];
+  let route;
+  try {
+    route = defaultReviewerRouteFromEnv(env, { topPath, loaderImpl })
+      || ROUTE_BY_BUILDER_CLASS[builderClass];
+  } catch (err) {
+    if (err && err.name === 'AgentOSConfigError') {
+      // Surface a tagged sentinel so the watcher's per-PR loop can
+      // route to a dedicated "config-broken" disposition + back off,
+      // without losing the in-progress batch. The boot-time validator
+      // is the legitimate fail-loud path; runtime edits should not
+      // abort a tick.
+      return {
+        configBroken: true,
+        error: err,
+        builderClass,
+        tag: tagFromBuilderClass(builderClass),
+        reviewerModel: null,
+        botTokenEnv: null,
+      };
+    }
+    throw err;
+  }
   return {
     builderClass,
     tag: tagFromBuilderClass(builderClass),
@@ -137,6 +171,10 @@ function routePR(prTitle, subject = null, options = {}) {
   if (!builderClass) return null;
   const route = routeSubject({ builderClass }, options);
   if (!route) return null;
+  // CFG-02 round-1 review B3 fix: propagate the config-broken sentinel
+  // so the caller can route to a dedicated disposition instead of
+  // dereferencing null reviewerModel/botTokenEnv.
+  if (route.configBroken) return route;
   return {
     builderClass,
     tag: route.tag,
@@ -145,6 +183,13 @@ function routePR(prTitle, subject = null, options = {}) {
     linearTicketId: extractLinearTicketId(prTitle),
   };
 }
+
+// `resolveDefaultReviewer` is the CFG-02 cascade-aware name. It returns
+// the same route object as `defaultReviewerRouteFromEnv` (or null when no
+// pin is in effect); callers/tests targeting the new API can import it
+// directly. `defaultReviewerRouteFromEnv` is preserved as the back-compat
+// alias and continues to work unchanged for existing call sites.
+const resolveDefaultReviewer = defaultReviewerRouteFromEnv;
 
 export {
   DEFAULT_REVIEWER_ENV,
@@ -156,6 +201,7 @@ export {
   isCrossModelReviewWaived,
   normalizeBuilderClass,
   normalizeReviewerModel,
+  resolveDefaultReviewer,
   routePR,
   routeSubject,
   validateDefaultReviewerRouteConfig,

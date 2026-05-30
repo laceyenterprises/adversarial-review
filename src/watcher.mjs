@@ -92,6 +92,7 @@ import {
   shouldUseReviewerTimeoutExhaustedMergeGate,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
+  validateStartupMergeAgentConfig,
 } from './follow-up-merge-agent.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
@@ -3240,6 +3241,22 @@ async function pollOnce(
 
       let crossModelWaiverReason = null;
       const baseRoute = routeSubject(subject);
+      // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject can now
+      // return a tagged `configBroken: true` sentinel when a runtime
+      // edit to config.yaml violates the strict schema (instead of
+      // throwing and aborting the whole tick). Skip this PR with a
+      // loud log so the operator sees the bad config and fixes it;
+      // the boot-time validator (validateDefaultReviewerRouteConfig)
+      // would have caught the same edit at daemon restart, so this
+      // path is the runtime-edit-during-tick fallback.
+      if (baseRoute && baseRoute.configBroken) {
+        console.warn(
+          `[watcher] routeSubject returned config-broken for ${repoPath}#${prNumber}: ` +
+          `${baseRoute.error?.message || baseRoute.error || 'unknown config error'} — ` +
+          `skipping this PR for the tick; fix the config and restart the watcher to recover`
+        );
+        continue;
+      }
       if (!baseRoute) {
         if (!existing) {
           stmtCreateReviewRow.run(
@@ -3834,7 +3851,13 @@ function requireEnv(name) {
 async function main() {
   requireEnv('GITHUB_TOKEN');
   try {
+    // CFG-02: defaultReviewerRouteFromEnv now consults the loader, which
+    // validates the full config.yaml schema. Validate merge-agent here too
+    // so a typo in ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS or in
+    // tools/adversarial-review/config.yaml fails loud at boot instead of
+    // hours later at first merge-agent dispatch.
     defaultReviewerRouteFromEnv(process.env);
+    validateStartupMergeAgentConfig(process.env);
   } catch (err) {
     console.error(`[watcher] FATAL config: ${err?.message || err}`);
     throw err;

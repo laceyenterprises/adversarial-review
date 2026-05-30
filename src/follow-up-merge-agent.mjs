@@ -41,6 +41,10 @@ import {
   CASCADE_FAILURE_CAP,
   readCascadeState,
 } from './reviewer-cascade.mjs';
+import {
+  resolveDefaultMergeAgentWorkerClass,
+  validateStartupRoleConfig,
+} from './role-config.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
@@ -107,35 +111,42 @@ const ALLOWED_MERGE_AGENT_WORKER_CLASSES = Object.freeze([
   'claude-code',
 ]);
 
-function resolveMergeAgentWorkerClass(env = process.env) {
-  const raw = env?.[MERGE_AGENT_WORKER_CLASS_ENV];
-  if (raw === undefined || String(raw).trim() === '') {
-    return DEFAULT_MERGE_AGENT_WORKER_CLASS;
-  }
-  const value = String(raw).trim();
-  if (!ALLOWED_MERGE_AGENT_WORKER_CLASSES.includes(value)) {
-    const err = new Error(
-      `${MERGE_AGENT_WORKER_CLASS_ENV} must be one of: ${ALLOWED_MERGE_AGENT_WORKER_CLASSES.join(', ')}; ` +
-      `got ${JSON.stringify(raw)}`
-    );
-    err.isMergeAgentConfigError = true;
-    err.configKey = MERGE_AGENT_WORKER_CLASS_ENV;
-    err.requestedValue = raw;
+// Cascade-aware merge-agent worker class resolver. Consults config.yaml
+// FIRST (module → top → *.local) and env LAST per SPEC §3. The top-level
+// canonical key `roles.merge_agent_worker_class` overrides the module's
+// `merge_agent.worker_class` via the SPEC §10.2 `__aliases` block. The
+// loader fails loud on enum violations, env-alias conflicts, and YAML 1.2
+// boolean-coercion attempts.
+//
+// The `_isMergeAgentConfigError` flag and `configKey` / `requestedValue`
+// shape on the error are preserved for downstream callers that key off
+// them (e.g. the dispatch refusal path).
+// CFG-02 round-1 review B6 fix (2026-05-30): requestedValue defaults
+// to null so downstream templating doesn't render the multi-value
+// diagnostic blob the loader puts in err.got for env-alias conflicts.
+// (B1 mislabel fix deferred — see follow-up-remediation.mjs for the
+// matching rationale.)
+function resolveMergeAgentWorkerClass(env = process.env, opts = {}) {
+  try {
+    return resolveDefaultMergeAgentWorkerClass({ env, ...opts });
+  } catch (err) {
+    if (err && err.name === 'AgentOSConfigError') {
+      err.isMergeAgentConfigError = true;
+      err.configKey = err.envName || MERGE_AGENT_WORKER_CLASS_ENV;
+      err.requestedValue = null;
+    }
     throw err;
   }
-  return value;
 }
 
 // Boot-time validator. Call this from the watcher's startup path next to
 // `validateStartupRemediationConfig` so a typo in
 // `ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS` (`condex`, `claude_code`,
 // etc.) crashes the daemon at boot with a `FATAL config:` banner instead
-// of failing silently at the first merge-agent dispatch hours later. The
-// resolver itself throws the same error shape mid-flight; this helper just
-// makes the failure visible at boot the way the reviewer/remediator env
-// validators do.
-function validateStartupMergeAgentConfig(env = process.env) {
-  resolveMergeAgentWorkerClass(env);
+// of failing silently at the first merge-agent dispatch hours later.
+function validateStartupMergeAgentConfig(env = process.env, opts = {}) {
+  validateStartupRoleConfig({ env, ...opts });
+  resolveMergeAgentWorkerClass(env, opts);
 }
 
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);

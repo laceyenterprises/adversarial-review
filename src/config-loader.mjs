@@ -147,6 +147,47 @@ function schemaV1() {
           merge_agent_failure_recovery_disable: { __type: TYPE_BOOL, __default: false },
         },
       },
+      // Module-internal sections used by tools/adversarial-review. These are
+      // module-scoped knobs (no top-level canonical equivalent); declared here
+      // so `tools/adversarial-review/config.yaml` parses against the strict
+      // schema. Only role keys are wired through resolvers in CFG-02; the
+      // others are checked-in defaults waiting on per-knob refactors.
+      // `merge_agent.worker_class` is NOT a separate slot: the adversarial
+      // module file aliases it onto `roles.merge_agent_worker_class` per
+      // SPEC §10.2, so the canonical body never carries the legacy path.
+      remediation: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          max_concurrent_jobs: { __type: TYPE_INT, __default: 1 },
+        },
+      },
+      merge_agent: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          final_pass_on_request_changes: { __type: TYPE_BOOL, __default: true },
+        },
+      },
+      reviewer: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          timeout_ms: { __type: TYPE_INT, __default: 1200000 },
+          fallback_threshold: { __type: TYPE_INT, __default: 2 },
+        },
+      },
+      watcher: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          alert_to_op_ref: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+        },
+      },
     },
   };
 }

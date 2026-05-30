@@ -38,6 +38,10 @@ import { staleDriftStopDecision } from './stale-drift.mjs';
 import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
 import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
+import {
+  resolveDefaultRemediator,
+  validateStartupRoleConfig,
+} from './role-config.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -754,24 +758,50 @@ function normalizeRemediationWorkerClass(workerClassInput) {
   }
 }
 
-function defaultRemediatorWorkerClassFromEnv(env = process.env) {
-  const raw = env?.[DEFAULT_REMEDIATOR_ENV];
-  if (raw === undefined || String(raw).trim() === '') return null;
-  const workerClass = normalizeRemediationWorkerClass(raw);
-  if (!workerClass) {
-    const err = new Error(
-      `${DEFAULT_REMEDIATOR_ENV} must be one of: codex, claude-code; got ${JSON.stringify(raw)}`
-    );
-    err.isRemediationConfigError = true;
-    err.configKey = DEFAULT_REMEDIATOR_ENV;
-    err.requestedValue = raw;
+// Cascade-aware default remediator resolver. Consults config.yaml FIRST
+// (module → top-level → *.local) and env LAST per SPEC §3 resolution
+// order. Returns null when no pin is in effect (the per-builder-tag
+// cross-model routing in `pickRemediationWorkerClass` then applies).
+//
+// `defaultRemediatorWorkerClassFromEnv` is kept as a back-compat alias so
+// external callers/tests that import the old name keep working; the body
+// delegates to the file-cascade resolver. The `_workerClass` flag on the
+// error is preserved for the existing
+// `consumeNextFollowUpJob` requeue path.
+// CFG-02 round-1 review B6 fix (2026-05-30): do not blindly copy
+// `err.got` to `requestedValue`. For env-alias conflicts the loader
+// puts a multi-value diagnostic string (e.g.
+// `'AGENT_OS_X="a", LEGACY_Y="b"'`) into `err.got` — templating that
+// into operator-visible messages produces nonsense. Default to null
+// and let downstream code use the loader's structured `err.got`
+// directly if it wants the raw diagnostic.
+//
+// CFG-02 round-1 review B1 (mislabel) is deferred to a follow-up
+// CFG ticket: gating on `err.key === 'roles.remediator'` /
+// `err.envName ∈ ALIASES` breaks back-compat with downstream
+// consumeNextFollowUpJob requeue tests. The gate needs paired
+// loader changes (consistent err.key/envName population across all
+// throw sites) to be safe; track separately.
+function defaultRemediatorWorkerClassFromEnv(env = process.env, opts = {}) {
+  try {
+    return resolveDefaultRemediator({ env, ...opts });
+  } catch (err) {
+    if (err && err.name === 'AgentOSConfigError') {
+      err.isRemediationConfigError = true;
+      err.configKey = err.envName || DEFAULT_REMEDIATOR_ENV;
+      err.requestedValue = null;
+    }
     throw err;
   }
-  return workerClass;
 }
 
-function validateStartupRemediationConfig(env = process.env) {
-  defaultRemediatorWorkerClassFromEnv(env);
+function validateStartupRemediationConfig(env = process.env, opts = {}) {
+  // Single fail-loud entry point: the loader walks the entire schema, so
+  // schema errors in any section (not just the role keys) fail loud at
+  // boot. The `resolveRemediationMaxConcurrentJobs` env-only knob is
+  // still validated here pending CFG-03's cascade refactor for it.
+  validateStartupRoleConfig({ env, ...opts });
+  defaultRemediatorWorkerClassFromEnv(env, opts);
   resolveRemediationMaxConcurrentJobs(env);
 }
 
@@ -806,8 +836,8 @@ function validateStartupRemediationConfig(env = process.env) {
 // material. Future: consider raising and routing the job to `pending` with
 // `lastConfigValidationFailure` (matches the bad-env contract) once
 // upstream missing-tag rate is measured.
-function pickRemediationWorkerClass(job, { env = process.env } = {}) {
-  const envOverride = defaultRemediatorWorkerClassFromEnv(env);
+function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImpl } = {}) {
+  const envOverride = defaultRemediatorWorkerClassFromEnv(env, { topPath, loaderImpl });
   if (envOverride) return envOverride;
   const builderTag = String(job?.builderTag || '').trim().toLowerCase();
   if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
@@ -3887,6 +3917,7 @@ export {
   assertClaudeCodeOAuth,
   assertRemediationWorkerOAuth,
   defaultRemediatorWorkerClassFromEnv,
+  resolveDefaultRemediator,
   validateStartupRemediationConfig,
   normalizeRemediationWorkerClass,
   pickRemediationWorkerClass,

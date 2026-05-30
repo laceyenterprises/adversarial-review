@@ -114,14 +114,21 @@ test('github-pr routing can force the default reviewer from env', () => {
   });
 });
 
-test('github-pr routing rejects unknown default reviewer env values', () => {
-  assert.throws(
-    () => routeSubject(
-      { builderClass: 'codex' },
-      { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' } }
-    ),
-    /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
+test('github-pr routing surfaces config-broken sentinel for unknown reviewer env values', () => {
+  // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject no longer
+  // throws on bad config — it returns a tagged sentinel so the watcher
+  // can route to a "config-broken" disposition without aborting the
+  // whole tick. The boot-time validator
+  // (validateDefaultReviewerRouteConfig) remains the legitimate
+  // fail-loud path; runtime edits during a tick go through this
+  // sentinel.
+  const route = routeSubject(
+    { builderClass: 'codex' },
+    { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini', AGENT_OS_CONFIG_PATH: '/dev/null' } }
   );
+  assert.equal(route.configBroken, true);
+  assert.match(route.error.message, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
+  assert.match(route.error.message, /gemini/);
 });
 
 test('github-pr routing exposes same-family review waiver detection for override pins', () => {
@@ -145,8 +152,15 @@ test('github-pr routing exposes same-family review waiver detection for override
 
 test('github-pr routing startup validation rejects unknown default reviewer env values', () => {
   assert.throws(
-    () => defaultReviewerRouteFromEnv({ ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' }),
-    /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
+    () => defaultReviewerRouteFromEnv({
+      ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+    }),
+    (err) => {
+      assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
+      assert.match(err.message, /gemini/);
+      return true;
+    }
   );
 });
 
@@ -160,13 +174,54 @@ test('watcher startup prints a fatal config banner for invalid default reviewer 
         ...process.env,
         GITHUB_TOKEN: 'test-token',
         ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
       },
       encoding: 'utf8',
     },
   );
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /FATAL config: ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/);
+  assert.match(result.stderr, /FATAL config/);
+  assert.match(result.stderr, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
+  assert.match(result.stderr, /gemini/);
+});
+
+// ── CFG-02 cascade tests (env via canonical + legacy) ─────────────────────
+
+test('CFG-02 routeSubject: canonical AGENT_OS_ROLES_REVIEWER pins reviewer', () => {
+  assert.deepEqual(
+    routeSubject(
+      { builderClass: 'codex' },
+      { env: { AGENT_OS_ROLES_REVIEWER: 'claude-code', AGENT_OS_CONFIG_PATH: '/dev/null' } },
+    ),
+    {
+      builderClass: 'codex',
+      tag: 'codex',
+      reviewerModel: 'claude',
+      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    },
+  );
+});
+
+test('CFG-02 routeSubject: canonical + legacy env conflict surfaces sentinel (§10.1 + B3 fix)', () => {
+  // CFG-02 round-1 review B3 fix (2026-05-30): see preceding test's
+  // comment. The fail-loud guarantee for env-alias conflict still holds
+  // — but now via the config-broken sentinel rather than a throw, so
+  // the watcher's per-PR loop doesn't abort.
+  const route = routeSubject(
+    { builderClass: 'codex' },
+    {
+      env: {
+        AGENT_OS_ROLES_REVIEWER: 'codex',
+        ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'claude-code',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+    },
+  );
+  assert.equal(route.configBroken, true);
+  assert.match(route.error.message, /AGENT_OS_ROLES_REVIEWER/);
+  assert.match(route.error.message, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
+  assert.match(route.error.message, /conflict/i);
 });
 
 test('github-pr subject adapter fetches diff content through the subject interface', async () => {

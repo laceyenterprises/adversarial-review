@@ -1103,48 +1103,89 @@ test('pickRemediationWorkerClass routes null jobs to codex (no usable builderTag
   assert.equal(pickRemediationWorkerClass(null), 'codex');
 });
 
-test('pickRemediationWorkerClass can force claude-code from env', () => {
+test('pickRemediationWorkerClass can force claude-code from env (legacy alias)', () => {
   assert.equal(
     pickRemediationWorkerClass(
       { builderTag: 'codex', reviewerModel: 'claude' },
-      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'claude-code' } }
-    ),
-    'claude-code'
-  );
-
-  assert.equal(
-    pickRemediationWorkerClass(
-      { builderTag: 'clio-agent', reviewerModel: 'codex' },
-      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'claude' } }
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'claude-code', AGENT_OS_CONFIG_PATH: '/dev/null' } }
     ),
     'claude-code'
   );
 });
 
-test('pickRemediationWorkerClass can force codex from env aliases', () => {
+test('pickRemediationWorkerClass can force claude-code from canonical env (CFG-02)', () => {
   assert.equal(
     pickRemediationWorkerClass(
-      { builderTag: 'claude-code', reviewerModel: 'codex' },
-      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'codex-remediation' } }
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: { AGENT_OS_ROLES_REMEDIATOR: 'claude-code', AGENT_OS_CONFIG_PATH: '/dev/null' } }
     ),
-    'codex'
+    'claude-code'
+  );
+});
+
+test('pickRemediationWorkerClass canonical env wins over legacy alias on match', () => {
+  // §10.1 contract: canonical AGENT_OS_* beats legacy on same-value overlap.
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'clio-agent', reviewerModel: 'codex' },
+      { env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
+        ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'claude-code',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      } }
+    ),
+    'claude-code'
   );
 });
 
 test('pickRemediationWorkerClass rejects unknown default remediator env values', () => {
+  // Loader enforces §10.3 enum; error message names the env var the operator
+  // actually set (legacy alias) plus the canonical key path.
   assert.throws(
     () => pickRemediationWorkerClass(
       { builderTag: 'codex', reviewerModel: 'claude' },
-      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini' } }
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini', AGENT_OS_CONFIG_PATH: '/dev/null' } }
     ),
-    /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+    (err) => {
+      assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
+      assert.match(err.message, /gemini/);
+      assert.match(err.message, /claude-code/);
+      return true;
+    }
+  );
+});
+
+test('pickRemediationWorkerClass fails loud on canonical+legacy env conflict (CFG-02)', () => {
+  // §10.1: canonical + alias set with different values → fail loud.
+  assert.throws(
+    () => pickRemediationWorkerClass(
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
+        ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'codex',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      } }
+    ),
+    (err) => {
+      assert.match(err.message, /AGENT_OS_ROLES_REMEDIATOR/);
+      assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
+      assert.match(err.message, /conflict/i);
+      return true;
+    }
   );
 });
 
 test('validateStartupRemediationConfig rejects unknown default remediator env values', () => {
   assert.throws(
-    () => validateStartupRemediationConfig({ ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini' }),
-    /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+    () => validateStartupRemediationConfig({
+      ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini',
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+    }),
+    (err) => {
+      assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
+      assert.match(err.message, /gemini/);
+      return true;
+    }
   );
 });
 
@@ -3245,7 +3286,11 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
         promptTemplate: 'Remediation prompt template.',
         resolvePRLifecycleImpl: async () => null,
       }),
-      /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/
+      (err) => {
+        assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
+        assert.match(err.message, /gemini/);
+        return true;
+      }
     );
 
     const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
@@ -3266,7 +3311,8 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
     assert.equal(pendingJob.remediationPlan.currentRound, 0);
     assert.deepEqual(pendingJob.remediationPlan.rounds, []);
     assert.equal(pendingJob.lastConfigValidationFailure.code, 'config-validation-failure');
-    assert.match(pendingJob.lastConfigValidationFailure.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR must be one of: codex, claude-code/);
+    assert.match(pendingJob.lastConfigValidationFailure.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
+    assert.match(pendingJob.lastConfigValidationFailure.message, /gemini/);
   } finally {
     if (prevDefaultRemediator === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
     else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = prevDefaultRemediator;

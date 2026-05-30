@@ -408,6 +408,31 @@ titles with normalization for case, dash variants, quote variants, and
 whitespace so humans are not punished for harmless typography, while
 errors still show the original expected and supplied text.
 
+**Blocking-only invariant (LAC-893).** `addressed[]`, `pushback[]`, and
+`blockers[]` are blocking-only. The validator enforces
+`addressed.length + pushback.length + blockers.length === blocking_findings_in_review`
+(exactly once per finding) and rejects the reply as
+`invalid-remediation-reply` if the sum exceeds the expected count. The
+canonical failure shape is:
+
+```text
+Remediation reply does not account for every blocking finding:
+review has N blocking issue(s), reply records N+M
+(addressed=..., pushback=..., blockers=...).
+```
+
+When triaging that error, check the actual reply artifact at
+`data/dispatch/remediation-replies/<jobId>/remediation-reply.json` first:
+the typical cause is a worker that put non-blocking findings into
+`addressed[]` instead of the dedicated `nonBlocking[]` array. The fix
+is for the worker to move those entries to `nonBlocking[]` (same
+per-entry shape as `addressed[]`; not counted against the blocking
+coverage check) or to mention them only in the top-level `summary`
+field. Non-blocking findings whose `title` matches the review's
+`## Non-blocking Issues` section are tolerated in `addressed[]` for
+backward compatibility, but new workers should always route them to
+`nonBlocking[]`.
+
 Keep per-finding `finding`, `action`, `reasoning`, and
 `needsHumanInput` fields short: 1200 characters and 20 non-empty lines
 per field. The validator rejects raw JSON/log/tool-output/traceback/diff

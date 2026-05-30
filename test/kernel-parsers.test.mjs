@@ -911,3 +911,213 @@ test('validateRemediationReply accepts an exact nested-bullet title that ends wi
 
   assert.deepEqual(validateRemediationReply(reply, { expectedJob }), reply);
 });
+
+// LAC-893: Claude remediators were inflating addressed[] by appending
+// non-blocking findings (paraphrased, with no matching title in the
+// review's `## Non-blocking Issues` section). The validator's existing
+// title-match tolerance only filters non-blocking extras whose `title`
+// matches a parsed non-blocking finding; an untitled or paraphrased
+// non-blocking entry still trips the strict count check. These tests
+// pin both the rejection (so over-counting stays a hard fail) and the
+// new `nonBlocking[]` exit (so workers have a structured place to
+// record non-blocking fixes without touching the blocking-only arrays).
+test('validateRemediationReply rejects over-count of addressed[] when non-blocking entry is untitled', () => {
+  const reviewBody = [
+    '## Summary',
+    'Two blocking issues, three non-blocking notes.',
+    '',
+    '## Blocking Issues',
+    '- **First blocker**',
+    '  - **File:** `src/a.mjs`',
+    '  - **Lines:** 10-12',
+    '  - **Problem:** The first blocker is still unresolved.',
+    '- **Second blocker**',
+    '  - **File:** `src/b.mjs`',
+    '  - **Lines:** 30-31',
+    '  - **Problem:** The second blocker also needs a fix.',
+    '',
+    '## Non-blocking Issues',
+    '- **Lint smell A**',
+    '  - **File:** `src/c.mjs`',
+    '  - **Lines:** 50',
+    '  - **Problem:** Lint smell A.',
+    '- **Lint smell B**',
+    '  - **File:** `src/d.mjs`',
+    '  - **Lines:** 60',
+    '  - **Problem:** Lint smell B.',
+    '- **Lint smell C**',
+    '  - **File:** `src/e.mjs`',
+    '  - **Lines:** 70',
+    '  - **Problem:** Lint smell C.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = {
+    jobId: 'lac-893__over-count',
+    reviewBody,
+  };
+  const overCounted = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'lac-893__over-count',
+    outcome: 'completed',
+    summary: 'Fixed both blockers and a few extras.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'First blocker', finding: 'First blocker.', action: 'Fixed it.' },
+      { title: 'Second blocker', finding: 'Second blocker.', action: 'Fixed it.' },
+      { finding: 'Cleaned up a lint smell.', action: 'Reformatted.' },
+      { finding: 'Tightened a docstring.', action: 'Rewrote.' },
+      { finding: 'Tweaked a log message.', action: 'Made it clearer.' },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Ready.' },
+  };
+
+  assert.throws(
+    () => validateRemediationReply(overCounted, { expectedJob }),
+    /does not account for every blocking finding.*review has 2 blocking issue\(s\), reply records 5/s,
+  );
+});
+
+test('validateRemediationReply accepts nonBlocking[] alongside blocking-only addressed[]', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocking issue, two non-blocking notes.',
+    '',
+    '## Blocking Issues',
+    '- **Primary bug**',
+    '  - **File:** `src/x.mjs`',
+    '  - **Lines:** 5-7',
+    '  - **Problem:** Primary bug needs the fix.',
+    '',
+    '## Non-blocking Issues',
+    '- **Stale doc**',
+    '  - **File:** `docs/runbook.md`',
+    '  - **Lines:** 12',
+    '  - **Problem:** Stale paragraph.',
+    '- **Verbose log**',
+    '  - **File:** `src/y.mjs`',
+    '  - **Lines:** 200',
+    '  - **Problem:** Log message is noisy.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = {
+    jobId: 'lac-893__nonblocking',
+    reviewBody,
+  };
+  const reply = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'lac-893__nonblocking',
+    outcome: 'completed',
+    summary: 'Fixed the blocker; also cleaned up two non-blocking items.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'Primary bug', finding: 'Primary bug needs the fix.', action: 'Applied the fix.' },
+    ],
+    pushback: [],
+    blockers: [],
+    nonBlocking: [
+      {
+        title: 'Stale doc',
+        finding: 'Stale paragraph in the runbook.',
+        action: 'Rewrote the paragraph to match current behavior.',
+        files: ['docs/runbook.md'],
+      },
+      {
+        finding: 'Verbose log line.',
+        action: 'Demoted to debug level.',
+      },
+    ],
+    reReview: { requested: true, reason: 'Ready for re-review.' },
+  };
+
+  assert.deepEqual(validateRemediationReply(reply, { expectedJob }), reply);
+});
+
+test('validateRemediationReply rejects nonBlocking[] entries with empty finding or action', () => {
+  const reviewBody = [
+    '## Summary',
+    'One blocker.',
+    '',
+    '## Blocking Issues',
+    '- **Only blocker**',
+    '  - **File:** `src/x.mjs`',
+    '  - **Lines:** 1',
+    '  - **Problem:** Only blocker.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  const expectedJob = { jobId: 'lac-893__nonblocking-shape', reviewBody };
+  const baseReply = {
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: 'lac-893__nonblocking-shape',
+    outcome: 'completed',
+    summary: 'Fixed.',
+    validation: ['npm test'],
+    addressed: [
+      { title: 'Only blocker', finding: 'Only blocker.', action: 'Fixed.' },
+    ],
+    pushback: [],
+    blockers: [],
+    reReview: { requested: true, reason: 'Ready.' },
+  };
+
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, nonBlocking: [{ finding: '', action: 'Did a thing.' }] },
+      { expectedJob },
+    ),
+    /nonBlocking\[0\]\.finding must be a non-empty string/,
+  );
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, nonBlocking: [{ finding: 'A non-blocking note.', action: '' }] },
+      { expectedJob },
+    ),
+    /nonBlocking\[0\]\.action must be a non-empty string/,
+  );
+  assert.throws(
+    () => validateRemediationReply(
+      { ...baseReply, nonBlocking: 'not-an-array' },
+      { expectedJob },
+    ),
+    /nonBlocking must be an array/,
+  );
+});
+
+test('claude remediator prompts state addressed/pushback/blockers are BLOCKING-ONLY', async () => {
+  // LAC-893: pin the load-bearing semantic ("blocking-only") so a
+  // well-meaning future edit that softens the language back to "you
+  // may include non-blocking findings in addressed[]" fails CI before
+  // it lands.
+  const { readFile } = await import('node:fs/promises');
+  const promptRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'code-pr');
+  const files = ['remediator.first.md', 'remediator.middle.md', 'remediator.last.md'];
+
+  for (const file of files) {
+    const body = await readFile(join(promptRoot, file), 'utf8');
+    assert.match(
+      body,
+      /addressed\[\][^\n]*pushback\[\][^\n]*blockers\[\][^\n]*BLOCKING-ONLY/s,
+      `${file} is missing the BLOCKING-ONLY load-bearing semantic`,
+    );
+    assert.match(
+      body,
+      /nonBlocking\[\]/,
+      `${file} does not mention nonBlocking[] as a structured exit for non-blocking fixes`,
+    );
+    assert.doesNotMatch(
+      body,
+      /you may include those fixes in[\s\n]+`addressed\[\]` too/i,
+      `${file} still permits non-blocking findings inside addressed[] — LAC-893 fix regressed`,
+    );
+  }
+});

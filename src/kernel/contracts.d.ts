@@ -34,6 +34,13 @@ export interface RemediationReplyAddressed {
   files?: readonly string[];
 }
 
+export interface RemediationReplyNonBlocking {
+  title?: string;
+  finding: string;
+  action: string;
+  files?: readonly string[];
+}
+
 export interface RemediationReplyPushback {
   title?: string;
   finding: string;
@@ -63,6 +70,10 @@ export interface RemediationReply {
   validation: readonly string[];
   addressed?: readonly RemediationReplyAddressed[];
   pushback?: readonly RemediationReplyPushback[];
+  // Non-blocking review findings that the worker chose to fix in this
+  // round. Same per-entry shape as addressed[] but NOT counted toward
+  // the blocking-coverage check; rendered in its own PR-comment section.
+  nonBlocking?: readonly RemediationReplyNonBlocking[];
   // Legacy string blockers remain valid under schemaVersion 1 so older
   // persisted replies still parse during reconciliation. New producer
   // code should prefer structured RemediationReplyBlocker objects.

@@ -143,37 +143,49 @@ function assertPublicReplyTextQuality(value, locationLabel, { publicCommentLabel
 // while addressing the finding). Per-entry validation rejects a
 // missing or empty finding/action so the public reply never
 // renders an empty bullet, but tolerates files being absent.
-function validateAddressedField(items, options = {}) {
+function validateAddressedShapeField(items, fieldName, options = {}) {
   if (!Array.isArray(items)) {
-    throw new Error('Remediation reply addressed must be an array');
+    throw new Error(`Remediation reply ${fieldName} must be an array`);
   }
   items.forEach((entry, index) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new Error(`Remediation reply addressed[${index}] must be an object`);
+      throw new Error(`Remediation reply ${fieldName}[${index}] must be an object`);
     }
     if (typeof entry.finding !== 'string' || !entry.finding.trim()) {
-      throw new Error(`Remediation reply addressed[${index}].finding must be a non-empty string`);
+      throw new Error(`Remediation reply ${fieldName}[${index}].finding must be a non-empty string`);
     }
     if (typeof entry.action !== 'string' || !entry.action.trim()) {
-      throw new Error(`Remediation reply addressed[${index}].action must be a non-empty string`);
+      throw new Error(`Remediation reply ${fieldName}[${index}].action must be a non-empty string`);
     }
-    validateOptionalTitle(entry, `addressed[${index}]`);
-    assertNoPlaceholderText(entry.finding, `addressed[${index}].finding`);
-    assertNoPlaceholderText(entry.action, `addressed[${index}].action`);
-    assertPublicReplyTextQuality(entry.finding, `addressed[${index}].finding`, options);
-    assertPublicReplyTextQuality(entry.action, `addressed[${index}].action`, options);
+    validateOptionalTitle(entry, `${fieldName}[${index}]`);
+    assertNoPlaceholderText(entry.finding, `${fieldName}[${index}].finding`);
+    assertNoPlaceholderText(entry.action, `${fieldName}[${index}].action`);
+    assertPublicReplyTextQuality(entry.finding, `${fieldName}[${index}].finding`, options);
+    assertPublicReplyTextQuality(entry.action, `${fieldName}[${index}].action`, options);
     if (entry.files !== undefined) {
       if (!Array.isArray(entry.files)) {
-        throw new Error(`Remediation reply addressed[${index}].files must be an array if provided`);
+        throw new Error(`Remediation reply ${fieldName}[${index}].files must be an array if provided`);
       }
       entry.files.forEach((f, fi) => {
         if (typeof f !== 'string' || !f.trim()) {
-          throw new Error(`Remediation reply addressed[${index}].files[${fi}] must be a non-empty string`);
+          throw new Error(`Remediation reply ${fieldName}[${index}].files[${fi}] must be a non-empty string`);
         }
-        assertNoPlaceholderText(f, `addressed[${index}].files[${fi}]`);
+        assertNoPlaceholderText(f, `${fieldName}[${index}].files[${fi}]`);
       });
     }
   });
+}
+
+function validateAddressedField(items, options = {}) {
+  validateAddressedShapeField(items, 'addressed', options);
+}
+
+// nonBlocking[] entries share the addressed[] shape but cover
+// non-blocking review findings. The blocking-coverage check ignores
+// them entirely; they exist as a structured place for the worker to
+// record non-blocking fixes without inflating the blocking-only arrays.
+function validateNonBlockingField(items, options = {}) {
+  validateAddressedShapeField(items, 'nonBlocking', options);
 }
 
 // pushback[] entries are { title?, finding, reasoning }. Finding and
@@ -588,6 +600,7 @@ function usesPerFindingReplyContract(reply) {
   if (
     reply.addressed !== undefined
     || reply.pushback !== undefined
+    || reply.nonBlocking !== undefined
     || reply.operationalBlockers !== undefined
   ) {
     return true;
@@ -799,16 +812,19 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
     validateOperationalBlockersField(reply.operationalBlockers, publicReplyOptions);
   }
 
-  // addressed[] / pushback[] are additive — replies that omit them
-  // entirely are still valid (legacy worker output, jobs created before
-  // this schema landed). Only validate shape when the fields are
-  // present. Workers that emit them get strict enforcement so a
-  // half-formed entry never reaches the public reply renderer.
+  // addressed[] / pushback[] / nonBlocking[] are additive — replies
+  // that omit them entirely are still valid (legacy worker output, jobs
+  // created before this schema landed). Only validate shape when the
+  // fields are present. Workers that emit them get strict enforcement
+  // so a half-formed entry never reaches the public reply renderer.
   if (reply.addressed !== undefined) {
     validateAddressedField(reply.addressed, publicReplyOptions);
   }
   if (reply.pushback !== undefined) {
     validatePushbackField(reply.pushback, publicReplyOptions);
+  }
+  if (reply.nonBlocking !== undefined) {
+    validateNonBlockingField(reply.nonBlocking, publicReplyOptions);
   }
 
   if (!reply.reReview || typeof reply.reReview !== 'object' || Array.isArray(reply.reReview)) {

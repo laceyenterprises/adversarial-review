@@ -1863,3 +1863,93 @@ test('buildRemediationOutcomeCommentBody on invalid-remediation-reply with no sa
   assert.match(body, /did not produce a usable remediation reply/);
   assert.doesNotMatch(body, /failed strict schema validation/);
 });
+
+// LAC-893: nonBlocking[] is the structured exit for non-blocking
+// improvements the worker chose to ship in the same round. The
+// renderer must surface it as its own section so the public PR comment
+// keeps "what was required" (Addressed findings) visually distinct
+// from "what was bonus polish" (Non-blocking improvements).
+test('buildRemediationOutcomeCommentBody renders nonBlocking[] in its own section between Pushback and Blockers', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed the blocker and bundled a stale-doc cleanup.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug needed the fix.', action: 'Applied the fix.' },
+      ],
+      pushback: [],
+      blockers: [],
+      nonBlocking: [
+        {
+          title: 'Stale doc paragraph',
+          finding: 'Stale runbook sentence.',
+          action: 'Rewrote the paragraph to match current behavior.',
+          files: ['docs/runbook.md'],
+        },
+      ],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+
+  assert.match(body, /## Addressed findings/);
+  assert.match(body, /## Non-blocking improvements/);
+  // Section ordering: Addressed → Pushback (omitted-when-empty) →
+  // Non-blocking → Blockers (omitted-when-empty). The renderer must
+  // place non-blocking AFTER addressed/pushback so the reader's eye
+  // hits the required work first.
+  const idxAddressed = body.indexOf('## Addressed findings');
+  const idxNonBlocking = body.indexOf('## Non-blocking improvements');
+  assert.ok(idxAddressed >= 0 && idxNonBlocking >= 0, 'expected both section headers');
+  assert.ok(idxAddressed < idxNonBlocking, 'addressed renders before non-blocking');
+  // The non-blocking entry renders with the same nested-bullet card
+  // shape as addressed entries.
+  assert.match(body, /^- \*\*Stale doc paragraph\*\*$/m);
+  assert.match(body, /^ {2}- \*\*Action:\*\* Rewrote the paragraph to match current behavior\.$/m);
+  assert.match(body, /^ {2}- \*\*Files:\*\* `docs\/runbook\.md`$/m);
+});
+
+test('buildRemediationOutcomeCommentBody omits Non-blocking improvements section when nonBlocking[] is absent or empty', () => {
+  // Backward compatibility: replies that don't supply nonBlocking[]
+  // (legacy workers, replies that simply didn't bundle non-blocking
+  // fixes) must not produce an empty section header.
+  const bodyAbsent = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug.', action: 'Fixed it.' },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+  assert.doesNotMatch(bodyAbsent, /## Non-blocking improvements/);
+
+  const bodyEmpty = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug.', action: 'Fixed it.' },
+      ],
+      pushback: [],
+      blockers: [],
+      nonBlocking: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+  assert.doesNotMatch(bodyEmpty, /## Non-blocking improvements/);
+});

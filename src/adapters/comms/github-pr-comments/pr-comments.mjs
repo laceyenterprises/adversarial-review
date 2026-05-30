@@ -658,6 +658,7 @@ function buildRemediationOutcomeCommentBody({
           || reply.validation?.length
           || reply.addressed?.length
           || reply.pushback?.length
+          || reply.nonBlocking?.length
           || reply.blockers?.length
           || reply.operationalBlockers?.length)
     );
@@ -723,6 +724,21 @@ function buildRemediationOutcomeCommentBody({
       lines.push('## Pushback (deliberately not changed)');
       lines.push('');
       lines.push(pushback);
+    }
+  }
+
+  // Non-blocking improvements the worker chose to ship in this round.
+  // Rendered separately from `## Addressed findings` so the public
+  // comment never conflates blocking-finding accountability (the
+  // load-bearing count check the validator enforces) with optional
+  // non-blocking polish. Same nested-bullet card shape as addressed[].
+  if (reply?.nonBlocking?.length) {
+    const nonBlocking = formatAddressedList(reply.nonBlocking, '');
+    if (nonBlocking) {
+      lines.push('');
+      lines.push('## Non-blocking improvements');
+      lines.push('');
+      lines.push(nonBlocking);
     }
   }
 

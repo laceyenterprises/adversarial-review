@@ -2002,6 +2002,7 @@ export {
   readRemediationReplyArtifact,
   salvagePartialRemediationReply,
   readFollowUpJob,
+  remediationAttemptNumber,
   resolveRoundBudgetForJob,
   requeueFollowUpJobForNextRound,
   stopFollowUpJob,

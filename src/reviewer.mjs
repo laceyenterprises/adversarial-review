@@ -36,9 +36,10 @@ import {
   fetchLinkedSpecContents,
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
+import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
-import { looksLikeRuntimeJunk, normalizeWhitespace, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
+import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
@@ -1009,13 +1010,13 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
 
 // ── GitHub review posting ────────────────────────────────────────────────────
 
-async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv) {
+async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync) {
   const token = process.env[botTokenEnv];
   if (!token) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
 
-  await execFileAsync(
+  await execFileImpl(
     'gh',
     ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],
     {
@@ -1023,6 +1024,55 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv) {
       maxBuffer: 5 * 1024 * 1024,
     }
   );
+}
+
+async function postGitHubReviewWithCapture({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  attemptNumber,
+  reviewerModel,
+  reviewBody,
+  botTokenEnv,
+  passKind,
+  postedAt = null,
+  execFileImpl = execFileAsync,
+  log = console,
+} = {}) {
+  const token = process.env[botTokenEnv];
+  if (!token) {
+    throw new Error(`Missing env var: ${botTokenEnv}`);
+  }
+
+  await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl);
+
+  // Capture postedAt AFTER the gh post returns so the candidate window
+  // bounds the artifact's GitHub-assigned timestamp, which is set during
+  // post handling — not before the request leaves.
+  const effectivePostedAt = postedAt || new Date().toISOString();
+
+  // Normalize 'unknown' to null so the reviewer_passes.verdict CHECK
+  // constraint (approved / comment-only / request-changes / dismissed / NULL)
+  // does not abort the body-capture UPDATE when a reviewer goes off-script.
+  // Losing the parsed-verdict shortcut is preferable to losing body capture
+  // entirely; downstream consumers already treat NULL as "verdict unknown".
+  const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(reviewBody));
+  const persistedVerdict = normalizedVerdict === 'unknown' ? null : normalizedVerdict;
+
+  await captureReviewerBodyAfterPost(rootDir, {
+    repo,
+    prNumber,
+    attemptNumber: Number(attemptNumber),
+    reviewerModel,
+    botTokenEnv,
+    reviewBody,
+    verdict: persistedVerdict,
+    passKind,
+    postedAt: effectivePostedAt,
+    execFileImpl,
+    env: { ...process.env, [botTokenEnv]: token },
+    log,
+  });
 }
 
 // ── Clio alert (OAuth failure) ───────────────────────────────────────────────
@@ -1088,8 +1138,10 @@ async function main() {
     builderTag,
     reviewerHeadSha,
     reviewAttemptNumber,
+    reviewDbAttemptNumber,
     completedRemediationRounds,
     maxRemediationRounds,
+    passKind,
     reviewerSessionUuid,
     labels = [],
     ticketPipelinePaused = false,
@@ -1262,7 +1314,26 @@ async function main() {
 
   try {
     console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);
-    await postGitHubReview(repo, prNumber, fullComment, botTokenEnv);
+    // Use reviewDbAttemptNumber to match the row beginReviewerPass created
+    // in watcher.spawnReviewer. reviewAttemptNumber (ledger.completedRoundsForPR + 1)
+    // only advances on round completion, while reviewDbAttemptNumber
+    // (review_attempts + 1) advances on every launch attempt — they diverge
+    // on retry-within-round, and the row key is the launch-attempt counter.
+    const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
+      ? Number(reviewDbAttemptNumber)
+      : Number(reviewAttemptNumber);
+    await postGitHubReviewWithCapture({
+      rootDir: ROOT,
+      repo,
+      prNumber,
+      attemptNumber: captureAttemptNumber,
+      reviewerModel: effectiveModel,
+      reviewBody: fullComment,
+      botTokenEnv,
+      passKind,
+      execFileImpl: execFileAsync,
+      log: console,
+    });
     console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
   } catch (err) {
     console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err.message);
@@ -1343,6 +1414,7 @@ const __test__ = {
   buildCodexReviewArgs,
   parseCodexJsonTokenUsage,
   spawnCodexReview,
+  postGitHubReviewWithCapture,
 };
 
 export {

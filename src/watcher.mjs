@@ -118,6 +118,7 @@ import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
@@ -157,6 +158,10 @@ const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
 const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({ watcherConfig: config });
+const DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS = 900;
+const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_ON = 60;
+const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF = 300;
+const PENDING_DRAFT_RESPAWN_AGE_MAX_SECONDS = 1800;
 const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
   claude: {
     reviewerModel: 'claude',
@@ -205,6 +210,114 @@ const FAST_MERGE_CHANGED_FILES_MAX_PAGES = Math.max(
 
 function isFastMergeSkipEnabled() {
   return process.env.FML_WATCHER_SKIP_ENABLED === 'true';
+}
+
+function resolveSigtermFenceMode(env = process.env) {
+  return String(env.ADVERSARIAL_REVIEW_SIGTERM_FENCE || 'on').trim().toLowerCase() === 'off'
+    ? 'off'
+    : 'on';
+}
+
+function resolvePendingDraftRespawnAgeSeconds(env = process.env) {
+  const raw = env.ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS;
+  const parsed = raw === undefined
+    ? DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS
+    : Number.parseInt(String(raw), 10);
+  const fenceMode = resolveSigtermFenceMode(env);
+  const min = fenceMode === 'off'
+    ? PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF
+    : PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_ON;
+
+  if (!Number.isInteger(parsed)) {
+    const err = new Error(
+      `ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS must be an integer seconds value; got ${JSON.stringify(raw)}`
+    );
+    err.logKey = 'respawn_age_out_of_range';
+    throw err;
+  }
+  if (fenceMode === 'off' && parsed < PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF) {
+    const err = new Error(
+      `ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS=${parsed} is below the fence-off floor ` +
+      `${PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF}s while ADVERSARIAL_REVIEW_SIGTERM_FENCE=off`
+    );
+    err.logKey = 'respawn_age_below_fence_off_floor';
+    throw err;
+  }
+  if (parsed < min || parsed > PENDING_DRAFT_RESPAWN_AGE_MAX_SECONDS) {
+    const err = new Error(
+      `ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS=${parsed} is outside the safe range ` +
+      `[${min}, ${PENDING_DRAFT_RESPAWN_AGE_MAX_SECONDS}] for ADVERSARIAL_REVIEW_SIGTERM_FENCE=${fenceMode}`
+    );
+    err.logKey = 'respawn_age_out_of_range';
+    throw err;
+  }
+  return parsed;
+}
+
+function emitWatcherTickReconciliationEvent({
+  log = console,
+  prNumber,
+  identity,
+  listed,
+  cleared,
+  retained,
+  retainedReason,
+  respawnAgeSeconds,
+  respawnDeadlineUtc,
+} = {}) {
+  log.log?.(JSON.stringify({
+    schemaVersion: 1,
+    event: 'watcher_tick_reconciliation',
+    pr: prNumber,
+    identity,
+    listed,
+    cleared,
+    retained,
+    retainedReason: retainedReason || null,
+    respawnAgeSeconds,
+    respawnDeadlineUtc: respawnDeadlineUtc || null,
+  }));
+}
+
+async function reconcilePendingDraftsBeforeSpawn({
+  repoPath,
+  prNumber,
+  botTokenEnv,
+  currentHeadSha,
+  respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds(),
+  now = new Date(),
+  fetchImpl = globalThis.fetch,
+  reconcileImpl = reconcilePendingReviewsForSelf,
+  log = console,
+} = {}) {
+  const token = process.env[botTokenEnv];
+  const reconciliation = await reconcileImpl({
+    repo: repoPath,
+    prNumber,
+    token,
+    currentHeadSha,
+    respawnAgeSeconds,
+    now,
+    fetchImpl,
+    log,
+  });
+  if (reconciliation?.selfLogin) {
+    emitWatcherTickReconciliationEvent({
+      log,
+      prNumber,
+      identity: reconciliation.selfLogin,
+      listed: reconciliation.listed ?? 0,
+      cleared: reconciliation.cleared ?? 0,
+      retained: reconciliation.retained ?? 0,
+      retainedReason: reconciliation.retainedReason ?? null,
+      respawnAgeSeconds,
+      respawnDeadlineUtc: reconciliation.respawnDeadlineUtc ?? null,
+    });
+  }
+  return {
+    ...reconciliation,
+    skipSpawn: reconciliation?.shouldSpawn === false,
+  };
 }
 
 function normalizeLabelName(label) {
@@ -1434,6 +1547,20 @@ const stmtMarkReviewerPgid = db.prepare(
       SET reviewer_pgid = ?,
           reviewer_started_at = ?,
           reviewer_lease_expires_at = ?
+    WHERE reviewer_session_uuid = ?
+      AND repo = ?
+      AND pr_number = ?
+      AND review_status = 'reviewing'`
+);
+const stmtReleaseReviewerClaim = db.prepare(
+  `UPDATE reviewed_prs
+      SET review_status = 'pending',
+          reviewer_session_uuid = NULL,
+          reviewer_started_at = NULL,
+          reviewer_head_sha = NULL,
+          reviewer_timeout_ms = NULL,
+          reviewer_lease_expires_at = NULL,
+          reviewer_pgid = NULL
     WHERE reviewer_session_uuid = ?
       AND repo = ?
       AND pr_number = ?
@@ -3616,6 +3743,7 @@ async function pollOnce(
           }
 
           try {
+            const respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds();
             const attemptAt = new Date().toISOString();
             const reviewerSessionUuid = randomUUID();
             // After ARA-06's operator-surface carve, the per-PR loop iterates
@@ -3703,6 +3831,24 @@ async function pollOnce(
                 `[watcher] freshness re-check failed for ${repoPath}#${prNumber}; proceeding with spawn:`,
                 err?.message || err
               );
+            }
+
+            const preSpawnReconciliation = await reconcilePendingDraftsBeforeSpawn({
+              repoPath,
+              prNumber,
+              botTokenEnv: route.botTokenEnv,
+              currentHeadSha: reviewerHeadSha,
+              respawnAgeSeconds,
+              now: new Date(attemptAt),
+            });
+            if (preSpawnReconciliation.skipSpawn) {
+              console.log(
+                `[watcher] Skipping reviewer spawn for ${repoPath}#${prNumber}: ` +
+                `fresh pending draft retained for ${preSpawnReconciliation.selfLogin} ` +
+                `until ${preSpawnReconciliation.respawnDeadlineUtc || 'unknown deadline'}`
+              );
+              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+              return;
             }
 
             // Final-round inputs come from the durable per-PR follow-up ledger,
@@ -3897,8 +4043,11 @@ async function main() {
     // hours later at first merge-agent dispatch.
     defaultReviewerRouteFromEnv(process.env);
     validateStartupMergeAgentConfig(process.env);
+    resolvePendingDraftRespawnAgeSeconds(process.env);
   } catch (err) {
-    console.error(`[watcher] FATAL config: ${err?.message || err}`);
+    console.error(
+      `[watcher] FATAL config${err?.logKey ? ` key=${err.logKey}` : ''}: ${err?.message || err}`
+    );
     throw err;
   }
 
@@ -4008,6 +4157,7 @@ if (isMain) {
 
 export {
   classifyReviewerFailure,
+  DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   evaluateRoundBudgetForReview,
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,
@@ -4019,14 +4169,17 @@ export {
   pollOnce,
   persistReviewerPgid,
   readWatcherDrainState,
+  reconcilePendingDraftsBeforeSpawn,
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
+  resolvePendingDraftRespawnAgeSeconds,
   resolveFirstPassReviewerPoolConfig,
   runFastMergeClosePathIsolated,
   runBoundedReviewerDispatchQueue,
   reserveReviewerMemoryAdmission,
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
+  resolveSigtermFenceMode,
   resolveStaleReviewerReconcilePerPoll,
   resolveReviewerTimeoutFallbackThreshold,
   sortReviewerDispatchCandidates,

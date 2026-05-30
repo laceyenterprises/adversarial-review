@@ -120,6 +120,42 @@ test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp',
   assert.equal(calls[1][1], 'api');
 });
 
+test('shared pre-write helper runs before the GitHub review mutation', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, { reviewerClass: 'claude' });
+  const events = [];
+
+  await withEnv({ GH_CLAUDE_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'claude',
+    reviewBody: '## Verdict\n\nComment only\n\nOrdered write',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    passKind: 'first-pass',
+    postedAt: '2026-05-29T12:01:00.000Z',
+    prepareReviewWrite: async (payload) => {
+      events.push({ kind: 'prepare', payload });
+      return { cleared: 0, listed: 0 };
+    },
+    execFileImpl: async (_command, args) => {
+      events.push({ kind: 'exec', args });
+      if (args[0] === 'pr' && args[1] === 'review') return { stdout: '', stderr: '' };
+      return {
+        stdout: `${JSON.stringify({ id: 911, login: 'claude-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: '## Verdict\n\nComment only\n\nOrdered write' })}\n`,
+        stderr: '',
+      };
+    },
+  }));
+
+  assert.equal(events[0].kind, 'prepare');
+  assert.deepEqual(events[1], {
+    kind: 'exec',
+    args: ['pr', 'review', String(pass.prNumber), '--repo', pass.repo, '--comment', '--body', '## Verdict\n\nComment only\n\nOrdered write'],
+  });
+});
+
 test('reviewer recapture is idempotent and preserves the first stored body', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, { passKind: 'rereview', reviewerClass: 'codex' });

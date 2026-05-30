@@ -103,6 +103,45 @@ test('clearPendingReviewsForSelf deletes the bot\'s pending review and leaves su
   assert.deepEqual(deleted, [1002]);
 });
 
+test('clearPendingReviewsForSelf resolves codex-reviewer-lacey from the token and deletes only that draft', async () => {
+  const deleted = [];
+  const fetchImpl = async function (url, opts = {}) {
+    if (url === 'https://api.github.com/user') {
+      return { ok: true, status: 200, async json() { return { login: 'codex-reviewer-lacey' }; } };
+    }
+    if (url.endsWith('/pulls/188/reviews') && (!opts.method || opts.method === 'GET')) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [
+            { id: 2001, state: 'PENDING', user: { login: 'claude-reviewer-lacey' } },
+            { id: 2002, state: 'PENDING', user: { login: 'codex-reviewer-lacey' } },
+          ];
+        },
+      };
+    }
+    if (url.endsWith('/reviews/2002') && opts.method === 'DELETE') {
+      deleted.push(2002);
+      return { ok: true, status: 200, async json() { return { id: 2002 }; } };
+    }
+    throw new Error(`unmocked fetch: ${opts.method || 'GET'} ${url}`);
+  };
+
+  const result = await clearPendingReviewsForSelf({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 188,
+    token: 'ghp_test',
+    fetchImpl,
+    log: { log() {}, warn() {} },
+  });
+
+  assert.equal(result.cleared, 1);
+  assert.equal(result.listed, 2);
+  assert.equal(result.selfLogin, 'codex-reviewer-lacey');
+  assert.deepEqual(deleted, [2002]);
+});
+
 test('clearPendingReviewsForSelf is best-effort when /user probe fails', async () => {
   const fetchImpl = async (url) => {
     if (url === 'https://api.github.com/user') {

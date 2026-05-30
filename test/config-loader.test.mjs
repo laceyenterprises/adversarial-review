@@ -18,6 +18,8 @@ import {
   loadConfig,
   validateSchema,
   SCHEMA_VERSION,
+  getConfig,
+  resetConfigCache,
 } from '../src/config-loader.mjs';
 
 function freshTmp() {
@@ -784,6 +786,65 @@ test('module __aliases targeting submodules subtree is accepted (non-strict)', (
     const cfg = loadConfig({ topPath: top, modulePaths: [mod], env: {} });
     assert.equal(cfg.get('submodules.worker_pool.size'), 4);
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// -------- Round-2 review remediations -------------------------------------
+
+test('localSibling refuses non-yaml/yml top path (Layer 4 skipped)', () => {
+  const tmp = freshTmp();
+  try {
+    // Top path with an unconventional extension.
+    const top = join(tmp, 'config.conf');
+    writeFile(top, `
+      version: 1
+      roles:
+        reviewer: codex
+    `);
+    // A `.local` sibling that, if synthesized, would be picked up and
+    // (incorrectly) override the top value. The new contract refuses to
+    // compute that sibling, so the override must NOT apply.
+    writeFile(join(tmp, 'config.conf.local'), `
+      version: 1
+      roles:
+        reviewer: claude
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roles.reviewer'), 'codex');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('getConfig invalidates cache when top YAML mtime changes', () => {
+  const tmp = freshTmp();
+  const top = join(tmp, 'config.yaml');
+  const originalEnv = process.env.AGENT_OS_CONFIG_PATH;
+  try {
+    process.env.AGENT_OS_CONFIG_PATH = top;
+    resetConfigCache();
+    writeFile(top, `
+      version: 1
+      roles:
+        reviewer: codex
+    `);
+    assert.equal(getConfig('roles.reviewer'), 'codex');
+
+    // Sleep enough to guarantee a fresh mtime even on coarse filesystems.
+    // Using a busy-wait to keep the test synchronous.
+    const start = Date.now();
+    while (Date.now() - start < 50) { /* spin */ }
+    writeFile(top, `
+      version: 1
+      roles:
+        reviewer: adversarial
+    `);
+    assert.equal(getConfig('roles.reviewer'), 'adversarial');
+  } finally {
+    if (originalEnv === undefined) delete process.env.AGENT_OS_CONFIG_PATH;
+    else process.env.AGENT_OS_CONFIG_PATH = originalEnv;
+    resetConfigCache();
     rmSync(tmp, { recursive: true, force: true });
   }
 });

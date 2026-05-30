@@ -1,12 +1,32 @@
 // agent-os-config — Node loader for the cross-language config surface (CFG).
 //
 // Behavior contract: ../../../projects/cfg/LOADER-CONTRACT.md in the
-// agent-os repo. This file is a byte-equivalent implementation of the Python
-// loader in `modules/worker-pool/lib/python/agent_os_config/__init__.py`;
-// the conformance test suite in `test/config-loader.test.mjs` exercises the
+// agent-os repo is the canonical source for what this loader (and the Python
+// sibling at `platform/agent-os-config/src/agent_os_config/__init__.py`) must
+// do. The conformance suite in `test/config-loader.test.mjs` exercises the
 // same fixture cases as the Python `tests/test_loader.py`.
+//
+// This file aims for behavior-equivalence with the Python sibling, NOT
+// byte-equivalence. Deliberate divergences from the current Python sibling
+// (each one strictly tightens the contract; tracked for alignment in the
+// agent-os PR landing the Python helper):
+//   1. Empty-string boolean env vars: this loader rejects them with a loud
+//      AgentOSConfigError; the Python sibling currently coerces "" → false.
+//      Operators "unsetting" a security-relevant flag must remove the env
+//      var, not blank it.
+//   2. Explicit `~` / null on non-nullable keys: this loader fails the
+//      schema; the Python sibling reverts to defaults.
+//   3. Same-file alias conflict: this loader compares the canonical-target
+//      values with deep structural equality (isDeepStrictEqual); the Python
+//      sibling uses identity. Trivially-deep-equal dicts merge cleanly here.
+//   4. localSibling for non-`.yaml`/`.yml` top-level paths: this loader
+//      refuses to compute a sibling and skips Layer 4 for that file; the
+//      Python sibling appends `.local` literally (producing odd siblings
+//      like `config.conf.local`).
+// LOADER-CONTRACT.md should land these as the canonical contract on the
+// agent-os side so the divergences narrow back to zero.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
@@ -723,6 +743,12 @@ function loadLayerFile(path) {
   return { doc, rawText: text };
 }
 
+// Returns the Layer-4 sibling path for `path`, or null if `path` doesn't end
+// in `.yaml`/`.yml`. Non-YAML extensions (e.g. operator points
+// AGENT_OS_CONFIG_PATH at `/etc/agent-os/config` or `…/config.conf`) used to
+// silently fall back to `${name}.local`, producing oddly-named siblings that
+// the YAML parser would happily try to load. Refusing makes the rule legible:
+// pick a `.yaml` / `.yml` path or the loader doesn't synthesize a sibling.
 function localSibling(path) {
   const dir = dirname(path);
   const name = basename(path);
@@ -732,7 +758,7 @@ function localSibling(path) {
   if (name.endsWith('.yml')) {
     return join(dir, `${name.slice(0, -'.yml'.length)}.local.yml`);
   }
-  return join(dir, `${name}.local`);
+  return null;
 }
 
 // -------- AgentOSConfig (public class) -------------------------------------
@@ -828,12 +854,14 @@ export function loadConfig({
   }
 
   // --- Layer 4: *.local.yaml siblings ---
+  // localSibling returns null for non-yaml/yml top paths; we skip Layer 4
+  // entirely for those rather than synthesize a `${name}.local` sibling.
   const localSources = [];
   const topLocal = localSibling(topPathResolved);
-  if (existsSync(topLocal)) localSources.push(topLocal);
+  if (topLocal && existsSync(topLocal)) localSources.push(topLocal);
   for (const rawPath of modulePaths) {
     const moduleLocal = localSibling(rawPath);
-    if (existsSync(moduleLocal)) localSources.push(moduleLocal);
+    if (moduleLocal && existsSync(moduleLocal)) localSources.push(moduleLocal);
   }
   for (const local of localSources) {
     const { doc: localDoc, rawText: localRaw } = loadLayerFile(local);
@@ -927,25 +955,58 @@ function isEmptyDoc(doc) {
 
 // -------- Convenience wrapper ----------------------------------------------
 
-// `getConfig` lazily caches the first `loadConfig()` for the lifetime of the
-// process. That is fine for short-lived CLIs but NOT safe in long-running
-// daemons (e.g. the adversarial-watcher and follow-up daemons): env-var
-// rotations and live config edits will not be reflected until the cache is
-// invalidated. Long-lived processes must either call `resetConfigCache()`
-// on SIGHUP / on a known reconfigure boundary, or call `loadConfig()`
-// directly per-tick instead of using `getConfig()`.
+// `getConfig` caches the most recent `loadConfig()` and invalidates it when
+// the resolved top-level YAML's mtime / inode changes. That makes the common
+// "operator edited config.yaml, kicked the daemon — does it pick it up?"
+// case work without the operator needing to know about `resetConfigCache()`.
+//
+// What this does NOT catch: env-var rotations (e.g. AGENT_OS_CONFIG_PATH
+// itself changes mid-process), and edits to module-config / *.local.yaml
+// siblings. Daemons that consume env-driven config (or any non-top file
+// layer) should still call `loadConfig()` per-tick, or call
+// `resetConfigCache()` explicitly on a known reconfigure boundary.
 let _cachedConfig = null;
+let _cachedTopPath = null;
+let _cachedTopMtime = null;  // milliseconds-since-epoch; null = file absent
+let _cachedTopIno = null;    // inode number; null = file absent
+
+function _currentTopSignature() {
+  const topPath = process.env.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
+  try {
+    const st = statSync(topPath);
+    return { topPath, mtime: st.mtimeMs, ino: st.ino };
+  } catch {
+    return { topPath, mtime: null, ino: null };
+  }
+}
+
+function _ensureFreshConfig() {
+  const sig = _currentTopSignature();
+  if (
+    _cachedConfig === null
+    || _cachedTopPath !== sig.topPath
+    || _cachedTopMtime !== sig.mtime
+    || _cachedTopIno !== sig.ino
+  ) {
+    _cachedConfig = loadConfig();
+    _cachedTopPath = sig.topPath;
+    _cachedTopMtime = sig.mtime;
+    _cachedTopIno = sig.ino;
+  }
+  return _cachedConfig;
+}
 
 export function getConfig(key, defaultValue = null) {
-  if (_cachedConfig === null) _cachedConfig = loadConfig();
-  return _cachedConfig.get(key, defaultValue);
+  return _ensureFreshConfig().get(key, defaultValue);
 }
 
 export function resolutionTrace(key) {
-  if (_cachedConfig === null) _cachedConfig = loadConfig();
-  return _cachedConfig.resolutionTrace(key);
+  return _ensureFreshConfig().resolutionTrace(key);
 }
 
 export function resetConfigCache() {
   _cachedConfig = null;
+  _cachedTopPath = null;
+  _cachedTopMtime = null;
+  _cachedTopIno = null;
 }

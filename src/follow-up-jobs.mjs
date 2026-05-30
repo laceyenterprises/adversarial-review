@@ -86,6 +86,26 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // A settled review stops the automatic loop, but an explicit operator
   // retrigger label/CLI call means "address the remaining non-blocking flags."
   'review-settled',
+  // The silent-no-progress guard auto-stops when a remediation round
+  // completes without setting `reReview.requested = true`. The guard
+  // prevents an automatic loop where remediation keeps "completing"
+  // without forward signal. An explicit operator retrigger gesture means
+  // "I see the no-progress signal — try anyway, I'll evaluate."
+  // (PR laceyenterprises/agent-os#1086 hit this: `no-progress` was
+  // missing from the allowlist and the watcher reported `job-active`
+  // on every tick for hours without progress.)
+  'no-progress',
+  // The remediation was stopped because the head had moved out from
+  // under a review created for an older SHA. By the time the operator
+  // applies the retrigger label, the head IS the current head, so the
+  // operator's gesture ("re-review the current head") races nothing.
+  'stale-review-head',
+  //
+  // Intentionally NOT retriggerable: `operator-stop` (encodes explicit
+  // operator intent to halt — a new operator gesture should explicitly
+  // un-stop, not paper over) and `rereview-blocked` (encodes "blocked
+  // re-review state" — retriggering would likely re-hit the same block;
+  // separate decision if we ever want operator override to bypass it).
 ]);
 const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
 

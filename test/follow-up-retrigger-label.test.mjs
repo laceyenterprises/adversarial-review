@@ -266,6 +266,65 @@ test('tryRetriggerRemediationFromLabel requeues stopped:daemon-bounce-safety for
   assert.match(claimed.jobPath, /data\/follow-up-jobs\/in-progress\/.+\.json$/);
 });
 
+test('tryRetriggerRemediationFromLabel requeues stopped:no-progress for explicit operator override', async () => {
+  // Regression for laceyenterprises/agent-os#1086 (2026-05-30): the
+  // silent-no-progress guard auto-stopped the job after round 1
+  // completed without `reReview.requested = true`. Without `no-progress`
+  // in RETRIGGERABLE_STOP_CODES the watcher reported `job-active` on
+  // every tick for hours and the operator's explicit retrigger gesture
+  // was silently no-op.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'no-progress',
+    currentRound: 1,
+    maxRounds: 2,
+  });
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    // makeHaltedJob fixes prNumber=238; the agent-os#1086 reference in
+    // the comment above is the incident, not the test fixture's PR.
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-no-progress' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+    now: () => '2026-05-30T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  const requeued = readFollowUpJob(result.jobPath);
+  assert.equal(requeued.status, 'pending');
+  assert.equal(requeued.remediationPlan.nextAction.operatorOverride, true);
+});
+
+test('tryRetriggerRemediationFromLabel requeues stopped:stale-review-head once head is current', async () => {
+  // The remediation was auto-stopped because the head had moved out from
+  // under a review created for an older SHA. By the time the operator
+  // applies the label, the head IS the current head — the retrigger
+  // gesture races nothing.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'stale-review-head',
+    currentRound: 1,
+    maxRounds: 2,
+  });
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-stale-head' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+    now: () => '2026-05-30T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  const requeued = readFollowUpJob(result.jobPath);
+  assert.equal(requeued.status, 'pending');
+});
+
 test('tryRetriggerRemediationFromLabel works on completed jobs that requested re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   makeHaltedJob(rootDir, {

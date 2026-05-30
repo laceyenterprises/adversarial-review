@@ -820,6 +820,11 @@ export async function tryRetriggerRemediationFromLabel({
       requestedAt: ts,
       requestedBy: `pr-label:${labelEventActor}`,
       reason,
+      // Pass the resolved current head so the requeue path can write it
+      // into nextJob.revisionRef. Without this, a stopped:stale-review-head
+      // requeue would re-fire the same stop on the next consume tick
+      // (round-1 review B1).
+      revisionRef: normalizedRevisionRef,
     });
   } catch (err) {
     const failedRequeue = {

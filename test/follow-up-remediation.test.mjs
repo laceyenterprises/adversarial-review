@@ -1044,32 +1044,31 @@ test('spawnCodexRemediationWorker omits WORKER_JOB_ID when no jobId is provided'
   assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'WORKER_JOB_ID'), false);
 });
 
-// ── worker-class dispatcher (same-model remediation; LAC-358 revert) ───────
+// ── worker-class dispatcher (cross-model remediation; adversarial default) ─
 
-test('pickRemediationWorkerClass routes builderTag=codex to codex (same-model)', () => {
-  // Same-model remediation: codex wrote the PR → codex remediates.
+test('pickRemediationWorkerClass routes builderTag=codex to claude-code (cross-model)', () => {
+  // Cross-model remediation: codex wrote the PR → claude-code remediates,
+  // so a second model both reviews AND fixes (adversarial-by-default).
   assert.equal(
     pickRemediationWorkerClass({ builderTag: 'codex', reviewerModel: 'claude' }),
-    'codex'
-  );
-});
-
-test('pickRemediationWorkerClass routes builderTag=claude-code to claude-code (same-model)', () => {
-  // Same-model remediation: claude wrote the PR → claude-code remediates.
-  assert.equal(
-    pickRemediationWorkerClass({ builderTag: 'claude-code', reviewerModel: 'codex' }),
     'claude-code'
   );
 });
 
-test('pickRemediationWorkerClass routes builderTag=clio-agent to codex (Clio writer is codex)', () => {
-  // Same-model remediation: Clio dispatches codex workers; the writer of
-  // a [clio-agent] PR is codex, so the remediator is codex too. This is
-  // the test that was previously test.skip()'d while the LAC-358
-  // codex-only override was active.
+test('pickRemediationWorkerClass routes builderTag=claude-code to codex (cross-model)', () => {
+  // Cross-model remediation: claude wrote the PR → codex remediates.
+  assert.equal(
+    pickRemediationWorkerClass({ builderTag: 'claude-code', reviewerModel: 'codex' }),
+    'codex'
+  );
+});
+
+test('pickRemediationWorkerClass routes builderTag=clio-agent to claude-code (Clio writer is codex; cross-model)', () => {
+  // Cross-model remediation: Clio dispatches codex writers; the opposite
+  // model is claude-code.
   assert.equal(
     pickRemediationWorkerClass({ builderTag: 'clio-agent', reviewerModel: 'claude' }),
-    'codex'
+    'claude-code'
   );
 });
 
@@ -3282,8 +3281,8 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
   // failures become terminal queue state (failed/), not orphaned claims.
   //
   // This regression test exercises the codex OAuth pre-flight path. With
-  // same-model remediation (LAC-358 revert, 2026-05-29), a [codex] PR
-  // routes to the codex remediator; the fixture uses builderTag='codex'
+  // cross-model remediation (default 2026-05-29), a [claude-code] PR
+  // routes to the codex remediator; the fixture uses builderTag='claude-code'
   // and CODEX_* env to drive that path. The dormant claude-code launch
   // path is covered by separate tests.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
@@ -3300,8 +3299,8 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
-      reviewerModel: 'claude',
-      builderTag: 'codex',
+      reviewerModel: 'codex',
+      builderTag: 'claude-code',
       linearTicketId: 'LAC-207',
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
       reviewPostedAt: '2026-04-21T08:00:00.000Z',
@@ -3383,8 +3382,8 @@ test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral wh
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
-      reviewerModel: 'claude',
-      builderTag: 'codex',
+      reviewerModel: 'codex',
+      builderTag: 'claude-code',
       linearTicketId: 'LAC-207',
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
       reviewPostedAt: '2026-04-21T08:00:00.000Z',
@@ -4493,7 +4492,7 @@ test('reconcile falls through to pickRemediationWorkerClass when worker.model is
 
   assert.equal(commentCalls.length, 1);
   assert.equal(
-    commentCalls[0].workerClass, 'codex',
-    'unmappable worker.model should fall through to pickRemediationWorkerClass(job) — clio-agent → codex'
+    commentCalls[0].workerClass, 'claude-code',
+    'unmappable worker.model should fall through to pickRemediationWorkerClass(job) — clio-agent → claude-code (cross-model)'
   );
 });

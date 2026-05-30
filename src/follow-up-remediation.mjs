@@ -140,24 +140,25 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 const DEFAULT_REMEDIATOR_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
 
-// Same-model remediator routing. The model that wrote the code knows its
-// own conventions, structure, and the intent behind decisions best, so the
-// remediation worker class is the same as the PR's writer:
+// Cross-model (adversarial) remediator routing. The remediator runs as
+// the OPPOSITE model from the writer, so a second model both reviews AND
+// fixes — the writer's blind spots don't get reinforced by a same-model
+// fix that pattern-matches on the same wrong intuitions:
 //
-//   [codex]       → codex remediates (writer is codex)
-//   [claude-code] → claude-code remediates (writer is claude)
-//   [clio-agent]  → codex remediates (Clio dispatches codex workers)
+//   [codex]       → claude-code remediates (writer is codex)
+//   [claude-code] → codex remediates       (writer is claude)
+//   [clio-agent]  → claude-code remediates (Clio dispatches codex writers)
 //
-// This pairs with cross-model REVIEW: reviewer catches blind spots the
-// writer can't see; remediator (same model) knows the codebase context to
-// implement the fix coherently.
+// Pairs with cross-model REVIEW (adapters/subject/github-pr/routing.mjs):
+// reviewer and remediator are both adversarial-by-default.
 //
-// Operators override via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost
-// or availability requires pinning to a specific worker class.
+// Operators pin globally via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex`
+// or `=claude-code` — the env override wins over per-tag routing for
+// budget-squeeze or model-availability scenarios.
 const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
-  codex: 'codex',
-  'claude-code': 'claude-code',
-  'clio-agent': 'codex',
+  codex: 'claude-code',
+  'claude-code': 'codex',
+  'clio-agent': 'claude-code',
 });
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
@@ -772,10 +773,10 @@ function validateStartupRemediationConfig(env = process.env) {
   resolveRemediationMaxConcurrentJobs(env);
 }
 
-// Per-PR remediator routing: pair the writer model with itself so the
-// remediator inherits the writer's codebase context and conventions. See
+// Per-PR remediator routing: pair the writer model with the OPPOSITE model
+// so a second model both reviews AND fixes (adversarial-by-default). See
 // `REMEDIATION_WORKER_BY_BUILDER_TAG` above for the mapping. The reviewer
-// stays cross-model (see `adapters/subject/github-pr/routing.mjs`).
+// also stays cross-model (see `adapters/subject/github-pr/routing.mjs`).
 //
 // Operators can override the per-PR derivation via
 // `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` when cost or availability requires
@@ -784,10 +785,25 @@ function validateStartupRemediationConfig(env = process.env) {
 // claude regardless of the original PR's builderTag.
 //
 // Historical note: LAC-358 previously hard-routed all remediation to codex
-// regardless of builderTag. The per-PR same-model derivation was restored
-// on 2026-05-29 after codex weekly-budget pressure made the codex-only
-// default operator-unworkable; the env override provides the same operator
-// escape hatch in the other direction.
+// regardless of builderTag. PR #172 (2026-05-29 AM) attempted to restore
+// per-tag derivation but landed at same-model (writer remediates itself).
+// This PR (#175, 2026-05-29 PM) flipped it back to cross-model
+// (adversarial-by-default) — the writer's blind spots don't get reinforced
+// by a same-model fix that pattern-matches on the same wrong intuitions.
+// The env override provides the same operator escape hatch in either
+// direction.
+//
+// Fallback semantics: when `builderTag` is missing or unknown
+// (job-schema-migration field loss, hand-edited triage records), the
+// derivation falls through to `DEFAULT_REMEDIATION_WORKER_CLASS = 'codex'`.
+// Under cross-model, a `[codex]` PR with a corrupted builderTag would
+// silently route to codex remediation — same-model in disguise. This is an
+// operator-acceptable degraded path: it preserves "something runs" over
+// "nothing runs", and the operator can pin via
+// `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` if the missing-tag rate becomes
+// material. Future: consider raising and routing the job to `pending` with
+// `lastConfigValidationFailure` (matches the bad-env contract) once
+// upstream missing-tag rate is measured.
 function pickRemediationWorkerClass(job, { env = process.env } = {}) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(env);
   if (envOverride) return envOverride;
@@ -795,8 +811,8 @@ function pickRemediationWorkerClass(job, { env = process.env } = {}) {
   if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }
-  // No usable builderTag — fall back to codex per historical default; operator
-  // can still override via the env var above.
+  // No usable builderTag — degraded same-model fallback to codex (per
+  // doc-block above). Operator can pin via env to bypass.
   return DEFAULT_REMEDIATION_WORKER_CLASS;
 }
 

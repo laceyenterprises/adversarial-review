@@ -7,12 +7,12 @@
     "node": ">=20 <26"
   },
   "main": "src/watcher.mjs",
-    "bin": {
-      "adversarial-review": "src/cli.mjs"
-    },
-    "scripts": {
-      "lint": "eslint \"src/**/*.{js,mjs}\"",
-      "start": "node src/watcher.mjs",
+  "bin": {
+    "adversarial-review": "src/cli.mjs"
+  },
+  "scripts": {
+    "lint": "eslint \"src/**/*.{js,mjs}\"",
+    "start": "node src/watcher.mjs",
     "review": "node src/reviewer.mjs",
     "pr:create:tagged": "node src/pr-create-tagged.mjs",
     "test": "node --test test/*.test.mjs test/adapters/*.test.mjs",
@@ -37,7 +37,8 @@
   "dependencies": {
     "@linear/sdk": "^86.0.0",
     "@octokit/rest": "^22.0.1",
-    "better-sqlite3": "^12.10.0"
+    "better-sqlite3": "^12.10.0",
+    "js-yaml": "^4.1.1"
   },
   "devDependencies": {
     "eslint": "^10.4.0",

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,6 +46,16 @@ import {
   resolveSessionLedgerDbPath,
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
+import { resetRoleConfigCache } from '../src/role-config.mjs';
+
+// CFG-09 (2026-05-30): the role-config cascade caches by (topPath,
+// modulePaths) — not env. Tests in this file rotate env between cases
+// (codex vs claude-code vs merge-agent vs invalid) without changing
+// the call shape, so the cache must be cleared between cases for the
+// per-test env to take effect.
+beforeEach(() => {
+  resetRoleConfigCache();
+});
 
 // Existing dispatchMergeAgentForPR tests assume agent-os (the hq CLI
 // + merge-agent adapter) IS present on the host running the tests.

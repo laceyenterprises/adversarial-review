@@ -1,0 +1,231 @@
+// CFG-09 cache + per-tick reset tests for `loadRoleConfig`.
+//
+// These tests exercise the documented cache-invalidation contract:
+//
+//   - The role-config cascade cache is keyed by (topPath, modulePaths)
+//     and watches file mtime/inode. Repeated calls with the same call
+//     shape are cache hits; file edits invalidate the slot.
+//   - Env mutations DO NOT auto-invalidate the cache. The caller MUST
+//     call `resetRoleConfigCache()` at the per-tick / per-job boundary.
+//
+// Sibling: `test/helpers/role-config-cache-reset.mjs` exports a
+// `beforeEach`/`afterEach` helper for tests that want pristine cache
+// state between cases.
+
+import { test } from 'node:test';
+import { strict as assert } from 'node:assert';
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import yaml from 'js-yaml';
+
+import { loadRoleConfig, resetRoleConfigCache } from '../src/role-config.mjs';
+import { routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
+
+function makeTmp() {
+  return mkdtempSync(join(tmpdir(), 'cfg-09-cache-'));
+}
+
+function writeYaml(path, body) {
+  writeFileSync(path, body, { encoding: 'utf8' });
+}
+
+// ── Per-tick reset: two ticks with different env both see fresh resolution ──
+
+test('CFG-09 per-tick reset: two ticks with different env both resolve env value', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, 'roles:\n  remediator: codex\n');
+
+    // Tick 1: env pins to codex (matches file; trace still shows env).
+    resetRoleConfigCache();
+    const cfg1 = loadRoleConfig({
+      env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'codex',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    });
+    assert.equal(cfg1.get('roles.remediator'), 'codex');
+
+    // Tick 2: env rotates; the explicit reset is the contract.
+    resetRoleConfigCache();
+    const cfg2 = loadRoleConfig({
+      env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    });
+    assert.equal(cfg2.get('roles.remediator'), 'claude-code');
+    const trace2 = cfg2.resolutionTrace('roles.remediator');
+    assert.equal(trace2[trace2.length - 1].source, 'env:AGENT_OS_ROLES_REMEDIATOR');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ── Cache hit within a tick: repeated calls do not re-parse YAML ──
+
+test('CFG-09 cache hit: repeated loadRoleConfig within a tick does not re-parse', (t) => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, 'roles:\n  remediator: codex\n');
+
+    resetRoleConfigCache();
+    const callArgs = {
+      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    };
+    // Prime the cache.
+    loadRoleConfig(callArgs);
+
+    // Now spy on yaml.load — config-loader.mjs imports the same
+    // default export, so this intercepts its parses.
+    const yamlLoadSpy = t.mock.method(yaml, 'load');
+
+    for (let i = 0; i < 10; i++) {
+      loadRoleConfig(callArgs);
+    }
+    assert.equal(
+      yamlLoadSpy.mock.callCount(),
+      0,
+      'repeated loadRoleConfig calls within a tick must hit cache (no YAML parses)',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ── Env mutation without reset returns stale cached value (documented) ──
+
+test('CFG-09 env mutation without reset returns stale cached value (documented contract)', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, 'roles:\n  remediator: codex\n');
+
+    resetRoleConfigCache();
+    const cfg1 = loadRoleConfig({
+      env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'codex',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    });
+    assert.equal(cfg1.get('roles.remediator'), 'codex');
+
+    // Same call shape (topPath + modulePaths) but env mutates. Without
+    // a reset, the cache returns the previously resolved AgentOSConfig.
+    // This is the CFG-09 documented behavior; callers that need fresh
+    // env reads MUST call resetRoleConfigCache() at their boundary.
+    const cfg2 = loadRoleConfig({
+      env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    });
+    assert.equal(
+      cfg2.get('roles.remediator'),
+      'codex',
+      'env mutation without resetRoleConfigCache must return the stale cached value',
+    );
+
+    // After reset, the new env wins.
+    resetRoleConfigCache();
+    const cfg3 = loadRoleConfig({
+      env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    });
+    assert.equal(cfg3.get('roles.remediator'), 'claude-code');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ── N2 hot path regression: routeSubject × ~10 PRs × repeated ticks ──
+
+test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) => {
+  // routeSubject does not accept `modulePaths`, so it always consults
+  // the real adversarial-review module config. We pin `topPath` to
+  // `/dev/null` to keep the top layer empty + deterministic. The cache
+  // key is therefore (null|topPath: '/dev/null', modulePaths:
+  // [MODULE_CONFIG_PATH]) which is stable across all PRs in a tick.
+  const env = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+  const callOpts = { env, topPath: '/dev/null' };
+  const subjects = [];
+  for (let i = 0; i < 10; i++) {
+    subjects.push({ builderClass: i % 2 === 0 ? 'codex' : 'claude-code' });
+  }
+
+  for (let tick = 0; tick < 3; tick++) {
+    resetRoleConfigCache();
+    // Prime the tick.
+    const firstRoute = routeSubject(subjects[0], callOpts);
+    assert.ok(firstRoute, `tick ${tick}: first routeSubject must succeed`);
+
+    // Now count parses for the remaining 9 PRs. Each should be a cache hit.
+    const yamlLoadSpy = t.mock.method(yaml, 'load');
+    try {
+      for (let i = 1; i < subjects.length; i++) {
+        routeSubject(subjects[i], callOpts);
+      }
+      assert.equal(
+        yamlLoadSpy.mock.callCount(),
+        0,
+        `tick ${tick}: PRs 2-10 must all hit cache; saw ${yamlLoadSpy.mock.callCount()} parses`,
+      );
+    } finally {
+      yamlLoadSpy.mock.restore();
+    }
+  }
+});
+
+// ── Cache invalidates on module-file mtime change ──
+
+test('CFG-09 module-file edit invalidates cache without explicit reset', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, 'roles:\n  remediator: codex\n');
+
+    resetRoleConfigCache();
+    const callArgs = {
+      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    };
+    const cfg1 = loadRoleConfig(callArgs);
+    assert.equal(cfg1.get('roles.remediator'), 'codex');
+
+    // Rewrite the module file with a different remediator and force a
+    // noticeable mtime delta. writeFileSync updates mtime to now, but
+    // sub-millisecond test ticks can leave _cachedSignature unchanged;
+    // utimesSync to a future time guarantees a signature change.
+    const future = new Date(Date.now() + 1000);
+    writeYaml(modulePath, 'roles:\n  remediator: claude-code\n');
+    utimesSync(modulePath, future, future);
+
+    const cfg2 = loadRoleConfig(callArgs);
+    assert.equal(
+      cfg2.get('roles.remediator'),
+      'claude-code',
+      'module-file mtime change should auto-invalidate cache',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

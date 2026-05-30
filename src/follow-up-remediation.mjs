@@ -39,6 +39,7 @@ import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs'
 import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
+  resetRoleConfigCache,
   resolveDefaultRemediator,
   validateStartupRoleConfig,
 } from './role-config.mjs';
@@ -3296,6 +3297,12 @@ async function consumeNextFollowUpJob({
   onExcludedRepoPrKey = null,
   log = console,
 } = {}) {
+  // CFG-09: per-job boundary for the role-config cascade cache. Match
+  // the watcher's per-tick reset so an env rotation between claims
+  // propagates to `pickRemediationWorkerClass`; without this, a stale
+  // cached config from a prior `loadRoleConfig` call (in this process
+  // or via the role resolvers below) would mask the new env.
+  resetRoleConfigCache();
   // Claim first so we know which worker class we're running. This lets
   // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
   // pointed at Claude Code's CLI rather than incorrectly blocking on

@@ -118,9 +118,13 @@ test('github-pr routing rejects unknown default reviewer env values', () => {
   assert.throws(
     () => routeSubject(
       { builderClass: 'codex' },
-      { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' } }
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini', AGENT_OS_CONFIG_PATH: '/dev/null' } }
     ),
-    /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
+    (err) => {
+      assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
+      assert.match(err.message, /gemini/);
+      return true;
+    }
   );
 });
 
@@ -145,8 +149,15 @@ test('github-pr routing exposes same-family review waiver detection for override
 
 test('github-pr routing startup validation rejects unknown default reviewer env values', () => {
   assert.throws(
-    () => defaultReviewerRouteFromEnv({ ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' }),
-    /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/
+    () => defaultReviewerRouteFromEnv({
+      ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+    }),
+    (err) => {
+      assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
+      assert.match(err.message, /gemini/);
+      return true;
+    }
   );
 });
 
@@ -160,13 +171,54 @@ test('watcher startup prints a fatal config banner for invalid default reviewer 
         ...process.env,
         GITHUB_TOKEN: 'test-token',
         ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
       },
       encoding: 'utf8',
     },
   );
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /FATAL config: ADVERSARIAL_REVIEW_DEFAULT_REVIEWER must be one of: codex, claude/);
+  assert.match(result.stderr, /FATAL config/);
+  assert.match(result.stderr, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
+  assert.match(result.stderr, /gemini/);
+});
+
+// ── CFG-02 cascade tests (env via canonical + legacy) ─────────────────────
+
+test('CFG-02 routeSubject: canonical AGENT_OS_ROLES_REVIEWER pins reviewer', () => {
+  assert.deepEqual(
+    routeSubject(
+      { builderClass: 'codex' },
+      { env: { AGENT_OS_ROLES_REVIEWER: 'claude-code', AGENT_OS_CONFIG_PATH: '/dev/null' } },
+    ),
+    {
+      builderClass: 'codex',
+      tag: 'codex',
+      reviewerModel: 'claude',
+      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    },
+  );
+});
+
+test('CFG-02 routeSubject: canonical + legacy env conflict fails loud (§10.1)', () => {
+  assert.throws(
+    () => routeSubject(
+      { builderClass: 'codex' },
+      {
+        env: {
+          AGENT_OS_ROLES_REVIEWER: 'codex',
+          ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'claude-code',
+          AGENT_OS_CONFIG_PATH: '/dev/null',
+        },
+      },
+    ),
+    (err) => {
+      assert.match(err.message, /AGENT_OS_ROLES_REVIEWER/);
+      assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
+      assert.match(err.message, /conflict/i);
+      return true;
+    },
+  );
 });
 
 test('github-pr subject adapter fetches diff content through the subject interface', async () => {

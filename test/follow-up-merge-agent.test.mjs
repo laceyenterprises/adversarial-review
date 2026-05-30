@@ -5526,7 +5526,56 @@ test('validateStartupMergeAgentConfig passes when env is a known value', () => {
 
 test('validateStartupMergeAgentConfig throws on unknown env (boot-time fail-loud)', () => {
   assert.throws(
-    () => validateStartupMergeAgentConfig({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'condex' }),
-    /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS must be one of: merge-agent, codex, claude-code/
+    () => validateStartupMergeAgentConfig({
+      [MERGE_AGENT_WORKER_CLASS_ENV]: 'condex',
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+    }),
+    (err) => {
+      assert.match(err.message, /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS/);
+      assert.match(err.message, /condex/);
+      return true;
+    }
+  );
+});
+
+// ── CFG-02 cascade tests (file→env, top-over-module, alias) ───────────────
+
+test('CFG-02 resolveMergeAgentWorkerClass: canonical AGENT_OS_* env wins over legacy', () => {
+  // §10.1 contract: canonical AGENT_OS_* and legacy alias both reach the
+  // same key; on same-value overlap the canonical wins (trace records
+  // canonical as the source).
+  assert.equal(
+    resolveMergeAgentWorkerClass({
+      AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS: 'codex',
+      [MERGE_AGENT_WORKER_CLASS_ENV]: 'codex',
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+    }),
+    'codex'
+  );
+});
+
+test('CFG-02 resolveMergeAgentWorkerClass: canonical + legacy with different values fails loud', () => {
+  assert.throws(
+    () => resolveMergeAgentWorkerClass({
+      AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS: 'codex',
+      [MERGE_AGENT_WORKER_CLASS_ENV]: 'claude-code',
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+    }),
+    (err) => {
+      assert.match(err.message, /AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS/);
+      assert.match(err.message, /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS/);
+      assert.match(err.message, /conflict/i);
+      return true;
+    }
+  );
+});
+
+test('CFG-02 resolveMergeAgentWorkerClass: canonical AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS honored', () => {
+  assert.equal(
+    resolveMergeAgentWorkerClass({
+      AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS: 'claude-code',
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+    }),
+    'claude-code'
   );
 });

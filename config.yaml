@@ -1,0 +1,59 @@
+# Adversarial-review module configuration.
+#
+# Loader contract: see the top-level agent-os repo's
+# projects/cfg/SPEC.md (CFG pack). This file is the module-level layer in
+# the resolution order:
+#   code defaults → THIS FILE → top-level config.yaml → *.local.yaml
+#   → env vars → CLI flags
+#
+# The top-level /Users/airlock/agent-os/config.yaml (when `roles.*` is set
+# there) overrides values in this file per SPEC §10.2.
+#
+# Module files MUST NOT declare `version:` — that's the top-level lock.
+# Strict schema is enforced by src/config-loader.mjs; unknown keys fail
+# loud at startup.
+
+# §10.2 alias: when the operator pins `roles.merge_agent_worker_class` at
+# the top level, that value is the canonical truth — this module's
+# `merge_agent.worker_class` resolves to the same value via the alias.
+# The loader fails loud if both are set with different values.
+__aliases:
+  merge_agent.worker_class: roles.merge_agent_worker_class
+
+# Role pins. Canonical home is the top-level config.yaml; these are the
+# module-internal defaults when the operator hasn't pinned a value there.
+# CFG-02 wires resolvers for these three knobs to consult this file FIRST,
+# then env override LAST.
+roles:
+  reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / adversarial
+  remediator: adversarial           # enum: claude-code / codex / adversarial
+
+# Merge-agent worker class. Aliased above to roles.merge_agent_worker_class
+# so the operator can pin from the top level OR from this file (but not
+# both with different values — the loader fails loud on conflict).
+merge_agent:
+  worker_class: merge-agent         # enum: merge-agent / codex / claude-code
+  # ON: dispatch the merge-agent on the final pass even when the reviewer
+  # is still Request changes (the comment_only_followups sub-worker becomes
+  # the final substance gate). Track: future ticket wires this through the
+  # file→env cascade; the env var MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES
+  # remains the operator override today.
+  final_pass_on_request_changes: true
+
+# Remediation concurrency cap. Future ticket wires through cascade; env var
+# ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS remains operator override.
+remediation:
+  max_concurrent_jobs: 1
+
+# Reviewer timing knobs. Future ticket wires through cascade; env vars
+# (REVIEWER_TIMEOUT_MS, REVIEWER_FALLBACK_THRESHOLD) remain operator
+# overrides for now.
+reviewer:
+  timeout_ms: 1200000
+  fallback_threshold: 2
+
+# Watcher alert routing. null = no default; operator MUST set in
+# config.local.yaml or env (ALERT_TO_OP_REF, or the ALLOW_MISSING escape
+# hatch) — secrets stay env-only per SPEC §2.
+watcher:
+  alert_to_op_ref: null

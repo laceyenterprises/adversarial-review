@@ -9,6 +9,7 @@
  */
 
 import { builderClassFromTitle, tagFromBuilderClass } from './title-tagging.mjs';
+import { resolveDefaultReviewer as resolveDefaultReviewerFromConfig } from '../../../role-config.mjs';
 
 const ROUTE_BY_BUILDER_CLASS = {
   codex: {
@@ -74,20 +75,24 @@ function normalizeReviewerModel(reviewerInput) {
   }
 }
 
-function defaultReviewerRouteFromEnv(env = process.env) {
-  const raw = env?.[DEFAULT_REVIEWER_ENV];
-  if (raw === undefined || String(raw).trim() === '') return null;
-  const reviewerModel = normalizeReviewerModel(raw);
-  if (!reviewerModel) {
-    throw new Error(
-      `${DEFAULT_REVIEWER_ENV} must be one of: codex, claude; got ${JSON.stringify(raw)}`
-    );
-  }
-  return REVIEWER_ROUTE_BY_MODEL[reviewerModel];
+// Cascade-aware reviewer route resolver. Consults config.yaml FIRST
+// (module → top → *.local) and env LAST per SPEC §3. Returns null when
+// no pin is in effect (the per-tag cross-model routing in
+// ROUTE_BY_BUILDER_CLASS then applies).
+//
+// `defaultReviewerRouteFromEnv` is preserved as the public name; the body
+// delegates to the file-cascade resolver. `routeSubject` and the watcher's
+// boot validator both consume this without changes.
+function defaultReviewerRouteFromEnv(env = process.env, opts = {}) {
+  return resolveDefaultReviewerFromConfig({
+    env,
+    reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+    ...opts,
+  });
 }
 
-function validateDefaultReviewerRouteConfig(env = process.env) {
-  defaultReviewerRouteFromEnv(env);
+function validateDefaultReviewerRouteConfig(env = process.env, opts = {}) {
+  defaultReviewerRouteFromEnv(env, opts);
 }
 
 function isCrossModelReviewWaived(builderClassInput, reviewerInput) {
@@ -113,10 +118,11 @@ function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = 
   );
 }
 
-function routeSubject(subject, { env = process.env } = {}) {
+function routeSubject(subject, { env = process.env, topPath, loaderImpl } = {}) {
   const builderClass = normalizeBuilderClass(subject?.builderClass);
   if (!builderClass) return null;
-  const route = defaultReviewerRouteFromEnv(env) || ROUTE_BY_BUILDER_CLASS[builderClass];
+  const route = defaultReviewerRouteFromEnv(env, { topPath, loaderImpl })
+    || ROUTE_BY_BUILDER_CLASS[builderClass];
   return {
     builderClass,
     tag: tagFromBuilderClass(builderClass),
@@ -146,6 +152,13 @@ function routePR(prTitle, subject = null, options = {}) {
   };
 }
 
+// `resolveDefaultReviewer` is the CFG-02 cascade-aware name. It returns
+// the same route object as `defaultReviewerRouteFromEnv` (or null when no
+// pin is in effect); callers/tests targeting the new API can import it
+// directly. `defaultReviewerRouteFromEnv` is preserved as the back-compat
+// alias and continues to work unchanged for existing call sites.
+const resolveDefaultReviewer = defaultReviewerRouteFromEnv;
+
 export {
   DEFAULT_REVIEWER_ENV,
   extractLinearTicketId,
@@ -156,6 +169,7 @@ export {
   isCrossModelReviewWaived,
   normalizeBuilderClass,
   normalizeReviewerModel,
+  resolveDefaultReviewer,
   routePR,
   routeSubject,
   validateDefaultReviewerRouteConfig,

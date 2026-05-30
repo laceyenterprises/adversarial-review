@@ -92,6 +92,7 @@ import {
   shouldUseReviewerTimeoutExhaustedMergeGate,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
+  validateStartupMergeAgentConfig,
 } from './follow-up-merge-agent.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
@@ -3834,7 +3835,13 @@ function requireEnv(name) {
 async function main() {
   requireEnv('GITHUB_TOKEN');
   try {
+    // CFG-02: defaultReviewerRouteFromEnv now consults the loader, which
+    // validates the full config.yaml schema. Validate merge-agent here too
+    // so a typo in ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS or in
+    // tools/adversarial-review/config.yaml fails loud at boot instead of
+    // hours later at first merge-agent dispatch.
     defaultReviewerRouteFromEnv(process.env);
+    validateStartupMergeAgentConfig(process.env);
   } catch (err) {
     console.error(`[watcher] FATAL config: ${err?.message || err}`);
     throw err;

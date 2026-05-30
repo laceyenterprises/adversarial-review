@@ -31,6 +31,7 @@
     "retrigger-review": "node src/retrigger-review.mjs",
     "retrigger-remediation": "node src/retrigger-remediation.mjs",
     "reset-pr": "node src/reset-pr.mjs",
+    "diagnose-stuck-rereview": "node src/diagnose-stuck-rereview.mjs",
     "typecheck:contracts": "node ./node_modules/typescript/bin/tsc -p tsconfig.contracts.json"
   },
   "dependencies": {

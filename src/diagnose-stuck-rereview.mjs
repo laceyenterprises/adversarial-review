@@ -32,11 +32,11 @@
  */
 
 import { parseArgs } from 'node:util';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { openReviewStateDb, ensureReviewStateSchema } from './review-state.mjs';
+import Database from 'better-sqlite3';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = join(__dirname, '..');
@@ -59,11 +59,13 @@ function readJobsForPR({ rootDir, repo, prNumber }) {
   const result = { latestJob: null, latestJobKey: null, byBucket: {} };
   if (!existsSync(base)) return result;
   const buckets = ['pending', 'in-progress', 'completed', 'failed', 'stopped'];
+  const filenamePrefix = `${repo.replace('/', '__')}-pr-${prNumber}-`;
   let latestTs = '';
   for (const bucket of buckets) {
     const dir = join(base, bucket);
     if (!existsSync(dir)) continue;
-    const entries = readdirSync(dir).filter((name) => name.includes(`pr-${prNumber}-`)).filter((n) => n.endsWith('.json'));
+    const entries = readdirSync(dir)
+      .filter((name) => name.startsWith(filenamePrefix) && name.endsWith('.json'));
     if (!entries.length) continue;
     result.byBucket[bucket] = [];
     for (const filename of entries) {
@@ -72,6 +74,9 @@ function readJobsForPR({ rootDir, repo, prNumber }) {
       try {
         job = JSON.parse(readFileSync(path, 'utf8'));
       } catch {
+        // Only surface parse failures whose filename matches this PR's prefix
+        // (already enforced above) so the diagnostic does not chase unrelated
+        // job files into operator triage noise.
         result.byBucket[bucket].push({ filename, error: 'parse-failed' });
         continue;
       }
@@ -178,6 +183,14 @@ function formatHumanRow({ row, classification, jobInfo }) {
   return lines.join('\n');
 }
 
+// Exit-code contract (for cron / operator alerting; keep stable):
+//   0 = clean — no stuck rows found, or help/usage printed
+//   2 = usage error — invalid flag combination (e.g. --pr without --repo,
+//       --threshold-minutes negative or non-finite)
+//   3 = environment error — reviews.db missing or unreadable
+//   4 = stuck rows found (operator action required)
+// Add a new code only after thinking through every consumer of `npm run
+// diagnose-stuck-rereview` (cron jobs, follow-up alerts, runbook prose).
 function main() {
   const args = parseArgs({
     options: {
@@ -198,22 +211,80 @@ function main() {
     return 0;
   }
 
-  const rootDir = args['root-dir'] || DEFAULT_ROOT;
-  const thresholdMinutes = Number(args['threshold-minutes']) || DEFAULT_STUCK_THRESHOLD_MINUTES;
+  if ((args.repo && !args.pr) || (args.pr && !args.repo)) {
+    process.stderr.write(`error: --repo and --pr must be passed together\n`);
+    return 2;
+  }
+  let prNumber = null;
+  if (args.pr !== undefined) {
+    const parsedPr = Number(args.pr);
+    if (!Number.isInteger(parsedPr) || parsedPr <= 0) {
+      process.stderr.write(`error: --pr must be a positive integer (got ${JSON.stringify(args.pr)})\n`);
+      return 2;
+    }
+    prNumber = parsedPr;
+  }
+
+  let thresholdMinutes = DEFAULT_STUCK_THRESHOLD_MINUTES;
+  if (args['threshold-minutes'] !== undefined) {
+    const parsed = Number(args['threshold-minutes']);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      process.stderr.write(`error: --threshold-minutes must be a non-negative finite number (got ${JSON.stringify(args['threshold-minutes'])})\n`);
+      return 2;
+    }
+    thresholdMinutes = parsed;
+  }
   const thresholdMs = thresholdMinutes * 60_000;
   const now = Date.now();
 
-  const db = openReviewStateDb(rootDir);
+  const rootDir = args['root-dir'] || DEFAULT_ROOT;
+  const dbPath = join(rootDir, 'data', 'reviews.db');
+  if (!existsSync(dbPath)) {
+    process.stderr.write(`error: reviews.db not found at ${dbPath}\n`);
+    return 3;
+  }
+
+  // The watcher runs as `placey` and owns `reviews.db`; opening that file
+  // with a writeable handle from a different uid (e.g. an `airlock` shell)
+  // would materialize WAL/SHM sidecars under the wrong owner and break the
+  // watcher's next bounce. Opening readonly with `query_only=1` keeps us off
+  // that footgun entirely (no WAL/SHM writes), and the soft owner mismatch
+  // warning surfaces the misconfiguration so the operator notices instead of
+  // silently using a stale or wrong DB path.
+  if (typeof process.getuid === 'function') {
+    try {
+      const fileUid = statSync(dbPath).uid;
+      const callerUid = process.getuid();
+      if (fileUid !== callerUid) {
+        process.stderr.write(
+          `warning: reviews.db is owned by uid=${fileUid} but this process is uid=${callerUid}; ` +
+          `read-only access continues, but verify the rootDir matches the watcher's deploy checkout.\n`
+        );
+      }
+    } catch {
+      // best-effort owner probe; do not fail the diagnostic if statSync errors
+    }
+  }
+
+  let db;
   try {
-    ensureReviewStateSchema(db);
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    db.pragma('busy_timeout = 5000');
+    db.pragma('query_only = 1');
+  } catch (err) {
+    process.stderr.write(`error: failed to open reviews.db readonly: ${err?.message || err}\n`);
+    return 3;
+  }
+
+  try {
     let rows;
-    if (args.repo && args.pr) {
+    if (args.repo && prNumber != null) {
       rows = db.prepare(
         `SELECT repo, pr_number, review_status, review_attempts, last_attempted_at,
                 posted_at, rereview_requested_at, reviewer_head_sha
            FROM reviewed_prs
           WHERE repo = ? AND pr_number = ?`
-      ).all(args.repo, Number(args.pr));
+      ).all(args.repo, prNumber);
     } else {
       rows = db.prepare(
         `SELECT repo, pr_number, review_status, review_attempts, last_attempted_at,
@@ -245,4 +316,6 @@ function main() {
   }
 }
 
-process.exit(main());
+// Use process.exitCode rather than process.exit so non-blocking stdout
+// (e.g. when piped into `jq` or `tee`) drains before the process terminates.
+process.exitCode = main();

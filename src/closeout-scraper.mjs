@@ -2,6 +2,14 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import {
+  GH_LOOKUP_TIMEOUT_MS,
+  execGhWithRetry,
+  parseDate,
+  parseJsonLines,
+} from './gh-cli.mjs';
+
+
+import {
   readLatestCompletedReviewerPassEndedAt,
   readReviewerPassLogins,
   recordMergeCloseout,
@@ -25,9 +33,22 @@ const DEFAULT_MAX_ATTEMPTS = DEFAULT_RETRY_BACKOFF_MS.length + 1;
 // build the closeout-author exclusion set, and getting it wrong would
 // silently let the real reviewer's comments leak into the operator
 // closeout attribution.
+// Both reviewer-side AND builder-side defensive fallbacks are encoded here:
+//   - reviewer-side: 'claude' → claude-reviewer-lacey, 'codex' → codex-reviewer-lacey
+//     (these are the values reviewer_class / reviewer_model authoritatively hold).
+//   - builder-side defensive fallbacks: in legacy rows or job-schema corruption
+//     paths, the *builder* tag can end up in reviewer_class. For those rows we
+//     must exclude the actual *reviewer* bot per the cross-model routing table.
+//     '[clio-agent]' PRs are reviewed by Codex (Clio dispatches Codex writers,
+//     so reviewer = opposite = Codex). '[claude-code]' PRs are reviewed by
+//     Codex (writer = Claude, opposite = Codex). Both defensive rows must
+//     point at codex-reviewer-lacey for the exclusion to fire correctly.
+//     The defensive 'claude-code' entry was previously claude-reviewer-lacey,
+//     a partial guard that left Codex reviewer comments leaking into operator
+//     closeout attribution when reviewer_class held the builder tag.
 const REVIEWER_LOGIN_BY_CLASS = new Map([
   ['claude', 'claude-reviewer-lacey'],
-  ['claude-code', 'claude-reviewer-lacey'],
+  ['claude-code', 'codex-reviewer-lacey'],
   ['clio-agent', 'codex-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
 ]);
@@ -153,7 +174,7 @@ function stderrLooksFatal(stderrText) {
   return GH_STDERR_FATAL_PATTERN.test(stderrText);
 }
 
-async function fetchIssueComments({
+async function scraperFetchIssueComments({
   repo,
   prNumber,
   execFileImpl = execFileAsync,
@@ -277,7 +298,7 @@ async function scrapeMergeCloseout({
   sleepImpl = sleep,
   reviewerLoginResolver = reviewerLoginForClass,
   fetchPullRequestCreatedAtImpl = fetchPullRequestCreatedAt,
-  fetchIssueCommentsImpl = fetchIssueComments,
+  fetchIssueCommentsImpl = scraperFetchIssueComments,
   recordMergeCloseoutImpl = recordMergeCloseout,
   recordMergeCloseoutScrapeFailureImpl = recordMergeCloseoutScrapeFailure,
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
@@ -294,14 +315,20 @@ async function scrapeMergeCloseout({
   }
 
   try {
-    return await withRetry(async () => {
-      const lowerBound = readLatestCompletedReviewerPassEndedAt(db, { repo, prNumber })
-        || await fetchPullRequestCreatedAtImpl({ repo, prNumber, execFileImpl });
-      const lowerBoundMs = parseIsoMs(lowerBound);
-      if (lowerBoundMs === null) {
-        throw new Error(`Unable to resolve closeout lower bound for ${repo}#${prNumber}`);
-      }
+    // Lower-bound resolution is hoisted out of `withRetry` so a flaky
+    // `fetchIssueComments` does NOT replay the upstream `gh pulls/{n}` fetch
+    // (or the DB read) on every retry — 2-3× redundant GH API calls per
+    // failing scrape, compounded across the 20-row tick budget exactly when
+    // GH is degraded. The lower bound cannot change between attempts within
+    // a single scrape, so resolve it once before the retry shell.
+    const lowerBound = readLatestCompletedReviewerPassEndedAt(db, { repo, prNumber })
+      || await fetchPullRequestCreatedAtImpl({ repo, prNumber, execFileImpl });
+    const lowerBoundMs = parseIsoMs(lowerBound);
+    if (lowerBoundMs === null) {
+      throw new Error(`Unable to resolve closeout lower bound for ${repo}#${prNumber}`);
+    }
 
+    return await withRetry(async () => {
       const reviewerLogins = new Set(
         readReviewerPassLogins(db, { repo, prNumber, reviewerLoginResolver })
           .map((login) => String(login || '').trim().toLowerCase())
@@ -327,8 +354,14 @@ async function scrapeMergeCloseout({
       const scrapeCheckedAt = now.toISOString();
       const closeoutBodyMd = composeCloseoutBody(comments);
       const closeoutAuthors = uniqueFirstSeen(comments.map((comment) => comment.login));
+      // closeout_posted_at is the FIRST closeout comment's created_at, not
+      // the last. The field name reads as "when the closeout was posted,"
+      // which is naturally the first comment in the closeout thread. Using
+      // the last comment was a semantics mismatch that would mislead any
+      // "how long after merge did the operator close this out" analytics
+      // query against this column by the spread of the comment thread.
       const closeoutPostedAt = comments.length > 0
-        ? comments[comments.length - 1].created_at
+        ? comments[0].created_at
         : null;
       const settledEmpty = comments.length === 0
         && now.getTime() >= mergedAtMs + EMPTY_CLOSEOUT_SETTLE_MS;
@@ -422,13 +455,130 @@ async function scrapeMergeCloseout({
   }
 }
 
+const CLOSEOUT_MARKER = 'hq:closeout:pr';
+const CLOSEOUT_SETTLE_DELAY_MS = 10 * 60 * 1000;
+
+function isMergeCloseoutMarked(body) {
+  return String(body || '').includes(CLOSEOUT_MARKER);
+}
+
+function stripMergeCloseoutMarker(body) {
+  return String(body || '')
+    .replace(/<!--\s*hq:closeout:pr\s*-->\s*/gi, '')
+    .trim();
+}
+
+function normalizeIssueComment(raw = {}) {
+  return {
+    id: raw.id ?? null,
+    nodeId: raw.node_id ?? raw.nodeId ?? null,
+    body: String(raw.body ?? ''),
+    createdAt: raw.created_at ?? raw.createdAt ?? null,
+    updatedAt: raw.updated_at ?? raw.updatedAt ?? null,
+    authorLogin: raw?.user?.login ?? raw.authorLogin ?? null,
+    url: raw.html_url ?? raw.url ?? null,
+  };
+}
+
+async function fetchIssueComments({
+  repo,
+  prNumber,
+  execFileImpl,
+  env = process.env,
+  timeoutMs = GH_LOOKUP_TIMEOUT_MS,
+  retries,
+} = {}) {
+  const { stdout } = await execGhWithRetry({
+    execFileImpl,
+    env,
+    timeoutMs,
+    retries,
+    args: [
+      'api',
+      '--paginate',
+      `repos/${repo}/issues/${encodeURIComponent(prNumber)}/comments`,
+      '-q',
+      '.[] | {id: .id, node_id: .node_id, body: .body, created_at: .created_at, updated_at: .updated_at, html_url: .html_url, user: {login: .user.login}}',
+    ],
+  });
+  return parseJsonLines(stdout).map(normalizeIssueComment);
+}
+
+function composeMergeCloseoutFromComments({ comments = [] } = {}) {
+  const marked = comments
+    .map(normalizeIssueComment)
+    .filter((comment) => isMergeCloseoutMarked(comment.body))
+    .map((comment) => ({
+      ...comment,
+      strippedBody: stripMergeCloseoutMarker(comment.body),
+      createdAtDate: parseDate(comment.createdAt),
+    }))
+    .filter((comment) => comment.strippedBody);
+
+  if (marked.length === 0) {
+    return {
+      closeoutBodyMd: null,
+      closeoutAuthors: [],
+      closeoutPostedAt: null,
+      ghArtifactRefs: [],
+      artifactCount: 0,
+    };
+  }
+
+  marked.sort((left, right) => {
+    const leftMs = left.createdAtDate?.getTime() ?? 0;
+    const rightMs = right.createdAtDate?.getTime() ?? 0;
+    return leftMs - rightMs;
+  });
+  // Body: last marked comment wins (most recent operator/agent intent).
+  // Authors: deduplicated across all marked comments so multi-author
+  // closeouts are not silently discarded; column is structurally a JSON
+  // array of distinct authors in first-seen order.
+  const selected = marked.at(-1);
+  const closeoutAuthors = [];
+  const seenAuthors = new Set();
+  for (const comment of marked) {
+    const author = comment.authorLogin;
+    if (!author || seenAuthors.has(author)) continue;
+    seenAuthors.add(author);
+    closeoutAuthors.push(author);
+  }
+  const ghArtifactRefs = marked.map((comment) => ({
+    kind: 'comment',
+    id: comment.nodeId || comment.id || null,
+    url: comment.url || null,
+  }));
+  return {
+    closeoutBodyMd: selected.strippedBody,
+    closeoutAuthors,
+    closeoutPostedAt: selected.createdAt || selected.updatedAt || null,
+    ghArtifactRefs,
+    artifactCount: ghArtifactRefs.length,
+  };
+}
+
+function shouldConfirmEmptyCloseout({ mergedAt, observedAt }) {
+  const merged = parseDate(mergedAt);
+  const observed = parseDate(observedAt);
+  if (!merged || !observed) return false;
+  return observed.getTime() >= (merged.getTime() + CLOSEOUT_SETTLE_DELAY_MS);
+}
+
 export {
+  CLOSEOUT_MARKER,
+  CLOSEOUT_SETTLE_DELAY_MS,
+  composeMergeCloseoutFromComments,
+  fetchIssueComments,
+  isMergeCloseoutMarked,
+  normalizeIssueComment,
+  shouldConfirmEmptyCloseout,
+  stripMergeCloseoutMarker,
   DEFAULT_MAX_ATTEMPTS,
   DEFAULT_RETRY_BACKOFF_MS,
   EMPTY_CLOSEOUT_SETTLE_MS,
   POST_MERGE_CLOSEOUT_WINDOW_MS,
   composeCloseoutBody,
-  fetchIssueComments,
+  scraperFetchIssueComments,
   fetchPullRequestCreatedAt,
   formatCloseoutHeadingTimestamp,
   isExcludedCloseoutAuthor,

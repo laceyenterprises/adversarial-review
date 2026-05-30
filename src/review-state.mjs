@@ -116,12 +116,18 @@ function getReviewRow(db, { repo, prNumber }) {
 }
 
 function readLatestCompletedReviewerPassEndedAt(db, { repo, prNumber }) {
+  // status = 'completed' is load-bearing — failed / failed-orphan passes
+  // with an ended_at must NOT shift the closeout lower bound forward,
+  // because no actual reviewer output landed for those passes. Operator
+  // commentary posted between a failed pass and the eventual successful
+  // re-review must remain inside the closeout window.
   return db.prepare(
     `SELECT MAX(ended_at) AS ended_at
        FROM reviewer_passes
       WHERE repo = ?
         AND pr_number = ?
         AND pass_kind IN ('first-pass', 'rereview')
+        AND status = 'completed'
         AND ended_at IS NOT NULL`
   ).get(repo, prNumber)?.ended_at || null;
 }
@@ -313,11 +319,20 @@ function recordMergeCloseout(db, {
          ELSE excluded.gh_artifact_refs
        END,
        scrape_attempt_count = CASE
+         -- Reset on any terminal success path: body captured OR settled-empty
+         -- confirmed. Otherwise a row that accumulated N failures then recovered
+         -- to settled-empty would keep a stale scrape_attempt_count forever and
+         -- trigger triage dashboards / alerts that page on chronic-failure rows
+         -- that have already recovered.
          WHEN excluded.closeout_body_md IS NOT NULL THEN 0
+         WHEN excluded.empty_confirmed_at IS NOT NULL
+              AND pr_merge_closeouts.closeout_body_md IS NULL THEN 0
          ELSE pr_merge_closeouts.scrape_attempt_count
        END,
        scrape_last_error = CASE
          WHEN excluded.closeout_body_md IS NOT NULL THEN NULL
+         WHEN excluded.empty_confirmed_at IS NOT NULL
+              AND pr_merge_closeouts.closeout_body_md IS NULL THEN NULL
          ELSE pr_merge_closeouts.scrape_last_error
        END`
   ).run(

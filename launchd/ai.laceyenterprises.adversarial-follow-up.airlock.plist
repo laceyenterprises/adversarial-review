@@ -59,16 +59,16 @@
         <string>op://Cliovault/adversarial-watcher-alert-to/credential</string>
 
         <!--
-          BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30: claude pinned
-          reviewer + claude-code pinned remediator while codex weekly token
-          budget is at 1%. REVERT both entries after the codex weekly reset.
-          Grep marker for revert: BUILD-PACK-DEFAULT-FLIP-PLIST-2026-05-29.
+          BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30 → reverted
+          2026-05-30 (PT) when codex OAuth came back online. Remediator
+          pinned to `codex`, reviewer pinned to `adversarial`
+          (cross-model adversarial-by-default) per operator directive.
           See watcher plist for full rationale.
         -->
         <key>ADVERSARIAL_REVIEW_DEFAULT_REVIEWER</key>
-        <string>claude</string>
+        <string>adversarial</string>
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
-        <string>claude-code</string>
+        <string>codex</string>
     </dict>
 
     <key>RunAtLoad</key>

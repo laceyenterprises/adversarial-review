@@ -74,19 +74,20 @@
         <string>op://Cliovault/adversarial-watcher-alert-to/credential</string>
 
         <!--
-          BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30: claude is the
-          pinned reviewer and claude-code is the pinned remediator while the
-          codex weekly token budget is at 1%. REVERT both env entries after
-          the codex weekly reset on 2026-05-30 so reviewer / remediator
-          routing returns to the adversarial-by-default (cross-model) shape.
+          BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30 → reverted
+          2026-05-30 (PT) when codex OAuth came back online. Per the
+          operator directive: remediator pins to `codex`; reviewer
+          pins to `adversarial` (cross-model adversarial-by-default —
+          the value also lives in config.yaml, so this env entry is
+          really just a belt-and-suspenders explicit override).
+
           See LAC-893 + the role-pin env knobs documented in
-          `docs/follow-up-runbook.md`. Grep marker for revert:
-          BUILD-PACK-DEFAULT-FLIP-PLIST-2026-05-29.
+          `docs/follow-up-runbook.md`.
         -->
         <key>ADVERSARIAL_REVIEW_DEFAULT_REVIEWER</key>
-        <string>claude</string>
+        <string>adversarial</string>
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
-        <string>claude-code</string>
+        <string>codex</string>
     </dict>
 
     <key>RunAtLoad</key>

@@ -118,17 +118,33 @@ and GitHub freshness checks remain the load-bearing concurrency protections.
 
 The durable remediation reply schema is the public contract between the worker,
 the validator, reconciliation, and the PR-comment renderer. `schemaVersion: 1`
-supports four accountability lanes:
+supports five accountability lanes:
 
-- `addressed[]` for blocking review findings that were fixed. Workers may also
-  include additionally-fixed non-blocking findings here when they copy the
-  exact title from the review's `## Non-blocking issues` section; those extras
-  render publicly but do not satisfy blocking-finding coverage.
+- `addressed[]` for blocking review findings that were fixed. The blocking-only
+  contract: new code must place non-blocking findings in `nonBlocking[]` (see
+  below). A narrow back-compat tolerance still lets entries whose `title`
+  exactly matches a finding in the review's `## Non-blocking issues` section
+  count as "non-blocking extras" — they render publicly but do not satisfy
+  blocking-finding coverage. That tolerance is for pre-`nonBlocking[]` producers
+  only and should not be relied on by new workers.
 - `pushback[]` for blocking review findings the worker deliberately left unchanged.
 - `blockers[]` for blocking review findings that hard-stop on required human input.
 - `operationalBlockers[]` for git/process failures that are not themselves review
   findings, such as `branch-contamination`, `stale-pr-head`,
   `push-lease-rejected`, `missing-auth`, `fetch-failed`, or `rebase-conflict`.
+- `nonBlocking[]` (LAC-893) for non-blocking review findings the worker
+  nonetheless fixed in this round. Same per-entry shape as `addressed[]`
+  (`{ title?, finding, action, files? }`). **Invisible to the blocking-coverage
+  check** — the validator does not count `nonBlocking[]` entries toward the
+  `addressed + pushback + blockers === blocking_findings_in_review` invariant.
+  Renderer emits it as its own `## Non-blocking improvements` section placed
+  LAST among the per-finding sections (after Addressed → Pushback → Blockers →
+  Operational blockers) so an operator skimming the comment hits the
+  operationally-urgent surfaces first. The renderer dedupes by normalized
+  title against `addressed[]` so a worker that hedges by listing the same
+  finding in both arrays does not produce a double-print in the public comment.
+  Untitled entries render with a per-section numbered fallback
+  (`Non-blocking improvement N`) instead of a collapsed `Finding` label.
 
 Remote PR-head movement is an optimistic-concurrency event, not an immediate
 hard stop. A remediation worker must capture the clean post-base-rebase head

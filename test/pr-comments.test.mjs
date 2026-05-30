@@ -1863,3 +1863,175 @@ test('buildRemediationOutcomeCommentBody on invalid-remediation-reply with no sa
   assert.match(body, /did not produce a usable remediation reply/);
   assert.doesNotMatch(body, /failed strict schema validation/);
 });
+
+// LAC-893: nonBlocking[] is the structured exit for non-blocking
+// improvements the worker chose to ship in the same round. The
+// renderer must surface it as its own section, placed LAST among the
+// per-finding sections, so the public PR comment puts the
+// operationally-urgent surfaces (Addressed → Pushback → Blockers →
+// Operational blockers) before optional polish.
+test('buildRemediationOutcomeCommentBody renders nonBlocking[] last, after Addressed → Pushback → Blockers → Operational blockers', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed the blocker and bundled a stale-doc cleanup.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug needed the fix.', action: 'Applied the fix.' },
+      ],
+      pushback: [
+        { title: 'Disputed nit', finding: 'Reviewer flagged a nit.', reasoning: 'Disagree; current shape is intentional.' },
+      ],
+      blockers: [],
+      nonBlocking: [
+        {
+          title: 'Stale doc paragraph',
+          finding: 'Stale runbook sentence.',
+          action: 'Rewrote the paragraph to match current behavior.',
+          files: ['docs/runbook.md'],
+        },
+      ],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+
+  assert.match(body, /## Addressed findings/);
+  assert.match(body, /## Pushback \(deliberately not changed\)/);
+  assert.match(body, /## Non-blocking improvements/);
+  // Locked section order:
+  //   Addressed → Pushback → Blockers → Operational blockers → Non-blocking
+  // Blockers / Operational blockers are omitted when empty; the test
+  // asserts the offsets of the sections that DO render so a future
+  // edit that hoists Non-blocking above Pushback (or above any
+  // future-emitted Blockers section) trips the assertion.
+  const idxAddressed = body.indexOf('## Addressed findings');
+  const idxPushback = body.indexOf('## Pushback');
+  const idxNonBlocking = body.indexOf('## Non-blocking improvements');
+  assert.ok(idxAddressed >= 0 && idxPushback >= 0 && idxNonBlocking >= 0, 'expected three section headers');
+  assert.ok(idxAddressed < idxPushback, 'addressed renders before pushback');
+  assert.ok(idxPushback < idxNonBlocking, 'pushback renders before non-blocking');
+  // The non-blocking entry renders with the same nested-bullet card
+  // shape as addressed entries.
+  assert.match(body, /^- \*\*Stale doc paragraph\*\*$/m);
+  assert.match(body, /^ {2}- \*\*Action:\*\* Rewrote the paragraph to match current behavior\.$/m);
+  assert.match(body, /^ {2}- \*\*Files:\*\* `docs\/runbook\.md`$/m);
+});
+
+// LAC-893 review-2 finding #3 / review-1 finding #1: a worker that
+// hedges by listing the same finding in both addressed[] (via the
+// title-match tolerance path) and nonBlocking[] used to render the
+// finding twice in the public comment. Renderer-side dedupe by
+// normalized title prevents the double-print.
+test('buildRemediationOutcomeCommentBody dedupes nonBlocking[] entries that share a title with addressed[]', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Bundled a non-blocking polish.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Stale doc paragraph', finding: 'Stale runbook sentence.', action: 'Rewrote the paragraph.' },
+      ],
+      pushback: [],
+      blockers: [],
+      nonBlocking: [
+        { title: 'Stale doc paragraph', finding: 'Same finding, duplicated.', action: 'Already done above.' },
+        { title: 'Other polish', finding: 'Unrelated tidy-up.', action: 'Renamed a helper.' },
+      ],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+
+  // The shared-title entry must NOT render under non-blocking; the
+  // distinct-title entry must.
+  const addressedIdx = body.indexOf('## Addressed findings');
+  const nonBlockingIdx = body.indexOf('## Non-blocking improvements');
+  assert.ok(addressedIdx >= 0, 'addressed section present');
+  assert.ok(nonBlockingIdx > addressedIdx, 'non-blocking section present after addressed');
+  // Slice the non-blocking section to count title cards inside it.
+  const tail = body.slice(nonBlockingIdx);
+  const nonBlockingCardCount = (tail.match(/^- \*\*[^*]+\*\*$/mg) || []).length;
+  assert.equal(nonBlockingCardCount, 1, 'only the distinct-title non-blocking entry renders');
+  assert.match(tail, /\*\*Other polish\*\*/);
+});
+
+// LAC-893 review-1 finding #4: untitled nonBlocking[] entries used to
+// all render as "- **Finding**", colliding visually. The renderer now
+// substitutes a per-section numbered fallback.
+test('buildRemediationOutcomeCommentBody numbers untitled nonBlocking[] entries instead of repeating "Finding"', () => {
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Two untitled non-blocking polishes.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary', finding: 'Primary bug.', action: 'Fixed.' },
+      ],
+      pushback: [],
+      blockers: [],
+      nonBlocking: [
+        { finding: 'First polish description.', action: 'Did a thing.' },
+        { finding: 'Second polish description.', action: 'Did another thing.' },
+      ],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+
+  assert.match(body, /^- \*\*Non-blocking improvement 1\*\*$/m);
+  assert.match(body, /^- \*\*Non-blocking improvement 2\*\*$/m);
+  // The static "Finding" fallback must NOT appear in the non-blocking
+  // section.
+  const nonBlockingIdx = body.indexOf('## Non-blocking improvements');
+  const tail = body.slice(nonBlockingIdx);
+  assert.doesNotMatch(tail, /^- \*\*Finding\*\*$/m);
+});
+
+test('buildRemediationOutcomeCommentBody omits Non-blocking improvements section when nonBlocking[] is absent or empty', () => {
+  // Backward compatibility: replies that don't supply nonBlocking[]
+  // (legacy workers, replies that simply didn't bundle non-blocking
+  // fixes) must not produce an empty section header.
+  const bodyAbsent = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug.', action: 'Fixed it.' },
+      ],
+      pushback: [],
+      blockers: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+  assert.doesNotMatch(bodyAbsent, /## Non-blocking improvements/);
+
+  const bodyEmpty = buildRemediationOutcomeCommentBody({
+    workerClass: 'codex',
+    action: 'completed',
+    job: makeJob(),
+    reply: {
+      outcome: 'completed',
+      summary: 'Fixed.',
+      validation: ['npm test'],
+      addressed: [
+        { title: 'Primary bug', finding: 'Primary bug.', action: 'Fixed it.' },
+      ],
+      pushback: [],
+      blockers: [],
+      nonBlocking: [],
+    },
+    reReview: { requested: true, triggered: true, status: 'pending', reason: 'Ready.' },
+  });
+  assert.doesNotMatch(bodyEmpty, /## Non-blocking improvements/);
+});

@@ -130,11 +130,32 @@ review you read above, add exactly one entry to one of these three
 lists in the reply JSON — they are not redundant, they encode
 **different decisions**:
 
-If you also fix non-blocking issues, you may include those fixes in
-`addressed[]` too, but only when you copy the non-blocking review
-finding title exactly from the `## Non-blocking issues` section. These
-extra entries do not count toward the one-entry-per-blocking-finding
-contract.
+**`addressed[]`, `pushback[]`, and `blockers[]` are BLOCKING-ONLY.**
+The validator counts `addressed.length + pushback.length + blockers.length`
+and rejects the reply unless that sum equals the number of findings in
+the review's `## Blocking Issues` section, exactly once each. Non-blocking
+findings (from the review's `## Non-blocking Issues` section) do NOT
+belong in those three arrays for any new code. If you over-count by
+even one, the entire remediation round is rejected as
+`invalid-remediation-reply`, the public PR comment never goes up, and
+an operator has to triage the failure. This is the single most common
+cause of remediation-round failures; treat it as load-bearing.
+
+There is a narrow back-compat tolerance — entries in `addressed[]`
+whose `title` exactly matches a finding in the review's
+`## Non-blocking Issues` section are excluded from the blocking-coverage
+count (see the runbook). That tolerance exists only so legacy producers
+that pre-date `nonBlocking[]` keep validating; it is NOT an invitation
+to route new non-blocking fixes through `addressed[]`. Use
+`nonBlocking[]` for new code.
+
+Non-blocking fixes you made go in the dedicated `nonBlocking[]` array
+(same shape as `addressed[]`: `{ title?, finding, action, files? }`).
+That array is rendered in its own PR-comment section, is NOT counted
+against the blocking-coverage check, and is the right home for any
+non-blocking improvements you chose to ship in this round. If you
+prefer, you may instead mention non-blocking observations only in the
+top-level `summary` field; do **not** put them in `addressed[]`.
 
 - `addressed[]` → you fixed it. One entry per finding, with:
   - `title`: copy the review finding's title exactly. In current reviews,
@@ -214,14 +235,36 @@ contract.
   When you populate `operationalBlockers`, set `reReview.requested = false`
   and use `outcome = "blocked"` or `"partial"`.
 
-A round that addresses every finding produces an `addressed[]` of
-length N and empty `pushback[]` / `blockers[]` / `operationalBlockers[]`. A round that fixed 4
-of 5 findings and pushed back on the 5th produces `addressed[]` of
-length 4 and `pushback[]` of length 1, with `reReview.requested = true`.
+- `nonBlocking[]` → optional. Non-blocking findings from the review's
+  `## Non-blocking Issues` section that you nonetheless fixed in this
+  round, with the same per-entry shape as `addressed[]`
+  (`{ title?, finding, action, files? }`). These entries DO NOT count
+  toward the blocking-coverage check; they exist to give the public PR
+  comment a clean place to record non-blocking improvements without
+  inflating the blocking-only arrays. Leave the array empty (or omit
+  it) if you did not fix any non-blocking findings. Do NOT put
+  non-blocking entries in `addressed[]` to work around this — the
+  validator will reject the reply for over-counting.
+
+  Shape:
+
+  ```
+  { "title":   "Drift in stale doc",
+    "finding": "Reviewer flagged a stale sentence in the runbook.",
+    "action":  "Rewrote the paragraph to match current behavior.",
+    "files":   ["docs/runbook.md"] }
+  ```
+
+A round that addresses every blocking finding produces an `addressed[]` of
+length N (= blocking-issue count) and empty `pushback[]` / `blockers[]` / `operationalBlockers[]`.
+A round that fixed 4 of 5 blocking findings and pushed back on the 5th produces
+`addressed[]` of length 4 and `pushback[]` of length 1, with `reReview.requested = true`.
 A round that hits a hard exit on finding 3 produces partial entries in
 `addressed[]` for the work that did happen plus a `blockers[]` entry,
 with `reReview.requested = false` and `outcome = "blocked"` (or
-`"partial"`).
+`"partial"`). A round that also ships non-blocking fixes appends those
+to `nonBlocking[]`; the blocking-coverage check only inspects the
+three blocking-only arrays.
 
 The validator enforces these invariants — it will reject a reply that
 sets `reReview.requested = true` while `blockers` or

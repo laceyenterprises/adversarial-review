@@ -473,6 +473,13 @@ function salvagePartialRemediationReply(replyPath) {
     if (p.length) partial.pushback = p;
   }
 
+  if (Array.isArray(raw.nonBlocking)) {
+    const nb = raw.nonBlocking.filter(
+      (e) => e && typeof e === 'object' && !Array.isArray(e) && isStr(e.finding) && isStr(e.action)
+    );
+    if (nb.length) partial.nonBlocking = nb;
+  }
+
   if (Array.isArray(raw.blockers)) {
     const b = raw.blockers.filter((e) => {
       if (typeof e === 'string') return e.trim().length > 0;

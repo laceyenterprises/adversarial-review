@@ -49,16 +49,16 @@ import {
 // production. Tests that exercise the pre-flight need a fresh cache
 // per case — clear it between tests.
 //
-// CFG-09 (2026-05-30): the role-config cascade also caches at module
-// scope, keyed by (topPath, modulePaths) — NOT env. Tests in this file
-// mutate `env` between cases (gemini vs codex vs claude-code etc.)
-// without changing the call shape, so a previously-cached resolution
-// would otherwise leak. `resetRoleConfigCache` drops the slot so each
-// test re-resolves from its own env.
-import { resetRoleConfigCache } from '../src/role-config.mjs';
+// CFG-09 (2026-05-30, round-2): the role-config cascade also caches
+// at module scope, keyed by (topPath, modulePaths) — NOT env. Tests
+// in this file mutate `env` between cases (gemini vs codex vs
+// claude-code etc.) without changing the call shape, so a
+// previously-cached resolution would otherwise leak. The side-effect
+// import below auto-installs beforeEach + afterEach reset hooks for
+// the role-config cache.
+import './helpers/role-config-cache-reset.mjs';
 beforeEach(() => {
   resetOAuthPreflightCache();
-  resetRoleConfigCache();
 });
 import { collectWorkspaceDocContext } from '../src/prompt-context.mjs';
 import {

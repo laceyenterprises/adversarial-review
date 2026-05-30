@@ -1003,17 +1003,34 @@ function isEmptyDoc(doc) {
 //
 // What this does NOT catch by mtime alone: env-var rotations (e.g.
 // AGENT_OS_ROLES_REMEDIATOR flipped in-process). The cache is keyed on
-// the *path shape* (topPath + modulePaths), not env content — so env
-// mutations between calls return the stale cached value. CFG-09's
-// cache-invalidation contract makes that explicit: per-tick / per-job
-// callers MUST call `resetConfigCache()` (or `resetRoleConfigCache()`
-// from `role-config.mjs`) at their reconfigure boundary.
+// the *path shape* (env-resolved topPath + modulePaths), not env
+// content — so env mutations between calls return the stale cached
+// value. CFG-09's cache-invalidation contract makes that explicit:
+// per-tick / per-job callers MUST call `resetConfigCache()` (or
+// `resetRoleConfigCache()` from `role-config.mjs`) at their
+// reconfigure boundary.
 //
-// Cache structure: a Map keyed by JSON({topPath, modulePaths}), each
-// entry holding the resolved AgentOSConfig + the file signature it was
-// loaded under. Single-call-shape callers (getConfig, the watcher's
-// per-tick loadRoleConfig, the follow-up consumer's per-job loadRoleConfig)
-// each see a single slot.
+// Cache structure: a Map keyed by JSON({resolvedTopPath, modulePaths}),
+// each entry holding the resolved AgentOSConfig + the file signature it
+// was loaded under. The cache key ALWAYS uses the env-resolved top
+// (`topPath || env.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH`) so
+// two callers with the same call shape but different
+// `env.AGENT_OS_CONFIG_PATH` get distinct slots — without that, the
+// signature half (which already resolves via env) and the key half
+// (which previously didn't) would ping-pong, defeating the cache.
+//
+// Capacity: the cache is LRU-capped at `_CACHE_MAX_SLOTS` so a process
+// that repeatedly creates one-shot call shapes (e.g. a test suite that
+// mkdtemps a new `modulePaths` per case) cannot grow it unboundedly.
+// Production callers (watcher per-tick, follow-up consumer per-job)
+// reset at their boundary so the cap is invisible in practice; it only
+// fires in long-running test processes and pathological misuse.
+//
+// Cost note: every `loadConfigCached` / `getConfig` call re-stats the
+// watched files (2 + 2·N syscalls) even on cache hits — net win vs.
+// a full YAML parse, but not free. Don't call in tight inner loops
+// outside the documented per-tick / per-job hot paths.
+const _CACHE_MAX_SLOTS = 16;
 const _configCache = new Map();
 const _configSignatures = new Map();
 
@@ -1045,29 +1062,60 @@ function _currentSignature({ topPath, modulePaths, env }) {
   return parts.join('::');
 }
 
-function _cacheKeyFor({ topPath, modulePaths }) {
+function _cacheKeyFor({ topPath, modulePaths, env }) {
+  // Fold the env-resolved top into the cache key so two callers with
+  // the same explicit call shape but different `env.AGENT_OS_CONFIG_PATH`
+  // get distinct slots (matches the signature's view of which file is
+  // actually being read). Without this, the signature would invalidate
+  // the slot on every env switch and the cache would never hit.
+  const envView = env || process.env;
+  const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   return JSON.stringify({
-    topPath: topPath ?? null,
+    resolvedTopPath: resolvedTop,
     modulePaths: [...(modulePaths || [])],
   });
 }
 
+function _touchCacheLru(cacheKey) {
+  // Map iteration order is insertion order; re-setting moves the entry
+  // to the most-recent position. Cheap O(1) LRU touch.
+  if (!_configCache.has(cacheKey)) return;
+  const value = _configCache.get(cacheKey);
+  const sig = _configSignatures.get(cacheKey);
+  _configCache.delete(cacheKey);
+  _configSignatures.delete(cacheKey);
+  _configCache.set(cacheKey, value);
+  _configSignatures.set(cacheKey, sig);
+}
+
+function _evictCacheLruIfNeeded() {
+  while (_configCache.size > _CACHE_MAX_SLOTS) {
+    const oldestKey = _configCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    _configCache.delete(oldestKey);
+    _configSignatures.delete(oldestKey);
+  }
+}
+
 function _ensureFreshConfig({ topPath, modulePaths, env } = {}) {
-  const cacheKey = _cacheKeyFor({ topPath, modulePaths });
+  const cacheKey = _cacheKeyFor({ topPath, modulePaths, env });
   const sig = _currentSignature({ topPath, modulePaths, env });
   const cached = _configCache.get(cacheKey);
   if (cached === undefined || _configSignatures.get(cacheKey) !== sig) {
     const fresh = loadConfig({ topPath, modulePaths, env });
     _configCache.set(cacheKey, fresh);
     _configSignatures.set(cacheKey, sig);
+    _evictCacheLruIfNeeded();
     return fresh;
   }
+  _touchCacheLru(cacheKey);
   return cached;
 }
 
 // loadConfigCached — public cached entry point for callers that pass
 // non-default {topPath, modulePaths, env} (the role-config cascade is
-// the principal consumer). Single-slot per call-shape; reset via
+// the principal consumer). Slots are keyed by (env-resolved topPath +
+// modulePaths) and capped LRU at `_CACHE_MAX_SLOTS`; reset via
 // `resetConfigCache()` or the role-scoped `resetRoleConfigCache()`
 // re-export in `role-config.mjs`.
 export function loadConfigCached({ topPath, modulePaths, env } = {}) {

@@ -3249,6 +3249,14 @@ async function reconcileInProgressFollowUpJobs({
   execFileImpl = execFileAsync,
   log = console,
 } = {}) {
+  // CFG-09: per-reconcile-pass boundary for the role-config cascade
+  // cache. Symmetric with `consumeNextFollowUpJob`'s reset above —
+  // `resolveReconcileWorkerClass` calls `pickRemediationWorkerClass`,
+  // which goes through `loadRoleConfig`. Today's callers are one-shot
+  // CLI entrypoints (cache is empty per process), so the contract held
+  // by accident; this reset makes it robust against a future long-
+  // running tick loop that folds reconciliation in.
+  resetRoleConfigCache();
   const jobs = listInProgressFollowUpJobs(rootDir);
   // Sequential, not Promise.all: each comment post is a network call to
   // GitHub, and if many jobs land on the same PR we'd rather queue a

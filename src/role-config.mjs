@@ -195,7 +195,13 @@ export function loadRoleConfig({
 } = {}) {
   const modulePathsResolved = modulePaths || [MODULE_CONFIG_PATH];
   const envPruned = pruneBlankRoleEnvVars(env);
-  const loader = loaderImpl || loadConfigCached;
+  // Only an `undefined` loaderImpl opts into the default cached loader;
+  // an explicit `null` / `false` / `0` opts OUT of caching (passes
+  // through, which throws because it isn't callable — surfacing the
+  // intent at the call site instead of silently falling back to the
+  // cache). `loaderImpl || loadConfigCached` would silently use the
+  // cache on a falsy explicit value, which is a documented footgun.
+  const loader = loaderImpl !== undefined ? loaderImpl : loadConfigCached;
   try {
     return loader({
       topPath,
@@ -215,6 +221,16 @@ export function loadRoleConfig({
 // or jobs. Tests that mutate `process.env` between cases should call
 // this from an `afterEach`-style hook; see
 // `test/helpers/role-config-cache-reset.mjs`.
+//
+// IMPORTANT — process-wide scope. This is a thin re-export of
+// `resetConfigCache()` from `config-loader.mjs`; it drops EVERY slot
+// in the shared cache, including the `getConfig` /
+// `resolutionTrace` slot keyed by the empty call shape. The name
+// reads like "role-config-only" because role-config is the principal
+// caller, but the underlying cache is shared across `loadConfigCached`,
+// `getConfig`, and `resolutionTrace`. If a future caller adds a
+// "drop only my slot" sibling, rename this to `resetCascadeCache` to
+// keep the boundary honest.
 export function resetRoleConfigCache() {
   resetConfigCache();
 }

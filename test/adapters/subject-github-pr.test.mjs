@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -18,16 +18,16 @@ import {
   routePR,
   routeSubject,
 } from '../../src/adapters/subject/github-pr/routing.mjs';
+// CFG-09 (2026-05-30, round-2): role-config cascade cache is keyed by
+// call shape (topPath + modulePaths), not env. The reviewer-routing
+// tests here mutate env between cases (e.g. AGENT_OS_ROLES_REVIEWER
+// values, canonical/legacy conflicts), so the cache must be dropped
+// between cases to surface the per-test env. The side-effect import
+// below auto-installs beforeEach + afterEach reset hooks for this
+// file. Mid-test resets (line ~120 below) stay explicit because the
+// boundary is inside a single test, not between tests.
+import '../helpers/role-config-cache-reset.mjs';
 import { resetRoleConfigCache } from '../../src/role-config.mjs';
-
-// CFG-09 (2026-05-30): role-config cascade cache is keyed by call
-// shape (topPath + modulePaths), not env. The reviewer-routing tests
-// here mutate env between cases (e.g. AGENT_OS_ROLES_REVIEWER values,
-// canonical/legacy conflicts), so we drop the cache between cases to
-// surface the per-test env.
-beforeEach(() => {
-  resetRoleConfigCache();
-});
 
 const fixture = JSON.parse(
   readFileSync(

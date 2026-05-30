@@ -49,6 +49,26 @@
              still apply). -->
         <key>MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES</key>
         <string>1</string>
+
+        <!--
+          ALERT_TO 1Password ref is REQUIRED. See the corresponding watcher
+          plist for the resolution contract. Mirrored here because the
+          follow-up daemon's tick path validates the same env at startup.
+        -->
+        <key>ADVERSARIAL_REVIEW_ALERT_TO_OP_REF</key>
+        <string>op://Cliovault/adversarial-watcher-alert-to/credential</string>
+
+        <!--
+          BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30: claude pinned
+          reviewer + claude-code pinned remediator while codex weekly token
+          budget is at 1%. REVERT both entries after the codex weekly reset.
+          Grep marker for revert: BUILD-PACK-DEFAULT-FLIP-PLIST-2026-05-29.
+          See watcher plist for full rationale.
+        -->
+        <key>ADVERSARIAL_REVIEW_DEFAULT_REVIEWER</key>
+        <string>claude</string>
+        <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
+        <string>claude-code</string>
     </dict>
 
     <key>RunAtLoad</key>

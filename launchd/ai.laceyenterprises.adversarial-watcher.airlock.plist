@@ -59,6 +59,34 @@
         <string>/bin/zsh</string>
         <key>HQ_ROOT</key>
         <string>/Users/airlock/agent-os-hq</string>
+
+        <!--
+          ALERT_TO 1Password ref is REQUIRED for the watcher to start.
+          The watcher's startup script (`scripts/adversarial-watcher-start.sh`)
+          resolves this op:// ref via the service-account token and fail-loud
+          refuses to start without it. Hardcoded here as the operator's
+          standing default. Operators who want to suppress paging (e.g. dev
+          envs) set `ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1` on the
+          plist + drop this line. See `scripts/adversarial-watcher-start.sh`
+          for the resolution contract.
+        -->
+        <key>ADVERSARIAL_REVIEW_ALERT_TO_OP_REF</key>
+        <string>op://Cliovault/adversarial-watcher-alert-to/credential</string>
+
+        <!--
+          BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30: claude is the
+          pinned reviewer and claude-code is the pinned remediator while the
+          codex weekly token budget is at 1%. REVERT both env entries after
+          the codex weekly reset on 2026-05-30 so reviewer / remediator
+          routing returns to the adversarial-by-default (cross-model) shape.
+          See LAC-893 + the role-pin env knobs documented in
+          `docs/follow-up-runbook.md`. Grep marker for revert:
+          BUILD-PACK-DEFAULT-FLIP-PLIST-2026-05-29.
+        -->
+        <key>ADVERSARIAL_REVIEW_DEFAULT_REVIEWER</key>
+        <string>claude</string>
+        <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
+        <string>claude-code</string>
     </dict>
 
     <key>RunAtLoad</key>

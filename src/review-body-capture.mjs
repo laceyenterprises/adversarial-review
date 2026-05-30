@@ -101,11 +101,19 @@ async function lookupRecentReviewArtifact({
   timestampField = 'created_at',
 } = {}) {
   if (!repo || !prNumber || !endpoint || !login || !postedAt) return null;
+  // `-f per_page=100` makes `gh api` send the field as a JSON body which
+  // forces method=POST and the comments endpoint returns HTTP 422
+  // ("body wasn't supplied"). `-X GET` keeps the method explicit so the
+  // field becomes a query-string parameter as intended. Without this fix
+  // every reviewer/remediation body capture failed silently and
+  // reviewer_passes.gh_comment_id stayed NULL forever.
   const { stdout } = await execFileImpl(
     'gh',
     [
       'api',
       '--paginate',
+      '-X',
+      'GET',
       endpoint,
       '-f',
       'per_page=100',

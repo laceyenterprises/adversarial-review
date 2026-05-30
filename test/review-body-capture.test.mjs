@@ -483,6 +483,45 @@ test('remediation reply capture stores body and leaves verdict NULL', async () =
   assert.ok(row.body_captured_at);
 });
 
+test('lookup forces gh api -X GET so per_page does not flip method to POST', async () => {
+  // Regression for 2026-05-30: `gh api -f per_page=100` (no -X GET) treats
+  // per_page as a JSON body field, switches to method=POST, and the comments
+  // endpoint returns HTTP 422 ("body wasn't supplied"). Every gh_comment_id
+  // was NULL across the entire reviewer_passes table until this fix landed.
+  // Lock in the -X GET arg so it cannot regress silently.
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, {
+    attemptNumber: 2,
+    reviewerClass: 'codex',
+    reviewerModel: 'codex',
+    passKind: 'remediation',
+  });
+  const body = '## Remediation Worker (codex)\n\nApplied the fix.';
+  let capturedArgs = null;
+
+  await captureRemediationBodyAfterPost(rootDir, {
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    workerClass: 'codex',
+    body,
+    postedAt: '2026-05-29T12:01:00.000Z',
+    execFileImpl: async (_command, args) => {
+      capturedArgs = args;
+      return {
+        stdout: `${JSON.stringify({ id: 909, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
+        stderr: '',
+      };
+    },
+    env: { GH_TOKEN: 'token' },
+  });
+
+  assert.ok(capturedArgs, 'execFileImpl must be invoked');
+  const xFlagIndex = capturedArgs.indexOf('-X');
+  assert.ok(xFlagIndex >= 0, `expected -X flag in gh api args, got ${JSON.stringify(capturedArgs)}`);
+  assert.equal(capturedArgs[xFlagIndex + 1], 'GET', '-X must be immediately followed by GET');
+});
+
 test('reviewer capture with attempt=M leaves a same-passKind row at attempt=N untouched', async () => {
   // Regression guard for RBP-02 blocking issue: when the row was created
   // at one attempt number (reviewDbAttemptNumber) but the capture call

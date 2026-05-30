@@ -86,6 +86,39 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // A settled review stops the automatic loop, but an explicit operator
   // retrigger label/CLI call means "address the remaining non-blocking flags."
   'review-settled',
+  // The silent-no-progress guard auto-stops when a remediation round
+  // completes without setting `reReview.requested = true`. The guard
+  // prevents an automatic loop where remediation keeps "completing"
+  // without forward signal. An explicit operator retrigger gesture means
+  // "I see the no-progress signal — try anyway, I'll evaluate."
+  // (PR laceyenterprises/agent-os#1086 hit this: `no-progress` was
+  // missing from the allowlist and the watcher reported `job-active`
+  // on every tick for hours without progress.)
+  'no-progress',
+  // The remediation was stopped because the head had moved out from
+  // under a review created for an older SHA. By the time the operator
+  // applies the retrigger label, the head IS the current head, so the
+  // operator's gesture ("re-review the current head") races nothing.
+  // The requeue path clears or refreshes `revisionRef` so the
+  // consume-time `lifecycleStopDecision` check does not re-fire the
+  // same stop on the next tick (round-1 review B1).
+  'stale-review-head',
+  //
+  // Intentionally NOT retriggerable — listed exhaustively per round-1
+  // review N3 so a future contributor doesn't misread the asymmetry as
+  // oversight:
+  //   * `operator-stop` — explicit operator-applied stop; a new
+  //     operator gesture should explicitly un-stop, not paper over.
+  //   * `rereview-blocked` — encodes "blocked re-review state"; the
+  //     reviewer who refused the reset would refuse it again until
+  //     the in-flight review clears or is operator-bumped via a
+  //     different lever. Separate decision if we ever want override.
+  //   * `stale-drift` — operator-applied `no-merge-hold` / drift
+  //     suppression label; semantically a sibling of `operator-stop`
+  //     emitted from `lifecycleStopDecision` against the same
+  //     "operator says do not remediate" intent.
+  //   * `operator-merged-pr` / `operator-closed-pr` — terminal
+  //     lifecycle states; the PR is gone, retriggering has no target.
 ]);
 const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
 
@@ -1856,6 +1889,16 @@ function requeueFollowUpJobForNextRound({
   requestedAt = new Date().toISOString(),
   requestedBy = 'operator',
   reason = 'Additional remediation round requested.',
+  // PR #186 round-1 review B1: when the job was stopped with
+  // `stale-review-head`, the consume-time check at
+  // `lifecycleStopDecision` (`src/follow-up-remediation.mjs:2370-2381`)
+  // re-fires `jobRevisionRef !== currentHeadSha` on the next tick
+  // unless we either (a) write the fresh head into `nextJob.revisionRef`
+  // or (b) clear it so the guard short-circuits. Callers that know the
+  // current head (the label handler reads it from
+  // `labelEvent.headSha`) pass it via `revisionRef`; callers that don't
+  // (the CLI) get the safe fallback below.
+  revisionRef = null,
 }) {
   const currentJob = readFollowUpJob(jobPath);
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
@@ -1909,8 +1952,29 @@ function requeueFollowUpJobForNextRound({
     });
   }
 
+  // Resolve the revisionRef the requeued job should carry.
+  //   - Caller-supplied head (label handler) → write that. The operator
+  //     gesture is "remediate against this head" so it's authoritative.
+  //   - Caller didn't supply a head AND the job was stopped with
+  //     `stale-review-head` → clear `revisionRef` so the consume-time
+  //     `jobRevisionRef && currentHeadSha && jobRevisionRef !== currentHeadSha`
+  //     check short-circuits on the next tick. Otherwise the operator
+  //     gesture is silently inert: the job flips to `pending`, then the
+  //     next consume tick re-fires the same stale-head stop within ≤120s.
+  //   - Otherwise → preserve the existing revisionRef unchanged.
+  const previousStopCode = currentJob?.remediationPlan?.stop?.code || null;
+  let nextRevisionRef;
+  if (typeof revisionRef === 'string' && revisionRef.trim()) {
+    nextRevisionRef = revisionRef.trim();
+  } else if (previousStopCode === 'stale-review-head') {
+    nextRevisionRef = null;
+  } else {
+    nextRevisionRef = currentJob?.revisionRef ?? null;
+  }
+
   const nextJob = {
     ...currentJob,
+    revisionRef: nextRevisionRef,
     status: 'pending',
     pendingAt: requestedAt,
     claimedAt: null,

@@ -8,6 +8,7 @@ import {
   claimNextFollowUpJob,
   createFollowUpJob,
   readFollowUpJob,
+  requeueFollowUpJobForNextRound,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import {
@@ -26,6 +27,7 @@ function makeHaltedJob(rootDir, {
   currentRound = 2,
   riskClass = 'medium',
   reviewBody = '## Summary\nsummary',
+  revisionRef = null,
 } = {}) {
   const created = createFollowUpJob({
     rootDir,
@@ -41,6 +43,7 @@ function makeHaltedJob(rootDir, {
     ...created.job,
     status,
     riskClass,
+    revisionRef,
     remediationPlan: {
       ...created.job.remediationPlan,
       currentRound,
@@ -264,6 +267,170 @@ test('tryRetriggerRemediationFromLabel requeues stopped:daemon-bounce-safety for
   });
   assert.equal(claimed.job.status, 'in_progress');
   assert.match(claimed.jobPath, /data\/follow-up-jobs\/in-progress\/.+\.json$/);
+});
+
+test('tryRetriggerRemediationFromLabel requeues stopped:no-progress for explicit operator override', async () => {
+  // Regression for laceyenterprises/agent-os#1086 (2026-05-30): the
+  // silent-no-progress guard auto-stopped the job after round 1
+  // completed without `reReview.requested = true`. Without `no-progress`
+  // in RETRIGGERABLE_STOP_CODES the watcher reported `job-active` on
+  // every tick for hours and the operator's explicit retrigger gesture
+  // was silently no-op.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'no-progress',
+    currentRound: 1,
+    maxRounds: 2,
+  });
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    // makeHaltedJob fixes prNumber=238; the agent-os#1086 reference in
+    // the comment above is the incident, not the test fixture's PR.
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-no-progress' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+    now: () => '2026-05-30T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  const requeued = readFollowUpJob(result.jobPath);
+  assert.equal(requeued.status, 'pending');
+  assert.equal(requeued.remediationPlan.nextAction.operatorOverride, true);
+});
+
+test('tryRetriggerRemediationFromLabel requeues stopped:stale-review-head with the fresh head', async () => {
+  // The remediation was auto-stopped because the head had moved out from
+  // under a review created for an older SHA. The retrigger label carries
+  // the CURRENT head; the requeue path MUST write that head into
+  // nextJob.revisionRef so the consume-time lifecycleStopDecision check
+  // (jobRevisionRef !== currentHeadSha) does not re-fire the same stop
+  // on the next tick (round-1 review B1).
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'stale-review-head',
+    currentRound: 1,
+    maxRounds: 2,
+    revisionRef: 'sha-old',  // job was originally created for this SHA
+  });
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    // makeLabelEvent's default headSha is 'sha-retrigger' — the current
+    // head when the operator applied the label.
+    labelEvent: makeLabelEvent({ id: 'evt-stale-head' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+    now: () => '2026-05-30T18:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  const requeued = readFollowUpJob(result.jobPath);
+  assert.equal(requeued.status, 'pending');
+  assert.equal(
+    requeued.revisionRef,
+    'sha-retrigger',
+    'requeued job must carry the labelEvent headSha so the next consume '
+      + 'tick does not re-fire stale-review-head',
+  );
+});
+
+test('requeueFollowUpJobForNextRound clears stale revisionRef when caller omits one (CLI fallback)', async () => {
+  // CLI invocations don't have a current-head context, so when an
+  // operator retriggers a stopped:stale-review-head job via the CLI
+  // the requeue path must still un-stick it. Clearing revisionRef makes
+  // the consume-time `jobRevisionRef && currentHeadSha` guard short-
+  // circuit, so the job proceeds past the same stale-head check
+  // (round-1 review B1 fallback).
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { jobPath } = makeHaltedJob(rootDir, {
+    stopCode: 'stale-review-head',
+    currentRound: 1,
+    maxRounds: 2,
+    revisionRef: 'sha-old',
+  });
+
+  requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath,
+    requestedAt: '2026-05-30T18:00:00.000Z',
+    requestedBy: 'cli-operator',
+    reason: 'CLI retrigger',
+    // revisionRef intentionally omitted to exercise the CLI fallback.
+  });
+
+  // moveFollowUpJob moves the file from stopped/ → pending/; read by repo+pr.
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  const names = readdirSync(dir).filter((n) => n.endsWith('.json'));
+  assert.equal(names.length, 1);
+  const requeued = JSON.parse(readFileSync(path.join(dir, names[0]), 'utf8'));
+  assert.equal(requeued.status, 'pending');
+  assert.equal(
+    requeued.revisionRef,
+    null,
+    'CLI fallback must clear revisionRef so consume-time stale-head check '
+      + 'short-circuits',
+  );
+});
+
+test('requeueFollowUpJobForNextRound preserves revisionRef for non-stale stop codes', async () => {
+  // For stop codes other than stale-review-head, the revisionRef
+  // recorded on the job is still meaningful (e.g. for downstream review
+  // identity) and should NOT be silently cleared just because the
+  // caller did not supply a fresh one.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { jobPath } = makeHaltedJob(rootDir, {
+    stopCode: 'max-rounds-reached',
+    currentRound: 2,
+    maxRounds: 3,
+    revisionRef: 'sha-preserved',
+  });
+
+  requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath,
+    requestedAt: '2026-05-30T18:00:00.000Z',
+    requestedBy: 'cli-operator',
+    reason: 'CLI retrigger',
+  });
+
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  const names = readdirSync(dir).filter((n) => n.endsWith('.json'));
+  assert.equal(names.length, 1);
+  const requeued = JSON.parse(readFileSync(path.join(dir, names[0]), 'utf8'));
+  assert.equal(requeued.revisionRef, 'sha-preserved');
+});
+
+test('requeueFollowUpJobForNextRound caller-supplied revisionRef wins regardless of stop code', async () => {
+  // The label handler always passes the fresh head; the requeue should
+  // honor it even on stop codes where the fallback would otherwise
+  // preserve the old value.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { jobPath } = makeHaltedJob(rootDir, {
+    stopCode: 'max-rounds-reached',
+    currentRound: 1,
+    maxRounds: 2,
+    revisionRef: 'sha-old',
+  });
+
+  requeueFollowUpJobForNextRound({
+    rootDir,
+    jobPath,
+    requestedAt: '2026-05-30T18:00:00.000Z',
+    requestedBy: 'pr-label:VirtualPaul',
+    reason: 'label retrigger',
+    revisionRef: 'sha-new',
+  });
+
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  const names = readdirSync(dir).filter((n) => n.endsWith('.json'));
+  assert.equal(names.length, 1);
+  const requeued = JSON.parse(readFileSync(path.join(dir, names[0]), 'utf8'));
+  assert.equal(requeued.revisionRef, 'sha-new');
 });
 
 test('tryRetriggerRemediationFromLabel works on completed jobs that requested re-review', async () => {

@@ -18,6 +18,16 @@ import {
   routePR,
   routeSubject,
 } from '../../src/adapters/subject/github-pr/routing.mjs';
+// CFG-09 (2026-05-30, round-2): role-config cascade cache is keyed by
+// call shape (topPath + modulePaths), not env. The reviewer-routing
+// tests here mutate env between cases (e.g. AGENT_OS_ROLES_REVIEWER
+// values, canonical/legacy conflicts), so the cache must be dropped
+// between cases to surface the per-test env. The side-effect import
+// below auto-installs beforeEach + afterEach reset hooks for this
+// file. Mid-test resets (line ~120 below) stay explicit because the
+// boundary is inside a single test, not between tests.
+import '../helpers/role-config-cache-reset.mjs';
+import { resetRoleConfigCache } from '../../src/role-config.mjs';
 
 const fixture = JSON.parse(
   readFileSync(
@@ -103,6 +113,11 @@ test('github-pr routing can force the default reviewer from env', () => {
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   });
 
+  // CFG-09: this third assertion rotates env mid-test, which is the
+  // documented boundary that requires an explicit cache reset. In
+  // production this maps to a per-tick / per-job boundary; here it
+  // maps to one cache drop between the env-flip and the next call.
+  resetRoleConfigCache();
   assert.deepEqual(routePR('[codex] LAC-484 env default reviewer', null, {
     env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'claude-code' },
   }), {

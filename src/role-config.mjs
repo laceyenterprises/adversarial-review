@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 import {
   AgentOSConfigError,
   loadConfig,
+  loadConfigCached,
+  resetConfigCache,
 } from './config-loader.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -166,26 +168,42 @@ function pruneBlankRoleEnvVars(env) {
 // `topPath: '/dev/null'` to bypass `~/agent-os/config.yaml` on the host.
 // `contextKey` is the canonical key the caller cares about — used only
 // for error-shaping when the loader rejects an env-sourced value.
-// CFG-02 round-1 review N2 (per-call file I/O): deferred to follow-up.
-// The reviewer's recommended cache lives in `_ensureFreshConfig` in
-// `config-loader.mjs` and only invalidates on top-level mtime/inode
-// changes; for the per-watcher-tick hot path here we'd need either
-// (a) explicit per-tick cache invalidation wired through `loadRoleConfig`,
-// or (b) an env-content fingerprint that doesn't break test isolation.
-// The naive cache attempted in the round-1 fix poisoned tests across
-// process.env mutations. Tracked separately.
+//
+// Caching (CFG-09): when no `loaderImpl` is injected, the call routes
+// through `loadConfigCached` in `config-loader.mjs`. That keeps a
+// single-slot cache per (topPath, modulePaths) shape and invalidates
+// when any watched file (top + top.local + each module + each
+// module.local) changes mtime/inode. The cache does NOT watch env
+// content — callers MUST call `resetRoleConfigCache()` at their
+// per-tick / per-job boundary so in-process env mutations propagate.
+// This is the documented contract from CFG-09 (`LOADER-CONTRACT.md`
+// §Cache invalidation), not a regression of the failed naive cache
+// attempted in the CFG-02 round-1 remediation.
+//
+// Tests that need hermetic env-mutation behavior either (a) pass an
+// explicit `loaderImpl` (the cache is fully bypassed), (b) use a fresh
+// tmp `modulePaths` per case (different cache slot per test), or
+// (c) call `resetRoleConfigCache()` from a per-test hook (see
+// `test/helpers/role-config-cache-reset.mjs`).
 
 export function loadRoleConfig({
   env = process.env,
   topPath,
   modulePaths,
-  loaderImpl = loadConfig,
+  loaderImpl,
   contextKey = null,
 } = {}) {
   const modulePathsResolved = modulePaths || [MODULE_CONFIG_PATH];
   const envPruned = pruneBlankRoleEnvVars(env);
+  // Only an `undefined` loaderImpl opts into the default cached loader;
+  // an explicit `null` / `false` / `0` opts OUT of caching (passes
+  // through, which throws because it isn't callable — surfacing the
+  // intent at the call site instead of silently falling back to the
+  // cache). `loaderImpl || loadConfigCached` would silently use the
+  // cache on a falsy explicit value, which is a documented footgun.
+  const loader = loaderImpl !== undefined ? loaderImpl : loadConfigCached;
   try {
-    return loaderImpl({
+    return loader({
       topPath,
       modulePaths: modulePathsResolved,
       env: envPruned,
@@ -193,6 +211,28 @@ export function loadRoleConfig({
   } catch (err) {
     throw reshapeLoaderError(err, contextKey);
   }
+}
+
+// resetRoleConfigCache — drops the cached role-config slot so the next
+// `loadRoleConfig` call re-reads files and re-applies env. Wired into
+// the watcher's `pollOnce` tick boundary and the follow-up consumer's
+// `consumeNextFollowUpJob` job boundary so an operator's in-process env
+// rotation (or a stale per-test cache entry) cannot bleed across ticks
+// or jobs. Tests that mutate `process.env` between cases should call
+// this from an `afterEach`-style hook; see
+// `test/helpers/role-config-cache-reset.mjs`.
+//
+// IMPORTANT — process-wide scope. This is a thin re-export of
+// `resetConfigCache()` from `config-loader.mjs`; it drops EVERY slot
+// in the shared cache, including the `getConfig` /
+// `resolutionTrace` slot keyed by the empty call shape. The name
+// reads like "role-config-only" because role-config is the principal
+// caller, but the underlying cache is shared across `loadConfigCached`,
+// `getConfig`, and `resolutionTrace`. If a future caller adds a
+// "drop only my slot" sibling, rename this to `resetCascadeCache` to
+// keep the boundary honest.
+export function resetRoleConfigCache() {
+  resetConfigCache();
 }
 
 // resolveDefaultRemediator — returns the operator-pinned remediation

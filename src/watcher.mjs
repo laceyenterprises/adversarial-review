@@ -20,6 +20,7 @@ import {
   isCrossModelReviewWaived,
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
+import { resetRoleConfigCache } from './role-config.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -2840,6 +2841,13 @@ async function pollOnce(
     afterClaim = null,
   } = {}
 ) {
+  // CFG-09: per-tick boundary for the role-config cascade cache. Drop
+  // the cached AgentOSConfig so this tick re-resolves env + config.yaml
+  // before `routeSubject` / `pickRemediationWorkerClass` consult it.
+  // Cache-hit reuse happens within the tick (multiple PRs in this loop
+  // see the same cached config); operator env rotations between ticks
+  // propagate after this reset, not at next file-mtime change.
+  resetRoleConfigCache();
   const healthTick = healthProbe?.beginTick?.();
   try {
   const operatorSurface = createWatcherOperatorSurface();

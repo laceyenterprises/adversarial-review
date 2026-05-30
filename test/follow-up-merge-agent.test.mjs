@@ -46,6 +46,14 @@ import {
   resolveSessionLedgerDbPath,
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
+// CFG-09 (2026-05-30, round-2): role-config cascade caches by
+// (topPath, modulePaths) — not env. Tests in this file rotate env
+// between cases (codex vs claude-code vs merge-agent vs invalid)
+// without changing the call shape, so the cache must be cleared
+// between cases. The side-effect import below auto-installs
+// `beforeEach(resetRoleConfigCache)` + `afterEach(resetRoleConfigCache)`
+// for this file — one line replaces the manual hook block.
+import './helpers/role-config-cache-reset.mjs';
 
 // Existing dispatchMergeAgentForPR tests assume agent-os (the hq CLI
 // + merge-agent adapter) IS present on the host running the tests.

@@ -1,4 +1,3 @@
-import { normalizeReviewVerdict } from './kernel/verdict.mjs';
 import { REMEDIATION_COMMENT_MARKER_PREFIX } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
@@ -20,9 +19,19 @@ const REVIEWER_LOGIN_BY_CLASS = new Map([
 ]);
 const BODY_CAPTURE_GRACE_MS = 5 * 60 * 1000;
 const REMEDIATION_MARKER_REQUIRED_FROM = '2026-05-04T00:00:00.000Z';
+// The migration's verdict CHECK constraint and BEFORE UPDATE trigger
+// (20260529_reviewer_passes_body_capture_and_closeouts.sql) accept exactly
+// these values. Kept local because GitHub review-state mapping is a
+// backfill concern; the kernel's normalizeReviewVerdict interprets review
+// *bodies* and intentionally has no 'dismissed' kind.
+const REVIEWER_PASS_VERDICT_ALLOWLIST = new Set([
+  'approved',
+  'comment-only',
+  'request-changes',
+  'dismissed',
+]);
 
 function closeOwnedReviewDb(db) {
-  if (db?.name === ':memory:') return;
   db?.close();
 }
 
@@ -31,13 +40,22 @@ function reviewerLoginForClass(value) {
   return REVIEWER_LOGIN_BY_CLASS.get(normalized) || null;
 }
 
-function ghReviewStateToVerdictInput(state) {
+// Map a GitHub review-state literal directly to the migration's
+// allowlisted verdict tokens. GitHub auto-applies `DISMISSED` to existing
+// reviewer-bot reviews whenever a new commit lands on a branch with
+// "Dismiss stale pull request approvals when new commits are pushed"
+// enabled, so the DB must carry `'dismissed'` rather than falling through
+// to a kernel-level `'unknown'` that the CHECK constraint then rejects.
+const GH_REVIEW_STATE_TO_VERDICT = new Map([
+  ['approved', 'approved'],
+  ['commented', 'comment-only'],
+  ['changes_requested', 'request-changes'],
+  ['dismissed', 'dismissed'],
+]);
+
+function ghReviewStateToVerdict(state) {
   const normalized = String(state || '').trim().toLowerCase();
-  if (normalized === 'approved') return 'approved';
-  if (normalized === 'commented') return 'comment only';
-  if (normalized === 'changes_requested') return 'request changes';
-  if (normalized === 'dismissed') return 'dismissed';
-  return normalized;
+  return GH_REVIEW_STATE_TO_VERDICT.get(normalized) ?? null;
 }
 
 function normalizeReviewArtifact(raw = {}) {
@@ -362,6 +380,7 @@ async function backfillReviewerPassBodies(rootDir, {
       gh_fetch_error: 0,
       duplicate_artifact_claim: 0,
       apply_constraint_violation: 0,
+      would_violate_verdict_check: 0,
     },
   };
   try {
@@ -438,7 +457,25 @@ async function backfillReviewerPassBodies(rootDir, {
 
         const verdict = row.pass_kind === 'remediation'
           ? null
-          : normalizeReviewVerdict(ghReviewStateToVerdictInput(match.matched.state));
+          : ghReviewStateToVerdict(match.matched.state);
+        // Predict the apply-time verdict CHECK so dry-run is a faithful
+        // gate. Without this, a verdict the migration would reject (e.g.
+        // an unrecognized future GH state) would silently inflate the
+        // "populated" count in dry-run and only surface as an
+        // apply_constraint_violation at apply time.
+        if (
+          row.pass_kind !== 'remediation'
+          && verdict !== null
+          && !REVIEWER_PASS_VERDICT_ALLOWLIST.has(verdict)
+        ) {
+          summary.unmatched += 1;
+          summary.unmatchedByReason.would_violate_verdict_check += 1;
+          logLine(
+            log,
+            `unmatched pass_id=${row.pass_id} repo=${row.repo} pr=${row.pr_number} attempt=${row.attempt_number} pass_kind=${row.pass_kind} reason=would_violate_verdict_check verdict=${JSON.stringify(verdict)} gh_state=${JSON.stringify(match.matched.state ?? null)}`
+          );
+          continue;
+        }
         const capturedAt = now();
         logLine(
           log,
@@ -462,13 +499,15 @@ async function backfillReviewerPassBodies(rootDir, {
         } catch (err) {
           // Last-ditch safety: per-group dedupe should already block the
           // SQLITE_CONSTRAINT_UNIQUE path, but another worker (or a row
-          // populated since the SELECT) can still race the index. Record
-          // the per-row diagnostic instead of letting the run die.
+          // populated since the SELECT) can still race the index. The
+          // CHECK / trigger on verdict can also fire if GH ever ships a
+          // review state we don't map here — include the attempted verdict
+          // so the next surprise is diagnosable in one read.
           summary.unmatched += 1;
           summary.unmatchedByReason.apply_constraint_violation += 1;
           logLine(
             log,
-            `unmatched pass_id=${row.pass_id} repo=${row.repo} pr=${row.pr_number} attempt=${row.attempt_number} pass_kind=${row.pass_kind} reason=apply_constraint_violation gh_comment_id=${nodeId || 'null'} error=${JSON.stringify(ghErrorMessage(err))}`
+            `unmatched pass_id=${row.pass_id} repo=${row.repo} pr=${row.pr_number} attempt=${row.attempt_number} pass_kind=${row.pass_kind} reason=apply_constraint_violation gh_comment_id=${nodeId || 'null'} verdict=${JSON.stringify(verdict)} gh_state=${JSON.stringify(match.matched.state ?? null)} error=${JSON.stringify(ghErrorMessage(err))}`
           );
         }
       }
@@ -597,6 +636,7 @@ async function backfillReviewBodies(rootDir, {
         gh_fetch_error: 0,
         duplicate_artifact_claim: 0,
         apply_constraint_violation: 0,
+        would_violate_verdict_check: 0,
       },
     },
     closeouts: {

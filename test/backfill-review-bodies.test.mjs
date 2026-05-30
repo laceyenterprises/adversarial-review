@@ -682,6 +682,107 @@ test('overlapping same-reviewer passes do not crash on the gh_comment_id UNIQUE 
   });
 });
 
+test('DISMISSED review state captures verdict=dismissed instead of failing the CHECK constraint', async () => {
+  // Branch protection's "Dismiss stale pull request approvals when new commits
+  // are pushed" auto-dismisses prior reviewer-bot reviews. The DB column
+  // accepts 'dismissed' (per the 20260529 migration); the backfill must
+  // populate the body rather than dropping the row as an
+  // apply_constraint_violation.
+  const rootDir = makeRootDir();
+  withDb(rootDir, (db) => {
+    seedReviewedPr(db, { prNumber: 1101 });
+    seedReviewerPass(db, {
+      prNumber: 1101,
+      attemptNumber: 1,
+      reviewerClass: 'claude',
+      passKind: 'first-pass',
+      startedAt: '2026-05-29T10:00:00.000Z',
+      endedAt: '2026-05-29T10:10:00.000Z',
+      status: 'completed',
+    });
+  });
+  const execFileImpl = makeExecFileStub({
+    'repos/laceyenterprises/adversarial-review/pulls/1101/reviews': jsonLines([
+      {
+        node_id: 'RV_dismissed',
+        submitted_at: '2026-05-29T10:05:00.000Z',
+        state: 'DISMISSED',
+        body: 'dismissed body',
+        user: { login: 'claude-reviewer-lacey' },
+      },
+    ]),
+    'repos/laceyenterprises/adversarial-review/issues/1101/comments': '\n',
+  });
+
+  const result = await runCli(rootDir, ['--apply', '--pass', 'bodies'], {
+    execFileImpl,
+    now: () => '2026-05-29T12:30:00.000Z',
+  });
+
+  assert.equal(result.code, 0);
+  assert.doesNotMatch(result.stdout, /apply_constraint_violation/);
+  assert.doesNotMatch(result.stdout, /would_violate_verdict_check/);
+  assert.match(result.stdout, /bodies populated:\s+1/);
+
+  withDb(rootDir, (db) => {
+    const row = db.prepare(
+      'SELECT verdict, body_md, gh_comment_id FROM reviewer_passes WHERE pr_number = 1101'
+    ).get();
+    assert.equal(row.verdict, 'dismissed');
+    assert.equal(row.body_md, 'dismissed body');
+    assert.equal(row.gh_comment_id, 'RV_dismissed');
+  });
+});
+
+test('unrecognized GH review state falls back to verdict=null so the body is still captured', async () => {
+  // Unknown future GH review states map to a null verdict (which the
+  // migration's CHECK allows) instead of silently dropping the row. Dry-run
+  // reports the same outcome apply would, so the populated count stays
+  // honest.
+  const rootDir = makeRootDir();
+  withDb(rootDir, (db) => {
+    seedReviewedPr(db, { prNumber: 1102 });
+    seedReviewerPass(db, {
+      prNumber: 1102,
+      attemptNumber: 1,
+      reviewerClass: 'claude',
+      passKind: 'first-pass',
+      startedAt: '2026-05-29T10:00:00.000Z',
+      endedAt: '2026-05-29T10:10:00.000Z',
+      status: 'completed',
+    });
+  });
+  const execFileImpl = makeExecFileStub({
+    'repos/laceyenterprises/adversarial-review/pulls/1102/reviews': jsonLines([
+      {
+        node_id: 'RV_future',
+        submitted_at: '2026-05-29T10:05:00.000Z',
+        state: 'PENDING',
+        body: 'future state body',
+        user: { login: 'claude-reviewer-lacey' },
+      },
+    ]),
+    'repos/laceyenterprises/adversarial-review/issues/1102/comments': '\n',
+  });
+
+  const result = await runCli(rootDir, ['--apply', '--pass', 'bodies'], {
+    execFileImpl,
+    now: () => '2026-05-29T12:30:00.000Z',
+  });
+
+  assert.equal(result.code, 0);
+  assert.doesNotMatch(result.stdout, /apply_constraint_violation/);
+  assert.match(result.stdout, /bodies populated:\s+1/);
+
+  withDb(rootDir, (db) => {
+    const row = db.prepare(
+      'SELECT verdict, body_md FROM reviewer_passes WHERE pr_number = 1102'
+    ).get();
+    assert.equal(row.verdict, null);
+    assert.equal(row.body_md, 'future state body');
+  });
+});
+
 test('--limit rejects 0 with a clear error', async () => {
   const rootDir = makeRootDir();
   const execFileImpl = makeExecFileStub({});

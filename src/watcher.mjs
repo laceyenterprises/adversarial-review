@@ -32,7 +32,13 @@ import {
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } from './watcher-poll-guard.mjs';
-import { ensureReviewStateSchema, openReviewStateDb, requestReviewRereview } from './review-state.mjs';
+import {
+  ensureReviewStateSchema,
+  listPendingMergeCloseouts,
+  openReviewStateDb,
+  requestReviewRereview,
+} from './review-state.mjs';
+import { scrapeMergeCloseout } from './closeout-scraper.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -86,7 +92,6 @@ import {
   shouldUseReviewerTimeoutExhaustedMergeGate,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,
-  validateStartupMergeAgentConfig,
 } from './follow-up-merge-agent.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
@@ -1652,9 +1657,7 @@ async function spawnReviewer({
         builderTag,
         reviewerHeadSha,
         reviewAttemptNumber,
-        reviewDbAttemptNumber,
         maxRemediationRounds,
-        passKind,
         reviewerSessionUuid,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
@@ -2319,6 +2322,13 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         pr, repo, prNumber, transition: 'merged',
       });
       stmtMarkMerged.run(pr.merged_at, repo, prNumber);
+      // Closeout capture is intentionally NOT awaited inline here. The
+      // gh retry budget for a single scrape (~30–45s worst case) would
+      // otherwise stall the gates-deletion and Linear triage sync for
+      // every later PR on the open-list when two or more merge between
+      // polls. retryPendingMergeCloseouts runs later in the same
+      // pollOnce tick and picks up this freshly-merged row from the
+      // pending list.
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await operatorSurface.syncTriageStatus(
         subjectRefWithLinearTicket({
@@ -2345,6 +2355,83 @@ async function syncPRLifecycle(octokit, operatorSurface) {
       );
     }
     // Still open → nothing to do
+  }
+}
+
+async function attemptMergeCloseoutCapture({
+  repo,
+  prNumber,
+  mergedAt,
+  now = new Date(),
+  logger = console,
+} = {}) {
+  const result = await scrapeMergeCloseout({
+    db,
+    repo,
+    prNumber,
+    mergedAt,
+    now,
+    execFileImpl: execFileAsync,
+    logger,
+  });
+  if (!result.ok) {
+    logger.warn?.(
+      `[watcher] merge closeout capture still owed for ${repo}#${prNumber}`
+    );
+    return result;
+  }
+  logger.log?.(
+    `[watcher] merge closeout scrape ${repo}#${prNumber}: comments=${result.commentCount} settled_empty=${result.settledEmpty}`
+  );
+  return result;
+}
+
+// Cap per-tick batch so a backlog of dozens-to-hundreds of merged-but-
+// uncaptured PRs (steady state after a watcher outage, SQLite restore,
+// or upstream gh blip) does not stall the poll loop for hours behind a
+// serial `gh api --paginate` × retry budget per row. Freshly-merged
+// rows have the highest pending-query priority; chronic failures sort
+// to the bottom via scrape_attempt_count.
+const PENDING_MERGE_CLOSEOUTS_PER_TICK = 20;
+// Hard wall-clock budget per tick. The serial `await` shape means a row
+// stuck on the gh retry path costs ~45s; without a budget the per-tick
+// cap of 20 can theoretically burn ~15 minutes of poll-loop time while
+// fast-merge / open-PR sweep work is starved. The budget is checked
+// between rows: we never abort a row mid-flight (so its DB writes stay
+// consistent), but once the budget is spent the remaining rows are
+// left for the next tick. Freshly-merged rows always come first via
+// the listPendingMergeCloseouts ordering, so what gets deferred is the
+// chronic-failure tail — exactly the rows it is safe to defer.
+const PENDING_MERGE_CLOSEOUTS_BUDGET_MS = 60_000;
+
+async function retryPendingMergeCloseouts({
+  limit = PENDING_MERGE_CLOSEOUTS_PER_TICK,
+  budgetMs = PENDING_MERGE_CLOSEOUTS_BUDGET_MS,
+  logger = console,
+} = {}) {
+  // Pass `now` per-iteration: a serial loop across the batch can take
+  // several minutes under backlog, and a stale `now` would flip
+  // settle-empty decisions for the last few PRs by minutes.
+  const rows = listPendingMergeCloseouts(db, { limit, now: new Date() });
+  const startedAt = Date.now();
+  let processed = 0;
+  for (const row of rows) {
+    if (!row?.merged_at) continue;
+    if (Number.isFinite(budgetMs) && budgetMs > 0 && Date.now() - startedAt >= budgetMs) {
+      const remaining = rows.length - processed;
+      logger.warn?.(
+        `[watcher] merge closeout capture budget (${budgetMs}ms) spent after ${processed} rows; deferring ${remaining} to next tick`
+      );
+      break;
+    }
+    await attemptMergeCloseoutCapture({
+      repo: row.repo,
+      prNumber: row.pr_number,
+      mergedAt: row.merged_at,
+      now: new Date(),
+      logger,
+    });
+    processed += 1;
   }
 }
 
@@ -2784,6 +2871,7 @@ async function pollOnce(
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit, operatorSurface);
+  await retryPendingMergeCloseouts();
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);
   await runFastMergeClosePathIsolated();
@@ -3751,12 +3839,6 @@ async function main() {
     console.error(`[watcher] FATAL config: ${err?.message || err}`);
     throw err;
   }
-  try {
-    validateStartupMergeAgentConfig(process.env);
-  } catch (err) {
-    console.error(`[watcher] FATAL config: ${err?.message || err}`);
-    throw err;
-  }
 
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;
@@ -3886,6 +3968,7 @@ export {
   resolveReviewerTimeoutFallbackThreshold,
   sortReviewerDispatchCandidates,
   retryPendingMergeAgentLifecycleCleanups,
+  retryPendingMergeCloseouts,
   selectReviewerRouteForAttempt,
   shouldDeferReviewForActiveFollowUp,
   shouldRetryMergeAgentLifecycleCleanup,

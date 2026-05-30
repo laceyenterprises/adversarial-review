@@ -345,6 +345,8 @@ single `(repo, pr_number)`:
 | `empty_confirmed_at` | Time the scraper confirmed no closeout body was available |
 | `merged_at` | GitHub `mergedAt` observed by the closeout scraper for scrape diagnostics; `reviewed_prs.merged_at` remains canonical for merged-state decisions |
 | `gh_artifact_refs` | JSON array of GitHub artifacts used by the closeout, e.g. comment references |
+| `scrape_attempt_count` | Count of failed scrape attempts persisted on the row for triage of chronic failures |
+| `scrape_last_error` | Truncated error string from the most recent scrape attempt that failed |
 
 Lifecycle:
 
@@ -368,6 +370,39 @@ that state instead of table-scanning all historical merged PRs.
 Retention is intentionally indefinite until a closeout archive/prune job exists;
 the scrape-pending index keeps active scans bounded while preserving historical
 closeout evidence for audit reports.
+
+`empty_confirmed_at` is **not** a terminal guillotine. Settled-empty rows
+are kept observable on a slower cadence (default 1 hour between scrapes)
+until the row is more than 24 hours past `merged_at`, so a late closeout
+comment posted after the 10-minute settle window still has a path to
+upgrade the row to `closeout_body_md`. The comment-window upper bound
+matches: comments posted up to 24 hours after `merged_at` are eligible
+for capture; past that the terminal-empty decision stands. The watcher
+caps `listPendingMergeCloseouts` to 20 rows per tick (fresh debt first,
+chronic failures last via `scrape_attempt_count`) and also bounds the
+batch by a 60s wall-clock budget enforced between rows: once the budget
+is spent the remaining rows are deferred to the next tick instead of
+stalling `pollOnce` behind a serial `gh api --paginate` × retry budget
+per row. Freshly-merged rows always come first via the pending-list
+ordering, so what gets deferred under a chronic-failure backlog is the
+chronic-failure tail, not new debt. Failed scrapes upsert a debt row
+with `scrape_attempt_count` bumped and `scrape_last_error` populated so
+chronic failures are triageable off the hot loop instead of being
+retried silently every tick; the failure-debt persist itself is
+wrapped in the same SQLITE_BUSY retry as the success path, so brief DB
+contention cannot silently drop the attempt-count signal. When a row
+later recovers and a non-null `closeout_body_md` is captured, the
+upsert resets `scrape_attempt_count` to 0 and clears `scrape_last_error`
+so triage queries can distinguish currently-broken rows from
+previously-broken-now-fine rows. `gh` stderr classification is content-
+sensitive: a parsed non-empty stdout is accepted even when stderr
+carries a benign banner (update notice, deprecation, ratelimit warning,
+"Note:" header), with the stderr logged at warn; only stderr matching
+fatal patterns (`error:`, `gh:`, `HTTP 4xx/5xx`, `GraphQL`, auth
+failures) or stderr alongside an empty parsed result trips the retry-
+then-fail path. Individual non-JSON lines in `gh`'s stdout are skipped
+with a warn and the surviving parsed entries are kept; only an all-
+non-JSON stdout falls through to a parse-error retry.
 
 ---
 

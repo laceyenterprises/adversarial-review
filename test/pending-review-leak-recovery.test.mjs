@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { clearPendingReviewsForSelf } from '../src/reviewer.mjs';
+import { reconcilePendingReviewsForSelf } from '../src/reviewer-pre-write.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
 // ── classifier ──────────────────────────────────────────────────────────────
@@ -244,4 +245,46 @@ test('clearPendingReviewsForSelf swallows transient DELETE failure and continues
   });
   assert.equal(result.cleared, 1); // only 11 succeeded
   assert.deepEqual(deleted, [11]);
+});
+
+test('reconcilePendingReviewsForSelf accepts numeric now and keeps fresh current-head draft', async () => {
+  const deleted = [];
+  const fetchImpl = async function (url, opts = {}) {
+    if (url === 'https://api.github.com/user') {
+      return { ok: true, status: 200, async json() { return { login: 'claude-reviewer-lacey' }; } };
+    }
+    if (url.endsWith('/pulls/7/reviews') && (!opts.method || opts.method === 'GET')) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [
+            { id: 12, state: 'PENDING', commit_id: 'head', created_at: '2026-05-30T04:00:00.000Z', user: { login: 'claude-reviewer-lacey' } },
+          ];
+        },
+      };
+    }
+    if (opts.method === 'DELETE') {
+      deleted.push(url);
+      return { ok: true, status: 200, async json() { return {}; } };
+    }
+    throw new Error(`unexpected fetch: ${opts.method || 'GET'} ${url}`);
+  };
+
+  const result = await reconcilePendingReviewsForSelf({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 7,
+    token: 'ghp_test',
+    currentHeadSha: 'head',
+    respawnAgeSeconds: 900,
+    now: Date.parse('2026-05-30T04:01:00.000Z'),
+    fetchImpl,
+    log: { log() {}, warn() {} },
+  });
+
+  assert.equal(result.shouldSpawn, false);
+  assert.equal(result.listed, 1);
+  assert.equal(result.pendingMine, 1);
+  assert.equal(result.retained, 1);
+  assert.deepEqual(deleted, []);
 });

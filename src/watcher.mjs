@@ -220,15 +220,19 @@ function resolveSigtermFenceMode(env = process.env) {
 
 function resolvePendingDraftRespawnAgeSeconds(env = process.env) {
   const raw = env.ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS;
+  const rawText = raw === undefined ? null : String(raw).trim();
   const parsed = raw === undefined
     ? DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS
-    : Number.parseInt(String(raw), 10);
+    : Number(rawText);
   const fenceMode = resolveSigtermFenceMode(env);
   const min = fenceMode === 'off'
     ? PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF
     : PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_ON;
 
-  if (!Number.isInteger(parsed)) {
+  if (
+    !Number.isInteger(parsed) ||
+    (rawText !== null && String(parsed) !== rawText)
+  ) {
     const err = new Error(
       `ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS must be an integer seconds value; got ${JSON.stringify(raw)}`
     );
@@ -256,26 +260,32 @@ function resolvePendingDraftRespawnAgeSeconds(env = process.env) {
 
 function emitWatcherTickReconciliationEvent({
   log = console,
+  repoPath,
   prNumber,
   identity,
   listed,
+  pendingMine,
   cleared,
   retained,
   retainedReason,
   respawnAgeSeconds,
   respawnDeadlineUtc,
+  skippedReason,
 } = {}) {
   log.log?.(JSON.stringify({
     schemaVersion: 1,
     event: 'watcher_tick_reconciliation',
+    repo: repoPath,
     pr: prNumber,
-    identity,
+    identity: identity || null,
     listed,
+    pendingMine,
     cleared,
     retained,
     retainedReason: retainedReason || null,
     respawnAgeSeconds,
     respawnDeadlineUtc: respawnDeadlineUtc || null,
+    skippedReason: skippedReason || null,
   }));
 }
 
@@ -301,19 +311,20 @@ async function reconcilePendingDraftsBeforeSpawn({
     fetchImpl,
     log,
   });
-  if (reconciliation?.selfLogin) {
-    emitWatcherTickReconciliationEvent({
-      log,
-      prNumber,
-      identity: reconciliation.selfLogin,
-      listed: reconciliation.listed ?? 0,
-      cleared: reconciliation.cleared ?? 0,
-      retained: reconciliation.retained ?? 0,
-      retainedReason: reconciliation.retainedReason ?? null,
-      respawnAgeSeconds,
-      respawnDeadlineUtc: reconciliation.respawnDeadlineUtc ?? null,
-    });
-  }
+  emitWatcherTickReconciliationEvent({
+    log,
+    repoPath,
+    prNumber,
+    identity: reconciliation?.selfLogin ?? null,
+    listed: reconciliation?.listed ?? 0,
+    pendingMine: reconciliation?.pendingMine ?? 0,
+    cleared: reconciliation?.cleared ?? 0,
+    retained: reconciliation?.retained ?? 0,
+    retainedReason: reconciliation?.retainedReason ?? null,
+    respawnAgeSeconds,
+    respawnDeadlineUtc: reconciliation?.respawnDeadlineUtc ?? null,
+    skippedReason: reconciliation?.skippedReason ?? null,
+  });
   return {
     ...reconciliation,
     skipSpawn: reconciliation?.shouldSpawn === false,
@@ -3832,7 +3843,6 @@ async function pollOnce(
                 err?.message || err
               );
             }
-
             const preSpawnReconciliation = await reconcilePendingDraftsBeforeSpawn({
               repoPath,
               prNumber,

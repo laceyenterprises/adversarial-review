@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   reconcilePendingDraftsBeforeSpawn,
   resolvePendingDraftRespawnAgeSeconds,
 } from '../src/watcher.mjs';
+
+const WATCHER_SOURCE = new URL('../src/watcher.mjs', import.meta.url);
 
 async function withEnv(overrides, fn) {
   const previous = {};
@@ -86,9 +89,26 @@ test('watcher pre-spawn reconciliation clears stale-head drafts before spawn and
   assert.deepEqual(deleted, [7001]);
   const event = parseStructuredEvent(log);
   assert.equal(event.schemaVersion, 1);
+  assert.equal(event.repo, 'laceyenterprises/adversarial-review');
+  assert.equal(event.listed, 1);
+  assert.equal(event.pendingMine, 1);
   assert.equal(event.cleared, 1);
   assert.equal(event.retained, 0);
   assert.equal(event.retainedReason, null);
+  assert.equal(event.skippedReason, null);
+});
+
+test('watcher runs pending-draft reconciliation after claim and freshness re-check', () => {
+  const source = readFileSync(WATCHER_SOURCE, 'utf8');
+  const claimIndex = source.indexOf('const claim = stmtMarkAttemptStarted.run(');
+  const freshnessIndex = source.indexOf('Freshness re-check (2026-05-18)');
+  const reconcileIndex = source.indexOf('const preSpawnReconciliation = await reconcilePendingDraftsBeforeSpawn({');
+  const releaseIndex = source.indexOf('stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);');
+
+  assert.ok(claimIndex > 0, 'claim site should exist');
+  assert.ok(freshnessIndex > claimIndex, 'freshness re-check should happen after claim');
+  assert.ok(reconcileIndex > freshnessIndex, 'reconciliation should happen after freshness re-check');
+  assert.ok(releaseIndex > reconcileIndex, 'skip-spawn path should release the claim');
 });
 
 test('watcher pre-spawn reconciliation retains a fresh current-head draft and skips this tick', async () => {
@@ -103,6 +123,13 @@ test('watcher pre-spawn reconciliation retains a fresh current-head draft and sk
         status: 200,
         async json() {
           return [
+            {
+              id: 7000,
+              state: 'PENDING',
+              commit_id: 'current-head',
+              created_at: '2026-05-30T03:59:00.000Z',
+              user: { login: 'other-reviewer-lacey' },
+            },
             {
               id: 7002,
               state: 'PENDING',
@@ -132,6 +159,8 @@ test('watcher pre-spawn reconciliation retains a fresh current-head draft and sk
   assert.equal(result.retainedReason, 'current-head-fresh-draft');
   assert.equal(result.respawnDeadlineUtc, '2026-05-30T04:14:00.000Z');
   const event = parseStructuredEvent(log);
+  assert.equal(event.listed, 2);
+  assert.equal(event.pendingMine, 1);
   assert.equal(event.retainedReason, 'current-head-fresh-draft');
   assert.equal(event.respawnDeadlineUtc, '2026-05-30T04:14:00.000Z');
 });
@@ -183,6 +212,36 @@ test('watcher pre-spawn reconciliation clears an expired current-head draft and 
   const event = parseStructuredEvent(log);
   assert.equal(event.cleared, 1);
   assert.equal(event.retainedReason, null);
+});
+
+test('watcher reconciliation emits repo-scoped skipped event when identity probe fails', async () => {
+  const log = makeLog();
+  const fetchImpl = async (url) => {
+    if (url === 'https://api.github.com/user') {
+      return { ok: false, status: 503, async json() { return { message: 'unavailable' }; } };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  const result = await withEnv({ GH_CLAUDE_REVIEWER_TOKEN: 'token' }, () => reconcilePendingDraftsBeforeSpawn({
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 177,
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    currentHeadSha: 'current-head',
+    now: new Date('2026-05-30T04:00:00.000Z'),
+    fetchImpl,
+    log,
+  }));
+
+  assert.equal(result.skipSpawn, false);
+  assert.equal(result.skippedReason, 'identity-probe-failed');
+  const event = parseStructuredEvent(log);
+  assert.equal(event.repo, 'laceyenterprises/adversarial-review');
+  assert.equal(event.pr, 177);
+  assert.equal(event.identity, null);
+  assert.equal(event.listed, 0);
+  assert.equal(event.pendingMine, 0);
+  assert.equal(event.skippedReason, 'identity-probe-failed');
 });
 
 test('two ticks against the same fresh draft skip first and reap after the respawn age elapses', async () => {
@@ -271,6 +330,20 @@ test('respawn age validation accepts fence-on values in [60, 1800] and rejects o
     () => resolvePendingDraftRespawnAgeSeconds({
       ADVERSARIAL_REVIEW_SIGTERM_FENCE: 'on',
       ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS: '86400',
+    }),
+    (err) => err?.logKey === 'respawn_age_out_of_range'
+  );
+  assert.throws(
+    () => resolvePendingDraftRespawnAgeSeconds({
+      ADVERSARIAL_REVIEW_SIGTERM_FENCE: 'on',
+      ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS: '60xyz',
+    }),
+    (err) => err?.logKey === 'respawn_age_out_of_range'
+  );
+  assert.throws(
+    () => resolvePendingDraftRespawnAgeSeconds({
+      ADVERSARIAL_REVIEW_SIGTERM_FENCE: 'on',
+      ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS: '15min',
     }),
     (err) => err?.logKey === 'respawn_age_out_of_range'
   );

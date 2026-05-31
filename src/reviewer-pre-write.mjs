@@ -146,24 +146,28 @@ async function reconcilePendingReviewsForSelf({
   if (!token) {
     return {
       listed: 0,
+      pendingMine: 0,
       cleared: 0,
       retained: 0,
       retainedReason: null,
       respawnDeadlineUtc: null,
       shouldSpawn: true,
       selfLogin: null,
+      skippedReason: 'missing-token',
     };
   }
   const { owner, repoName } = splitRepo(repo);
   if (!owner || !repoName) {
     return {
       listed: 0,
+      pendingMine: 0,
       cleared: 0,
       retained: 0,
       retainedReason: null,
       respawnDeadlineUtc: null,
       shouldSpawn: true,
       selfLogin: null,
+      skippedReason: 'invalid-repo',
     };
   }
 
@@ -171,18 +175,24 @@ async function reconcilePendingReviewsForSelf({
   if (!selfLogin) {
     return {
       listed: 0,
+      pendingMine: 0,
       cleared: 0,
       retained: 0,
       retainedReason: null,
       respawnDeadlineUtc: null,
       shouldSpawn: true,
       selfLogin: null,
+      skippedReason: 'identity-probe-failed',
     };
   }
 
   const reviews = await listPullRequestReviews({ repo, prNumber, token, fetchImpl, log });
   const pendingMine = pendingReviewsOwnedBy(reviews, selfLogin);
-  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now);
+  const nowMs = now instanceof Date
+    ? now.getTime()
+    : typeof now === 'number'
+      ? now
+      : Date.parse(now);
   const currentHead = String(currentHeadSha || '').trim() || null;
   const maxFreshDeadlineMs = { value: null };
   let cleared = 0;
@@ -223,7 +233,8 @@ async function reconcilePendingReviewsForSelf({
   }
 
   return {
-    listed: pendingMine.length,
+    listed: reviews.length,
+    pendingMine: pendingMine.length,
     cleared,
     retained,
     retainedReason: retained > 0 ? 'current-head-fresh-draft' : null,
@@ -232,6 +243,7 @@ async function reconcilePendingReviewsForSelf({
       : null,
     shouldSpawn: retained === 0,
     selfLogin,
+    skippedReason: null,
   };
 }
 

@@ -22,6 +22,10 @@ The Grafana dashboard lives at
   attempts by `status`, `failure_class`, and `pass_kind`. The Prometheus
   output declares this as a gauge because it is a windowed snapshot, not a
   cumulative counter.
+- `review_pipeline_failed_attempts_distinct_prs`: distinct PR count contributing
+  failed reviewer attempts by `failure_class` within the configured
+  unknown-rate alert window. This drives the dashboard sub-panel that shows
+  whether an unknown spike is one flapping PR or a cross-PR incident.
 - `review_pipeline_health_collector_up`: 1 when the collector can open
   `reviews.db` read-only, 0 when the review-state ledger is missing or
   unreadable.
@@ -48,6 +52,7 @@ The Grafana dashboard lives at
 | Code | Default threshold | Tier | Clears when |
 |---|---:|---|---|
 | `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | page | the settled-attempt window falls below threshold or the minimum-attempt guard |
+| `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | page | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:queue_starvation` | oldest pending first-pass row is >30m old | page | no pending row exceeds the age threshold |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | page | the PR is merged/closed or the settled job is no longer past threshold |
@@ -59,6 +64,10 @@ All thresholds are configurable through environment variables:
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_DEATH_RATE_WINDOW_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_DEATH_RATE_THRESHOLD`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_DEATH_RATE_MIN_ATTEMPTS`
+- `REVIEW_UNKNOWN_RATE_THRESHOLD`
+- `REVIEW_UNKNOWN_RATE_WINDOW_MINUTES`
+- `REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR`
+- `REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_QUEUE_STARVATION_MAX_AGE_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REMEDIATION_BACKLOG_THRESHOLD`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_MERGE_STALLED_MAX_TICKS`

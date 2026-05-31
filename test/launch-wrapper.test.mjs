@@ -36,6 +36,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
   alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
   opCliPath = '/missing/op',
   opMode = 'ok',
+  extraEnv = {},
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'watcher-launch-wrapper-'));
   const fakeBin = join(root, 'bin');
@@ -80,6 +81,9 @@ async function runMaintainerWatcherLauncher(scriptName, {
       + '    ok)\n'
       + '      printf "alert@example.com"; exit 0\n'
       + '      ;;\n'
+      + '    missing-alert)\n'
+      + '      echo "not found" >&2; exit 1\n'
+      + '      ;;\n'
       + '  esac\n'
       + 'fi\n'
       + 'printf "secret-value"; exit 0\n',
@@ -100,6 +104,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
     ADVERSARIAL_REVIEW_ALERT_TO_OP_REF: alertToOpRef,
     ADVERSARIAL_REVIEW_OP_CLI: opCliPath,
     TEST_OP_MODE: opMode,
+    ...extraEnv,
   };
   try {
     const result = await execFileAsync('/bin/zsh', [wrapperPath], { env, cwd: root });
@@ -189,5 +194,24 @@ test('maintainer watcher launchers retry transient ALERT_TO op failures', {
     assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
     assert.match(result.stderr, /failed to resolve ALERT_TO from 1Password \(attempt 1\/3\)/);
     assert.match(result.stderr, /failed to resolve ALERT_TO from 1Password \(attempt 2\/3\)/);
+  }
+});
+
+test('maintainer watcher launchers honor config-derived allow-missing-alert flag semantics', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const result = await runMaintainerWatcherLauncher(scriptName, {
+      opMode: 'missing-alert',
+      extraEnv: {
+        AGENT_OS_CFG_FEATURE_FLAGS_ALLOW_MISSING_ALERT_TO: 'true',
+      },
+    });
+    assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
+    assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
+    assert.doesNotMatch(result.stderr, /ERROR: ALERT_TO is not provisioned/);
   }
 });

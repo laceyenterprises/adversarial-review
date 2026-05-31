@@ -87,6 +87,45 @@ test('linear issue prefix and session ledger database name env overrides resolve
   }
 });
 
+test('linear issue prefix and session ledger database name reject invalid shapes', () => {
+  const tmp = freshTmp();
+  try {
+    const badLinear = join(tmp, 'bad-linear.yaml');
+    writeFile(badLinear, `
+      version: 1
+      linear:
+        issue_prefix: acme
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badLinear, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'linear.issue_prefix');
+        assert.match(err.message, /Linear issue prefix/);
+        return true;
+      },
+    );
+
+    const badDatabase = join(tmp, 'bad-database.yaml');
+    writeFile(badDatabase, `
+      version: 1
+      session_ledger:
+        database_name: bad-name
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badDatabase, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'session_ledger.database_name');
+        assert.match(err.message, /SQL identifier/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('empty file returns defaults', () => {
   const tmp = freshTmp();
   try {

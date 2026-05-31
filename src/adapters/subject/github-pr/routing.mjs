@@ -161,7 +161,13 @@ function routeSubject(subject, { env = process.env, topPath, loaderImpl } = {}) 
 }
 
 function linearIssuePrefix(options = {}) {
-  const cfg = loadConfigCached({ env: options.env || process.env });
+  const configOptions = {
+    env: options.env || process.env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+  };
+  const loader = options.loaderImpl !== undefined ? options.loaderImpl : loadConfigCached;
+  const cfg = loader(configOptions);
   const value = cfg.get('linear.issue_prefix', 'LAC');
   return String(value || 'LAC').trim() || 'LAC';
 }

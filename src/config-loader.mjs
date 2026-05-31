@@ -136,17 +136,17 @@ function schemaV1() {
             __default: null,
             __nullable: true,
           },
+          tailscale_hostname: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
         },
       },
       tailscale: {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
-          hostname: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
           workstation_ip: {
             __type: TYPE_STRING,
             __default: null,
@@ -294,7 +294,7 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_HOST_NAME',
     aliases: [],
   },
-  'tailscale.hostname': {
+  'host.tailscale_hostname': {
     canonical: 'AGENT_OS_TAILSCALE_HOSTNAME',
     aliases: [['TAILSCALE_HOSTNAME', identity]],
   },

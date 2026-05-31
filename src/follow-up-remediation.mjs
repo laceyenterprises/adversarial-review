@@ -4542,39 +4542,50 @@ async function main() {
       return;
     }
 
-    const result = await consumeNextFollowUpJob();
-    if (!result.consumed) {
-      // A claimed-then-stopped outcome (e.g. lifecycle gate fired) is
-      // operationally meaningful — it represents a real state transition
-      // on a queued job. Don't collapse it into the "no pending jobs"
-      // bucket where it'd look like a no-op. Each stop reason gets an
-      // explicit log line so operators reading the daemon log can tell
-      // a merged-PR stop from "queue was empty".
-      if (result.reason === 'no-pending-jobs') {
-        console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
-        return;
+    const drain = await consumeFollowUpJobsUntilCapacity();
+    if (drain.results.length === 0 || (
+      drain.spawned === 0
+      && drain.stopped === 0
+      && drain.deferredSamePR === 0
+    )) {
+      console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
+      return;
+    }
+
+    console.log(
+      `[follow-up-remediation] Drain summary: maxConcurrent=${drain.maxConcurrent} activeAtStart=${drain.activeAtStart} `
+      + `availableAtStart=${drain.availableAtStart} spawned=${drain.spawned} stopped=${drain.stopped} `
+      + `deferredSamePR=${drain.deferredSamePR} capacityRemaining=${drain.capacityRemaining}`
+    );
+
+    for (const result of drain.results) {
+      if (result.consumed) {
+        const workerModel = result.job.remediationWorker?.model || 'codex';
+        const dispatchTag = result.job.remediationWorker?.dispatchMode === 'hq'
+          ? ` lrq=${result.job.remediationWorker.launchRequestId}`
+          : ` pid=${result.job.remediationWorker.processId}`;
+        console.log(
+          `[follow-up-remediation] Spawned ${workerModel} remediation worker${dispatchTag} for ${result.job.repo}#${result.job.prNumber}`
+        );
+        console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
+        continue;
       }
-      const stopRepoTag = result.job?.repo && result.job?.prNumber
+
+      if (!result.job) {
+        continue;
+      }
+
+      const stopRepoTag = result.job.repo && result.job.prNumber
         ? `${result.job.repo}#${result.job.prNumber} `
         : '';
-      const stopCode = result.job?.remediationPlan?.stop?.code || result.reason;
+      const stopCode = result.job?.remediationPlan?.stop?.code || result.reason || 'stopped';
       console.log(
-        `[follow-up-remediation] Stopped pending ${stopRepoTag}-> ${stopCode} (${result.reason})`
+        `[follow-up-remediation] Stopped pending ${stopRepoTag}-> ${stopCode} (${result.reason || 'stopped'})`
       );
       if (result.jobPath) {
         console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
       }
-      return;
     }
-
-    const workerModel = result.job.remediationWorker?.model || 'codex';
-    const dispatchTag = result.job.remediationWorker?.dispatchMode === 'hq'
-      ? ` lrq=${result.job.remediationWorker.launchRequestId}`
-      : ` pid=${result.job.remediationWorker.processId}`;
-    console.log(
-      `[follow-up-remediation] Spawned ${workerModel} remediation worker${dispatchTag} for ${result.job.repo}#${result.job.prNumber}`
-    );
-    console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
   } catch (err) {
     if (err.isOAuthError) {
       console.error(`[follow-up-remediation] Stopped: ${err.message}`);

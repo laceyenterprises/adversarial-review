@@ -558,74 +558,107 @@ test('isFinalPassOnRequestChangesEnabled defaults ON for unset/empty, off for ex
   // Silent stub so the warn() call on unknown values doesn't noise up
   // the test output.
   const silentLogger = { warn: () => {} };
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
-  // Default ON: env unset OR empty.
-  assert.equal(isFinalPassOnRequestChangesEnabled({ env: {}, logger: silentLogger }), true);
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({
-      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '' },
-      logger: silentLogger,
-    }),
-    true,
-  );
-  // Explicit off-switch values: 0 / false / no (case-insensitive).
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({
-      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0' },
-      logger: silentLogger,
-    }),
-    false,
-  );
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({
-      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'false' },
-      logger: silentLogger,
-    }),
-    false,
-  );
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({
-      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'NO' },
-      logger: silentLogger,
-    }),
-    false,
-  );
-  // Explicit on values (redundant with default but supported).
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({
-      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1' },
-      logger: silentLogger,
-    }),
-    true,
-  );
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({
-      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'true' },
-      logger: silentLogger,
-    }),
-    true,
-  );
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({
-      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'YES' },
-      logger: silentLogger,
-    }),
-    true,
-  );
-  // Unknown value: fail-CLOSED and log a warning. A typo'd env must NOT
-  // silently broaden merge authority.
-  const warnings = [];
-  const captureLogger = { warn: (msg) => warnings.push(msg) };
-  assert.equal(
-    isFinalPassOnRequestChangesEnabled({
-      env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'maybe' },
-      logger: captureLogger,
-    }),
-    false,
-  );
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /maybe/);
-  assert.match(warnings[0], /falling back to OFF/);
+  try {
+    const topPath = path.join(rootDir, 'no-top.yaml');
+    const modulePath = path.join(rootDir, 'config.yaml');
+    writeFileSync(modulePath, 'feature_flags: {}\n', 'utf8');
+
+    // Default ON: env unset OR empty.
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: {},
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '' },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+    // Explicit off-switch values: 0 / false / no (case-insensitive).
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0' },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'false' },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'NO' },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+    // Explicit on values (redundant with default but supported).
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '1' },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'true' },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'YES' },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+    // Unknown value: fail-CLOSED and log a warning. A typo'd env must NOT
+    // silently broaden merge authority.
+    const warnings = [];
+    const captureLogger = { warn: (msg) => warnings.push(msg) };
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: 'maybe' },
+        logger: captureLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /maybe/);
+    assert.match(warnings[0], /falling back to OFF/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('pickMergeAgentDispatch fails closed on missing verdicts', () => {
@@ -3834,6 +3867,98 @@ test('dispatchMergeAgentForPR honors MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES f
   );
   assert.equal(hqCalls[0].env?.MERGE_AGENT_BLOCKING_FINDING_COUNT, '0');
   assert.ok(!('MERGE_AGENT_BLOCKER_REMEDIATION_REQUIRED' in hqCalls[0].env));
+});
+
+test('isFinalPassOnRequestChangesEnabled honors config when env is unset', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  try {
+    const topPath = path.join(rootDir, 'no-top.yaml');
+    const modulePath = path.join(rootDir, 'config.yaml');
+    writeFileSync(modulePath, [
+      'feature_flags:',
+      '  merge_agent_final_pass_on_request_changes: false',
+      '',
+    ].join('\n'), 'utf8');
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: {},
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('isFinalPassOnRequestChangesEnabled honors AGENT_OS_CONFIG_PATH when env is unset', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  try {
+    const topPath = path.join(rootDir, 'top.yaml');
+    const modulePath = path.join(rootDir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n', 'utf8');
+    writeFileSync(modulePath, [
+      'feature_flags:',
+      '  merge_agent_final_pass_on_request_changes: false',
+      '',
+    ].join('\n'), 'utf8');
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { AGENT_OS_CONFIG_PATH: topPath },
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('env wins over config for final-pass flag', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  try {
+    const topPath = path.join(rootDir, 'no-top.yaml');
+    const modulePath = path.join(rootDir, 'config.yaml');
+    writeFileSync(modulePath, [
+      'feature_flags:',
+      '  merge_agent_final_pass_on_request_changes: true',
+      '',
+    ].join('\n'), 'utf8');
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0' },
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('isFinalPassOnRequestChangesEnabled falls back to default ON when config load fails', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const warnings = [];
+  try {
+    const topPath = path.join(rootDir, 'no-top.yaml');
+    const modulePath = path.join(rootDir, 'config.yaml');
+    writeFileSync(modulePath, 'feature_flags: [\n', 'utf8');
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: {},
+        logger: { warn: (message) => warnings.push(message) },
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /failed to load feature_flags\.merge_agent_final_pass_on_request_changes/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('dispatchMergeAgentForPR defaults final-pass ON when env unset (no halt at budget-exhausted)', async () => {

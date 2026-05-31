@@ -23,6 +23,12 @@ export CODEX_AUTH_PATH="/Users/placey/.codex/auth.json"
 # gate BEFORE any 1Password resolution so a broken native module produces
 # zero popups.
 WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
+REPO_ROOT="${AGENT_OS_ROOT:-${WATCHER_DIR%/tools/adversarial-review}}"
+if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
+  source "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh"
+  export AGENT_OS_CFG_MODULES="$REPO_ROOT/tools/adversarial-review/config.yaml${AGENT_OS_CFG_MODULES:+:$AGENT_OS_CFG_MODULES}"
+  eval "$(agent_os_config_export)"
+fi
 WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"
 if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$WATCHER_NATIVE_CHECK_ERR" 2>&1; then
   echo "[adversarial-watcher] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
@@ -56,7 +62,11 @@ fi
 
 ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
 ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
-ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
+ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-${AGENT_OS_CFG_FEATURE_FLAGS_ALLOW_MISSING_ALERT_TO:-}}"
+
+allow_missing_alert_to_enabled() {
+  [[ "$ALLOW_MISSING_ALERT_TO" == "1" || "$ALLOW_MISSING_ALERT_TO" == "true" ]]
+}
 
 resolve_op_bin() {
   local op_bin
@@ -156,22 +166,22 @@ if [[ -z "${ALERT_TO:-}" ]]; then
   if alert_to_value="$(resolve_alert_to_optional)"; then
     export ALERT_TO="$alert_to_value"
   else
-    status=$?
-    if [[ $status -eq 3 ]]; then
-      if [[ "$ALLOW_MISSING_ALERT_TO" == "1" ]]; then
-        echo "[adversarial-watcher] WARN: ALERT_TO is unset by explicit operator override (ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1). Watcher-health and proactive-stuck-scan alerts will not page until $ALERT_TO_REF_LABEL is provisioned." >&2
+    alert_to_status=$?
+    if [[ $alert_to_status -eq 3 ]]; then
+      if allow_missing_alert_to_enabled; then
+        echo "[adversarial-watcher] WARN: ALERT_TO is unset by explicit operator override (ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 or feature_flags.allow_missing_alert_to: true). Watcher-health and proactive-stuck-scan alerts will not page until $ALERT_TO_REF_LABEL is provisioned." >&2
       else
-        echo "[adversarial-watcher] ERROR: ALERT_TO is not provisioned at $ALERT_TO_REF_LABEL and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
-        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; set ALERT_TO directly, configure ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
+        echo "[adversarial-watcher] ERROR: ALERT_TO is not provisioned at $ALERT_TO_REF_LABEL and degraded startup is not enabled via ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 or feature_flags.allow_missing_alert_to: true." >&2
+        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; set ALERT_TO directly, configure ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1, or enable feature_flags.allow_missing_alert_to: true in tools/adversarial-review/config.yaml for explicit degraded bring-up." >&2
         sleep 3600
         exit 1
       fi
-    elif [[ $status -eq 4 ]]; then
-      if [[ "$ALLOW_MISSING_ALERT_TO" == "1" ]]; then
-        echo "[adversarial-watcher] WARN: ALERT_TO cannot be resolved because 1Password CLI 'op' is unavailable, but ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 explicitly allows degraded alert-free startup." >&2
+    elif [[ $alert_to_status -eq 4 ]]; then
+      if allow_missing_alert_to_enabled; then
+        echo "[adversarial-watcher] WARN: ALERT_TO cannot be resolved because 1Password CLI 'op' is unavailable, but degraded startup is explicitly enabled via ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 or feature_flags.allow_missing_alert_to: true." >&2
       else
-        echo "[adversarial-watcher] ERROR: ALERT_TO cannot be resolved because 1Password CLI 'op' is unavailable and ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO is not set to 1." >&2
-        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; install op, set ALERT_TO directly, or set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 for an explicit degraded bring-up." >&2
+        echo "[adversarial-watcher] ERROR: ALERT_TO cannot be resolved because 1Password CLI 'op' is unavailable and degraded startup is not enabled via ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1 or feature_flags.allow_missing_alert_to: true." >&2
+        echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; install op, set ALERT_TO directly, set ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO=1, or enable feature_flags.allow_missing_alert_to: true in tools/adversarial-review/config.yaml for explicit degraded bring-up." >&2
         sleep 3600
         exit 1
       fi

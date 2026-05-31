@@ -235,6 +235,38 @@ mis-resolved workspace tree. Workspace-root provisioning failures must surface a
 structured error that names both `HQ_ROOT` and the runtime user so first-deploy
 permission drift is diagnosable without reading a raw stack trace.
 
+### HQ Branch-Push Remediation Lane
+
+When `ADV_WITH_HQ_INTEGRATION=1`, follow-up remediation dispatches through
+`hq dispatch --completion-shape branch-push` instead of the legacy detached
+local CLI spawn. The durable worker record must still preserve the same
+reconciliation invariants as the local lane:
+
+- The worker record persists both `launchRequestId` and `dispatchId` from the
+  HQ dispatch ticket. `launchRequestId` remains the reply-storage and audit key;
+  `dispatchId` is the authoritative handle for `hq dispatch status` and
+  `hq dispatch cancel`.
+- The daemon, not the worker prompt, owns commit-hook installation. The
+  checked-out remediation workspace already has the worker-provenance
+  `commit-msg` hook installed before the worker runs, and any pre-existing hook
+  must remain chained through `commit-msg.worker-provenance-chain`.
+- Before honoring `reReview.requested=true`, reconcile runs the same
+  branch-contamination audit used by the legacy lane against the HQ-managed git
+  workspace. If the dispatch ticket did not provide that path, reconcile must
+  resolve it from `hq worker info <launchRequestId> --root <HQ_ROOT>` and fail
+  closed when the workspace cannot be proven.
+- If reconcile decides to move an active HQ remediation to a terminal stop
+  because the PR merged/closed or another terminal guard fired, it must cancel
+  the in-flight dispatch with `hq dispatch cancel <dispatchId> --root <HQ_ROOT>`
+  before finalizing the queue record. Transient `EIO`/timeout failures get a
+  bounded retry with backoff; non-transient failures surface as
+  `hq-dispatch-cancel-failed` instead of silently writing a stopped ledger row
+  while the remote worker keeps running.
+- HQ liveness and failure classification continue to use the existing
+  `hq-dispatch-failed`, `hq-dispatch-not-found`, and
+  `hq-dispatch-status-unavailable` reconcile reasons, but those states are
+  derived from `hq dispatch status <dispatchId>`, never from `launchRequestId`.
+
 ## Follow-Up Stop Codes
 
 Queue stop codes are operator-facing state. The durable stop surface currently

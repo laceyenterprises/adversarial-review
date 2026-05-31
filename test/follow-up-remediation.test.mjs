@@ -415,6 +415,8 @@ test('buildRemediationPrompt can include governing repo docs and fallback guidan
   assert.match(prompt, /Additional Governing Repo Docs/);
   assert.match(prompt, /README\.md/);
   assert.match(prompt, /Before making architecture-sensitive changes, read the obvious governing docs/);
+  assert.doesNotMatch(prompt, /EOF_WORKER_PROVENANCE_HOOK/);
+  assert.match(prompt, /Do not overwrite it from inside the worker/);
 });
 
 test('collectWorkspaceDocContext reads obvious repo docs from the workspace when present', () => {
@@ -2933,7 +2935,14 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
             return { stdout: JSON.stringify({ baseRefName: 'main' }), stderr: '' };
           }
           if (command === 'hq' && args[0] === 'dispatch') {
-            return { stdout: JSON.stringify({ launchRequestId: 'lrq_arp04_dispatch', dispatchId: 'dispatch_arp04_dispatch' }), stderr: '' };
+            return {
+              stdout: JSON.stringify({
+                launchRequestId: 'lrq_arp04_dispatch',
+                dispatchId: 'dispatch_arp04_dispatch',
+                workspaceDir: path.join(hqRoot, 'workers', 'lrq_arp04_dispatch'),
+              }),
+              stderr: '',
+            };
           }
           return { stdout: '', stderr: '' };
         },
@@ -2945,6 +2954,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(result.consumed, true);
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
       assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_arp04_dispatch');
+      assert.equal(result.job.remediationWorker.dispatchId, 'dispatch_arp04_dispatch');
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
       const dispatchCall = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch');
       assert.ok(dispatchCall);
@@ -2997,6 +3007,7 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
       launchRequestId: 'lrq_arp04_recovery',
       dispatchId: 'dispatch_arp04_recovery',
       hqRoot,
+      workspaceDir: path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId),
       promptPath,
       replyPath,
       outputPath: null,
@@ -3041,8 +3052,9 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
         reason: 'review-status-reset',
         reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
       }),
-      auditWorkspaceForContaminationImpl: async () => {
-        throw new Error('HQ branch-push dispatch should not run the legacy local contamination audit');
+      auditWorkspaceForContaminationImpl: async ({ workspaceDir }) => {
+        assert.equal(workspaceDir, spawned.job.remediationWorker.workspaceDir);
+        return cleanContaminationAudit();
       },
     });
 
@@ -3075,6 +3087,7 @@ test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ disp
   process.env.CODEX_AUTH_PATH = authPath;
   process.env.CODEX_CLI_PATH = 'codex';
   process.env.HQ_ROOT = path.join(rootDir, 'hq');
+  mkdirSync(process.env.HQ_ROOT, { recursive: true });
   delete process.env.ADV_WITH_HQ_INTEGRATION;
 
   try {
@@ -3122,6 +3135,60 @@ test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ disp
       else process.env[key] = value;
     }
   }
+});
+
+test('reconcileFollowUpJob cancels an active HQ dispatch before stopping on PR lifecycle closure', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'hq');
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 74 });
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, { hqRoot });
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_arp04_cancel',
+      dispatchId: 'dispatch_arp04_cancel',
+      hqRoot,
+      workspaceDir: path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId),
+      promptPath: path.join(rootDir, 'prompt.md'),
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  const commands = [];
+  const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
+    rootDir,
+    job: spawned.job,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:15:00.000Z',
+    execFileImpl: async (command, args) => {
+      commands.push([command, ...args]);
+      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'running', health: 'healthy' }), stderr: '' };
+      }
+      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'cancel') {
+        return { stdout: JSON.stringify({ status: 'cancelled' }), stderr: '' };
+      }
+      throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+    },
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'closed',
+      closedAt: '2026-04-21T10:14:00.000Z',
+    }),
+  }));
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.reason, 'pr-closed');
+  assert.ok(
+    commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] === 'cancel' && entry[3] === 'dispatch_arp04_cancel'),
+  );
 });
 
 test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly claimed work through hq', async () => {
@@ -3179,7 +3246,14 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
             return { stdout: JSON.stringify({ baseRefName: 'main' }), stderr: '' };
           }
           if (command === 'hq' && args[0] === 'dispatch') {
-            return { stdout: JSON.stringify({ launchRequestId: 'lrq_arp04_mixed', dispatchId: 'dispatch_arp04_mixed' }), stderr: '' };
+            return {
+              stdout: JSON.stringify({
+                launchRequestId: 'lrq_arp04_mixed',
+                dispatchId: 'dispatch_arp04_mixed',
+                workspaceDir: path.join(process.env.HQ_ROOT, 'workers', 'lrq_arp04_mixed'),
+              }),
+              stderr: '',
+            };
           }
           return { stdout: '', stderr: '' };
         },

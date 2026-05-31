@@ -62,6 +62,11 @@ const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const VALID_REPLY_STORAGE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
 const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
+const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
 
 function normalizeBaseBranch(baseBranch) {
   if (typeof baseBranch !== 'string') return null;
@@ -367,15 +372,43 @@ function parseHqJsonObject(text, label) {
 
 function parseHqDispatchTicket(stdout) {
   const payload = parseHqJsonObject(stdout, 'hq dispatch');
-  const launchRequestId = String(payload?.launchRequestId || payload?.lrq || payload?.dispatchId || '').trim();
+  const launchRequestId = String(payload?.launchRequestId || payload?.lrq || '').trim();
+  const dispatchId = String(payload?.dispatchId || '').trim();
   if (!launchRequestId) {
-    throw new Error('hq dispatch ticket missing launchRequestId/lrq/dispatchId');
+    throw new Error('hq dispatch ticket missing launchRequestId/lrq');
+  }
+  if (!dispatchId) {
+    throw new Error('hq dispatch ticket missing dispatchId');
   }
   return {
     ...payload,
     launchRequestId,
-    dispatchId: String(payload?.dispatchId || '').trim() || null,
+    dispatchId,
   };
+}
+
+function normalizeHqWorkspaceDir(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized ? resolve(normalized) : null;
+}
+
+function parseHqWorkerWorkspaceFromPayload(payload) {
+  const direct = [
+    payload?.workspaceDir,
+    payload?.workspacePath,
+    payload?.worktreePath,
+    payload?.repoPath,
+    payload?.cwd,
+  ];
+  for (const candidate of direct) {
+    const resolvedPath = normalizeHqWorkspaceDir(candidate);
+    if (resolvedPath) return resolvedPath;
+  }
+  const nested = payload?.worker;
+  if (nested && typeof nested === 'object') {
+    return parseHqWorkerWorkspaceFromPayload(nested);
+  }
+  return null;
 }
 
 function parseHqDispatchStatus(stdout) {
@@ -388,6 +421,111 @@ function parseHqDispatchStatus(stdout) {
     ...payload,
     status,
     health: String(payload?.health || '').trim().toLowerCase() || null,
+  };
+}
+
+function parseHqWorkerInfo(stdout) {
+  const payload = parseHqJsonObject(stdout, 'hq worker info');
+  const workspaceDir = parseHqWorkerWorkspaceFromPayload(payload);
+  if (!workspaceDir) {
+    throw new Error('hq worker info payload missing workspaceDir/workspacePath/worktreePath');
+  }
+  return {
+    ...payload,
+    workspaceDir,
+  };
+}
+
+async function resolveHqWorkerWorkspace({
+  worker,
+  execFileImpl = execFileAsync,
+  env = process.env,
+} = {}) {
+  const persistedWorkspaceDir = normalizeHqWorkspaceDir(worker?.workspaceDir);
+  if (persistedWorkspaceDir && existsSync(join(persistedWorkspaceDir, '.git'))) {
+    return persistedWorkspaceDir;
+  }
+  const launchRequestId = String(worker?.launchRequestId || '').trim();
+  const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
+  if (!launchRequestId || !hqRoot) {
+    return null;
+  }
+  const hqBin = resolveHqBin(env);
+  const { stdout } = await execFileImpl(hqBin, [
+    'worker',
+    'info',
+    launchRequestId,
+    '--root',
+    hqRoot,
+  ], {
+    env: {
+      ...env,
+      HQ_ROOT: hqRoot,
+    },
+    maxBuffer: 5 * 1024 * 1024,
+  });
+  return parseHqWorkerInfo(stdout).workspaceDir;
+}
+
+function isHqCancelRetryable(err) {
+  const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
+  return /(?:^|[\s:])(EIO)(?:$|[\s:])|timed out|timeout/i.test(detail);
+}
+
+async function cancelHqDispatch({
+  worker,
+  execFileImpl = execFileAsync,
+  env = process.env,
+} = {}) {
+  const dispatchId = String(worker?.dispatchId || '').trim();
+  const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
+  if (!dispatchId || !hqRoot) {
+    return {
+      cancelled: false,
+      skipped: true,
+      reason: 'missing-hq-dispatch-handle',
+      attempts: 0,
+    };
+  }
+
+  const hqBin = resolveHqBin(env);
+  const retryDelaysMs = [0, ...HQ_CANCEL_RETRY_DELAYS_MS];
+  let lastError = null;
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    if (retryDelaysMs[attempt] > 0) {
+      await sleep(retryDelaysMs[attempt]);
+    }
+    try {
+      const result = await execFileImpl(hqBin, ['dispatch', 'cancel', dispatchId, '--root', hqRoot], {
+        env: {
+          ...env,
+          HQ_ROOT: hqRoot,
+        },
+        maxBuffer: 5 * 1024 * 1024,
+      });
+      return {
+        cancelled: true,
+        attempts: attempt + 1,
+        exitCode: 0,
+        stdout: String(result?.stdout || '').trim() || null,
+        stderr: String(result?.stderr || '').trim() || null,
+      };
+    } catch (err) {
+      lastError = err;
+      if (!isHqCancelRetryable(err) || attempt === retryDelaysMs.length - 1) {
+        break;
+      }
+    }
+  }
+
+  return {
+    cancelled: false,
+    attempts: retryDelaysMs.length,
+    exitCode: Number.isInteger(lastError?.code) ? lastError.code : null,
+    stdout: String(lastError?.stdout || '').trim() || null,
+    stderr: String(lastError?.stderr || '').trim() || null,
+    error: lastError?.message || 'hq dispatch cancel failed',
+    retryable: isHqCancelRetryable(lastError),
   };
 }
 
@@ -1099,6 +1237,15 @@ async function dispatchRemediationViaHq({
     maxBuffer: 5 * 1024 * 1024,
   });
   const ticket = parseHqDispatchTicket(stdout);
+  const workspaceDir = parseHqWorkerWorkspaceFromPayload(ticket)
+    || await resolveHqWorkerWorkspace({
+      worker: {
+        launchRequestId: ticket.launchRequestId,
+        hqRoot,
+      },
+      execFileImpl,
+      env,
+    });
   return {
     model: workerClass,
     workerClass,
@@ -1112,6 +1259,7 @@ async function dispatchRemediationViaHq({
     completionShape: 'branch-push',
     launchRequestId: ticket.launchRequestId,
     dispatchId: ticket.dispatchId,
+    workspaceDir,
     hqRoot,
     hqParentSession: parentSession,
     hqProject: project,
@@ -1658,15 +1806,6 @@ function buildRemediationPrompt(job, {
     HQ_ROOT: replyContext.hqRoot || '',
     LRQ_ID: replyContext.launchRequestId || '',
   }, { strict: true });
-  const workerHookInstallSnippet = [
-    'HOOK_DIR="$(git rev-parse --git-path hooks)"',
-    'mkdir -p "$HOOK_DIR"',
-    `cat >"$HOOK_DIR/commit-msg" <<'EOF_WORKER_PROVENANCE_HOOK'`,
-    readFileSync(WORKER_PROVENANCE_HOOK_SRC, 'utf8').trimEnd(),
-    'EOF_WORKER_PROVENANCE_HOOK',
-    'chmod +x "$HOOK_DIR/commit-msg"',
-  ].join('\n');
-
   return `${interpolatedTemplate}
 
 ## Trusted Job Metadata
@@ -1695,9 +1834,8 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
 - If a reviewer finding explicitly asks for a spec / governance / runbook update (e.g. "update SPEC.md to match the new behavior", "the runbook should document the new failure mode"), make that update as part of THIS remediation round. Do not refuse the doc edit on the grounds that it is "out of scope" — when the reviewer flags spec drift, closing the drift IS the remediation. Treat the governing doc as a load-bearing artifact equal in weight to the code change. If the reviewer's finding is ambiguous about whether a doc update is required, prefer to update the doc; an over-conservative read leaves the spec stale and the next reviewer round will repeat the finding.
-- Before the first commit, install the worker-provenance \`commit-msg\` hook in the checked-out repo and keep it active for the remediation commit. Use this exact script:
-${formatFencedBlock(workerHookInstallSnippet, 'bash')}
-- When you commit remediation changes, run the commit with these env vars set so the hook appends the required trailers:
+- The remediation workspace already has the worker-provenance \`commit-msg\` hook installed by the spawn path. Do not overwrite it from inside the worker; preserve any chained upstream hook behavior already present in the repo.
+- When you commit remediation changes, run the commit with these env vars set so the preinstalled hook appends the required trailers:
   \`WORKER_CLASS=${REMEDIATION_WORKER_TRAILER_CLASS}\`
   \`WORKER_JOB_ID=${job.jobId}\`
   \`WORKER_RUN_AT=<current ISO 8601 timestamp>\`
@@ -2341,7 +2479,7 @@ async function assessWorkerLivenessDetailed(job, {
   env = process.env,
 } = {}) {
   const worker = job?.remediationWorker || {};
-  if (!worker?.launchRequestId || worker?.dispatchMode !== 'hq') {
+  if (!worker?.dispatchId || worker?.dispatchMode !== 'hq') {
     return assessWorkerLiveness(job, { now, isWorkerRunning });
   }
 
@@ -2355,7 +2493,7 @@ async function assessWorkerLivenessDetailed(job, {
     const { stdout } = await execFileImpl(hqBin, [
       'dispatch',
       'status',
-      worker.launchRequestId,
+      worker.dispatchId,
       '--root',
       hqRoot,
     ], {
@@ -2701,6 +2839,71 @@ function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) 
   };
 }
 
+async function failFollowUpJobForHqCancel({
+  rootDir,
+  job,
+  jobPath,
+  worker,
+  workerState,
+  failedAt,
+  cancellation,
+  action,
+  postCommentImpl,
+  now,
+  log,
+}) {
+  const failure = {
+    code: 'hq-dispatch-cancel-failed',
+    message: [
+      `Failed to cancel HQ remediation dispatch ${worker?.dispatchId || '(missing dispatchId)'} before moving the job to ${action}.`,
+      cancellation?.error || 'hq dispatch cancel failed',
+    ].join('\n'),
+  };
+  const { commentDelivery } = buildReconcileCommentDelivery({
+    job,
+    worker,
+    action: 'failed',
+    failure,
+    now,
+  });
+  const failed = markFollowUpJobFailed({
+    rootDir,
+    jobPath,
+    failedAt,
+    failureCode: 'hq-dispatch-cancel-failed',
+    error: new Error(failure.message),
+    remediationWorker: {
+      ...workerState,
+      state: 'failed',
+      cancellation,
+    },
+    failure: {
+      hqDispatchCancel: cancellation,
+    },
+    commentDelivery,
+  });
+
+  await postReconcileOutcomeCommentSafe({
+    rootDir,
+    jobPath: failed.jobPath,
+    job: failed.job,
+    worker,
+    action: 'failed',
+    failure,
+    postCommentImpl,
+    alreadyTerminal: failed.alreadyTerminal,
+    now,
+    log,
+  });
+
+  return {
+    action: 'failed',
+    reason: 'hq-dispatch-cancel-failed',
+    job: failed.job,
+    jobPath: failed.jobPath,
+  };
+}
+
 async function reconcileFollowUpJob({
   rootDir = ROOT,
   job,
@@ -2715,7 +2918,7 @@ async function reconcileFollowUpJob({
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
-  const isHqWorker = worker?.dispatchMode === 'hq' && typeof worker?.launchRequestId === 'string' && worker.launchRequestId.trim();
+  const isHqWorker = worker?.dispatchMode === 'hq' && typeof worker?.dispatchId === 'string' && worker.dispatchId.trim();
   if ((!isHqWorker && !worker?.processId) || worker.state !== 'spawned') {
     return {
       action: 'skipped',
@@ -2730,25 +2933,6 @@ async function reconcileFollowUpJob({
     isWorkerRunning,
     execFileImpl,
   });
-  if (liveness.state === 'active') {
-    return {
-      action: 'active',
-      reason: liveness.reason,
-      job,
-      jobPath,
-    };
-  }
-
-  // Lifecycle gate: stop the bounded loop on any non-open PR state. If
-  // the operator merged or closed the PR while the worker was running,
-  // none of the downstream reconcile steps will help — the rereview
-  // reset is refused because pr_state != 'open', and any PR comment
-  // lands at the bottom of an already-terminal thread. The worker's
-  // pushed commits stay on the remote branch; if they're already in
-  // main via the merge, that's the operator's intent and we don't
-  // want to undo it. resolvePRLifecycleImpl prefers a live `gh pr
-  // view` lookup over the SQLite mirror so this gate closes the race
-  // where the watcher's syncPRLifecycle poll lags GitHub.
   const lifecycle = await resolveJobPRLifecycleSafe({
     rootDir,
     job,
@@ -2762,6 +2946,70 @@ async function reconcileFollowUpJob({
     site: 'reconcile',
     job,
   });
+  if (liveness.state === 'active' && !lifecycleStop) {
+    return {
+      action: 'active',
+      reason: liveness.reason,
+      job,
+      jobPath,
+    };
+  }
+  if (liveness.state === 'active') {
+    const lifecycleStoppedAt = now();
+    const workerState = {
+      ...worker,
+      state: lifecycleStop.workerState,
+      reconciledAt: lifecycleStoppedAt,
+    };
+    if (isHqWorker) {
+      const cancellation = await cancelHqDispatch({
+        worker,
+        execFileImpl,
+      });
+      if (!cancellation.cancelled) {
+        return failFollowUpJobForHqCancel({
+          rootDir,
+          job,
+          jobPath,
+          worker,
+          workerState,
+          failedAt: lifecycleStoppedAt,
+          cancellation,
+          action: lifecycleStop.stopCode,
+          postCommentImpl,
+          now,
+          log,
+        });
+      }
+      workerState.cancellation = cancellation;
+    }
+    const stopped = markFollowUpJobStopped({
+      rootDir,
+      jobPath,
+      stoppedAt: lifecycleStoppedAt,
+      stopCode: lifecycleStop.stopCode,
+      stopReason: lifecycleStop.stopReason,
+      sourceStatus: 'in_progress',
+      remediationWorker: workerState,
+    });
+    return {
+      action: 'stopped',
+      reason: lifecycleStop.actionReason,
+      job: stopped.job,
+      jobPath: stopped.jobPath,
+    };
+  }
+
+  // Lifecycle gate: stop the bounded loop on any non-open PR state. If
+  // the operator merged or closed the PR while the worker was running,
+  // none of the downstream reconcile steps will help — the rereview
+  // reset is refused because pr_state != 'open', and any PR comment
+  // lands at the bottom of an already-terminal thread. The worker's
+  // pushed commits stay on the remote branch; if they're already in
+  // main via the merge, that's the operator's intent and we don't
+  // want to undo it. resolvePRLifecycleImpl prefers a live `gh pr
+  // view` lookup over the SQLite mirror so this gate closes the race
+  // where the watcher's syncPRLifecycle poll lags GitHub.
   if (lifecycleStop) {
     const lifecycleStoppedAt = now();
     const stopped = markFollowUpJobStopped({
@@ -3027,60 +3275,142 @@ async function reconcileFollowUpJob({
         // the next reviewer pass will treat them as PR scope and
         // generate spurious findings. Refuse to request the rereview
         // and emit a `failed:branch-contamination` outcome instead.
-        if (worker?.dispatchMode !== 'hq') {
-          let baseBranch;
+        let baseBranch;
+        try {
+          const hydrated = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
+          job = hydrated.job;
+          baseBranch = hydrated.baseBranch;
+        } catch (err) {
+          rereview = buildRereviewResult({
+            requested: false,
+            reason: null,
+            outcome: {
+              status: 'refused',
+              reason: 'base-branch-resolution-failed',
+              error: err.message,
+            },
+          });
+          const baseBranchFailure = {
+            code: 'base-branch-resolution-failed',
+            message: [
+              `Could not prove the PR base branch for ${job?.repo}#${job?.prNumber}; refused to request rereview.`,
+              err.message,
+              'Resolve the PR base branch and retry remediation before any rebase or branch-contamination audit.',
+            ].join('\n'),
+          };
+          const { commentDelivery: baseBranchFailureDelivery } = buildReconcileCommentDelivery({
+            job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: baseBranchFailure,
+            now,
+          });
+          const failed = markFollowUpJobFailed({
+            rootDir,
+            jobPath,
+            failedAt: completedAt,
+            failureCode: 'base-branch-resolution-failed',
+            error: new Error(baseBranchFailure.message),
+            remediationWorker: {
+              ...workerState,
+              state: 'failed',
+            },
+            failure: {
+              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+              error: err.message,
+            },
+            commentDelivery: baseBranchFailureDelivery,
+            jobUpdates: {
+              completedAt,
+              remediationReply,
+              completionMetadata: {
+                source: 'reconcile:base-branch-resolution-failed',
+                note: 'PR base branch could not be proven; refused rereview rather than defaulting to main.',
+                error: err.message,
+              },
+              parsedReply,
+              rereview,
+            },
+          });
+
+          await postReconcileOutcomeCommentSafe({
+            rootDir,
+            jobPath: failed.jobPath,
+            job: failed.job,
+            worker,
+            action: 'failed',
+            reply: parsedReply,
+            failure: baseBranchFailure,
+            postCommentImpl,
+            alreadyTerminal: failed.alreadyTerminal,
+            now,
+            log,
+          });
+
+          return {
+            action: 'failed',
+            reason: 'base-branch-resolution-failed',
+            job: failed.job,
+            jobPath: failed.jobPath,
+          };
+        }
+        let auditWorkspaceDir = paths.workspaceDir;
+        if (worker?.dispatchMode === 'hq') {
           try {
-            const hydrated = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
-            job = hydrated.job;
-            baseBranch = hydrated.baseBranch;
+            auditWorkspaceDir = await resolveHqWorkerWorkspace({
+              worker,
+              execFileImpl,
+            }) || paths.workspaceDir;
           } catch (err) {
+            const contaminationAudit = { suspect: [], error: `hq worker info failed: ${err.message}` };
             rereview = buildRereviewResult({
               requested: false,
               reason: null,
               outcome: {
                 status: 'refused',
-                reason: 'base-branch-resolution-failed',
-                error: err.message,
+                reason: 'branch-contamination-audit-error',
+                auditError: contaminationAudit.error,
               },
             });
-            const baseBranchFailure = {
-              code: 'base-branch-resolution-failed',
+            const auditFailure = {
+              code: 'branch-contamination-audit-error',
               message: [
-                `Could not prove the PR base branch for ${job?.repo}#${job?.prNumber}; refused to request rereview.`,
-                err.message,
-                'Resolve the PR base branch and retry remediation before any rebase or branch-contamination audit.',
+                `Branch cleanliness audit failed before rereview could be requested for origin/${baseBranch}.`,
+                contaminationAudit.error,
+                'Fix the workspace git state or upstream ref lookup, then retry remediation.',
               ].join('\n'),
             };
-            const { commentDelivery: baseBranchFailureDelivery } = buildReconcileCommentDelivery({
+            const { commentDelivery: auditFailureDelivery } = buildReconcileCommentDelivery({
               job,
               worker,
               action: 'failed',
               reply: parsedReply,
-              failure: baseBranchFailure,
+              failure: auditFailure,
               now,
             });
             const failed = markFollowUpJobFailed({
               rootDir,
               jobPath,
               failedAt: completedAt,
-              failureCode: 'base-branch-resolution-failed',
-              error: new Error(baseBranchFailure.message),
+              failureCode: 'branch-contamination-audit-error',
+              error: new Error(auditFailure.message),
               remediationWorker: {
                 ...workerState,
                 state: 'failed',
               },
               failure: {
                 remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
-                error: err.message,
+                auditError: contaminationAudit.error,
               },
-              commentDelivery: baseBranchFailureDelivery,
+              commentDelivery: auditFailureDelivery,
               jobUpdates: {
                 completedAt,
                 remediationReply,
                 completionMetadata: {
-                  source: 'reconcile:base-branch-resolution-failed',
-                  note: 'PR base branch could not be proven; refused rereview rather than defaulting to main.',
-                  error: err.message,
+                  source: 'reconcile:branch-contamination-audit-error',
+                  note: 'PR branch cleanliness could not be proven because the HQ worker workspace could not be resolved.',
+                  auditError: contaminationAudit.error,
                 },
                 parsedReply,
                 rereview,
@@ -3094,7 +3424,7 @@ async function reconcileFollowUpJob({
               worker,
               action: 'failed',
               reply: parsedReply,
-              failure: baseBranchFailure,
+              failure: auditFailure,
               postCommentImpl,
               alreadyTerminal: failed.alreadyTerminal,
               now,
@@ -3103,16 +3433,17 @@ async function reconcileFollowUpJob({
 
             return {
               action: 'failed',
-              reason: 'base-branch-resolution-failed',
+              reason: 'branch-contamination-audit-error',
               job: failed.job,
               jobPath: failed.jobPath,
             };
           }
-          const contaminationAudit = await auditWorkspaceForContaminationImpl({
-            workspaceDir: paths.workspaceDir,
-            baseBranch,
-            execFileImpl,
-          });
+        }
+        const contaminationAudit = await auditWorkspaceForContaminationImpl({
+          workspaceDir: auditWorkspaceDir,
+          baseBranch,
+          execFileImpl,
+        });
           if (contaminationAudit.error) {
             rereview = buildRereviewResult({
               requested: false,
@@ -3264,7 +3595,6 @@ async function reconcileFollowUpJob({
               job: failed.job,
               jobPath: failed.jobPath,
             };
-          }
         }
 
         const requestedAt = completedAt;
@@ -3847,7 +4177,7 @@ async function consumeNextFollowUpJob({
       remediationReplyPath: replyPath,
       hqRoot,
       launchRequestId: replyStorageKey,
-      governingDocContext: hqDispatchEnabled ? '' : governingDocContext,
+      governingDocContext,
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
 
@@ -3886,8 +4216,8 @@ async function consumeNextFollowUpJob({
       worker: {
         ...worker,
         workspaceState,
-        workspaceRoot: worker.workspaceDir ? serializeWorkerPath(rootDir, dirname(worker.workspaceDir)) : serializeWorkerPath(rootDir, workspaceRootDir),
-        workspaceDir: worker.workspaceDir ? serializeWorkerPath(rootDir, worker.workspaceDir) : serializeWorkerPath(rootDir, workspaceDir),
+        workspaceRoot: worker.workspaceDir ? serializeWorkerPath(rootDir, dirname(worker.workspaceDir)) : (hqDispatchEnabled ? null : serializeWorkerPath(rootDir, workspaceRootDir)),
+        workspaceDir: worker.workspaceDir ? serializeWorkerPath(rootDir, worker.workspaceDir) : (hqDispatchEnabled ? null : serializeWorkerPath(rootDir, workspaceDir)),
         promptPath: serializeWorkerPath(rootDir, worker.promptPath),
         outputPath: worker.outputPath ? serializeWorkerPath(rootDir, worker.outputPath) : null,
         logPath: worker.logPath ? serializeWorkerPath(rootDir, worker.logPath) : null,

@@ -142,6 +142,11 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          hostname: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
           workstation_ip: {
             __type: TYPE_STRING,
             __default: null,
@@ -288,6 +293,10 @@ export const ENV_ALIASES = {
   'host.name': {
     canonical: 'AGENT_OS_HOST_NAME',
     aliases: [],
+  },
+  'tailscale.hostname': {
+    canonical: 'AGENT_OS_TAILSCALE_HOSTNAME',
+    aliases: [['TAILSCALE_HOSTNAME', identity]],
   },
   'tailscale.workstation_ip': {
     canonical: 'AGENT_OS_TAILSCALE_WORKSTATION_IP',

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   ROUND_BUDGET_BY_RISK_CLASS,
   getFollowUpJobDir,
+  isActiveFollowUpJobStatus,
   readFollowUpJob,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
@@ -126,7 +127,7 @@ function bumpRemediationBudget({
     return buildJobScopedIdempotentResult(existingEntry, jobPath);
   }
 
-  if (currentJob.status === 'pending' || currentJob.status === 'inProgress') {
+  if (isActiveFollowUpJobStatus(currentJob.status)) {
     return { bumped: false, reason: 'job-active', jobPath, job: currentJob };
   }
 

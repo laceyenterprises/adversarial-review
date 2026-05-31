@@ -91,6 +91,29 @@ test('bumpRemediationBudget refuses inProgress jobs without mutating them', () =
   assert.equal(readFileSync(jobPath, 'utf8'), before);
 });
 
+test('bumpRemediationBudget refuses in_progress (underscore form) jobs without mutating them — status-drift regression (2026-05-31)', () => {
+  // The on-disk follow-up job `status` is written as `'in_progress'`
+  // (underscore form) by `claimNextFollowUpJob` and
+  // `markFollowUpJobSpawned`. Before this fix, the bump-budget active
+  // guard only matched `'pending' | 'inProgress'`, so an operator
+  // bump-budget call (or a `retrigger-remediation` label event) while
+  // a remediation worker was running would silently MUTATE the live
+  // job's `maxRounds` instead of refusing with `job-active`.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
+  const { jobPath } = makeJob(rootDir, { status: 'in_progress' });
+  const before = readFileSync(jobPath, 'utf8');
+  const result = bumpRemediationBudget({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    bumpBudget: 1,
+    auditEntry: makeAuditEntry('idem:in_progress'),
+  });
+  assert.equal(result.bumped, false, 'must NOT bump a running worker\'s budget');
+  assert.equal(result.reason, 'job-active');
+  assert.equal(readFileSync(jobPath, 'utf8'), before, 'on-disk job file must be byte-for-byte unchanged');
+});
+
 test('bumpRemediationBudget rejects non-positive bump budgets without mutating the job', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'operator-helpers-'));
   const { jobPath } = makeJob(rootDir, {

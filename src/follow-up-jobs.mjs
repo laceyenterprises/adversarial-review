@@ -122,6 +122,31 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
 ]);
 const RETRIGGERABLE_STOP_CODE_SET = new Set(RETRIGGERABLE_STOP_CODES);
 
+// Canonical set of follow-up job `status` field values that indicate
+// the job is still being worked. A second invocation that intends to
+// re-trigger / re-bump / re-spawn should refuse against any of these.
+//
+// All four spellings have to be accepted because the codebase has drifted:
+// - `'pending'` and `'in_progress'` are what the writers in this file
+//   produce today (`createFollowUpJob`, `claimNextFollowUpJob`,
+//   `markFollowUpJobSpawned`).
+// - `'inProgress'` / `'in-progress'` appear in older callers and
+//   directory-key forms (`FOLLOW_UP_JOB_DIRS.inProgress`, the
+//   `'in-progress'` filesystem path).
+//
+// Older readers hand-rolled `status === 'pending' || status ===
+// 'inProgress'` checks, which silently missed the underscore form the
+// writers actually produce — see the 2026-05-31 watcher
+// `isActiveFollowUpJob` bug for the same shape on a different reader.
+// Use this set instead of open-coding the literals.
+const ACTIVE_FOLLOW_UP_JOB_STATUSES = Object.freeze(
+  new Set(['pending', 'inProgress', 'in-progress', 'in_progress'])
+);
+
+function isActiveFollowUpJobStatus(status) {
+  return ACTIVE_FOLLOW_UP_JOB_STATUSES.has(status);
+}
+
 function getFollowUpJobDir(rootDir, key) {
   const parts = FOLLOW_UP_JOB_DIRS[key];
   if (!parts) {
@@ -1911,7 +1936,7 @@ function requeueFollowUpJobForNextRound({
       : 'max-rounds-reached',
   });
 
-  if (currentJob.status === 'pending' || currentJob.status === 'inProgress') {
+  if (isActiveFollowUpJobStatus(currentJob.status)) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
   }
   if (!['completed', 'failed', 'stopped'].includes(currentJob.status)) {
@@ -2060,6 +2085,7 @@ export {
   extractReviewSummary,
   getCurrentRound,
   getFollowUpJobDir,
+  isActiveFollowUpJobStatus,
   isRetriggerableStoppedFollowUpJob,
   listFollowUpJobsInDir,
   listInProgressFollowUpJobPaths,

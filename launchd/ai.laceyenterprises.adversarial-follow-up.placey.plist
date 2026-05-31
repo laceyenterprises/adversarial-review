@@ -89,6 +89,9 @@
     <key>ThrottleInterval</key>
     <integer>30</integer>
 
+    <key>ExitTimeOut</key>
+    <integer>45</integer>
+
     <key>RunAtLoad</key>
     <true/>
 

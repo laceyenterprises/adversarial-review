@@ -47,6 +47,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>ADVERSARIAL_REVIEW_WATCHER_PLIST_PATH</key>
+        <string>/Users/airlock/agent-os/tools/adversarial-review/launchd/ai.laceyenterprises.adversarial-watcher.airlock.plist</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
@@ -104,5 +106,8 @@
 
     <key>ThrottleInterval</key>
     <integer>30</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>45</integer>
 </dict>
 </plist>

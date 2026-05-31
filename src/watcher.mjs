@@ -118,7 +118,27 @@ import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
+import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
+import {
+  appendFenceAuditEvent,
+  classifyFenceOrphan,
+  deleteCleanupJob,
+  deleteSpawnRecord,
+  isFenceStale,
+  listCleanupJobs,
+  listFenceJsonPaths,
+  loadSpawnRecords,
+  probeFenceLock,
+  queueFenceCleanupJob,
+  readFenceRecord,
+  resolveAdversarialReviewStateDir,
+  resolveFencePaths,
+  resolveSpawnRecordPath,
+  resolveSigtermFenceGraceSeconds,
+  upsertSpawnRecord,
+  validateFenceConfig,
+  validateWatcherExitTimeout,
+} from './reviewer-fence.mjs';
 import {
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
@@ -154,6 +174,7 @@ const db = openReviewStateDb(ROOT);
 ensureReviewStateSchema(db);
 const watcherHealthProbe = createWatcherHealthProbe();
 const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
+const ADVERSARIAL_REVIEW_STATE_DIR = resolveAdversarialReviewStateDir(ROOT, process.env);
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
@@ -172,6 +193,10 @@ const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
 };
+const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
+  GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
+  GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
+});
 
 // Stuck-pre-spawn alert debounce. Once we've alerted on a particular
 // (repo, PR, dispatchedAt) tuple, suppress the next alert for this
@@ -216,6 +241,22 @@ function resolveSigtermFenceMode(env = process.env) {
   return String(env.ADVERSARIAL_REVIEW_SIGTERM_FENCE || 'on').trim().toLowerCase() === 'off'
     ? 'off'
     : 'on';
+}
+
+function resolveReviewerIdentity({ reviewerModel, botTokenEnv } = {}) {
+  if (REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV[botTokenEnv]) {
+    return REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV[botTokenEnv];
+  }
+  return String(reviewerModel || '').trim().toLowerCase() === 'codex'
+    ? 'codex-reviewer-lacey'
+    : 'claude-reviewer-lacey';
+}
+
+function resolveBotTokenEnvForIdentity(identity) {
+  const normalized = String(identity || '').trim().toLowerCase();
+  if (normalized.startsWith('codex-reviewer-')) return 'GH_CODEX_REVIEWER_TOKEN';
+  if (normalized.startsWith('claude-reviewer-')) return 'GH_CLAUDE_REVIEWER_TOKEN';
+  return null;
 }
 
 function resolvePendingDraftRespawnAgeSeconds(env = process.env) {
@@ -1324,6 +1365,7 @@ function handlePollError(err, source = 'pollOnce') {
 // subprocesses are launched as bounce survivors and startup reconciliation
 // re-adopts them via the durable review row plus PGID identity checks.
 const inFlightReviewerSessions = new Set();
+const activeReviewerSpawns = new Map();
 let exitInProgress = false;
 
 async function cancelInFlightReviewerRuntimeSessions(reason) {
@@ -1339,6 +1381,212 @@ async function cancelInFlightReviewerRuntimeSessions(reason) {
       );
     }
   }));
+}
+
+function emitFenceAuditEvent(event) {
+  const payload = {
+    schemaVersion: 1,
+    ...event,
+  };
+  console.log(JSON.stringify(payload));
+  appendFenceAuditEvent(ADVERSARIAL_REVIEW_STATE_DIR, payload);
+}
+
+async function processQueuedFenceCleanupJobs({
+  stateDir = ADVERSARIAL_REVIEW_STATE_DIR,
+  clearPendingReviewsImpl = clearPendingReviewsForSelf,
+  log = console,
+} = {}) {
+  let processed = 0;
+  for (const jobPath of listCleanupJobs(stateDir)) {
+    const job = JSON.parse(readFileSync(jobPath, 'utf8'));
+    const tokenEnv = job.botTokenEnv || resolveBotTokenEnvForIdentity(job.identity);
+    try {
+      await clearPendingReviewsImpl({
+        repo: job.repo,
+        prNumber: job.pr,
+        token: tokenEnv ? process.env[tokenEnv] : null,
+        log,
+      });
+      deleteCleanupJob(jobPath);
+      processed += 1;
+      emitFenceAuditEvent({
+        event: 'fence_cleanup_processed',
+        spawnToken: job.spawnToken || null,
+        repo: job.repo,
+        pr: job.pr,
+        identity: job.identity || null,
+      });
+    } catch (err) {
+      emitFenceAuditEvent({
+        event: 'fence_cleanup_failed',
+        spawnToken: job.spawnToken || null,
+        repo: job.repo,
+        pr: job.pr,
+        identity: job.identity || null,
+        error: err?.message || String(err),
+      });
+    }
+  }
+  return processed;
+}
+
+function queueFenceCleanupFromRecord(record, {
+  stateDir = ADVERSARIAL_REVIEW_STATE_DIR,
+  botTokenEnv = null,
+  reason,
+} = {}) {
+  queueFenceCleanupJob(stateDir, {
+    spawnToken: record.spawnToken,
+    repo: record.repo || null,
+    pr: record.pr,
+    identity: record.identity,
+    botTokenEnv: botTokenEnv || null,
+    reason,
+  });
+}
+
+async function sweepReviewerFencesOnStartup({
+  stateDir = ADVERSARIAL_REVIEW_STATE_DIR,
+  staleTtlSeconds = validateFenceConfig(process.env).staleTtlSeconds,
+  activeSpawnMap = activeReviewerSpawns,
+} = {}) {
+  const persistedSpawnRecords = loadSpawnRecords(stateDir);
+  const persistedSpawnTokens = new Set(Object.keys(persistedSpawnRecords));
+  const activeSpawnTokens = new Set(activeSpawnMap.keys());
+  let orphaned = 0;
+
+  for (const jsonPath of listFenceJsonPaths(stateDir)) {
+    const record = readFenceRecord(jsonPath);
+    const { lockPath } = resolveFencePaths(stateDir, record.spawnToken);
+    const lockProbe = probeFenceLock(lockPath);
+    const orphanDecision = classifyFenceOrphan({
+      record,
+      lockProbe,
+      activeSpawnTokens,
+      persistedSpawnTokens,
+      staleTtlSeconds,
+    });
+    if (!orphanDecision.orphan) {
+      continue;
+    }
+
+    if (lockProbe.reason === 'lock-missing') {
+      emitFenceAuditEvent({
+        event: 'fence_lock_missing_with_json',
+        spawnToken: record.spawnToken,
+        pr: record.pr,
+        identity: record.identity,
+      });
+    }
+    const persisted = persistedSpawnRecords[record.spawnToken] || null;
+    queueFenceCleanupFromRecord(
+      { ...persisted, ...record },
+      {
+        stateDir,
+        botTokenEnv: persisted?.botTokenEnv || null,
+        reason: orphanDecision.reason,
+      }
+    );
+    rmSync(jsonPath, { force: true });
+    rmSync(lockPath, { force: true });
+    delete persistedSpawnRecords[record.spawnToken];
+    orphaned += 1;
+    emitFenceAuditEvent({
+      event: 'fence_orphan_reaped',
+      spawnToken: record.spawnToken,
+      pr: record.pr,
+      identity: record.identity,
+      orphanReason: orphanDecision.reason,
+    });
+  }
+
+  for (const activeToken of activeSpawnMap.keys()) {
+    persistedSpawnRecords[activeToken] = persistedSpawnRecords[activeToken] || activeSpawnMap.get(activeToken);
+  }
+  writeFileAtomic(
+    resolveSpawnRecordPath(stateDir),
+    `${JSON.stringify(persistedSpawnRecords, null, 2)}\n`,
+  );
+  return orphaned;
+}
+
+async function waitForActiveReviewerFencesOnSigterm({
+  stateDir = ADVERSARIAL_REVIEW_STATE_DIR,
+  graceSeconds = resolveSigtermFenceGraceSeconds(process.env),
+  staleTtlSeconds = validateFenceConfig(process.env).staleTtlSeconds,
+  activeSpawnMap = activeReviewerSpawns,
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  const deadlineMs = Date.now() + (graceSeconds * 1000);
+  const remaining = new Map();
+  for (const jsonPath of listFenceJsonPaths(stateDir)) {
+    const record = readFenceRecord(jsonPath);
+    if (!activeSpawnMap.has(record.spawnToken)) continue;
+    const spawnMeta = activeSpawnMap.get(record.spawnToken);
+    remaining.set(record.spawnToken, {
+      ...record,
+      repo: spawnMeta?.repo || null,
+      botTokenEnv: spawnMeta?.botTokenEnv || null,
+      jsonPath,
+      lockPath: resolveFencePaths(stateDir, record.spawnToken).lockPath,
+    });
+  }
+  if (remaining.size === 0) {
+    return { status: 'no-active-fence', outstanding: [] };
+  }
+
+  while (remaining.size > 0) {
+    for (const [spawnToken, record] of remaining.entries()) {
+      if (!existsSync(record.jsonPath)) {
+        remaining.delete(spawnToken);
+        continue;
+      }
+      if (isFenceStale(record, staleTtlSeconds)) {
+        queueFenceCleanupFromRecord(record, {
+          stateDir,
+          botTokenEnv: record.botTokenEnv,
+          reason: 'fence_stuck_open',
+        });
+        emitFenceAuditEvent({
+          event: 'fence_stuck_open',
+          spawnToken,
+          repo: record.repo,
+          pr: record.pr,
+          identity: record.identity,
+          openedAt: record.openedAt,
+        });
+        return {
+          status: 'stale',
+          outstanding: Array.from(remaining.values()),
+        };
+      }
+    }
+    if (remaining.size === 0) break;
+    if (Date.now() >= deadlineMs) {
+      for (const record of remaining.values()) {
+        queueFenceCleanupFromRecord(record, {
+          stateDir,
+          botTokenEnv: record.botTokenEnv,
+          reason: 'fence_grace_exceeded',
+        });
+        emitFenceAuditEvent({
+          event: 'fence_grace_exceeded',
+          spawnToken: record.spawnToken,
+          repo: record.repo,
+          pr: record.pr,
+          identity: record.identity,
+          openedAt: record.openedAt,
+        });
+      }
+      return {
+        status: 'grace-exceeded',
+        outstanding: Array.from(remaining.values()),
+      };
+    }
+    await sleepImpl(250);
+  }
+  return { status: 'cleared', outstanding: [] };
 }
 
 function exitAfterReviewerCleanup({
@@ -1434,16 +1682,36 @@ function shouldPreserveReviewersOnSigterm(_drainState) {
 process.on('SIGTERM', () => {
   const drainState = readWatcherDrainState();
   const preserveInFlightReviewers = shouldPreserveReviewersOnSigterm(drainState);
+  if (resolveSigtermFenceMode(process.env) === 'off') {
+    const message = preserveInFlightReviewers
+      ? `SIGTERM received${drainState?.active ? ` during active drain (reason=${drainState?.reason || 'unknown'})` : ''}; preserving in-flight reviewer subprocesses for the next watcher to reattach`
+      : 'SIGTERM received; cancelling active reviewer runtime sessions before exit';
+    exitAfterReviewerCleanup({
+      code: 143,
+      reason: preserveInFlightReviewers ? 'SIGTERM-preserve-reviewers' : 'SIGTERM',
+      source: 'SIGTERM',
+      message,
+      preserveInFlightReviewers,
+    });
+    return;
+  }
   const message = preserveInFlightReviewers
     ? `SIGTERM received${drainState?.active ? ` during active drain (reason=${drainState?.reason || 'unknown'})` : ''}; preserving in-flight reviewer subprocesses for the next watcher to reattach`
     : 'SIGTERM received; cancelling active reviewer runtime sessions before exit';
-  exitAfterReviewerCleanup({
-    code: 143,
-    reason: preserveInFlightReviewers ? 'SIGTERM-preserve-reviewers' : 'SIGTERM',
-    source: 'SIGTERM',
-    message,
-    preserveInFlightReviewers,
-  });
+  void waitForActiveReviewerFencesOnSigterm()
+    .catch((err) => {
+      console.error('[watcher] fence wait failed during SIGTERM:', err?.message || err);
+      return { status: 'fence-wait-error', outstanding: [] };
+    })
+    .finally(() => {
+      exitAfterReviewerCleanup({
+        code: 143,
+        reason: preserveInFlightReviewers ? 'SIGTERM-preserve-reviewers' : 'SIGTERM',
+        source: 'SIGTERM',
+        message,
+        preserveInFlightReviewers,
+      });
+    });
 });
 
 process.on('SIGINT', () => {
@@ -1777,6 +2045,19 @@ async function spawnReviewer({
     : '';
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
+  const reviewerSpawnToken = randomUUID();
+  const reviewerIdentity = resolveReviewerIdentity({ reviewerModel, botTokenEnv });
+  const spawnRecord = {
+    spawnToken: reviewerSpawnToken,
+    repo,
+    pr: prNumber,
+    identity: reviewerIdentity,
+    botTokenEnv,
+    reviewerSessionUuid,
+    spawnedAt: new Date().toISOString(),
+  };
+  activeReviewerSpawns.set(reviewerSpawnToken, spawnRecord);
+  upsertSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, spawnRecord);
   inFlightReviewerSessions.add(reviewerSessionUuid);
   try {
     const startedAt = new Date().toISOString();
@@ -1816,8 +2097,10 @@ async function spawnReviewer({
         builderTag,
         reviewerHeadSha,
         reviewAttemptNumber,
+        reviewDbAttemptNumber,
         maxRemediationRounds,
         reviewerSessionUuid,
+        reviewerSpawnToken,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
       },
@@ -1889,6 +2172,8 @@ async function spawnReviewer({
     throw err;
   } finally {
     inFlightReviewerSessions.delete(reviewerSessionUuid);
+    activeReviewerSpawns.delete(reviewerSpawnToken);
+    deleteSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, reviewerSpawnToken);
   }
 }
 
@@ -4054,6 +4339,8 @@ async function main() {
     defaultReviewerRouteFromEnv(process.env);
     validateStartupMergeAgentConfig(process.env);
     resolvePendingDraftRespawnAgeSeconds(process.env);
+    validateFenceConfig(process.env);
+    validateWatcherExitTimeout(process.env);
   } catch (err) {
     console.error(
       `[watcher] FATAL config${err?.logKey ? ` key=${err.logKey}` : ''}: ${err?.message || err}`
@@ -4075,6 +4362,9 @@ async function main() {
   // Reconcile any rows stuck in 'reviewing' from a previous watcher
   // run against GitHub first. Only after that should daemon-bounce
   // recovery mark any still-reviewing rows as failed.
+  await processQueuedFenceCleanupJobs();
+  await sweepReviewerFencesOnStartup();
+  await processQueuedFenceCleanupJobs();
   await reconcileOrphanedReviewing(octokit);
   await recoverReviewerRunRecords({
     rootDir: ROOT,
@@ -4212,5 +4502,9 @@ export {
   WATCHER_DRAIN_FILE,
   WATCHER_DRAIN_MAX_MS,
   settleReviewerAttempt,
+  sweepReviewerFencesOnStartup,
+  processQueuedFenceCleanupJobs,
+  validateFenceConfig,
+  waitForActiveReviewerFencesOnSigterm,
   writeFastMergeAuditEntry,
 };

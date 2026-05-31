@@ -57,6 +57,7 @@ test('missing file returns defaults', () => {
     );
     assert.equal(cfg.get('roots.hq'), null);
     assert.equal(cfg.get('host.name'), null);
+    assert.equal(cfg.get('tailscale.hostname'), null);
     assert.equal(cfg.get('tailscale.workstation_ip'), null);
     assert.equal(cfg.get('tailscale.daily_driver_ip'), null);
     assert.equal(cfg.get('tailscale.ipad_ip'), null);
@@ -207,6 +208,7 @@ test('host and tailscale sections load through strict Node schema', () => {
       host:
         name: laceyent-mbpro
       tailscale:
+        hostname: laceyent-mbpro.tail7a19d9.ts.net
         workstation_ip: 100.64.0.10
         daily_driver_ip: 100.64.0.11
         ipad_ip: 100.64.0.12
@@ -214,6 +216,7 @@ test('host and tailscale sections load through strict Node schema', () => {
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('host.name'), 'laceyent-mbpro');
+    assert.equal(cfg.get('tailscale.hostname'), 'laceyent-mbpro.tail7a19d9.ts.net');
     assert.equal(cfg.get('tailscale.workstation_ip'), '100.64.0.10');
     assert.equal(cfg.get('tailscale.daily_driver_ip'), '100.64.0.11');
     assert.equal(cfg.get('tailscale.ipad_ip'), '100.64.0.12');
@@ -231,6 +234,7 @@ test('host and tailscale canonical env aliases override defaults', () => {
       topPath: top,
       env: {
         AGENT_OS_HOST_NAME: 'env-host',
+        AGENT_OS_TAILSCALE_HOSTNAME: 'env-host.tailnet.example',
         AGENT_OS_TAILSCALE_WORKSTATION_IP: '100.64.1.10',
         AGENT_OS_TAILSCALE_DAILY_DRIVER_IP: '100.64.1.11',
         AGENT_OS_TAILSCALE_IPAD_IP: '100.64.1.12',
@@ -238,6 +242,7 @@ test('host and tailscale canonical env aliases override defaults', () => {
       },
     });
     assert.equal(cfg.get('host.name'), 'env-host');
+    assert.equal(cfg.get('tailscale.hostname'), 'env-host.tailnet.example');
     assert.equal(cfg.get('tailscale.workstation_ip'), '100.64.1.10');
     assert.equal(cfg.get('tailscale.daily_driver_ip'), '100.64.1.11');
     assert.equal(cfg.get('tailscale.ipad_ip'), '100.64.1.12');
@@ -245,6 +250,24 @@ test('host and tailscale canonical env aliases override defaults', () => {
     assert.equal(
       cfg.resolutionTrace('host.name').at(-1).source,
       'env:AGENT_OS_HOST_NAME',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('tailscale hostname legacy env alias wins without canonical', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const cfg = loadConfig({
+      topPath: top,
+      env: { TAILSCALE_HOSTNAME: 'legacy-host.tailnet.example' },
+    });
+    assert.equal(cfg.get('tailscale.hostname'), 'legacy-host.tailnet.example');
+    assert.equal(
+      cfg.resolutionTrace('tailscale.hostname').at(-1).source,
+      'env:TAILSCALE_HOSTNAME',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

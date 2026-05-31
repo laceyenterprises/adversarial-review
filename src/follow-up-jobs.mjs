@@ -1598,6 +1598,68 @@ function markFollowUpJobSpawned({
   return { job: nextJob, jobPath };
 }
 
+function requeueInProgressFollowUpJobForRetry({
+  rootDir,
+  jobPath,
+  requeuedAt = new Date().toISOString(),
+  retryReason = 'Transient remediation worker failure; retrying on a future tick.',
+  remediationWorker = null,
+  retryMetadata = null,
+}) {
+  const currentJob = readFollowUpJob(jobPath);
+  if (currentJob?.status !== 'in_progress') {
+    throw new Error(`Cannot retry follow-up job ${currentJob?.jobId || '<unknown>'} from status ${currentJob?.status || 'unknown'}`);
+  }
+
+  const currentRoundNumber = Number(currentJob?.remediationPlan?.currentRound || 0);
+  const nextCurrentRound = Math.max(0, currentRoundNumber - 1);
+  let nextJob = {
+    ...currentJob,
+    status: 'pending',
+    pendingAt: requeuedAt,
+    claimedAt: null,
+    claimedBy: null,
+    remediationWorker: remediationWorker || null,
+    failure: null,
+    completedAt: null,
+    stoppedAt: null,
+    completion: null,
+    remediationPlan: {
+      ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
+      currentRound: nextCurrentRound,
+      stopReason: null,
+      nextAction: {
+        type: 'consume-pending-round',
+        round: currentRoundNumber,
+        operatorVisibility: 'explicit',
+        requestedAt: requeuedAt,
+        requestedBy: 'system',
+        reason: retryReason,
+      },
+    },
+  };
+
+  if (currentRoundNumber > 0) {
+    nextJob.remediationPlan = {
+      ...nextJob.remediationPlan,
+      rounds: (nextJob.remediationPlan?.rounds || []).map((round) => (
+        round.round === currentRoundNumber
+          ? {
+              ...round,
+              state: 'retry-pending',
+              requeuedAt,
+              retryReason,
+              retryMetadata,
+              worker: remediationWorker || round.worker || currentJob.remediationWorker || null,
+            }
+          : round
+      )),
+    };
+  }
+
+  return moveFollowUpJob(rootDir, jobPath, 'pending', nextJob);
+}
+
 function inferRootDirFromFollowUpJobPath(jobPath) {
   const marker = `${join('data', 'follow-up-jobs')}`;
   const normalized = resolve(jobPath);
@@ -2094,6 +2156,7 @@ export {
   listPendingFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
+  requeueInProgressFollowUpJobForRetry,
   markFollowUpJobSpawned,
   markFollowUpJobStopped,
   readRemediationReplyArtifact,

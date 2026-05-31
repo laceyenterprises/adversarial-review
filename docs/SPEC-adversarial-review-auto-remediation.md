@@ -336,6 +336,51 @@ reconciliation invariants as the local lane:
   `hq-dispatch-failed`, `hq-dispatch-not-found`, and
   `hq-dispatch-status-unavailable` reconcile reasons, but those states are
   derived from `hq dispatch status <dispatchId>`, never from `launchRequestId`.
+- HQ terminal failures are not uniformly fatal. Reconcile must classify known
+  transient dispatch failures from the status payload before terminalizing the
+  queue record:
+  - Retryable / backpressure-class failures such as memory-pressure admission
+    refusal (`launch_refused_memory_pressure`, `memory pressure refused admit`),
+    lease loss, or daemon-bounce/restart signals move the job back to
+    `pending/` for a later tick. The round history should retain retry
+    metadata so operators can tell that the attempt launched and then
+    requeued.
+  - Non-transient failures such as prompt rejection, explicit cancellation, or
+    workspace corruption still terminalize to `failed/`.
+
+## Follow-Up Drain-To-Capacity Tick Contract
+
+The follow-up consume tick no longer follows the historical "claim one job,
+return" model. Each tick drains pending remediation work until either:
+
+- the daemon reaches `ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS`,
+- there are no more pending jobs, or
+- the tick hits an explicit safety stop such as same-PR exclusion or shutdown.
+
+The consume result exposes the per-tick counters that operators rely on for
+lane observability:
+
+- `maxConcurrent`
+- `activeAtStart`
+- `availableAtStart`
+- `spawned`
+- `stopped`
+- `deferredSamePR`
+- `capacityRemaining`
+
+Logging contract:
+
+- `Drain summary: ...` is the canonical per-tick heartbeat and must always be
+  emitted, including idle ticks and saturated ticks.
+- `No pending follow-up jobs to consume.` is reserved for the truly idle shape:
+  no active remediation workers, no claimed work this tick, and no pending jobs
+  available to claim.
+- When `availableAtStart === 0` and pending jobs still exist, the daemon must
+  emit a distinct backpressure line (`Backpressure: activeAtStart=N
+  pendingCount=M`) instead of collapsing that state into "queue empty".
+- Same-PR exclusion remains part of the drain contract: pending jobs for a PR
+  that already has an active remediation worker stay in `pending/`, increment
+  `deferredSamePR`, and do not consume another slot in the same tick.
 
 ## Follow-Up Stop Codes
 

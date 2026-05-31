@@ -11,6 +11,8 @@ import {
   assertRemediationWorkerOAuth,
   assessWorkerLiveness,
   assertValidRepoSlug,
+  buildBackpressureLogLine,
+  buildDrainSummaryLogLine,
   buildRemediationPrompt,
   buildInheritedPath,
   consumeFollowUpJobsUntilCapacity,
@@ -2164,6 +2166,14 @@ test('consumeFollowUpJobsUntilCapacity applies HQ backpressure by treating queue
   assert.equal(result.capacityRemaining, 0);
   assert.equal(spawnCalls.length, 0);
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 2);
+  assert.equal(
+    buildBackpressureLogLine({ activeAtStart: result.activeAtStart, pendingCount: 2 }),
+    '[follow-up-remediation] Backpressure: activeAtStart=2 pendingCount=2'
+  );
+  assert.equal(
+    buildDrainSummaryLogLine(result),
+    '[follow-up-remediation] Drain summary: maxConcurrent=2 activeAtStart=2 availableAtStart=0 spawned=0 stopped=0 deferredSamePR=0 capacityRemaining=0'
+  );
 });
 
 test('consumeFollowUpJobsUntilCapacity defers a pending job for a PR with active remediation', async () => {
@@ -3177,7 +3187,7 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
   });
 });
 
-test('reconcileFollowUpJob moves a dead HQ remediation worker out of in-progress when dispatch status reports failure with no reply', async () => {
+test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch status reports a transient failure with no reply', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 722, linearTicketId: 'LAC-2722' });
   const hqRoot = path.join(rootDir, 'hq');
@@ -3228,12 +3238,74 @@ test('reconcileFollowUpJob moves a dead HQ remediation worker out of in-progress
       log: { warn() {}, error() {}, log() {} },
     });
 
+    assert.equal(result.action, 'requeued');
+    assert.equal(result.reason, 'hq-dispatch-transient');
+    assert.equal(result.job.status, 'pending');
+    assert.equal(result.job.remediationWorker, null);
+    assert.equal(result.job.remediationPlan.currentRound, 0);
+    assert.equal(result.job.remediationPlan.rounds.at(-1)?.state, 'retry-pending');
+    assert.match(result.job.remediationPlan.rounds.at(-1)?.retryReason || '', /memory pressure refused admit until the worker was reaped/i);
+    assert.equal(existsSync(spawned.jobPath), false, 'dead HQ worker must not remain in in-progress/');
+    assert.equal(existsSync(result.jobPath), true, 'dead HQ worker should be requeued into pending/');
+  });
+});
+
+test('reconcileFollowUpJob still terminalizes non-transient HQ dispatch failures with no reply', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 723, linearTicketId: 'LAC-2723' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const promptPath = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_arp05_terminal_worker',
+      dispatchId: 'dispatch_arp05_terminal_worker',
+      hqRoot,
+      workspaceDir: path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId),
+      promptPath,
+      replyPath: path.join(hqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json'),
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  await withHqRootEnv(hqRoot, async () => {
+    const result = await reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:25:00.000Z',
+      execFileImpl: async (command, args) => {
+        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          return {
+            stdout: JSON.stringify({
+              status: 'failed',
+              health: 'failed',
+              failureDetail: 'prompt rejected by policy gate',
+              workspacePath: spawned.job.remediationWorker.workspaceDir,
+            }),
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+      },
+      resolvePRLifecycleImpl: async () => null,
+      log: { warn() {}, error() {}, log() {} },
+    });
+
     assert.equal(result.action, 'failed');
     assert.equal(result.job.status, 'failed');
-    assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
-    assert.match(result.job.failure.message, /memory pressure refused admit until the worker was reaped/i);
-    assert.equal(existsSync(spawned.jobPath), false, 'dead HQ worker must not remain in in-progress/');
-    assert.equal(existsSync(result.jobPath), true, 'dead HQ worker should be terminalized into failed/');
+    assert.match(result.job.failure.message, /prompt rejected by policy gate/i);
+    assert.equal(existsSync(spawned.jobPath), false);
+    assert.equal(existsSync(result.jobPath), true);
   });
 });
 

@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  isActiveFollowUpJobStatus,
   isRetriggerableStoppedFollowUpJob,
   requeueFollowUpJobForNextRound,
 } from './follow-up-jobs.mjs';
@@ -123,7 +124,7 @@ function readStdinSync() {
 
 function remediationEligibility(job) {
   if (!job) return { ok: false, outcome: 'refused:no-job', detail: 'no-job' };
-  if (job.status === 'pending' || job.status === 'inProgress') {
+  if (isActiveFollowUpJobStatus(job.status)) {
     return { ok: false, outcome: 'refused:job-active', detail: job.status };
   }
   if (job.status === 'completed' && job?.reReview?.requested !== true) {
@@ -299,7 +300,7 @@ function main(argv, {
   }
 
   const latest = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
-  if (latest?.job && ['pending', 'inProgress'].includes(latest.job.status)) {
+  if (latest?.job && isActiveFollowUpJobStatus(latest.job.status)) {
     let activeReplay = null;
     try {
       activeReplay = bumpBudgetImpl({

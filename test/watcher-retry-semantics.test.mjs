@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -683,6 +683,102 @@ test('watcher defers a pending review while the active follow-up job has status=
   });
   assert.equal(decision.defer, true, 'watcher MUST defer while the underscore-form in_progress remediation is mid-flight');
   assert.equal(decision.latestJobStatus, 'in_progress');
+});
+
+test('watcher defer + operator bumpRemediationBudget + retrigger-remediation eligibility all agree on every active-status spelling (cross-module agreement)', async () => {
+  // Cross-module agreement check requested by the PR #198 review:
+  // every production reader that classifies "is this follow-up job
+  // active?" must agree, otherwise a future spelling rename can split
+  // watcher behavior from operator-retrigger behavior and reintroduce
+  // the same duplicate-review / mid-flight-mutation class of bugs.
+  //
+  // The four spellings exhaust what writers in the codebase produce
+  // today (`'pending'` from createFollowUpJob; `'in_progress'` from
+  // claimNextFollowUpJob/markFollowUpJobSpawned) PLUS the legacy
+  // `'inProgress'` / `'in-progress'` spellings that older readers
+  // accepted and the helper still tolerates for safety.
+  const { bumpRemediationBudget } = await import('../src/operator-retrigger-helpers.mjs');
+  const { main: retriggerRemediationMain } = await import('../src/retrigger-remediation.mjs');
+  const { createFollowUpJob: createJob, writeFollowUpJob: writeJob, readFollowUpJob } =
+    await import('../src/follow-up-jobs.mjs');
+
+  function captureStream() {
+    let buf = '';
+    return {
+      write(chunk) { buf += chunk; },
+      text() { return buf; },
+    };
+  }
+
+  for (const spelling of ['pending', 'inProgress', 'in-progress', 'in_progress']) {
+    const rootDir = mkdtempSync(path.join(tmpdir(), `cross-module-${spelling.replace(/[^a-z]/gi, '')}-`));
+    const created = createJob({
+      rootDir,
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 9999,
+      reviewerModel: 'claude',
+      linearTicketId: null,
+      reviewBody: '## Summary\nfixture\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-05-31T07:00:00.000Z',
+      critical: false,
+      maxRemediationRounds: 2,
+    });
+    // Force the status on disk to the spelling under test. Read back
+    // to confirm so the test asserts the exact bytes the production
+    // readers will encounter.
+    writeJob(created.jobPath, { ...created.job, status: spelling });
+    assert.equal(readFollowUpJob(created.jobPath).status, spelling,
+      `fixture setup: on-disk status must be ${spelling}`);
+
+    // Reader 1: watcher defer guard.
+    const decision = shouldDeferReviewForActiveFollowUp({
+      rootDir,
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 9999,
+    });
+    assert.equal(decision.defer, true,
+      `watcher must defer for status=${spelling}`);
+    assert.equal(decision.latestJobStatus, spelling);
+
+    // Reader 2: operator bumpRemediationBudget — must refuse with job-active.
+    const bumpBefore = readFileSync(created.jobPath, 'utf8');
+    const bumpResult = bumpRemediationBudget({
+      rootDir,
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 9999,
+      bumpBudget: 1,
+      auditEntry: {
+        idempotencyKey: `idem:cross:${spelling}`,
+        requestFingerprint: `fp:cross:${spelling}`,
+        reason: 'cross-module agreement test',
+        operator: 'test',
+        ts: '2026-05-31T07:00:01.000Z',
+        auditRow: null,
+      },
+    });
+    assert.equal(bumpResult.bumped, false,
+      `bumpRemediationBudget must refuse for status=${spelling}`);
+    assert.equal(bumpResult.reason, 'job-active',
+      `bumpRemediationBudget reason must be job-active for status=${spelling}`);
+    assert.equal(readFileSync(created.jobPath, 'utf8'), bumpBefore,
+      `bumpRemediationBudget must leave job file unchanged for status=${spelling}`);
+
+    // Reader 3: retrigger-remediation CLI — must refuse with refused:job-active
+    // (not refused:not-eligible, the wrong label that drift would produce).
+    const err = captureStream();
+    const rc = retriggerRemediationMain([
+      '--repo', 'laceyenterprises/agent-os',
+      '--pr', '9999',
+      '--reason', `cross-module test for ${spelling}`,
+      '--root-dir', rootDir,
+      '--audit-root-dir', rootDir,
+    ], { stdout: captureStream(), stderr: err });
+    assert.equal(rc, 1, `retrigger-remediation must exit 1 (blocked) for status=${spelling}`);
+    assert.match(err.text(), /refused:job-active/,
+      `retrigger-remediation must use refused:job-active outcome for status=${spelling}`);
+    assert.doesNotMatch(err.text(), /refused:not-eligible/,
+      `retrigger-remediation must NOT fall through to refused:not-eligible for status=${spelling}`);
+  }
 });
 
 test('evaluateRoundBudgetForReview preserves elevated legacy caps above the current riskClass tier', () => {

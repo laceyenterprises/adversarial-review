@@ -72,6 +72,31 @@ test('retrigger-remediation refuses active jobs', () => {
   assert.match(err.text(), /refused:job-active/);
 });
 
+test('retrigger-remediation refuses active in_progress (underscore form) jobs with refused:job-active — status-drift regression (2026-05-31)', () => {
+  // Before this fix, the CLI's active-job dispatch at
+  // `retrigger-remediation.mjs:302` checked `['pending','inProgress']`
+  // only. With status='in_progress' (the actual on-disk form written
+  // by `claimNextFollowUpJob` and `markFollowUpJobSpawned`), the active
+  // branch was skipped and execution fell through to
+  // `remediationEligibility`, which also missed the underscore form
+  // and refused with `refused:not-eligible` — wrong audit outcome and
+  // no idempotent active-replay handling.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
+  makeJob(rootDir, { status: 'in_progress' });
+  const err = makeCaptureStream();
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'extra round',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
+  ], { stdout: makeCaptureStream(), stderr: err });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /refused:job-active/, 'must use the active-job refusal outcome, not refused:not-eligible');
+  assert.doesNotMatch(err.text(), /refused:not-eligible/);
+});
+
 test('retrigger-remediation returns runtime exit code when refused-path audit append fails', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-remediation-'));
   const err = makeCaptureStream();

@@ -68,6 +68,7 @@ import {
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import {
+  isActiveFollowUpJobStatus,
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
@@ -2400,24 +2401,16 @@ function evaluateRoundBudgetForReview({
   };
 }
 
-// Canonical "an active follow-up exists for this PR; do not spawn a new
-// first-pass reviewer" check.
-//
-// Follow-up job status drift: the on-disk job files are written with
-// `status: 'in_progress'` (underscore form) by `markFollowUpJobClaimed`
-// and `markFollowUpJobSpawned` in follow-up-jobs.mjs, but other readers
-// in the codebase historically used `'inProgress'` or `'in-progress'`.
-// Forgetting the underscore form here causes the watcher to MISS the
-// active-job guard while a remediation worker is mid-flight; it then
-// re-claims the review row (still `pending` from `requestReviewRereview`
-// or its initial state) and spawns a duplicate reviewer on the same
-// commit SHA — which is exactly the same-SHA duplicate-review symptom
-// observed across PRs #1151 / #1164 / #1165 on 2026-05-31.
-//
-// Accept every spelling the writers actually produce. Keep this list in
-// sync with the literal `status:` assignments in follow-up-jobs.mjs.
+// "Active follow-up exists for this PR; do not spawn a new first-pass
+// reviewer." Delegates to the shared status predicate exported from
+// follow-up-jobs.mjs so the watcher, operator-retrigger paths, and
+// internal requeue helper all agree on what "active" means. Forgetting
+// even one spelling here caused the 2026-05-31 same-SHA duplicate
+// reviews on PRs #1151 / #1164 / #1165 (the watcher's inline list
+// missed `'in_progress'` — the underscore form that
+// markFollowUpJobClaimed / markFollowUpJobSpawned actually persist).
 function isActiveFollowUpJob(job) {
-  return ['pending', 'inProgress', 'in-progress', 'in_progress'].includes(job?.status);
+  return isActiveFollowUpJobStatus(job?.status);
 }
 
 function shouldDeferReviewForActiveFollowUp({

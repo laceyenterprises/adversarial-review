@@ -3528,6 +3528,32 @@ test('requeueFollowUpJobForNextRound rejects non-terminal source statuses', () =
   );
 });
 
+test('requeueFollowUpJobForNextRound rejects in_progress source statuses with the active-job error message — status-drift regression (2026-05-31)', () => {
+  // Before consolidating onto `isActiveFollowUpJobStatus`, the
+  // `'pending' || 'inProgress'` active-guard missed the underscore
+  // form the writers actually produce, so the throw fell through to
+  // the generic "not in {completed,failed,stopped}" branch. End user
+  // saw the same error text, but the duplicate logic obscured intent.
+  // Pin the underscore form so the active-guard branch is the one
+  // that fires.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-31T08:09:04.440Z' });
+  // claimNextFollowUpJob writes status='in_progress' (underscore).
+  // Sanity-check that assumption so this regression test stays
+  // anchored if a future helper change moves the spelling.
+  const onDisk = JSON.parse(readFileSync(claimed.jobPath, 'utf8'));
+  assert.equal(onDisk.status, 'in_progress');
+
+  assert.throws(
+    () => requeueFollowUpJobForNextRound({
+      rootDir,
+      jobPath: claimed.jobPath,
+    }),
+    /Cannot requeue follow-up job .* from status in_progress/
+  );
+});
+
 test('requeueFollowUpJobForNextRound accepts failed terminal jobs', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({

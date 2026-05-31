@@ -68,6 +68,7 @@ import {
   createFollowUpJob,
   getFollowUpJobDir,
   markFollowUpJobSpawned,
+  readFollowUpJob,
   summarizePRRemediationLedger,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
@@ -3243,11 +3244,84 @@ test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch s
     assert.equal(result.job.status, 'pending');
     assert.equal(result.job.remediationWorker, null);
     assert.equal(result.job.remediationPlan.currentRound, 0);
-    assert.equal(result.job.remediationPlan.rounds.at(-1)?.state, 'retry-pending');
-    assert.match(result.job.remediationPlan.rounds.at(-1)?.retryReason || '', /memory pressure refused admit until the worker was reaped/i);
+    assert.deepEqual(result.job.remediationPlan.rounds, []);
+    assert.equal(result.job.remediationPlan.transientRetries, 1);
+    assert.equal(result.job.remediationPlan.retryHistory.at(-1)?.round, 1);
+    assert.match(result.job.remediationPlan.retryHistory.at(-1)?.retryReason || '', /memory pressure refused admit until the worker was reaped/i);
+    assert.equal(result.job.remediationPlan.retryAfter, '2026-04-21T10:30:00.000Z');
     assert.equal(existsSync(spawned.jobPath), false, 'dead HQ worker must not remain in in-progress/');
     assert.equal(existsSync(result.jobPath), true, 'dead HQ worker should be requeued into pending/');
   });
+});
+
+test('reconcileFollowUpJob fails HQ transient dispatches once the retry budget is exhausted', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 722, linearTicketId: 'LAC-2722' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const promptPath = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_arp05_budget_worker',
+      dispatchId: 'dispatch_arp05_budget_worker',
+      hqRoot,
+      workspaceDir: path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId),
+      promptPath,
+      replyPath: path.join(hqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json'),
+      outputPath: null,
+      logPath: null,
+    },
+  });
+  const budgetedJob = readFollowUpJob(spawned.jobPath);
+  budgetedJob.remediationPlan.transientRetries = 3;
+  writeFollowUpJob(spawned.jobPath, budgetedJob);
+
+  const originalMaxTransientRetries = process.env.ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES;
+  process.env.ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES = '3';
+
+  try {
+    await withHqRootEnv(hqRoot, async () => {
+      const result = await reconcileFollowUpJob({
+        rootDir,
+        job: budgetedJob,
+        jobPath: spawned.jobPath,
+        now: () => '2026-04-21T10:25:00.000Z',
+        execFileImpl: async (command, args) => {
+          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            return {
+              stdout: JSON.stringify({
+                status: 'failed',
+                health: 'failed',
+                failureDetail: 'memory pressure refused admit until the worker was reaped',
+                workspacePath: budgetedJob.remediationWorker.workspaceDir,
+              }),
+              stderr: '',
+            };
+          }
+          throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+        },
+        resolvePRLifecycleImpl: async () => null,
+        log: { warn() {}, error() {}, log() {} },
+      });
+
+      assert.equal(result.action, 'failed');
+      assert.equal(result.reason, 'hq-dispatch-transient-budget-exhausted');
+      assert.equal(result.job.status, 'failed');
+      assert.equal(result.job.failure.code, 'hq-dispatch-transient-budget-exhausted');
+      assert.match(result.job.failure.message, /Exhausted transient HQ retry budget \(3\/3\)/);
+    });
+  } finally {
+    if (originalMaxTransientRetries === undefined) delete process.env.ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES;
+    else process.env.ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES = originalMaxTransientRetries;
+  }
 });
 
 test('reconcileFollowUpJob still terminalizes non-transient HQ dispatch failures with no reply', async () => {

@@ -22,6 +22,7 @@ import {
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
+  requeueInProgressFollowUpJobForRetry,
   salvagePartialRemediationReply,
   readFollowUpJob,
   resolveRoundBudgetForJob,
@@ -3664,6 +3665,67 @@ test('requeueFollowUpJobForNextRound rejects stopped:abandoned jobs', () => {
     }),
     /stopped:abandoned/
   );
+});
+
+test('requeueInProgressFollowUpJobForRetry drops the active round entry so re-claim reuses the round number without duplicates', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob({
+    ...makeJobInput(rootDir),
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const requeued = requeueInProgressFollowUpJobForRetry({
+    rootDir,
+    jobPath: claimed.jobPath,
+    requeuedAt: '2026-04-21T10:05:00.000Z',
+    retryReason: 'Transient HQ remediation dispatch failure: memory pressure',
+    retryMetadata: { code: 'hq-dispatch-transient' },
+  });
+
+  assert.equal(requeued.job.status, 'pending');
+  assert.equal(requeued.job.remediationPlan.currentRound, 0);
+  assert.equal(requeued.job.remediationPlan.rounds.length, 0);
+  assert.equal(requeued.job.remediationPlan.transientRetries, 1);
+  assert.equal(requeued.job.remediationPlan.retryHistory.length, 1);
+  assert.equal(requeued.job.remediationPlan.retryHistory[0].round, 1);
+  assert.equal(requeued.job.remediationPlan.retryHistory[0].transientRetry, 1);
+
+  const reclaimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:10:00.000Z' });
+  assert.equal(reclaimed.job.remediationPlan.currentRound, 1);
+  assert.deepEqual(
+    reclaimed.job.remediationPlan.rounds.map((round) => round.round),
+    [1]
+  );
+
+  const completed = markFollowUpJobCompleted({
+    rootDir,
+    jobPath: reclaimed.jobPath,
+    finishedAt: '2026-04-21T10:12:00.000Z',
+    completionPreview: 'Retry landed cleanly.',
+  });
+  assert.equal(completed.job.remediationPlan.rounds[0].state, 'completed');
+  assert.equal(completed.job.remediationPlan.rounds[0].completion.preview, 'Retry landed cleanly.');
+  assert.equal(completed.job.remediationPlan.retryHistory[0].retryReason, 'Transient HQ remediation dispatch failure: memory pressure');
+});
+
+test('claimNextFollowUpJob skips transiently requeued jobs until retryAfter elapses', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  requeueInProgressFollowUpJobForRetry({
+    rootDir,
+    jobPath: claimed.jobPath,
+    requeuedAt: '2026-04-21T10:05:00.000Z',
+    retryReason: 'Transient HQ remediation dispatch failure: memory pressure',
+  });
+
+  const skipped = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:06:00.000Z' });
+  assert.equal(skipped, null);
+
+  const reclaimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:10:00.000Z' });
+  assert.equal(reclaimed?.job?.status, 'in_progress');
+  assert.equal(reclaimed?.job?.remediationPlan?.currentRound, 1);
+  assert.equal(reclaimed?.job?.remediationPlan?.retryAfter, null);
 });
 
 test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible metadata', () => {

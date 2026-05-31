@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import {
   buildRemediationReply,
   claimNextFollowUpJob,
+  DEFAULT_MAX_TRANSIENT_RETRIES,
   getFollowUpJobDir,
   listInProgressFollowUpJobs,
   listPendingFollowUpJobs,
@@ -229,6 +230,7 @@ const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
   'clio-agent': 'claude-code',
 });
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
+const REMEDIATION_MAX_TRANSIENT_RETRIES_ENV = 'ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
@@ -505,6 +507,14 @@ function classifyHqDispatchFailure(dispatchStatus = {}) {
     return 'transient';
   }
   return 'terminal';
+}
+
+function resolveMaxTransientRemediationRetries(env = process.env) {
+  const raw = env?.[REMEDIATION_MAX_TRANSIENT_RETRIES_ENV];
+  const parsed = Number.parseInt(String(raw ?? ''), 10);
+  return Number.isInteger(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_MAX_TRANSIENT_RETRIES;
 }
 
 function buildDrainSummaryLogLine(drain) {
@@ -3899,9 +3909,49 @@ async function reconcileFollowUpJob({
 
   const dispatchFailureDetail = liveness?.dispatchStatus?.failureDetail || null;
   if (worker?.dispatchMode === 'hq' && classifyHqDispatchFailure(liveness?.dispatchStatus) === 'transient') {
+    const nextTransientRetry = Number(job?.remediationPlan?.transientRetries || 0) + 1;
+    const maxTransientRetries = resolveMaxTransientRemediationRetries();
     const retryReason = dispatchFailureDetail
       ? `Transient HQ remediation dispatch failure: ${dispatchFailureDetail}`
       : `Transient HQ remediation dispatch failure: ${liveness?.dispatchStatus?.status || 'unknown'}`;
+    if (nextTransientRetry > maxTransientRetries) {
+      const failureCode = 'hq-dispatch-transient-budget-exhausted';
+      const failureMessage = `${retryReason}. Exhausted transient HQ retry budget (${nextTransientRetry - 1}/${maxTransientRetries}).`;
+      const { commentDelivery: retryBudgetDelivery } = buildReconcileCommentDelivery({
+        job,
+        worker,
+        action: 'failed',
+        failure: { code: failureCode, message: failureMessage },
+        now,
+      });
+      const failed = markFollowUpJobFailed({
+        rootDir,
+        jobPath,
+        failedAt: completedAt,
+        failureCode,
+        error: new Error(failureMessage),
+        remediationWorker: {
+          ...workerState,
+          state: 'failed',
+        },
+        failure: {
+          code: failureCode,
+          message: failureMessage,
+          transientRetryBudget: {
+            attempted: nextTransientRetry - 1,
+            max: maxTransientRetries,
+          },
+          dispatchStatus: liveness?.dispatchStatus || null,
+        },
+        commentDelivery: retryBudgetDelivery,
+      });
+      return {
+        action: 'failed',
+        reason: failureCode,
+        job: failed.job,
+        jobPath: failed.jobPath,
+      };
+    }
     const requeued = requeueInProgressFollowUpJobForRetry({
       rootDir,
       jobPath,
@@ -3912,6 +3962,9 @@ async function reconcileFollowUpJob({
         dispatchStatus: liveness?.dispatchStatus || null,
       },
     });
+    log?.log?.(
+      `[follow-up-remediation] Requeued ${job.repo}#${job.prNumber} -> hq-dispatch-transient (${retryReason})`
+    );
     return {
       action: 'requeued',
       reason: 'hq-dispatch-transient',

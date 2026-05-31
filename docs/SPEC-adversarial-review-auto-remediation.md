@@ -342,9 +342,19 @@ reconciliation invariants as the local lane:
   - Retryable / backpressure-class failures such as memory-pressure admission
     refusal (`launch_refused_memory_pressure`, `memory pressure refused admit`),
     lease loss, or daemon-bounce/restart signals move the job back to
-    `pending/` for a later tick. The round history should retain retry
-    metadata so operators can tell that the attempt launched and then
-    requeued.
+    `pending/` for a later tick. The canonical round ledger remains one entry
+    per round number: on requeue, the live `rounds[]` entry for round `N` is
+    removed before the next claim can recreate round `N`, and the failed
+    launch/requeue summary is appended to `remediationPlan.retryHistory[]`
+    instead. Each requeue also increments the job-level
+    `remediationPlan.transientRetries` counter, stamps a future
+    `remediationPlan.retryAfter`, and backs off exponentially so a wedged HQ
+    does not hot-loop on every consume tick.
+  - Transient retries are bounded by
+    `ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES` (default `3`). Once the
+    next transient retry would exceed that cap, reconcile terminalizes the job
+    to `failed/` with `failure.code = "hq-dispatch-transient-budget-exhausted"`
+    instead of requeueing again.
   - Non-transient failures such as prompt rejection, explicit cancellation, or
     workspace corruption still terminalize to `failed/`.
 

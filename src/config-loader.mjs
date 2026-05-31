@@ -106,6 +106,24 @@ function schemaV1() {
           },
         },
       },
+      // Cross-cutting GitHub integration. Added 2026-05-31 to mirror the
+      // Python schema (`platform/agent-os-config/src/agent_os_config/__init__.py`
+      // `_schema_v1()`). PR #1136 added `github.org` to the Python side
+      // for the WBH-03 de-hardcoding fix and to top-level `config.yaml`;
+      // this Node loader has its OWN strict schema and crashed in a loop
+      // on watcher startup with `expected: 'one of [...]', got: 'github'`
+      // until this entry was added. Keep this section in sync with the
+      // Python schema. Default: `laceyenterprises`.
+      github: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          org: {
+            __type: TYPE_STRING,
+            __default: 'laceyenterprises',
+          },
+        },
+      },
       submodules: {
         __type: TYPE_DICT,
         __strict: false,

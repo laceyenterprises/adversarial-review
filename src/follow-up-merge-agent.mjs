@@ -23,7 +23,6 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
-  MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   MERGE_AGENT_STUCK_LABEL,
   NO_MERGE_HOLD_LABEL,
@@ -232,15 +231,6 @@ const _FINAL_PASS_CONFIG_WARNED_PATHS = new Set();
 // premature merge. The window is generous so an in-flight delegated recovery is
 // never escalated out from under.
 const _PHANTOM_HANDOFF_GRACE_MINUTES = 60;
-// MAR-C: hard ceiling on how long the recovery-in-flight label may
-// suppress phantom-handoff escalation. If the label is present but
-// the original dispatch is older than this, the recovery worker has
-// almost certainly died without cleaning up its own label (the
-// most common cause is the spawn.sh teardown bug observed
-// 2026-05-31). Escalate anyway so a stuck label can't freeze the
-// PR forever. 2× the grace window keeps the worst case bounded
-// without artificially squeezing slow remediations.
-const _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES = 120;
 
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
@@ -1830,32 +1820,6 @@ async function reconcileProactivePhantomHandoffs({
     ) {
       continue;
     }
-    // MAR-C: MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL suppresses the
-    // proactive scan UNLESS the merge-agent dispatch is older than
-    // the recovery-in-flight ceiling — at that point the label is
-    // almost certainly stuck (recovery worker died without cleanup)
-    // and we must let the grace timer / escalation path run.
-    if (labelNames.includes(MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL)) {
-      const recordedForLabelCheck = getRecordedMergeAgentDispatchForHead(rootDir, currentPR);
-      const dispatchedAtMs = Date.parse(String(recordedForLabelCheck?.dispatchedAt || ''));
-      const nowMs = Date.parse(String(now || ''));
-      const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
-      const ageMinutes = Number.isFinite(dispatchedAtMs)
-        ? (effectiveNowMs - dispatchedAtMs) / 60_000
-        : 0;
-      if (ageMinutes < _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES) {
-        continue;
-      }
-      mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_max_age_exceeded', {
-        repo: currentPR.repo,
-        prNumber: currentPR.prNumber,
-        launchRequestId: recordedForLabelCheck?.launchRequestId || null,
-        ageMinutes,
-        maxMinutes: _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES,
-        at: now,
-      });
-      // fall through to the existing reconcile-and-escalate path below
-    }
     const recordedDispatch = getRecordedMergeAgentDispatchForHead(rootDir, currentPR);
     if (!recordedDispatch?.launchRequestId) continue;
     const recordedDispatchStatus = await probeDispatchStatusViaHq({
@@ -2735,35 +2699,6 @@ async function reconcilePhantomHandoffEscalation({
   const labelNames = normalizeLabelNames(labels);
   if (labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL) || labelNames.includes(MERGE_AGENT_STUCK_LABEL)) {
     return recordedDispatch;
-  }
-  // MAR-C: MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL is the merge-agent's
-  // own signal that it dispatched a failure-recovery worker and
-  // expects that worker to drive the next state transition. Suppress
-  // the grace timer while it's present UNLESS the original dispatch
-  // is older than the recovery-in-flight ceiling — at that point the
-  // recovery worker has almost certainly died without removing its
-  // own label (spawn.sh teardown bug shape observed 2026-05-31) and
-  // we must escalate anyway.
-  if (labelNames.includes(MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL)) {
-    const dispatchedAtMs = Date.parse(String(recordedDispatch?.dispatchedAt || ''));
-    const nowMs = Date.parse(String(now || ''));
-    const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
-    const ageMinutes = Number.isFinite(dispatchedAtMs)
-      ? (effectiveNowMs - dispatchedAtMs) / 60_000
-      : 0;
-    if (ageMinutes < _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES) {
-      return recordedDispatch;
-    }
-    mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_max_age_exceeded', {
-      repo: job.repo,
-      prNumber: job.prNumber,
-      launchRequestId: recordedDispatch.launchRequestId,
-      ageMinutes,
-      maxMinutes: _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES,
-      at: now,
-    });
-    // Fall through to the grace-timer / escalation path below — the
-    // recovery-in-flight label looks stale, treat as orphan.
   }
   if (!recordedDispatch.phantomHandoffObservedAt) {
     const observed = updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({

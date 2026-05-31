@@ -30,17 +30,6 @@ const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched';
 // the operator (max rounds reached with an unresolved blocker, or a merge it
 // could not complete). Re-reviewing a stuck PR only churns it further.
 const MERGE_AGENT_STUCK_LABEL = 'merge-agent-stuck';
-// MAR-C (2026-05-31): transitional marker applied by the merge-agent when
-// it has dispatched a failure-recovery worker. The recovery dispatch
-// previously cleared the dispatched label immediately, leaving no
-// on-PR signal that anything was still in flight — if the recovery
-// worker died abnormally (spawn.sh teardown bug, OOM, etc.) the
-// phantom-handoff detector would observe a no-dispatched-no-recovery
-// PR after the 60min grace and apply merge-agent-stuck even though
-// recovery had legitimately been handed off and just crashed.
-// The phantom-handoff detector now treats this label as equivalent
-// to merge-agent-dispatched for grace-timer purposes.
-const MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL = 'merge-agent-recovery-in-flight';
 // Operator/maintainer hold: the PR must not be merged or otherwise advanced
 // by the autonomous pipeline until the label is cleared.
 const NO_MERGE_HOLD_LABEL = 'no-merge-hold';
@@ -268,7 +257,6 @@ export {
   FORCE_REREVIEW_LABEL,
   HALTED_LOOP_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL,
-  MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   MERGE_AGENT_STUCK_LABEL,
   NO_MERGE_HOLD_LABEL,

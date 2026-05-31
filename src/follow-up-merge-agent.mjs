@@ -209,6 +209,7 @@ const FAST_MERGE_SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped',
 // operator recovery action for that stuck state and forces one retry path past
 // this bound.
 const _WATCHER_REDISPATCH_BOUND = 2;
+const _FINAL_PASS_CONFIG_WARNED_PATHS = new Set();
 
 // Grace window before the watcher treats a terminal-failed dispatch whose
 // `merge-agent-dispatched` marker is already cleared as a PHANTOM HANDOFF.
@@ -238,18 +239,33 @@ function isFinalPassOnRequestChangesEnabled({
   modulePaths,
 } = {}) {
   const raw = env?.[FINAL_PASS_ON_REQUEST_CHANGES_ENV];
-  const effectiveRaw = raw == null
-    ? (
-        loadConfigCached({
-          env: {},
-          topPath,
-          modulePaths: modulePaths || [MODULE_CONFIG_PATH],
-        }).get('feature_flags.merge_agent_final_pass_on_request_changes')
-          ? 'true'
-          : 'false'
-      )
-    : raw;
-  if (effectiveRaw == null) return true; // unset → default ON
+  let effectiveRaw = raw;
+  if (effectiveRaw == null) {
+    const configEnv = env?.AGENT_OS_CONFIG_PATH == null
+      ? {}
+      : { AGENT_OS_CONFIG_PATH: env.AGENT_OS_CONFIG_PATH };
+    try {
+      effectiveRaw = loadConfigCached({
+        env: configEnv,
+        topPath,
+        modulePaths: modulePaths || [MODULE_CONFIG_PATH],
+      }).get('feature_flags.merge_agent_final_pass_on_request_changes')
+        ? 'true'
+        : 'false';
+    } catch (err) {
+      const warnKey = `${topPath || configEnv.AGENT_OS_CONFIG_PATH || '<default>'}|${(modulePaths || [MODULE_CONFIG_PATH]).join(':')}`;
+      if (!_FINAL_PASS_CONFIG_WARNED_PATHS.has(warnKey)) {
+        _FINAL_PASS_CONFIG_WARNED_PATHS.add(warnKey);
+        if (logger && typeof logger.warn === 'function') {
+          logger.warn(
+            '[merge-agent] failed to load feature_flags.merge_agent_final_pass_on_request_changes; '
+            + `falling back to default ON. ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+      return true;
+    }
+  }
   const normalized = String(effectiveRaw).trim().toLowerCase();
   if (normalized === '') return true; // empty → default ON
   if (normalized === '0' || normalized === 'false' || normalized === 'no') {

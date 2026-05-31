@@ -154,6 +154,16 @@ test('watcher launchers require explicit opt-in before running without ALERT_TO'
   }
 });
 
+test('watcher launchers append module config instead of overwriting AGENT_OS_CFG_MODULES', () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const script = readScript(scriptName);
+    assert.match(script, /AGENT_OS_CFG_MODULES="\$REPO_ROOT\/tools\/adversarial-review\/config\.yaml\$\{AGENT_OS_CFG_MODULES:\+:\$AGENT_OS_CFG_MODULES\}"/);
+  }
+});
+
 test('maintainer watcher launchers resolve ALERT_TO through configured op ref', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
 }, async () => {

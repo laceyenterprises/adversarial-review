@@ -26,7 +26,7 @@ WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
 REPO_ROOT="${AGENT_OS_ROOT:-${WATCHER_DIR%/tools/adversarial-review}}"
 if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
   source "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh"
-  export AGENT_OS_CFG_MODULES="$REPO_ROOT/tools/adversarial-review/config.yaml"
+  export AGENT_OS_CFG_MODULES="$REPO_ROOT/tools/adversarial-review/config.yaml${AGENT_OS_CFG_MODULES:+:$AGENT_OS_CFG_MODULES}"
   eval "$(agent_os_config_export)"
 fi
 WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"

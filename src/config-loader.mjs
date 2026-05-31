@@ -58,6 +58,10 @@ const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
+const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
+const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
+const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
+const PATTERN_SQL_IDENTIFIER_DESCRIPTION = 'SQL identifier /^[A-Za-z_][A-Za-z0-9_]{0,62}$/';
 
 const TYPE_STRING = 'string';
 const TYPE_BOOL = 'bool';
@@ -103,6 +107,12 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: null,
             __nullable: true,
+          },
+          database_name: {
+            __type: TYPE_STRING,
+            __default: 'agent_os_ledger',
+            __pattern: PATTERN_SQL_IDENTIFIER,
+            __pattern_description: PATTERN_SQL_IDENTIFIER_DESCRIPTION,
           },
         },
       },
@@ -166,6 +176,18 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: null,
             __nullable: true,
+          },
+        },
+      },
+      linear: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          issue_prefix: {
+            __type: TYPE_STRING,
+            __default: 'LAC',
+            __pattern: PATTERN_LINEAR_ISSUE_PREFIX,
+            __pattern_description: PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION,
           },
         },
       },
@@ -288,6 +310,14 @@ export const ENV_ALIASES = {
   },
   'session_ledger.dsn': {
     canonical: 'AGENT_OS_SESSION_LEDGER_DSN',
+    aliases: [],
+  },
+  'session_ledger.database_name': {
+    canonical: 'AGENT_OS_SESSION_LEDGER_DATABASE_NAME',
+    aliases: [],
+  },
+  'linear.issue_prefix': {
+    canonical: 'AGENT_OS_LINEAR_ISSUE_PREFIX',
     aliases: [],
   },
   'host.name': {
@@ -438,6 +468,13 @@ function checkLeaf(value, schema, keyPath, source) {
       throw new AgentOSConfigError(
         `${keyPath}: expected string, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
         { key: keyPath, expected: 'string', got: value, source },
+      );
+    }
+    if (schema.__pattern && !(new RegExp(schema.__pattern).test(value))) {
+      const expectedPattern = schema.__pattern_description || schema.__pattern;
+      throw new AgentOSConfigError(
+        `${keyPath}: value ${JSON.stringify(value)} does not match ${expectedPattern}`,
+        { key: keyPath, expected: expectedPattern, got: value, source },
       );
     }
   }

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -127,6 +128,44 @@ test('github-pr routing can force the default reviewer from env', () => {
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
     linearTicketId: 'LAC-484',
   });
+});
+
+test('github-pr routing extracts configured linear issue prefix', () => {
+  resetRoleConfigCache();
+  assert.deepEqual(routePR('[codex] ACME-484 env prefix', null, {
+    env: { AGENT_OS_LINEAR_ISSUE_PREFIX: 'ACME' },
+  }), {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    linearTicketId: 'ACME-484',
+  });
+});
+
+test('github-pr routing extracts configured linear issue prefix from topPath', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'subject-github-pr-'));
+  try {
+    const topPath = path.join(tmp, 'config.yaml');
+    writeFileSync(
+      topPath,
+      'version: 1\nlinear:\n  issue_prefix: ACME\n',
+      'utf8',
+    );
+    resetRoleConfigCache();
+    assert.deepEqual(routePR('[codex] ACME-484 file prefix', null, {
+      topPath,
+      env: {},
+    }), {
+      builderClass: 'codex',
+      tag: 'codex',
+      reviewerModel: 'claude',
+      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+      linearTicketId: 'ACME-484',
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('github-pr routing surfaces config-broken sentinel for unknown reviewer env values', () => {

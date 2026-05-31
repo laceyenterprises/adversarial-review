@@ -27,6 +27,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>ADVERSARIAL_REVIEW_WATCHER_PLIST_PATH</key>
+        <string>${REPO_ROOT}/launchd/ai.laceyenterprises.adversarial-watcher.${WATCHER_USER_LABEL}.plist</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
@@ -41,6 +43,9 @@
 
     <key>ThrottleInterval</key>
     <integer>30</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>45</integer>
 
     <key>StandardOutPath</key>
     <string>${LOG_ROOT}/adversarial-watcher.log</string>

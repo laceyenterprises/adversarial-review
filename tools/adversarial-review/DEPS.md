@@ -14,6 +14,11 @@ uses PATH and per-user defaults.
   moves, Homebrew Node upgrades, or fnm/asdf version switches.
 - Rebuild: `npm rebuild better-sqlite3`.
 - Probe: `node -e "new (require('better-sqlite3'))(':memory:').close()"`.
+- Native addon: `fs-ext` backs reviewer-fence `flock()` calls and also needs a
+  working C/C++ toolchain (Xcode Command Line Tools on macOS) plus rebuilds
+  after Node ABI changes.
+- Rebuild: `npm rebuild fs-ext`.
+- Probe: `node -e "const fs=require('node:fs'); const fsExt=require('fs-ext'); const fd=fs.openSync('tmp.lock','w'); fsExt.flockSync(fd, fsExt.constants.LOCK_EX | fsExt.constants.LOCK_NB); fsExt.flockSync(fd, fsExt.constants.LOCK_UN); fs.closeSync(fd); fs.rmSync('tmp.lock',{force:true});"`.
 
 ## CLIs
 

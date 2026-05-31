@@ -207,7 +207,9 @@ const rows = db.prepare(
 ).all();
 console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
   rows,
-  auditEntries: (globalThis.__fastMergeAuditWrites || []).map((write) => JSON.parse(write.content)),
+  auditEntries: (globalThis.__fastMergeAuditWrites || [])
+    .map((write) => JSON.parse(write.content))
+    .filter((entry) => entry?.kind === 'fast-merge-audit'),
   spawns: globalThis.__fastMergeSpawns || [],
 }));
 `;

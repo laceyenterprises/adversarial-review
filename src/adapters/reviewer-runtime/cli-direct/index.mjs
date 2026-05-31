@@ -219,6 +219,7 @@ function buildReviewerProcessArgs(subjectContext = {}) {
     maxRemediationRounds: subjectContext.maxRemediationRounds,
     passKind: subjectContext.passKind,
     reviewerSessionUuid: subjectContext.reviewerSessionUuid || subjectContext.sessionUuid,
+    reviewerSpawnToken: subjectContext.reviewerSpawnToken || null,
     crossModelReviewWaived: subjectContext.crossModelReviewWaived,
     crossModelReviewWaiverReason: subjectContext.crossModelReviewWaiverReason,
   };

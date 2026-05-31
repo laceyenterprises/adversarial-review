@@ -38,6 +38,11 @@ import {
 } from './prompt-context.mjs';
 import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
+import {
+  openReviewerFence,
+  resolveAdversarialReviewStateDir,
+  resolveSigtermFenceGraceSeconds,
+} from './reviewer-fence.mjs';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
@@ -1048,14 +1053,37 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
     log: opts.log || console,
   });
 
-  await execFileImpl(
-    'gh',
-    ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],
-    {
-      env: { ...process.env, GH_TOKEN: token },
-      maxBuffer: 5 * 1024 * 1024,
+  const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, opts.env || process.env);
+  let reviewerFence = null;
+  try {
+    reviewerFence = openReviewerFence({
+      stateDir,
+      spawnToken: opts.reviewerSpawnToken,
+      repo,
+      pr: prNumber,
+      identity: opts.reviewerIdentity,
+      graceSeconds: resolveSigtermFenceGraceSeconds(opts.env || process.env),
+    });
+  } catch (err) {
+    if (err?.code === 'EWOULDBLOCK' || err?.code === 'EAGAIN') {
+      throw err;
     }
-  );
+    (opts.log || console).warn?.(
+      `[reviewer] reviewer fence unavailable; posting review without fence: ${err?.message || err}`
+    );
+  }
+  try {
+    await execFileImpl(
+      'gh',
+      ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],
+      {
+        env: { ...process.env, GH_TOKEN: token },
+        maxBuffer: 5 * 1024 * 1024,
+      }
+    );
+  } finally {
+    reviewerFence?.clear();
+  }
 }
 
 async function postGitHubReviewWithCapture({
@@ -1072,6 +1100,8 @@ async function postGitHubReviewWithCapture({
   log = console,
   fetchImpl = globalThis.fetch,
   prepareReviewWrite = clearPendingReviewsForSelf,
+  reviewerSpawnToken = null,
+  reviewerIdentity = null,
 } = {}) {
   const token = process.env[botTokenEnv];
   if (!token) {
@@ -1079,9 +1109,12 @@ async function postGitHubReviewWithCapture({
   }
 
   await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
+    rootDir,
     fetchImpl,
     log,
     prepareReviewWrite,
+    reviewerSpawnToken,
+    reviewerIdentity,
   });
 
   // Capture postedAt AFTER the gh post returns so the candidate window
@@ -1181,6 +1214,7 @@ async function main() {
     maxRemediationRounds,
     passKind,
     reviewerSessionUuid,
+    reviewerSpawnToken,
     labels = [],
     ticketPipelinePaused = false,
     crossModelReviewWaived = false,
@@ -1369,6 +1403,8 @@ async function main() {
       reviewBody: fullComment,
       botTokenEnv,
       passKind,
+      reviewerSpawnToken,
+      reviewerIdentity: effectiveModel === 'codex' ? 'codex-reviewer-lacey' : 'claude-reviewer-lacey',
       execFileImpl: execFileAsync,
       log: console,
     });
@@ -1451,6 +1487,7 @@ const __test__ = {
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
   parseCodexJsonTokenUsage,
+  postGitHubReview,
   spawnCodexReview,
   postGitHubReviewWithCapture,
 };

@@ -2708,8 +2708,9 @@ test('reconcileInProgressFollowUpJobs leaves live workers in place', async () =>
 
   const result = await reconcileInProgressFollowUpJobs({
     rootDir,
-    now: () => '2026-04-21T10:32:00.000Z',
+    now: () => '2026-04-21T10:20:00.000Z',
     isWorkerRunning: () => true,
+    resolvePRLifecycleImpl: async () => null,
   });
 
   assert.deepEqual(

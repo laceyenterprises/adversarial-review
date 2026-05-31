@@ -144,7 +144,13 @@ function schemaV1() {
         __keys: {
           live_steer_allow_unvetted: { __type: TYPE_BOOL, __default: false },
           claude_code_ambient_auth_fallback: { __type: TYPE_BOOL, __default: false },
+          claude_code_hijack_probe_disable: { __type: TYPE_BOOL, __default: false },
           merge_agent_failure_recovery_disable: { __type: TYPE_BOOL, __default: false },
+          codex_health_allow_cross_user: { __type: TYPE_BOOL, __default: false },
+          auto_merge_adjudication_sync: { __type: TYPE_BOOL, __default: false },
+          test_mode: { __type: TYPE_BOOL, __default: false },
+          merge_agent_final_pass_on_request_changes: { __type: TYPE_BOOL, __default: true },
+          allow_missing_alert_to: { __type: TYPE_BOOL, __default: false },
         },
       },
       // Module-internal sections used by tools/adversarial-review. These are
@@ -233,9 +239,33 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK',
     aliases: [['CLAUDE_CODE_ALLOW_AMBIENT_AUTH_FALLBACK', identity]],
   },
+  'feature_flags.claude_code_hijack_probe_disable': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_HIJACK_PROBE_DISABLE',
+    aliases: [['HQ_CLAUDE_CODE_HIJACK_PROBE_DISABLE', identity]],
+  },
   'feature_flags.merge_agent_failure_recovery_disable': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_FAILURE_RECOVERY_DISABLE',
     aliases: [['MERGE_AGENT_FAILURE_RECOVERY_DISABLE', identity]],
+  },
+  'feature_flags.codex_health_allow_cross_user': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_CODEX_HEALTH_ALLOW_CROSS_USER',
+    aliases: [['CODEX_HEALTH_ALLOW_CROSS_USER', identity]],
+  },
+  'feature_flags.auto_merge_adjudication_sync': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_AUTO_MERGE_ADJUDICATION_SYNC',
+    aliases: [['AUTO_MERGE_ADJUDICATION_SYNC', identity]],
+  },
+  'feature_flags.test_mode': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_TEST_MODE',
+    aliases: [['HQ_TEST_MODE', identity]],
+  },
+  'feature_flags.merge_agent_final_pass_on_request_changes': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES',
+    aliases: [['MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES', identity]],
+  },
+  'feature_flags.allow_missing_alert_to': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_ALLOW_MISSING_ALERT_TO',
+    aliases: [['ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO', identity]],
   },
 };
 

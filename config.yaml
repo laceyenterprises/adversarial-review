@@ -48,3 +48,13 @@ merge_agent:
 # section. The schemaV1 dropdown still accepts these keys (so this file
 # can re-introduce them once a resolver consumes them) but they no longer
 # appear in the shipped defaults to avoid the footgun.
+feature_flags:
+  # Lets merge-agent take the final pass after round budget is exhausted on
+  # Request changes verdicts.
+  # Default true because the legacy OFF behavior stranded PRs at the operator desk.
+  # Motivation: PRs #426 and #504 convergence-loop deadlock notes in follow-up-merge-agent.mjs.
+  merge_agent_final_pass_on_request_changes: true
+  # Allows the watcher to start without ALERT_TO being provisioned.
+  # Default false because degraded alert-free startup must be an explicit choice.
+  # Motivation: adversarial-watcher degraded bring-up path / CFG-05.
+  allow_missing_alert_to: false

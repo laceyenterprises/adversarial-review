@@ -3836,6 +3836,52 @@ test('dispatchMergeAgentForPR honors MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES f
   assert.ok(!('MERGE_AGENT_BLOCKER_REMEDIATION_REQUIRED' in hqCalls[0].env));
 });
 
+test('isFinalPassOnRequestChangesEnabled honors config when env is unset', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  try {
+    const topPath = path.join(rootDir, 'no-top.yaml');
+    const modulePath = path.join(rootDir, 'config.yaml');
+    writeFileSync(modulePath, [
+      'feature_flags:',
+      '  merge_agent_final_pass_on_request_changes: true',
+      '',
+    ].join('\n'), 'utf8');
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: {},
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('env wins over config for final-pass flag', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  try {
+    const topPath = path.join(rootDir, 'no-top.yaml');
+    const modulePath = path.join(rootDir, 'config.yaml');
+    writeFileSync(modulePath, [
+      'feature_flags:',
+      '  merge_agent_final_pass_on_request_changes: true',
+      '',
+    ].join('\n'), 'utf8');
+    assert.equal(
+      isFinalPassOnRequestChangesEnabled({
+        env: { [FINAL_PASS_ON_REQUEST_CHANGES_ENV]: '0' },
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('dispatchMergeAgentForPR defaults final-pass ON when env unset (no halt at budget-exhausted)', async () => {
   // After 2026-05-16: the env default is ON. With env unset, a
   // budget-exhausted Request-changes PR should still dispatch with the

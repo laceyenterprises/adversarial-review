@@ -43,8 +43,10 @@ import {
 } from './reviewer-cascade.mjs';
 import {
   resolveDefaultMergeAgentWorkerClass,
+  MODULE_CONFIG_PATH,
   validateStartupRoleConfig,
 } from './role-config.mjs';
+import { loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
@@ -232,10 +234,23 @@ const _PHANTOM_HANDOFF_GRACE_MINUTES = 60;
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
   logger = console,
+  topPath,
+  modulePaths,
 } = {}) {
   const raw = env?.[FINAL_PASS_ON_REQUEST_CHANGES_ENV];
-  if (raw == null) return true; // unset → default ON
-  const normalized = String(raw).trim().toLowerCase();
+  const effectiveRaw = raw == null
+    ? (
+        loadConfigCached({
+          env: {},
+          topPath,
+          modulePaths: modulePaths || [MODULE_CONFIG_PATH],
+        }).get('feature_flags.merge_agent_final_pass_on_request_changes')
+          ? 'true'
+          : 'false'
+      )
+    : raw;
+  if (effectiveRaw == null) return true; // unset → default ON
+  const normalized = String(effectiveRaw).trim().toLowerCase();
   if (normalized === '') return true; // empty → default ON
   if (normalized === '0' || normalized === 'false' || normalized === 'no') {
     return false;
@@ -248,7 +263,7 @@ function isFinalPassOnRequestChangesEnabled({
   // when triaging unexpected halt behavior.
   if (logger && typeof logger.warn === 'function') {
     logger.warn(
-      `[merge-agent] ${FINAL_PASS_ON_REQUEST_CHANGES_ENV}=${JSON.stringify(raw)} `
+      `[merge-agent] ${FINAL_PASS_ON_REQUEST_CHANGES_ENV}=${JSON.stringify(effectiveRaw)} `
       + 'is not a recognized boolean (use 1/true/yes or 0/false/no); '
       + 'falling back to OFF (legacy halt-at-max-rounds-reached behavior). '
       + 'Unset the env var to use the default-ON behavior.'

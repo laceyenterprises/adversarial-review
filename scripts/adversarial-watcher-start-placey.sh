@@ -23,6 +23,12 @@ export CODEX_AUTH_PATH="/Users/placey/.codex/auth.json"
 # gate BEFORE any 1Password resolution so a broken native module produces
 # zero popups.
 WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
+REPO_ROOT="${AGENT_OS_ROOT:-${WATCHER_DIR%/tools/adversarial-review}}"
+if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
+  source "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh"
+  export AGENT_OS_CFG_MODULES="$REPO_ROOT/tools/adversarial-review/config.yaml"
+  eval "$(agent_os_config_export)"
+fi
 WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"
 if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$WATCHER_NATIVE_CHECK_ERR" 2>&1; then
   echo "[adversarial-watcher] ERROR: better-sqlite3 failed to load — likely Node ABI mismatch after a node upgrade." >&2
@@ -56,7 +62,7 @@ fi
 
 ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
 ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
-ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
+ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-${AGENT_OS_CFG_FEATURE_FLAGS_ALLOW_MISSING_ALERT_TO:-}}"
 
 resolve_op_bin() {
   local op_bin

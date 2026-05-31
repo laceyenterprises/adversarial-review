@@ -18,6 +18,12 @@ set -euo pipefail
 # gate BEFORE any 1Password resolution so a broken native module produces
 # zero popups.
 WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
+REPO_ROOT="${AGENT_OS_ROOT:-${WATCHER_DIR%/tools/adversarial-review}}"
+if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
+  source "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh"
+  export AGENT_OS_CFG_MODULES="$REPO_ROOT/tools/adversarial-review/config.yaml"
+  eval "$(agent_os_config_export)"
+fi
 # Per-user err-file path. The original `/tmp/adversarial-watcher-native-check.err`
 # was a single shared path across users, which silently broke the airlock-side
 # launch when an old placey-owned file existed (cross-user redirect denied,
@@ -72,7 +78,7 @@ export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json
 
 ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
 ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
-ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-}"
+ALLOW_MISSING_ALERT_TO="${ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO:-${AGENT_OS_CFG_FEATURE_FLAGS_ALLOW_MISSING_ALERT_TO:-}}"
 
 resolve_op_bin() {
   local op_bin

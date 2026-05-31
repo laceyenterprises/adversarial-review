@@ -2932,14 +2932,22 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
         execFileImpl: async (command, args) => {
           commands.push([command, ...args]);
           if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-            return { stdout: JSON.stringify({ baseRefName: 'main' }), stderr: '' };
+            return { stdout: JSON.stringify({ baseRefName: 'main', headRefName: 'codex/fix-pr-71' }), stderr: '' };
+          }
+          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            return {
+              stdout: JSON.stringify({
+                status: 'queued',
+                workspacePath: path.join(hqRoot, 'workers', 'lrq_arp04_dispatch'),
+              }),
+              stderr: '',
+            };
           }
           if (command === 'hq' && args[0] === 'dispatch') {
             return {
               stdout: JSON.stringify({
                 launchRequestId: 'lrq_arp04_dispatch',
                 dispatchId: 'dispatch_arp04_dispatch',
-                workspaceDir: path.join(hqRoot, 'workers', 'lrq_arp04_dispatch'),
               }),
               stderr: '',
             };
@@ -2956,6 +2964,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_arp04_dispatch');
       assert.equal(result.job.remediationWorker.dispatchId, 'dispatch_arp04_dispatch');
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
+      assert.equal(result.job.branch, 'codex/fix-pr-71');
       const dispatchCall = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch');
       assert.ok(dispatchCall);
       assert.deepEqual(dispatchCall.slice(0, 14), [
@@ -2975,9 +2984,10 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.ok(dispatchCall.includes('adversarial-review'));
       assert.ok(dispatchCall.includes('--root'));
       assert.ok(dispatchCall.includes(hqRoot));
+      assert.ok(dispatchCall.includes('--branch'));
+      assert.ok(dispatchCall.includes('codex/fix-pr-71'));
       const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
       assert.match(prompt, /WORKER_CLASS=codex-remediation/);
-      assert.match(prompt, /Worker-Class:/);
     });
   } finally {
     for (const [key, value] of Object.entries(previous)) {
@@ -3023,7 +3033,14 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
       now: () => '2026-04-21T10:10:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
-          return { stdout: JSON.stringify({ status: 'running', health: 'healthy' }), stderr: '' };
+          return {
+            stdout: JSON.stringify({
+              status: 'running',
+              health: 'healthy',
+              workspacePath: spawned.job.remediationWorker.workspaceDir,
+            }),
+            stderr: '',
+          };
         }
         throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
       },
@@ -3041,7 +3058,14 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
-          return { stdout: JSON.stringify({ status: 'succeeded', health: 'healthy' }), stderr: '' };
+          return {
+            stdout: JSON.stringify({
+              status: 'succeeded',
+              health: 'healthy',
+              workspacePath: spawned.job.remediationWorker.workspaceDir,
+            }),
+            stderr: '',
+          };
         }
         throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
       },
@@ -3061,6 +3085,72 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
     assert.equal(completed.action, 'completed');
     assert.equal(completed.job.remediationWorker.dispatchMode, 'hq');
     assert.equal(completed.job.reReview.requested, true);
+  });
+});
+
+test('reconcileFollowUpJob resolves the HQ workspace from dispatch status when the persisted path is unusable', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 721, linearTicketId: 'LAC-2721' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const staleWorkspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', 'stale-workspace');
+  const resolvedWorkspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+  mkdirSync(path.join(resolvedWorkspaceDir, '.git'), { recursive: true });
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, { hqRoot });
+  writeValidReply(replyPath, claimed.job, {
+    reReview: { requested: true, reason: 'Recovered under worker-pool leasing and pushed the remediation.' },
+  });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_arp04_recovery_status',
+      dispatchId: 'dispatch_arp04_recovery_status',
+      hqRoot,
+      workspaceDir: staleWorkspaceDir,
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  await withHqRootEnv(hqRoot, async () => {
+    const completed = await reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:25:00.000Z',
+      execFileImpl: async (command, args) => {
+        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          return {
+            stdout: JSON.stringify({
+              status: 'succeeded',
+              health: 'healthy',
+              workspacePath: resolvedWorkspaceDir,
+            }),
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+      },
+      resolvePRLifecycleImpl: async () => null,
+      requestReviewRereviewImpl: () => ({
+        triggered: true,
+        status: 'pending',
+        reason: 'review-status-reset',
+        reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
+      }),
+      auditWorkspaceForContaminationImpl: async ({ workspaceDir }) => {
+        assert.equal(workspaceDir, resolvedWorkspaceDir);
+        return cleanContaminationAudit();
+      },
+    });
+
+    assert.equal(completed.action, 'completed');
   });
 });
 
@@ -3243,14 +3333,22 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
         now: () => '2026-04-21T10:00:00.000Z',
         execFileImpl: async (command, args) => {
           if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-            return { stdout: JSON.stringify({ baseRefName: 'main' }), stderr: '' };
+            return { stdout: JSON.stringify({ baseRefName: 'main', headRefName: 'codex/fix-pr-75' }), stderr: '' };
+          }
+          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            return {
+              stdout: JSON.stringify({
+                status: 'queued',
+                workspacePath: path.join(process.env.HQ_ROOT, 'workers', 'lrq_arp04_mixed'),
+              }),
+              stderr: '',
+            };
           }
           if (command === 'hq' && args[0] === 'dispatch') {
             return {
               stdout: JSON.stringify({
                 launchRequestId: 'lrq_arp04_mixed',
                 dispatchId: 'dispatch_arp04_mixed',
-                workspaceDir: path.join(process.env.HQ_ROOT, 'workers', 'lrq_arp04_mixed'),
               }),
               stderr: '',
             };

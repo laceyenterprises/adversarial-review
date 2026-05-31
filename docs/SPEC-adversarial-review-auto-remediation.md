@@ -246,6 +246,10 @@ reconciliation invariants as the local lane:
   HQ dispatch ticket. `launchRequestId` remains the reply-storage and audit key;
   `dispatchId` is the authoritative handle for `hq dispatch status` and
   `hq dispatch cancel`.
+- HQ branch-push remediation dispatches must pass the PR head ref with
+  `--branch <headRefName>`. The daemon resolves and persists that ref from
+  GitHub PR metadata before dispatch so the worker attaches to the live PR head
+  instead of a synthetic provisioning branch.
 - The daemon, not the worker prompt, owns commit-hook installation. The
   checked-out remediation workspace already has the worker-provenance
   `commit-msg` hook installed before the worker runs, and any pre-existing hook
@@ -253,8 +257,9 @@ reconciliation invariants as the local lane:
 - Before honoring `reReview.requested=true`, reconcile runs the same
   branch-contamination audit used by the legacy lane against the HQ-managed git
   workspace. If the dispatch ticket did not provide that path, reconcile must
-  resolve it from `hq worker info <launchRequestId> --root <HQ_ROOT>` and fail
-  closed when the workspace cannot be proven.
+  resolve it from `hq dispatch status <dispatchId> --root <HQ_ROOT>` and fail
+  closed when the workspace cannot be proven. `dispatchId`, not
+  `launchRequestId`, is the lookup handle for this workspace recovery path.
 - If reconcile decides to move an active HQ remediation to a terminal stop
   because the PR merged/closed or another terminal guard fired, it must cancel
   the in-flight dispatch with `hq dispatch cancel <dispatchId> --root <HQ_ROOT>`

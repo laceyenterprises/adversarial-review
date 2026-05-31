@@ -74,14 +74,20 @@ function normalizeBaseBranch(baseBranch) {
   return trimmed || null;
 }
 
-async function fetchPRBaseBranch({
+function normalizePrHeadRef(branch) {
+  if (typeof branch !== 'string') return null;
+  const trimmed = branch.trim();
+  return trimmed || null;
+}
+
+async function fetchPRBranchMetadata({
   repo,
   prNumber,
   execFileImpl = execFileAsync,
 } = {}) {
   const { stdout } = await execFileImpl(
     'gh',
-    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName'],
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName,headRefName'],
     { maxBuffer: 1 * 1024 * 1024 }
   );
   const parsed = JSON.parse(String(stdout || '{}'));
@@ -89,22 +95,43 @@ async function fetchPRBaseBranch({
   if (!baseBranch) {
     throw new Error(`Could not resolve baseRefName for ${repo}#${prNumber}`);
   }
-  return baseBranch;
+  const branch = normalizePrHeadRef(parsed.headRefName);
+  return { baseBranch, branch };
 }
 
-async function ensureJobBaseBranch({
+async function fetchPRBaseBranch({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const metadata = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl });
+  return metadata.baseBranch;
+}
+
+async function ensureJobBranchMetadata({
   job,
   jobPath,
+  requireBranch = false,
   execFileImpl = execFileAsync,
 } = {}) {
   const existing = normalizeBaseBranch(job?.baseBranch);
-  if (existing) {
-    return { job: { ...job, baseBranch: existing }, baseBranch: existing, hydrated: false };
+  const existingBranch = normalizePrHeadRef(job?.branch);
+  if (existing && (!requireBranch || existingBranch)) {
+    return {
+      job: {
+        ...job,
+        baseBranch: existing,
+        branch: existingBranch || null,
+      },
+      baseBranch: existing,
+      branch: existingBranch,
+      hydrated: false,
+    };
   }
 
-  let baseBranch;
+  let metadata;
   try {
-    baseBranch = await fetchPRBaseBranch({
+    metadata = await fetchPRBranchMetadata({
       repo: job?.repo,
       prNumber: job?.prNumber,
       execFileImpl,
@@ -113,11 +140,36 @@ async function ensureJobBaseBranch({
     err.isBaseBranchResolutionError = true;
     throw err;
   }
-  const nextJob = { ...job, baseBranch };
+  const baseBranch = existing || metadata.baseBranch;
+  const branch = existingBranch || metadata.branch;
+  if (requireBranch && !branch) {
+    const err = new Error(`Could not resolve headRefName for ${job?.repo}#${job?.prNumber}`);
+    err.isBaseBranchResolutionError = true;
+    throw err;
+  }
+  const nextJob = {
+    ...job,
+    baseBranch,
+    branch: branch || null,
+  };
   if (jobPath) {
     writeFollowUpJob(jobPath, nextJob);
   }
-  return { job: nextJob, baseBranch, hydrated: true };
+  return { job: nextJob, baseBranch, branch, hydrated: true };
+}
+
+async function ensureJobBaseBranch({
+  job,
+  jobPath,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const resolved = await ensureJobBranchMetadata({
+    job,
+    jobPath,
+    requireBranch: false,
+    execFileImpl,
+  });
+  return { job: resolved.job, baseBranch: resolved.baseBranch, hydrated: resolved.hydrated };
 }
 
 function requireJobBaseBranch(job) {
@@ -424,11 +476,11 @@ function parseHqDispatchStatus(stdout) {
   };
 }
 
-function parseHqWorkerInfo(stdout) {
-  const payload = parseHqJsonObject(stdout, 'hq worker info');
+function parseHqDispatchWorkspaceStatus(stdout) {
+  const payload = parseHqDispatchStatus(stdout);
   const workspaceDir = parseHqWorkerWorkspaceFromPayload(payload);
   if (!workspaceDir) {
-    throw new Error('hq worker info payload missing workspaceDir/workspacePath/worktreePath');
+    throw new Error('hq dispatch status payload missing workspaceDir/workspacePath/worktreePath');
   }
   return {
     ...payload,
@@ -445,16 +497,16 @@ async function resolveHqWorkerWorkspace({
   if (persistedWorkspaceDir && existsSync(join(persistedWorkspaceDir, '.git'))) {
     return persistedWorkspaceDir;
   }
-  const launchRequestId = String(worker?.launchRequestId || '').trim();
+  const dispatchId = String(worker?.dispatchId || '').trim();
   const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
-  if (!launchRequestId || !hqRoot) {
+  if (!dispatchId || !hqRoot) {
     return null;
   }
   const hqBin = resolveHqBin(env);
   const { stdout } = await execFileImpl(hqBin, [
-    'worker',
-    'info',
-    launchRequestId,
+    'dispatch',
+    'status',
+    dispatchId,
     '--root',
     hqRoot,
   ], {
@@ -464,7 +516,7 @@ async function resolveHqWorkerWorkspace({
     },
     maxBuffer: 5 * 1024 * 1024,
   });
-  return parseHqWorkerInfo(stdout).workspaceDir;
+  return parseHqDispatchWorkspaceStatus(stdout).workspaceDir;
 }
 
 function isHqCancelRetryable(err) {
@@ -1237,15 +1289,14 @@ async function dispatchRemediationViaHq({
     maxBuffer: 5 * 1024 * 1024,
   });
   const ticket = parseHqDispatchTicket(stdout);
-  const workspaceDir = parseHqWorkerWorkspaceFromPayload(ticket)
-    || await resolveHqWorkerWorkspace({
-      worker: {
-        launchRequestId: ticket.launchRequestId,
-        hqRoot,
-      },
-      execFileImpl,
-      env,
-    });
+  const workspaceDir = await resolveHqWorkerWorkspace({
+    worker: {
+      dispatchId: ticket.dispatchId,
+      hqRoot,
+    },
+    execFileImpl,
+    env,
+  });
   return {
     model: workerClass,
     workerClass,
@@ -3363,7 +3414,7 @@ async function reconcileFollowUpJob({
               execFileImpl,
             }) || paths.workspaceDir;
           } catch (err) {
-            const contaminationAudit = { suspect: [], error: `hq worker info failed: ${err.message}` };
+            const contaminationAudit = { suspect: [], error: `hq dispatch status failed: ${err.message}` };
             rereview = buildRereviewResult({
               requested: false,
               reason: null,
@@ -4061,12 +4112,14 @@ async function consumeNextFollowUpJob({
 
   try {
     workerClass = pickRemediationWorkerClass(claimed.job);
-    const baseReadyJob = await ensureJobBaseBranch({
+    const hqDispatchEnabled = shouldDispatchRemediationViaHq(process.env);
+    const branchReadyJob = await ensureJobBranchMetadata({
       job: claimed.job,
       jobPath: claimed.jobPath,
+      requireBranch: hqDispatchEnabled,
       execFileImpl,
     });
-    claimed.job = baseReadyJob.job;
+    claimed.job = branchReadyJob.job;
 
     // Round-budget check first (cheap, short-circuits before any
     // OAuth/work). The pr-merge-orchestration spec's risk-tiered
@@ -4126,7 +4179,6 @@ async function consumeNextFollowUpJob({
     // The runbook contract is that launch-preparation failures become
     // terminal queue state, not orphaned in_progress claims.
     await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
-    const hqDispatchEnabled = shouldDispatchRemediationViaHq(process.env);
     const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: process.env });
     const artifactWorkspaceDir = join(workspaceRootDir, claimed.job.jobId);
     let workspaceDir = artifactWorkspaceDir;

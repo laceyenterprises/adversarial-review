@@ -1587,6 +1587,7 @@ async function waitForActiveReviewerFencesOnSigterm({
 } = {}) {
   const deadlineMs = Date.now() + (graceSeconds * 1000);
   const remaining = new Map();
+  let sawStaleFence = false;
   for (const jsonPath of listFenceJsonPaths(stateDir)) {
     const record = readFenceRecord(jsonPath);
     if (!activeSpawnMap.has(record.spawnToken)) continue;
@@ -1623,10 +1624,9 @@ async function waitForActiveReviewerFencesOnSigterm({
           identity: record.identity,
           openedAt: record.openedAt,
         });
-        return {
-          status: 'stale',
-          outstanding: Array.from(remaining.values()),
-        };
+        sawStaleFence = true;
+        remaining.delete(spawnToken);
+        continue;
       }
     }
     if (remaining.size === 0) break;
@@ -1656,7 +1656,7 @@ async function waitForActiveReviewerFencesOnSigterm({
     }
     await sleepImpl(250);
   }
-  return { status: 'cleared', outstanding: [] };
+  return { status: sawStaleFence ? 'stale' : 'cleared', outstanding: [] };
 }
 
 function exitAfterReviewerCleanup({
@@ -2131,10 +2131,10 @@ async function spawnReviewer({
     reviewerSessionUuid,
     spawnedAt: new Date().toISOString(),
   };
-  activeReviewerSpawns.set(reviewerSpawnToken, spawnRecord);
-  upsertSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, spawnRecord);
-  inFlightReviewerSessions.add(reviewerSessionUuid);
   try {
+    activeReviewerSpawns.set(reviewerSpawnToken, spawnRecord);
+    upsertSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, spawnRecord);
+    inFlightReviewerSessions.add(reviewerSessionUuid);
     const startedAt = new Date().toISOString();
     beginReviewerPass(ROOT, {
       repo,

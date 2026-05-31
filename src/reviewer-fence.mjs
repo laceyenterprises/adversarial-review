@@ -65,6 +65,10 @@ function resolveFencePaths(stateDir, spawnToken) {
   };
 }
 
+function normalizeFenceSpawnToken(spawnToken) {
+  return spawnToken == null || spawnToken === '' ? randomUUID() : String(spawnToken);
+}
+
 function resolveCleanupQueueDir(stateDir) {
   const dirPath = join(ensureReviewerFenceDir(stateDir), CLEANUP_QUEUE_DIRNAME);
   mkdirSync(dirPath, { recursive: true, mode: 0o700 });
@@ -271,6 +275,7 @@ function openReviewerFence({
   openedAt = new Date().toISOString(),
   auditEventWriter = appendFenceAuditEvent,
 } = {}) {
+  spawnToken = normalizeFenceSpawnToken(spawnToken);
   const { jsonPath, lockPath } = resolveFencePaths(stateDir, spawnToken);
   const expectedClearBy = new Date(Date.parse(openedAt) + (graceSeconds * 1000)).toISOString();
   const lockFd = openSync(lockPath, 'w', 0o600);
@@ -300,6 +305,18 @@ function openReviewerFence({
       expectedClearBy,
     });
   } catch (err) {
+    try {
+      auditEventWriter(stateDir, {
+        event: 'fence_open_rolled_back',
+        spawnToken,
+        repo,
+        pr,
+        identity,
+        openedAt,
+        expectedClearBy,
+        error: err?.message || String(err),
+      });
+    } catch {}
     try {
       flockSync(lockFd, LOCK_UN);
     } catch {}
@@ -418,7 +435,7 @@ function moveFenceArtifactToQuarantine(stateDir, filePath, {
 } = {}) {
   const targetPath = join(
     resolveFenceQuarantineDir(stateDir),
-    `${prefix}-${now}-${basename(filePath)}`,
+    `${prefix}-${now}-${randomUUID()}-${basename(filePath)}`,
   );
   renameSync(filePath, targetPath);
   return targetPath;

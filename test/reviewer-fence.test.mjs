@@ -155,6 +155,53 @@ test('openReviewerFence rolls back lock file when audit write fails after flock'
   }
 });
 
+test('openReviewerFence normalizes missing spawn tokens instead of writing null artifacts', () => {
+  const rootDir = makeRootDir('reviewer-fence-null-token-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const fence = openReviewerFence({
+      stateDir,
+      spawnToken: null,
+      repo: 'laceyenterprises/adversarial-review',
+      pr: 177,
+      identity: 'claude-reviewer-lacey',
+    });
+    assert.notEqual(fence.record.spawnToken, 'null');
+    assert.notEqual(fence.record.spawnToken, '');
+    assert.equal(existsSync(path.join(stateDir, 'reviewer-fences', 'null.json')), false);
+    assert.equal(existsSync(path.join(stateDir, 'reviewer-fences', 'null.lock')), false);
+    fence.clear();
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('openReviewerFence emits rollback audit event when fence_open persistence fails', () => {
+  const rootDir = makeRootDir('reviewer-fence-open-rollback-audit-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const events = [];
+    assert.throws(
+      () => openReviewerFence({
+        stateDir,
+        spawnToken: '24242424-2424-4242-8242-242424242424',
+        repo: 'laceyenterprises/adversarial-review',
+        pr: 177,
+        identity: 'claude-reviewer-lacey',
+        auditEventWriter: (_stateDir, event) => {
+          events.push(event);
+          if (event.event === 'fence_open') throw new Error('audit-fsync-failed');
+        },
+      }),
+      /audit-fsync-failed/,
+    );
+    assert.deepEqual(events.map((event) => event.event), ['fence_open', 'fence_open_rolled_back']);
+    assert.equal(events[1].error, 'audit-fsync-failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('fs-ext flock integration: EX-held lock blocks SH|NB in another process and SH|NB succeeds after exit', async () => {
   const rootDir = makeRootDir('reviewer-fence-flock-');
   try {
@@ -298,6 +345,57 @@ test('watcher SIGTERM fence wait treats wall-clock openedAt as stale', async () 
     });
     assert.equal(result.status, 'stale');
     assert.equal(listCleanupJobs(stateDir).length, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('watcher SIGTERM stale fence cleanup does not forfeit grace for healthy fences', async () => {
+  const rootDir = makeRootDir('watcher-fence-stale-and-healthy-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    openReviewerFence({
+      stateDir,
+      spawnToken: '56565656-5656-4565-8565-565656565656',
+      repo: 'laceyenterprises/adversarial-review',
+      pr: 199,
+      identity: 'claude-reviewer-lacey',
+      openedAt: '2026-05-30T00:00:00.000Z',
+    });
+    const healthyFence = openReviewerFence({
+      stateDir,
+      spawnToken: '57575757-5757-4575-8575-575757575757',
+      repo: 'laceyenterprises/adversarial-review',
+      pr: 200,
+      identity: 'claude-reviewer-lacey',
+    });
+    const activeSpawnMap = new Map([
+      [
+        '56565656-5656-4565-8565-565656565656',
+        {
+          spawnToken: '56565656-5656-4565-8565-565656565656',
+          repo: 'laceyenterprises/adversarial-review',
+          pr: 199,
+          identity: 'claude-reviewer-lacey',
+          botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+        },
+      ],
+      [
+        healthyFence.record.spawnToken,
+        { ...healthyFence.record, botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
+      ],
+    ]);
+    setTimeout(() => healthyFence.clear(), 100);
+    const result = await waitForActiveReviewerFencesOnSigterm({
+      stateDir,
+      graceSeconds: 1,
+      staleTtlSeconds: 90,
+      activeSpawnMap,
+    });
+    assert.equal(result.status, 'stale');
+    const cleanupJobs = listCleanupJobs(stateDir);
+    assert.equal(cleanupJobs.length, 1);
+    assert.equal(JSON.parse(readFileSync(cleanupJobs[0], 'utf8')).pr, 199);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -483,13 +581,13 @@ test('processQueuedFenceCleanupJobs drains queued cleanup jobs', async () => {
       sleepImpl: async () => {},
     });
     const calls = [];
-    await processQueuedFenceCleanupJobs({
+    await withEnv({ GH_CLAUDE_REVIEWER_TOKEN: 'token' }, () => processQueuedFenceCleanupJobs({
       stateDir,
       clearPendingReviewsImpl: async (args) => {
         calls.push(args);
         return { cleared: 1 };
       },
-    });
+    }));
     assert.equal(calls.length, 1);
     assert.equal(calls[0].repo, 'laceyenterprises/adversarial-review');
     assert.equal(listCleanupJobs(stateDir).length, 0);

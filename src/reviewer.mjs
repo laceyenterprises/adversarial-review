@@ -1054,14 +1054,24 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   });
 
   const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, opts.env || process.env);
-  const reviewerFence = openReviewerFence({
-    stateDir,
-    spawnToken: opts.reviewerSpawnToken,
-    repo,
-    pr: prNumber,
-    identity: opts.reviewerIdentity,
-    graceSeconds: resolveSigtermFenceGraceSeconds(opts.env || process.env),
-  });
+  let reviewerFence = null;
+  try {
+    reviewerFence = openReviewerFence({
+      stateDir,
+      spawnToken: opts.reviewerSpawnToken,
+      repo,
+      pr: prNumber,
+      identity: opts.reviewerIdentity,
+      graceSeconds: resolveSigtermFenceGraceSeconds(opts.env || process.env),
+    });
+  } catch (err) {
+    if (err?.code === 'EWOULDBLOCK' || err?.code === 'EAGAIN') {
+      throw err;
+    }
+    (opts.log || console).warn?.(
+      `[reviewer] reviewer fence unavailable; posting review without fence: ${err?.message || err}`
+    );
+  }
   try {
     await execFileImpl(
       'gh',
@@ -1072,7 +1082,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
       }
     );
   } finally {
-    reviewerFence.clear();
+    reviewerFence?.clear();
   }
 }
 

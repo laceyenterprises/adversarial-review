@@ -4,10 +4,13 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { __test__ as reviewerTest } from '../src/reviewer.mjs';
 import {
+  clearReviewerFence,
   DEFAULT_SIGTERM_FENCE_GRACE_SECONDS,
   EXIT_TIMEOUT_SAFETY_SECONDS,
+  inspectWatcherExitTimeout,
   listCleanupJobs,
   openReviewerFence,
   parseExitTimeOutFromPlist,
@@ -25,6 +28,7 @@ import {
 } from '../src/watcher.mjs';
 
 const { postGitHubReview } = reviewerTest;
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 function makeRootDir(prefix) {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -204,6 +208,38 @@ test('watcher SIGTERM fence wait queues cleanup after grace expires', async () =
   }
 });
 
+test('watcher SIGTERM preserve mode emits audit without queueing cleanup after grace expires', async () => {
+  const rootDir = makeRootDir('watcher-fence-preserve-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const fence = openReviewerFence({
+      stateDir,
+      spawnToken: '44444444-4444-4444-8444-555555555555',
+      repo: 'laceyenterprises/adversarial-review',
+      pr: 189,
+      identity: 'codex-reviewer-lacey',
+    });
+    const activeSpawnMap = new Map([[
+      fence.record.spawnToken,
+      { ...fence.record, repo: 'laceyenterprises/adversarial-review', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
+    ]]);
+    const result = await waitForActiveReviewerFencesOnSigterm({
+      stateDir,
+      graceSeconds: 1,
+      staleTtlSeconds: 90,
+      activeSpawnMap,
+      queueCleanupOnGraceExpiry: false,
+      sleepImpl: async () => {},
+    });
+    assert.equal(result.status, 'grace-exceeded');
+    assert.equal(listCleanupJobs(stateDir).length, 0);
+    assert.equal(readFenceDirAuditEvents(stateDir).at(-1)?.cleanupQueued, false);
+    fence.clear();
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('watcher SIGTERM fence wait treats wall-clock openedAt as stale', async () => {
   const rootDir = makeRootDir('watcher-fence-stale-');
   try {
@@ -283,7 +319,39 @@ test('startup orphan sweep reaps flock-free fences and skips flock-held fences',
     assert.equal(existsSync(freeJson), false);
     assert.equal(probeFenceLock(resolveFencePaths(stateDir, heldFence.record.spawnToken).lockPath).status, 'held');
     assert.equal(listCleanupJobs(stateDir).length, 1);
+    assert.equal(readFenceDirAuditEvents(stateDir).length > 0, true);
     heldFence.clear();
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('removing fence json before unlock prevents concurrent sweep from queueing cleanup', async () => {
+  const rootDir = makeRootDir('watcher-fence-clear-order-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const fence = openReviewerFence({
+      stateDir,
+      spawnToken: '67676767-6767-4767-8767-676767676767',
+      repo: 'laceyenterprises/adversarial-review',
+      pr: 214,
+      identity: 'claude-reviewer-lacey',
+    });
+    const { jsonPath } = resolveFencePaths(stateDir, fence.record.spawnToken);
+    rmSync(jsonPath, { force: true });
+    const orphaned = await sweepReviewerFencesOnStartup({
+      stateDir,
+      staleTtlSeconds: 90,
+      activeSpawnMap: new Map(),
+    });
+    assert.equal(orphaned, 0);
+    assert.equal(listCleanupJobs(stateDir).length, 0);
+    clearReviewerFence({
+      stateDir,
+      spawnToken: fence.record.spawnToken,
+      lockFd: fence.lockFd,
+      record: fence.record,
+    });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -365,8 +433,17 @@ test('watcher startup plist validation rejects ExitTimeOut below grace + 15', ()
   }
 });
 
+test('watcher startup plist inspection warns instead of hard-failing when plist path is unavailable', () => {
+  const result = inspectWatcherExitTimeout({
+    ADVERSARIAL_REVIEW_SIGTERM_FENCE_GRACE_SECONDS: '30',
+    ADVERSARIAL_REVIEW_FENCE_STALE_TTL_SECONDS: '90',
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.warning, /cannot self-validate ExitTimeOut/);
+});
+
 test('shipped watcher plist ExitTimeOut covers default grace + safety margin', () => {
-  const plistPath = path.join(process.cwd(), 'launchd', 'ai.laceyenterprises.adversarial-watcher.airlock.plist');
+  const plistPath = path.join(TEST_DIR, '..', 'launchd', 'ai.laceyenterprises.adversarial-watcher.airlock.plist');
   const exitTimeout = parseExitTimeOutFromPlist(readFileSync(plistPath, 'utf8'));
   const grace = validateFenceConfig({}).graceSeconds;
   assert.equal(exitTimeout >= Math.max(45, grace + EXIT_TIMEOUT_SAFETY_SECONDS), true);

@@ -152,23 +152,53 @@ function resolveWatcherPlistPath(env = process.env) {
 function validateWatcherExitTimeout(env = process.env, {
   readFileImpl = readFileSync,
 } = {}) {
+  const result = inspectWatcherExitTimeout(env, { readFileImpl });
+  if (!result.ok) {
+    const err = new Error(result.warning);
+    err.logKey = 'plist_exit_timeout_below_grace';
+    throw err;
+  }
+  return result;
+}
+
+function inspectWatcherExitTimeout(env = process.env, {
+  readFileImpl = readFileSync,
+} = {}) {
   const { graceSeconds } = validateFenceConfig(env);
   const requiredExitTimeoutSeconds = graceSeconds + EXIT_TIMEOUT_SAFETY_SECONDS;
   const plistPath = resolveWatcherPlistPath(env);
   if (!plistPath) {
-    const err = new Error('ADVERSARIAL_REVIEW_WATCHER_PLIST_PATH is required for ExitTimeOut validation');
-    err.logKey = 'plist_exit_timeout_below_grace';
-    throw err;
+    return {
+      ok: false,
+      plistPath: null,
+      exitTimeoutSeconds: null,
+      requiredExitTimeoutSeconds,
+      warning: 'ADVERSARIAL_REVIEW_WATCHER_PLIST_PATH is unset; watcher will continue but cannot self-validate ExitTimeOut',
+    };
   }
-  const exitTimeoutSeconds = parseExitTimeOutFromPlist(readFileImpl(plistPath, 'utf8'));
+  let exitTimeoutSeconds = null;
+  try {
+    exitTimeoutSeconds = parseExitTimeOutFromPlist(readFileImpl(plistPath, 'utf8'));
+  } catch (err) {
+    return {
+      ok: false,
+      plistPath,
+      exitTimeoutSeconds: null,
+      requiredExitTimeoutSeconds,
+      warning: `Failed to read ${plistPath} for ExitTimeOut validation: ${err?.message || err}`,
+    };
+  }
   if (!Number.isInteger(exitTimeoutSeconds) || exitTimeoutSeconds < requiredExitTimeoutSeconds) {
-    const err = new Error(
-      `ExitTimeOut=${exitTimeoutSeconds ?? 'missing'} in ${plistPath} must be >= ${requiredExitTimeoutSeconds}`
-    );
-    err.logKey = 'plist_exit_timeout_below_grace';
-    throw err;
+    return {
+      ok: false,
+      plistPath,
+      exitTimeoutSeconds,
+      requiredExitTimeoutSeconds,
+      warning: `ExitTimeOut=${exitTimeoutSeconds ?? 'missing'} in ${plistPath} should be >= ${requiredExitTimeoutSeconds}`,
+    };
   }
   return {
+    ok: true,
     plistPath,
     exitTimeoutSeconds,
     requiredExitTimeoutSeconds,
@@ -274,6 +304,7 @@ function clearReviewerFence({
   auditEventWriter = appendFenceAuditEvent,
 } = {}) {
   const { jsonPath, lockPath } = resolveFencePaths(stateDir, spawnToken);
+  rmSync(jsonPath, { force: true });
   try {
     if (Number.isInteger(lockFd)) {
       flockSync(lockFd, LOCK_UN);
@@ -282,7 +313,6 @@ function clearReviewerFence({
   try {
     if (Number.isInteger(lockFd)) closeSync(lockFd);
   } catch {}
-  rmSync(jsonPath, { force: true });
   rmSync(lockPath, { force: true });
   auditEventWriter(stateDir, {
     event: 'fence_clear',
@@ -319,9 +349,6 @@ function isFenceStale(record, staleTtlSeconds, now = Date.now()) {
 }
 
 function probeFenceLock(lockPath) {
-  if (!existsSync(lockPath)) {
-    return { status: 'inconclusive', reason: 'lock-missing' };
-  }
   let fd = null;
   try {
     fd = openSync(lockPath, 'r');
@@ -329,6 +356,9 @@ function probeFenceLock(lockPath) {
     flockSync(fd, LOCK_UN);
     return { status: 'free' };
   } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { status: 'inconclusive', reason: 'lock-missing' };
+    }
     if (err?.code === 'EWOULDBLOCK' || err?.code === 'EAGAIN') {
       return { status: 'held', error: err };
     }
@@ -448,6 +478,7 @@ export {
   deleteSpawnRecord,
   ensureReviewerFenceDir,
   fenceAgeSeconds,
+  inspectWatcherExitTimeout,
   isFenceStale,
   listCleanupJobs,
   listFenceJsonPaths,

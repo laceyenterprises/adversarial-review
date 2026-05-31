@@ -51,6 +51,59 @@ Invalid non-empty override values are configuration errors. The runtime must
 not silently fall back from an invalid value because that can route work to an
 expensive, unavailable, or intentionally locked-out agent.
 
+## SIGTERM Fence Contract
+
+When `ADVERSARIAL_REVIEW_SIGTERM_FENCE` is not `off`, reviewer subprocesses
+serialize the review-post critical section with a fence under
+`<stateDir>/reviewer-fences/`, where `stateDir` resolves from
+`ADVERSARIAL_REVIEW_STATE_DIR` or the repo-local `data/` root. Each active
+reviewer fence uses:
+
+- `<spawnToken>.json` for the durable reviewer metadata (`repo`, `pr`,
+  `identity`, `openedAt`, `expectedClearBy`)
+- `<spawnToken>.lock` for the live `flock` guard
+- `spawn-records.json` for restart-time identity/token lookup
+- `cleanup-jobs/*.json` for deferred pending-review cleanup work
+- `audit/*.jsonl` for append-only fence lifecycle events
+
+Fence cleanup order is load-bearing: the reviewer deletes the JSON sidecar
+before unlocking the flocked lock file, then closes and removes the lock file.
+That ordering makes a concurrent startup sweep or SIGTERM probe observe either
+"no fence" or "still held", never a transient free-lock orphan on a clean exit.
+
+Watcher startup runs this sequence before orphan-review reconciliation:
+
+1. `processQueuedFenceCleanupJobs()`
+2. `sweepReviewerFencesOnStartup()`
+3. `processQueuedFenceCleanupJobs()`
+4. `reconcileOrphanedReviewing()`
+
+`classifyFenceOrphan()` currently applies these rules:
+
+- `flock-held` is not an orphan.
+- `flock-free` is an orphan and queues cleanup.
+- Unknown tokens are orphaned immediately as `token-unknown`.
+- Known tokens whose wall-clock age exceeds
+  `ADVERSARIAL_REVIEW_FENCE_STALE_TTL_SECONDS` are orphaned as
+  `wall-clock-stale`.
+- Missing or inconclusive locks on known, non-stale tokens are orphaned as
+  `fence_lock_missing_with_json` or `lock-inconclusive-known-token`.
+
+The SIGTERM grace path waits up to
+`ADVERSARIAL_REVIEW_SIGTERM_FENCE_GRACE_SECONDS` for active fences to clear.
+If `shouldPreserveReviewersOnSigterm()` says the reviewer subprocesses should
+survive the watcher bounce, grace expiry emits `fence_grace_exceeded` audit
+events but does not queue cleanup jobs; only truly stale fences queue cleanup
+in preserve mode. Non-preserve shutdown paths may queue cleanup on grace
+expiry.
+
+`ADVERSARIAL_REVIEW_WATCHER_PLIST_PATH` points at the watcher LaunchAgent plist
+for startup self-checks. The watcher warns, rather than refusing to start, when
+the plist path is unavailable or its `ExitTimeOut` is below
+`ADVERSARIAL_REVIEW_SIGTERM_FENCE_GRACE_SECONDS + 15`. Operators should still
+set `ExitTimeOut >= 45`, and at minimum `grace + 15`, so launchd gives the
+watcher enough time to wait for fence release on SIGTERM.
+
 ## First-Pass Reviewer Pool And Memory Admission
 
 The watcher may dispatch first-pass reviewers through a bounded global pool

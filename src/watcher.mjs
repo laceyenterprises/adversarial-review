@@ -124,6 +124,7 @@ import {
   classifyFenceOrphan,
   deleteCleanupJob,
   deleteSpawnRecord,
+  inspectWatcherExitTimeout,
   isFenceStale,
   listCleanupJobs,
   listFenceJsonPaths,
@@ -137,7 +138,6 @@ import {
   resolveSigtermFenceGraceSeconds,
   upsertSpawnRecord,
   validateFenceConfig,
-  validateWatcherExitTimeout,
 } from './reviewer-fence.mjs';
 import {
   compareReviewerDispatchCandidates,
@@ -1383,13 +1383,13 @@ async function cancelInFlightReviewerRuntimeSessions(reason) {
   }));
 }
 
-function emitFenceAuditEvent(event) {
+function emitFenceAuditEvent(stateDir = ADVERSARIAL_REVIEW_STATE_DIR, event) {
   const payload = {
     schemaVersion: 1,
     ...event,
   };
   console.log(JSON.stringify(payload));
-  appendFenceAuditEvent(ADVERSARIAL_REVIEW_STATE_DIR, payload);
+  appendFenceAuditEvent(stateDir, payload);
 }
 
 async function processQueuedFenceCleanupJobs({
@@ -1402,15 +1402,21 @@ async function processQueuedFenceCleanupJobs({
     const job = JSON.parse(readFileSync(jobPath, 'utf8'));
     const tokenEnv = job.botTokenEnv || resolveBotTokenEnvForIdentity(job.identity);
     try {
+      if (!tokenEnv) {
+        throw new Error(`Unknown reviewer identity ${JSON.stringify(job.identity)}; cannot resolve bot token env`);
+      }
+      if (!process.env[tokenEnv]) {
+        throw new Error(`Missing ${tokenEnv}; cleanup job retained for retry`);
+      }
       await clearPendingReviewsImpl({
         repo: job.repo,
         prNumber: job.pr,
-        token: tokenEnv ? process.env[tokenEnv] : null,
+        token: process.env[tokenEnv],
         log,
       });
       deleteCleanupJob(jobPath);
       processed += 1;
-      emitFenceAuditEvent({
+      emitFenceAuditEvent(stateDir, {
         event: 'fence_cleanup_processed',
         spawnToken: job.spawnToken || null,
         repo: job.repo,
@@ -1418,7 +1424,7 @@ async function processQueuedFenceCleanupJobs({
         identity: job.identity || null,
       });
     } catch (err) {
-      emitFenceAuditEvent({
+      emitFenceAuditEvent(stateDir, {
         event: 'fence_cleanup_failed',
         spawnToken: job.spawnToken || null,
         repo: job.repo,
@@ -1472,7 +1478,7 @@ async function sweepReviewerFencesOnStartup({
     }
 
     if (lockProbe.reason === 'lock-missing') {
-      emitFenceAuditEvent({
+      emitFenceAuditEvent(stateDir, {
         event: 'fence_lock_missing_with_json',
         spawnToken: record.spawnToken,
         pr: record.pr,
@@ -1492,7 +1498,7 @@ async function sweepReviewerFencesOnStartup({
     rmSync(lockPath, { force: true });
     delete persistedSpawnRecords[record.spawnToken];
     orphaned += 1;
-    emitFenceAuditEvent({
+    emitFenceAuditEvent(stateDir, {
       event: 'fence_orphan_reaped',
       spawnToken: record.spawnToken,
       pr: record.pr,
@@ -1516,6 +1522,7 @@ async function waitForActiveReviewerFencesOnSigterm({
   graceSeconds = resolveSigtermFenceGraceSeconds(process.env),
   staleTtlSeconds = validateFenceConfig(process.env).staleTtlSeconds,
   activeSpawnMap = activeReviewerSpawns,
+  queueCleanupOnGraceExpiry = true,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const deadlineMs = Date.now() + (graceSeconds * 1000);
@@ -1548,7 +1555,7 @@ async function waitForActiveReviewerFencesOnSigterm({
           botTokenEnv: record.botTokenEnv,
           reason: 'fence_stuck_open',
         });
-        emitFenceAuditEvent({
+        emitFenceAuditEvent(stateDir, {
           event: 'fence_stuck_open',
           spawnToken,
           repo: record.repo,
@@ -1565,18 +1572,21 @@ async function waitForActiveReviewerFencesOnSigterm({
     if (remaining.size === 0) break;
     if (Date.now() >= deadlineMs) {
       for (const record of remaining.values()) {
-        queueFenceCleanupFromRecord(record, {
-          stateDir,
-          botTokenEnv: record.botTokenEnv,
-          reason: 'fence_grace_exceeded',
-        });
-        emitFenceAuditEvent({
+        if (queueCleanupOnGraceExpiry) {
+          queueFenceCleanupFromRecord(record, {
+            stateDir,
+            botTokenEnv: record.botTokenEnv,
+            reason: 'fence_grace_exceeded',
+          });
+        }
+        emitFenceAuditEvent(stateDir, {
           event: 'fence_grace_exceeded',
           spawnToken: record.spawnToken,
           repo: record.repo,
           pr: record.pr,
           identity: record.identity,
           openedAt: record.openedAt,
+          cleanupQueued: queueCleanupOnGraceExpiry,
         });
       }
       return {
@@ -1698,7 +1708,12 @@ process.on('SIGTERM', () => {
   const message = preserveInFlightReviewers
     ? `SIGTERM received${drainState?.active ? ` during active drain (reason=${drainState?.reason || 'unknown'})` : ''}; preserving in-flight reviewer subprocesses for the next watcher to reattach`
     : 'SIGTERM received; cancelling active reviewer runtime sessions before exit';
-  void waitForActiveReviewerFencesOnSigterm()
+  // Preserve-mode means the reviewer is expected to survive the watcher exit.
+  // A grace timeout therefore emits audit only; cleanup is reserved for truly
+  // stale fences or non-preserve shutdown paths.
+  void waitForActiveReviewerFencesOnSigterm({
+    queueCleanupOnGraceExpiry: !preserveInFlightReviewers,
+  })
     .catch((err) => {
       console.error('[watcher] fence wait failed during SIGTERM:', err?.message || err);
       return { status: 'fence-wait-error', outstanding: [] };
@@ -4340,7 +4355,12 @@ async function main() {
     validateStartupMergeAgentConfig(process.env);
     resolvePendingDraftRespawnAgeSeconds(process.env);
     validateFenceConfig(process.env);
-    validateWatcherExitTimeout(process.env);
+    if (resolveSigtermFenceMode(process.env) !== 'off') {
+      const exitTimeoutCheck = inspectWatcherExitTimeout(process.env);
+      if (!exitTimeoutCheck.ok) {
+        console.error(`[watcher] WARN config key=plist_exit_timeout_below_grace: ${exitTimeoutCheck.warning}`);
+      }
+    }
   } catch (err) {
     console.error(
       `[watcher] FATAL config${err?.logKey ? ` key=${err.logKey}` : ''}: ${err?.message || err}`

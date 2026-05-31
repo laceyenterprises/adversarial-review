@@ -168,6 +168,35 @@ async function withHqRootEnv(hqRoot, run) {
   }
 }
 
+async function withHqDispatchEnv(workDir, run) {
+  const hqRoot = path.join(workDir, 'agent-os-hq');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
+    ownerUser: process.env.USER || process.env.LOGNAME || 'unknown',
+  }), 'utf8');
+
+  const previous = {
+    ADV_WITH_HQ_INTEGRATION: process.env.ADV_WITH_HQ_INTEGRATION,
+    HQ_ROOT: process.env.HQ_ROOT,
+    HQ_PARENT_SESSION: process.env.HQ_PARENT_SESSION,
+    HQ_PROJECT: process.env.HQ_PROJECT,
+  };
+
+  process.env.ADV_WITH_HQ_INTEGRATION = '1';
+  process.env.HQ_ROOT = hqRoot;
+  process.env.HQ_PARENT_SESSION = 'sess_parent_123';
+  process.env.HQ_PROJECT = 'adversarial-review';
+
+  try {
+    return await run(hqRoot);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 function writeValidReply(replyPath, job, overrides = {}) {
   writeFileSync(replyPath, `${JSON.stringify({
     kind: 'adversarial-review-remediation-reply',
@@ -2855,6 +2884,321 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
     for (const k of Object.keys(prev)) {
       if (prev[k] === undefined) delete process.env[k];
       else process.env[k] = prev[k];
+    }
+  }
+});
+
+test('consumeNextFollowUpJob dispatches remediation through hq branch-push when the flag is on', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const codexHome = path.join(rootDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(authPath, JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { access_token: 'a', refresh_token: 'b' },
+  }), 'utf8');
+
+  const previous = {
+    HOME: process.env.HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH,
+    CODEX_CLI_PATH: process.env.CODEX_CLI_PATH,
+  };
+  process.env.HOME = rootDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+  process.env.CODEX_CLI_PATH = 'codex';
+
+  try {
+    await withHqDispatchEnv(rootDir, async (hqRoot) => {
+      createFollowUpJob({
+        rootDir,
+        repo: 'laceyenterprises/clio',
+        prNumber: 71,
+        reviewerModel: 'claude',
+        linearTicketId: 'LAC-271',
+        reviewBody: '## Summary\nFix the worker-pool dispatch path.\n\n## Verdict\nRequest changes',
+        reviewPostedAt: '2026-04-21T08:00:00.000Z',
+        critical: true,
+      });
+
+      const commands = [];
+      const result = await consumeNextFollowUpJob({
+        rootDir,
+        promptTemplate: 'You are a remediation worker.',
+        now: () => '2026-04-21T10:00:00.000Z',
+        execFileImpl: async (command, args) => {
+          commands.push([command, ...args]);
+          if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+            return { stdout: JSON.stringify({ baseRefName: 'main' }), stderr: '' };
+          }
+          if (command === 'hq' && args[0] === 'dispatch') {
+            return { stdout: JSON.stringify({ launchRequestId: 'lrq_arp04_dispatch', dispatchId: 'dispatch_arp04_dispatch' }), stderr: '' };
+          }
+          return { stdout: '', stderr: '' };
+        },
+        spawnImpl: () => {
+          throw new Error('legacy spawn path should not run when HQ dispatch is enabled');
+        },
+      });
+
+      assert.equal(result.consumed, true);
+      assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
+      assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_arp04_dispatch');
+      assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
+      const dispatchCall = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch');
+      assert.ok(dispatchCall);
+      assert.deepEqual(dispatchCall.slice(0, 14), [
+        'hq', 'dispatch',
+        '--ticket', result.job.jobId,
+        '--worker-class', result.job.remediationWorker.model,
+        '--task-kind', 'coding',
+        '--repo', 'clio',
+        '--pr', '71',
+        '--prompt', path.join(rootDir, result.job.remediationWorker.promptPath),
+      ]);
+      assert.ok(dispatchCall.includes('--completion-shape'));
+      assert.ok(dispatchCall.includes('branch-push'));
+      assert.ok(dispatchCall.includes('--parent-session'));
+      assert.ok(dispatchCall.includes('sess_parent_123'));
+      assert.ok(dispatchCall.includes('--project'));
+      assert.ok(dispatchCall.includes('adversarial-review'));
+      assert.ok(dispatchCall.includes('--root'));
+      assert.ok(dispatchCall.includes(hqRoot));
+      const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
+      assert.match(prompt, /WORKER_CLASS=codex-remediation/);
+      assert.match(prompt, /Worker-Class:/);
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon bounce and then completes from the worker-pool reply', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 72, linearTicketId: 'LAC-272' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, { hqRoot });
+  const promptPath = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_arp04_recovery',
+      dispatchId: 'dispatch_arp04_recovery',
+      hqRoot,
+      promptPath,
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  await withHqRootEnv(hqRoot, async () => {
+    const active = await reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:10:00.000Z',
+      execFileImpl: async (command, args) => {
+        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'running', health: 'healthy' }), stderr: '' };
+        }
+        throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+      },
+    });
+    assert.equal(active.action, 'active');
+    assert.equal(active.reason, 'hq-dispatch-running');
+
+    writeValidReply(replyPath, spawned.job, {
+      reReview: { requested: true, reason: 'Recovered under worker-pool leasing and pushed the remediation.' },
+    });
+    const completed = await reconcileFollowUpJob({
+      rootDir,
+      job: spawned.job,
+      jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:25:00.000Z',
+      execFileImpl: async (command, args) => {
+        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded', health: 'healthy' }), stderr: '' };
+        }
+        throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+      },
+      resolvePRLifecycleImpl: async () => null,
+      requestReviewRereviewImpl: () => ({
+        triggered: true,
+        status: 'pending',
+        reason: 'review-status-reset',
+        reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
+      }),
+      auditWorkspaceForContaminationImpl: async () => {
+        throw new Error('HQ branch-push dispatch should not run the legacy local contamination audit');
+      },
+    });
+
+    assert.equal(completed.action, 'completed');
+    assert.equal(completed.job.remediationWorker.dispatchMode, 'hq');
+    assert.equal(completed.job.reReview.requested, true);
+  });
+});
+
+test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ dispatch flag is off', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const codexHome = path.join(rootDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(authPath, JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { access_token: 'a', refresh_token: 'b' },
+  }), 'utf8');
+
+  const previous = {
+    HOME: process.env.HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH,
+    CODEX_CLI_PATH: process.env.CODEX_CLI_PATH,
+    HQ_ROOT: process.env.HQ_ROOT,
+    ADV_WITH_HQ_INTEGRATION: process.env.ADV_WITH_HQ_INTEGRATION,
+  };
+  process.env.HOME = rootDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+  process.env.CODEX_CLI_PATH = 'codex';
+  process.env.HQ_ROOT = path.join(rootDir, 'hq');
+  delete process.env.ADV_WITH_HQ_INTEGRATION;
+
+  try {
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 73,
+      reviewerModel: 'claude',
+      linearTicketId: 'LAC-273',
+      reviewBody: '## Summary\nStay on the legacy spawner.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: false,
+    });
+
+    let spawnCalls = 0;
+    const commands = [];
+    const result = await consumeNextFollowUpJob({
+      rootDir,
+      promptTemplate: 'You are a remediation worker.',
+      now: () => '2026-04-21T10:00:00.000Z',
+      execFileImpl: async (command, args) => {
+        commands.push([command, ...args]);
+        if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+          return { stdout: JSON.stringify({ baseRefName: 'main' }), stderr: '' };
+        }
+        if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+          mkdirSync(path.join(args[3], '.git'), { recursive: true });
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: '', stderr: '' };
+      },
+      spawnImpl: () => {
+        spawnCalls += 1;
+        return { pid: 7310, unref() {} };
+      },
+    });
+
+    assert.equal(result.consumed, true);
+    assert.equal(spawnCalls, 1);
+    assert.equal(result.job.remediationWorker.dispatchMode, undefined);
+    assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch'), false);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly claimed work through hq', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const codexHome = path.join(rootDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(authPath, JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { access_token: 'a', refresh_token: 'b' },
+  }), 'utf8');
+
+  const previous = {
+    HOME: process.env.HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH,
+    CODEX_CLI_PATH: process.env.CODEX_CLI_PATH,
+  };
+  process.env.HOME = rootDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+  process.env.CODEX_CLI_PATH = 'codex';
+
+  try {
+    const legacy = markActiveInProgressJob(rootDir, { prNumber: 74, processId: 8174 });
+    const samePrPending = createFollowUpJob({
+      rootDir,
+      repo: legacy.job.repo,
+      prNumber: legacy.job.prNumber,
+      reviewerModel: 'claude',
+      linearTicketId: 'LAC-274A',
+      reviewBody: '## Summary\nShould stay pending behind the legacy lane.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:02:00.000Z',
+      critical: false,
+    });
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 75,
+      reviewerModel: 'claude',
+      linearTicketId: 'LAC-275',
+      reviewBody: '## Summary\nDispatch this through hq.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:03:00.000Z',
+      critical: false,
+    });
+
+    await withHqDispatchEnv(rootDir, async () => {
+      const result = await consumeFollowUpJobsUntilCapacity({
+        rootDir,
+        maxConcurrent: 2,
+        promptTemplate: 'You are a remediation worker.',
+        now: () => '2026-04-21T10:00:00.000Z',
+        execFileImpl: async (command, args) => {
+          if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+            return { stdout: JSON.stringify({ baseRefName: 'main' }), stderr: '' };
+          }
+          if (command === 'hq' && args[0] === 'dispatch') {
+            return { stdout: JSON.stringify({ launchRequestId: 'lrq_arp04_mixed', dispatchId: 'dispatch_arp04_mixed' }), stderr: '' };
+          }
+          return { stdout: '', stderr: '' };
+        },
+        spawnImpl: () => {
+          throw new Error('mixed-mode hq lane should not use the legacy spawner for new claims');
+        },
+      });
+
+      assert.equal(result.spawned, 1);
+      assert.equal(result.deferredSamePR, 1);
+      assert.equal(result.results[0].job.prNumber, 75);
+      assert.equal(result.results[0].job.remediationWorker.dispatchMode, 'hq');
+      const samePrPendingPath = path.join(getFollowUpJobDir(rootDir, 'pending'), path.basename(samePrPending.jobPath));
+      assert.equal(existsSync(samePrPendingPath), true);
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 });

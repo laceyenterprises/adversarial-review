@@ -60,6 +60,8 @@ const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const VALID_REPLY_STORAGE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
+const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
+const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
 
 function normalizeBaseBranch(baseBranch) {
   if (typeof baseBranch !== 'string') return null;
@@ -298,6 +300,95 @@ function resolveHqRoot(env = process.env, { requireExists = false } = {}) {
 
 function shouldUseHqIntegration(env = process.env) {
   return env.ADV_WITH_HQ_INTEGRATION === '1' || Boolean(env.HQ_ROOT);
+}
+
+function shouldDispatchRemediationViaHq(env = process.env) {
+  return env.ADV_WITH_HQ_INTEGRATION === '1';
+}
+
+function currentUsername(env = process.env) {
+  return env.USER || env.LOGNAME || userInfo().username;
+}
+
+function resolveHqBin(env = process.env) {
+  const explicit = String(env.HQ_BIN || '').trim();
+  if (explicit) {
+    return explicit;
+  }
+  return 'hq';
+}
+
+function requireHqDispatchEnvValue(env, key, message) {
+  const value = String(env?.[key] || '').trim();
+  if (!value) {
+    throw new Error(message);
+  }
+  return value;
+}
+
+function readHqConfigOwnerUser(hqRoot) {
+  const configPath = join(hqRoot, '.hq', 'config.json');
+  const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+  const ownerUser = String(parsed?.ownerUser || parsed?.owner_user || '').trim();
+  if (!ownerUser) {
+    throw new Error(`HQ config at ${configPath} is missing ownerUser`);
+  }
+  return ownerUser;
+}
+
+function assertHqDispatchOwnerMatches(env = process.env) {
+  const hqRoot = resolveHqRoot(env, { requireExists: true });
+  const ownerUser = readHqConfigOwnerUser(hqRoot);
+  const actualUser = currentUsername(env);
+  if (ownerUser !== actualUser) {
+    throw new Error(
+      `HQ owner mismatch: follow-up remediation is running as '${actualUser}' but HQ ownerUser is '${ownerUser}'.`
+    );
+  }
+  return ownerUser;
+}
+
+function parseHqJsonObject(text, label) {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    throw new Error(`${label} produced empty output`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return JSON.parse(raw.slice(start, end + 1));
+    }
+    throw new Error(`${label} did not return JSON`);
+  }
+}
+
+function parseHqDispatchTicket(stdout) {
+  const payload = parseHqJsonObject(stdout, 'hq dispatch');
+  const launchRequestId = String(payload?.launchRequestId || payload?.lrq || payload?.dispatchId || '').trim();
+  if (!launchRequestId) {
+    throw new Error('hq dispatch ticket missing launchRequestId/lrq/dispatchId');
+  }
+  return {
+    ...payload,
+    launchRequestId,
+    dispatchId: String(payload?.dispatchId || '').trim() || null,
+  };
+}
+
+function parseHqDispatchStatus(stdout) {
+  const payload = parseHqJsonObject(stdout, 'hq dispatch status');
+  const status = String(payload?.status || '').trim().toLowerCase();
+  if (!status) {
+    throw new Error('hq dispatch status payload missing status');
+  }
+  return {
+    ...payload,
+    status,
+    health: String(payload?.health || '').trim().toLowerCase() || null,
+  };
 }
 
 function resolveLocalRepliesRoot(env = process.env, { requireExists = false } = {}) {
@@ -804,6 +895,20 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
   validateStartupRoleConfig({ env, ...opts });
   defaultRemediatorWorkerClassFromEnv(env, opts);
   resolveRemediationMaxConcurrentJobs(env);
+  if (shouldDispatchRemediationViaHq(env)) {
+    resolveHqRoot(env, { requireExists: true });
+    requireHqDispatchEnvValue(
+      env,
+      'HQ_PARENT_SESSION',
+      'HQ_PARENT_SESSION must be set when --with-hq-integration is enabled for remediation dispatch'
+    );
+    requireHqDispatchEnvValue(
+      env,
+      'HQ_PROJECT',
+      'HQ_PROJECT must be set when --with-hq-integration is enabled for remediation dispatch'
+    );
+    assertHqDispatchOwnerMatches(env);
+  }
 }
 
 // Per-PR remediator routing: pair the writer model with the OPPOSITE model
@@ -915,6 +1020,104 @@ function spawnRemediationWorker(workerClass, opts) {
     default:
       throw new Error(`unknown remediation worker class: ${workerClass}`);
   }
+}
+
+function buildHqRemediationDispatchArgs({
+  ticketRef,
+  workerClass,
+  promptPath,
+  parentSession,
+  project,
+  hqRoot,
+  repo,
+  prNumber,
+  branch = null,
+} = {}) {
+  const args = [
+    'dispatch',
+    '--ticket', ticketRef,
+    '--worker-class', workerClass,
+    '--task-kind', 'coding',
+    '--repo', String(repo).split('/')[1] || String(repo),
+    '--pr', String(prNumber),
+    '--prompt', promptPath,
+    '--completion-shape', 'branch-push',
+    '--parent-session', parentSession,
+    '--project', project,
+    '--root', hqRoot,
+  ];
+  if (branch) {
+    args.push('--branch', branch);
+  }
+  return args;
+}
+
+async function dispatchRemediationViaHq({
+  hqRoot,
+  workerClass,
+  repo,
+  prNumber,
+  branch = null,
+  promptPath,
+  replyPath,
+  launchRequestId,
+  jobId,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const hqBin = resolveHqBin(env);
+  const parentSession = requireHqDispatchEnvValue(
+    env,
+    'HQ_PARENT_SESSION',
+    'HQ_PARENT_SESSION must be set when HQ remediation dispatch is enabled'
+  );
+  const project = requireHqDispatchEnvValue(
+    env,
+    'HQ_PROJECT',
+    'HQ_PROJECT must be set when HQ remediation dispatch is enabled'
+  );
+  const ticketRef = String(jobId || launchRequestId || `PR-${prNumber}`).trim();
+  const args = buildHqRemediationDispatchArgs({
+    ticketRef,
+    workerClass,
+    promptPath,
+    parentSession,
+    project,
+    hqRoot,
+    repo,
+    prNumber,
+    branch,
+  });
+  const { stdout } = await execFileImpl(hqBin, args, {
+    env: {
+      ...env,
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: parentSession,
+      HQ_PROJECT: project,
+    },
+    maxBuffer: 5 * 1024 * 1024,
+  });
+  const ticket = parseHqDispatchTicket(stdout);
+  return {
+    model: workerClass,
+    workerClass,
+    state: 'spawned',
+    spawnedAt: now(),
+    promptPath,
+    outputPath: null,
+    logPath: null,
+    replyPath,
+    dispatchMode: 'hq',
+    completionShape: 'branch-push',
+    launchRequestId: ticket.launchRequestId,
+    dispatchId: ticket.dispatchId,
+    hqRoot,
+    hqParentSession: parentSession,
+    hqProject: project,
+    ticketRef,
+    command: [hqBin, ...args],
+  };
 }
 
 function normalizeMaxConcurrentFollowUpJobs(value, {
@@ -1455,6 +1658,14 @@ function buildRemediationPrompt(job, {
     HQ_ROOT: replyContext.hqRoot || '',
     LRQ_ID: replyContext.launchRequestId || '',
   }, { strict: true });
+  const workerHookInstallSnippet = [
+    'HOOK_DIR="$(git rev-parse --git-path hooks)"',
+    'mkdir -p "$HOOK_DIR"',
+    `cat >"$HOOK_DIR/commit-msg" <<'EOF_WORKER_PROVENANCE_HOOK'`,
+    readFileSync(WORKER_PROVENANCE_HOOK_SRC, 'utf8').trimEnd(),
+    'EOF_WORKER_PROVENANCE_HOOK',
+    'chmod +x "$HOOK_DIR/commit-msg"',
+  ].join('\n');
 
   return `${interpolatedTemplate}
 
@@ -1484,6 +1695,12 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${governingDocContext}${buildObv
 - Address the review findings directly in code, tests, or docs as needed.
 - Before making architecture-sensitive changes, read the obvious governing docs already present in the checked-out repo (for example README.md, SPEC.md, docs/, runbooks, and prompt files) when relevant.
 - If a reviewer finding explicitly asks for a spec / governance / runbook update (e.g. "update SPEC.md to match the new behavior", "the runbook should document the new failure mode"), make that update as part of THIS remediation round. Do not refuse the doc edit on the grounds that it is "out of scope" — when the reviewer flags spec drift, closing the drift IS the remediation. Treat the governing doc as a load-bearing artifact equal in weight to the code change. If the reviewer's finding is ambiguous about whether a doc update is required, prefer to update the doc; an over-conservative read leaves the spec stale and the next reviewer round will repeat the finding.
+- Before the first commit, install the worker-provenance \`commit-msg\` hook in the checked-out repo and keep it active for the remediation commit. Use this exact script:
+${formatFencedBlock(workerHookInstallSnippet, 'bash')}
+- When you commit remediation changes, run the commit with these env vars set so the hook appends the required trailers:
+  \`WORKER_CLASS=${REMEDIATION_WORKER_TRAILER_CLASS}\`
+  \`WORKER_JOB_ID=${job.jobId}\`
+  \`WORKER_RUN_AT=<current ISO 8601 timestamp>\`
 - Run the smallest relevant validation before finishing.
 - Commit the remediation changes and push the PR branch.
 - Do not open a new PR; this job is for an existing PR follow-up.
@@ -2117,6 +2334,77 @@ function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWor
   return { state: 'exited', reason: 'worker-not-running', ageMs };
 }
 
+async function assessWorkerLivenessDetailed(job, {
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+  execFileImpl = execFileAsync,
+  env = process.env,
+} = {}) {
+  const worker = job?.remediationWorker || {};
+  if (!worker?.launchRequestId || worker?.dispatchMode !== 'hq') {
+    return assessWorkerLiveness(job, { now, isWorkerRunning });
+  }
+
+  const nowAt = parseIsoTime(now());
+  const spawnedAt = parseIsoTime(worker.spawnedAt);
+  const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
+  const hqRoot = worker.hqRoot || resolveHqRoot(env, { requireExists: false });
+  const hqBin = resolveHqBin(env);
+
+  try {
+    const { stdout } = await execFileImpl(hqBin, [
+      'dispatch',
+      'status',
+      worker.launchRequestId,
+      '--root',
+      hqRoot,
+    ], {
+      env: {
+        ...env,
+        HQ_ROOT: hqRoot,
+      },
+      maxBuffer: 5 * 1024 * 1024,
+    });
+    const statusPayload = parseHqDispatchStatus(stdout);
+    if (HQ_TERMINAL_STATUSES.has(statusPayload.status)) {
+      return {
+        state: 'exited',
+        reason: `hq-dispatch-${statusPayload.status}`,
+        ageMs,
+        dispatchStatus: statusPayload,
+      };
+    }
+    return {
+      state: 'active',
+      reason: `hq-dispatch-${statusPayload.status}`,
+      ageMs,
+      dispatchStatus: statusPayload,
+    };
+  } catch (err) {
+    const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
+    if (/no dispatch with id|not found/i.test(detail)) {
+      return {
+        state: 'exited',
+        reason: 'hq-dispatch-not-found',
+        ageMs,
+        dispatchStatus: {
+          status: 'not-found',
+          failureDetail: detail,
+        },
+      };
+    }
+    return {
+      state: 'active',
+      reason: 'hq-dispatch-status-unavailable',
+      ageMs,
+      dispatchStatus: {
+        status: 'unknown',
+        failureDetail: detail || err?.message || 'status probe failed',
+      },
+    };
+  }
+}
+
 // Resolve the worker class (codex / claude-code) for a reconcile-time
 // comment. Must reuse the same canonical mapping consume uses
 // (`pickRemediationWorkerClass`), because the bot-token map only
@@ -2427,7 +2715,8 @@ async function reconcileFollowUpJob({
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
-  if (!worker?.processId || worker.state !== 'spawned') {
+  const isHqWorker = worker?.dispatchMode === 'hq' && typeof worker?.launchRequestId === 'string' && worker.launchRequestId.trim();
+  if ((!isHqWorker && !worker?.processId) || worker.state !== 'spawned') {
     return {
       action: 'skipped',
       reason: 'missing-worker-metadata',
@@ -2436,7 +2725,11 @@ async function reconcileFollowUpJob({
     };
   }
 
-  const liveness = assessWorkerLiveness(job, { now, isWorkerRunning });
+  const liveness = await assessWorkerLivenessDetailed(job, {
+    now,
+    isWorkerRunning,
+    execFileImpl,
+  });
   if (liveness.state === 'active') {
     return {
       action: 'active',
@@ -2734,242 +3027,244 @@ async function reconcileFollowUpJob({
         // the next reviewer pass will treat them as PR scope and
         // generate spurious findings. Refuse to request the rereview
         // and emit a `failed:branch-contamination` outcome instead.
-        let baseBranch;
-        try {
-          const hydrated = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
-          job = hydrated.job;
-          baseBranch = hydrated.baseBranch;
-        } catch (err) {
-          rereview = buildRereviewResult({
-            requested: false,
-            reason: null,
-            outcome: {
-              status: 'refused',
-              reason: 'base-branch-resolution-failed',
-              error: err.message,
-            },
-          });
-          const baseBranchFailure = {
-            code: 'base-branch-resolution-failed',
-            message: [
-              `Could not prove the PR base branch for ${job?.repo}#${job?.prNumber}; refused to request rereview.`,
-              err.message,
-              'Resolve the PR base branch and retry remediation before any rebase or branch-contamination audit.',
-            ].join('\n'),
-          };
-          const { commentDelivery: baseBranchFailureDelivery } = buildReconcileCommentDelivery({
-            job,
-            worker,
-            action: 'failed',
-            reply: parsedReply,
-            failure: baseBranchFailure,
-            now,
-          });
-          const failed = markFollowUpJobFailed({
-            rootDir,
-            jobPath,
-            failedAt: completedAt,
-            failureCode: 'base-branch-resolution-failed',
-            error: new Error(baseBranchFailure.message),
-            remediationWorker: {
-              ...workerState,
-              state: 'failed',
-            },
-            failure: {
-              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
-              error: err.message,
-            },
-            commentDelivery: baseBranchFailureDelivery,
-            jobUpdates: {
-              completedAt,
-              remediationReply,
-              completionMetadata: {
-                source: 'reconcile:base-branch-resolution-failed',
-                note: 'PR base branch could not be proven; refused rereview rather than defaulting to main.',
+        if (worker?.dispatchMode !== 'hq') {
+          let baseBranch;
+          try {
+            const hydrated = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
+            job = hydrated.job;
+            baseBranch = hydrated.baseBranch;
+          } catch (err) {
+            rereview = buildRereviewResult({
+              requested: false,
+              reason: null,
+              outcome: {
+                status: 'refused',
+                reason: 'base-branch-resolution-failed',
                 error: err.message,
               },
-              parsedReply,
-              rereview,
-            },
-          });
+            });
+            const baseBranchFailure = {
+              code: 'base-branch-resolution-failed',
+              message: [
+                `Could not prove the PR base branch for ${job?.repo}#${job?.prNumber}; refused to request rereview.`,
+                err.message,
+                'Resolve the PR base branch and retry remediation before any rebase or branch-contamination audit.',
+              ].join('\n'),
+            };
+            const { commentDelivery: baseBranchFailureDelivery } = buildReconcileCommentDelivery({
+              job,
+              worker,
+              action: 'failed',
+              reply: parsedReply,
+              failure: baseBranchFailure,
+              now,
+            });
+            const failed = markFollowUpJobFailed({
+              rootDir,
+              jobPath,
+              failedAt: completedAt,
+              failureCode: 'base-branch-resolution-failed',
+              error: new Error(baseBranchFailure.message),
+              remediationWorker: {
+                ...workerState,
+                state: 'failed',
+              },
+              failure: {
+                remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+                error: err.message,
+              },
+              commentDelivery: baseBranchFailureDelivery,
+              jobUpdates: {
+                completedAt,
+                remediationReply,
+                completionMetadata: {
+                  source: 'reconcile:base-branch-resolution-failed',
+                  note: 'PR base branch could not be proven; refused rereview rather than defaulting to main.',
+                  error: err.message,
+                },
+                parsedReply,
+                rereview,
+              },
+            });
 
-          await postReconcileOutcomeCommentSafe({
-            rootDir,
-            jobPath: failed.jobPath,
-            job: failed.job,
-            worker,
-            action: 'failed',
-            reply: parsedReply,
-            failure: baseBranchFailure,
-            postCommentImpl,
-            alreadyTerminal: failed.alreadyTerminal,
-            now,
-            log,
-          });
+            await postReconcileOutcomeCommentSafe({
+              rootDir,
+              jobPath: failed.jobPath,
+              job: failed.job,
+              worker,
+              action: 'failed',
+              reply: parsedReply,
+              failure: baseBranchFailure,
+              postCommentImpl,
+              alreadyTerminal: failed.alreadyTerminal,
+              now,
+              log,
+            });
 
-          return {
-            action: 'failed',
-            reason: 'base-branch-resolution-failed',
-            job: failed.job,
-            jobPath: failed.jobPath,
-          };
-        }
-        const contaminationAudit = await auditWorkspaceForContaminationImpl({
-          workspaceDir: paths.workspaceDir,
-          baseBranch,
-          execFileImpl,
-        });
-        if (contaminationAudit.error) {
-          rereview = buildRereviewResult({
-            requested: false,
-            reason: null,
-            outcome: {
-              status: 'refused',
-              reason: 'branch-contamination-audit-error',
-              auditError: contaminationAudit.error,
-            },
+            return {
+              action: 'failed',
+              reason: 'base-branch-resolution-failed',
+              job: failed.job,
+              jobPath: failed.jobPath,
+            };
+          }
+          const contaminationAudit = await auditWorkspaceForContaminationImpl({
+            workspaceDir: paths.workspaceDir,
+            baseBranch,
+            execFileImpl,
           });
-          const auditFailure = {
-            code: 'branch-contamination-audit-error',
-            message: [
-              `Branch cleanliness audit failed before rereview could be requested for origin/${baseBranch}.`,
-              contaminationAudit.error,
-              'Fix the workspace git state or upstream ref lookup, then retry remediation.',
-            ].join('\n'),
-          };
-          const { commentDelivery: auditFailureDelivery } = buildReconcileCommentDelivery({
-            job,
-            worker,
-            action: 'failed',
-            reply: parsedReply,
-            failure: auditFailure,
-            now,
-          });
-          const failed = markFollowUpJobFailed({
-            rootDir,
-            jobPath,
-            failedAt: completedAt,
-            failureCode: 'branch-contamination-audit-error',
-            error: new Error(auditFailure.message),
-            remediationWorker: {
-              ...workerState,
-              state: 'failed',
-            },
-            failure: {
-              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
-              auditError: contaminationAudit.error,
-            },
-            commentDelivery: auditFailureDelivery,
-            jobUpdates: {
-              completedAt,
-              remediationReply,
-              completionMetadata: {
-                source: 'reconcile:branch-contamination-audit-error',
-                note: 'PR branch cleanliness could not be proven because the server-side git fetch/cherry audit failed; refused to request rereview.',
+          if (contaminationAudit.error) {
+            rereview = buildRereviewResult({
+              requested: false,
+              reason: null,
+              outcome: {
+                status: 'refused',
+                reason: 'branch-contamination-audit-error',
                 auditError: contaminationAudit.error,
               },
-              parsedReply,
-              rereview,
-            },
-          });
+            });
+            const auditFailure = {
+              code: 'branch-contamination-audit-error',
+              message: [
+                `Branch cleanliness audit failed before rereview could be requested for origin/${baseBranch}.`,
+                contaminationAudit.error,
+                'Fix the workspace git state or upstream ref lookup, then retry remediation.',
+              ].join('\n'),
+            };
+            const { commentDelivery: auditFailureDelivery } = buildReconcileCommentDelivery({
+              job,
+              worker,
+              action: 'failed',
+              reply: parsedReply,
+              failure: auditFailure,
+              now,
+            });
+            const failed = markFollowUpJobFailed({
+              rootDir,
+              jobPath,
+              failedAt: completedAt,
+              failureCode: 'branch-contamination-audit-error',
+              error: new Error(auditFailure.message),
+              remediationWorker: {
+                ...workerState,
+                state: 'failed',
+              },
+              failure: {
+                remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
+                auditError: contaminationAudit.error,
+              },
+              commentDelivery: auditFailureDelivery,
+              jobUpdates: {
+                completedAt,
+                remediationReply,
+                completionMetadata: {
+                  source: 'reconcile:branch-contamination-audit-error',
+                  note: 'PR branch cleanliness could not be proven because the server-side git fetch/cherry audit failed; refused to request rereview.',
+                  auditError: contaminationAudit.error,
+                },
+                parsedReply,
+                rereview,
+              },
+            });
 
-          await postReconcileOutcomeCommentSafe({
-            rootDir,
-            jobPath: failed.jobPath,
-            job: failed.job,
-            worker,
-            action: 'failed',
-            reply: parsedReply,
-            failure: auditFailure,
-            postCommentImpl,
-            alreadyTerminal: failed.alreadyTerminal,
-            now,
-            log,
-          });
+            await postReconcileOutcomeCommentSafe({
+              rootDir,
+              jobPath: failed.jobPath,
+              job: failed.job,
+              worker,
+              action: 'failed',
+              reply: parsedReply,
+              failure: auditFailure,
+              postCommentImpl,
+              alreadyTerminal: failed.alreadyTerminal,
+              now,
+              log,
+            });
 
-          return {
-            action: 'failed',
-            reason: 'branch-contamination-audit-error',
-            job: failed.job,
-            jobPath: failed.jobPath,
-          };
-        }
-        if (contaminationAudit.suspect && contaminationAudit.suspect.length > 0) {
-          rereview = buildRereviewResult({
-            requested: false,
-            reason: null,
-            outcome: {
-              status: 'refused',
-              reason: 'branch-contamination',
-              suspectCommits: contaminationAudit.suspect,
-            },
-          });
-          const contaminationFailure = {
-            code: 'branch-contamination',
-            message: [
-              `Branch contamination detected: HEAD contains commits that are patch-equivalent to commits already on origin/${baseBranch}.`,
-              ...contaminationAudit.suspect.map((entry) => `- ${((entry.sha || '').slice(0, 12) + ' ' + (entry.subject || '')).trim()}`),
-              'Clean the PR branch before requesting another adversarial pass.',
-            ].join('\n'),
-          };
-          const { commentDelivery: contaminationDelivery } = buildReconcileCommentDelivery({
-            job,
-            worker,
-            action: 'failed',
-            reply: parsedReply,
-            failure: contaminationFailure,
-            now,
-          });
-          const failed = markFollowUpJobFailed({
-            rootDir,
-            jobPath,
-            failedAt: completedAt,
-            failureCode: 'branch-contamination',
-            error: new Error(contaminationFailure.message),
-            remediationWorker: {
-              ...workerState,
-              state: 'failed',
-            },
-            failure: {
-              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
-              suspectCommits: contaminationAudit.suspect,
-              auditError: contaminationAudit.error || null,
-            },
-            commentDelivery: contaminationDelivery,
-            jobUpdates: {
-              completedAt,
-              remediationReply,
-              completionMetadata: {
-                source: 'reconcile:branch-contamination',
-                note: 'PR branch contains patch-equivalent copies of commits already on the base branch; refused to request rereview to avoid confusing the next reviewer pass.',
+            return {
+              action: 'failed',
+              reason: 'branch-contamination-audit-error',
+              job: failed.job,
+              jobPath: failed.jobPath,
+            };
+          }
+          if (contaminationAudit.suspect && contaminationAudit.suspect.length > 0) {
+            rereview = buildRereviewResult({
+              requested: false,
+              reason: null,
+              outcome: {
+                status: 'refused',
+                reason: 'branch-contamination',
+                suspectCommits: contaminationAudit.suspect,
+              },
+            });
+            const contaminationFailure = {
+              code: 'branch-contamination',
+              message: [
+                `Branch contamination detected: HEAD contains commits that are patch-equivalent to commits already on origin/${baseBranch}.`,
+                ...contaminationAudit.suspect.map((entry) => `- ${((entry.sha || '').slice(0, 12) + ' ' + (entry.subject || '')).trim()}`),
+                'Clean the PR branch before requesting another adversarial pass.',
+              ].join('\n'),
+            };
+            const { commentDelivery: contaminationDelivery } = buildReconcileCommentDelivery({
+              job,
+              worker,
+              action: 'failed',
+              reply: parsedReply,
+              failure: contaminationFailure,
+              now,
+            });
+            const failed = markFollowUpJobFailed({
+              rootDir,
+              jobPath,
+              failedAt: completedAt,
+              failureCode: 'branch-contamination',
+              error: new Error(contaminationFailure.message),
+              remediationWorker: {
+                ...workerState,
+                state: 'failed',
+              },
+              failure: {
+                remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
                 suspectCommits: contaminationAudit.suspect,
                 auditError: contaminationAudit.error || null,
               },
-              parsedReply,
-              rereview,
-            },
-          });
+              commentDelivery: contaminationDelivery,
+              jobUpdates: {
+                completedAt,
+                remediationReply,
+                completionMetadata: {
+                  source: 'reconcile:branch-contamination',
+                  note: 'PR branch contains patch-equivalent copies of commits already on the base branch; refused to request rereview to avoid confusing the next reviewer pass.',
+                  suspectCommits: contaminationAudit.suspect,
+                  auditError: contaminationAudit.error || null,
+                },
+                parsedReply,
+                rereview,
+              },
+            });
 
-          await postReconcileOutcomeCommentSafe({
-            rootDir,
-            jobPath: failed.jobPath,
-            job: failed.job,
-            worker,
-            action: 'failed',
-            reply: parsedReply,
-            failure: contaminationFailure,
-            postCommentImpl,
-            alreadyTerminal: failed.alreadyTerminal,
-            now,
-            log,
-          });
+            await postReconcileOutcomeCommentSafe({
+              rootDir,
+              jobPath: failed.jobPath,
+              job: failed.job,
+              worker,
+              action: 'failed',
+              reply: parsedReply,
+              failure: contaminationFailure,
+              postCommentImpl,
+              alreadyTerminal: failed.alreadyTerminal,
+              now,
+              log,
+            });
 
-          return {
-            action: 'failed',
-            reason: 'branch-contamination',
-            job: failed.job,
-            jobPath: failed.jobPath,
-          };
+            return {
+              action: 'failed',
+              reason: 'branch-contamination',
+              job: failed.job,
+              jobPath: failed.jobPath,
+            };
+          }
         }
 
         const requestedAt = completedAt;
@@ -3192,10 +3487,15 @@ async function reconcileFollowUpJob({
     };
   }
 
-  const failureCode = finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion';
-  const failureMessage = finalMessage.exists
-    ? 'Remediation worker exited without a non-empty final message artifact.'
-    : 'Remediation worker exited before writing the final message artifact.';
+  const dispatchFailureDetail = liveness?.dispatchStatus?.failureDetail || null;
+  const failureCode = worker?.dispatchMode === 'hq' && !HQ_SUCCESS_STATUSES.has(String(liveness?.dispatchStatus?.status || ''))
+    ? 'hq-dispatch-failed'
+    : (finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion');
+  const failureMessage = failureCode === 'hq-dispatch-failed'
+    ? dispatchFailureDetail || `HQ remediation dispatch ended with status ${liveness?.dispatchStatus?.status || 'unknown'} before writing a usable remediation reply.`
+    : (finalMessage.exists
+      ? 'Remediation worker exited without a non-empty final message artifact.'
+      : 'Remediation worker exited before writing the final message artifact.');
   const artifactFailure = { code: failureCode, message: failureMessage };
   const { commentDelivery: artifactFailureDelivery } = buildReconcileCommentDelivery({
     job, worker, action: 'failed', failure: artifactFailure, now,
@@ -3214,6 +3514,7 @@ async function reconcileFollowUpJob({
       finalMessagePath: worker.outputPath || null,
       finalMessageBytes: finalMessage.bytes,
       logPath: worker.logPath || null,
+      dispatchStatus: liveness?.dispatchStatus || null,
     },
     commentDelivery: artifactFailureDelivery,
   });
@@ -3495,13 +3796,24 @@ async function consumeNextFollowUpJob({
     // The runbook contract is that launch-preparation failures become
     // terminal queue state, not orphaned in_progress claims.
     await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
-
-    const { workspaceDir, workspaceState } = await prepareWorkspaceForJob({
-      rootDir,
-      job: claimed.job,
-      execFileImpl,
-    });
-    await ensureWorkspaceArtifactExclude(workspaceDir, { execFileImpl });
+    const hqDispatchEnabled = shouldDispatchRemediationViaHq(process.env);
+    const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: process.env });
+    const artifactWorkspaceDir = join(workspaceRootDir, claimed.job.jobId);
+    let workspaceDir = artifactWorkspaceDir;
+    let workspaceState = {
+      action: hqDispatchEnabled ? 'hq-dispatch' : 'reused',
+      reason: hqDispatchEnabled ? 'worker-pool-managed' : 'missing',
+    };
+    if (!hqDispatchEnabled) {
+      const prepared = await prepareWorkspaceForJob({
+        rootDir,
+        job: claimed.job,
+        execFileImpl,
+      });
+      workspaceDir = prepared.workspaceDir;
+      workspaceState = prepared.workspaceState;
+      await ensureWorkspaceArtifactExclude(workspaceDir, { execFileImpl });
+    }
 
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
     resetWorkspaceDir(artifactDir);
@@ -3535,22 +3847,36 @@ async function consumeNextFollowUpJob({
       remediationReplyPath: replyPath,
       hqRoot,
       launchRequestId: replyStorageKey,
-      governingDocContext,
+      governingDocContext: hqDispatchEnabled ? '' : governingDocContext,
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
 
-    const worker = spawnRemediationWorker(workerClass, {
-      workspaceDir,
-      promptPath,
-      outputPath,
-      logPath,
-      replyPath,
-      hqRoot,
-      launchRequestId: replyStorageKey,
-      jobId: claimed.job.jobId,
-      spawnImpl,
-      now,
-    });
+    const worker = hqDispatchEnabled
+      ? await dispatchRemediationViaHq({
+          hqRoot: resolveHqRoot(process.env, { requireExists: true }),
+          workerClass,
+          repo: claimed.job.repo,
+          prNumber: claimed.job.prNumber,
+          branch: claimed.job.branch || null,
+          promptPath,
+          replyPath,
+          launchRequestId: replyStorageKey,
+          jobId: claimed.job.jobId,
+          execFileImpl,
+          now,
+        })
+      : spawnRemediationWorker(workerClass, {
+          workspaceDir,
+          promptPath,
+          outputPath,
+          logPath,
+          replyPath,
+          hqRoot,
+          launchRequestId: replyStorageKey,
+          jobId: claimed.job.jobId,
+          spawnImpl,
+          now,
+        });
     spawnedWorker = worker;
 
     const updated = markFollowUpJobSpawned({
@@ -3560,11 +3886,11 @@ async function consumeNextFollowUpJob({
       worker: {
         ...worker,
         workspaceState,
-        workspaceRoot: serializeWorkerPath(rootDir, dirname(worker.workspaceDir)),
-        workspaceDir: serializeWorkerPath(rootDir, worker.workspaceDir),
+        workspaceRoot: worker.workspaceDir ? serializeWorkerPath(rootDir, dirname(worker.workspaceDir)) : serializeWorkerPath(rootDir, workspaceRootDir),
+        workspaceDir: worker.workspaceDir ? serializeWorkerPath(rootDir, worker.workspaceDir) : serializeWorkerPath(rootDir, workspaceDir),
         promptPath: serializeWorkerPath(rootDir, worker.promptPath),
-        outputPath: serializeWorkerPath(rootDir, worker.outputPath),
-        logPath: serializeWorkerPath(rootDir, worker.logPath),
+        outputPath: worker.outputPath ? serializeWorkerPath(rootDir, worker.outputPath) : null,
+        logPath: worker.logPath ? serializeWorkerPath(rootDir, worker.logPath) : null,
         replyPath,
       },
     });
@@ -3860,8 +4186,11 @@ async function main() {
     }
 
     const workerModel = result.job.remediationWorker?.model || 'codex';
+    const dispatchTag = result.job.remediationWorker?.dispatchMode === 'hq'
+      ? ` lrq=${result.job.remediationWorker.launchRequestId}`
+      : ` pid=${result.job.remediationWorker.processId}`;
     console.log(
-      `[follow-up-remediation] Spawned ${workerModel} remediation worker pid=${result.job.remediationWorker.processId} for ${result.job.repo}#${result.job.prNumber}`
+      `[follow-up-remediation] Spawned ${workerModel} remediation worker${dispatchTag} for ${result.job.repo}#${result.job.prNumber}`
     );
     console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
   } catch (err) {
@@ -3910,6 +4239,7 @@ export {
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
   lifecycleStopDecision,
+  dispatchRemediationViaHq,
   resolveCodexCliPath,
   resolveCodexAuthPath,
   resolveHqReplyPath,
@@ -3918,6 +4248,7 @@ export {
   resolveLocalRepliesRoot,
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,
+  shouldDispatchRemediationViaHq,
   shouldUseHqIntegration,
   resolveJobRelativePath,
   resolveStoredWorkspaceRoot,

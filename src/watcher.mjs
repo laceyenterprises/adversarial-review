@@ -2040,8 +2040,24 @@ function evaluateRoundBudgetForReview({
   };
 }
 
+// Canonical "an active follow-up exists for this PR; do not spawn a new
+// first-pass reviewer" check.
+//
+// Follow-up job status drift: the on-disk job files are written with
+// `status: 'in_progress'` (underscore form) by `markFollowUpJobClaimed`
+// and `markFollowUpJobSpawned` in follow-up-jobs.mjs, but other readers
+// in the codebase historically used `'inProgress'` or `'in-progress'`.
+// Forgetting the underscore form here causes the watcher to MISS the
+// active-job guard while a remediation worker is mid-flight; it then
+// re-claims the review row (still `pending` from `requestReviewRereview`
+// or its initial state) and spawns a duplicate reviewer on the same
+// commit SHA — which is exactly the same-SHA duplicate-review symptom
+// observed across PRs #1151 / #1164 / #1165 on 2026-05-31.
+//
+// Accept every spelling the writers actually produce. Keep this list in
+// sync with the literal `status:` assignments in follow-up-jobs.mjs.
 function isActiveFollowUpJob(job) {
-  return ['pending', 'inProgress', 'in-progress'].includes(job?.status);
+  return ['pending', 'inProgress', 'in-progress', 'in_progress'].includes(job?.status);
 }
 
 function shouldDeferReviewForActiveFollowUp({

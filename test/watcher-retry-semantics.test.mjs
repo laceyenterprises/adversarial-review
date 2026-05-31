@@ -11,6 +11,7 @@ import {
   createFollowUpJob,
   markFollowUpJobCompleted,
   markFollowUpJobSpawned,
+  readFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import {
   evaluateRoundBudgetForReview,
@@ -608,6 +609,80 @@ test('watcher defers a pending review while a requeued follow-up job is active (
   const after = db.prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
     .get('laceyenterprises/adversarial-review', 48);
   assert.equal(after.review_status, 'pending');
+});
+
+test('watcher defers a pending review while the active follow-up job has status="in_progress" (same-SHA duplicate-review regression, 2026-05-31)', () => {
+  // Regression for the same-SHA duplicate-review symptom observed across
+  // PRs #1151 / #1164 / #1165 on 2026-05-31. Sequence that produced the
+  // bug:
+  //   1. First review posts, follow-up job created (status='pending').
+  //      Watcher correctly defers the next reviewer spawn.
+  //   2. The follow-up daemon claims the job. `claimNextFollowUpJob` /
+  //      `markFollowUpJobSpawned` rewrite the on-disk job file with
+  //      `status: 'in_progress'` (underscore form).
+  //   3. The remediation worker is still running but the active-job
+  //      guard's allow-list missed the underscore spelling, so
+  //      `isActiveFollowUpJob` returned false and the watcher fell
+  //      through to spawn a NEW first-pass reviewer.
+  //   4. The new reviewer posted a second review on the SAME commit SHA
+  //      before the remediation worker had pushed anything.
+  //
+  // This test pins the underscore form as a recognized "active" status
+  // so the spawn-defer survives every spelling the writers actually
+  // produce.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const db = setupDb();
+  db.prepare(
+    'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(
+    'laceyenterprises/agent-os',
+    1165,
+    '2026-05-31T07:53:02.449Z',
+    'claude',
+    'open',
+    'pending',
+    1,
+  );
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1165,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewBody: '## Summary\nIn-progress fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-05-31T07:53:02.449Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-05-31T08:09:04.440Z',
+  });
+  assert.equal(claimed?.job?.status, 'in_progress', 'claimNextFollowUpJob writes the underscore form');
+
+  // After markFollowUpJobSpawned the file on disk still carries the
+  // underscore form — re-read it so we exercise the actual disk shape
+  // the latest-job finder sees.
+  markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    worker: {
+      processId: 64594,
+      processGroupId: 64594,
+      workspaceDir: '/tmp/fixture-workspace',
+    },
+    spawnedAt: '2026-05-31T08:09:04.440Z',
+  });
+  const onDisk = readFollowUpJob(claimed.jobPath);
+  assert.equal(onDisk.status, 'in_progress', 'markFollowUpJobSpawned also persists the underscore form');
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1165,
+  });
+  assert.equal(decision.defer, true, 'watcher MUST defer while the underscore-form in_progress remediation is mid-flight');
+  assert.equal(decision.latestJobStatus, 'in_progress');
 });
 
 test('evaluateRoundBudgetForReview preserves elevated legacy caps above the current riskClass tier', () => {

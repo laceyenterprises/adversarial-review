@@ -1446,6 +1446,8 @@ function claimNextFollowUpJob({
   returnStopped = false,
   excludedRepoPrKeys = new Set(),
   onExcludedRepoPrKey = null,
+  delayedPendingPaths = null,
+  onDelayedPendingJob = null,
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
   const normalizedExcludedRepoPrKeys = new Set(
@@ -1453,14 +1455,25 @@ function claimNextFollowUpJob({
   );
 
   for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+    if (delayedPendingPaths?.has?.(pendingPath)) continue;
+
     let pendingJob = null;
+    try {
+      pendingJob = readFollowUpJob(pendingPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+
+    const retryAfterMs = parseIsoTimestamp(pendingJob?.remediationPlan?.retryAfter);
+    const claimedAtMs = parseIsoTimestamp(claimedAt);
+    if (retryAfterMs !== null && claimedAtMs !== null && retryAfterMs > claimedAtMs) {
+      delayedPendingPaths?.add?.(pendingPath);
+      onDelayedPendingJob?.(pendingPath, pendingJob);
+      continue;
+    }
+
     if (normalizedExcludedRepoPrKeys.size) {
-      try {
-        pendingJob = readFollowUpJob(pendingPath);
-      } catch (err) {
-        if (err?.code === 'ENOENT') continue;
-        throw err;
-      }
       const repoPrKey = followUpJobRepoPrKey(pendingJob);
       if (normalizedExcludedRepoPrKeys.has(repoPrKey)) {
         onExcludedRepoPrKey?.(pendingPath, repoPrKey, pendingJob);
@@ -1477,13 +1490,7 @@ function claimNextFollowUpJob({
       throw err;
     }
 
-    const job = pendingJob || readFollowUpJob(inProgressPath);
-    const retryAfterMs = parseIsoTimestamp(job?.remediationPlan?.retryAfter);
-    const claimedAtMs = parseIsoTimestamp(claimedAt);
-    if (retryAfterMs !== null && claimedAtMs !== null && retryAfterMs > claimedAtMs) {
-      renameSync(inProgressPath, pendingPath);
-      continue;
-    }
+    const job = pendingJob;
 
     if (isSettledReviewJob(job)) {
       let stopped = null;
@@ -1662,6 +1669,10 @@ function requeueInProgressFollowUpJobForRetry({
   if (currentJob?.status !== 'in_progress') {
     throw new Error(`Cannot retry follow-up job ${currentJob?.jobId || '<unknown>'} from status ${currentJob?.status || 'unknown'}`);
   }
+  const effectiveWorker = remediationWorker || currentJob.remediationWorker || null;
+  if (effectiveWorker?.dispatchMode !== 'hq') {
+    throw new Error(`Cannot retry follow-up job ${currentJob?.jobId || '<unknown>'}: transient retry requeue is only valid for HQ remediation workers`);
+  }
 
   const currentRoundNumber = Number(currentJob?.remediationPlan?.currentRound || 0);
   const priorTransientRetries = Number(currentJob?.remediationPlan?.transientRetries || 0);
@@ -1689,9 +1700,12 @@ function requeueInProgressFollowUpJobForRetry({
       transientRetries: nextTransientRetries,
       retryAfter,
       stopReason: null,
+      stop: null,
       nextAction: {
         type: 'consume-pending-round',
-        round: currentRoundNumber,
+        // After requeue, currentRound is decremented so the next claim reuses
+        // the same round number without creating duplicate live round entries.
+        round: nextCurrentRound + 1,
         operatorVisibility: 'explicit',
         requestedAt: requeuedAt,
         requestedBy: 'system',
@@ -1706,7 +1720,7 @@ function requeueInProgressFollowUpJobForRetry({
           retryAfter,
           retryReason,
           retryMetadata,
-          worker: remediationWorker || activeRound?.worker || currentJob.remediationWorker || null,
+          worker: effectiveWorker || activeRound?.worker || null,
         },
       ],
     },

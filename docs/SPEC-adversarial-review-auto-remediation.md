@@ -339,22 +339,33 @@ reconciliation invariants as the local lane:
 - HQ terminal failures are not uniformly fatal. Reconcile must classify known
   transient dispatch failures from the status payload before terminalizing the
   queue record:
-  - Retryable / backpressure-class failures such as memory-pressure admission
-    refusal (`launch_refused_memory_pressure`, `memory pressure refused admit`),
-    lease loss, or daemon-bounce/restart signals move the job back to
-    `pending/` for a later tick. The canonical round ledger remains one entry
-    per round number: on requeue, the live `rounds[]` entry for round `N` is
-    removed before the next claim can recreate round `N`, and the failed
+  - Retryable / backpressure-class failures are identified first from
+    structured status fields (`failureClass`, `failureCode`, `code`, `status`,
+    `health`, etc.) using the canonical codes `launch_refused_memory_pressure`,
+    `memory_pressure`, `lease_lost`, `daemon_bounced`, `daemon_restart`, and
+    `supervisor_restart`; bounded free-text `failureDetail` matching is only a
+    compatibility fallback for older HQ payloads and is limited to canonical
+    memory-pressure and lease-loss wording. Retryable failures move the
+    job back to `pending/` for a later tick. The canonical round ledger remains
+    one entry per round number: on requeue, the live `rounds[]` entry for round
+    `N` is removed before the next claim can recreate round `N`, and the failed
     launch/requeue summary is appended to `remediationPlan.retryHistory[]`
     instead. Each requeue also increments the job-level
     `remediationPlan.transientRetries` counter, stamps a future
     `remediationPlan.retryAfter`, and backs off exponentially so a wedged HQ
     does not hot-loop on every consume tick.
+  - Pending jobs with `retryAfter` in the future are not claimable work. The
+    consume loop must pre-read and skip them in `pending/` without bouncing the
+    file through `in-progress/`, so concurrent status readers never observe a
+    delayed pending job as a claimed worker.
   - Transient retries are bounded by
     `ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES` (default `3`). Once the
     next transient retry would exceed that cap, reconcile terminalizes the job
     to `failed/` with `failure.code = "hq-dispatch-transient-budget-exhausted"`
-    instead of requeueing again.
+    instead of requeueing again. The cap is job-scoped, not round-scoped; the
+    terminal failure message must include the current round and the number of
+    rounds represented in `retryHistory[]` so operators can tell when an earlier
+    round consumed the shared transient budget.
   - Non-transient failures such as prompt rejection, explicit cancellation, or
     workspace corruption still terminalize to `failed/`.
 
@@ -377,6 +388,8 @@ lane observability:
 - `stopped`
 - `deferredSamePR`
 - `capacityRemaining`
+- `pendingClaimable`
+- `pendingRetryDelayed`
 
 Logging contract:
 
@@ -385,9 +398,17 @@ Logging contract:
 - `No pending follow-up jobs to consume.` is reserved for the truly idle shape:
   no active remediation workers, no claimed work this tick, and no pending jobs
   available to claim.
-- When `availableAtStart === 0` and pending jobs still exist, the daemon must
-  emit a distinct backpressure line (`Backpressure: activeAtStart=N
-  pendingCount=M`) instead of collapsing that state into "queue empty".
+- When `availableAtStart === 0` and pending claimable jobs still exist, the
+  daemon must emit a distinct backpressure line (`Backpressure:
+  activeAtStart=N pendingClaimable=M`) instead of collapsing that state into
+  "queue empty". Pending jobs delayed by `retryAfter` do not count as claimable
+  backpressure until their retry window opens; saturated-but-empty ticks use the
+  drain summary alone. The drain result carries these pending counters so the
+  CLI logging path does not perform a second pending-directory scan.
+- `pendingClaimable` and `pendingRetryDelayed` are per-tick pending-directory
+  snapshots, not "encountered during drain" counters. The drain summary includes
+  both fields so retry-after-delayed backlog is visible even when capacity is
+  otherwise available.
 - Same-PR exclusion remains part of the drain contract: pending jobs for a PR
   that already has an active remediation worker stay in `pending/`, increment
   `deferredSamePR`, and do not consume another slot in the same tick.

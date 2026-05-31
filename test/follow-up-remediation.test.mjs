@@ -15,11 +15,14 @@ import {
   buildDrainSummaryLogLine,
   buildRemediationPrompt,
   buildInheritedPath,
+  classifyHqDispatchFailure,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
+  countPendingFollowUpJobsByRetryWindow,
   digestWorkerFinalMessage,
   installWorkerProvenanceHook,
   auditWorkspaceForContamination,
+  isDrainQueueIdle,
   killDetachedWorkerProcessGroup,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
@@ -2165,16 +2168,88 @@ test('consumeFollowUpJobsUntilCapacity applies HQ backpressure by treating queue
   assert.equal(result.availableAtStart, 0);
   assert.equal(result.spawned, 0);
   assert.equal(result.capacityRemaining, 0);
+  assert.equal(result.pendingClaimable, 2);
+  assert.equal(result.pendingRetryDelayed, 0);
   assert.equal(spawnCalls.length, 0);
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 2);
   assert.equal(
     buildBackpressureLogLine({ activeAtStart: result.activeAtStart, pendingCount: 2 }),
-    '[follow-up-remediation] Backpressure: activeAtStart=2 pendingCount=2'
+    '[follow-up-remediation] Backpressure: activeAtStart=2 pendingClaimable=2'
   );
   assert.equal(
     buildDrainSummaryLogLine(result),
-    '[follow-up-remediation] Drain summary: maxConcurrent=2 activeAtStart=2 availableAtStart=0 spawned=0 stopped=0 deferredSamePR=0 capacityRemaining=0'
+    '[follow-up-remediation] Drain summary: maxConcurrent=2 activeAtStart=2 availableAtStart=0 spawned=0 stopped=0 deferredSamePR=0 capacityRemaining=0 pendingClaimable=2 pendingRetryDelayed=0'
   );
+});
+
+test('isDrainQueueIdle recognizes empty and retry-delayed-only drain sentinels', async () => {
+  const emptyRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const emptyResult = await withOAuthTestEnv(emptyRoot, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(emptyRoot, [], { maxConcurrent: 2 })
+  ));
+
+  assert.equal(isDrainQueueIdle(emptyResult), true);
+  assert.equal(
+    buildDrainSummaryLogLine(emptyResult),
+    '[follow-up-remediation] Drain summary: maxConcurrent=2 activeAtStart=0 availableAtStart=2 spawned=0 stopped=0 deferredSamePR=0 capacityRemaining=2 pendingClaimable=0 pendingRetryDelayed=0'
+  );
+
+  const delayedRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const delayed = createPendingRemediationJob(delayedRoot, { prNumber: 23, reviewPostedAt: '2026-04-21T08:05:00.000Z' });
+  writeFollowUpJob(delayed.jobPath, {
+    ...delayed.job,
+    remediationPlan: {
+      ...delayed.job.remediationPlan,
+      retryAfter: '2026-04-21T11:00:00.000Z',
+    },
+  });
+  const delayedResult = await withOAuthTestEnv(delayedRoot, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(delayedRoot, [], {
+      maxConcurrent: 2,
+      now: () => '2026-04-21T10:00:00.000Z',
+    })
+  ));
+
+  assert.equal(isDrainQueueIdle(delayedResult), true);
+  assert.equal(delayedResult.pendingClaimable, 0);
+  assert.equal(delayedResult.pendingRetryDelayed, 1);
+  assert.equal(
+    buildDrainSummaryLogLine(delayedResult),
+    '[follow-up-remediation] Drain summary: maxConcurrent=2 activeAtStart=0 availableAtStart=2 spawned=0 stopped=0 deferredSamePR=0 capacityRemaining=2 pendingClaimable=0 pendingRetryDelayed=1'
+  );
+});
+
+test('backpressure pending count ignores retry-after delayed jobs and suppresses empty queues', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createPendingRemediationJob(rootDir, { prNumber: 21, reviewPostedAt: '2026-04-21T08:03:00.000Z' });
+  const delayed = createPendingRemediationJob(rootDir, { prNumber: 22, reviewPostedAt: '2026-04-21T08:04:00.000Z' });
+  writeFollowUpJob(delayed.jobPath, {
+    ...delayed.job,
+    remediationPlan: {
+      ...delayed.job.remediationPlan,
+      retryAfter: '2026-04-21T11:00:00.000Z',
+    },
+  });
+
+  assert.deepEqual(
+    countPendingFollowUpJobsByRetryWindow(rootDir, '2026-04-21T10:00:00.000Z'),
+    { claimable: 1, delayed: 1 }
+  );
+
+  const emptyRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  assert.deepEqual(
+    countPendingFollowUpJobsByRetryWindow(emptyRoot, '2026-04-21T10:00:00.000Z'),
+    { claimable: 0, delayed: 0 }
+  );
+});
+
+test('classifyHqDispatchFailure prefers structured transient codes and bounded detail matches', () => {
+  assert.equal(classifyHqDispatchFailure({ failureClass: 'launch_refused_memory_pressure' }), 'transient');
+  assert.equal(classifyHqDispatchFailure({ status: 'failed', failureDetail: 'memory pressure refused admit until the worker was reaped' }), 'transient');
+  assert.equal(classifyHqDispatchFailure({ status: 'failed', failureDetail: 'operator refused admit prompt rejected by policy' }), 'terminal');
+  assert.equal(classifyHqDispatchFailure({ status: 'failed', failureDetail: 'supervisor restart-required for policy' }), 'terminal');
+  assert.equal(classifyHqDispatchFailure({ status: 'failed', failureDetail: 'operator refused prompt; memory-pressure note was historical' }), 'terminal');
+  assert.equal(classifyHqDispatchFailure({ status: 'failed', failureDetail: 'prompt rejected by policy' }), 'terminal');
 });
 
 test('consumeFollowUpJobsUntilCapacity defers a pending job for a PR with active remediation', async () => {
@@ -3317,6 +3392,13 @@ test('reconcileFollowUpJob fails HQ transient dispatches once the retry budget i
       assert.equal(result.job.status, 'failed');
       assert.equal(result.job.failure.code, 'hq-dispatch-transient-budget-exhausted');
       assert.match(result.job.failure.message, /Exhausted transient HQ retry budget \(3\/3\)/);
+      assert.match(result.job.failure.message, /Current round=1; budget is job-scoped across 1 round\(s\)/);
+      assert.deepEqual(result.job.failure.transientRetryBudget, {
+        attempted: 3,
+        max: 3,
+        currentRound: 1,
+        roundsObserved: 1,
+      });
     });
   } finally {
     if (originalMaxTransientRetries === undefined) delete process.env.ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES;

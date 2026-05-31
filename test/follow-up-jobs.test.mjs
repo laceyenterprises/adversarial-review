@@ -3674,17 +3674,28 @@ test('requeueInProgressFollowUpJobForRetry drops the active round entry so re-cl
     maxRemediationRounds: 2,
   });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  writeFollowUpJob(claimed.jobPath, {
+    ...claimed.job,
+    remediationPlan: {
+      ...claimed.job.remediationPlan,
+      stop: { code: 'stale-stop', reason: 'legacy stop metadata' },
+      stopReason: 'legacy stop metadata',
+    },
+  });
   const requeued = requeueInProgressFollowUpJobForRetry({
     rootDir,
     jobPath: claimed.jobPath,
     requeuedAt: '2026-04-21T10:05:00.000Z',
     retryReason: 'Transient HQ remediation dispatch failure: memory pressure',
+    remediationWorker: { dispatchMode: 'hq', launchRequestId: 'lrq_retry_round' },
     retryMetadata: { code: 'hq-dispatch-transient' },
   });
 
   assert.equal(requeued.job.status, 'pending');
   assert.equal(requeued.job.remediationPlan.currentRound, 0);
   assert.equal(requeued.job.remediationPlan.rounds.length, 0);
+  assert.equal(requeued.job.remediationPlan.stop, null);
+  assert.equal(requeued.job.remediationPlan.stopReason, null);
   assert.equal(requeued.job.remediationPlan.transientRetries, 1);
   assert.equal(requeued.job.remediationPlan.retryHistory.length, 1);
   assert.equal(requeued.job.remediationPlan.retryHistory[0].round, 1);
@@ -3717,15 +3728,35 @@ test('claimNextFollowUpJob skips transiently requeued jobs until retryAfter elap
     jobPath: claimed.jobPath,
     requeuedAt: '2026-04-21T10:05:00.000Z',
     retryReason: 'Transient HQ remediation dispatch failure: memory pressure',
+    remediationWorker: { dispatchMode: 'hq', launchRequestId: 'lrq_retry_after' },
   });
 
   const skipped = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:06:00.000Z' });
   assert.equal(skipped, null);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 0);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 1);
 
   const reclaimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:10:00.000Z' });
   assert.equal(reclaimed?.job?.status, 'in_progress');
   assert.equal(reclaimed?.job?.remediationPlan?.currentRound, 1);
   assert.equal(reclaimed?.job?.remediationPlan?.retryAfter, null);
+});
+
+test('requeueInProgressFollowUpJobForRetry rejects non-HQ remediation workers', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+
+  assert.throws(
+    () => requeueInProgressFollowUpJobForRetry({
+      rootDir,
+      jobPath: claimed.jobPath,
+      requeuedAt: '2026-04-21T10:05:00.000Z',
+      retryReason: 'Transient local failure should not use HQ retry semantics',
+      remediationWorker: { dispatchMode: 'local', processId: 1234 },
+    }),
+    /only valid for HQ remediation workers/
+  );
 });
 
 test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible metadata', () => {

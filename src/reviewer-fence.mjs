@@ -7,11 +7,12 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import fsExt from 'fs-ext';
 import { writeFileAtomic } from './atomic-write.mjs';
 
@@ -32,8 +33,10 @@ const DEFAULT_FENCE_STALE_TTL_SECONDS = 90;
 const EXIT_TIMEOUT_SAFETY_SECONDS = 15;
 const REVIEWER_FENCE_DIR_NAME = 'reviewer-fences';
 const SPAWN_RECORDS_FILENAME = 'spawn-records.json';
+const SPAWN_RECORDS_DIRNAME = 'spawn-records';
 const CLEANUP_QUEUE_DIRNAME = 'cleanup-jobs';
 const AUDIT_DIRNAME = 'audit';
+const QUARANTINE_DIRNAME = 'quarantine';
 
 function resolveAdversarialReviewStateDir(rootDir, env = process.env) {
   const configured = String(env.ADVERSARIAL_REVIEW_STATE_DIR || '').trim();
@@ -74,8 +77,24 @@ function resolveFenceAuditDir(stateDir) {
   return dirPath;
 }
 
+function resolveFenceQuarantineDir(stateDir) {
+  const dirPath = join(ensureReviewerFenceDir(stateDir), QUARANTINE_DIRNAME);
+  mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  return dirPath;
+}
+
 function resolveSpawnRecordPath(stateDir) {
   return join(ensureReviewerFenceDir(stateDir), SPAWN_RECORDS_FILENAME);
+}
+
+function resolveSpawnRecordDir(stateDir) {
+  const dirPath = join(ensureReviewerFenceDir(stateDir), SPAWN_RECORDS_DIRNAME);
+  mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  return dirPath;
+}
+
+function resolveSpawnRecordEntryPath(stateDir, spawnToken) {
+  return join(resolveSpawnRecordDir(stateDir), `${spawnToken}.json`);
 }
 
 function parsePositiveIntegerEnv(rawValue, {
@@ -269,16 +288,28 @@ function openReviewerFence({
     openedAt,
     expectedClearBy,
   });
-  writeFileAtomic(jsonPath, `${JSON.stringify(record, null, 2)}\n`);
-  auditEventWriter(stateDir, {
-    event: 'fence_open',
-    spawnToken,
-    repo,
-    pr,
-    identity,
-    openedAt,
-    expectedClearBy,
-  });
+  try {
+    writeFileAtomic(jsonPath, `${JSON.stringify(record, null, 2)}\n`);
+    auditEventWriter(stateDir, {
+      event: 'fence_open',
+      spawnToken,
+      repo,
+      pr,
+      identity,
+      openedAt,
+      expectedClearBy,
+    });
+  } catch (err) {
+    try {
+      flockSync(lockFd, LOCK_UN);
+    } catch {}
+    try {
+      closeSync(lockFd);
+    } catch {}
+    rmSync(lockPath, { force: true });
+    rmSync(jsonPath, { force: true });
+    throw err;
+  }
   return {
     record,
     jsonPath,
@@ -338,6 +369,15 @@ function listFenceJsonPaths(stateDir) {
     .map((name) => join(fenceDir, name));
 }
 
+function listFenceLockPaths(stateDir) {
+  const fenceDir = resolveReviewerFenceDir(stateDir);
+  if (!existsSync(fenceDir)) return [];
+  return readdirSync(fenceDir)
+    .filter((name) => name.endsWith('.lock'))
+    .sort()
+    .map((name) => join(fenceDir, name));
+}
+
 function fenceAgeSeconds(record, now = Date.now()) {
   const openedAtMs = Date.parse(record?.openedAt || '');
   if (!Number.isFinite(openedAtMs)) return Number.POSITIVE_INFINITY;
@@ -372,35 +412,78 @@ function probeFenceLock(lockPath) {
   }
 }
 
+function moveFenceArtifactToQuarantine(stateDir, filePath, {
+  prefix = 'artifact',
+  now = Date.now(),
+} = {}) {
+  const targetPath = join(
+    resolveFenceQuarantineDir(stateDir),
+    `${prefix}-${now}-${basename(filePath)}`,
+  );
+  renameSync(filePath, targetPath);
+  return targetPath;
+}
+
 function loadSpawnRecords(stateDir) {
-  const filePath = resolveSpawnRecordPath(stateDir);
-  if (!existsSync(filePath)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
+  const records = {};
+  const dirPath = resolveSpawnRecordDir(stateDir);
+  for (const entryPath of readdirSync(dirPath)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map((name) => join(dirPath, name))) {
+    try {
+      const parsed = JSON.parse(readFileSync(entryPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && typeof parsed.spawnToken === 'string') {
+        records[parsed.spawnToken] = parsed;
+      }
+    } catch {}
   }
+  const legacyFilePath = resolveSpawnRecordPath(stateDir);
+  if (!existsSync(legacyFilePath)) return records;
+  try {
+    const parsed = JSON.parse(readFileSync(legacyFilePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return records;
+    for (const [spawnToken, record] of Object.entries(parsed)) {
+      if (!(spawnToken in records) && record && typeof record === 'object' && !Array.isArray(record)) {
+        records[spawnToken] = record;
+      }
+    }
+  } catch {}
+  return records;
 }
 
-function persistSpawnRecords(stateDir, records) {
-  writeFileAtomic(resolveSpawnRecordPath(stateDir), `${JSON.stringify(records, null, 2)}\n`);
-}
-
-function upsertSpawnRecord(stateDir, record) {
-  const records = loadSpawnRecords(stateDir);
-  records[record.spawnToken] = {
+function persistSpawnRecord(stateDir, record) {
+  const normalized = {
     schemaVersion: REVIEWER_FENCE_SCHEMA_VERSION,
     ...record,
   };
-  persistSpawnRecords(stateDir, records);
-  return records[record.spawnToken];
+  writeFileAtomic(
+    resolveSpawnRecordEntryPath(stateDir, normalized.spawnToken),
+    `${JSON.stringify(normalized, null, 2)}\n`,
+  );
+  return normalized;
+}
+
+function syncSpawnRecords(stateDir, records) {
+  const dirPath = resolveSpawnRecordDir(stateDir);
+  const keep = new Set();
+  for (const record of Object.values(records)) {
+    const normalized = persistSpawnRecord(stateDir, record);
+    keep.add(`${normalized.spawnToken}.json`);
+  }
+  for (const name of readdirSync(dirPath)) {
+    if (!name.endsWith('.json') || keep.has(name)) continue;
+    rmSync(join(dirPath, name), { force: true });
+  }
+  rmSync(resolveSpawnRecordPath(stateDir), { force: true });
+}
+
+function upsertSpawnRecord(stateDir, record) {
+  return persistSpawnRecord(stateDir, record);
 }
 
 function deleteSpawnRecord(stateDir, spawnToken) {
-  const records = loadSpawnRecords(stateDir);
-  delete records[spawnToken];
-  persistSpawnRecords(stateDir, records);
+  rmSync(resolveSpawnRecordEntryPath(stateDir, spawnToken), { force: true });
 }
 
 function listCleanupJobs(stateDir) {
@@ -482,7 +565,9 @@ export {
   isFenceStale,
   listCleanupJobs,
   listFenceJsonPaths,
+  listFenceLockPaths,
   loadSpawnRecords,
+  moveFenceArtifactToQuarantine,
   openReviewerFence,
   parseExitTimeOutFromPlist,
   probeFenceLock,
@@ -492,10 +577,13 @@ export {
   resolveAdversarialReviewStateDir,
   resolveCleanupQueueDir,
   resolveFencePaths,
+  resolveFenceQuarantineDir,
   resolveReviewerFenceDir,
+  resolveSpawnRecordDir,
   resolveSigtermFenceGraceSeconds,
   resolveSigtermFenceMode,
   resolveSpawnRecordPath,
+  syncSpawnRecords,
   resolveWatcherPlistPath,
   upsertSpawnRecord,
   validateFenceConfig,

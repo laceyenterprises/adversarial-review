@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,9 +16,11 @@ import {
   parseExitTimeOutFromPlist,
   probeFenceLock,
   readFenceDirAuditEvents,
+  resolveFenceQuarantineDir,
   resolveFencePaths,
   validateFenceConfig,
   validateWatcherExitTimeout,
+  loadSpawnRecords,
   upsertSpawnRecord,
 } from '../src/reviewer-fence.mjs';
 import {
@@ -119,6 +121,32 @@ test('reviewer-side fence is deleted after failed gh review post without draft h
         /boom/,
       );
     });
+    const { jsonPath, lockPath } = resolveFencePaths(stateDir, spawnToken);
+    assert.equal(existsSync(jsonPath), false);
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('openReviewerFence rolls back lock file when audit write fails after flock', () => {
+  const rootDir = makeRootDir('reviewer-fence-open-rollback-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const spawnToken = '23232323-2323-4232-8232-232323232323';
+    assert.throws(
+      () => openReviewerFence({
+        stateDir,
+        spawnToken,
+        repo: 'laceyenterprises/adversarial-review',
+        pr: 177,
+        identity: 'claude-reviewer-lacey',
+        auditEventWriter: () => {
+          throw new Error('audit-fsync-failed');
+        },
+      }),
+      /audit-fsync-failed/,
+    );
     const { jsonPath, lockPath } = resolveFencePaths(stateDir, spawnToken);
     assert.equal(existsSync(jsonPath), false);
     assert.equal(existsSync(lockPath), false);
@@ -326,6 +354,81 @@ test('startup orphan sweep reaps flock-free fences and skips flock-held fences',
   }
 });
 
+test('startup orphan sweep quarantines corrupt fence json and continues sweeping', async () => {
+  const rootDir = makeRootDir('watcher-fence-corrupt-json-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const badPath = path.join(stateDir, 'reviewer-fences', 'broken.json');
+    const freeToken = '68686868-6868-4868-8868-686868686868';
+    const { jsonPath: freeJson, lockPath: freeLock } = resolveFencePaths(stateDir, freeToken);
+    writeFileSync(badPath, '{', 'utf8');
+    writeFileSync(freeLock, '', 'utf8');
+    writeFileSync(
+      freeJson,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        spawnToken: freeToken,
+        repo: 'laceyenterprises/adversarial-review',
+        pr: 210,
+        identity: 'codex-reviewer-lacey',
+        openedAt: new Date().toISOString(),
+        expectedClearBy: new Date(Date.now() + 60_000).toISOString(),
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    const orphaned = await sweepReviewerFencesOnStartup({
+      stateDir,
+      staleTtlSeconds: 90,
+      activeSpawnMap: new Map(),
+    });
+    assert.equal(orphaned, 1);
+    assert.equal(existsSync(badPath), false);
+    assert.equal(listCleanupJobs(stateDir).length, 1);
+    assert.equal(readdirSync(resolveFenceQuarantineDir(stateDir)).length > 0, true);
+    assert.equal(
+      readFenceDirAuditEvents(stateDir).some((entry) => entry.event === 'fence_corrupted_skipped'),
+      true,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('startup orphan sweep reaps stale lock files without json sidecars', async () => {
+  const rootDir = makeRootDir('watcher-fence-orphan-lock-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const spawnToken = '69696969-6969-4969-8969-696969696969';
+    const { lockPath } = resolveFencePaths(stateDir, spawnToken);
+    writeFileSync(lockPath, '', 'utf8');
+    const staleSeconds = 120;
+    const staleMs = Date.now() - (staleSeconds * 1000);
+    const orphaned = await sweepReviewerFencesOnStartup({
+      stateDir,
+      staleTtlSeconds: 90,
+      activeSpawnMap: new Map(),
+    });
+    assert.equal(orphaned, 0);
+    assert.equal(existsSync(lockPath), true);
+
+    utimesSync(lockPath, staleMs / 1000, staleMs / 1000);
+    const reaped = await sweepReviewerFencesOnStartup({
+      stateDir,
+      staleTtlSeconds: 90,
+      activeSpawnMap: new Map(),
+    });
+    assert.equal(reaped, 1);
+    assert.equal(existsSync(lockPath), false);
+    assert.equal(
+      readFenceDirAuditEvents(stateDir).some((entry) => entry.event === 'fence_orphan_lock_reaped'),
+      true,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('removing fence json before unlock prevents concurrent sweep from queueing cleanup', async () => {
   const rootDir = makeRootDir('watcher-fence-clear-order-');
   try {
@@ -396,6 +499,30 @@ test('processQueuedFenceCleanupJobs drains queued cleanup jobs', async () => {
   }
 });
 
+test('processQueuedFenceCleanupJobs quarantines corrupt cleanup jobs and continues', async () => {
+  const rootDir = makeRootDir('watcher-fence-corrupt-cleanup-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const cleanupDir = path.join(stateDir, 'reviewer-fences', 'cleanup-jobs');
+    mkdirSync(cleanupDir, { recursive: true });
+    writeFileSync(path.join(cleanupDir, 'broken.json'), '{', 'utf8');
+    const processed = await processQueuedFenceCleanupJobs({
+      stateDir,
+      clearPendingReviewsImpl: async () => {
+        throw new Error('should not run');
+      },
+    });
+    assert.equal(processed, 0);
+    assert.equal(readdirSync(resolveFenceQuarantineDir(stateDir)).length > 0, true);
+    assert.equal(
+      readFenceDirAuditEvents(stateDir).some((entry) => entry.event === 'fence_corrupted_skipped'),
+      true,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('fence config validation rejects stale_TTL below 2 * grace', () => {
   assert.throws(
     () => validateFenceConfig({
@@ -426,7 +553,7 @@ test('watcher startup plist validation rejects ExitTimeOut below grace + 15', ()
         ADVERSARIAL_REVIEW_FENCE_STALE_TTL_SECONDS: '90',
         ADVERSARIAL_REVIEW_WATCHER_PLIST_PATH: plistPath,
       }),
-      /must be >= 45/,
+      /should be >= 45/,
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -484,6 +611,43 @@ test('token-known scope across restart uses persisted spawn-record union', async
     });
     assert.equal(orphaned, 1);
     assert.equal(listCleanupJobs(stateDir).length, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent upsertSpawnRecord calls from separate processes preserve both records', async () => {
+  const rootDir = makeRootDir('watcher-fence-spawn-records-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const records = [
+      {
+        spawnToken: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        repo: 'laceyenterprises/adversarial-review',
+        pr: 301,
+        identity: 'claude-reviewer-lacey',
+        botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+      },
+      {
+        spawnToken: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        repo: 'laceyenterprises/adversarial-review',
+        pr: 302,
+        identity: 'codex-reviewer-lacey',
+        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      },
+    ];
+    await Promise.all(records.map((record) => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', `
+        import { upsertSpawnRecord } from ${JSON.stringify(path.join(TEST_DIR, '..', 'src', 'reviewer-fence.mjs'))};
+        upsertSpawnRecord(${JSON.stringify(stateDir)}, ${JSON.stringify(record)});
+      `], { stdio: ['ignore', 'ignore', 'inherit'] });
+      child.once('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`child exited with code ${code}`));
+      });
+    })));
+    const persisted = loadSpawnRecords(stateDir);
+    assert.deepEqual(Object.keys(persisted).sort(), records.map((record) => record.spawnToken).sort());
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

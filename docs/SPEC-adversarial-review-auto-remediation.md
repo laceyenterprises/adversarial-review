@@ -62,14 +62,19 @@ reviewer fence uses:
 - `<spawnToken>.json` for the durable reviewer metadata (`repo`, `pr`,
   `identity`, `openedAt`, `expectedClearBy`)
 - `<spawnToken>.lock` for the live `flock` guard
-- `spawn-records.json` for restart-time identity/token lookup
+- `spawn-records/<spawnToken>.json` for restart-time identity/token lookup
 - `cleanup-jobs/*.json` for deferred pending-review cleanup work
+- `quarantine/` for corrupt fence JSON or cleanup-job files that recovery
+  moved aside instead of crashing startup
 - `audit/*.jsonl` for append-only fence lifecycle events
 
 Fence cleanup order is load-bearing: the reviewer deletes the JSON sidecar
 before unlocking the flocked lock file, then closes and removes the lock file.
 That ordering makes a concurrent startup sweep or SIGTERM probe observe either
 "no fence" or "still held", never a transient free-lock orphan on a clean exit.
+If fence open fails after `flock(2)` succeeds, the reviewer must unlock, close,
+and remove the lock file before rethrowing so failed opens cannot strand
+orphaned `*.lock` files forever.
 
 Watcher startup runs this sequence before orphan-review reconciliation:
 
@@ -77,6 +82,13 @@ Watcher startup runs this sequence before orphan-review reconciliation:
 2. `sweepReviewerFencesOnStartup()`
 3. `processQueuedFenceCleanupJobs()`
 4. `reconcileOrphanedReviewing()`
+
+Startup recovery treats corrupt fence JSON and corrupt cleanup-job JSON as
+recoverable input: quarantine the bad file under
+`reviewer-fences/quarantine/`, emit `fence_corrupted_skipped`, and continue
+iterating. The sweep also prunes stale `*.lock` files that no longer have a
+matching JSON sidecar once they age past
+`ADVERSARIAL_REVIEW_FENCE_STALE_TTL_SECONDS`.
 
 `classifyFenceOrphan()` currently applies these rules:
 

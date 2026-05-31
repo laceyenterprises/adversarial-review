@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
@@ -128,14 +128,16 @@ import {
   isFenceStale,
   listCleanupJobs,
   listFenceJsonPaths,
+  listFenceLockPaths,
   loadSpawnRecords,
+  moveFenceArtifactToQuarantine,
   probeFenceLock,
   queueFenceCleanupJob,
   readFenceRecord,
   resolveAdversarialReviewStateDir,
   resolveFencePaths,
-  resolveSpawnRecordPath,
   resolveSigtermFenceGraceSeconds,
+  syncSpawnRecords,
   upsertSpawnRecord,
   validateFenceConfig,
 } from './reviewer-fence.mjs';
@@ -1392,6 +1394,23 @@ function emitFenceAuditEvent(stateDir = ADVERSARIAL_REVIEW_STATE_DIR, event) {
   appendFenceAuditEvent(stateDir, payload);
 }
 
+function quarantineCorruptFenceFile(stateDir, filePath, {
+  fileKind,
+  err,
+} = {}) {
+  const quarantinedPath = moveFenceArtifactToQuarantine(stateDir, filePath, {
+    prefix: `${fileKind || 'file'}-corrupt`,
+  });
+  emitFenceAuditEvent(stateDir, {
+    event: 'fence_corrupted_skipped',
+    fileKind: fileKind || null,
+    filePath,
+    quarantinedPath,
+    error: err?.message || String(err),
+  });
+  return quarantinedPath;
+}
+
 async function processQueuedFenceCleanupJobs({
   stateDir = ADVERSARIAL_REVIEW_STATE_DIR,
   clearPendingReviewsImpl = clearPendingReviewsForSelf,
@@ -1399,7 +1418,16 @@ async function processQueuedFenceCleanupJobs({
 } = {}) {
   let processed = 0;
   for (const jobPath of listCleanupJobs(stateDir)) {
-    const job = JSON.parse(readFileSync(jobPath, 'utf8'));
+    let job;
+    try {
+      job = JSON.parse(readFileSync(jobPath, 'utf8'));
+    } catch (err) {
+      quarantineCorruptFenceFile(stateDir, jobPath, {
+        fileKind: 'cleanup-job',
+        err,
+      });
+      continue;
+    }
     const tokenEnv = job.botTokenEnv || resolveBotTokenEnvForIdentity(job.identity);
     try {
       if (!tokenEnv) {
@@ -1463,7 +1491,16 @@ async function sweepReviewerFencesOnStartup({
   let orphaned = 0;
 
   for (const jsonPath of listFenceJsonPaths(stateDir)) {
-    const record = readFenceRecord(jsonPath);
+    let record;
+    try {
+      record = readFenceRecord(jsonPath);
+    } catch (err) {
+      quarantineCorruptFenceFile(stateDir, jsonPath, {
+        fileKind: 'fence-json',
+        err,
+      });
+      continue;
+    }
     const { lockPath } = resolveFencePaths(stateDir, record.spawnToken);
     const lockProbe = probeFenceLock(lockPath);
     const orphanDecision = classifyFenceOrphan({
@@ -1507,13 +1544,36 @@ async function sweepReviewerFencesOnStartup({
     });
   }
 
+  const now = Date.now();
+  for (const lockPath of listFenceLockPaths(stateDir)) {
+    const spawnToken = basename(lockPath, '.lock');
+    const { jsonPath } = resolveFencePaths(stateDir, spawnToken);
+    if (existsSync(jsonPath)) continue;
+    let ageSeconds = Number.POSITIVE_INFINITY;
+    try {
+      ageSeconds = (now - statSync(lockPath).mtimeMs) / 1000;
+    } catch (err) {
+      emitFenceAuditEvent(stateDir, {
+        event: 'fence_orphan_lock_probe_failed',
+        spawnToken,
+        error: err?.message || String(err),
+      });
+      continue;
+    }
+    if (ageSeconds <= staleTtlSeconds) continue;
+    rmSync(lockPath, { force: true });
+    orphaned += 1;
+    emitFenceAuditEvent(stateDir, {
+      event: 'fence_orphan_lock_reaped',
+      spawnToken,
+      ageSeconds,
+    });
+  }
+
   for (const activeToken of activeSpawnMap.keys()) {
     persistedSpawnRecords[activeToken] = persistedSpawnRecords[activeToken] || activeSpawnMap.get(activeToken);
   }
-  writeFileAtomic(
-    resolveSpawnRecordPath(stateDir),
-    `${JSON.stringify(persistedSpawnRecords, null, 2)}\n`,
-  );
+  syncSpawnRecords(stateDir, persistedSpawnRecords);
   return orphaned;
 }
 

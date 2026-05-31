@@ -56,6 +56,11 @@ test('missing file returns defaults', () => {
       '~/.agent-os/governance/emergency-stop',
     );
     assert.equal(cfg.get('roots.hq'), null);
+    assert.equal(cfg.get('host.name'), null);
+    assert.equal(cfg.get('tailscale.workstation_ip'), null);
+    assert.equal(cfg.get('tailscale.daily_driver_ip'), null);
+    assert.equal(cfg.get('tailscale.ipad_ip'), null);
+    assert.equal(cfg.get('tailscale.iphone_ip'), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -188,6 +193,59 @@ test('env override canonical wins', () => {
       env: { AGENT_OS_ROLES_REVIEWER: 'claude-code' },
     });
     assert.equal(cfg.get('roles.reviewer'), 'claude-code');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('host and tailscale sections load through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      host:
+        name: laceyent-mbpro
+      tailscale:
+        workstation_ip: 100.64.0.10
+        daily_driver_ip: 100.64.0.11
+        ipad_ip: 100.64.0.12
+        iphone_ip: 100.64.0.13
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('host.name'), 'laceyent-mbpro');
+    assert.equal(cfg.get('tailscale.workstation_ip'), '100.64.0.10');
+    assert.equal(cfg.get('tailscale.daily_driver_ip'), '100.64.0.11');
+    assert.equal(cfg.get('tailscale.ipad_ip'), '100.64.0.12');
+    assert.equal(cfg.get('tailscale.iphone_ip'), '100.64.0.13');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('host and tailscale canonical env aliases override defaults', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_HOST_NAME: 'env-host',
+        AGENT_OS_TAILSCALE_WORKSTATION_IP: '100.64.1.10',
+        AGENT_OS_TAILSCALE_DAILY_DRIVER_IP: '100.64.1.11',
+        AGENT_OS_TAILSCALE_IPAD_IP: '100.64.1.12',
+        AGENT_OS_TAILSCALE_IPHONE_IP: '100.64.1.13',
+      },
+    });
+    assert.equal(cfg.get('host.name'), 'env-host');
+    assert.equal(cfg.get('tailscale.workstation_ip'), '100.64.1.10');
+    assert.equal(cfg.get('tailscale.daily_driver_ip'), '100.64.1.11');
+    assert.equal(cfg.get('tailscale.ipad_ip'), '100.64.1.12');
+    assert.equal(cfg.get('tailscale.iphone_ip'), '100.64.1.13');
+    assert.equal(
+      cfg.resolutionTrace('host.name').at(-1).source,
+      'env:AGENT_OS_HOST_NAME',
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

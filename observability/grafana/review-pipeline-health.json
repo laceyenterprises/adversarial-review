@@ -124,6 +124,60 @@
       },
       "fieldConfig": {
         "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "sum(review_pipeline_reviewer_attempts_total{status=\"failed\",failure_class=\"unknown\"}) / clamp_min(sum(review_pipeline_reviewer_attempts_total{status=\"failed\"}), 1)",
+          "refId": "A"
+        }
+      ],
+      "title": "Unknown Failure Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "review_pipeline_failed_attempts_distinct_prs{failure_class=\"unknown\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Unknown Failure Distinct PRs",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
           "unit": "short"
         },
         "overrides": []
@@ -213,7 +267,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 20
       },
       "id": 8,
       "targets": [
@@ -240,7 +294,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 22
+        "y": 26
       },
       "id": 9,
       "targets": [

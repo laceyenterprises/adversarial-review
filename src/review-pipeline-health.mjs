@@ -5,6 +5,11 @@ import { join } from 'node:path';
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
 const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
+const DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD = 0.30;
+const DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES = 15;
+const DEFAULT_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 5;
+const MIN_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR = 3;
+const DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR = 2;
 const DEFAULT_QUEUE_STARVATION_MAX_AGE_MS = 30 * 60 * 1000;
 const DEFAULT_REMEDIATION_BACKLOG_THRESHOLD = 5;
 const DEFAULT_MERGE_STALLED_MAX_TICKS = 3;
@@ -22,6 +27,7 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
 const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_health_collector_up',
   'review_pipeline_reviewer_attempts_total',
+  'review_pipeline_failed_attempts_distinct_prs',
   'review_pipeline_first_pass_queue_depth',
   'review_pipeline_first_pass_oldest_pending_age_seconds',
   'review_pipeline_remediation_backlog_jobs',
@@ -35,6 +41,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
 const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_health_collector_up: 'Whether the collector could open the review-state ledger.',
   review_pipeline_reviewer_attempts_total: 'Windowed reviewer attempt count by status, failure class, and pass kind.',
+  review_pipeline_failed_attempts_distinct_prs: 'Windowed distinct PR count contributing failed reviewer attempts by failure class.',
   review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows.',
   review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row.',
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
@@ -54,6 +61,15 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD,
     windowKey: 'reviewerDeathRateWindowMs',
     defaultWindowMs: DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS,
+  },
+  {
+    code: 'review:unknown_failure_rate_high',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: 'reviewUnknownRateThreshold',
+    defaultThreshold: DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD,
+    windowKey: 'reviewUnknownRateWindowMs',
+    defaultWindowMs: DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES * 60 * 1000,
   },
   {
     code: 'review:queue_starvation',
@@ -88,6 +104,11 @@ function parsePositiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseIntegerAtLeast(value, fallback, min) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= min ? parsed : fallback;
+}
+
 function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
   return {
     reviewerDeathRateWindowMs: parsePositiveInteger(
@@ -104,6 +125,28 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.reviewerDeathRateMinAttempts
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_DEATH_RATE_MIN_ATTEMPTS,
       DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS
+    ),
+    reviewUnknownRateThreshold: parseNumber(
+      overrides.reviewUnknownRateThreshold
+        ?? env.REVIEW_UNKNOWN_RATE_THRESHOLD,
+      DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD
+    ),
+    reviewUnknownRateWindowMinutes: parsePositiveInteger(
+      overrides.reviewUnknownRateWindowMinutes
+        ?? env.REVIEW_UNKNOWN_RATE_WINDOW_MINUTES,
+      DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES
+    ),
+    reviewUnknownRateSampleFloor: parseIntegerAtLeast(
+      overrides.reviewUnknownRateSampleFloor
+        ?? env.REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR,
+      DEFAULT_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR,
+      MIN_REVIEW_UNKNOWN_RATE_SAMPLE_FLOOR
+    ),
+    reviewUnknownRateDistinctPrFloor: parseIntegerAtLeast(
+      overrides.reviewUnknownRateDistinctPrFloor
+        ?? env.REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR,
+      DEFAULT_REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR,
+      1
     ),
     queueStarvationMaxAgeMs: parsePositiveInteger(
       overrides.queueStarvationMaxAgeMs
@@ -130,6 +173,9 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REMEDIATION_THROUGHPUT_WINDOW_MS,
       DEFAULT_REMEDIATION_THROUGHPUT_WINDOW_MS
     ),
+    get reviewUnknownRateWindowMs() {
+      return this.reviewUnknownRateWindowMinutes * 60 * 1000;
+    },
   };
 }
 
@@ -234,6 +280,7 @@ function openReviewStateReadOnlyDb(rootDir) {
 
 function summarizeReviewerAttempts(db, { nowMs, config }) {
   const cutoff = new Date(nowMs - config.reviewerDeathRateWindowMs).toISOString();
+  const unknownRateCutoff = new Date(nowMs - config.reviewUnknownRateWindowMs).toISOString();
   const rows = safeAll(
     db,
     `SELECT repo, pr_number, pass_kind, status, started_at, ended_at, metadata_json
@@ -270,7 +317,7 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
   if (total === 0) {
     const fallbackRows = safeAll(
       db,
-      `SELECT review_status, failure_message, last_attempted_at, failed_at
+      `SELECT repo, pr_number, review_status, failure_message, last_attempted_at, failed_at
          FROM reviewed_prs
         WHERE last_attempted_at >= ?
            OR failed_at >= ?`,
@@ -298,6 +345,29 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
     )).length;
   }
 
+  const unknownWindowRows = safeAll(
+    db,
+    `SELECT repo, pr_number, metadata_json
+       FROM reviewer_passes
+      WHERE started_at >= ?
+        AND status = 'failed'
+        AND pass_kind IN ('first-pass', 'rereview')`,
+    [unknownRateCutoff]
+  );
+  let unknownWindowFailed = 0;
+  const unknownWindowDistinctPrsByClass = new Map();
+  const unknownWindowDistinctPrs = new Set();
+  for (const row of unknownWindowRows) {
+    const failureClass = failureClassForPass(row);
+    if (!unknownWindowDistinctPrsByClass.has(failureClass)) unknownWindowDistinctPrsByClass.set(failureClass, new Set());
+    unknownWindowDistinctPrsByClass.get(failureClass).add(`${row.repo}#${row.pr_number}`);
+    if (failureClass === 'unknown') {
+      unknownWindowFailed += 1;
+      unknownWindowDistinctPrs.add(`${row.repo}#${row.pr_number}`);
+    }
+  }
+  const totalWindowFailures = unknownWindowRows.length;
+
   return {
     total,
     settled,
@@ -310,6 +380,17 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
       attempted: settled,
       ratio: settled > 0 ? failed / settled : 0,
     })),
+    failedDistinctPrs: Array.from(unknownWindowDistinctPrsByClass, ([failureClass, prKeys]) => ({
+      failureClass,
+      distinctPrs: prKeys.size,
+    })),
+    unknownRateWindow: {
+      failed: unknownWindowFailed,
+      totalFailures: totalWindowFailures,
+      ratio: totalWindowFailures > 0 ? unknownWindowFailed / totalWindowFailures : 0,
+      distinctPrs: unknownWindowDistinctPrs.size,
+      windowMs: config.reviewUnknownRateWindowMs,
+    },
   };
 }
 
@@ -518,6 +599,35 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (
+    snapshot.reviewer.unknownRateWindow.totalFailures >= config.reviewUnknownRateSampleFloor
+    && snapshot.reviewer.unknownRateWindow.distinctPrs >= config.reviewUnknownRateDistinctPrFloor
+    && snapshot.reviewer.unknownRateWindow.ratio > config.reviewUnknownRateThreshold
+  ) {
+    findings.push(buildFinding({
+      code: 'review:unknown_failure_rate_high',
+      tier: 'page',
+      subject: `Unknown-classified failures are ${Math.round(snapshot.reviewer.unknownRateWindow.ratio * 100)}% of recent reviewer failures`,
+      message: `${snapshot.reviewer.unknownRateWindow.failed}/${snapshot.reviewer.unknownRateWindow.totalFailures} failures in the last ${config.reviewUnknownRateWindowMinutes} minute(s) were classified unknown across ${snapshot.reviewer.unknownRateWindow.distinctPrs} distinct PR(s).`,
+      evidence: [
+        `reviews.db reviewer_passes window=${config.reviewUnknownRateWindowMs}ms`,
+        `unknown failures=${snapshot.reviewer.unknownRateWindow.failed}/${snapshot.reviewer.unknownRateWindow.totalFailures}`,
+      ],
+      recommendedAction: 'Inspect the unknown-class reviewer failures and recent classifier misses before retries accumulate behind a blind spot.',
+      observedAt,
+      details: {
+        failed: snapshot.reviewer.unknownRateWindow.failed,
+        totalFailures: snapshot.reviewer.unknownRateWindow.totalFailures,
+        ratio: snapshot.reviewer.unknownRateWindow.ratio,
+        distinctPrs: snapshot.reviewer.unknownRateWindow.distinctPrs,
+        threshold: config.reviewUnknownRateThreshold,
+        sampleFloor: config.reviewUnknownRateSampleFloor,
+        distinctPrFloor: config.reviewUnknownRateDistinctPrFloor,
+        windowMs: config.reviewUnknownRateWindowMs,
+      },
+    }));
+  }
+
   const oldest = snapshot.firstPassQueue.oldest;
   if (oldest && oldest.ageMs > config.queueStarvationMaxAgeMs) {
     findings.push(buildFinding({
@@ -589,7 +699,22 @@ function collectReviewPipelineHealth({
   try {
     const reviewer = db
       ? summarizeReviewerAttempts(db, { nowMs, config })
-      : { total: 0, settled: 0, failed: 0, failureRatio: 0, attempts: [], failureRatios: [] };
+      : {
+          total: 0,
+          settled: 0,
+          failed: 0,
+          failureRatio: 0,
+          attempts: [],
+          failureRatios: [],
+          failedDistinctPrs: [],
+          unknownRateWindow: {
+            failed: 0,
+            totalFailures: 0,
+            ratio: 0,
+            distinctPrs: 0,
+            windowMs: config.reviewUnknownRateWindowMs,
+          },
+        };
     const firstPassQueue = db
       ? summarizeFirstPassQueue(db, { nowMs })
       : { depth: 0, oldest: null };
@@ -657,6 +782,15 @@ function renderReviewPipelinePrometheus(snapshot) {
       failure_class: row.failure_class,
       pass_kind: row.pass_kind,
     }, row.value);
+  }
+  const failedDistinctPrs = snapshot.reviewer.failedDistinctPrs.length
+    ? snapshot.reviewer.failedDistinctPrs
+    : [{ failureClass: 'none', distinctPrs: 0 }];
+  for (const row of failedDistinctPrs) {
+    pushMetric('review_pipeline_failed_attempts_distinct_prs', {
+      failure_class: row.failureClass,
+      window: `${snapshot.config.reviewUnknownRateWindowMs}ms`,
+    }, row.distinctPrs);
   }
   pushMetric('review_pipeline_first_pass_queue_depth', {}, snapshot.firstPassQueue.depth);
   pushMetric(

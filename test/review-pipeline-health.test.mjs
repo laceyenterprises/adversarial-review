@@ -85,6 +85,10 @@ function insertReviewerPass(rootDir, overrides = {}) {
   }
 }
 
+function insertReviewerPasses(rootDir, passes) {
+  for (const pass of passes) insertReviewerPass(rootDir, pass);
+}
+
 function writeJob(rootDir, state, name, job) {
   const dir = path.join(rootDir, 'data', 'follow-up-jobs', state);
   mkdirSync(dir, { recursive: true });
@@ -137,6 +141,134 @@ test('reviewer death-rate finding aggregates mixed failure classes over settled 
   assert.equal(snapshot.reviewer.settled, 6);
   assert.equal(snapshot.reviewer.failureRatios.find((row) => row.failureClass === 'auth')?.failed, 2);
   assert.equal(snapshot.findings[0].details.excludedStatuses.join(','), 'running,cancelled');
+});
+
+test('unknown failure-rate finding fires on 6/10 failures from 2 distinct PRs in-window', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 40, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewRow(rootDir, { prNumber: 41, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewerPasses(rootDir, [
+    { prNumber: 40, attemptNumber: 1, startedAt: '2026-05-25T17:50:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 40, attemptNumber: 2, startedAt: '2026-05-25T17:51:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 40, attemptNumber: 3, startedAt: '2026-05-25T17:52:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 41, attemptNumber: 1, startedAt: '2026-05-25T17:53:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 41, attemptNumber: 2, startedAt: '2026-05-25T17:54:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 41, attemptNumber: 3, startedAt: '2026-05-25T17:55:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 40, attemptNumber: 4, startedAt: '2026-05-25T17:56:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 40, attemptNumber: 5, startedAt: '2026-05-25T17:57:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 41, attemptNumber: 4, startedAt: '2026-05-25T17:58:00.000Z', status: 'failed', metadata: { failureClass: 'auth' } },
+    { prNumber: 41, attemptNumber: 5, startedAt: '2026-05-25T17:59:00.000Z', status: 'failed', metadata: { failureClass: 'upstream 502' } },
+  ]);
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(findingCodes(snapshot).includes('review:unknown_failure_rate_high'));
+  assert.equal(snapshot.reviewer.unknownRateWindow.failed, 6);
+  assert.equal(snapshot.reviewer.unknownRateWindow.totalFailures, 10);
+  assert.equal(snapshot.reviewer.unknownRateWindow.distinctPrs, 2);
+});
+
+test('unknown failure-rate finding suppresses single-PR flapping by default and can opt out', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 42, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewerPasses(rootDir, [
+    { prNumber: 42, attemptNumber: 1, startedAt: '2026-05-25T17:50:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 42, attemptNumber: 2, startedAt: '2026-05-25T17:51:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 42, attemptNumber: 3, startedAt: '2026-05-25T17:52:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 42, attemptNumber: 4, startedAt: '2026-05-25T17:53:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 42, attemptNumber: 5, startedAt: '2026-05-25T17:54:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 42, attemptNumber: 6, startedAt: '2026-05-25T17:55:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 42, attemptNumber: 7, startedAt: '2026-05-25T17:56:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 42, attemptNumber: 8, startedAt: '2026-05-25T17:57:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 42, attemptNumber: 9, startedAt: '2026-05-25T17:58:00.000Z', status: 'failed', metadata: { failureClass: 'auth' } },
+    { prNumber: 42, attemptNumber: 10, startedAt: '2026-05-25T17:59:00.000Z', status: 'failed', metadata: { failureClass: 'upstream 502' } },
+  ]);
+
+  const suppressed = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(!findingCodes(suppressed).includes('review:unknown_failure_rate_high'));
+
+  const optedOut = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    env: { REVIEW_UNKNOWN_RATE_DISTINCT_PR_FLOOR: '1' },
+  });
+  assert.ok(findingCodes(optedOut).includes('review:unknown_failure_rate_high'));
+});
+
+test('unknown failure-rate finding clears below threshold and respects sample floor', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 43, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewRow(rootDir, { prNumber: 44, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewerPasses(rootDir, [
+    { prNumber: 43, attemptNumber: 1, startedAt: '2026-05-25T17:50:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 44, attemptNumber: 1, startedAt: '2026-05-25T17:51:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 43, attemptNumber: 2, startedAt: '2026-05-25T17:52:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 44, attemptNumber: 2, startedAt: '2026-05-25T17:53:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 43, attemptNumber: 3, startedAt: '2026-05-25T17:54:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 44, attemptNumber: 3, startedAt: '2026-05-25T17:55:00.000Z', status: 'failed', metadata: { failureClass: 'auth' } },
+    { prNumber: 43, attemptNumber: 4, startedAt: '2026-05-25T17:56:00.000Z', status: 'failed', metadata: { failureClass: 'auth' } },
+    { prNumber: 44, attemptNumber: 4, startedAt: '2026-05-25T17:57:00.000Z', status: 'failed', metadata: { failureClass: 'upstream 502' } },
+    { prNumber: 43, attemptNumber: 5, startedAt: '2026-05-25T17:58:00.000Z', status: 'failed', metadata: { failureClass: 'runtime' } },
+    { prNumber: 44, attemptNumber: 5, startedAt: '2026-05-25T17:59:00.000Z', status: 'failed', metadata: { failureClass: 'orphan' } },
+  ]);
+
+  const cleared = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(!findingCodes(cleared).includes('review:unknown_failure_rate_high'));
+
+  const sampleFloorRoot = tempRoot();
+  insertReviewRow(sampleFloorRoot, { prNumber: 45, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewRow(sampleFloorRoot, { prNumber: 46, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewerPasses(sampleFloorRoot, [
+    { prNumber: 45, attemptNumber: 1, startedAt: '2026-05-25T17:58:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 46, attemptNumber: 1, startedAt: '2026-05-25T17:59:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+  ]);
+  const sampleFloorSuppressed = collectReviewPipelineHealth({ rootDir: sampleFloorRoot, now: () => new Date(NOW) });
+  assert.ok(!findingCodes(sampleFloorSuppressed).includes('review:unknown_failure_rate_high'));
+});
+
+test('unknown failure-rate finding respects configurable threshold and window', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 47, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewRow(rootDir, { prNumber: 48, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewerPasses(rootDir, [
+    { prNumber: 47, attemptNumber: 1, startedAt: '2026-05-25T17:50:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 47, attemptNumber: 2, startedAt: '2026-05-25T17:51:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 48, attemptNumber: 1, startedAt: '2026-05-25T17:52:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 48, attemptNumber: 2, startedAt: '2026-05-25T17:53:00.000Z', status: 'failed', metadata: {} },
+    { prNumber: 47, attemptNumber: 3, startedAt: '2026-05-25T17:54:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 47, attemptNumber: 4, startedAt: '2026-05-25T17:55:00.000Z', status: 'failed', metadata: { failureClass: 'timeout' } },
+    { prNumber: 48, attemptNumber: 3, startedAt: '2026-05-25T17:56:00.000Z', status: 'failed', metadata: { failureClass: 'auth' } },
+    { prNumber: 48, attemptNumber: 4, startedAt: '2026-05-25T17:57:00.000Z', status: 'failed', metadata: { failureClass: 'auth' } },
+    { prNumber: 47, attemptNumber: 5, startedAt: '2026-05-25T17:58:00.000Z', status: 'failed', metadata: { failureClass: 'upstream 502' } },
+    { prNumber: 48, attemptNumber: 5, startedAt: '2026-05-25T17:59:00.000Z', status: 'failed', metadata: { failureClass: 'runtime' } },
+  ]);
+
+  const defaultSnapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.ok(findingCodes(defaultSnapshot).includes('review:unknown_failure_rate_high'));
+
+  const thresholdRaised = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    env: { REVIEW_UNKNOWN_RATE_THRESHOLD: '0.50' },
+  });
+  assert.ok(!findingCodes(thresholdRaised).includes('review:unknown_failure_rate_high'));
+
+  const oneMinuteRoot = tempRoot();
+  insertReviewRow(oneMinuteRoot, { prNumber: 49, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewRow(oneMinuteRoot, { prNumber: 50, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewerPasses(oneMinuteRoot, [
+    { prNumber: 49, attemptNumber: 1, startedAt: '2026-05-25T17:59:10.000Z', status: 'failed', metadata: {} },
+    { prNumber: 50, attemptNumber: 1, startedAt: '2026-05-25T17:59:20.000Z', status: 'failed', metadata: {} },
+    { prNumber: 49, attemptNumber: 2, startedAt: '2026-05-25T17:59:30.000Z', status: 'failed', metadata: {} },
+    { prNumber: 50, attemptNumber: 2, startedAt: '2026-05-25T17:59:40.000Z', status: 'failed', metadata: {} },
+    { prNumber: 49, attemptNumber: 3, startedAt: '2026-05-25T17:59:50.000Z', status: 'failed', metadata: {} },
+  ]);
+  const oneMinuteSnapshot = collectReviewPipelineHealth({
+    rootDir: oneMinuteRoot,
+    now: () => new Date(NOW),
+    env: { REVIEW_UNKNOWN_RATE_WINDOW_MINUTES: '1' },
+  });
+  assert.ok(findingCodes(oneMinuteSnapshot).includes('review:unknown_failure_rate_high'));
+  assert.equal(oneMinuteSnapshot.reviewer.unknownRateWindow.windowMs, 60_000);
 });
 
 test('collector reads review state without mutating legacy or missing-schema databases', () => {
@@ -366,6 +498,17 @@ test('documented Sentinel findings match emitted finding definition codes', () =
   const documented = Array.from(doc.matchAll(/`(review:[a-z_]+)`/g), (match) => match[1]).sort();
   const defined = REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.map((definition) => definition.code).sort();
   assert.deepEqual(documented, defined);
+});
+
+test('unknown failure-rate finding definition code matches the spec contract and dashboard includes the unknown panels', () => {
+  assert.ok(
+    REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.some((definition) => definition.code === 'review:unknown_failure_rate_high')
+  );
+
+  const dashboard = JSON.parse(readFileSync('observability/grafana/review-pipeline-health.json', 'utf8'));
+  const titles = dashboard.panels.map((panel) => panel.title);
+  assert.ok(titles.includes('Unknown Failure Rate'));
+  assert.ok(titles.includes('Unknown Failure Distinct PRs'));
 });
 
 test('Prometheus renderer emits every dashboard metric at least once', () => {

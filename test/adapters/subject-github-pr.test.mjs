@@ -129,6 +129,19 @@ test('github-pr routing can force the default reviewer from env', () => {
   });
 });
 
+test('github-pr routing extracts configured linear issue prefix', () => {
+  resetRoleConfigCache();
+  assert.deepEqual(routePR('[codex] ACME-484 env prefix', null, {
+    env: { AGENT_OS_LINEAR_ISSUE_PREFIX: 'ACME' },
+  }), {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    linearTicketId: 'ACME-484',
+  });
+});
+
 test('github-pr routing surfaces config-broken sentinel for unknown reviewer env values', () => {
   // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject no longer
   // throws on bad config — it returns a tagged sentinel so the watcher

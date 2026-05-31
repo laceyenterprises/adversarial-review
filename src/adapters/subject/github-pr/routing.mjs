@@ -10,6 +10,7 @@
 
 import { builderClassFromTitle, tagFromBuilderClass } from './title-tagging.mjs';
 import { resolveDefaultReviewer as resolveDefaultReviewerFromConfig } from '../../../role-config.mjs';
+import { loadConfigCached } from '../../../config-loader.mjs';
 
 const ROUTE_BY_BUILDER_CLASS = {
   codex: {
@@ -159,8 +160,21 @@ function routeSubject(subject, { env = process.env, topPath, loaderImpl } = {}) 
   };
 }
 
-function extractLinearTicketId(title) {
-  const match = String(title || '').match(/\b(LAC-\d+)\b/i);
+function linearIssuePrefix(options = {}) {
+  const cfg = loadConfigCached({ env: options.env || process.env });
+  const value = cfg.get('linear.issue_prefix', 'LAC');
+  return String(value || 'LAC').trim() || 'LAC';
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractLinearTicketId(title, options = {}) {
+  const prefix = linearIssuePrefix(options);
+  const match = String(title || '').match(
+    new RegExp(`\\b(${escapeRegExp(prefix)}-\\d+)\\b`, 'i')
+  );
   return match ? match[1].toUpperCase() : null;
 }
 
@@ -180,7 +194,7 @@ function routePR(prTitle, subject = null, options = {}) {
     tag: route.tag,
     reviewerModel: route.reviewerModel,
     botTokenEnv: route.botTokenEnv,
-    linearTicketId: extractLinearTicketId(prTitle),
+    linearTicketId: extractLinearTicketId(prTitle, options),
   };
 }
 

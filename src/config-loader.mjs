@@ -104,6 +104,10 @@ function schemaV1() {
             __default: null,
             __nullable: true,
           },
+          database_name: {
+            __type: TYPE_STRING,
+            __default: 'agent_os_ledger',
+          },
         },
       },
       // Cross-cutting GitHub integration. Added 2026-05-31 to mirror the
@@ -166,6 +170,16 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: null,
             __nullable: true,
+          },
+        },
+      },
+      linear: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          issue_prefix: {
+            __type: TYPE_STRING,
+            __default: 'LAC',
           },
         },
       },
@@ -288,6 +302,14 @@ export const ENV_ALIASES = {
   },
   'session_ledger.dsn': {
     canonical: 'AGENT_OS_SESSION_LEDGER_DSN',
+    aliases: [],
+  },
+  'session_ledger.database_name': {
+    canonical: 'AGENT_OS_SESSION_LEDGER_DATABASE_NAME',
+    aliases: [],
+  },
+  'linear.issue_prefix': {
+    canonical: 'AGENT_OS_LINEAR_ISSUE_PREFIX',
     aliases: [],
   },
   'host.name': {

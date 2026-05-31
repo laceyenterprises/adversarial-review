@@ -62,6 +62,26 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('tailscale.daily_driver_ip'), null);
     assert.equal(cfg.get('tailscale.ipad_ip'), null);
     assert.equal(cfg.get('tailscale.iphone_ip'), null);
+    assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
+    assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('linear issue prefix and session ledger database name env overrides resolve through cfg loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_LINEAR_ISSUE_PREFIX: 'ACME',
+        AGENT_OS_SESSION_LEDGER_DATABASE_NAME: 'acme_ledger',
+      },
+    });
+    assert.equal(cfg.get('linear.issue_prefix'), 'ACME');
+    assert.equal(cfg.get('session_ledger.database_name'), 'acme_ledger');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

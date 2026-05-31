@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { clearPendingReviewsForSelf } from '../src/reviewer.mjs';
+import { reconcilePendingReviewsForSelf } from '../src/reviewer-pre-write.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
 // ── classifier ──────────────────────────────────────────────────────────────
@@ -101,6 +102,45 @@ test('clearPendingReviewsForSelf deletes the bot\'s pending review and leaves su
   assert.equal(result.listed, 3);
   assert.equal(result.selfLogin, 'claude-reviewer-lacey');
   assert.deepEqual(deleted, [1002]);
+});
+
+test('clearPendingReviewsForSelf resolves codex-reviewer-lacey from the token and deletes only that draft', async () => {
+  const deleted = [];
+  const fetchImpl = async function (url, opts = {}) {
+    if (url === 'https://api.github.com/user') {
+      return { ok: true, status: 200, async json() { return { login: 'codex-reviewer-lacey' }; } };
+    }
+    if (url.endsWith('/pulls/188/reviews') && (!opts.method || opts.method === 'GET')) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [
+            { id: 2001, state: 'PENDING', user: { login: 'claude-reviewer-lacey' } },
+            { id: 2002, state: 'PENDING', user: { login: 'codex-reviewer-lacey' } },
+          ];
+        },
+      };
+    }
+    if (url.endsWith('/reviews/2002') && opts.method === 'DELETE') {
+      deleted.push(2002);
+      return { ok: true, status: 200, async json() { return { id: 2002 }; } };
+    }
+    throw new Error(`unmocked fetch: ${opts.method || 'GET'} ${url}`);
+  };
+
+  const result = await clearPendingReviewsForSelf({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 188,
+    token: 'ghp_test',
+    fetchImpl,
+    log: { log() {}, warn() {} },
+  });
+
+  assert.equal(result.cleared, 1);
+  assert.equal(result.listed, 2);
+  assert.equal(result.selfLogin, 'codex-reviewer-lacey');
+  assert.deepEqual(deleted, [2002]);
 });
 
 test('clearPendingReviewsForSelf is best-effort when /user probe fails', async () => {
@@ -205,4 +245,46 @@ test('clearPendingReviewsForSelf swallows transient DELETE failure and continues
   });
   assert.equal(result.cleared, 1); // only 11 succeeded
   assert.deepEqual(deleted, [11]);
+});
+
+test('reconcilePendingReviewsForSelf accepts numeric now and keeps fresh current-head draft', async () => {
+  const deleted = [];
+  const fetchImpl = async function (url, opts = {}) {
+    if (url === 'https://api.github.com/user') {
+      return { ok: true, status: 200, async json() { return { login: 'claude-reviewer-lacey' }; } };
+    }
+    if (url.endsWith('/pulls/7/reviews') && (!opts.method || opts.method === 'GET')) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [
+            { id: 12, state: 'PENDING', commit_id: 'head', created_at: '2026-05-30T04:00:00.000Z', user: { login: 'claude-reviewer-lacey' } },
+          ];
+        },
+      };
+    }
+    if (opts.method === 'DELETE') {
+      deleted.push(url);
+      return { ok: true, status: 200, async json() { return {}; } };
+    }
+    throw new Error(`unexpected fetch: ${opts.method || 'GET'} ${url}`);
+  };
+
+  const result = await reconcilePendingReviewsForSelf({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 7,
+    token: 'ghp_test',
+    currentHeadSha: 'head',
+    respawnAgeSeconds: 900,
+    now: Date.parse('2026-05-30T04:01:00.000Z'),
+    fetchImpl,
+    log: { log() {}, warn() {} },
+  });
+
+  assert.equal(result.shouldSpawn, false);
+  assert.equal(result.listed, 1);
+  assert.equal(result.pendingMine, 1);
+  assert.equal(result.retained, 1);
+  assert.deepEqual(deleted, []);
 });

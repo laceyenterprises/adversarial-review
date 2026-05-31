@@ -124,6 +124,46 @@ function schemaV1() {
           },
         },
       },
+      // OSR-06 — host + Tailscale per-device identity. Keep these keys in
+      // lockstep with the Python loader so checked-in top-level config.yaml
+      // remains readable by strict Node CFG consumers.
+      host: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          name: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+        },
+      },
+      tailscale: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          workstation_ip: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+          daily_driver_ip: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+          ipad_ip: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+          iphone_ip: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+        },
+      },
       submodules: {
         __type: TYPE_DICT,
         __strict: false,
@@ -243,6 +283,26 @@ export const ENV_ALIASES = {
   },
   'session_ledger.dsn': {
     canonical: 'AGENT_OS_SESSION_LEDGER_DSN',
+    aliases: [],
+  },
+  'host.name': {
+    canonical: 'AGENT_OS_HOST_NAME',
+    aliases: [],
+  },
+  'tailscale.workstation_ip': {
+    canonical: 'AGENT_OS_TAILSCALE_WORKSTATION_IP',
+    aliases: [],
+  },
+  'tailscale.daily_driver_ip': {
+    canonical: 'AGENT_OS_TAILSCALE_DAILY_DRIVER_IP',
+    aliases: [],
+  },
+  'tailscale.ipad_ip': {
+    canonical: 'AGENT_OS_TAILSCALE_IPAD_IP',
+    aliases: [],
+  },
+  'tailscale.iphone_ip': {
+    canonical: 'AGENT_OS_TAILSCALE_IPHONE_IP',
     aliases: [],
   },
   'feature_flags.live_steer_allow_unvetted': {

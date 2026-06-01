@@ -13,6 +13,7 @@ import path from 'node:path';
 import {
   buildFollowUpJob,
   getFollowUpJobDir,
+  markFollowUpJobStopped,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import {
@@ -20,6 +21,7 @@ import {
   IN_PROGRESS_STUCK_THRESHOLD_MS_ENV,
   STALE_HEARTBEAT_STOP_CODE,
   applyPRMergedPrecheck,
+  emitHeartbeatsForActiveJobs,
   fetchPRTerminalState,
   resolveInProgressStuckThresholdMs,
   sweepStuckInProgressClaims,
@@ -126,6 +128,31 @@ test('sweepStuckInProgressClaims: fresh lastHeartbeatAt leaves claim in place', 
   assert.equal(existsSync(stoppedDir) ? readdirSync(stoppedDir).length : 0, 0);
 });
 
+test('sweepStuckInProgressClaims: HQ-dispatched jobs are exempt from stale reclaim', () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1226-hq',
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+  });
+  const job = readJobAtPath(jobPath);
+  writeFollowUpJob(jobPath, {
+    ...job,
+    remediationWorker: {
+      ...job.remediationWorker,
+      dispatchMode: 'hq',
+      processId: null,
+    },
+  });
+
+  const nowMs = Date.parse('2026-06-01T05:35:00.000Z');
+  const result = sweepStuckInProgressClaims({ rootDir, nowMs });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reclaimed, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(existsSync(jobPath), true, 'HQ claim stays in in-progress/');
+});
+
 test('sweepStuckInProgressClaims: missing lastHeartbeatAt falls back to file mtime', () => {
   const rootDir = makeRoot();
   // No lastHeartbeatAt, no claimedAt, no spawnedAt — only mtime.
@@ -152,6 +179,30 @@ test('sweepStuckInProgressClaims: missing lastHeartbeatAt falls back to file mti
   const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
   const stoppedJob = readJobAtPath(stoppedPath);
   assert.equal(stoppedJob.remediationWorker?.reclaimSource, 'mtime');
+});
+
+test('emitHeartbeatsForActiveJobs before sweep preserves a live detached worker after daemon downtime', () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1227-bounce-survivor',
+    prNumber: 1227,
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+  });
+  const heartbeatMs = Date.parse('2026-06-01T05:34:59.000Z');
+  const sweepMs = Date.parse('2026-06-01T05:35:00.000Z');
+
+  const heartbeatResult = emitHeartbeatsForActiveJobs({
+    rootDir,
+    nowMs: heartbeatMs,
+    isWorkerAlive: (pid) => pid === 99999,
+  });
+  const sweepResult = sweepStuckInProgressClaims({ rootDir, nowMs: sweepMs });
+
+  assert.equal(heartbeatResult.touched, 1);
+  assert.equal(sweepResult.reclaimed, 0);
+  assert.equal(existsSync(jobPath), true, 'live worker must remain claimable after restart');
+  const job = readJobAtPath(jobPath);
+  assert.equal(job.lastHeartbeatAt, '2026-06-01T05:34:59.000Z');
 });
 
 test('sweepStuckInProgressClaims: env var threshold is honored', () => {
@@ -217,12 +268,13 @@ test('fetchPRTerminalState parses gh pr view output for OPEN/MERGED/CLOSED', asy
   }
 });
 
-test('applyPRMergedPrecheck: MERGED moves claim to completed/ without spawning', async () => {
+test('applyPRMergedPrecheck: MERGED delegates to canonical stopped/operator-merged-pr path', async () => {
   const rootDir = makeRoot();
   const { job, jobPath } = seedInProgressJob(rootDir, {
     lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
   });
   const logs = [];
+  const stopCalls = [];
   const ghStub = async () => ({
     stdout: JSON.stringify({
       state: 'MERGED',
@@ -235,23 +287,45 @@ test('applyPRMergedPrecheck: MERGED moves claim to completed/ without spawning',
     job,
     jobPath,
     execFileImpl: ghStub,
+    stopConsumedJobWithCommentImpl: async (args) => {
+      stopCalls.push(args);
+      return markFollowUpJobStopped({
+        rootDir: args.rootDir,
+        jobPath: args.jobPath,
+        stoppedAt: args.stoppedAt,
+        stopCode: args.stopCode,
+        stopReason: args.stopReason,
+        sourceStatus: args.sourceStatus,
+        remediationWorker: args.remediationWorker,
+        commentDelivery: {
+          body: 'owed comment',
+          posted: false,
+          action: 'stopped',
+          attempts: [],
+        },
+      });
+    },
     now: () => '2026-06-01T05:01:51.000Z',
     log: { log: (msg) => logs.push(msg) },
   });
 
   assert.equal(result.action, 'merged');
   assert.equal(existsSync(jobPath), false);
-  const completedPath = path.join(getFollowUpJobDir(rootDir, 'completed'), path.basename(jobPath));
-  assert.equal(existsSync(completedPath), true);
-  const completedJob = readJobAtPath(completedPath);
-  assert.equal(completedJob.status, 'completed');
-  assert.equal(completedJob.remediationWorker?.state, 'never-spawned');
-  assert.equal(completedJob.remediationWorker?.prMergedAt, '2026-06-01T05:01:49.000Z');
+  assert.equal(stopCalls.length, 1);
+  assert.equal(stopCalls[0].stopCode, 'operator-merged-pr');
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+  assert.equal(existsSync(stoppedPath), true);
+  const stoppedJob = readJobAtPath(stoppedPath);
+  assert.equal(stoppedJob.status, 'stopped');
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'operator-merged-pr');
+  assert.equal(stoppedJob.remediationWorker?.state, 'never-spawned');
+  assert.equal(stoppedJob.remediationWorker?.prMergedAt, '2026-06-01T05:01:49.000Z');
+  assert.equal(stoppedJob.commentDelivery?.posted, false);
   assert.match(logs[0], /pr-already-terminal/);
   assert.match(logs[0], /state=merged/);
 });
 
-test('applyPRMergedPrecheck: CLOSED moves claim to stopped/ without spawning', async () => {
+test('applyPRMergedPrecheck: CLOSED delegates to canonical stopped/operator-closed-pr path', async () => {
   const rootDir = makeRoot();
   const { job, jobPath } = seedInProgressJob(rootDir, {
     jobId: 'laceyenterprises__agent-os-pr-1228-closed',
@@ -270,6 +344,21 @@ test('applyPRMergedPrecheck: CLOSED moves claim to stopped/ without spawning', a
     job,
     jobPath,
     execFileImpl: ghStub,
+    stopConsumedJobWithCommentImpl: async (args) => markFollowUpJobStopped({
+      rootDir: args.rootDir,
+      jobPath: args.jobPath,
+      stoppedAt: args.stoppedAt,
+      stopCode: args.stopCode,
+      stopReason: args.stopReason,
+      sourceStatus: args.sourceStatus,
+      remediationWorker: args.remediationWorker,
+      commentDelivery: {
+        body: 'owed comment',
+        posted: false,
+        action: 'stopped',
+        attempts: [],
+      },
+    }),
     now: () => '2026-06-01T05:01:51.000Z',
   });
 
@@ -278,9 +367,10 @@ test('applyPRMergedPrecheck: CLOSED moves claim to stopped/ without spawning', a
   const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
   const stoppedJob = readJobAtPath(stoppedPath);
   assert.equal(stoppedJob.status, 'stopped');
-  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'pr-already-closed');
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'operator-closed-pr');
   assert.equal(stoppedJob.remediationWorker?.state, 'never-spawned');
   assert.equal(stoppedJob.remediationWorker?.prClosedAt, '2026-06-01T05:01:49.000Z');
+  assert.equal(stoppedJob.commentDelivery?.posted, false);
 });
 
 test('applyPRMergedPrecheck: OPEN PR returns continue and leaves the claim intact', async () => {

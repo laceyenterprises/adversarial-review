@@ -17,8 +17,8 @@
 //      stands in for them. Newly-spawned jobs are seeded with
 //      `lastHeartbeatAt = spawnedAt` by `markFollowUpJobSpawned` so
 //      the very first sweep pass after spawn sees a fresh timestamp.
-//   2. Sweep: at the start of each tick (after reconcile, before
-//      consume), any in-progress claim whose `lastHeartbeatAt` is
+//   2. Sweep: after the daemon's live-worker heartbeat pass, any
+//      in-progress claim whose `lastHeartbeatAt` is
 //      older than the stuck threshold (default 10m) is moved to
 //      stopped/ with stopCode='stale-heartbeat'. Records with no
 //      `lastHeartbeatAt` fall back to file mtime so legacy
@@ -44,7 +44,6 @@ import { statSync } from 'node:fs';
 import { basename } from 'node:path';
 import {
   listInProgressFollowUpJobs,
-  markFollowUpJobCompleted,
   markFollowUpJobStopped,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
@@ -110,6 +109,10 @@ function sweepStuckInProgressClaims({
 
   for (const { job, jobPath } of listInProgressFollowUpJobs(rootDir)) {
     scanned += 1;
+    if (job?.remediationWorker?.dispatchMode === 'hq') {
+      skipped += 1;
+      continue;
+    }
     const { sourceMs, source } = resolveLastObservedAtMs(job, jobPath);
     if (sourceMs === null) {
       skipped += 1;
@@ -259,6 +262,8 @@ async function applyPRMergedPrecheck({
   job,
   jobPath,
   execFileImpl,
+  stopConsumedJobWithCommentImpl = null,
+  postCommentImpl,
   now = () => new Date().toISOString(),
   log = console,
 } = {}) {
@@ -290,24 +295,39 @@ async function applyPRMergedPrecheck({
     const reasonText =
       `PR ${job.repo}#${job.prNumber} merged before remediation spawn` +
       `${observation.mergedAt ? ` (mergedAt=${observation.mergedAt})` : ''}; ` +
-      `finalizing claim to completed/ without spawning.`;
-    const finalized = markFollowUpJobCompleted({
-      rootDir,
-      jobPath,
-      completedAt: nowIso,
-      remediationWorker: {
-        ...(job?.remediationWorker || {}),
-        state: 'never-spawned',
-        prMergedPrecheckAt: nowIso,
-        prMergedAt: observation.mergedAt,
-      },
-      completion: {
-        preview: 'PR already merged at remediator entry; no remediation needed.',
-      },
-    });
+      `stopping the bounded loop instead of spawning a worker on a closed branch.`;
+    const remediationWorker = {
+      ...(job?.remediationWorker || {}),
+      state: 'never-spawned',
+      prMergedPrecheckAt: nowIso,
+      prMergedAt: observation.mergedAt,
+    };
+    const finalized = stopConsumedJobWithCommentImpl
+      ? await stopConsumedJobWithCommentImpl({
+          rootDir,
+          job,
+          jobPath,
+          stoppedAt: nowIso,
+          stopCode: 'operator-merged-pr',
+          stopReason: reasonText,
+          sourceStatus: 'in_progress',
+          remediationWorker,
+          postCommentImpl,
+          now,
+          log,
+        })
+      : markFollowUpJobStopped({
+          rootDir,
+          jobPath,
+          stoppedAt: nowIso,
+          stopCode: 'operator-merged-pr',
+          stopReason: reasonText,
+          sourceStatus: 'in_progress',
+          remediationWorker,
+        });
     log.log?.(
       `[follow-up-remediation ${nowIso}] pr-already-terminal jobId=${job?.jobId} ` +
-      `state=merged action=completed mergedAt=${observation.mergedAt || 'unknown'}`
+      `state=merged action=stopped mergedAt=${observation.mergedAt || 'unknown'}`
     );
     return { action: 'merged', job: finalized.job, jobPath: finalized.jobPath, reason: reasonText };
   }
@@ -315,21 +335,36 @@ async function applyPRMergedPrecheck({
   const closedReason =
     `PR ${job.repo}#${job.prNumber} closed before remediation spawn` +
     `${observation.closedAt ? ` (closedAt=${observation.closedAt})` : ''}; ` +
-    `finalizing claim to stopped/ without spawning.`;
-  const stopped = markFollowUpJobStopped({
-    rootDir,
-    jobPath,
-    stoppedAt: nowIso,
-    stopCode: 'pr-already-closed',
-    stopReason: closedReason,
-    sourceStatus: 'in_progress',
-    remediationWorker: {
-      ...(job?.remediationWorker || {}),
-      state: 'never-spawned',
-      prClosedPrecheckAt: nowIso,
-      prClosedAt: observation.closedAt,
-    },
-  });
+    `stopping the bounded loop instead of spawning a worker on a closed branch.`;
+  const remediationWorker = {
+    ...(job?.remediationWorker || {}),
+    state: 'never-spawned',
+    prClosedPrecheckAt: nowIso,
+    prClosedAt: observation.closedAt,
+  };
+  const stopped = stopConsumedJobWithCommentImpl
+    ? await stopConsumedJobWithCommentImpl({
+        rootDir,
+        job,
+        jobPath,
+        stoppedAt: nowIso,
+        stopCode: 'operator-closed-pr',
+        stopReason: closedReason,
+        sourceStatus: 'in_progress',
+        remediationWorker,
+        postCommentImpl,
+        now,
+        log,
+      })
+    : markFollowUpJobStopped({
+        rootDir,
+        jobPath,
+        stoppedAt: nowIso,
+        stopCode: 'operator-closed-pr',
+        stopReason: closedReason,
+        sourceStatus: 'in_progress',
+        remediationWorker,
+      });
   log.log?.(
     `[follow-up-remediation ${nowIso}] pr-already-terminal jobId=${job?.jobId} ` +
     `state=closed action=stopped closedAt=${observation.closedAt || 'unknown'}`

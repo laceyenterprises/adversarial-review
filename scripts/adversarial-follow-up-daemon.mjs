@@ -18,10 +18,13 @@
 //
 // The daemon's tick loop:
 //   1. reconcileInProgressFollowUpJobs — finalize exited workers
-//   2. consumeFollowUpJobsUntilCapacity — claim + spawn pending jobs
+//   2. emitHeartbeatsForActiveJobs — refresh live detached workers so
+//      daemon bounces do not age them into the stale-claim path
+//   3. sweepStuckInProgressClaims — reclaim only genuinely stale claims
+//   4. consumeFollowUpJobsUntilCapacity — claim + spawn pending jobs
 //      until active workers reach ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS
 //      (default 1, preserving the legacy one-worker behavior)
-//   3. retryFailedCommentDeliveries — bounded historical retry drain
+//   5. retryFailedCommentDeliveries — bounded historical retry drain
 //
 // Workers spawned by the consume step are detached subprocesses of `codex` /
 // `claude` (separate binaries with their own TCC identity), not
@@ -132,6 +135,17 @@ async function main() {
   while (!stopping) {
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
     if (stopping) break;
+    await runStep('heartbeat', () => {
+      const result = emitHeartbeatsForActiveJobs({
+        rootDir: ROOT,
+        isWorkerAlive: isWorkerProcessRunning,
+      });
+      logTick(
+        'heartbeat',
+        `scanned=${result.scanned} touched=${result.touched} skipped=${result.skipped}`
+      );
+    });
+    if (stopping) break;
     await runStep('stale-claim-sweep', () => {
       const thresholdMs = resolveInProgressStuckThresholdMs(process.env);
       const result = sweepStuckInProgressClaims({ rootDir: ROOT, thresholdMs });
@@ -153,17 +167,6 @@ async function main() {
         `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
         `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
         `capacityRemaining=${result.capacityRemaining}`
-      );
-    });
-    if (stopping) break;
-    await runStep('heartbeat', () => {
-      const result = emitHeartbeatsForActiveJobs({
-        rootDir: ROOT,
-        isWorkerAlive: isWorkerProcessRunning,
-      });
-      logTick(
-        'heartbeat',
-        `scanned=${result.scanned} touched=${result.touched} skipped=${result.skipped}`
       );
     });
     if (stopping) break;

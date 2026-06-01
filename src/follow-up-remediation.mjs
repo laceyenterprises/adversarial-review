@@ -4420,6 +4420,8 @@ async function consumeNextFollowUpJob({
       job: claimed.job,
       jobPath: claimed.jobPath,
       execFileImpl,
+      stopConsumedJobWithCommentImpl: stopConsumedJobWithComment,
+      postCommentImpl,
       now,
       log,
     });

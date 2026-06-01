@@ -421,6 +421,8 @@ includes:
 - `operator-stop` — human explicitly stopped the job.
 - `no-progress` — worker exited without a durable `reReview.requested=true`.
 - `max-rounds-reached` — another round would exceed the stored cap.
+- `stale-heartbeat` — the stuck-claim sweep reclaimed an orphaned in-progress
+  claim after liveness went stale.
 - `operator-merged-pr` — the PR merged before consume or reconcile could
   advance the loop.
 - `operator-closed-pr` — the PR closed unmerged before consume or reconcile
@@ -428,10 +430,22 @@ includes:
 - `stale-review-head` — consume-only guard: the job was created for an older PR
   head and a newer head is already live, so this stale job must not spawn.
 
+`stale-heartbeat` is a recovery stop for a transient daemon/worker failure mode,
+not a terminal business state. The sweep compares `lastHeartbeatAt`, then the
+spawn timestamp, then the claim timestamp, then file mtime for legacy rows. A
+reclaimed job remains operator-retriggerable through the normal CLI or
+`retrigger-remediation` label flow after inspection.
+
 `stale-review-head` is intentionally a pre-spawn stale-job signal, not a
 post-spawn invariant. Reconcile must not emit it merely because the remediation
 worker pushed commits and moved the PR head away from `job.revisionRef`; that
 head movement is the normal success path before rereview is requested.
+
+The merged/closed consume guard is rerun immediately before worker spawn through
+the same canonical lifecycle resolver/decision path used at claim time and
+reconcile time. That late recheck must preserve live-to-mirror fallback,
+`source=live|mirror` stop-reason tagging, and consume-time stale-drift /
+stale-review-head suppression instead of maintaining a second bespoke parser.
 
 The operator `follow-up:stop` command is the terminal ledger transition for
 manual intervention. When it targets an in-progress job whose

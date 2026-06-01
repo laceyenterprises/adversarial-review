@@ -1,4 +1,4 @@
-// LAC-957 / ARP-FUS-01 — stuck-claim sweep + PR-merged precheck.
+// LAC-957 / ARP-FUS-01 — stuck-claim sweep + pre-spawn lifecycle recheck.
 //
 // Tonight (2026-06-01 ~05:02Z) an orphaned in-progress claim blocked
 // the follow-up daemon's queue for 35 min because the remediator
@@ -20,9 +20,8 @@ import {
   DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS,
   IN_PROGRESS_STUCK_THRESHOLD_MS_ENV,
   STALE_HEARTBEAT_STOP_CODE,
-  applyPRMergedPrecheck,
+  applyPreSpawnLifecycleGate,
   emitHeartbeatsForActiveJobs,
-  fetchPRTerminalState,
   resolveInProgressStuckThresholdMs,
   sweepStuckInProgressClaims,
 } from '../src/follow-up-stuck-claim-sweep.mjs';
@@ -247,46 +246,24 @@ test('resolveInProgressStuckThresholdMs returns the default when env var is unse
   );
 });
 
-test('fetchPRTerminalState parses gh pr view output for OPEN/MERGED/CLOSED', async () => {
-  async function ghStub(state) {
-    return {
-      stdout: JSON.stringify({
-        state,
-        mergedAt: state === 'MERGED' ? '2026-06-01T05:01:49.000Z' : null,
-        closedAt: state === 'CLOSED' ? '2026-06-01T05:01:49.000Z' : null,
-      }),
-    };
-  }
-
-  for (const [input, expected] of [['OPEN', 'open'], ['MERGED', 'merged'], ['CLOSED', 'closed']]) {
-    const observation = await fetchPRTerminalState({
-      repo: 'laceyenterprises/agent-os',
-      prNumber: 1226,
-      execFileImpl: () => ghStub(input),
-    });
-    assert.equal(observation.state, expected);
-  }
-});
-
-test('applyPRMergedPrecheck: MERGED delegates to canonical stopped/operator-merged-pr path', async () => {
+test('applyPreSpawnLifecycleGate: merged lifecycle delegates to canonical stopped/operator-merged-pr path', async () => {
   const rootDir = makeRoot();
   const { job, jobPath } = seedInProgressJob(rootDir, {
     lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
   });
   const logs = [];
   const stopCalls = [];
-  const ghStub = async () => ({
-    stdout: JSON.stringify({
-      state: 'MERGED',
-      mergedAt: '2026-06-01T05:01:49.000Z',
-      closedAt: null,
-    }),
-  });
-  const result = await applyPRMergedPrecheck({
+  const result = await applyPreSpawnLifecycleGate({
     rootDir,
     job,
     jobPath,
-    execFileImpl: ghStub,
+    resolvePRLifecycleImpl: async () => ({
+      source: 'mirror',
+      prState: 'merged',
+      mergedAt: '2026-06-01T05:01:49.000Z',
+      closedAt: null,
+    }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
     stopConsumedJobWithCommentImpl: async (args) => {
       stopCalls.push(args);
       return markFollowUpJobStopped({
@@ -309,7 +286,7 @@ test('applyPRMergedPrecheck: MERGED delegates to canonical stopped/operator-merg
     log: { log: (msg) => logs.push(msg) },
   });
 
-  assert.equal(result.action, 'merged');
+  assert.equal(result.action, 'stopped');
   assert.equal(existsSync(jobPath), false);
   assert.equal(stopCalls.length, 1);
   assert.equal(stopCalls[0].stopCode, 'operator-merged-pr');
@@ -319,31 +296,32 @@ test('applyPRMergedPrecheck: MERGED delegates to canonical stopped/operator-merg
   assert.equal(stoppedJob.status, 'stopped');
   assert.equal(stoppedJob.remediationPlan?.stop?.code, 'operator-merged-pr');
   assert.equal(stoppedJob.remediationWorker?.state, 'never-spawned');
+  assert.equal(stoppedJob.remediationPlan?.stop?.reason.includes('source=mirror'), true);
+  assert.equal(stoppedJob.remediationWorker?.preSpawnLifecycleCheckAt, '2026-06-01T05:01:51.000Z');
   assert.equal(stoppedJob.remediationWorker?.prMergedAt, '2026-06-01T05:01:49.000Z');
   assert.equal(stoppedJob.commentDelivery?.posted, false);
-  assert.match(logs[0], /pr-already-terminal/);
-  assert.match(logs[0], /state=merged/);
+  assert.match(logs[0], /pre-spawn-lifecycle-stop/);
+  assert.match(logs[0], /operator-merged-pr/);
 });
 
-test('applyPRMergedPrecheck: CLOSED delegates to canonical stopped/operator-closed-pr path', async () => {
+test('applyPreSpawnLifecycleGate: closed lifecycle delegates to canonical stopped/operator-closed-pr path', async () => {
   const rootDir = makeRoot();
   const { job, jobPath } = seedInProgressJob(rootDir, {
     jobId: 'laceyenterprises__agent-os-pr-1228-closed',
     prNumber: 1228,
     lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
   });
-  const ghStub = async () => ({
-    stdout: JSON.stringify({
-      state: 'CLOSED',
-      mergedAt: null,
-      closedAt: '2026-06-01T05:01:49.000Z',
-    }),
-  });
-  const result = await applyPRMergedPrecheck({
+  const result = await applyPreSpawnLifecycleGate({
     rootDir,
     job,
     jobPath,
-    execFileImpl: ghStub,
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'closed',
+      mergedAt: null,
+      closedAt: '2026-06-01T05:01:49.000Z',
+    }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
     stopConsumedJobWithCommentImpl: async (args) => markFollowUpJobStopped({
       rootDir: args.rootDir,
       jobPath: args.jobPath,
@@ -362,7 +340,7 @@ test('applyPRMergedPrecheck: CLOSED delegates to canonical stopped/operator-clos
     now: () => '2026-06-01T05:01:51.000Z',
   });
 
-  assert.equal(result.action, 'closed');
+  assert.equal(result.action, 'stopped');
   assert.equal(existsSync(jobPath), false);
   const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
   const stoppedJob = readJobAtPath(stoppedPath);
@@ -373,56 +351,93 @@ test('applyPRMergedPrecheck: CLOSED delegates to canonical stopped/operator-clos
   assert.equal(stoppedJob.commentDelivery?.posted, false);
 });
 
-test('applyPRMergedPrecheck: OPEN PR returns continue and leaves the claim intact', async () => {
+test('applyPreSpawnLifecycleGate: stale-review-head uses the canonical consume-time stop', async () => {
   const rootDir = makeRoot();
   const { job, jobPath } = seedInProgressJob(rootDir, {
-    jobId: 'laceyenterprises__agent-os-pr-1229-open',
+    jobId: 'laceyenterprises__agent-os-pr-1229-stale-head',
     prNumber: 1229,
     lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
   });
-  const ghStub = async () => ({
-    stdout: JSON.stringify({ state: 'OPEN', mergedAt: null, closedAt: null }),
-  });
-  const result = await applyPRMergedPrecheck({
+  const result = await applyPreSpawnLifecycleGate({
     rootDir,
-    job,
+    job: { ...job, revisionRef: 'sha-before' },
     jobPath,
-    execFileImpl: ghStub,
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergedAt: null,
+      closedAt: null,
+      headSha: 'sha-after',
+    }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
     now: () => '2026-06-01T05:01:51.000Z',
   });
 
-  assert.equal(result.action, 'continue');
-  assert.equal(existsSync(jobPath), true, 'claim still in in-progress/');
-  assert.equal(
-    existsSync(path.join(getFollowUpJobDir(rootDir, 'completed'), path.basename(jobPath))),
-    false,
-  );
-  assert.equal(
-    existsSync(path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath))),
-    false,
-  );
+  assert.equal(result.action, 'stopped');
+  assert.equal(existsSync(jobPath), false);
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+  const stoppedJob = readJobAtPath(stoppedPath);
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'stale-review-head');
+  assert.match(stoppedJob.remediationPlan?.stop?.reason, /sha-before/);
+  assert.match(stoppedJob.remediationPlan?.stop?.reason, /sha-after/);
+  assert.equal(stoppedJob.remediationWorker?.state, 'never-spawned');
 });
 
-test('applyPRMergedPrecheck: gh failure falls through to continue (non-fatal)', async () => {
+test('applyPreSpawnLifecycleGate: stale-drift uses the canonical consume-time stop', async () => {
   const rootDir = makeRoot();
   const { job, jobPath } = seedInProgressJob(rootDir, {
-    jobId: 'laceyenterprises__agent-os-pr-1230-ghfail',
+    jobId: 'laceyenterprises__agent-os-pr-1230-stale-drift',
     prNumber: 1230,
     lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
   });
-  const ghStub = async () => { throw new Error('gh: network unreachable'); };
   const logs = [];
-  const result = await applyPRMergedPrecheck({
+  const result = await applyPreSpawnLifecycleGate({
     rootDir,
     job,
     jobPath,
-    execFileImpl: ghStub,
+    resolvePRLifecycleImpl: async () => ({
+      source: 'mirror',
+      prState: 'open',
+      mergedAt: null,
+      closedAt: null,
+      labels: [{ name: 'stale-drift' }],
+    }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
     now: () => '2026-06-01T05:01:51.000Z',
-    log: { info: (msg) => logs.push(msg) },
+    log: { log: (msg) => logs.push(msg) },
+  });
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(existsSync(jobPath), false);
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+  const stoppedJob = readJobAtPath(stoppedPath);
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'stale-drift');
+  assert.match(stoppedJob.remediationPlan?.stop?.reason, /stale-drift label/);
+  assert.match(logs[0], /stale-drift/);
+});
+
+test('applyPreSpawnLifecycleGate: unresolved lifecycle still falls through to continue', async () => {
+  const rootDir = makeRoot();
+  const { job, jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1231-no-lifecycle',
+    prNumber: 1231,
+    lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
+  });
+  const logs = [];
+  const result = await applyPreSpawnLifecycleGate({
+    rootDir,
+    job,
+    jobPath,
+    resolvePRLifecycleImpl: async () => {
+      throw new Error('gh: network unreachable');
+    },
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    now: () => '2026-06-01T05:01:51.000Z',
+    log: { error: (msg) => logs.push(msg) },
   });
 
   assert.equal(result.action, 'continue');
-  assert.equal(result.reason, 'precheck-failed');
+  assert.equal(result.reason, 'pr-open');
   assert.equal(existsSync(jobPath), true);
-  assert.match(logs[0], /pr-state-precheck non-fatal/);
+  assert.match(logs[0], /PR lifecycle resolve threw/);
 });

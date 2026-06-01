@@ -1,4 +1,4 @@
-// Stuck-claim sweep + heartbeat emitter + PR-merged precheck.
+// Stuck-claim sweep + heartbeat emitter + pre-spawn lifecycle recheck.
 //
 // Why this exists (LAC-957, 2026-05-31):
 // On 2026-06-01 ~05:02Z the daemon claimed a remediation job for a PR
@@ -23,13 +23,11 @@
 //      stopped/ with stopCode='stale-heartbeat'. Records with no
 //      `lastHeartbeatAt` fall back to file mtime so legacy
 //      pre-heartbeat claims still get reclaimed.
-//   3. PR-merged precheck: just before spawning a worker, the daemon
-//      re-checks the PR's state via `gh pr view`. If the PR merged or
-//      closed in the window between the initial lifecycle check and
-//      the spawn (the exact race tonight's incident exhibited), the
-//      claim is finalized to completed/ (merged) or stopped/ (closed)
-//      without spawning. Factored as a standalone function so it can
-//      be unit-tested with a fake execFile.
+//   3. Pre-spawn lifecycle recheck: just before spawning a worker, the
+//      daemon reruns the canonical lifecycle resolver/decision path. If
+//      the PR merged/closed, the head changed, or an operator applied a
+//      stale-drift label in the prep window, the claim is finalized with
+//      the same consume-time stop contract instead of spawning.
 //
 // The sweep is intentionally a separate path from reconcile.
 // Reconcile finalizes workers that exited cleanly (a final-message
@@ -47,6 +45,7 @@ import {
   markFollowUpJobStopped,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
+import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -208,108 +207,76 @@ function emitHeartbeatsForActiveJobs({
   return { scanned, touched, skipped };
 }
 
-// Lightweight PR-merged precheck. The bug this addresses: between the
-// claim moment and the actual `spawn` call, OAuth pre-flight + workspace
-// prep can take ~10-20s, during which the PR may merge. The existing
-// lifecycleStopDecision call runs BEFORE that delay, so it doesn't
-// catch the race. This precheck runs RIGHT BEFORE spawn.
-//
-// Returns { state: 'open'|'merged'|'closed', mergedAt, closedAt } or
-// throws on a malformed gh response. Errors from gh (network / auth /
-// etc.) are surfaced to the caller, which is expected to swallow them
-// and proceed with spawn — the precheck is opportunistic; falling
-// through to the spawn matches the existing lifecycle-gate's "degrade
-// open" policy.
-async function fetchPRTerminalState({
-  repo,
-  prNumber,
-  execFileImpl,
-}) {
-  if (!repo || !prNumber) {
-    throw new Error('fetchPRTerminalState requires repo and prNumber');
-  }
-  if (typeof execFileImpl !== 'function') {
-    throw new Error('fetchPRTerminalState requires execFileImpl');
-  }
-  const { stdout } = await execFileImpl(
-    'gh',
-    ['pr', 'view', String(prNumber), '--repo', String(repo), '--json', 'state,mergedAt,closedAt'],
-    { maxBuffer: 1 * 1024 * 1024 }
-  );
-  const parsed = JSON.parse(String(stdout || '{}'));
-  const rawState = String(parsed?.state || '').trim().toUpperCase();
-  const normalizedState =
-    rawState === 'MERGED' ? 'merged'
-      : rawState === 'CLOSED' ? 'closed'
-        : rawState === 'OPEN' ? 'open'
-          : null;
-  if (!normalizedState) {
-    throw new Error(`gh pr view returned unrecognized state for ${repo}#${prNumber}: ${JSON.stringify(parsed?.state)}`);
-  }
-  return {
-    state: normalizedState,
-    mergedAt: typeof parsed?.mergedAt === 'string' && parsed.mergedAt.trim() ? parsed.mergedAt : null,
-    closedAt: typeof parsed?.closedAt === 'string' && parsed.closedAt.trim() ? parsed.closedAt : null,
-  };
-}
-
-// Returns an action description ('continue' | 'merged' | 'closed') so
-// the caller knows whether to proceed with spawn. On 'merged' /
-// 'closed' the precheck has ALREADY moved the file out of in-progress/
-// to the right terminal state.
-async function applyPRMergedPrecheck({
+// Returns an action description (`continue` or `stopped`) so the caller
+// knows whether to proceed with spawn. On `stopped` the gate has already
+// moved the file out of `in-progress/` with the canonical consume-time
+// stop semantics.
+async function applyPreSpawnLifecycleGate({
   rootDir,
   job,
   jobPath,
+  resolvePRLifecycleImpl,
   execFileImpl,
   stopConsumedJobWithCommentImpl = null,
   postCommentImpl,
   now = () => new Date().toISOString(),
   log = console,
 } = {}) {
-  let observation;
-  try {
-    observation = await fetchPRTerminalState({
-      repo: job?.repo,
-      prNumber: job?.prNumber,
-      execFileImpl,
-    });
-  } catch (err) {
-    // Precheck is opportunistic — when it can't get a definitive PR
-    // state, fall through to spawn and let the regular reconcile path
-    // catch any real failures. Logged at info-level so operators can
-    // tail debug output without flooding the warn channel that the
-    // drain-summary path uses for genuine spawn-preparation failures.
-    log.info?.(
-      `[follow-up-remediation] pr-state-precheck non-fatal for ${job?.repo}#${job?.prNumber}: ${err?.message || err}`
-    );
-    return { action: 'continue', reason: 'precheck-failed' };
-  }
-
-  if (observation.state === 'open') {
+  const lifecycle = await resolveJobPRLifecycleSafe({
+    rootDir,
+    job,
+    resolvePRLifecycleImpl,
+    execFileImpl,
+    log,
+  });
+  const lifecycleStop = lifecycleStopDecision(lifecycle, {
+    repo: job?.repo,
+    prNumber: job?.prNumber,
+    site: 'consume',
+    job,
+  });
+  if (!lifecycleStop) {
     return { action: 'continue', reason: 'pr-open' };
+  }
+  if (lifecycleStop.logMessage) {
+    log.log?.(lifecycleStop.logMessage);
   }
 
   const nowIso = now();
-  if (observation.state === 'merged') {
-    const reasonText =
-      `PR ${job.repo}#${job.prNumber} merged before remediation spawn` +
-      `${observation.mergedAt ? ` (mergedAt=${observation.mergedAt})` : ''}; ` +
-      `stopping the bounded loop instead of spawning a worker on a closed branch.`;
-    const remediationWorker = {
-      ...(job?.remediationWorker || {}),
-      state: 'never-spawned',
-      prMergedPrecheckAt: nowIso,
-      prMergedAt: observation.mergedAt,
-    };
-    const finalized = stopConsumedJobWithCommentImpl
+  const remediationWorker = {
+    ...(job?.remediationWorker || {}),
+    state: lifecycleStop.workerState,
+    preSpawnLifecycleCheckAt: nowIso,
+  };
+  if (lifecycleStop.stopCode === 'operator-merged-pr' && lifecycle?.mergedAt) {
+    remediationWorker.prMergedAt = lifecycle.mergedAt;
+  }
+  if (lifecycleStop.stopCode === 'operator-closed-pr' && lifecycle?.closedAt) {
+    remediationWorker.prClosedAt = lifecycle.closedAt;
+  }
+  const stopped = (lifecycleStop.stopCode === 'stale-drift' || lifecycleStop.stopCode === 'stale-review-head')
+    ? markFollowUpJobStopped({
+        rootDir,
+        jobPath,
+        stoppedAt: nowIso,
+        stopCode: lifecycleStop.stopCode,
+        stopReason: lifecycleStop.stopReason,
+        sourceStatus: 'in_progress',
+        remediationWorker: {
+          ...(job?.remediationWorker || {}),
+          state: lifecycleStop.workerState,
+          reconciledAt: nowIso,
+          preSpawnLifecycleCheckAt: nowIso,
+        },
+      })
+    : stopConsumedJobWithCommentImpl
       ? await stopConsumedJobWithCommentImpl({
           rootDir,
           job,
           jobPath,
           stoppedAt: nowIso,
-          stopCode: 'operator-merged-pr',
-          stopReason: reasonText,
+          stopCode: lifecycleStop.stopCode,
+          stopReason: lifecycleStop.stopReason,
           sourceStatus: 'in_progress',
           remediationWorker,
           postCommentImpl,
@@ -320,65 +287,24 @@ async function applyPRMergedPrecheck({
           rootDir,
           jobPath,
           stoppedAt: nowIso,
-          stopCode: 'operator-merged-pr',
-          stopReason: reasonText,
+          stopCode: lifecycleStop.stopCode,
+          stopReason: lifecycleStop.stopReason,
           sourceStatus: 'in_progress',
           remediationWorker,
         });
-    log.log?.(
-      `[follow-up-remediation ${nowIso}] pr-already-terminal jobId=${job?.jobId} ` +
-      `state=merged action=stopped mergedAt=${observation.mergedAt || 'unknown'}`
-    );
-    return { action: 'merged', job: finalized.job, jobPath: finalized.jobPath, reason: reasonText };
-  }
-
-  const closedReason =
-    `PR ${job.repo}#${job.prNumber} closed before remediation spawn` +
-    `${observation.closedAt ? ` (closedAt=${observation.closedAt})` : ''}; ` +
-    `stopping the bounded loop instead of spawning a worker on a closed branch.`;
-  const remediationWorker = {
-    ...(job?.remediationWorker || {}),
-    state: 'never-spawned',
-    prClosedPrecheckAt: nowIso,
-    prClosedAt: observation.closedAt,
-  };
-  const stopped = stopConsumedJobWithCommentImpl
-    ? await stopConsumedJobWithCommentImpl({
-        rootDir,
-        job,
-        jobPath,
-        stoppedAt: nowIso,
-        stopCode: 'operator-closed-pr',
-        stopReason: closedReason,
-        sourceStatus: 'in_progress',
-        remediationWorker,
-        postCommentImpl,
-        now,
-        log,
-      })
-    : markFollowUpJobStopped({
-        rootDir,
-        jobPath,
-        stoppedAt: nowIso,
-        stopCode: 'operator-closed-pr',
-        stopReason: closedReason,
-        sourceStatus: 'in_progress',
-        remediationWorker,
-      });
   log.log?.(
-    `[follow-up-remediation ${nowIso}] pr-already-terminal jobId=${job?.jobId} ` +
-    `state=closed action=stopped closedAt=${observation.closedAt || 'unknown'}`
+    `[follow-up-remediation ${nowIso}] pre-spawn-lifecycle-stop jobId=${job?.jobId} ` +
+    `stopCode=${lifecycleStop.stopCode}`
   );
-  return { action: 'closed', job: stopped.job, jobPath: stopped.jobPath, reason: closedReason };
+  return { action: 'stopped', job: stopped.job, jobPath: stopped.jobPath, reason: lifecycleStop.actionReason };
 }
 
 export {
   IN_PROGRESS_STUCK_THRESHOLD_MS_ENV,
   DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS,
   STALE_HEARTBEAT_STOP_CODE,
-  applyPRMergedPrecheck,
+  applyPreSpawnLifecycleGate,
   emitHeartbeatsForActiveJobs,
-  fetchPRTerminalState,
   resolveInProgressStuckThresholdMs,
   resolveLastObservedAtMs,
   sweepStuckInProgressClaims,

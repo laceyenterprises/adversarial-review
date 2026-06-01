@@ -22,7 +22,36 @@ function missingRequiredReviewerBotTokens(env = process.env) {
 }
 
 async function probeClaudeRuntime() {
-  await assertClaudeOAuth();
+  try {
+    await assertClaudeOAuth();
+  } catch (err) {
+    // Probe-env limitation: assertClaudeOAuth wraps `claude auth status`
+    // in `launchctl asuser <uid> env ... claude ...`. `launchctl asuser`
+    // requires an audit session bound to the calling shell. Inside
+    // `npm test`, sandbox-exec, container CI, or any non-interactive
+    // context that wasn't launched via a real user login, the call
+    // fails immediately with "Could not switch to audit session
+    // <id>: 1: Operation not permitted" — BEFORE Claude is ever
+    // invoked. That's an environment limitation, not a Claude-auth
+    // failure: the postflight cannot probe Claude from a context
+    // that can't even hand off to the user's launchd domain. Treat
+    // it as a probe-skip with a clear warning and return cleanly so
+    // the installer / test sweep can continue. Production installs
+    // run from a real operator shell with a live audit session, so
+    // the launchctl handoff succeeds and this branch never fires.
+    const msg = String(err?.message || err || '');
+    if (/Could not switch to audit session.*Operation not permitted/i.test(msg)) {
+      process.stderr.write(
+        '[install-postflight] probe-claude skipped: '
+          + 'launchctl audit session unavailable in this context '
+          + '(non-interactive test/sandbox env; production installs '
+          + 'run from an interactive operator shell with a real audit '
+          + 'session and this probe runs normally there).\n'
+      );
+      return;
+    }
+    throw err;
+  }
 }
 
 async function probeCodexRuntime(options = {}) {

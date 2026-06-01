@@ -1616,6 +1616,13 @@ function markFollowUpJobSpawned({
   let nextJob = {
     ...currentJob,
     status: 'in_progress',
+    // Seed lastHeartbeatAt so the stale-claim sweep (LAC-957) sees a
+    // fresh timestamp on the very next tick. Without seeding, jobs
+    // spawned just before a tick boundary could read as "no heartbeat
+    // yet" and fall back to mtime — usually fine, but a spawn that
+    // immediately stalls before the daemon's first heartbeat pass
+    // would only be reclaimable via mtime, which lags real activity.
+    lastHeartbeatAt: effectiveSpawnedAt,
     remediationWorker: {
       model: 'codex',
       state: 'spawned',

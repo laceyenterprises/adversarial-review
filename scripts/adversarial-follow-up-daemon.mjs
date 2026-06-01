@@ -35,11 +35,17 @@ import { fileURLToPath } from 'node:url';
 import {
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   consumeFollowUpJobsUntilCapacity,
+  isWorkerProcessRunning,
   resolveRemediationMaxConcurrentJobs,
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { archiveStoppedFollowUpJobs } from '../src/follow-up-jobs.mjs';
+import {
+  emitHeartbeatsForActiveJobs,
+  resolveInProgressStuckThresholdMs,
+  sweepStuckInProgressClaims,
+} from '../src/follow-up-stuck-claim-sweep.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -126,6 +132,16 @@ async function main() {
   while (!stopping) {
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
     if (stopping) break;
+    await runStep('stale-claim-sweep', () => {
+      const thresholdMs = resolveInProgressStuckThresholdMs(process.env);
+      const result = sweepStuckInProgressClaims({ rootDir: ROOT, thresholdMs });
+      logTick(
+        'stale-claim-sweep',
+        `scanned=${result.scanned} reclaimed=${result.reclaimed} skipped=${result.skipped} ` +
+        `thresholdMs=${result.thresholdMs}`
+      );
+    });
+    if (stopping) break;
     await runStep('consume', async () => {
       const result = await consumeFollowUpJobsUntilCapacity({
         maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
@@ -137,6 +153,17 @@ async function main() {
         `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
         `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
         `capacityRemaining=${result.capacityRemaining}`
+      );
+    });
+    if (stopping) break;
+    await runStep('heartbeat', () => {
+      const result = emitHeartbeatsForActiveJobs({
+        rootDir: ROOT,
+        isWorkerAlive: isWorkerProcessRunning,
+      });
+      logTick(
+        'heartbeat',
+        `scanned=${result.scanned} touched=${result.touched} skipped=${result.skipped}`
       );
     });
     if (stopping) break;

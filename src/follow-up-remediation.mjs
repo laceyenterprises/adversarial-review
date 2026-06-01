@@ -46,6 +46,7 @@ import {
   resolveDefaultRemediator,
   validateStartupRoleConfig,
 } from './role-config.mjs';
+import { applyPRMergedPrecheck } from './follow-up-stuck-claim-sweep.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -4406,6 +4407,30 @@ async function consumeNextFollowUpJob({
       governingDocContext,
     });
     writeFileSync(promptPath, `${prompt}\n`, 'utf8');
+
+    // LAC-957: re-check PR state just before spawn. The lifecycle gate
+    // at the top of this function ran before OAuth pre-flight +
+    // workspace prep (~10-20s). On 2026-06-01 a PR merged in that
+    // window; the worker spawned, immediately died, and left an
+    // orphaned in-progress claim that blocked the queue for 35 min.
+    // The precheck moves the claim to completed/ (merged) or stopped/
+    // (closed) without spawning, closing that exact race.
+    const prTerminalCheck = await applyPRMergedPrecheck({
+      rootDir,
+      job: claimed.job,
+      jobPath: claimed.jobPath,
+      execFileImpl,
+      now,
+      log,
+    });
+    if (prTerminalCheck.action !== 'continue') {
+      return {
+        consumed: false,
+        reason: prTerminalCheck.action === 'merged' ? 'pr-already-merged' : 'pr-already-closed',
+        job: prTerminalCheck.job,
+        jobPath: prTerminalCheck.jobPath,
+      };
+    }
 
     const worker = hqDispatchEnabled
       ? await dispatchRemediationViaHq({

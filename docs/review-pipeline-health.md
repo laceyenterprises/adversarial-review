@@ -28,7 +28,9 @@ The Grafana dashboard lives at
   whether an unknown spike is one flapping PR or a cross-PR incident.
 - `review_pipeline_health_collector_up`: 1 when the collector can open
   `reviews.db` read-only, 0 when the review-state ledger is missing or
-  unreadable.
+  unreadable. Page on the specific unreadable-ledger Sentinel finding for the
+  exists-but-unopenable case; keep any `collector_up == 0` page scoped to the
+  missing-ledger case or downgrade it to avoid double-paging the same incident.
 - `review_pipeline_first_pass_queue_depth`: open PRs waiting in
   `reviewed_prs.review_status='pending'`.
 - `review_pipeline_first_pass_oldest_pending_age_seconds`: age of the oldest
@@ -51,6 +53,7 @@ The Grafana dashboard lives at
 
 | Code | Default threshold | Tier | Clears when |
 |---|---:|---|---|
+| `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | page | the collector can open `reviews.db` read-only again |
 | `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | page | the settled-attempt window falls below threshold or the minimum-attempt guard |
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | page | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:queue_starvation` | oldest pending first-pass row is >30m old | page | no pending row exceeds the age threshold |

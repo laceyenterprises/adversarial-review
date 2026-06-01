@@ -37,6 +37,7 @@ const fixture = JSON.parse(
   )
 );
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 
 function makeOctokitSnapshot() {
   return {
@@ -98,7 +99,7 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
 });
 
 test('github-pr routing can force the default reviewer from env', () => {
-  const env = { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' };
+  const env = { ...HERMETIC_CONFIG_ENV, ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' };
 
   assert.deepEqual(routeSubject({ builderClass: 'codex' }, { env }), {
     builderClass: 'codex',
@@ -120,7 +121,7 @@ test('github-pr routing can force the default reviewer from env', () => {
   // maps to one cache drop between the env-flip and the next call.
   resetRoleConfigCache();
   assert.deepEqual(routePR('[codex] LAC-484 env default reviewer', null, {
-    env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'claude-code' },
+    env: { ...HERMETIC_CONFIG_ENV, ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'claude-code' },
   }), {
     builderClass: 'codex',
     tag: 'codex',
@@ -133,7 +134,7 @@ test('github-pr routing can force the default reviewer from env', () => {
 test('github-pr routing extracts configured linear issue prefix', () => {
   resetRoleConfigCache();
   assert.deepEqual(routePR('[codex] ACME-484 env prefix', null, {
-    env: { AGENT_OS_LINEAR_ISSUE_PREFIX: 'ACME' },
+    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_LINEAR_ISSUE_PREFIX: 'ACME' },
   }), {
     builderClass: 'codex',
     tag: 'codex',

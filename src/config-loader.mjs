@@ -191,6 +191,19 @@ function schemaV1() {
           },
         },
       },
+      // OSR-02 — launchd label prefix for fork-safe reverse-DNS labels.
+      // Keep this in lockstep with the Python CFG schema; strict Node CFG
+      // consumers parse top-level config.yaml during watcher startup.
+      launchd: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          label_prefix: {
+            __type: TYPE_STRING,
+            __default: 'ai.laceyenterprises',
+          },
+        },
+      },
       linear: {
         __type: TYPE_DICT,
         __strict: true,
@@ -354,6 +367,10 @@ export const ENV_ALIASES = {
   },
   'tailscale.iphone_ip': {
     canonical: 'AGENT_OS_TAILSCALE_IPHONE_IP',
+    aliases: [],
+  },
+  'launchd.label_prefix': {
+    canonical: 'AGENT_OS_LAUNCHD_LABEL_PREFIX',
     aliases: [],
   },
   'feature_flags.live_steer_allow_unvetted': {

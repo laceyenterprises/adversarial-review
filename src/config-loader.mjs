@@ -81,6 +81,11 @@ function schemaV1() {
         __keys: {
           hq: { __type: TYPE_STRING, __default: null, __nullable: true },
           deploy: { __type: TYPE_STRING, __default: null, __nullable: true },
+          // OSR-03 — operator account-home roots. These pair with
+          // `AGENT_OS_ROOTS_RUNTIME_HOME` / `AGENT_OS_ROOTS_ADMIN_HOME`
+          // env aliases on the Python side. Forks override per-host.
+          runtime_home: { __type: TYPE_STRING, __default: null, __nullable: true },
+          admin_home: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
       governance: {

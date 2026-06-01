@@ -62,6 +62,7 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('tailscale.daily_driver_ip'), null);
     assert.equal(cfg.get('tailscale.ipad_ip'), null);
     assert.equal(cfg.get('tailscale.iphone_ip'), null);
+    assert.equal(cfg.get('launchd.label_prefix'), 'ai.laceyenterprises');
     assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
   } finally {
@@ -309,6 +310,32 @@ test('host and tailscale canonical env aliases override defaults', () => {
     assert.equal(
       cfg.resolutionTrace('host.name').at(-1).source,
       'env:AGENT_OS_HOST_NAME',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('launchd label prefix loads through strict Node schema and env alias', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      launchd:
+        label_prefix: ai.example
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('launchd.label_prefix'), 'ai.example');
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_LAUNCHD_LABEL_PREFIX: 'ai.env' },
+    });
+    assert.equal(envCfg.get('launchd.label_prefix'), 'ai.env');
+    assert.equal(
+      envCfg.resolutionTrace('launchd.label_prefix').at(-1).source,
+      'env:AGENT_OS_LAUNCHD_LABEL_PREFIX',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

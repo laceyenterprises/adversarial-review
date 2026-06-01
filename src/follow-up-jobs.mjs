@@ -106,6 +106,10 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // consume-time `lifecycleStopDecision` check does not re-fire the
   // same stop on the next tick (round-1 review B1).
   'stale-review-head',
+  // The stuck-claim sweep reclaims orphaned in-progress jobs into a
+  // durable stop state. That reclamation is a transient recovery path,
+  // so the normal operator retrigger surfaces must be able to requeue it.
+  'stale-heartbeat',
   //
   // Intentionally NOT retriggerable — listed exhaustively per round-1
   // review N3 so a future contributor doesn't misread the asymmetry as
@@ -1616,6 +1620,13 @@ function markFollowUpJobSpawned({
   let nextJob = {
     ...currentJob,
     status: 'in_progress',
+    // Seed lastHeartbeatAt so the stale-claim sweep (LAC-957) sees a
+    // fresh timestamp on the very next tick. Without seeding, jobs
+    // spawned just before a tick boundary could read as "no heartbeat
+    // yet" and fall back to mtime — usually fine, but a spawn that
+    // immediately stalls before the daemon's first heartbeat pass
+    // would only be reclaimable via mtime, which lags real activity.
+    lastHeartbeatAt: effectiveSpawnedAt,
     remediationWorker: {
       model: 'codex',
       state: 'spawned',

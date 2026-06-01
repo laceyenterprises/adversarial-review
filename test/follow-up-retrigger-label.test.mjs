@@ -301,6 +301,30 @@ test('tryRetriggerRemediationFromLabel requeues stopped:no-progress for explicit
   assert.equal(requeued.remediationPlan.nextAction.operatorOverride, true);
 });
 
+test('tryRetriggerRemediationFromLabel requeues stopped:stale-heartbeat for explicit operator recovery', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  makeHaltedJob(rootDir, {
+    stopCode: 'stale-heartbeat',
+    currentRound: 1,
+    maxRounds: 2,
+  });
+
+  const result = await tryRetriggerRemediationFromLabel({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 238,
+    labelEvent: makeLabelEvent({ id: 'evt-stale-heartbeat' }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    appendAuditRow: () => {},
+    now: () => '2026-06-01T06:00:00.000Z',
+  });
+
+  assert.equal(result.outcome, 'bumped-and-requeued');
+  const requeued = readFollowUpJob(result.jobPath);
+  assert.equal(requeued.status, 'pending');
+  assert.equal(requeued.remediationPlan.nextAction.operatorOverride, true);
+});
+
 test('tryRetriggerRemediationFromLabel requeues stopped:stale-review-head with the fresh head', async () => {
   // The remediation was auto-stopped because the head had moved out from
   // under a review created for an older SHA. The retrigger label carries

@@ -132,6 +132,18 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'laceyenterprises',
           },
+          // OSR-01 follow-on (agent-os PR #1216): the Python + YAML schemas
+          // accept `github.workspace_email_domain` as a nullable string. The
+          // Node loader must accept the same key or the watcher crash-loops
+          // at startup with `unknown key (strict schema)` — 4th occurrence of
+          // the CFG-01 multi-loader drift bug. Keep in lockstep with
+          // `platform/agent-os-config/src/agent_os_config/__init__.py`
+          // `workspace_email_domain` entry under `github`.
+          workspace_email_domain: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
         },
       },
       // OSR-06 — host + Tailscale per-device identity. Keep these keys in

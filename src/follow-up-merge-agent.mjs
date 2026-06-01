@@ -242,6 +242,49 @@ const _PHANTOM_HANDOFF_GRACE_MINUTES = 60;
 // without artificially squeezing slow remediations.
 const _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES = 120;
 
+// MAR-C round-1 review (codex-reviewer-lacey 2026-05-31, finding #3):
+// the ceiling MUST key off when the recovery-in-flight label was
+// actually applied, NOT the original merge-agent dispatch time. A slow
+// merge-agent that runs for 2h before dispatching recovery would
+// otherwise see `ageMinutes >= 120` the moment the label appears and
+// the ceiling would fire instantly — exactly the false-positive this
+// label is supposed to prevent.
+//
+// `fetchLatestLabelEvent` reads the latest `LabeledEvent.createdAt`
+// from the PR's GraphQL timeline (same path the operator-controls
+// adapter already uses for operator-approved / force-rereview). If
+// the lookup fails or returns no event, we fail closed: treat the
+// label as stale (return null → caller drops into the existing grace
+// path). Failing OPEN here is the riskier direction — it would
+// suppress escalation indefinitely on a PR whose label-add time we
+// can't establish, which is exactly the "stuck label freezes the PR"
+// shape the ceiling was added to prevent.
+async function _resolveRecoveryInFlightLabelAddedAt({
+  repo,
+  prNumber,
+  ghExecFileImpl,
+  logger = console,
+} = {}) {
+  if (!repo || prNumber == null) return null;
+  try {
+    const event = await fetchLatestLabelEvent(
+      repo,
+      Number(prNumber),
+      MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL,
+      { execFileImpl: ghExecFileImpl }
+    );
+    return event?.createdAt || null;
+  } catch (err) {
+    mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_lookup_failed', {
+      repo,
+      prNumber: Number(prNumber),
+      label: MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL,
+      error: err?.message || String(err),
+    });
+    return null;
+  }
+}
+
 function isFinalPassOnRequestChangesEnabled({
   env = process.env,
   logger = console,
@@ -1831,29 +1874,50 @@ async function reconcileProactivePhantomHandoffs({
       continue;
     }
     // MAR-C: MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL suppresses the
-    // proactive scan UNLESS the merge-agent dispatch is older than
-    // the recovery-in-flight ceiling — at that point the label is
+    // proactive scan UNLESS the label is older than the
+    // recovery-in-flight ceiling — at that point the label is
     // almost certainly stuck (recovery worker died without cleanup)
     // and we must let the grace timer / escalation path run.
+    //
+    // The ceiling keys off the LABEL'S add time (from GitHub's
+    // timeline), not the original dispatch time — see the comment
+    // on `_resolveRecoveryInFlightLabelAddedAt` for why. A missing
+    // / unresolvable label-add time falls through to the grace path
+    // (fail closed).
     if (labelNames.includes(MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL)) {
       const recordedForLabelCheck = getRecordedMergeAgentDispatchForHead(rootDir, currentPR);
-      const dispatchedAtMs = Date.parse(String(recordedForLabelCheck?.dispatchedAt || ''));
-      const nowMs = Date.parse(String(now || ''));
-      const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
-      const ageMinutes = Number.isFinite(dispatchedAtMs)
-        ? (effectiveNowMs - dispatchedAtMs) / 60_000
-        : 0;
-      if (ageMinutes < _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES) {
-        continue;
-      }
-      mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_max_age_exceeded', {
+      const labelAddedAt = await _resolveRecoveryInFlightLabelAddedAt({
         repo: currentPR.repo,
         prNumber: currentPR.prNumber,
-        launchRequestId: recordedForLabelCheck?.launchRequestId || null,
-        ageMinutes,
-        maxMinutes: _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES,
-        at: now,
+        ghExecFileImpl,
+        logger,
       });
+      const labelAddedAtMs = Date.parse(String(labelAddedAt || ''));
+      const nowMs = Date.parse(String(now || ''));
+      const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+      if (Number.isFinite(labelAddedAtMs)) {
+        const ageMinutes = (effectiveNowMs - labelAddedAtMs) / 60_000;
+        if (ageMinutes < _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES) {
+          continue;
+        }
+        mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_max_age_exceeded', {
+          repo: currentPR.repo,
+          prNumber: currentPR.prNumber,
+          launchRequestId: recordedForLabelCheck?.launchRequestId || null,
+          labelAddedAt,
+          ageMinutes,
+          maxMinutes: _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES,
+          at: now,
+        });
+      } else {
+        mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_age_unresolved', {
+          repo: currentPR.repo,
+          prNumber: currentPR.prNumber,
+          launchRequestId: recordedForLabelCheck?.launchRequestId || null,
+          reason: 'label-add timestamp not resolvable from GitHub timeline; failing closed',
+          at: now,
+        });
+      }
       // fall through to the existing reconcile-and-escalate path below
     }
     const recordedDispatch = getRecordedMergeAgentDispatchForHead(rootDir, currentPR);
@@ -2739,31 +2803,53 @@ async function reconcilePhantomHandoffEscalation({
   // MAR-C: MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL is the merge-agent's
   // own signal that it dispatched a failure-recovery worker and
   // expects that worker to drive the next state transition. Suppress
-  // the grace timer while it's present UNLESS the original dispatch
-  // is older than the recovery-in-flight ceiling — at that point the
+  // the grace timer while it's present UNLESS the LABEL itself is
+  // older than the recovery-in-flight ceiling — at that point the
   // recovery worker has almost certainly died without removing its
   // own label (spawn.sh teardown bug shape observed 2026-05-31) and
   // we must escalate anyway.
+  //
+  // The ceiling keys off the label's add time (from GitHub's
+  // timeline), not `recordedDispatch.dispatchedAt` — see the comment
+  // on `_resolveRecoveryInFlightLabelAddedAt`. A missing /
+  // unresolvable label-add time falls through to the grace path
+  // (fail closed).
   if (labelNames.includes(MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL)) {
-    const dispatchedAtMs = Date.parse(String(recordedDispatch?.dispatchedAt || ''));
-    const nowMs = Date.parse(String(now || ''));
-    const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
-    const ageMinutes = Number.isFinite(dispatchedAtMs)
-      ? (effectiveNowMs - dispatchedAtMs) / 60_000
-      : 0;
-    if (ageMinutes < _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES) {
-      return recordedDispatch;
-    }
-    mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_max_age_exceeded', {
+    const labelAddedAt = await _resolveRecoveryInFlightLabelAddedAt({
       repo: job.repo,
       prNumber: job.prNumber,
-      launchRequestId: recordedDispatch.launchRequestId,
-      ageMinutes,
-      maxMinutes: _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES,
-      at: now,
+      ghExecFileImpl,
+      logger,
     });
+    const labelAddedAtMs = Date.parse(String(labelAddedAt || ''));
+    const nowMs = Date.parse(String(now || ''));
+    const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+    if (Number.isFinite(labelAddedAtMs)) {
+      const ageMinutes = (effectiveNowMs - labelAddedAtMs) / 60_000;
+      if (ageMinutes < _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES) {
+        return recordedDispatch;
+      }
+      mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_max_age_exceeded', {
+        repo: job.repo,
+        prNumber: job.prNumber,
+        launchRequestId: recordedDispatch.launchRequestId,
+        labelAddedAt,
+        ageMinutes,
+        maxMinutes: _PHANTOM_HANDOFF_RECOVERY_IN_FLIGHT_MAX_MINUTES,
+        at: now,
+      });
+    } else {
+      mergeAgentLifecycleLog(logger, 'merge_agent.recovery_in_flight_label_age_unresolved', {
+        repo: job.repo,
+        prNumber: job.prNumber,
+        launchRequestId: recordedDispatch.launchRequestId,
+        reason: 'label-add timestamp not resolvable from GitHub timeline; failing closed',
+        at: now,
+      });
+    }
     // Fall through to the grace-timer / escalation path below — the
-    // recovery-in-flight label looks stale, treat as orphan.
+    // recovery-in-flight label looks stale (or its age is unknown),
+    // treat as orphan.
   }
   if (!recordedDispatch.phantomHandoffObservedAt) {
     const observed = updateRecordedMergeAgentDispatch(rootDir, job, (doc) => ({

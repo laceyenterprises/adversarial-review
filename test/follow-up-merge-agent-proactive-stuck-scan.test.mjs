@@ -42,6 +42,67 @@ function buildAuditFile(hqRoot, lrq, refusalCount) {
   writeFileSync(path.join(auditDir, `${lrq}.jsonl`), lines.join('\n') + '\n');
 }
 
+// MAR-C round-1 review: the recovery-in-flight ceiling now keys off
+// the LABEL's add timestamp from GitHub's timeline, not the original
+// dispatch time. Build a stub gh-graphql impl that returns a
+// well-formed labeled-event response for the recovery-in-flight label.
+//
+// Shape mirrors `fetchLatestLabelEvent` -> `latestMatchingScopedTimelineLabelEvent`:
+// the timeline needs both a code-anchor (PullRequestCommit at the
+// current head) AND a LabeledEvent after it for the label to scope.
+function stubGhExecFileForLabelLookup({
+  headSha,
+  labelAddedAt,
+  labelName = 'merge-agent-recovery-in-flight',
+  actor = 'test-actor',
+  passthrough = null,
+}) {
+  return async (cmd, args, options) => {
+    const isLabelGraphqlLookup =
+      cmd === 'gh'
+      && Array.isArray(args)
+      && args[0] === 'api'
+      && args[1] === 'graphql';
+    if (isLabelGraphqlLookup) {
+      const stdout = JSON.stringify({
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: headSha,
+              timelineItems: {
+                nodes: [
+                  {
+                    __typename: 'PullRequestCommit',
+                    id: 'anchor-1',
+                    commit: {
+                      oid: headSha,
+                      committedDate: '2026-05-19T01:00:00.000Z',
+                    },
+                  },
+                  {
+                    __typename: 'LabeledEvent',
+                    id: 'label-1',
+                    createdAt: labelAddedAt,
+                    actor: { login: actor },
+                    label: { name: labelName },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+      return { stdout, stderr: '' };
+    }
+    if (typeof passthrough === 'function') {
+      return passthrough(cmd, args, options);
+    }
+    throw new Error(
+      `unexpected gh exec in test stub: cmd=${cmd} args=${JSON.stringify(args)}`
+    );
+  };
+}
+
 function writeLifecycleCleanup(rootDir, {
   repo,
   prNumber,
@@ -513,9 +574,12 @@ test('reconcileProactivePhantomHandoffs respects merge-agent-recovery-in-flight 
     runtimeEnv: { HQ_ROOT: hqRoot },
     hqPath: '/bin/hq-unused',
     execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
-    ghExecFileImpl: async () => {
-      throw new Error('recovery-in-flight should suppress label/comment delivery');
-    },
+    // Recovery label was added 10 minutes before NOW — well under the
+    // 120-min ceiling. The watcher must suppress the grace timer.
+    ghExecFileImpl: stubGhExecFileForLabelLookup({
+      headSha: 'aaaa11112222333344445555666677778888aaaa',
+      labelAddedAt: '2026-05-19T03:20:00.000Z', // 10min before NOW (03:30Z)
+    }),
     now: '2026-05-19T03:30:00.000Z',
   });
 
@@ -527,22 +591,27 @@ test('reconcileProactivePhantomHandoffs respects merge-agent-recovery-in-flight 
   assert.equal(result.escalated, 0);
 });
 
-// MAR-C ceiling: if the recovery-in-flight label is present BUT the
-// original dispatch is older than the recovery-in-flight max-age
-// ceiling (120 min), the watcher escalates anyway. This bounds the
-// worst case so a stuck label can't freeze the PR forever — the
-// recovery worker has almost certainly died without cleaning up.
-test('reconcileProactivePhantomHandoffs escalates past recovery-in-flight after the max-age ceiling', async () => {
+// MAR-C ceiling: if the recovery-in-flight LABEL is older than the
+// 120min ceiling — meaning the recovery worker added the label and
+// then died without removing it — the watcher escalates anyway. This
+// bounds the worst case so a stuck label can't freeze the PR forever.
+// Round-1 review (codex-reviewer-lacey 2026-05-31 finding #3): the
+// ceiling keys off the LABEL's add timestamp, not the original
+// merge-agent dispatch time. The old shape would have fired the
+// ceiling immediately whenever the merge-agent had been running for
+// >120min before dispatching recovery — exactly the false-positive
+// this label is supposed to prevent.
+test('reconcileProactivePhantomHandoffs escalates past recovery-in-flight after the label is older than the max-age ceiling', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
-  // Dispatch 121 minutes ago — 1 minute past the 120min ceiling.
-  const OLD_DISPATCHED_AT = '2026-05-19T01:29:00.000Z';
   recordMergeAgentDispatch(rootDir, {
     repo: 'laceyenterprises/agent-os',
     prNumber: 1194,
     headSha: 'aaaa11112222333344445555666677778888aaaa',
   }, {
-    dispatchedAt: OLD_DISPATCHED_AT,
+    // Original dispatch ~43min before NOW — well under the ceiling.
+    // The ceiling MUST NOT key off this value.
+    dispatchedAt: STUCK_DISPATCHED_AT,
     prompt: '',
     dispatchId: STUCK_LRQ,
     launchRequestId: STUCK_LRQ,
@@ -560,13 +629,110 @@ test('reconcileProactivePhantomHandoffs escalates past recovery-in-flight after 
     runtimeEnv: { HQ_ROOT: hqRoot },
     hqPath: '/bin/hq-unused',
     execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
-    ghExecFileImpl: async () => {
-      throw new Error('grace start should not deliver label/comment');
-    },
+    // Label was added 121min before NOW — 1 min past the ceiling.
+    ghExecFileImpl: stubGhExecFileForLabelLookup({
+      headSha: 'aaaa11112222333344445555666677778888aaaa',
+      labelAddedAt: '2026-05-19T01:29:00.000Z', // 121min before NOW
+    }),
     now: '2026-05-19T03:30:00.000Z',
   });
 
   assert.equal(result.inspected, 1);
   assert.equal(result.graceStarted, 1, 'past the ceiling, grace timer starts');
   assert.equal(result.escalated, 0, 'grace just started, not yet escalated');
+});
+
+// MAR-C round-1 finding #3 regression: the ceiling MUST key off the
+// LABEL's add time, NOT the original dispatch time. Reproduces the
+// false-positive shape the round-1 reviewer called out: a slow
+// merge-agent that runs for >120min before dispatching recovery would
+// have seen `ageMinutes >= 120` the moment the label appeared under
+// the old (broken) `dispatchedAt`-keyed logic.
+test('reconcileProactivePhantomHandoffs suppresses grace even when original dispatch is older than the ceiling, as long as the recovery label is fresh', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  // Original dispatch 3 HOURS ago (180min — well past the 120min ceiling).
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1194,
+    headSha: 'aaaa11112222333344445555666677778888aaaa',
+  }, {
+    dispatchedAt: '2026-05-19T00:30:00.000Z', // 180min before NOW
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  const result = await reconcileProactivePhantomHandoffs({
+    rootDir,
+    currentPRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 1194,
+      headSha: 'aaaa11112222333344445555666677778888aaaa',
+      labels: [{ name: 'merge-agent-recovery-in-flight' }],
+    }],
+    runtimeEnv: { HQ_ROOT: hqRoot },
+    hqPath: '/bin/hq-unused',
+    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    // Recovery label was added 5 minutes ago — the recovery worker is
+    // alive and working. Old (broken) logic would have escalated
+    // because dispatched-at age = 180min > 120min ceiling.
+    ghExecFileImpl: stubGhExecFileForLabelLookup({
+      headSha: 'aaaa11112222333344445555666677778888aaaa',
+      labelAddedAt: '2026-05-19T03:25:00.000Z', // 5min before NOW
+    }),
+    now: '2026-05-19T03:30:00.000Z',
+  });
+
+  assert.equal(result.inspected, 0, 'label-add age < ceiling: PR filtered at label gate');
+  assert.equal(result.graceStarted, 0, 'fresh recovery label must suppress grace even when original dispatch is old');
+  assert.equal(result.escalated, 0);
+});
+
+// Fail-closed: if the label-add timestamp cannot be resolved (gh API
+// failure, no matching timeline event, etc), the watcher treats the
+// label as stale and falls through to the grace path. This is the
+// safer direction — false-positive on stuck vs leaving a PR
+// permanently wedged behind a label whose age we can't establish.
+test('reconcileProactivePhantomHandoffs falls through to grace when the recovery-in-flight label add time is unresolvable', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1194,
+    headSha: 'aaaa11112222333344445555666677778888aaaa',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+
+  const result = await reconcileProactivePhantomHandoffs({
+    rootDir,
+    currentPRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 1194,
+      headSha: 'aaaa11112222333344445555666677778888aaaa',
+      labels: [{ name: 'merge-agent-recovery-in-flight' }],
+    }],
+    runtimeEnv: { HQ_ROOT: hqRoot },
+    hqPath: '/bin/hq-unused',
+    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    // gh fails for ALL invocations — both the label-event lookup
+    // AND the grace-path label/comment delivery.
+    ghExecFileImpl: async () => {
+      throw new Error('gh unavailable');
+    },
+    now: '2026-05-19T03:30:00.000Z',
+  });
+
+  // PR makes it past the label gate (failed closed), grace machinery
+  // begins. graceStarted may stay 0 because the grace path itself
+  // also fails to post (we threw on every gh call) — the assertion
+  // we care about is "inspected went up," i.e. we did NOT silently
+  // trust an unresolvable label.
+  assert.equal(result.inspected, 1, 'unresolvable label-add age: fail closed → inspected');
 });

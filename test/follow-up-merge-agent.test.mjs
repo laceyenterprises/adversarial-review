@@ -60,6 +60,7 @@ import './helpers/role-config-cache-reset.mjs';
 // CI runners and OSS clones do not have hq, so we inject a presence
 // stub. New OSS-skip behavior is exercised by its own dedicated tests.
 const AGENT_OS_PRESENT_STUB = () => ({ present: true, source: 'test' });
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 
 function makeJob(overrides = {}) {
   return {
@@ -5617,28 +5618,28 @@ test('cancelMergeAgentDispatchOnMerge removes label even when no dispatch record
 // ── merge-agent worker-class override (operator pinning) ──────────────────
 
 test('resolveMergeAgentWorkerClass defaults to merge-agent when env unset', () => {
-  assert.equal(resolveMergeAgentWorkerClass({}), 'merge-agent');
-  assert.equal(resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: '' }), 'merge-agent');
-  assert.equal(resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: '   ' }), 'merge-agent');
+  assert.equal(resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV }), 'merge-agent');
+  assert.equal(resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: '' }), 'merge-agent');
+  assert.equal(resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: '   ' }), 'merge-agent');
 });
 
 test('resolveMergeAgentWorkerClass honors codex pin', () => {
   assert.equal(
-    resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'codex' }),
+    resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'codex' }),
     'codex'
   );
 });
 
 test('resolveMergeAgentWorkerClass honors claude-code pin', () => {
   assert.equal(
-    resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'claude-code' }),
+    resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'claude-code' }),
     'claude-code'
   );
 });
 
 test('resolveMergeAgentWorkerClass rejects unknown worker class', () => {
   assert.throws(
-    () => resolveMergeAgentWorkerClass({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'gemini' }),
+    () => resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'gemini' }),
     /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS must be one of: merge-agent, codex, claude-code/
   );
 });
@@ -5648,13 +5649,13 @@ test('DEFAULT_MERGE_AGENT_WORKER_CLASS is in the allowlist', () => {
 });
 
 test('validateStartupMergeAgentConfig passes when env is unset', () => {
-  assert.doesNotThrow(() => validateStartupMergeAgentConfig({}));
+  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ ...HERMETIC_CONFIG_ENV }));
 });
 
 test('validateStartupMergeAgentConfig passes when env is a known value', () => {
-  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'codex' }));
-  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'claude-code' }));
-  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ [MERGE_AGENT_WORKER_CLASS_ENV]: 'merge-agent' }));
+  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'codex' }));
+  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'claude-code' }));
+  assert.doesNotThrow(() => validateStartupMergeAgentConfig({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'merge-agent' }));
 });
 
 test('validateStartupMergeAgentConfig throws on unknown env (boot-time fail-loud)', () => {

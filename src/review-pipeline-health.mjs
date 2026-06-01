@@ -58,7 +58,8 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     tier: 'page',
     category: 'review-pipeline',
     thresholdKey: null,
-    defaultThreshold: 'reviews.db exists but cannot be opened read-only',
+    defaultThreshold: null,
+    thresholdDescription: 'reviews.db exists but cannot be opened read-only',
   },
   {
     code: 'review:reviewer_death_rate_high',
@@ -593,11 +594,8 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       tier: 'page',
       subject: 'Review-state ledger exists but pipeline-health cannot open it',
       message: `reviews.db at ${snapshot.reviewStateLedger.path} is unreadable: ${snapshot.reviewStateLedger.error || 'open-failed'}.`,
-      evidence: [
-        snapshot.reviewStateLedger.path,
-        `error=${snapshot.reviewStateLedger.error || 'open-failed'}`,
-      ],
-      recommendedAction: 'Check adversarial-review native dependencies and ledger permissions before treating the watcher as healthy.',
+      evidence: [snapshot.reviewStateLedger.path],
+      recommendedAction: 'Confirm data/reviews.db is a regular file with read access for the collector identity; inspect details.error for sqlite-side corruption before retrying.',
       observedAt,
       details: {
         ...snapshot.reviewStateLedger,

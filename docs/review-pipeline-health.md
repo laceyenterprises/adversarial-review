@@ -28,7 +28,9 @@ The Grafana dashboard lives at
   whether an unknown spike is one flapping PR or a cross-PR incident.
 - `review_pipeline_health_collector_up`: 1 when the collector can open
   `reviews.db` read-only, 0 when the review-state ledger is missing or
-  unreadable.
+  unreadable. Page on the specific unreadable-ledger Sentinel finding for the
+  exists-but-unopenable case; keep any `collector_up == 0` page scoped to the
+  missing-ledger case or downgrade it to avoid double-paging the same incident.
 - `review_pipeline_first_pass_queue_depth`: open PRs waiting in
   `reviewed_prs.review_status='pending'`.
 - `review_pipeline_first_pass_oldest_pending_age_seconds`: age of the oldest

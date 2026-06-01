@@ -324,6 +324,9 @@ test('collector emits a page finding when an existing review-state ledger cannot
   const finding = snapshot.findings.find((item) => item.code === 'review:review_state_ledger_unreadable');
   assert.equal(finding.tier, 'page');
   assert.match(finding.message, /reviews\.db/);
+  assert.deepEqual(finding.evidence, [snapshot.reviewStateLedger.path]);
+  assert.match(finding.recommended_action, /regular file with read access/);
+  assert.doesNotMatch(finding.recommended_action, /native dependencies/);
   assert.deepEqual(finding.details, snapshot.reviewStateLedger);
 });
 
@@ -516,6 +519,12 @@ test('documented Sentinel findings match emitted finding definition codes', () =
   const documented = Array.from(doc.matchAll(/`(review:[a-z_]+)`/g), (match) => match[1]).sort();
   const defined = REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.map((definition) => definition.code).sort();
   assert.deepEqual(documented, defined);
+  for (const definition of REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS) {
+    assert.ok(
+      definition.defaultThreshold === null || typeof definition.defaultThreshold === 'number',
+      `${definition.code} defaultThreshold must stay null or numeric`
+    );
+  }
 });
 
 test('unknown failure-rate finding definition code matches the spec contract and dashboard includes the unknown panels', () => {

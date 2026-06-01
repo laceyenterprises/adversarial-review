@@ -8,13 +8,16 @@ import { promisify } from 'node:util';
 import {
   buildRemediationReply,
   claimNextFollowUpJob,
+  DEFAULT_MAX_TRANSIENT_RETRIES,
   getFollowUpJobDir,
   listInProgressFollowUpJobs,
+  listPendingFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
   readRemediationReplyArtifact,
+  requeueInProgressFollowUpJobForRetry,
   remediationAttemptNumber,
   salvagePartialRemediationReply,
   resolveRoundBudgetForJob,
@@ -227,9 +230,24 @@ const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
   'clio-agent': 'claude-code',
 });
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
+const REMEDIATION_MAX_TRANSIENT_RETRIES_ENV = 'ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
+const TRANSIENT_HQ_DISPATCH_CODES = new Set([
+  'daemon_bounced',
+  'daemon-bounced',
+  'daemon_restart',
+  'daemon-restart',
+  'launch_refused_memory_pressure',
+  'launch-refused-memory-pressure',
+  'lease_lost',
+  'lease-lost',
+  'memory_pressure',
+  'memory-pressure',
+  'supervisor_restart',
+  'supervisor-restart',
+]);
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
@@ -486,6 +504,77 @@ function parseHqDispatchWorkspaceStatus(stdout) {
     ...payload,
     workspaceDir,
   };
+}
+
+function classifyHqDispatchFailure(dispatchStatus = {}) {
+  const structuredValues = [
+    dispatchStatus?.failureClass,
+    dispatchStatus?.failureCode,
+    dispatchStatus?.failure_class,
+    dispatchStatus?.failure_code,
+    dispatchStatus?.code,
+    dispatchStatus?.reasonCode,
+    dispatchStatus?.statusCode,
+    dispatchStatus?.status,
+    dispatchStatus?.health,
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+
+  if (structuredValues.some((value) => TRANSIENT_HQ_DISPATCH_CODES.has(value))) return 'transient';
+
+  const detail = String(dispatchStatus?.failureDetail || '').trim().toLowerCase();
+  if (!detail && structuredValues.length === 0) return 'terminal';
+  if (
+    /\bmemory pressure\b/.test(detail)
+    || /\blaunch[_ -]refused[_ -]memory[_ -]pressure\b/.test(detail)
+    || /\blease lost\b|\blost lease\b/.test(detail)
+  ) {
+    return 'transient';
+  }
+  return 'terminal';
+}
+
+function resolveMaxTransientRemediationRetries(env = process.env) {
+  const raw = env?.[REMEDIATION_MAX_TRANSIENT_RETRIES_ENV];
+  const parsed = Number.parseInt(String(raw ?? ''), 10);
+  return Number.isInteger(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_MAX_TRANSIENT_RETRIES;
+}
+
+function buildDrainSummaryLogLine(drain) {
+  return `[follow-up-remediation] Drain summary: maxConcurrent=${drain.maxConcurrent} activeAtStart=${drain.activeAtStart} `
+    + `availableAtStart=${drain.availableAtStart} spawned=${drain.spawned} stopped=${drain.stopped} `
+    + `deferredSamePR=${drain.deferredSamePR} capacityRemaining=${drain.capacityRemaining} `
+    + `pendingClaimable=${drain.pendingClaimable ?? 0} pendingRetryDelayed=${drain.pendingRetryDelayed ?? 0}`;
+}
+
+function buildBackpressureLogLine({ activeAtStart, pendingCount }) {
+  return `[follow-up-remediation] Backpressure: activeAtStart=${activeAtStart} pendingClaimable=${pendingCount}`;
+}
+
+function countPendingFollowUpJobsByRetryWindow(rootDir, now = new Date().toISOString()) {
+  const nowMs = Date.parse(String(now || ''));
+  const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  let claimable = 0;
+  let delayed = 0;
+  for (const { job } of listPendingFollowUpJobs(rootDir)) {
+    const retryAfterMs = Date.parse(String(job?.remediationPlan?.retryAfter || ''));
+    if (Number.isFinite(retryAfterMs) && retryAfterMs > effectiveNowMs) {
+      delayed += 1;
+    } else {
+      claimable += 1;
+    }
+  }
+  return { claimable, delayed };
+}
+
+function isDrainQueueIdle(drain) {
+  return drain.activeAtStart === 0
+    && drain.spawned === 0
+    && drain.stopped === 0
+    && drain.deferredSamePR === 0
+    && (drain.pendingClaimable ?? 0) === 0
+    && drain.results.every((result) => result.reason === 'no-pending-jobs');
 }
 
 async function resolveHqWorkerWorkspace({
@@ -3869,6 +3958,86 @@ async function reconcileFollowUpJob({
   }
 
   const dispatchFailureDetail = liveness?.dispatchStatus?.failureDetail || null;
+  if (worker?.dispatchMode === 'hq' && classifyHqDispatchFailure(liveness?.dispatchStatus) === 'transient') {
+    const nextTransientRetry = Number(job?.remediationPlan?.transientRetries || 0) + 1;
+    const maxTransientRetries = resolveMaxTransientRemediationRetries();
+    const currentRound = Number(job?.remediationPlan?.currentRound || 0);
+    const retryHistory = Array.isArray(job?.remediationPlan?.retryHistory)
+      ? job.remediationPlan.retryHistory
+      : [];
+    const retryRounds = new Set(
+      retryHistory
+        .map((entry) => Number(entry?.round || 0))
+        .filter((round) => Number.isFinite(round) && round > 0)
+    );
+    if (currentRound > 0) retryRounds.add(currentRound);
+    const retryReason = dispatchFailureDetail
+      ? `Transient HQ remediation dispatch failure: ${dispatchFailureDetail}`
+      : `Transient HQ remediation dispatch failure: ${liveness?.dispatchStatus?.status || 'unknown'}`;
+    if (nextTransientRetry > maxTransientRetries) {
+      const failureCode = 'hq-dispatch-transient-budget-exhausted';
+      const roundContext = currentRound > 0
+        ? ` Current round=${currentRound}; budget is job-scoped across ${retryRounds.size || 1} round(s).`
+        : ` Budget is job-scoped across ${retryRounds.size || 1} round(s).`;
+      const failureMessage = `${retryReason}. Exhausted transient HQ retry budget (${nextTransientRetry - 1}/${maxTransientRetries}).${roundContext}`;
+      const { commentDelivery: retryBudgetDelivery } = buildReconcileCommentDelivery({
+        job,
+        worker,
+        action: 'failed',
+        failure: { code: failureCode, message: failureMessage },
+        now,
+      });
+      const failed = markFollowUpJobFailed({
+        rootDir,
+        jobPath,
+        failedAt: completedAt,
+        failureCode,
+        error: new Error(failureMessage),
+        remediationWorker: {
+          ...workerState,
+          state: 'failed',
+        },
+        failure: {
+          code: failureCode,
+          message: failureMessage,
+          transientRetryBudget: {
+            attempted: nextTransientRetry - 1,
+            max: maxTransientRetries,
+            currentRound,
+            roundsObserved: retryRounds.size || 1,
+          },
+          dispatchStatus: liveness?.dispatchStatus || null,
+        },
+        commentDelivery: retryBudgetDelivery,
+      });
+      return {
+        action: 'failed',
+        reason: failureCode,
+        job: failed.job,
+        jobPath: failed.jobPath,
+      };
+    }
+    const requeued = requeueInProgressFollowUpJobForRetry({
+      rootDir,
+      jobPath,
+      requeuedAt: completedAt,
+      retryReason,
+      retryMetadata: {
+        code: 'hq-dispatch-transient',
+        dispatchStatus: liveness?.dispatchStatus || null,
+      },
+    });
+    log?.log?.(
+      `[follow-up-remediation] Requeued ${job.repo}#${job.prNumber} -> hq-dispatch-transient (${retryReason})`
+    );
+    return {
+      action: 'requeued',
+      reason: 'hq-dispatch-transient',
+      job: requeued.job,
+      jobPath: requeued.jobPath,
+    };
+  }
+
   const failureCode = worker?.dispatchMode === 'hq' && !HQ_SUCCESS_STATUSES.has(String(liveness?.dispatchStatus?.status || ''))
     ? 'hq-dispatch-failed'
     : (finalMessage.exists ? 'artifact-empty-completion' : 'artifact-missing-completion');
@@ -3969,6 +4138,7 @@ async function reconcileInProgressFollowUpJobs({
     active: results.filter((result) => result.action === 'active').length,
     completed: results.filter((result) => result.action === 'completed').length,
     failed: results.filter((result) => result.action === 'failed').length,
+    requeued: results.filter((result) => result.action === 'requeued').length,
     stopped: results.filter((result) => result.action === 'stopped').length,
     skipped: results.filter((result) => result.action === 'skipped').length,
     results,
@@ -3985,6 +4155,8 @@ async function consumeNextFollowUpJob({
   postCommentImpl = postRemediationOutcomeComment,
   excludedRepoPrKeys = new Set(),
   onExcludedRepoPrKey = null,
+  delayedPendingPaths = null,
+  onDelayedPendingJob = null,
   log = console,
 } = {}) {
   // CFG-09: per-job boundary for the role-config cascade cache. Match
@@ -4003,6 +4175,8 @@ async function consumeNextFollowUpJob({
     returnStopped: true,
     excludedRepoPrKeys,
     onExcludedRepoPrKey,
+    delayedPendingPaths,
+    onDelayedPendingJob,
   });
 
   if (!claimed) {
@@ -4386,6 +4560,9 @@ async function consumeFollowUpJobsUntilCapacity({
   let spawned = 0;
   let stopped = 0;
   const deferredSamePRPaths = new Set();
+  const delayedPendingPaths = new Set();
+  let pendingRetryDelayed = 0;
+  const pendingCountsAtStart = countPendingFollowUpJobsByRetryWindow(rootDir, now());
 
   while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
     /* eslint-disable no-await-in-loop */
@@ -4402,6 +4579,10 @@ async function consumeFollowUpJobsUntilCapacity({
         excludedRepoPrKeys: blockedRepoPrKeys,
         onExcludedRepoPrKey: (pendingPath) => {
           deferredSamePRPaths.add(String(pendingPath));
+        },
+        delayedPendingPaths,
+        onDelayedPendingJob: () => {
+          pendingRetryDelayed += 1;
         },
         log,
       });
@@ -4452,6 +4633,8 @@ async function consumeFollowUpJobsUntilCapacity({
     stopped,
     deferredSamePR: deferredSamePRPaths.size,
     capacityRemaining: Math.max(0, concurrencyCap - activeJobs.length - spawned),
+    pendingRetryDelayed: pendingCountsAtStart.delayed,
+    pendingClaimable: pendingCountsAtStart.claimable,
     results,
   };
 }
@@ -4531,10 +4714,10 @@ async function main() {
     if (mode === 'reconcile') {
       const result = await reconcileInProgressFollowUpJobs();
       console.log(
-        `[follow-up-remediation] Reconciliation scanned=${result.scanned} active=${result.active} completed=${result.completed} failed=${result.failed} stopped=${result.stopped} skipped=${result.skipped}`
+        `[follow-up-remediation] Reconciliation scanned=${result.scanned} active=${result.active} completed=${result.completed} failed=${result.failed} requeued=${result.requeued} stopped=${result.stopped} skipped=${result.skipped}`
       );
       result.results
-        .filter((entry) => entry.action === 'completed' || entry.action === 'failed' || entry.action === 'stopped')
+        .filter((entry) => ['completed', 'failed', 'requeued', 'stopped'].includes(entry.action))
         .forEach((entry) => {
           const reasonTag = entry.reason ? ` reason=${entry.reason}` : '';
           console.log(`[follow-up-remediation] ${entry.action}${reasonTag}: ${entry.job.repo}#${entry.job.prNumber} -> ${entry.jobPath}`);
@@ -4542,39 +4725,58 @@ async function main() {
       return;
     }
 
-    const result = await consumeNextFollowUpJob();
-    if (!result.consumed) {
-      // A claimed-then-stopped outcome (e.g. lifecycle gate fired) is
-      // operationally meaningful — it represents a real state transition
-      // on a queued job. Don't collapse it into the "no pending jobs"
-      // bucket where it'd look like a no-op. Each stop reason gets an
-      // explicit log line so operators reading the daemon log can tell
-      // a merged-PR stop from "queue was empty".
-      if (result.reason === 'no-pending-jobs') {
-        console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
-        return;
+    const drain = await consumeFollowUpJobsUntilCapacity();
+    if (isDrainQueueIdle(drain)) {
+      console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
+      console.log(buildDrainSummaryLogLine(drain));
+      return;
+    }
+
+    if (drain.availableAtStart === 0 && drain.activeAtStart > 0) {
+      if (drain.pendingClaimable > 0) {
+        console.log(buildBackpressureLogLine({ activeAtStart: drain.activeAtStart, pendingCount: drain.pendingClaimable }));
       }
-      const stopRepoTag = result.job?.repo && result.job?.prNumber
+    }
+
+    console.log(buildDrainSummaryLogLine(drain));
+
+    if (drain.results.length === 0 && drain.spawned === 0 && drain.stopped === 0 && drain.deferredSamePR === 0) {
+      return;
+    }
+
+    for (const result of drain.results) {
+      if (result.reason === 'no-pending-jobs') {
+        continue;
+      }
+      if (result.consumed) {
+        const workerModel = result.job.remediationWorker?.model || 'codex';
+        const dispatchTag = result.job.remediationWorker?.dispatchMode === 'hq'
+          ? ` lrq=${result.job.remediationWorker.launchRequestId}`
+          : ` pid=${result.job.remediationWorker.processId}`;
+        console.log(
+          `[follow-up-remediation] Spawned ${workerModel} remediation worker${dispatchTag} for ${result.job.repo}#${result.job.prNumber}`
+        );
+        console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
+        continue;
+      }
+
+      if (!result.job) {
+        const reasonTag = result.reason ? ` reason=${result.reason}` : '';
+        console.log(`[follow-up-remediation] Unhandled drain result${reasonTag} consumed=${Boolean(result.consumed)}`);
+        continue;
+      }
+
+      const stopRepoTag = result.job.repo && result.job.prNumber
         ? `${result.job.repo}#${result.job.prNumber} `
         : '';
-      const stopCode = result.job?.remediationPlan?.stop?.code || result.reason;
+      const stopCode = result.job?.remediationPlan?.stop?.code || result.reason || 'stopped';
       console.log(
-        `[follow-up-remediation] Stopped pending ${stopRepoTag}-> ${stopCode} (${result.reason})`
+        `[follow-up-remediation] Stopped pending ${stopRepoTag}-> ${stopCode} (${result.reason || 'stopped'})`
       );
       if (result.jobPath) {
         console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
       }
-      return;
     }
-
-    const workerModel = result.job.remediationWorker?.model || 'codex';
-    const dispatchTag = result.job.remediationWorker?.dispatchMode === 'hq'
-      ? ` lrq=${result.job.remediationWorker.launchRequestId}`
-      : ` pid=${result.job.remediationWorker.processId}`;
-    console.log(
-      `[follow-up-remediation] Spawned ${workerModel} remediation worker${dispatchTag} for ${result.job.repo}#${result.job.prNumber}`
-    );
-    console.log(`[follow-up-remediation] Queue record: ${result.jobPath}`);
   } catch (err) {
     if (err.isOAuthError) {
       console.error(`[follow-up-remediation] Stopped: ${err.message}`);
@@ -4651,6 +4853,11 @@ export {
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,
+  buildBackpressureLogLine,
+  buildDrainSummaryLogLine,
+  isDrainQueueIdle,
+  classifyHqDispatchFailure,
+  countPendingFollowUpJobsByRetryWindow,
   REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
   WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,
   postRemediationCommentWithCapture,

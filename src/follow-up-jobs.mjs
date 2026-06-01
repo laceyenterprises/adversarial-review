@@ -69,6 +69,9 @@ const ROUND_BUDGET_BY_RISK_CLASS = Object.freeze({
   critical: 4,
 });
 const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_CLASS];
+const DEFAULT_MAX_TRANSIENT_RETRIES = 3;
+const DEFAULT_TRANSIENT_RETRY_BACKOFF_MS = 5 * 60 * 1000;
+const MAX_TRANSIENT_RETRY_BACKOFF_MS = 60 * 60 * 1000;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],
@@ -323,6 +326,9 @@ function buildRemediationRoundPlan(maxRounds = DEFAULT_MAX_REMEDIATION_ROUNDS) {
     maxRounds: normalizedMaxRounds,
     currentRound: 0,
     rounds: [],
+    transientRetries: 0,
+    retryHistory: [],
+    retryAfter: null,
     stopReason: null,
     stop: null,
     nextAction: {
@@ -644,6 +650,17 @@ function normalizeRound(round, index, fallbackState = 'claimed') {
   };
 }
 
+function normalizeRetryHistoryEntry(entry, index) {
+  const roundNumber = Number(entry?.round ?? 0);
+  return {
+    ...entry,
+    round: roundNumber > 0 ? roundNumber : index + 1,
+    transientRetry: Number.isInteger(Number(entry?.transientRetry)) && Number(entry.transientRetry) > 0
+      ? Number(entry.transientRetry)
+      : index + 1,
+  };
+}
+
 function buildStopMetadata({
   code,
   reason,
@@ -686,6 +703,16 @@ function normalizeRemediationPlan(job) {
     const rounds = Array.isArray(job.remediationPlan.rounds)
       ? job.remediationPlan.rounds.map((round, index) => normalizeRound(round, index))
       : [];
+    const retryHistory = Array.isArray(job.remediationPlan.retryHistory)
+      ? job.remediationPlan.retryHistory.map((entry, index) => normalizeRetryHistoryEntry(entry, index))
+      : [];
+    const transientRetries = Number.isInteger(Number(job.remediationPlan.transientRetries))
+      && Number(job.remediationPlan.transientRetries) >= 0
+      ? Number(job.remediationPlan.transientRetries)
+      : retryHistory.length;
+    const retryAfter = typeof job.remediationPlan.retryAfter === 'string' && job.remediationPlan.retryAfter.trim()
+      ? job.remediationPlan.retryAfter
+      : null;
 
     return {
       ...buildRemediationRoundPlan(
@@ -696,6 +723,9 @@ function normalizeRemediationPlan(job) {
       maxRounds,
       currentRound,
       rounds,
+      transientRetries,
+      retryHistory,
+      retryAfter,
       stop: job.remediationPlan.stop && typeof job.remediationPlan.stop === 'object'
         ? buildStopMetadata({
             code: job.remediationPlan.stop.code,
@@ -768,6 +798,20 @@ function listPendingFollowUpJobPaths(rootDir) {
     .filter((name) => name.endsWith('.json'))
     .sort()
     .map((name) => join(pendingDir, name));
+}
+
+function parseIsoTimestamp(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function computeTransientRetryBackoffMs(transientRetryCount) {
+  const exponent = Math.max(0, Number(transientRetryCount || 1) - 1);
+  return Math.min(
+    DEFAULT_TRANSIENT_RETRY_BACKOFF_MS * (2 ** exponent),
+    MAX_TRANSIENT_RETRY_BACKOFF_MS
+  );
 }
 
 function listInProgressFollowUpJobPaths(rootDir) {
@@ -1402,6 +1446,8 @@ function claimNextFollowUpJob({
   returnStopped = false,
   excludedRepoPrKeys = new Set(),
   onExcludedRepoPrKey = null,
+  delayedPendingPaths = null,
+  onDelayedPendingJob = null,
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
   const normalizedExcludedRepoPrKeys = new Set(
@@ -1409,14 +1455,25 @@ function claimNextFollowUpJob({
   );
 
   for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+    if (delayedPendingPaths?.has?.(pendingPath)) continue;
+
     let pendingJob = null;
+    try {
+      pendingJob = readFollowUpJob(pendingPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+
+    const retryAfterMs = parseIsoTimestamp(pendingJob?.remediationPlan?.retryAfter);
+    const claimedAtMs = parseIsoTimestamp(claimedAt);
+    if (retryAfterMs !== null && claimedAtMs !== null && retryAfterMs > claimedAtMs) {
+      delayedPendingPaths?.add?.(pendingPath);
+      onDelayedPendingJob?.(pendingPath, pendingJob);
+      continue;
+    }
+
     if (normalizedExcludedRepoPrKeys.size) {
-      try {
-        pendingJob = readFollowUpJob(pendingPath);
-      } catch (err) {
-        if (err?.code === 'ENOENT') continue;
-        throw err;
-      }
       const repoPrKey = followUpJobRepoPrKey(pendingJob);
       if (normalizedExcludedRepoPrKeys.has(repoPrKey)) {
         onExcludedRepoPrKey?.(pendingPath, repoPrKey, pendingJob);
@@ -1433,7 +1490,8 @@ function claimNextFollowUpJob({
       throw err;
     }
 
-    const job = pendingJob || readFollowUpJob(inProgressPath);
+    const job = pendingJob;
+
     if (isSettledReviewJob(job)) {
       let stopped = null;
       try {
@@ -1511,6 +1569,7 @@ function claimNextFollowUpJob({
       remediationPlan: {
         ...(job.remediationPlan || buildRemediationRoundPlan()),
         currentRound: nextRoundNumber,
+        retryAfter: null,
         stopReason: null,
         nextAction: {
           type: 'worker-spawn',
@@ -1596,6 +1655,85 @@ function markFollowUpJobSpawned({
     spawnedAt,
   });
   return { job: nextJob, jobPath };
+}
+
+function requeueInProgressFollowUpJobForRetry({
+  rootDir,
+  jobPath,
+  requeuedAt = new Date().toISOString(),
+  retryReason = 'Transient remediation worker failure; retrying on a future tick.',
+  remediationWorker = null,
+  retryMetadata = null,
+}) {
+  const currentJob = readFollowUpJob(jobPath);
+  if (currentJob?.status !== 'in_progress') {
+    throw new Error(`Cannot retry follow-up job ${currentJob?.jobId || '<unknown>'} from status ${currentJob?.status || 'unknown'}`);
+  }
+  const effectiveWorker = remediationWorker || currentJob.remediationWorker || null;
+  if (effectiveWorker?.dispatchMode !== 'hq') {
+    throw new Error(`Cannot retry follow-up job ${currentJob?.jobId || '<unknown>'}: transient retry requeue is only valid for HQ remediation workers`);
+  }
+
+  const currentRoundNumber = Number(currentJob?.remediationPlan?.currentRound || 0);
+  const priorTransientRetries = Number(currentJob?.remediationPlan?.transientRetries || 0);
+  const nextTransientRetries = priorTransientRetries + 1;
+  const requeuedAtMs = parseIsoTimestamp(requeuedAt) ?? Date.now();
+  const retryAfter = new Date(
+    requeuedAtMs + computeTransientRetryBackoffMs(nextTransientRetries)
+  ).toISOString();
+  const activeRound = currentRoundNumber > 0 ? getCurrentRound(currentJob) : null;
+  const nextCurrentRound = Math.max(0, currentRoundNumber - 1);
+  let nextJob = {
+    ...currentJob,
+    status: 'pending',
+    pendingAt: requeuedAt,
+    claimedAt: null,
+    claimedBy: null,
+    remediationWorker: remediationWorker || null,
+    failure: null,
+    completedAt: null,
+    stoppedAt: null,
+    completion: null,
+    remediationPlan: {
+      ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
+      currentRound: nextCurrentRound,
+      transientRetries: nextTransientRetries,
+      retryAfter,
+      stopReason: null,
+      stop: null,
+      nextAction: {
+        type: 'consume-pending-round',
+        // After requeue, currentRound is decremented so the next claim reuses
+        // the same round number without creating duplicate live round entries.
+        round: nextCurrentRound + 1,
+        operatorVisibility: 'explicit',
+        requestedAt: requeuedAt,
+        requestedBy: 'system',
+        reason: retryReason,
+      },
+      retryHistory: [
+        ...(currentJob?.remediationPlan?.retryHistory || []),
+        {
+          round: currentRoundNumber,
+          transientRetry: nextTransientRetries,
+          requeuedAt,
+          retryAfter,
+          retryReason,
+          retryMetadata,
+          worker: effectiveWorker || activeRound?.worker || null,
+        },
+      ],
+    },
+  };
+
+  if (currentRoundNumber > 0) {
+    nextJob.remediationPlan = {
+      ...nextJob.remediationPlan,
+      rounds: (nextJob.remediationPlan?.rounds || []).filter((round) => round.round !== currentRoundNumber),
+    };
+  }
+
+  return moveFollowUpJob(rootDir, jobPath, 'pending', nextJob);
 }
 
 function inferRootDirFromFollowUpJobPath(jobPath) {
@@ -2065,6 +2203,7 @@ function isRetriggerableStoppedFollowUpJob(job) {
 
 export {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
+  DEFAULT_MAX_TRANSIENT_RETRIES,
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS,
@@ -2094,6 +2233,7 @@ export {
   listPendingFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
+  requeueInProgressFollowUpJobForRetry,
   markFollowUpJobSpawned,
   markFollowUpJobStopped,
   readRemediationReplyArtifact,

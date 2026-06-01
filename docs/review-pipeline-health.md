@@ -51,6 +51,7 @@ The Grafana dashboard lives at
 
 | Code | Default threshold | Tier | Clears when |
 |---|---:|---|---|
+| `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | page | the collector can open `reviews.db` read-only again |
 | `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | page | the settled-attempt window falls below threshold or the minimum-attempt guard |
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | page | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
 | `review:queue_starvation` | oldest pending first-pass row is >30m old | page | no pending row exceeds the age threshold |

@@ -54,6 +54,13 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
 
 const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   {
+    code: 'review:review_state_ledger_unreadable',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: 'reviews.db exists but cannot be opened read-only',
+  },
+  {
     code: 'review:reviewer_death_rate_high',
     tier: 'page',
     category: 'review-pipeline',
@@ -576,6 +583,27 @@ function buildFinding({ code, tier, subject, message, evidence, recommendedActio
 function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const findings = [];
   const { config } = snapshot;
+
+  if (
+    snapshot.reviewStateLedger?.exists === true
+    && snapshot.reviewStateLedger?.readable !== true
+  ) {
+    findings.push(buildFinding({
+      code: 'review:review_state_ledger_unreadable',
+      tier: 'page',
+      subject: 'Review-state ledger exists but pipeline-health cannot open it',
+      message: `reviews.db at ${snapshot.reviewStateLedger.path} is unreadable: ${snapshot.reviewStateLedger.error || 'open-failed'}.`,
+      evidence: [
+        snapshot.reviewStateLedger.path,
+        `error=${snapshot.reviewStateLedger.error || 'open-failed'}`,
+      ],
+      recommendedAction: 'Check adversarial-review native dependencies and ledger permissions before treating the watcher as healthy.',
+      observedAt,
+      details: {
+        ...snapshot.reviewStateLedger,
+      },
+    }));
+  }
 
   if (
     snapshot.reviewer.settled >= config.reviewerDeathRateMinAttempts

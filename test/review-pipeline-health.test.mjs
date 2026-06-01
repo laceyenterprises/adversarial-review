@@ -303,10 +303,28 @@ test('collector emits a down signal when the review-state ledger is missing', ()
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.equal(snapshot.reviewStateLedger.exists, false);
   assert.equal(snapshot.reviewStateLedger.readable, false);
+  assert.ok(!findingCodes(snapshot).includes('review:review_state_ledger_unreadable'));
 
   const output = renderReviewPipelinePrometheus(snapshot);
   assert.match(output, /^# TYPE review_pipeline_health_collector_up gauge$/m);
   assert.match(output, /^review_pipeline_health_collector_up 0$/m);
+});
+
+test('collector emits a page finding when an existing review-state ledger cannot be opened', () => {
+  const rootDir = tempRoot();
+  mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+  mkdirSync(path.join(rootDir, 'data', 'reviews.db'));
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.equal(snapshot.reviewStateLedger.exists, true);
+  assert.equal(snapshot.reviewStateLedger.readable, false);
+  assert.ok(snapshot.reviewStateLedger.error);
+  assert.ok(findingCodes(snapshot).includes('review:review_state_ledger_unreadable'));
+  const finding = snapshot.findings.find((item) => item.code === 'review:review_state_ledger_unreadable');
+  assert.equal(finding.tier, 'page');
+  assert.match(finding.message, /reviews\.db/);
+  assert.deepEqual(finding.details, snapshot.reviewStateLedger);
 });
 
 test('legacy fallback death-rate denominator counts only settled review rows', () => {

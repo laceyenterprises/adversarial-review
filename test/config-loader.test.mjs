@@ -64,6 +64,42 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('tailscale.iphone_ip'), null);
     assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
+    assert.equal(cfg.get('github.org'), 'laceyenterprises');
+    assert.equal(cfg.get('github.workspace_email_domain'), null);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('github org and workspace email domain resolve through cfg loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      github:
+        org: example-org
+        workspace_email_domain: example.test
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('github.org'), 'example-org');
+    assert.equal(cfg.get('github.workspace_email_domain'), 'example.test');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('github workspace email domain may be explicitly null', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      github:
+        workspace_email_domain: null
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('github.workspace_email_domain'), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

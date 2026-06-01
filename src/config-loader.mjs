@@ -132,6 +132,11 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'laceyenterprises',
           },
+          workspace_email_domain: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
         },
       },
       // OSR-06 — host + Tailscale per-device identity. Keep these keys in

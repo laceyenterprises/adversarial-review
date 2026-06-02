@@ -176,6 +176,22 @@ function schemaV1() {
           },
         },
       },
+      // OSR-05 — operator identity. Parse-only for this package, but strict
+      // Node CFG consumers must accept the parent Agent OS top-level config.
+      operator: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          email: {
+            __type: TYPE_STRING,
+            __default: 'virtualpaul@gmail.com',
+          },
+          full_name: {
+            __type: TYPE_STRING,
+            __default: 'Paul Lacey',
+          },
+        },
+      },
       // OSR-06 — host + Tailscale per-device identity. Keep these keys in
       // lockstep with the Python loader so checked-in top-level config.yaml
       // remains readable by strict Node CFG consumers.
@@ -238,6 +254,10 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          team_name: {
+            __type: TYPE_STRING,
+            __default: 'Laceyenterprises',
+          },
           issue_prefix: {
             __type: TYPE_STRING,
             __default: 'LAC',
@@ -445,6 +465,22 @@ export const ENV_ALIASES = {
   },
   'session_ledger.database_name': {
     canonical: 'AGENT_OS_SESSION_LEDGER_DATABASE_NAME',
+    aliases: [],
+  },
+  'operator.email': {
+    canonical: 'AGENT_OS_OPERATOR_EMAIL',
+    aliases: [],
+  },
+  'operator.full_name': {
+    canonical: 'AGENT_OS_OPERATOR_FULL_NAME',
+    aliases: [],
+  },
+  'github.workspace_email_domain': {
+    canonical: 'AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
+    aliases: [['AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN', identity]],
+  },
+  'linear.team_name': {
+    canonical: 'AGENT_OS_LINEAR_TEAM_NAME',
     aliases: [],
   },
   'linear.issue_prefix': {

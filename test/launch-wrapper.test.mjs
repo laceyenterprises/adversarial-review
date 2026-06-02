@@ -139,6 +139,19 @@ test('wrapper launchers pass ADV_OP_TOKEN_TAG into the resolver subprocess', () 
   }
 });
 
+test('launcher scripts do not hardcode operator identity defaults', () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+    'adversarial-follow-up-tick.sh',
+  ]) {
+    const script = readScript(scriptName);
+    assert.doesNotMatch(script, /virtualpaul@gmail\.com/);
+    assert.doesNotMatch(script, /Paul Lacey/);
+    assert.doesNotMatch(script, /Laceyenterprises/);
+  }
+});
+
 test('watcher launchers require explicit opt-in before running without ALERT_TO', () => {
   for (const scriptName of [
     'adversarial-watcher-start.sh',

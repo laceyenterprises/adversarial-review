@@ -97,6 +97,14 @@ npm test
 
 CI runs both on Node 20 and Node 22 on every PR.
 
+### ACPX Discovery
+
+When the Codex reviewer runtime uses ACPX, the module resolves the ACPX
+binary in this order: `ACPX_CLI`, then `acpx` on `PATH`, then
+`AGENT_OS_OPENCLAW_INSTALL_ROOT` / `openclaw.install_root` as
+`<install-root>/tools/acpx/node_modules/.bin/acpx`, then the historical
+`~/.openclaw/tools/acpx/node_modules/.bin/acpx` fallback.
+
 ---
 
 ## Why this works — the design notes worth reading

@@ -28,6 +28,9 @@ roles:
   reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / adversarial
   remediator: adversarial           # enum: claude-code / codex / adversarial
 
+# Codex reviewer ACPX discovery:
+#   ACPX_CLI > `acpx` on PATH > AGENT_OS_OPENCLAW_INSTALL_ROOT /
+#   openclaw.install_root > ~/.openclaw
 openclaw:
   install_root: /Users/airlock/.openclaw   # cfg-allowlist: production-host-default — ACPX default install root until host-specific top-level config overrides it
 

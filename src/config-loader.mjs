@@ -99,9 +99,18 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
-          // OSR-04b: Node-only ACPX discovery knob; mirror this into the
-          // Python schema only if a Python consumer starts reading it.
+          // OSR-04b: top-level keys must be accepted by every strict CFG
+          // loader even when only one language consumes the value at runtime.
           install_root: { __type: TYPE_STRING, __default: null, __nullable: true },
+        },
+      },
+      codex: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          // OSR-04a: parent Agent OS promotes this for shell/Python consumers;
+          // the Node loader keeps it parseable to preserve strict-schema parity.
+          acp_state_home: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
       governance: {
@@ -471,8 +480,13 @@ export const ENV_ALIASES = {
     aliases: [],
   },
   'openclaw.install_root': {
-    // OSR-04b: Node-only ACPX discovery alias; see schema comment above.
+    // OSR-04b: ACPX discovery alias; see schema comment above.
     canonical: 'AGENT_OS_OPENCLAW_INSTALL_ROOT',
+    aliases: [],
+  },
+  'codex.acp_state_home': {
+    // OSR-04a: parse-only here; runtime shell/Python consumers use it.
+    canonical: 'AGENT_OS_CODEX_ACP_STATE_HOME',
     aliases: [],
   },
   // Per-task-kind dispatch default worker class env aliases. One canonical

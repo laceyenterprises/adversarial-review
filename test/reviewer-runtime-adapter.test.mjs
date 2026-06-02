@@ -1929,6 +1929,13 @@ test('acpx discovery uses ACPX_CLI, PATH lookup, fallback path, and a clear miss
     assert.equal(
       await resolveAcpxCliPath({
         env: { AGENT_OS_OPENCLAW_INSTALL_ROOT: fakeOpenclawRoot },
+        configLoaderImpl: ({ env }) => ({
+          get: (key, defaultValue = null) => (
+            key === 'openclaw.install_root'
+              ? (env?.AGENT_OS_OPENCLAW_INSTALL_ROOT ?? defaultValue)
+              : defaultValue
+          ),
+        }),
         execFileImpl: async () => {
           const err = new Error('not found');
           err.code = 1;

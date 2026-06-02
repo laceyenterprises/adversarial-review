@@ -64,23 +64,28 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('tailscale.iphone_ip'), null);
     assert.equal(cfg.get('launchd.label_prefix'), 'ai.laceyenterprises');
     assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
+    assert.equal(cfg.get('operator.email'), 'virtualpaul@gmail.com');
+    assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
+    assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('linear issue prefix and session ledger database name env overrides resolve through cfg loader', () => {
+test('linear and session ledger env overrides resolve through cfg loader', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
     const cfg = loadConfig({
       topPath: top,
       env: {
+        AGENT_OS_LINEAR_TEAM_NAME: 'AcmeProduct',
         AGENT_OS_LINEAR_ISSUE_PREFIX: 'ACME',
         AGENT_OS_SESSION_LEDGER_DATABASE_NAME: 'acme_ledger',
       },
     });
+    assert.equal(cfg.get('linear.team_name'), 'AcmeProduct');
     assert.equal(cfg.get('linear.issue_prefix'), 'ACME');
     assert.equal(cfg.get('session_ledger.database_name'), 'acme_ledger');
   } finally {
@@ -119,6 +124,115 @@ test('linear issue prefix and session ledger database name reject invalid shapes
         assert.ok(err instanceof AgentOSConfigError);
         assert.equal(err.key, 'session_ledger.database_name');
         assert.match(err.message, /SQL identifier/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('OSR-05 operator and workspace identity load through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      github:
+        workspace_email_domain: cfg.example
+      operator:
+        email: operator@example.com
+        full_name: Example Operator
+      linear:
+        team_name: ExampleTeam
+        issue_prefix: EX
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('github.workspace_email_domain'), 'cfg.example');
+    assert.equal(cfg.get('operator.email'), 'operator@example.com');
+    assert.equal(cfg.get('operator.full_name'), 'Example Operator');
+    assert.equal(cfg.get('linear.team_name'), 'ExampleTeam');
+    assert.equal(cfg.get('linear.issue_prefix'), 'EX');
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN: 'ops.example',
+        AGENT_OS_OPERATOR_EMAIL: 'env-operator@example.com',
+        AGENT_OS_OPERATOR_FULL_NAME: 'Env Operator',
+        AGENT_OS_LINEAR_TEAM_NAME: 'EnvTeam',
+      },
+    });
+    assert.equal(envCfg.get('github.workspace_email_domain'), 'ops.example');
+    assert.equal(envCfg.get('operator.email'), 'env-operator@example.com');
+    assert.equal(envCfg.get('operator.full_name'), 'Env Operator');
+    assert.equal(envCfg.get('linear.team_name'), 'EnvTeam');
+    assert.equal(
+      envCfg.resolutionTrace('github.workspace_email_domain').at(-1).source,
+      'env:AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN',
+    );
+    assert.equal(
+      envCfg.resolutionTrace('operator.email').at(-1).source,
+      'env:AGENT_OS_OPERATOR_EMAIL',
+    );
+    assert.equal(
+      envCfg.resolutionTrace('operator.full_name').at(-1).source,
+      'env:AGENT_OS_OPERATOR_FULL_NAME',
+    );
+    assert.equal(
+      envCfg.resolutionTrace('linear.team_name').at(-1).source,
+      'env:AGENT_OS_LINEAR_TEAM_NAME',
+    );
+
+    const legacyEnvCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN: 'legacy.example' },
+    });
+    assert.equal(legacyEnvCfg.get('github.workspace_email_domain'), 'legacy.example');
+    assert.equal(
+      legacyEnvCfg.resolutionTrace('github.workspace_email_domain').at(-1).source,
+      'env:AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('OSR-05 operator and linear sections reject unknown keys', () => {
+  const tmp = freshTmp();
+  try {
+    const badOperator = join(tmp, 'bad-operator.yaml');
+    writeFile(badOperator, `
+      version: 1
+      operator:
+        email: operator@example.com
+        full_name: Example Operator
+        handle: example
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badOperator, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'operator.handle');
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+
+    const badLinear = join(tmp, 'bad-linear-extra.yaml');
+    writeFile(badLinear, `
+      version: 1
+      linear:
+        team_name: ExampleTeam
+        issue_prefix: EX
+        project_slug: example
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badLinear, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'linear.project_slug');
+        assert.match(err.message, /unknown key/);
         return true;
       },
     );

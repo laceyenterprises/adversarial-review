@@ -342,6 +342,153 @@ test('launchd label prefix loads through strict Node schema and env alias', () =
   }
 });
 
+// ─── dispatch.default_worker_class_by_task_kind parity ──────────────────
+// Pairs with the Python sibling tests at
+// `platform/agent-os-config/src/agent_os_config/tests/test_dispatch_default_worker_class.py`.
+// The strict-schema parity rule is the load-bearing one: a deploy
+// `config.yaml` carrying `dispatch:` must parse cleanly through THIS Node
+// loader (the adversarial-watcher's CFG entrypoint) — if it doesn't, the
+// watcher crash-loops on the next deploy, which is the exact CFG-01
+// failure mode (PR #196 / #208 lineage).
+
+test('dispatch.default_worker_class_by_task_kind defaults coding/research/etc to codex', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `version: 1\n`);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    for (const kind of ['coding', 'research', 'drafting', 'analysis', 'other']) {
+      assert.equal(
+        cfg.get(`dispatch.default_worker_class_by_task_kind.${kind}`),
+        'codex',
+        `task_kind=${kind} should default to codex`,
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('dispatch.default_worker_class_by_task_kind defaults merge family to merge-agent', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `version: 1\n`);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    for (const kind of [
+      'merge',
+      'merge_conflict_resolution',
+      'merge_comment_only_followups',
+    ]) {
+      assert.equal(
+        cfg.get(`dispatch.default_worker_class_by_task_kind.${kind}`),
+        'merge-agent',
+        `task_kind=${kind} should default to merge-agent`,
+      );
+    }
+    assert.equal(
+      cfg.get(
+        'dispatch.default_worker_class_by_task_kind.merge_agent_failure_recovery',
+      ),
+      'codex',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('dispatch top-level file overrides default coding worker class', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      dispatch:
+        default_worker_class_by_task_kind:
+          coding: claude-code
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(
+      cfg.get('dispatch.default_worker_class_by_task_kind.coding'),
+      'claude-code',
+    );
+    // Other kinds still take the schema default.
+    assert.equal(
+      cfg.get('dispatch.default_worker_class_by_task_kind.research'),
+      'codex',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('dispatch per-task-kind env var overrides file', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      dispatch:
+        default_worker_class_by_task_kind:
+          coding: claude-code
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_CODING: 'codex',
+      },
+    });
+    assert.equal(
+      cfg.get('dispatch.default_worker_class_by_task_kind.coding'),
+      'codex',
+    );
+    assert.equal(
+      cfg.resolutionTrace('dispatch.default_worker_class_by_task_kind.coding').at(-1).source,
+      'env:AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_CODING',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('dispatch strict schema rejects unknown task_kind', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      dispatch:
+        default_worker_class_by_task_kind:
+          synthesizing: codex
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      AgentOSConfigError,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('dispatch strict schema rejects worker class outside the enum', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      dispatch:
+        default_worker_class_by_task_kind:
+          coding: linkedin-pipeline
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      AgentOSConfigError,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('tailscale hostname legacy env alias wins without canonical', () => {
   const tmp = freshTmp();
   try {

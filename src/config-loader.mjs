@@ -57,6 +57,13 @@ const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
+// Worker-class options for `dispatch.default_worker_class_by_task_kind` leaves.
+// Mirrors `_ENUM_DISPATCH_DEFAULT_WORKER_CLASS` in
+// `platform/agent-os-config/src/agent_os_config/__init__.py`. Constrained to
+// the three classes that make sense as a TASK-KIND DEFAULT — codex / claude-code
+// for the coding family, merge-agent for the merge family. Operators can still
+// pass `--worker-class` at the call site to escape this constraint.
+const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'claude-code', 'merge-agent'];
 const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
 const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
 const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
@@ -305,6 +312,82 @@ function schemaV1() {
           },
         },
       },
+      // Dispatch-time defaults consulted by hq when no `--worker-class` is
+      // passed. The Python sibling at
+      // `platform/agent-os-config/src/agent_os_config/__init__.py` is the
+      // canonical schema; this Node mirror exists so the adversarial-watcher
+      // doesn't crash-loop the moment an operator writes `dispatch:` into
+      // the top-level config.yaml (CFG-01 strict-schema parity rule).
+      //
+      // The prior code default for `default_worker_class_for_task_kind` in
+      // `modules/worker-pool/lib/python/cwp_dispatch/registry.py` was a hard
+      // `claude-code` regardless of task_kind. Coding-family tasks now
+      // default to `codex` (independent OpenAI budget); merge-family tasks
+      // default to `merge-agent` for schema completeness — the actual merge
+      // dispatch path hard-routes to merge-agent without consulting this
+      // function.
+      //
+      // YAML keys use underscores (not hyphens) because the loader's alias
+      // machinery expects dotted ASCII paths; the consumer-side resolver
+      // translates hyphenated task_kind values (`merge-conflict-resolution`
+      // etc.) to the underscore form at lookup time.
+      dispatch: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          default_worker_class_by_task_kind: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              coding: {
+                __type: TYPE_STRING,
+                __default: 'codex',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+              research: {
+                __type: TYPE_STRING,
+                __default: 'codex',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+              drafting: {
+                __type: TYPE_STRING,
+                __default: 'codex',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+              analysis: {
+                __type: TYPE_STRING,
+                __default: 'codex',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+              other: {
+                __type: TYPE_STRING,
+                __default: 'codex',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+              merge: {
+                __type: TYPE_STRING,
+                __default: 'merge-agent',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+              merge_conflict_resolution: {
+                __type: TYPE_STRING,
+                __default: 'merge-agent',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+              merge_comment_only_followups: {
+                __type: TYPE_STRING,
+                __default: 'merge-agent',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+              merge_agent_failure_recovery: {
+                __type: TYPE_STRING,
+                __default: 'codex',
+                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
+              },
+            },
+          },
+        },
+      },
     },
   };
 }
@@ -376,6 +459,45 @@ export const ENV_ALIASES = {
   },
   'launchd.label_prefix': {
     canonical: 'AGENT_OS_LAUNCHD_LABEL_PREFIX',
+    aliases: [],
+  },
+  // Per-task-kind dispatch default worker class env aliases. One canonical
+  // env var per leaf — matches the Python sibling at
+  // `platform/agent-os-config/src/agent_os_config/__init__.py`.
+  'dispatch.default_worker_class_by_task_kind.coding': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_CODING',
+    aliases: [],
+  },
+  'dispatch.default_worker_class_by_task_kind.research': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_RESEARCH',
+    aliases: [],
+  },
+  'dispatch.default_worker_class_by_task_kind.drafting': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_DRAFTING',
+    aliases: [],
+  },
+  'dispatch.default_worker_class_by_task_kind.analysis': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_ANALYSIS',
+    aliases: [],
+  },
+  'dispatch.default_worker_class_by_task_kind.other': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_OTHER',
+    aliases: [],
+  },
+  'dispatch.default_worker_class_by_task_kind.merge': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE',
+    aliases: [],
+  },
+  'dispatch.default_worker_class_by_task_kind.merge_conflict_resolution': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_CONFLICT_RESOLUTION',
+    aliases: [],
+  },
+  'dispatch.default_worker_class_by_task_kind.merge_comment_only_followups': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_COMMENT_ONLY_FOLLOWUPS',
+    aliases: [],
+  },
+  'dispatch.default_worker_class_by_task_kind.merge_agent_failure_recovery': {
+    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_AGENT_FAILURE_RECOVERY',
     aliases: [],
   },
   'feature_flags.live_steer_allow_unvetted': {

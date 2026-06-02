@@ -27,6 +27,7 @@ import {
   CANONICAL_OAUTH_STRIP_ENV as CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV,
   resolveProgressTimeoutForModel,
 } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
+import { AgentOSConfigError, resetConfigCache } from '../src/config-loader.mjs';
 import { probeCodexCli, resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import {
   readActiveReviewerRunRecords,
@@ -1894,6 +1895,7 @@ test('reviewer run-state remains parseable after SIGKILL during repeated heartbe
 });
 
 test('acpx discovery uses ACPX_CLI, PATH lookup, fallback path, and a clear missing-binary hint', async () => {
+  resetConfigCache();
   assert.equal(
     await resolveAcpxCliPath({
       env: { ACPX_CLI: 'custom-acpx' },
@@ -1916,10 +1918,14 @@ test('acpx discovery uses ACPX_CLI, PATH lookup, fallback path, and a clear miss
     '/usr/local/bin/acpx',
   );
   const fakeOpenclawRoot = mkdtempSync(join(tmpdir(), 'acpx-openclaw-root-'));
+  const fakeHomeRoot = mkdtempSync(join(tmpdir(), 'acpx-home-root-'));
   const fakeAcpx = join(fakeOpenclawRoot, 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
+  const fakeHomeAcpx = join(fakeHomeRoot, '.openclaw', 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
   try {
     mkdirSync(dirname(fakeAcpx), { recursive: true });
     writeFileSync(fakeAcpx, '');
+    mkdirSync(dirname(fakeHomeAcpx), { recursive: true });
+    writeFileSync(fakeHomeAcpx, '');
     assert.equal(
       await resolveAcpxCliPath({
         env: { AGENT_OS_OPENCLAW_INSTALL_ROOT: fakeOpenclawRoot },
@@ -1945,8 +1951,38 @@ test('acpx discovery uses ACPX_CLI, PATH lookup, fallback path, and a clear miss
       }),
       fakeAcpx,
     );
+    assert.equal(
+      await resolveAcpxCliPath({
+        env: { HOME: fakeHomeRoot },
+        configLoaderImpl: () => ({
+          get: (_key, defaultValue = null) => defaultValue,
+        }),
+        execFileImpl: async () => {
+          const err = new Error('not found');
+          err.code = 1;
+          throw err;
+        },
+      }),
+      fakeHomeAcpx,
+    );
+    assert.equal(
+      await resolveAcpxCliPath({
+        env: { HOME: fakeHomeRoot },
+        configLoaderImpl: () => {
+          throw new AgentOSConfigError('bad config');
+        },
+        execFileImpl: async () => {
+          const err = new Error('not found');
+          err.code = 1;
+          throw err;
+        },
+      }),
+      fakeHomeAcpx,
+    );
   } finally {
     rmSync(fakeOpenclawRoot, { recursive: true, force: true });
+    rmSync(fakeHomeRoot, { recursive: true, force: true });
+    resetConfigCache();
   }
   await assert.rejects(
     resolveAcpxCliPath({

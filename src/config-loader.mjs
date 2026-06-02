@@ -99,6 +99,8 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          // OSR-04b: Node-only ACPX discovery knob; mirror this into the
+          // Python schema only if a Python consumer starts reading it.
           install_root: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
@@ -469,6 +471,7 @@ export const ENV_ALIASES = {
     aliases: [],
   },
   'openclaw.install_root': {
+    // OSR-04b: Node-only ACPX discovery alias; see schema comment above.
     canonical: 'AGENT_OS_OPENCLAW_INSTALL_ROOT',
     aliases: [],
   },

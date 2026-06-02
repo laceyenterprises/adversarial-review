@@ -349,7 +349,7 @@ test('launchd label prefix loads through strict Node schema and env alias', () =
 // `config.yaml` carrying `dispatch:` must parse cleanly through THIS Node
 // loader (the adversarial-watcher's CFG entrypoint) — if it doesn't, the
 // watcher crash-loops on the next deploy, which is the exact CFG-01
-// failure mode (PR #196 / #208 lineage).
+// strict-loader drift failure mode.
 
 test('dispatch.default_worker_class_by_task_kind defaults coding/research/etc to codex', () => {
   const tmp = freshTmp();

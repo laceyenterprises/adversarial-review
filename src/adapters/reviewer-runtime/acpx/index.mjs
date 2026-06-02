@@ -2,8 +2,11 @@ import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { loadConfigCached } from '../../../config-loader.mjs';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
@@ -26,6 +29,8 @@ const DEFAULT_TAIL_BYTES = 8 * 1024;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 5_000;
 const DEFAULT_OAUTH_PROBE_TIMEOUT_MS = 20_000;
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const MODULE_CONFIG_PATH = join(__dirname, '..', '..', '..', '..', 'config.yaml');
 
 class OAuthProbeError extends Error {
   constructor(layer, reason, { stdout = '', stderr = '' } = {}) {
@@ -108,8 +113,21 @@ function emptyRemediatorResult({
   };
 }
 
-function installHint() {
-  return 'Install ACPX or set ACPX_CLI; expected `acpx` on PATH or ~/.openclaw/tools/acpx/node_modules/.bin/acpx';
+function resolveOpenclawInstallRoot({
+  env = process.env,
+  loaderImpl = loadConfigCached,
+} = {}) {
+  const envOverride = String(env.AGENT_OS_OPENCLAW_INSTALL_ROOT || '').trim();
+  if (envOverride) return envOverride;
+  const cfg = loaderImpl({ env, modulePaths: [MODULE_CONFIG_PATH] });
+  const configured = String(cfg.get('openclaw.install_root') || '').trim();
+  if (configured) return configured;
+  return join(env.HOME || homedir(), '.openclaw');
+}
+
+function installHint(env = process.env) {
+  const installRoot = resolveOpenclawInstallRoot({ env });
+  return `Install ACPX or set ACPX_CLI; expected \`acpx\` on PATH or ${join(installRoot, 'tools', 'acpx', 'node_modules', '.bin', 'acpx')}`;
 }
 
 async function resolveAcpxCliPath({
@@ -119,9 +137,9 @@ async function resolveAcpxCliPath({
 } = {}) {
   if (env.ACPX_CLI) {
     const override = String(env.ACPX_CLI).trim();
-    if (!override) throw new Error(`ACPX_CLI is empty. ${installHint()}`);
+    if (!override) throw new Error(`ACPX_CLI is empty. ${installHint(env)}`);
     if (override.includes('/') && !existsSync(override)) {
-      throw new Error(`ACPX CLI not found at ACPX_CLI=${override}. ${installHint()}`);
+      throw new Error(`ACPX CLI not found at ACPX_CLI=${override}. ${installHint(env)}`);
     }
     if (!override.includes('/')) {
       try {
@@ -135,7 +153,7 @@ async function resolveAcpxCliPath({
       } catch {
         // Fall through to a consistent install-hint error below.
       }
-      throw new Error(`ACPX CLI not found at ACPX_CLI=${override}. ${installHint()}`);
+      throw new Error(`ACPX CLI not found at ACPX_CLI=${override}. ${installHint(env)}`);
     }
     return override;
   }
@@ -152,9 +170,16 @@ async function resolveAcpxCliPath({
     // Fall through to the maintainer-local install path.
   }
 
-  const fallback = join(env.HOME || homedir(), '.openclaw', 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
+  const fallback = join(
+    resolveOpenclawInstallRoot({ env }),
+    'tools',
+    'acpx',
+    'node_modules',
+    '.bin',
+    'acpx',
+  );
   if (existsSync(fallback)) return fallback;
-  throw new Error(`ACPX CLI not found. ${installHint()}`);
+  throw new Error(`ACPX CLI not found. ${installHint(env)}`);
 }
 
 function buildAcpxProbeArgs(...args) {

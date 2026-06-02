@@ -1928,6 +1928,32 @@ test('acpx discovery uses ACPX_CLI, PATH lookup, fallback path, and a clear miss
   );
 });
 
+test('acpx discovery honors AGENT_OS_OPENCLAW_INSTALL_ROOT over HOME for the fallback path', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'acpx-install-root-'));
+  const installRoot = join(rootDir, 'custom-openclaw');
+  const fallback = join(installRoot, 'tools', 'acpx', 'node_modules', '.bin');
+  mkdirSync(fallback, { recursive: true });
+  writeFileSync(join(fallback, 'acpx'), '#!/bin/sh\nexit 0\n', 'utf8');
+  try {
+    assert.equal(
+      await resolveAcpxCliPath({
+        env: {
+          HOME: '/no/such/home',
+          AGENT_OS_OPENCLAW_INSTALL_ROOT: installRoot,
+        },
+        execFileImpl: async () => {
+          const err = new Error('not found');
+          err.code = 1;
+          throw err;
+        },
+      }),
+      join(fallback, 'acpx'),
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('acpx OAuth probe reports CLI and MCP OAuth failures distinctly', async () => {
   await assert.rejects(
     assertCodexOAuthLayers({

@@ -2410,9 +2410,11 @@ test('killDetachedWorkerProcessGroup terminates detached remediation workers by 
   });
   child.unref();
 
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  child.ref();
   assert.equal(killDetachedWorkerProcessGroup(child.pid), true);
 
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await closed;
   assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
 });
 

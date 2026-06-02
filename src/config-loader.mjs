@@ -476,8 +476,8 @@ export const ENV_ALIASES = {
     aliases: [],
   },
   'github.workspace_email_domain': {
-    canonical: 'AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
-    aliases: [['AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN', identity]],
+    canonical: 'AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN',
+    aliases: [['AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN', identity]],
   },
   'linear.team_name': {
     canonical: 'AGENT_OS_LINEAR_TEAM_NAME',

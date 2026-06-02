@@ -157,7 +157,7 @@ test('OSR-05 operator and workspace identity load through strict Node schema', (
     const envCfg = loadConfig({
       topPath: top,
       env: {
-        AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN: 'ops.example',
+        AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN: 'ops.example',
         AGENT_OS_OPERATOR_EMAIL: 'env-operator@example.com',
         AGENT_OS_OPERATOR_FULL_NAME: 'Env Operator',
         AGENT_OS_LINEAR_TEAM_NAME: 'EnvTeam',
@@ -169,7 +169,7 @@ test('OSR-05 operator and workspace identity load through strict Node schema', (
     assert.equal(envCfg.get('linear.team_name'), 'EnvTeam');
     assert.equal(
       envCfg.resolutionTrace('github.workspace_email_domain').at(-1).source,
-      'env:AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
+      'env:AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN',
     );
     assert.equal(
       envCfg.resolutionTrace('operator.email').at(-1).source,
@@ -186,12 +186,12 @@ test('OSR-05 operator and workspace identity load through strict Node schema', (
 
     const legacyEnvCfg = loadConfig({
       topPath: top,
-      env: { AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN: 'legacy.example' },
+      env: { AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN: 'legacy.example' },
     });
     assert.equal(legacyEnvCfg.get('github.workspace_email_domain'), 'legacy.example');
     assert.equal(
       legacyEnvCfg.resolutionTrace('github.workspace_email_domain').at(-1).source,
-      'env:AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN',
+      'env:AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

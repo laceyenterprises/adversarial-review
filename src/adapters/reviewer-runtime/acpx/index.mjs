@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -152,7 +152,8 @@ async function resolveAcpxCliPath({
     // Fall through to the maintainer-local install path.
   }
 
-  const fallback = join(env.HOME || homedir(), '.openclaw', 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
+  const openclawInstallRoot = env.AGENT_OS_OPENCLAW_INSTALL_ROOT || '/Users/airlock/.openclaw';
+  const fallback = join(openclawInstallRoot, 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
   if (existsSync(fallback)) return fallback;
   throw new Error(`ACPX CLI not found. ${installHint()}`);
 }

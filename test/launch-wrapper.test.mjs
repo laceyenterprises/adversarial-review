@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -25,6 +25,15 @@ const SKIP_REASON_NO_ZSH =
 
 function readScript(name) {
   return readFileSync(join(REPO_ROOT, 'scripts', name), 'utf8');
+}
+
+function readLauncherScript(name) {
+  const scriptPath = join(REPO_ROOT, 'scripts', name);
+  const script = readFileSync(scriptPath, 'utf8');
+  assert.ok(script.startsWith('#!'), `${name} appears empty or missing`);
+  assert.notEqual(statSync(scriptPath).mode & 0o111, 0, `${name} must be executable`);
+  assert.match(script, /set -euo pipefail/, `${name} must fail closed under shell errors`);
+  return script;
 }
 
 function writeExecutable(filePath, body) {
@@ -129,7 +138,7 @@ test('wrapper launchers pass ADV_OP_TOKEN_TAG into the resolver subprocess', () 
     ['adversarial-watcher-start-placey.sh', 'adversarial-watcher'],
     ['adversarial-follow-up-tick.sh', 'follow-up-tick'],
   ]) {
-    const script = readScript(scriptName);
+    const script = readLauncherScript(scriptName);
     const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.match(
       script,
@@ -140,15 +149,21 @@ test('wrapper launchers pass ADV_OP_TOKEN_TAG into the resolver subprocess', () 
 });
 
 test('launcher scripts do not hardcode operator identity defaults', () => {
+  // Reverse-DNS launchd labels such as `ai.laceyenterprises.*` are service
+  // identifiers, not operator identity defaults. This guard catches human/org
+  // display names and email literals while leaving service-label syntax alone.
+  const standaloneOrgName = /(^|[^.\w-])lacey(?:\s+|-|_)?enterprises($|[^.\w-])/i;
+  const operatorEmailDomain = /@\s*lacey[-_]?enterprises\.com/i;
   for (const scriptName of [
     'adversarial-watcher-start.sh',
     'adversarial-watcher-start-placey.sh',
     'adversarial-follow-up-tick.sh',
   ]) {
-    const script = readScript(scriptName);
-    assert.doesNotMatch(script, /virtualpaul@gmail\.com/);
-    assert.doesNotMatch(script, /Paul Lacey/);
-    assert.doesNotMatch(script, /Laceyenterprises/);
+    const script = readLauncherScript(scriptName);
+    assert.doesNotMatch(script, /\b(?:virtualpaul|paul[._-]?lacey)\s*@/i);
+    assert.doesNotMatch(script, operatorEmailDomain);
+    assert.doesNotMatch(script, /paul\s+lacey/i);
+    assert.doesNotMatch(script, standaloneOrgName);
   }
 });
 

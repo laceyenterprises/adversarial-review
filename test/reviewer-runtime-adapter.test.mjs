@@ -1915,9 +1915,8 @@ test('acpx discovery uses ACPX_CLI, PATH lookup, fallback path, and a clear miss
     }),
     '/usr/local/bin/acpx',
   );
-  const fakeOpenclawRoot = '/tmp/fake-openclaw';
+  const fakeOpenclawRoot = mkdtempSync(join(tmpdir(), 'acpx-openclaw-root-'));
   const fakeAcpx = join(fakeOpenclawRoot, 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
-  const hadFakeOpenclawRoot = existsSync(fakeOpenclawRoot);
   try {
     mkdirSync(dirname(fakeAcpx), { recursive: true });
     writeFileSync(fakeAcpx, '');
@@ -1932,16 +1931,29 @@ test('acpx discovery uses ACPX_CLI, PATH lookup, fallback path, and a clear miss
       }),
       fakeAcpx,
     );
+    assert.equal(
+      await resolveAcpxCliPath({
+        env: {},
+        configLoaderImpl: () => ({
+          get: (key, defaultValue = null) => (key === 'openclaw.install_root' ? fakeOpenclawRoot : defaultValue),
+        }),
+        execFileImpl: async () => {
+          const err = new Error('not found');
+          err.code = 1;
+          throw err;
+        },
+      }),
+      fakeAcpx,
+    );
   } finally {
-    if (!hadFakeOpenclawRoot) {
-      rmSync(fakeOpenclawRoot, { recursive: true, force: true });
-    } else {
-      rmSync(fakeAcpx, { force: true });
-    }
+    rmSync(fakeOpenclawRoot, { recursive: true, force: true });
   }
   await assert.rejects(
     resolveAcpxCliPath({
       env: { ACPX_CLI: 'acpx-typo', HOME: '/no/such/home' },
+      configLoaderImpl: () => ({
+        get: (_key, defaultValue = null) => defaultValue,
+      }),
       execFileImpl: async () => {
         const err = new Error('not found');
         err.code = 1;

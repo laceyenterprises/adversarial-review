@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { loadConfigCached } from '../../../config-loader.mjs';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
+import { MODULE_CONFIG_PATH } from '../../../role-config.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
 import {
@@ -109,13 +111,29 @@ function emptyRemediatorResult({
 }
 
 function installHint() {
-  return 'Install ACPX or set ACPX_CLI; expected `acpx` on PATH or ~/.openclaw/tools/acpx/node_modules/.bin/acpx';
+  return 'Install ACPX or set ACPX_CLI / AGENT_OS_OPENCLAW_INSTALL_ROOT; expected `acpx` on PATH or openclaw.install_root/tools/acpx/node_modules/.bin/acpx';
+}
+
+function resolveConfiguredOpenclawInstallRoot({
+  env = process.env,
+  configLoaderImpl = loadConfigCached,
+  topPath,
+  modulePaths = [MODULE_CONFIG_PATH],
+} = {}) {
+  const cfg = configLoaderImpl({ topPath, modulePaths, env });
+  const configured = cfg?.get?.('openclaw.install_root', null);
+  if (typeof configured !== 'string') return null;
+  const trimmed = configured.trim();
+  return trimmed || null;
 }
 
 async function resolveAcpxCliPath({
   env = process.env,
   execFileImpl = execFileAsync,
   timeout = DEFAULT_DISCOVERY_TIMEOUT_MS,
+  configLoaderImpl = loadConfigCached,
+  topPath,
+  modulePaths = [MODULE_CONFIG_PATH],
 } = {}) {
   if (env.ACPX_CLI) {
     const override = String(env.ACPX_CLI).trim();
@@ -152,7 +170,15 @@ async function resolveAcpxCliPath({
     // Fall through to the maintainer-local install path.
   }
 
-  const openclawInstallRoot = env.AGENT_OS_OPENCLAW_INSTALL_ROOT || '/Users/airlock/.openclaw';
+  const openclawInstallRoot = resolveConfiguredOpenclawInstallRoot({
+    env,
+    configLoaderImpl,
+    topPath,
+    modulePaths,
+  });
+  if (!openclawInstallRoot) {
+    throw new Error(`ACPX CLI not found. ${installHint()}`);
+  }
   const fallback = join(openclawInstallRoot, 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
   if (existsSync(fallback)) return fallback;
   throw new Error(`ACPX CLI not found. ${installHint()}`);

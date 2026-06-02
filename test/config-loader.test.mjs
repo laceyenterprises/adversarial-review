@@ -342,6 +342,31 @@ test('launchd label prefix loads through strict Node schema and env alias', () =
   }
 });
 
+test('openclaw install root loads through strict Node schema and env alias', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      openclaw:
+        install_root: /cfg/openclaw
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('openclaw.install_root'), '/cfg/openclaw');
+    const envCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_OPENCLAW_INSTALL_ROOT: '/env/openclaw' },
+    });
+    assert.equal(envCfg.get('openclaw.install_root'), '/env/openclaw');
+    assert.equal(
+      envCfg.resolutionTrace('openclaw.install_root').at(-1).source,
+      'env:AGENT_OS_OPENCLAW_INSTALL_ROOT',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // ─── dispatch.default_worker_class_by_task_kind parity ──────────────────
 // Pairs with the Python sibling tests at
 // `platform/agent-os-config/src/agent_os_config/tests/test_dispatch_default_worker_class.py`.

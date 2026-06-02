@@ -95,6 +95,13 @@ function schemaV1() {
           admin_home: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
+      openclaw: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          install_root: { __type: TYPE_STRING, __default: null, __nullable: true },
+        },
+      },
       governance: {
         __type: TYPE_DICT,
         __strict: true,
@@ -459,6 +466,10 @@ export const ENV_ALIASES = {
   },
   'launchd.label_prefix': {
     canonical: 'AGENT_OS_LAUNCHD_LABEL_PREFIX',
+    aliases: [],
+  },
+  'openclaw.install_root': {
+    canonical: 'AGENT_OS_OPENCLAW_INSTALL_ROOT',
     aliases: [],
   },
   // Per-task-kind dispatch default worker class env aliases. One canonical

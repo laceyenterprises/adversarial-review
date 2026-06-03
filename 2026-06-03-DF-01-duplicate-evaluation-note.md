@@ -1,4 +1,4 @@
-# DF-01 duplicate PR evaluation
+# 2026-06-03 DF-01 duplicate PR evaluation
 
 Compared on 2026-06-03:
 
@@ -8,9 +8,10 @@ Compared on 2026-06-03:
 
 I selected PR #221 for final remediation and merge.
 
-This note is intentionally committed at the module root as the durable
-operator-requested duplicate-PR evaluation artifact for this sweep. It is a
-one-shot merge decision note, not a reusable runbook page under `docs/`.
+This date-prefixed note is intentionally committed at the module root as the
+durable operator-requested duplicate-PR evaluation artifact for this sweep. It
+is a one-shot merge decision note, not a reusable runbook page under `docs/`;
+the filename keeps future sweep artifacts ordered and pruneable.
 
 PR #221 is the strongest branch because it implements workspace reaping in the
 current `follow-up-jobs` module, covers completed/failed/stopped terminal jobs,

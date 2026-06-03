@@ -7,7 +7,6 @@ import path from 'node:path';
 import {
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
-  resolveInitialStoppedArchiveSweepMs,
   runStoppedArchiveSweepIfDue,
   writeMaintenanceSweepState,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
@@ -31,7 +30,10 @@ test('maintenance sweep state round-trips through the persisted restart cursor',
     lastReapTerminalWorkspacesSweepMs,
     lastReapTerminalWorkspacesSweepAt: '2026-06-03T12:05:00.000Z',
   });
-  assert.equal(resolveInitialStoppedArchiveSweepMs(statePath), lastArchiveStoppedSweepMs);
+  assert.equal(
+    normalizeMaintenanceSweepState(readMaintenanceSweepState(statePath)).lastArchiveStoppedSweepMs,
+    lastArchiveStoppedSweepMs,
+  );
   assert.match(readFileSync(statePath, 'utf8'), /lastArchiveStoppedSweepMs/);
 });
 
@@ -57,7 +59,10 @@ test('maintenance sweep state falls back to zero when the persisted cursor is un
   writeFileSync(statePath, '{not-json}\n', 'utf8');
 
   assert.deepEqual(readMaintenanceSweepState(statePath), {});
-  assert.equal(resolveInitialStoppedArchiveSweepMs(statePath), 0);
+  assert.equal(
+    normalizeMaintenanceSweepState(readMaintenanceSweepState(statePath)).lastArchiveStoppedSweepMs,
+    0,
+  );
 });
 
 test('maintenance sweep cursors are persisted after archive and reap complete', async () => {

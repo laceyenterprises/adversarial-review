@@ -168,10 +168,6 @@ function serializeMaintenanceSweepState(state = {}) {
   return serialized;
 }
 
-function resolveInitialStoppedArchiveSweepMs(statePath = MAINTENANCE_SWEEP_STATE_PATH) {
-  return normalizeMaintenanceSweepState(readMaintenanceSweepState(statePath)).lastArchiveStoppedSweepMs;
-}
-
 let defaultMaintenanceSweepState = normalizeMaintenanceSweepState(readMaintenanceSweepState());
 
 function readCurrentMaintenanceSweepState(statePath) {
@@ -385,7 +381,6 @@ export {
   main,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
-  resolveInitialStoppedArchiveSweepMs,
   runStoppedArchiveSweepIfDue,
   writeMaintenanceSweepState,
 };

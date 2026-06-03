@@ -552,6 +552,34 @@ On watcher startup, `reconcileReviewerSessions` and `recoverReviewerRunRecords` 
 
 Follow-up remediation workers use the same lifecycle shape through their job JSON: `remediationWorker.processGroupId`, `processId`, `spawnedAt`, and worker artifacts are the durable adoption/cancel handles. The follow-up daemon's ordinary SIGTERM path stops the daemon loop only; it does not stop spawned workers. Reconcile adopts by reading the in-progress job record and worker artifacts, and operator cancellation uses `src/follow-up-stop.mjs` / `src/follow-up-worker-cancel.mjs` with PGID plus start-time identity checks.
 
+The follow-up daemon also owns terminal workspace reaping for
+`HQ_ROOT/adversarial-review/follow-up-workspaces/` or the configured remediation
+workspace root. A workspace is eligible only when its `jobId` has a matching
+terminal follow-up job record in `completed/`, `failed/`, `stopped/`, or
+`stopped-archived/`, and that terminal record's semantic terminal timestamp is
+at least 24 hours old. The workspace reaper deliberately does not fall back to
+workspace directory mtime or job-file mtime when a terminal record is missing a
+parseable terminal timestamp; it must skip the workspace, increment
+`missingTerminalTimestamp`, and leave manual recovery to an operator who can
+re-stamp the terminal record or remove the workspace after inspection.
+
+Archive and workspace-reap maintenance cursors are persisted separately in
+`data/follow-up-jobs/maintenance-sweeps.json`. A persistent failure in one step
+must not force the other successful step to rerun every daemon tick, and failed
+steps use the short retry cooldown before trying again. On first upgrade from
+the legacy single archive cursor, the workspace-reap cursor may inherit the
+legacy archive timestamp so the first reap can be deferred by up to one hour
+instead of spiking immediately after deploy.
+
+Workspace delete failures are isolated per entry. A failed `rm` must increment
+the reaper error count, log the workspace path and error code, and continue to
+later workspaces. For `EACCES` or `EPERM`, the daemon must not attempt
+privileged deletion. Instead it writes a structured
+`terminal-workspace-reap-permission-denied` anomaly under
+`data/archive-anomalies/` with the runtime user, `HQ_ROOT`, workspace path,
+ownership metadata when readable, and `action: "left-workspace-in-place"` for
+operator follow-up.
+
 Intentional teardown is a separate operator surface: `npm run hard-shutdown -- [reason]` runs `src/adversarial-hard-shutdown.mjs`, cancels every `review_status='reviewing'` reviewer and every in-progress spawned follow-up worker, waits for signalled process groups, and returns non-zero if any live worker could not be signalled or remained alive through the wait window. This command is the only normal lifecycle path that cancels children before the daemons drop; routine bounces are survive-and-reattach.
 
 ## Round-Budget Derivation

@@ -59,7 +59,11 @@ const ROOT = resolve(__dirname, '..');
 const TICK_INTERVAL_SECONDS = Number(process.env.TICK_INTERVAL_SECONDS) || 120;
 const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
 const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
-const STOPPED_ARCHIVE_FAILURE_RETRY_MS = 5 * 60 * 1000;
+const STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = positiveNumberEnv(
+  'STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS',
+  5 * 60,
+);
+const STOPPED_ARCHIVE_FAILURE_RETRY_MS = STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS * 1000;
 const MAINTENANCE_SWEEP_STATE_PATH = join(ROOT, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
 
 function ts() {
@@ -76,6 +80,11 @@ function logTick(label, msg) {
 
 function logError(msg) {
   console.error(`[follow-up-daemon ${ts()}] ${msg}`);
+}
+
+function positiveNumberEnv(name, fallback) {
+  const parsed = Number(process.env[name] || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 const MAX_CONCURRENT_REMEDIATION_JOBS = resolveRemediationMaxConcurrentJobs(process.env, {
@@ -168,11 +177,18 @@ function serializeMaintenanceSweepState(state = {}) {
   return serialized;
 }
 
-let defaultMaintenanceSweepState = normalizeMaintenanceSweepState(readMaintenanceSweepState());
+let defaultMaintenanceSweepState = null;
+
+function getDefaultMaintenanceSweepState() {
+  if (defaultMaintenanceSweepState === null) {
+    defaultMaintenanceSweepState = normalizeMaintenanceSweepState(readMaintenanceSweepState());
+  }
+  return defaultMaintenanceSweepState;
+}
 
 function readCurrentMaintenanceSweepState(statePath) {
   return statePath === MAINTENANCE_SWEEP_STATE_PATH
-    ? { ...defaultMaintenanceSweepState }
+    ? { ...getDefaultMaintenanceSweepState() }
     : normalizeMaintenanceSweepState(readMaintenanceSweepState(statePath));
 }
 

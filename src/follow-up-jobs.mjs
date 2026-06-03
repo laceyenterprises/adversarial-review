@@ -1059,7 +1059,20 @@ function archiveStoppedFollowUpJobs({
 }
 
 function terminalFollowUpJobTimestamp(job) {
-  return job?.completedAt || job?.failedAt || job?.stoppedAt || null;
+  let latestTimestamp = null;
+  let latestTimestampMs = NaN;
+  for (const timestamp of [job?.completedAt, job?.failedAt, job?.stoppedAt]) {
+    if (!timestamp) continue;
+    const timestampMs = Date.parse(timestamp);
+    if (
+      Number.isFinite(timestampMs)
+      && (!Number.isFinite(latestTimestampMs) || timestampMs > latestTimestampMs)
+    ) {
+      latestTimestamp = timestamp;
+      latestTimestampMs = timestampMs;
+    }
+  }
+  return latestTimestamp;
 }
 
 function listArchivedStoppedJobPathsForId(rootDir, jobId) {
@@ -1093,13 +1106,18 @@ function readTerminalWorkspaceJobForId(
       candidatePaths.push(candidatePath);
     }
   }
-  if (candidatePaths.length === 0) {
-    candidatePaths.push(...listArchivedStoppedJobPathsForId(rootDir, jobId));
+  candidatePaths.push(...listArchivedStoppedJobPathsForId(rootDir, jobId));
+  const seenCandidatePaths = new Set();
+  const orderedCandidatePaths = [];
+  for (const candidatePath of candidatePaths) {
+    if (seenCandidatePaths.has(candidatePath)) continue;
+    seenCandidatePaths.add(candidatePath);
+    orderedCandidatePaths.push(candidatePath);
   }
 
   let unreadableJobRecords = 0;
   let terminalJob = null;
-  for (const jobPath of candidatePaths) {
+  for (const jobPath of orderedCandidatePaths) {
     let job;
     try {
       job = readFollowUpJobImpl(jobPath);

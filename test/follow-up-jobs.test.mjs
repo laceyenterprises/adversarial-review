@@ -620,6 +620,93 @@ test('reapTerminalFollowUpWorkspaces lets a parseable duplicate timestamp beat a
   assert.equal(existsSync(workspaceDir), false);
 });
 
+test('reapTerminalFollowUpWorkspaces uses the newest terminal timestamp on a job record', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const failedDir = getFollowUpJobDir(rootDir, 'failed');
+  const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
+  mkdirSync(failedDir, { recursive: true });
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const nowMs = Date.parse('2026-06-03T12:00:00.000Z');
+  const jobId = 'laceyenterprises__agent-os-pr-1317-2026-06-01T12-00-00-000Z';
+  const jobPath = path.join(failedDir, `${jobId}.json`);
+  writeFollowUpJob(jobPath, {
+    ...buildFollowUpJob({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 1317,
+      reviewerModel: 'codex',
+      reviewBody: '## Summary\nFailed job',
+      reviewPostedAt: '2026-06-01T10:00:00.000Z',
+      critical: false,
+    }),
+    jobId,
+    status: 'failed',
+    completedAt: '2026-06-02T08:00:00.000Z',
+    failedAt: '2026-06-03T11:45:00.000Z',
+  });
+  const workspaceDir = path.join(workspaceRootDir, jobId);
+  mkdirSync(path.join(workspaceDir, '.adversarial-follow-up'), { recursive: true });
+
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir,
+    workspaceRootDir,
+    nowMs,
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reaped, 0);
+  assert.equal(result.recentTerminalJob, 1);
+  assert.equal(existsSync(workspaceDir), true);
+});
+
+test('reapTerminalFollowUpWorkspaces falls back to archived jobs when an active terminal record is unreadable', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+  const archiveDir = path.join(
+    getFollowUpJobDir(rootDir, 'stoppedArchived'),
+    '2026-05',
+  );
+  const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
+  mkdirSync(stoppedDir, { recursive: true });
+  mkdirSync(archiveDir, { recursive: true });
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const nowMs = Date.parse('2026-06-03T12:00:00.000Z');
+  const jobId = 'laceyenterprises__agent-os-pr-1318-2026-06-01T12-00-00-000Z';
+  writeFileSync(path.join(stoppedDir, `${jobId}.json`), '{"jobId":', 'utf8');
+  writeFollowUpJob(path.join(archiveDir, `${jobId}.json`), {
+    ...buildFollowUpJob({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 1318,
+      reviewerModel: 'codex',
+      reviewBody: '## Summary\nStopped job',
+      reviewPostedAt: '2026-06-01T10:00:00.000Z',
+      critical: false,
+    }),
+    jobId,
+    status: 'stopped',
+    stoppedAt: '2026-06-02T08:00:00.000Z',
+  });
+  const workspaceDir = path.join(workspaceRootDir, jobId);
+  mkdirSync(path.join(workspaceDir, '.adversarial-follow-up'), { recursive: true });
+  const errors = [];
+
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir,
+    workspaceRootDir,
+    nowMs,
+    logErrorImpl: (...args) => {
+      errors.push(args.map((entry) => String(entry)).join(' '));
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reaped, 1);
+  assert.equal(result.unreadableJobRecords, 1);
+  assert.equal(result.missingTerminalJob, 0);
+  assert.equal(existsSync(workspaceDir), false);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /Skipping unreadable terminal workspace job record/);
+});
+
 test('reapTerminalFollowUpWorkspaces continues after a per-workspace delete failure', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const completedDir = getFollowUpJobDir(rootDir, 'completed');

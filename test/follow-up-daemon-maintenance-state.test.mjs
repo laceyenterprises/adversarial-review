@@ -215,3 +215,93 @@ test('maintenance sweep cursors advance independently and throttle failed reap r
     lastReapTerminalWorkspacesSweepAt: '2026-06-03T14:05:00.000Z',
   });
 });
+
+test('maintenance failed-step retry cooldown can be tuned by env', async () => {
+  const previousCooldown = process.env.STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS;
+  process.env.STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = '1';
+  let daemonModule;
+  try {
+    daemonModule = await import(
+      `../scripts/adversarial-follow-up-daemon.mjs?cooldown=${Date.now()}-${Math.random()}`
+    );
+  } finally {
+    if (previousCooldown === undefined) {
+      delete process.env.STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS;
+    } else {
+      process.env.STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = previousCooldown;
+    }
+  }
+
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
+  const statePath = path.join(rootDir, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
+  const nowMs = Date.parse('2026-06-03T15:00:00.000Z');
+  const calls = { archive: 0, reap: 0 };
+
+  await daemonModule.runStoppedArchiveSweepIfDue({
+    nowMs,
+    statePath,
+    archiveStoppedFollowUpJobsImpl: () => {
+      calls.archive += 1;
+      return { scanned: 1, archived: 1, skipped: 0, collisions: 0 };
+    },
+    resolveRemediationWorkspaceRootImpl: () => path.join(rootDir, 'workers'),
+    reapTerminalFollowUpWorkspacesImpl: () => {
+      calls.reap += 1;
+      throw new Error('workspace root unavailable');
+    },
+  });
+
+  await daemonModule.runStoppedArchiveSweepIfDue({
+    nowMs: nowMs + 500,
+    statePath,
+    archiveStoppedFollowUpJobsImpl: () => {
+      calls.archive += 1;
+      return { scanned: 1, archived: 0, skipped: 1, collisions: 0 };
+    },
+    resolveRemediationWorkspaceRootImpl: () => path.join(rootDir, 'workers'),
+    reapTerminalFollowUpWorkspacesImpl: () => {
+      calls.reap += 1;
+      return {
+        scanned: 1,
+        reaped: 1,
+        skipped: 0,
+        missingTerminalJob: 0,
+        missingTerminalTimestamp: 0,
+        missingTerminalTimestampPaths: [],
+        recentTerminalJob: 0,
+        unreadableJobRecords: 0,
+        errors: 0,
+      };
+    },
+  });
+
+  await daemonModule.runStoppedArchiveSweepIfDue({
+    nowMs: nowMs + 1000,
+    statePath,
+    archiveStoppedFollowUpJobsImpl: () => {
+      calls.archive += 1;
+      return { scanned: 1, archived: 0, skipped: 1, collisions: 0 };
+    },
+    resolveRemediationWorkspaceRootImpl: () => path.join(rootDir, 'workers'),
+    reapTerminalFollowUpWorkspacesImpl: () => {
+      calls.reap += 1;
+      return {
+        scanned: 1,
+        reaped: 1,
+        skipped: 0,
+        missingTerminalJob: 0,
+        missingTerminalTimestamp: 0,
+        missingTerminalTimestampPaths: [],
+        recentTerminalJob: 0,
+        unreadableJobRecords: 0,
+        errors: 0,
+      };
+    },
+  });
+
+  assert.deepEqual(calls, { archive: 1, reap: 2 });
+  assert.equal(
+    daemonModule.readMaintenanceSweepState(statePath).lastReapTerminalWorkspacesSweepMs,
+    nowMs + 1000,
+  );
+});

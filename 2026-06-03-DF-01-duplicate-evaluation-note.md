@@ -34,3 +34,7 @@ archive/reaper maintenance cursors so persistent reaper failures no longer force
 archive reruns every tick, added a five-minute failed-step retry cooldown, and
 records structured permission-denied workspace-reap anomalies for operator
 follow-up instead of attempting privileged deletion from the gatekeeper daemon.
+
+Cleanup checklist: keep this root note through the duplicate-sweep merge window,
+then move or prune it with other dated evaluation artifacts once the selected PR
+has landed and the closed duplicate branches are no longer active review inputs.

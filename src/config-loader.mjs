@@ -41,14 +41,26 @@ export const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
 // -------- AgentOSConfigError ------------------------------------------------
 
 export class AgentOSConfigError extends Error {
-  constructor(message, { key, expected, got, source } = {}) {
+  constructor(message, { key, expected, got, source, envName, allowed, conflictingEnvNames } = {}) {
     super(message);
     this.name = 'AgentOSConfigError';
     this.key = key ?? null;
     this.expected = expected ?? null;
     this.got = got ?? null;
     this.source = source ?? null;
+    this.envName = normalizeEnvName(
+      envName ?? (typeof source === 'string' && source.startsWith('env:') ? source.slice('env:'.length) : null),
+    );
+    this.allowed = allowed ?? null;
+    this.conflictingEnvNames = Array.isArray(conflictingEnvNames)
+      ? conflictingEnvNames.map(normalizeEnvName).filter(Boolean)
+      : [];
   }
+}
+
+function normalizeEnvName(value) {
+  const normalized = String(value ?? '').trim();
+  return normalized || null;
 }
 
 // -------- Schema declaration -----------------------------------------------
@@ -57,6 +69,22 @@ const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
+const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
+// Keep this per-role fallback surface in lockstep with the Python
+// agent_os_config schema. The child dicts are intentionally strict so a
+// Python-only key must not land without adding the same key here first.
+// Role-class keys are hyphenated to mirror worker class tokens, while older
+// role-level knobs remain snake_case. Strict-schema errors should keep nearest
+// key suggestions useful for operator typos across both shapes.
+const ROLE_FALLBACK_CLASSES = [
+  'claude-code',
+  'codex',
+  'claude-reviewer-lacey',
+  'codex-reviewer-lacey',
+  'merge-agent',
+  'merge-agent-failure-recovery',
+  'clio-agent',
+];
 // Worker-class options for `dispatch.default_worker_class_by_task_kind` leaves.
 // Mirrors `_ENUM_DISPATCH_DEFAULT_WORKER_CLASS` in
 // `platform/agent-os-config/src/agent_os_config/__init__.py`. Constrained to
@@ -77,6 +105,44 @@ const TYPE_BOOL = 'bool';
 const TYPE_INT = 'int';
 const TYPE_FLOAT = 'float';
 const TYPE_DICT = 'dict';
+
+function buildRoleFallbackSchemaKeys() {
+  return Object.fromEntries(
+    ROLE_FALLBACK_CLASSES.map((roleClass) => [
+      roleClass,
+      {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          fallback_path: {
+            __type: TYPE_STRING,
+            __default: 'none',
+            __enum: ENUM_ROLES_FALLBACK_PATH,
+          },
+        },
+      },
+    ]),
+  );
+}
+
+function envClassSegment(roleClass) {
+  return roleClass.replaceAll('-', '_').toUpperCase();
+}
+
+function buildRoleFallbackEnvAliases() {
+  return Object.fromEntries(
+    ROLE_FALLBACK_CLASSES.map((roleClass) => {
+      const envSegment = envClassSegment(roleClass);
+      return [
+        `roles.${roleClass}.fallback_path`,
+        {
+          canonical: `AGENT_OS_ROLES_${envSegment}_FALLBACK_PATH`,
+          aliases: [[`LITELLM_VK_FALLBACK_FOR_${envSegment}`, identity]],
+        },
+      ];
+    }),
+  );
+}
 
 function schemaV1() {
   return {
@@ -390,6 +456,50 @@ function schemaV1() {
             __default: 'codex',
             __enum: ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS,
           },
+          ...buildRoleFallbackSchemaKeys(),
+          quota_probe: {
+            // Intentionally remains under `roles` to mirror the Python
+            // HRR-02b schema; relocating it must happen in both loaders
+            // together so Node does not fork the contract.
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              // Out-of-range values hard-fail at load time. This mirrors
+              // the Python loader's range-bound contract; there is no
+              // silent clamp because operators need misconfigurations in
+              // the startup banner, not hidden boundary rewrites.
+              ok_tick_seconds: {
+                __type: TYPE_INT,
+                __default: 3600,
+                __min: 300,
+                __max: 21600,
+              },
+              exhausted_unknown_tick_seconds: {
+                __type: TYPE_INT,
+                __default: 3600,
+                __min: 600,
+                __max: 21600,
+              },
+            },
+          },
+        },
+      },
+      policy: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          dedup: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              uncommitted_line_threshold: {
+                __type: TYPE_INT,
+                __default: 30,
+                __min: 10,
+                __max: 1000,
+              },
+            },
+          },
         },
       },
       feature_flags: {
@@ -401,6 +511,7 @@ function schemaV1() {
           merge_agent_failure_recovery_disable: { __type: TYPE_BOOL, __default: false },
           merge_agent_final_pass_on_request_changes: { __type: TYPE_BOOL, __default: true },
           allow_missing_alert_to: { __type: TYPE_BOOL, __default: false },
+          resume_context_envelope: { __type: TYPE_BOOL, __default: true },
         },
       },
       // Module-internal sections used by tools/adversarial-review. These are
@@ -549,6 +660,19 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS',
     aliases: [],
   },
+  ...buildRoleFallbackEnvAliases(),
+  'roles.quota_probe.ok_tick_seconds': {
+    canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_OK_TICK_SECONDS',
+    aliases: [],
+  },
+  'roles.quota_probe.exhausted_unknown_tick_seconds': {
+    canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_EXHAUSTED_UNKNOWN_TICK_SECONDS',
+    aliases: [],
+  },
+  'policy.dedup.uncommitted_line_threshold': {
+    canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',
+    aliases: [],
+  },
   'session_ledger.backend': {
     canonical: 'AGENT_OS_SESSION_LEDGER_BACKEND',
     aliases: [['AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME', postgresRuntimeAlias]],
@@ -678,6 +802,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_FEATURE_FLAGS_ALLOW_MISSING_ALERT_TO',
     aliases: [['ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO', identity]],
   },
+  'feature_flags.resume_context_envelope': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_RESUME_CONTEXT_ENVELOPE',
+    aliases: [],
+  },
 };
 
 // -------- YAML 1.2 strict-bool loader --------------------------------------
@@ -764,14 +892,16 @@ function checkLeaf(value, schema, keyPath, source) {
       );
     }
   } else if (expected === TYPE_INT) {
-    if (typeof value !== 'number' || !Number.isInteger(value) || Number.isNaN(value)) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
       throw new AgentOSConfigError(
         `${keyPath}: expected int, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
         { key: keyPath, expected: 'int', got: value, source },
       );
     }
   } else if (expected === TYPE_FLOAT) {
-    if (typeof value !== 'number' || Number.isNaN(value)) {
+    // Non-finite floats (Infinity/-Infinity) fail loud for parity with the
+    // int guard; env/CLI injection should not smuggle sentinel numbers in.
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
       throw new AgentOSConfigError(
         `${keyPath}: expected float, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
         { key: keyPath, expected: 'float', got: value, source },
@@ -798,10 +928,35 @@ function checkLeaf(value, schema, keyPath, source) {
       {
         key: keyPath,
         expected: `one of ${fmtEnum(schema.__enum)}`,
+        allowed: schema.__enum,
         got: value,
         source,
       },
     );
+  }
+  if (typeof value === 'number') {
+    if (schema.__min !== undefined && value < schema.__min) {
+      throw new AgentOSConfigError(
+        `${keyPath}: value ${value} below minimum ${schema.__min}`,
+        {
+          key: keyPath,
+          expected: `>= ${schema.__min}`,
+          got: value,
+          source,
+        },
+      );
+    }
+    if (schema.__max !== undefined && value > schema.__max) {
+      throw new AgentOSConfigError(
+        `${keyPath}: value ${value} above maximum ${schema.__max}`,
+        {
+          key: keyPath,
+          expected: `<= ${schema.__max}`,
+          got: value,
+          source,
+        },
+      );
+    }
   }
   if (schema.__normalize && Object.prototype.hasOwnProperty.call(schema.__normalize, value)) {
     return schema.__normalize[value];
@@ -1144,11 +1299,12 @@ function checkEnvOverlap(key, canonicalEnv, aliases, env) {
       key,
       expected: 'single env value or matching aliases',
       got: pairs,
+      conflictingEnvNames: seen.map(([name]) => name),
     },
   );
 }
 
-function coerceEnvValue(key, value, schemaLeaf) {
+function coerceEnvValue(key, value, schemaLeaf, source = null) {
   const expected = schemaLeaf.__type;
   if (expected === TYPE_BOOL) {
     const lower = value.trim().toLowerCase();
@@ -1159,7 +1315,7 @@ function coerceEnvValue(key, value, schemaLeaf) {
     // must do so by removing the env var, not blanking it.
     throw new AgentOSConfigError(
       `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false' or '1'/'0'; unset the env var instead of blanking it)`,
-      { key, expected: 'bool', got: value },
+      { key, expected: 'bool', got: value, source },
     );
   }
   if (expected === TYPE_INT) {
@@ -1167,7 +1323,7 @@ function coerceEnvValue(key, value, schemaLeaf) {
     if (!Number.isInteger(n)) {
       throw new AgentOSConfigError(
         `${key}: env value ${JSON.stringify(value)} is not an integer`,
-        { key, expected: 'int', got: value },
+        { key, expected: 'int', got: value, source },
       );
     }
     return n;
@@ -1177,7 +1333,7 @@ function coerceEnvValue(key, value, schemaLeaf) {
     if (!Number.isFinite(n)) {
       throw new AgentOSConfigError(
         `${key}: env value ${JSON.stringify(value)} is not a float`,
-        { key, expected: 'float', got: value },
+        { key, expected: 'float', got: value, source },
       );
     }
     return n;
@@ -1394,7 +1550,7 @@ export function loadConfig({
     if (winning === null) continue;
     let value;
     if (typeof rawValue === 'string') {
-      value = coerceEnvValue(key, rawValue, leaf);
+      value = coerceEnvValue(key, rawValue, leaf, `env:${winning}`);
     } else {
       value = rawValue;
     }

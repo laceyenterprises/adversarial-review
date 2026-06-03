@@ -39,11 +39,12 @@ import {
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   consumeFollowUpJobsUntilCapacity,
   isWorkerProcessRunning,
+  resolveRemediationWorkspaceRoot,
   resolveRemediationMaxConcurrentJobs,
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
-import { archiveStoppedFollowUpJobs } from '../src/follow-up-jobs.mjs';
+import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
   resolveInProgressStuckThresholdMs,
@@ -107,6 +108,19 @@ async function runStoppedArchiveSweepIfDue({ nowMs = Date.now() } = {}) {
     logTick(
       'archive-stopped',
       `scanned=${result.scanned} archived=${result.archived} skipped=${result.skipped} collisions=${result.collisions}`
+    );
+  });
+  await runStep('reap-workspaces', () => {
+    const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir: ROOT });
+    const result = reapTerminalFollowUpWorkspaces({
+      rootDir: ROOT,
+      workspaceRootDir,
+      nowMs,
+    });
+    logTick(
+      'reap-workspaces',
+      `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
+      `missingTerminalJob=${result.missingTerminalJob} recentTerminalJob=${result.recentTerminalJob}`
     );
   });
 }

@@ -21,6 +21,7 @@ import {
   markFollowUpJobFailed,
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
+  reapTerminalFollowUpWorkspaces,
   readRemediationReplyArtifact,
   requeueInProgressFollowUpJobForRetry,
   salvagePartialRemediationReply,
@@ -413,6 +414,59 @@ test('archiveStoppedFollowUpJobs deduplicates identical archive collisions only'
   const anomaly = JSON.parse(readFileSync(result.anomalyPaths[0], 'utf8'));
   assert.equal(anomaly.type, 'stopped-archive-duplicate');
   assert.equal(anomaly.related[0].action, 'removed-identical-source');
+});
+
+test('reapTerminalFollowUpWorkspaces removes completed HQ workspaces at least 24h old', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
+  mkdirSync(completedDir, { recursive: true });
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const nowMs = Date.parse('2026-06-03T12:00:00.000Z');
+  const oldJobId = 'laceyenterprises__agent-os-pr-1306-2026-06-01T11-00-00-000Z';
+  const freshJobId = 'laceyenterprises__agent-os-pr-1307-2026-06-03T01-00-00-000Z';
+
+  function writeCompletedJob(jobId, completedAt, prNumber) {
+    const jobPath = path.join(completedDir, `${jobId}.json`);
+    writeFollowUpJob(jobPath, {
+      ...buildFollowUpJob({
+        repo: 'laceyenterprises/agent-os',
+        prNumber,
+        reviewerModel: 'codex',
+        reviewBody: '## Summary\nCompleted job',
+        reviewPostedAt: '2026-06-01T10:00:00.000Z',
+        critical: false,
+      }),
+      jobId,
+      status: 'completed',
+      completedAt,
+    });
+  }
+
+  function writeWorkspace(jobId) {
+    const workspaceDir = path.join(workspaceRootDir, jobId);
+    mkdirSync(path.join(workspaceDir, '.adversarial-follow-up'), { recursive: true });
+    writeFileSync(path.join(workspaceDir, '.adversarial-follow-up', 'codex-last-message.md'), 'done\n', 'utf8');
+    return workspaceDir;
+  }
+
+  writeCompletedJob(oldJobId, '2026-06-02T11:00:00.000Z', 1306);
+  writeCompletedJob(freshJobId, '2026-06-03T11:00:00.000Z', 1307);
+  const oldWorkspaceDir = writeWorkspace(oldJobId);
+  const freshWorkspaceDir = writeWorkspace(freshJobId);
+
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir,
+    workspaceRootDir,
+    nowMs,
+  });
+
+  assert.equal(result.scanned, 2);
+  assert.equal(result.reaped, 1);
+  assert.equal(result.recentTerminalJob, 1);
+  assert.equal(existsSync(oldWorkspaceDir), false);
+  assert.equal(existsSync(freshWorkspaceDir), true);
+  assert.deepEqual(result.reapedPaths, [oldWorkspaceDir]);
 });
 
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {

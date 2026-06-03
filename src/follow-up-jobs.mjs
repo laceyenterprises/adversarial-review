@@ -1057,6 +1057,118 @@ function archiveStoppedFollowUpJobs({
   return { scanned, archived, skipped, collisions, archivedPaths, anomalyPaths };
 }
 
+function terminalFollowUpJobTimestamp(job) {
+  return job?.completedAt || job?.failedAt || job?.stoppedAt || null;
+}
+
+function listArchivedStoppedJobPaths(rootDir) {
+  const archivedRoot = getFollowUpJobDir(rootDir, 'stoppedArchived');
+  if (!existsSync(archivedRoot)) return [];
+
+  const jobPaths = [];
+  for (const entry of readdirSync(archivedRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const monthDir = join(archivedRoot, entry.name);
+    for (const name of readdirSync(monthDir).filter((candidate) => candidate.endsWith('.json')).sort()) {
+      jobPaths.push(join(monthDir, name));
+    }
+  }
+  return jobPaths.sort();
+}
+
+function buildTerminalWorkspaceReapIndex(rootDir) {
+  const jobPaths = [
+    ...listFollowUpJobsInDir(rootDir, 'completed').map(({ jobPath }) => jobPath),
+    ...listFollowUpJobsInDir(rootDir, 'failed').map(({ jobPath }) => jobPath),
+    ...listFollowUpJobsInDir(rootDir, 'stopped').map(({ jobPath }) => jobPath),
+    ...listArchivedStoppedJobPaths(rootDir),
+  ];
+
+  const index = new Map();
+  for (const jobPath of jobPaths) {
+    let job;
+    try {
+      job = readFollowUpJob(jobPath);
+    } catch {
+      continue;
+    }
+    if (!job?.jobId || !['completed', 'failed', 'stopped'].includes(job.status)) {
+      continue;
+    }
+
+    const existing = index.get(job.jobId);
+    const terminalTimestamp = terminalFollowUpJobTimestamp(job) || '';
+    const existingTimestamp = terminalFollowUpJobTimestamp(existing) || '';
+    if (!existing || terminalTimestamp >= existingTimestamp) {
+      index.set(job.jobId, job);
+    }
+  }
+
+  return index;
+}
+
+function reapTerminalFollowUpWorkspaces({
+  rootDir,
+  workspaceRootDir,
+  nowMs = Date.now(),
+  ttlMs = 24 * 60 * 60 * 1000,
+} = {}) {
+  if (!workspaceRootDir || !existsSync(workspaceRootDir)) {
+    return {
+      scanned: 0,
+      reaped: 0,
+      skipped: 0,
+      missingTerminalJob: 0,
+      recentTerminalJob: 0,
+      reapedPaths: [],
+    };
+  }
+
+  const terminalJobsById = buildTerminalWorkspaceReapIndex(rootDir);
+  let scanned = 0;
+  let reaped = 0;
+  let skipped = 0;
+  let missingTerminalJob = 0;
+  let recentTerminalJob = 0;
+  const reapedPaths = [];
+
+  for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    scanned += 1;
+    const workspacePath = join(workspaceRootDir, entry.name);
+    const terminalJob = terminalJobsById.get(entry.name);
+    if (!terminalJob) {
+      skipped += 1;
+      missingTerminalJob += 1;
+      continue;
+    }
+
+    const terminalAt = terminalFollowUpJobTimestamp(terminalJob);
+    const terminalAtMs = terminalAt ? Date.parse(terminalAt) : NaN;
+    const ageMs = Number.isFinite(terminalAtMs)
+      ? nowMs - terminalAtMs
+      : nowMs - statSync(workspacePath).mtimeMs;
+    if (ageMs < ttlMs) {
+      skipped += 1;
+      recentTerminalJob += 1;
+      continue;
+    }
+
+    rmSync(workspacePath, { recursive: true, force: true });
+    reaped += 1;
+    reapedPaths.push(workspacePath);
+  }
+
+  return {
+    scanned,
+    reaped,
+    skipped,
+    missingTerminalJob,
+    recentTerminalJob,
+    reapedPaths,
+  };
+}
+
 // Per-PR remediation ledger summary. The bounded loop's "round number"
 // must be derived from the durable follow-up-jobs ledger (the only
 // counter that actually advances when remediation work completes), not
@@ -2228,6 +2340,7 @@ export {
   buildRemediationReply,
   buildRemediationReplyArtifact,
   archiveStoppedFollowUpJobs,
+  reapTerminalFollowUpWorkspaces,
   claimNextFollowUpJob,
   createFollowUpJob,
   detectPublicReplyNoiseSignal,

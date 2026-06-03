@@ -48,10 +48,16 @@ export class AgentOSConfigError extends Error {
     this.expected = expected ?? null;
     this.got = got ?? null;
     this.source = source ?? null;
-    this.envName = envName
-      ?? (typeof source === 'string' && source.startsWith('env:') ? source.slice('env:'.length) : null);
+    this.envName = normalizeEnvName(
+      envName ?? (typeof source === 'string' && source.startsWith('env:') ? source.slice('env:'.length) : null),
+    );
     this.allowed = allowed ?? null;
   }
+}
+
+function normalizeEnvName(value) {
+  const normalized = String(value ?? '').trim();
+  return normalized || null;
 }
 
 // -------- Schema declaration -----------------------------------------------
@@ -61,6 +67,9 @@ const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
+// Keep this per-role fallback surface in lockstep with the Python
+// agent_os_config schema. The child dicts are intentionally strict so a
+// Python-only key must not land without adding the same key here first.
 const ROLE_FALLBACK_CLASSES = [
   'claude-code',
   'codex',
@@ -446,6 +455,10 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              // Out-of-range values hard-fail at load time. This mirrors
+              // the Python loader's range-bound contract; there is no
+              // silent clamp because operators need misconfigurations in
+              // the startup banner, not hidden boundary rewrites.
               ok_tick_seconds: {
                 __type: TYPE_INT,
                 __default: 3600,
@@ -870,14 +883,14 @@ function checkLeaf(value, schema, keyPath, source) {
       );
     }
   } else if (expected === TYPE_INT) {
-    if (typeof value !== 'number' || !Number.isInteger(value) || Number.isNaN(value)) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
       throw new AgentOSConfigError(
         `${keyPath}: expected int, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
         { key: keyPath, expected: 'int', got: value, source },
       );
     }
   } else if (expected === TYPE_FLOAT) {
-    if (typeof value !== 'number' || Number.isNaN(value)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
       throw new AgentOSConfigError(
         `${keyPath}: expected float, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
         { key: keyPath, expected: 'float', got: value, source },
@@ -1279,7 +1292,7 @@ function checkEnvOverlap(key, canonicalEnv, aliases, env) {
   );
 }
 
-function coerceEnvValue(key, value, schemaLeaf) {
+function coerceEnvValue(key, value, schemaLeaf, source = null) {
   const expected = schemaLeaf.__type;
   if (expected === TYPE_BOOL) {
     const lower = value.trim().toLowerCase();
@@ -1290,7 +1303,7 @@ function coerceEnvValue(key, value, schemaLeaf) {
     // must do so by removing the env var, not blanking it.
     throw new AgentOSConfigError(
       `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false' or '1'/'0'; unset the env var instead of blanking it)`,
-      { key, expected: 'bool', got: value },
+      { key, expected: 'bool', got: value, source },
     );
   }
   if (expected === TYPE_INT) {
@@ -1298,7 +1311,7 @@ function coerceEnvValue(key, value, schemaLeaf) {
     if (!Number.isInteger(n)) {
       throw new AgentOSConfigError(
         `${key}: env value ${JSON.stringify(value)} is not an integer`,
-        { key, expected: 'int', got: value },
+        { key, expected: 'int', got: value, source },
       );
     }
     return n;
@@ -1308,7 +1321,7 @@ function coerceEnvValue(key, value, schemaLeaf) {
     if (!Number.isFinite(n)) {
       throw new AgentOSConfigError(
         `${key}: env value ${JSON.stringify(value)} is not a float`,
-        { key, expected: 'float', got: value },
+        { key, expected: 'float', got: value, source },
       );
     }
     return n;
@@ -1525,7 +1538,7 @@ export function loadConfig({
     if (winning === null) continue;
     let value;
     if (typeof rawValue === 'string') {
-      value = coerceEnvValue(key, rawValue, leaf);
+      value = coerceEnvValue(key, rawValue, leaf, `env:${winning}`);
     } else {
       value = rawValue;
     }

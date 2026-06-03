@@ -1490,21 +1490,25 @@ test('fallback_path legacy env alias resolves with the same precedence', () => {
 test('fallback_path canonical and legacy env aliases fail loud on conflict', () => {
   const tmp = freshTmp();
   try {
-    assert.throws(
-      () => loadConfig({
-        topPath: join(tmp, 'missing.yaml'),
-        env: {
-          AGENT_OS_ROLES_CLAUDE_CODE_FALLBACK_PATH: 'none',
-          LITELLM_VK_FALLBACK_FOR_CLAUDE_CODE: 'litellm-vk',
+    for (const roleClass of FALLBACK_ROLE_CLASSES) {
+      const envSegment = roleClass.replaceAll('-', '_').toUpperCase();
+      assert.throws(
+        () => loadConfig({
+          topPath: join(tmp, 'missing.yaml'),
+          env: {
+            [`AGENT_OS_ROLES_${envSegment}_FALLBACK_PATH`]: 'none',
+            [`LITELLM_VK_FALLBACK_FOR_${envSegment}`]: 'litellm-vk',
+          },
+        }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, `roles.${roleClass}.fallback_path`);
+          assert.match(err.message, /conflict/i);
+          return true;
         },
-      }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'roles.claude-code.fallback_path');
-        assert.match(err.message, /conflict/i);
-        return true;
-      },
-    );
+        `expected alias conflict for ${roleClass}`,
+      );
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1543,7 +1547,19 @@ test('quota_probe cadence defaults resolve to 3600 when unset', () => {
   }
 });
 
-test('quota_probe ok_tick_seconds enforces HRR-02a clamp range', () => {
+test('AgentOSConfigError normalizes derived envName tokens', () => {
+  assert.equal(new AgentOSConfigError('broken', { source: 'env:' }).envName, null);
+  assert.equal(
+    new AgentOSConfigError('broken', { source: 'env:  AGENT_OS_ROLES_REVIEWER  ' }).envName,
+    'AGENT_OS_ROLES_REVIEWER',
+  );
+  assert.equal(
+    new AgentOSConfigError('broken', { envName: '  AGENT_OS_ROLES_CODEX_FALLBACK_PATH  ' }).envName,
+    'AGENT_OS_ROLES_CODEX_FALLBACK_PATH',
+  );
+});
+
+test('quota_probe ok_tick_seconds enforces HRR-02a range bounds', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -1569,7 +1585,7 @@ test('quota_probe ok_tick_seconds enforces HRR-02a clamp range', () => {
   }
 });
 
-test('quota_probe exhausted_unknown_tick_seconds enforces HRR-02a clamp range', () => {
+test('quota_probe exhausted_unknown_tick_seconds enforces HRR-02a range bounds', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -1612,7 +1628,31 @@ test('quota_probe cadence env overrides are honored', () => {
   }
 });
 
-test('policy dedup uncommitted_line_threshold mirrors default, clamp, and env override', () => {
+test('quota_probe cadence env rejects non-numeric values before range checks', () => {
+  const tmp = freshTmp();
+  try {
+    assert.throws(
+      () => loadConfig({
+        topPath: join(tmp, 'missing.yaml'),
+        env: {
+          AGENT_OS_ROLES_QUOTA_PROBE_OK_TICK_SECONDS: 'not-a-number',
+        },
+      }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'roles.quota_probe.ok_tick_seconds');
+        assert.equal(err.got, 'not-a-number');
+        assert.equal(err.envName, 'AGENT_OS_ROLES_QUOTA_PROBE_OK_TICK_SECONDS');
+        assert.match(err.message, /not an integer/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('policy dedup uncommitted_line_threshold mirrors default, range bounds, and env override', () => {
   const tmp = freshTmp();
   try {
     let cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });

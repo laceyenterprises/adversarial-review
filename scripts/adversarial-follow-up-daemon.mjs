@@ -120,7 +120,10 @@ async function runStoppedArchiveSweepIfDue({ nowMs = Date.now() } = {}) {
     logTick(
       'reap-workspaces',
       `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
-      `missingTerminalJob=${result.missingTerminalJob} recentTerminalJob=${result.recentTerminalJob}`
+      `missingTerminalJob=${result.missingTerminalJob} ` +
+      `missingTerminalTimestamp=${result.missingTerminalTimestamp} ` +
+      `recentTerminalJob=${result.recentTerminalJob} ` +
+      `unreadableJobRecords=${result.unreadableJobRecords} errors=${result.errors}`
     );
   });
 }

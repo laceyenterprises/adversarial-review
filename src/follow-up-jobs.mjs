@@ -7,6 +7,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
+import { userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { buildCodePrSubjectIdentity, buildDeliveryKey } from './identity-shapes.mjs';
@@ -1061,50 +1062,102 @@ function terminalFollowUpJobTimestamp(job) {
   return job?.completedAt || job?.failedAt || job?.stoppedAt || null;
 }
 
-function listArchivedStoppedJobPaths(rootDir) {
+function listArchivedStoppedJobPathsForId(rootDir, jobId) {
   const archivedRoot = getFollowUpJobDir(rootDir, 'stoppedArchived');
   if (!existsSync(archivedRoot)) return [];
 
+  const relativeJobName = `${jobId}.json`;
   const jobPaths = [];
   for (const entry of readdirSync(archivedRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    const monthDir = join(archivedRoot, entry.name);
-    for (const name of readdirSync(monthDir).filter((candidate) => candidate.endsWith('.json')).sort()) {
-      jobPaths.push(join(monthDir, name));
+    const candidatePath = join(archivedRoot, entry.name, relativeJobName);
+    if (existsSync(candidatePath)) {
+      jobPaths.push(candidatePath);
     }
   }
   return jobPaths.sort();
 }
 
-function buildTerminalWorkspaceReapIndex(rootDir) {
-  const jobPaths = [
-    ...listFollowUpJobsInDir(rootDir, 'completed').map(({ jobPath }) => jobPath),
-    ...listFollowUpJobsInDir(rootDir, 'failed').map(({ jobPath }) => jobPath),
-    ...listFollowUpJobsInDir(rootDir, 'stopped').map(({ jobPath }) => jobPath),
-    ...listArchivedStoppedJobPaths(rootDir),
-  ];
+function readTerminalWorkspaceJobForId(
+  rootDir,
+  jobId,
+  {
+    readFollowUpJobImpl = readFollowUpJob,
+    logErrorImpl = console.error,
+  } = {},
+) {
+  const candidatePaths = [];
+  for (const key of ['completed', 'failed', 'stopped']) {
+    const candidatePath = join(getFollowUpJobDir(rootDir, key), `${jobId}.json`);
+    if (existsSync(candidatePath)) {
+      candidatePaths.push(candidatePath);
+    }
+  }
+  if (candidatePaths.length === 0) {
+    candidatePaths.push(...listArchivedStoppedJobPathsForId(rootDir, jobId));
+  }
 
-  const index = new Map();
-  for (const jobPath of jobPaths) {
+  let unreadableJobRecords = 0;
+  let terminalJob = null;
+  for (const jobPath of candidatePaths) {
     let job;
     try {
-      job = readFollowUpJob(jobPath);
-    } catch {
+      job = readFollowUpJobImpl(jobPath);
+    } catch (err) {
+      unreadableJobRecords += 1;
+      logErrorImpl(
+        `[follow-up-jobs] Skipping unreadable terminal workspace job record ${jobPath}: ` +
+          `${err?.message || err}`,
+      );
       continue;
     }
     if (!job?.jobId || !['completed', 'failed', 'stopped'].includes(job.status)) {
       continue;
     }
 
-    const existing = index.get(job.jobId);
     const terminalTimestamp = terminalFollowUpJobTimestamp(job) || '';
-    const existingTimestamp = terminalFollowUpJobTimestamp(existing) || '';
-    if (!existing || terminalTimestamp >= existingTimestamp) {
-      index.set(job.jobId, job);
+    const existingTimestamp = terminalFollowUpJobTimestamp(terminalJob) || '';
+    if (!terminalJob || terminalTimestamp >= existingTimestamp) {
+      terminalJob = job;
     }
   }
 
-  return index;
+  return { terminalJob, unreadableJobRecords };
+}
+
+function runtimeUsername(env = process.env) {
+  const envUser = String(env.LOGNAME || env.USER || '').trim();
+  if (envUser) return envUser;
+  try {
+    return userInfo().username;
+  } catch {
+    return 'unknown';
+  }
+}
+
+function workspaceReapErrorDetails(workspacePath, err, env = process.env) {
+  if (err?.code !== 'EACCES' && err?.code !== 'EPERM') {
+    return `${err?.code ? `${err.code}: ` : ''}${err?.message || err}`;
+  }
+
+  const hqRoot = String(env.HQ_ROOT || '').trim() || '(unset)';
+  const runtimeUser = runtimeUsername(env);
+  let ownershipHint = '';
+  try {
+    const workspaceStat = statSync(workspacePath);
+    if (typeof process.getuid === 'function') {
+      const runtimeUid = process.getuid();
+      if (Number.isInteger(workspaceStat.uid) && workspaceStat.uid !== runtimeUid) {
+        ownershipHint = ` workspace uid=${workspaceStat.uid} differs from runtime uid=${runtimeUid}.`;
+      }
+    }
+  } catch {}
+
+  return (
+    `${err.code}: ${err?.message || err}. ` +
+    `While running as ${runtimeUser} with HQ_ROOT=${hqRoot}, the daemon could not reap ${workspacePath}.` +
+    `${ownershipHint}`
+  );
 }
 
 function reapTerminalFollowUpWorkspaces({
@@ -1112,59 +1165,87 @@ function reapTerminalFollowUpWorkspaces({
   workspaceRootDir,
   nowMs = Date.now(),
   ttlMs = 24 * 60 * 60 * 1000,
+  readFollowUpJobImpl = readFollowUpJob,
+  rmSyncImpl = rmSync,
+  logErrorImpl = console.error,
 } = {}) {
   if (!workspaceRootDir || !existsSync(workspaceRootDir)) {
     return {
       scanned: 0,
       reaped: 0,
       skipped: 0,
+      errors: 0,
       missingTerminalJob: 0,
+      missingTerminalTimestamp: 0,
       recentTerminalJob: 0,
+      unreadableJobRecords: 0,
       reapedPaths: [],
     };
   }
 
-  const terminalJobsById = buildTerminalWorkspaceReapIndex(rootDir);
   let scanned = 0;
   let reaped = 0;
   let skipped = 0;
+  let errors = 0;
   let missingTerminalJob = 0;
+  let missingTerminalTimestamp = 0;
   let recentTerminalJob = 0;
+  let unreadableJobRecords = 0;
   const reapedPaths = [];
 
   for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
-    const terminalJob = terminalJobsById.get(entry.name);
-    if (!terminalJob) {
-      skipped += 1;
-      missingTerminalJob += 1;
+    try {
+      const lookup = readTerminalWorkspaceJobForId(rootDir, entry.name, {
+        readFollowUpJobImpl,
+        logErrorImpl,
+      });
+      unreadableJobRecords += lookup.unreadableJobRecords;
+      const { terminalJob } = lookup;
+      if (!terminalJob) {
+        skipped += 1;
+        missingTerminalJob += 1;
+        continue;
+      }
+
+      const terminalAt = terminalFollowUpJobTimestamp(terminalJob);
+      const terminalAtMs = terminalAt ? Date.parse(terminalAt) : NaN;
+      if (!Number.isFinite(terminalAtMs)) {
+        skipped += 1;
+        missingTerminalTimestamp += 1;
+        continue;
+      }
+
+      if ((nowMs - terminalAtMs) < ttlMs) {
+        skipped += 1;
+        recentTerminalJob += 1;
+        continue;
+      }
+
+      rmSyncImpl(workspacePath, { recursive: true, force: true });
+      reaped += 1;
+      reapedPaths.push(workspacePath);
+    } catch (err) {
+      errors += 1;
+      logErrorImpl(
+        `[follow-up-jobs] Failed to reap terminal workspace ${workspacePath}: ` +
+          `${workspaceReapErrorDetails(workspacePath, err)}`,
+      );
       continue;
     }
-
-    const terminalAt = terminalFollowUpJobTimestamp(terminalJob);
-    const terminalAtMs = terminalAt ? Date.parse(terminalAt) : NaN;
-    const ageMs = Number.isFinite(terminalAtMs)
-      ? nowMs - terminalAtMs
-      : nowMs - statSync(workspacePath).mtimeMs;
-    if (ageMs < ttlMs) {
-      skipped += 1;
-      recentTerminalJob += 1;
-      continue;
-    }
-
-    rmSync(workspacePath, { recursive: true, force: true });
-    reaped += 1;
-    reapedPaths.push(workspacePath);
   }
 
   return {
     scanned,
     reaped,
     skipped,
+    errors,
     missingTerminalJob,
+    missingTerminalTimestamp,
     recentTerminalJob,
+    unreadableJobRecords,
     reapedPaths,
   };
 }

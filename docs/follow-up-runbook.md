@@ -218,7 +218,7 @@ terminal queue state
 
 The follow-up daemon runs a daily stopped-job archive sweep during its normal tick loop. Jobs remain in `stopped/` until their semantic `stoppedAt` age is at least 24 hours old (mtime is only a fallback for legacy or corrupt records), then move to `stopped-archived/YYYY-MM/`. Archive target collisions are not silently destructive: byte-identical sources may be deduplicated, divergent sources stay in `stopped/`, the daemon logs a separate `collisions` count, and a structured anomaly record is written under `data/archive-anomalies/`.
 
-The same hourly retention pass also reaps follow-up workspaces under `HQ_ROOT/adversarial-review/follow-up-workspaces/` (or the configured remediation workspace root) once their matching follow-up job is terminal and at least 24 hours old. Eligibility is keyed by the terminal job record for the same `jobId` in `completed/`, `failed/`, `stopped/`, or `stopped-archived/`; active workspaces without a matching terminal record are left untouched.
+The same daily archive sweep also reaps follow-up workspaces under `HQ_ROOT/adversarial-review/follow-up-workspaces/` (or the configured remediation workspace root) once their matching follow-up job is terminal and at least 24 hours old. Eligibility is keyed by the terminal job record for the same `jobId` in `completed/`, `failed/`, `stopped/`, or `stopped-archived/`; active workspaces without a matching terminal record are left untouched. The reaper resolves current workspace `jobId`s first, logs unreadable terminal job records instead of silently skipping them, treats missing terminal timestamps as an explicit skip class, and logs per-workspace delete failures without aborting the rest of the sweep.
 
 ---
 

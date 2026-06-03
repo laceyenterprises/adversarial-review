@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ import {
   markFollowUpJobFailed,
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
+  readFollowUpJob,
   readRemediationReplyArtifact,
   requeueInProgressFollowUpJobForRetry,
   remediationAttemptNumber,
@@ -1768,6 +1769,142 @@ function ensureWorkspaceRootDir(workspaceRootDir, env = process.env) {
     }
     throw err;
   }
+}
+
+function parseTerminalWorkspaceSweepTimestamp(job, status, st) {
+  const raw = status === 'completed'
+    ? job?.completedAt
+    : status === 'stopped'
+      ? job?.stoppedAt
+      : job?.failedAt;
+  const parsed = typeof raw === 'string' ? Date.parse(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : st.mtimeMs;
+}
+
+function reapTerminalFollowUpWorkspaces({
+  rootDir = ROOT,
+  env = process.env,
+  nowMs = Date.now(),
+  ttlMs = 24 * 60 * 60 * 1000,
+  log = console,
+} = {}) {
+  let workspaceRootDir;
+  try {
+    workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env });
+  } catch (err) {
+    log.warn?.(`[follow-up-remediation] terminal workspace sweep skipped: ${err?.message || err}`);
+    return {
+      scanned: 0,
+      reaped: 0,
+      skipped: 0,
+      missingTerminal: 0,
+      missingWorkspace: 0,
+      workspaceRootDir: null,
+    };
+  }
+
+  if (!existsSync(workspaceRootDir)) {
+    return {
+      scanned: 0,
+      reaped: 0,
+      skipped: 0,
+      missingTerminal: 0,
+      missingWorkspace: 0,
+      workspaceRootDir,
+    };
+  }
+
+  const terminalStatusKeys = ['completed', 'stopped', 'failed'];
+  let scanned = 0;
+  let reaped = 0;
+  let skipped = 0;
+  let missingTerminal = 0;
+  let missingWorkspace = 0;
+
+  for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    scanned += 1;
+
+    const workspaceDir = join(workspaceRootDir, entry.name);
+    let terminalJob = null;
+    let terminalStatus = null;
+    let terminalJobPath = null;
+    let terminalStat = null;
+
+    for (const key of terminalStatusKeys) {
+      const candidatePath = join(getFollowUpJobDir(rootDir, key), `${entry.name}.json`);
+      if (!existsSync(candidatePath)) continue;
+      terminalJobPath = candidatePath;
+      terminalStatus = key;
+      terminalStat = statSync(candidatePath);
+      try {
+        terminalJob = readFollowUpJob(candidatePath);
+      } catch {
+        terminalJob = null;
+      }
+      break;
+    }
+
+    if (!terminalStatus || !terminalJobPath || !terminalStat) {
+      missingTerminal += 1;
+      skipped += 1;
+      continue;
+    }
+
+    const storedWorkspaceRoot = resolveStoredWorkspaceRoot(
+      rootDir,
+      terminalJob?.remediationWorker?.workspaceRoot || terminalJob?.workspaceRoot || null,
+      { allowMissing: true, env, log }
+    ) || workspaceRootDir;
+    let expectedWorkspaceDir = null;
+    try {
+      expectedWorkspaceDir = resolveWorkerStoredPath(
+        rootDir,
+        terminalJob?.remediationWorker?.workspaceDir || terminalJob?.workspaceDir || null,
+        {
+          label: 'workspaceDir',
+          allowMissing: true,
+          workspaceRootDir: storedWorkspaceRoot,
+        }
+      ) || join(storedWorkspaceRoot, terminalJob?.jobId || entry.name);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+
+    if (resolve(expectedWorkspaceDir) !== resolve(workspaceDir)) {
+      skipped += 1;
+      continue;
+    }
+
+    const terminalTimestampMs = parseTerminalWorkspaceSweepTimestamp(
+      terminalJob,
+      terminalStatus,
+      terminalStat
+    );
+    if ((nowMs - terminalTimestampMs) < ttlMs) {
+      skipped += 1;
+      continue;
+    }
+
+    if (!existsSync(workspaceDir)) {
+      missingWorkspace += 1;
+      skipped += 1;
+      continue;
+    }
+
+    rmSync(workspaceDir, { recursive: true, force: true });
+    reaped += 1;
+  }
+
+  return {
+    scanned,
+    reaped,
+    skipped,
+    missingTerminal,
+    missingWorkspace,
+    workspaceRootDir,
+  };
 }
 
 function serializeWorkerPath(rootDir, absolutePath) {
@@ -4751,6 +4888,7 @@ export {
   loadFollowUpPromptTemplate,
   prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,
+  reapTerminalFollowUpWorkspaces,
   remediationWorkerGitIdentity,
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   reconcileFollowUpJob,

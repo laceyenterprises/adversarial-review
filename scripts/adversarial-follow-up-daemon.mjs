@@ -39,6 +39,7 @@ import {
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   consumeFollowUpJobsUntilCapacity,
   isWorkerProcessRunning,
+  reapTerminalFollowUpWorkspaces,
   resolveRemediationMaxConcurrentJobs,
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
@@ -107,6 +108,14 @@ async function runStoppedArchiveSweepIfDue({ nowMs = Date.now() } = {}) {
     logTick(
       'archive-stopped',
       `scanned=${result.scanned} archived=${result.archived} skipped=${result.skipped} collisions=${result.collisions}`
+    );
+  });
+  await runStep('reap-terminal-workspaces', () => {
+    const result = reapTerminalFollowUpWorkspaces({ rootDir: ROOT, nowMs });
+    logTick(
+      'reap-terminal-workspaces',
+      `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
+      `missingTerminal=${result.missingTerminal} missingWorkspace=${result.missingWorkspace}`
     );
   });
 }

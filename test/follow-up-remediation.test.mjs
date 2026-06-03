@@ -28,6 +28,7 @@ import {
   prepareClaudeCodeRemediationStartupEnv,
   prepareCodexRemediationStartupEnv,
   prepareWorkspaceForJob,
+  reapTerminalFollowUpWorkspaces,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
   resolveHqReplyPath,
@@ -612,6 +613,44 @@ test('resolveWorkerStoredPath allows absolute worker artifacts only under the wo
       /absolute path escapes remediation workspace root/,
     );
   });
+});
+
+test('reapTerminalFollowUpWorkspaces reaps completed HQ workspaces older than the TTL', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const workspaceRoot = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces');
+  const job = makeJob();
+  const workspaceDir = path.join(workspaceRoot, job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  const nowMs = Date.parse('2026-05-10T12:00:00.000Z');
+
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(artifactDir, 'codex-last-message.md'), 'done\n', 'utf8');
+  writeFollowUpJob(path.join(completedDir, `${job.jobId}.json`), {
+    ...job,
+    status: 'completed',
+    completedAt: '2026-05-09T10:00:00.000Z',
+    workspaceDir,
+    remediationWorker: {
+      workspaceRoot,
+      workspaceDir,
+    },
+  });
+
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir,
+    env: {
+      HQ_ROOT: hqRoot,
+    },
+    nowMs,
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reaped, 1);
+  assert.equal(result.skipped, 0);
+  assert.equal(existsSync(workspaceDir), false);
 });
 
 test('prepareWorkspaceForJob clones missing repos and checks out the PR branch', async () => {

@@ -41,7 +41,7 @@ export const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
 // -------- AgentOSConfigError ------------------------------------------------
 
 export class AgentOSConfigError extends Error {
-  constructor(message, { key, expected, got, source, envName, allowed } = {}) {
+  constructor(message, { key, expected, got, source, envName, allowed, conflictingEnvNames } = {}) {
     super(message);
     this.name = 'AgentOSConfigError';
     this.key = key ?? null;
@@ -52,6 +52,9 @@ export class AgentOSConfigError extends Error {
       envName ?? (typeof source === 'string' && source.startsWith('env:') ? source.slice('env:'.length) : null),
     );
     this.allowed = allowed ?? null;
+    this.conflictingEnvNames = Array.isArray(conflictingEnvNames)
+      ? conflictingEnvNames.map(normalizeEnvName).filter(Boolean)
+      : [];
   }
 }
 
@@ -70,6 +73,9 @@ const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferra
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a
 // Python-only key must not land without adding the same key here first.
+// Role-class keys are hyphenated to mirror worker class tokens, while older
+// role-level knobs remain snake_case. Strict-schema errors should keep nearest
+// key suggestions useful for operator typos across both shapes.
 const ROLE_FALLBACK_CLASSES = [
   'claude-code',
   'codex',
@@ -452,6 +458,9 @@ function schemaV1() {
           },
           ...buildRoleFallbackSchemaKeys(),
           quota_probe: {
+            // Intentionally remains under `roles` to mirror the Python
+            // HRR-02b schema; relocating it must happen in both loaders
+            // together so Node does not fork the contract.
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
@@ -890,6 +899,8 @@ function checkLeaf(value, schema, keyPath, source) {
       );
     }
   } else if (expected === TYPE_FLOAT) {
+    // Non-finite floats (Infinity/-Infinity) fail loud for parity with the
+    // int guard; env/CLI injection should not smuggle sentinel numbers in.
     if (typeof value !== 'number' || !Number.isFinite(value)) {
       throw new AgentOSConfigError(
         `${keyPath}: expected float, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
@@ -1288,6 +1299,7 @@ function checkEnvOverlap(key, canonicalEnv, aliases, env) {
       key,
       expected: 'single env value or matching aliases',
       got: pairs,
+      conflictingEnvNames: seen.map(([name]) => name),
     },
   );
 }

@@ -1504,6 +1504,11 @@ test('fallback_path canonical and legacy env aliases fail loud on conflict', () 
           assert.ok(err instanceof AgentOSConfigError);
           assert.equal(err.key, `roles.${roleClass}.fallback_path`);
           assert.match(err.message, /conflict/i);
+          assert.equal(err.envName, null);
+          assert.deepEqual(err.conflictingEnvNames, [
+            `AGENT_OS_ROLES_${envSegment}_FALLBACK_PATH`,
+            `LITELLM_VK_FALLBACK_FOR_${envSegment}`,
+          ]);
           return true;
         },
         `expected alias conflict for ${roleClass}`,
@@ -1556,6 +1561,12 @@ test('AgentOSConfigError normalizes derived envName tokens', () => {
   assert.equal(
     new AgentOSConfigError('broken', { envName: '  AGENT_OS_ROLES_CODEX_FALLBACK_PATH  ' }).envName,
     'AGENT_OS_ROLES_CODEX_FALLBACK_PATH',
+  );
+  assert.deepEqual(
+    new AgentOSConfigError('broken', {
+      conflictingEnvNames: ['  AGENT_OS_ROLES_CODEX_FALLBACK_PATH  ', '', null],
+    }).conflictingEnvNames,
+    ['AGENT_OS_ROLES_CODEX_FALLBACK_PATH'],
   );
 });
 

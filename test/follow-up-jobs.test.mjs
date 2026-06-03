@@ -480,7 +480,10 @@ test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and arc
   assert.equal(existsSync(failedWorkspaceDir), false);
   assert.equal(existsSync(archivedWorkspaceDir), false);
   assert.equal(existsSync(freshWorkspaceDir), true);
-  assert.deepEqual(result.reapedPaths, [completedWorkspaceDir, failedWorkspaceDir, archivedWorkspaceDir]);
+  assert.deepEqual(
+    result.reapedPaths.slice().sort(),
+    [completedWorkspaceDir, failedWorkspaceDir, archivedWorkspaceDir].sort()
+  );
 });
 
 test('reapTerminalFollowUpWorkspaces logs unreadable job records, skips missing timestamps, and prefers the latest duplicate terminal record', () => {

@@ -38,3 +38,10 @@ follow-up instead of attempting privileged deletion from the gatekeeper daemon.
 Cleanup checklist: keep this root note through the duplicate-sweep merge window,
 then move or prune it with other dated evaluation artifacts once the selected PR
 has landed and the closed duplicate branches are no longer active review inputs.
+
+Scheduled cleanup TODO (`DF-01-duplicate-note-cleanup`): after PR #221 has
+merged and PRs #222/#223 have remained closed for seven days (target:
+2026-06-10), move this file to
+`docs/notes/2026-06-03-DF-01-duplicate-evaluation.md` or delete it in the next
+cleanup PR. The file remains at the module root for this sweep only because the
+operator explicitly requested a root-level duplicate-evaluation artifact.

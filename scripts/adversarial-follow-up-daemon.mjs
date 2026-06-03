@@ -32,7 +32,7 @@
 // behavior — only the daemon's own subprocess churn.
 
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -125,8 +125,10 @@ function readMaintenanceSweepState(statePath = MAINTENANCE_SWEEP_STATE_PATH) {
 function writeMaintenanceSweepState(state, statePath = MAINTENANCE_SWEEP_STATE_PATH) {
   try {
     writeFileAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    return true;
   } catch (err) {
     logError(`could not write maintenance sweep state ${statePath}: ${err?.message || err}`);
+    return false;
   }
 }
 
@@ -178,12 +180,34 @@ function serializeMaintenanceSweepState(state = {}) {
 }
 
 let defaultMaintenanceSweepState = null;
+let defaultMaintenanceSweepStateMtimeMs = null;
+
+function maintenanceSweepStateMtimeMs(statePath = MAINTENANCE_SWEEP_STATE_PATH) {
+  try {
+    return statSync(statePath).mtimeMs;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      logError(`could not stat maintenance sweep state ${statePath}: ${err?.message || err}`);
+    }
+    return null;
+  }
+}
 
 function getDefaultMaintenanceSweepState() {
-  if (defaultMaintenanceSweepState === null) {
+  const fileMtimeMs = maintenanceSweepStateMtimeMs();
+  if (
+    defaultMaintenanceSweepState === null
+    || fileMtimeMs !== defaultMaintenanceSweepStateMtimeMs
+  ) {
     defaultMaintenanceSweepState = normalizeMaintenanceSweepState(readMaintenanceSweepState());
+    defaultMaintenanceSweepStateMtimeMs = fileMtimeMs;
   }
   return defaultMaintenanceSweepState;
+}
+
+function rememberDefaultMaintenanceSweepState(state) {
+  defaultMaintenanceSweepState = normalizeMaintenanceSweepState(state);
+  defaultMaintenanceSweepStateMtimeMs = maintenanceSweepStateMtimeMs();
 }
 
 function readCurrentMaintenanceSweepState(statePath) {
@@ -193,10 +217,13 @@ function readCurrentMaintenanceSweepState(statePath) {
 }
 
 function updateCurrentMaintenanceSweepState(state, statePath) {
+  const persisted = writeMaintenanceSweepState(serializeMaintenanceSweepState(state), statePath);
   if (statePath === MAINTENANCE_SWEEP_STATE_PATH) {
-    defaultMaintenanceSweepState = normalizeMaintenanceSweepState(state);
+    if (persisted) {
+      rememberDefaultMaintenanceSweepState(state);
+    }
   }
-  writeMaintenanceSweepState(serializeMaintenanceSweepState(state), statePath);
+  return persisted;
 }
 
 function shouldRunMaintenanceStep(state, nowMs, sweepKey, failedKey) {
@@ -296,10 +323,20 @@ async function runStoppedArchiveSweepIfDue({
     }
   }
 
-  updateCurrentMaintenanceSweepState(
+  const persisted = updateCurrentMaintenanceSweepState(
     normalizeMaintenanceSweepState(nextState),
     statePath,
   );
+  if (!persisted && statePath === MAINTENANCE_SWEEP_STATE_PATH) {
+    const failedState = { ...state };
+    if (archiveDue) {
+      markMaintenanceStepFailure(failedState, nowMs, 'lastArchiveStoppedSweepFailed');
+    }
+    if (reapDue) {
+      markMaintenanceStepFailure(failedState, nowMs, 'lastReapTerminalWorkspacesSweepFailed');
+    }
+    rememberDefaultMaintenanceSweepState(failedState);
+  }
 }
 
 let stopping = false;

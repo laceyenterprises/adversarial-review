@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -11,18 +11,24 @@ import {
   writeMaintenanceSweepState,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
 
-test('maintenance sweep state round-trips through the persisted restart cursor', () => {
+function makeTempDir(t) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  return rootDir;
+}
+
+test('maintenance sweep state round-trips through the persisted restart cursor', (t) => {
+  const rootDir = makeTempDir(t);
   const statePath = path.join(rootDir, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
   const lastArchiveStoppedSweepMs = Date.parse('2026-06-03T12:00:00.000Z');
   const lastReapTerminalWorkspacesSweepMs = Date.parse('2026-06-03T12:05:00.000Z');
 
-  writeMaintenanceSweepState({
+  assert.equal(writeMaintenanceSweepState({
     lastArchiveStoppedSweepMs,
     lastArchiveStoppedSweepAt: '2026-06-03T12:00:00.000Z',
     lastReapTerminalWorkspacesSweepMs,
     lastReapTerminalWorkspacesSweepAt: '2026-06-03T12:05:00.000Z',
-  }, statePath);
+  }, statePath), true);
 
   assert.deepEqual(readMaintenanceSweepState(statePath), {
     lastArchiveStoppedSweepMs,
@@ -53,8 +59,16 @@ test('maintenance sweep state migrates the legacy single cursor for both split s
   });
 });
 
-test('maintenance sweep state falls back to zero when the persisted cursor is unreadable', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
+test('maintenance sweep state returns false when persistence fails', (t) => {
+  const rootDir = makeTempDir(t);
+
+  assert.equal(writeMaintenanceSweepState({
+    lastArchiveStoppedSweepMs: Date.parse('2026-06-03T12:00:00.000Z'),
+  }, rootDir), false);
+});
+
+test('maintenance sweep state falls back to zero when the persisted cursor is unreadable', (t) => {
+  const rootDir = makeTempDir(t);
   const statePath = path.join(rootDir, 'maintenance-sweeps.json');
   writeFileSync(statePath, '{not-json}\n', 'utf8');
 
@@ -65,8 +79,8 @@ test('maintenance sweep state falls back to zero when the persisted cursor is un
   );
 });
 
-test('maintenance sweep cursors are persisted after archive and reap complete', async () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
+test('maintenance sweep cursors are persisted after archive and reap complete', async (t) => {
+  const rootDir = makeTempDir(t);
   const statePath = path.join(rootDir, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
   const nowMs = Date.parse('2026-06-03T13:00:00.000Z');
   const calls = { archive: 0, reap: 0 };
@@ -129,8 +143,8 @@ test('maintenance sweep cursors are persisted after archive and reap complete', 
   assert.deepEqual(calls, { archive: 1, reap: 1 });
 });
 
-test('maintenance sweep cursors advance independently and throttle failed reap retries', async () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
+test('maintenance sweep cursors advance independently and throttle failed reap retries', async (t) => {
+  const rootDir = makeTempDir(t);
   const statePath = path.join(rootDir, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
   const nowMs = Date.parse('2026-06-03T14:00:00.000Z');
   const calls = { archive: 0, reap: 0 };
@@ -216,7 +230,7 @@ test('maintenance sweep cursors advance independently and throttle failed reap r
   });
 });
 
-test('maintenance failed-step retry cooldown can be tuned by env', async () => {
+test('maintenance failed-step retry cooldown can be tuned by env', async (t) => {
   const previousCooldown = process.env.STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS;
   process.env.STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = '1';
   let daemonModule;
@@ -232,7 +246,7 @@ test('maintenance failed-step retry cooldown can be tuned by env', async () => {
     }
   }
 
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
+  const rootDir = makeTempDir(t);
   const statePath = path.join(rootDir, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
   const nowMs = Date.parse('2026-06-03T15:00:00.000Z');
   const calls = { archive: 0, reap: 0 };

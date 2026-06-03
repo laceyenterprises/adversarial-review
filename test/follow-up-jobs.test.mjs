@@ -49,6 +49,12 @@ function makeJobInput(rootDir) {
 
 const MISSING_REMEDIATION_WORKER = Symbol('missing-remediation-worker');
 
+function makeTempRoot(t, prefix = 'adversarial-review-') {
+  const rootDir = mkdtempSync(path.join(tmpdir(), prefix));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  return rootDir;
+}
+
 function writeLedgerTerminalJob(rootDir, {
   fileName,
   remediationWorker = MISSING_REMEDIATION_WORKER,
@@ -416,8 +422,8 @@ test('archiveStoppedFollowUpJobs deduplicates identical archive collisions only'
   assert.equal(anomaly.related[0].action, 'removed-identical-source');
 });
 
-test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and archived stopped workspaces', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and archived stopped workspaces', (t) => {
+  const rootDir = makeTempRoot(t);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
   const failedDir = getFollowUpJobDir(rootDir, 'failed');
   const archiveDir = path.join(getFollowUpJobDir(rootDir, 'stoppedArchived'), '2026-05');
@@ -486,8 +492,8 @@ test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and arc
   );
 });
 
-test('reapTerminalFollowUpWorkspaces logs unreadable job records, skips missing timestamps, and prefers the latest duplicate terminal record', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+test('reapTerminalFollowUpWorkspaces logs unreadable job records, skips missing timestamps, and prefers the latest duplicate terminal record', (t) => {
+  const rootDir = makeTempRoot(t);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
   const failedDir = getFollowUpJobDir(rootDir, 'failed');
   const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
@@ -569,8 +575,8 @@ test('reapTerminalFollowUpWorkspaces logs unreadable job records, skips missing 
   assert.match(errors.join('\n'), new RegExp(missingTimestampWorkspaceDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
-test('reapTerminalFollowUpWorkspaces lets a parseable duplicate timestamp beat an empty one', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+test('reapTerminalFollowUpWorkspaces lets a parseable duplicate timestamp beat an empty one', (t) => {
+  const rootDir = makeTempRoot(t);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
   const failedDir = getFollowUpJobDir(rootDir, 'failed');
   const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
@@ -620,8 +626,8 @@ test('reapTerminalFollowUpWorkspaces lets a parseable duplicate timestamp beat a
   assert.equal(existsSync(workspaceDir), false);
 });
 
-test('reapTerminalFollowUpWorkspaces uses the newest terminal timestamp on a job record', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+test('reapTerminalFollowUpWorkspaces uses the newest terminal timestamp on a job record', (t) => {
+  const rootDir = makeTempRoot(t);
   const failedDir = getFollowUpJobDir(rootDir, 'failed');
   const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
   mkdirSync(failedDir, { recursive: true });
@@ -658,8 +664,8 @@ test('reapTerminalFollowUpWorkspaces uses the newest terminal timestamp on a job
   assert.equal(existsSync(workspaceDir), true);
 });
 
-test('reapTerminalFollowUpWorkspaces falls back to archived jobs when an active terminal record is unreadable', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+test('reapTerminalFollowUpWorkspaces falls back to archived jobs when an active terminal record is unreadable', (t) => {
+  const rootDir = makeTempRoot(t);
   const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
   const archiveDir = path.join(
     getFollowUpJobDir(rootDir, 'stoppedArchived'),
@@ -707,8 +713,8 @@ test('reapTerminalFollowUpWorkspaces falls back to archived jobs when an active 
   assert.match(errors[0], /Skipping unreadable terminal workspace job record/);
 });
 
-test('reapTerminalFollowUpWorkspaces continues after a per-workspace delete failure', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+test('reapTerminalFollowUpWorkspaces continues after a per-workspace delete failure', (t) => {
+  const rootDir = makeTempRoot(t);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
   const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
   mkdirSync(completedDir, { recursive: true });
@@ -774,8 +780,8 @@ test('reapTerminalFollowUpWorkspaces continues after a per-workspace delete fail
   assert.match(errors[0], /Failed to reap terminal workspace/);
 });
 
-test('reapTerminalFollowUpWorkspaces logs permission context when a delete failure hides ownership details', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+test('reapTerminalFollowUpWorkspaces logs permission context when a delete failure hides ownership details', (t) => {
+  const rootDir = makeTempRoot(t);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
   const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
   mkdirSync(completedDir, { recursive: true });
@@ -844,8 +850,8 @@ test('reapTerminalFollowUpWorkspaces logs permission context when a delete failu
   assert.match(errors[0], new RegExp(workspaceDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
-test('reapTerminalFollowUpWorkspaces records a structured anomaly for permission delete failures', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+test('reapTerminalFollowUpWorkspaces records a structured anomaly for permission delete failures', (t) => {
+  const rootDir = makeTempRoot(t);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
   const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
   mkdirSync(completedDir, { recursive: true });

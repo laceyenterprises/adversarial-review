@@ -1161,7 +1161,15 @@ function runtimeUsername(env = process.env) {
   }
 }
 
-function workspaceReapErrorDetails(workspacePath, err, env = process.env) {
+function workspaceReapStatSnapshot(workspacePath) {
+  try {
+    return { stat: statSync(workspacePath), error: null };
+  } catch (err) {
+    return { stat: null, error: err };
+  }
+}
+
+function workspaceReapErrorDetails(workspacePath, err, env = process.env, workspaceSnapshot = null) {
   if (err?.code !== 'EACCES' && err?.code !== 'EPERM') {
     return `${err?.code ? `${err.code}: ` : ''}${err?.message || err}`;
   }
@@ -1169,15 +1177,15 @@ function workspaceReapErrorDetails(workspacePath, err, env = process.env) {
   const hqRoot = String(env.HQ_ROOT || '').trim() || '(unset)';
   const runtimeUser = runtimeUsername(env);
   let ownershipHint = '';
-  try {
-    const workspaceStat = statSync(workspacePath);
+  const workspaceStat = workspaceSnapshot?.stat || null;
+  if (workspaceStat) {
     if (typeof process.getuid === 'function') {
       const runtimeUid = process.getuid();
       if (Number.isInteger(workspaceStat.uid) && workspaceStat.uid !== runtimeUid) {
         ownershipHint = ` workspace uid=${workspaceStat.uid} differs from runtime uid=${runtimeUid}.`;
       }
     }
-  } catch {}
+  }
 
   return (
     `${err.code}: ${err?.message || err}. ` +
@@ -1186,7 +1194,14 @@ function workspaceReapErrorDetails(workspacePath, err, env = process.env) {
   );
 }
 
-function workspaceReapPermissionAnomaly(rootDir, nowMs, workspacePath, err, env = process.env) {
+function workspaceReapPermissionAnomaly(
+  rootDir,
+  nowMs,
+  workspacePath,
+  err,
+  env = process.env,
+  workspaceSnapshot = null,
+) {
   const runtimeUid = typeof process.getuid === 'function' ? process.getuid() : null;
   const hqRoot = String(env.HQ_ROOT || '').trim() || '(unset)';
   const runtimeUser = runtimeUsername(env);
@@ -1207,8 +1222,8 @@ function workspaceReapPermissionAnomaly(rootDir, nowMs, workspacePath, err, env 
     action: 'left-workspace-in-place',
   };
 
-  try {
-    const workspaceStat = statSync(workspacePath);
+  if (workspaceSnapshot?.stat) {
+    const workspaceStat = workspaceSnapshot.stat;
     anomaly.workspace = {
       uid: workspaceStat.uid,
       gid: workspaceStat.gid,
@@ -1220,13 +1235,16 @@ function workspaceReapPermissionAnomaly(rootDir, nowMs, workspacePath, err, env 
           : null
       ),
     };
-  } catch (statErr) {
+  } else if (workspaceSnapshot?.error) {
+    const statErr = workspaceSnapshot.error;
     anomaly.workspace = {
       statError: {
         code: statErr?.code || null,
         message: statErr?.message || String(statErr),
       },
     };
+  } else {
+    anomaly.workspace = null;
   }
 
   return anomaly;
@@ -1313,16 +1331,18 @@ function reapTerminalFollowUpWorkspaces({
       reapedPaths.push(workspacePath);
     } catch (err) {
       errors += 1;
+      const permissionError = err?.code === 'EACCES' || err?.code === 'EPERM';
+      const workspaceSnapshot = permissionError ? workspaceReapStatSnapshot(workspacePath) : null;
       logErrorImpl(
         `[follow-up-jobs] Failed to reap terminal workspace ${workspacePath}: ` +
-          `${workspaceReapErrorDetails(workspacePath, err, env)}`,
+          `${workspaceReapErrorDetails(workspacePath, err, env, workspaceSnapshot)}`,
       );
-      if (err?.code === 'EACCES' || err?.code === 'EPERM') {
+      if (permissionError) {
         try {
           anomalyPaths.push(writeArchiveAnomaly(
             rootDir,
             nowMs,
-            workspaceReapPermissionAnomaly(rootDir, nowMs, workspacePath, err, env),
+            workspaceReapPermissionAnomaly(rootDir, nowMs, workspacePath, err, env, workspaceSnapshot),
           ));
         } catch (anomalyErr) {
           logErrorImpl(

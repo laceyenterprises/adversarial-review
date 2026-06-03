@@ -11,6 +11,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   AgentOSConfig,
@@ -21,6 +22,18 @@ import {
   getConfig,
   resetConfigCache,
 } from '../src/config-loader.mjs';
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const MODULE_CONFIG_PATH = join(REPO_ROOT, 'config.yaml');
+const FALLBACK_ROLE_CLASSES = [
+  'claude-code',
+  'codex',
+  'claude-reviewer-lacey',
+  'codex-reviewer-lacey',
+  'merge-agent',
+  'merge-agent-failure-recovery',
+  'clio-agent',
+];
 
 function freshTmp() {
   return mkdtempSync(join(tmpdir(), 'cfg-loader-'));
@@ -1309,6 +1322,347 @@ test('getConfig invalidates cache when top YAML mtime changes', () => {
     if (originalEnv === undefined) delete process.env.AGENT_OS_CONFIG_PATH;
     else process.env.AGENT_OS_CONFIG_PATH = originalEnv;
     resetConfigCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// -------- HRR-02b Node loader mirror --------------------------------------
+
+test('fallback_path defaults to none for all mirrored role classes when unset everywhere', () => {
+  const tmp = freshTmp();
+  try {
+    const cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    for (const roleClass of FALLBACK_ROLE_CLASSES) {
+      assert.equal(cfg.get(`roles.${roleClass}.fallback_path`), 'none');
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('module config.yaml ships safe fallback_path defaults for reviewer and merge-agent classes', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+    `);
+    const cfg = loadConfig({ topPath: top, modulePaths: [MODULE_CONFIG_PATH], env: {} });
+    for (const roleClass of FALLBACK_ROLE_CLASSES) {
+      assert.equal(cfg.get(`roles.${roleClass}.fallback_path`), 'none');
+    }
+    for (const roleClass of [
+      'merge-agent',
+      'claude-reviewer-lacey',
+      'codex-reviewer-lacey',
+      'merge-agent-failure-recovery',
+    ]) {
+      assert.ok(
+        cfg.resolutionTrace(`roles.${roleClass}.fallback_path`).some(
+          (entry) => entry.source === `module:${MODULE_CONFIG_PATH}`,
+        ),
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fallback_path accepts all HRR-02a allowlisted values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    for (const value of ['none', 'litellm-vk', 'litellm-vk-then-deferral']) {
+      writeFile(top, `
+        version: 1
+        roles:
+          claude-code:
+            fallback_path: ${value}
+      `);
+      const cfg = loadConfig({ topPath: top, env: {} });
+      assert.equal(cfg.get('roles.claude-code.fallback_path'), value);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fallback_path rejects direct-api-key with tagged config error', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        claude-code:
+          fallback_path: direct-api-key
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'roles.claude-code.fallback_path');
+        assert.equal(err.got, 'direct-api-key');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fallback_path rejects wrong-namespace enum values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        claude-code:
+          fallback_path: claude-code
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'roles.claude-code.fallback_path');
+        assert.equal(err.got, 'claude-code');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fallback_path canonical env override beats module yaml', () => {
+  const tmp = freshTmp();
+  try {
+    const modulePath = join(tmp, 'module.yaml');
+    writeFile(modulePath, `
+      roles:
+        claude-code:
+          fallback_path: none
+    `);
+    const cfg = loadConfig({
+      topPath: join(tmp, 'missing.yaml'),
+      modulePaths: [modulePath],
+      env: {
+        AGENT_OS_ROLES_CLAUDE_CODE_FALLBACK_PATH: 'litellm-vk',
+      },
+    });
+    assert.equal(cfg.get('roles.claude-code.fallback_path'), 'litellm-vk');
+    assert.equal(
+      cfg.resolutionTrace('roles.claude-code.fallback_path').at(-1).source,
+      'env:AGENT_OS_ROLES_CLAUDE_CODE_FALLBACK_PATH',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fallback_path legacy env alias resolves with the same precedence', () => {
+  const tmp = freshTmp();
+  try {
+    const modulePath = join(tmp, 'module.yaml');
+    writeFile(modulePath, `
+      roles:
+        claude-code:
+          fallback_path: none
+    `);
+    const cfg = loadConfig({
+      topPath: join(tmp, 'missing.yaml'),
+      modulePaths: [modulePath],
+      env: {
+        LITELLM_VK_FALLBACK_FOR_CLAUDE_CODE: 'litellm-vk',
+      },
+    });
+    assert.equal(cfg.get('roles.claude-code.fallback_path'), 'litellm-vk');
+    assert.equal(
+      cfg.resolutionTrace('roles.claude-code.fallback_path').at(-1).source,
+      'env:LITELLM_VK_FALLBACK_FOR_CLAUDE_CODE',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fallback_path canonical and legacy env aliases fail loud on conflict', () => {
+  const tmp = freshTmp();
+  try {
+    assert.throws(
+      () => loadConfig({
+        topPath: join(tmp, 'missing.yaml'),
+        env: {
+          AGENT_OS_ROLES_CLAUDE_CODE_FALLBACK_PATH: 'none',
+          LITELLM_VK_FALLBACK_FOR_CLAUDE_CODE: 'litellm-vk',
+        },
+      }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'roles.claude-code.fallback_path');
+        assert.match(err.message, /conflict/i);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fallback_path env-sourced validation errors populate envName', () => {
+  const tmp = freshTmp();
+  try {
+    assert.throws(
+      () => loadConfig({
+        topPath: join(tmp, 'missing.yaml'),
+        env: {
+          AGENT_OS_ROLES_CLAUDE_CODE_FALLBACK_PATH: 'direct-api-key',
+        },
+      }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'roles.claude-code.fallback_path');
+        assert.equal(err.envName, 'AGENT_OS_ROLES_CLAUDE_CODE_FALLBACK_PATH');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('quota_probe cadence defaults resolve to 3600 when unset', () => {
+  const tmp = freshTmp();
+  try {
+    const cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(cfg.get('roles.quota_probe.ok_tick_seconds'), 3600);
+    assert.equal(cfg.get('roles.quota_probe.exhausted_unknown_tick_seconds'), 3600);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('quota_probe ok_tick_seconds enforces HRR-02a clamp range', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    for (const value of [299, 21601]) {
+      writeFile(top, `
+        version: 1
+        roles:
+          quota_probe:
+            ok_tick_seconds: ${value}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, 'roles.quota_probe.ok_tick_seconds');
+          assert.equal(err.got, value);
+          return true;
+        },
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('quota_probe exhausted_unknown_tick_seconds enforces HRR-02a clamp range', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    for (const value of [599, 21601]) {
+      writeFile(top, `
+        version: 1
+        roles:
+          quota_probe:
+            exhausted_unknown_tick_seconds: ${value}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, 'roles.quota_probe.exhausted_unknown_tick_seconds');
+          assert.equal(err.got, value);
+          return true;
+        },
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('quota_probe cadence env overrides are honored', () => {
+  const tmp = freshTmp();
+  try {
+    const cfg = loadConfig({
+      topPath: join(tmp, 'missing.yaml'),
+      env: {
+        AGENT_OS_ROLES_QUOTA_PROBE_OK_TICK_SECONDS: '4200',
+        AGENT_OS_ROLES_QUOTA_PROBE_EXHAUSTED_UNKNOWN_TICK_SECONDS: '1800',
+      },
+    });
+    assert.equal(cfg.get('roles.quota_probe.ok_tick_seconds'), 4200);
+    assert.equal(cfg.get('roles.quota_probe.exhausted_unknown_tick_seconds'), 1800);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('policy dedup uncommitted_line_threshold mirrors default, clamp, and env override', () => {
+  const tmp = freshTmp();
+  try {
+    let cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(cfg.get('policy.dedup.uncommitted_line_threshold'), 30);
+
+    const top = join(tmp, 'config.yaml');
+    for (const value of [9, 1001]) {
+      writeFile(top, `
+        version: 1
+        policy:
+          dedup:
+            uncommitted_line_threshold: ${value}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, 'policy.dedup.uncommitted_line_threshold');
+          assert.equal(err.got, value);
+          return true;
+        },
+      );
+    }
+
+    cfg = loadConfig({
+      topPath: join(tmp, 'missing.yaml'),
+      env: {
+        AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD: '44',
+      },
+    });
+    assert.equal(cfg.get('policy.dedup.uncommitted_line_threshold'), 44);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('resume_context_envelope mirrors default and env override', () => {
+  const tmp = freshTmp();
+  try {
+    let cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(cfg.get('feature_flags.resume_context_envelope'), true);
+
+    cfg = loadConfig({
+      topPath: join(tmp, 'missing.yaml'),
+      env: {
+        AGENT_OS_FEATURE_FLAGS_RESUME_CONTEXT_ENVELOPE: 'false',
+      },
+    });
+    assert.equal(cfg.get('feature_flags.resume_context_envelope'), false);
+  } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });

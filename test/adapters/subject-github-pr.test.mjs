@@ -241,6 +241,41 @@ test('watcher startup prints a fatal config banner for invalid default reviewer 
   assert.match(result.stderr, /gemini/);
 });
 
+test('watcher startup crashes with a fatal config banner for invalid fallback_path', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hrr-02b-'));
+  try {
+    const top = path.join(tmp, 'config.yaml');
+    writeFileSync(top, [
+      'version: 1',
+      'roles:',
+      '  claude-code:',
+      '    fallback_path: direct-api-key',
+      '',
+    ].join('\n'));
+
+    const result = spawnSync(
+      process.execPath,
+      ['src/watcher.mjs'],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          GITHUB_TOKEN: 'test-token',
+          AGENT_OS_CONFIG_PATH: top,
+        },
+        encoding: 'utf8',
+      },
+    );
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /FATAL config/);
+    assert.match(result.stderr, /roles\.claude-code\.fallback_path/);
+    assert.match(result.stderr, /direct-api-key/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // ── CFG-02 cascade tests (env via canonical + legacy) ─────────────────────
 
 test('CFG-02 routeSubject: canonical AGENT_OS_ROLES_REVIEWER pins reviewer', () => {

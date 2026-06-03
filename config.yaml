@@ -27,6 +27,14 @@ __aliases:
 roles:
   reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / adversarial
   remediator: adversarial           # enum: claude-code / codex / adversarial
+  merge-agent:
+    fallback_path: none
+  claude-reviewer-lacey:
+    fallback_path: none
+  codex-reviewer-lacey:
+    fallback_path: none
+  merge-agent-failure-recovery:
+    fallback_path: none
 
 # Codex reviewer ACPX discovery:
 #   ACPX_CLI > `acpx` on PATH > AGENT_OS_OPENCLAW_INSTALL_ROOT /

@@ -166,7 +166,7 @@ test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) 
   const tmp = makeTmp();
   try {
     const modulePath = join(tmp, 'config.yaml');
-    writeYaml(modulePath, 'roles:\n  reviewer: adversarial\n');
+    writeYaml(modulePath, 'roles:\n  reviewer: claude\n');
     // Pin `topPath` to `/dev/null` and `modulePaths` to this test's
     // private module config so full-suite YAML parsing in other files
     // cannot leak into the spy count.
@@ -182,6 +182,8 @@ test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) 
       // Prime the tick.
       const firstRoute = routeSubject(subjects[0], callOpts);
       assert.ok(firstRoute, `tick ${tick}: first routeSubject must succeed`);
+      assert.equal(firstRoute.configBroken ?? false, false);
+      assert.equal(firstRoute.reviewerModel, 'claude');
 
       // Now count parses for the remaining 9 PRs. Each should be a cache hit.
       const yamlLoadSpy = t.mock.method(yaml, 'load');

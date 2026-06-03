@@ -8,6 +8,9 @@ Compared on 2026-06-03:
 
 I selected PR #221 for final remediation and merge.
 
+This note is intentionally committed at the module root as the durable
+operator-requested duplicate-PR evaluation artifact for this sweep.
+
 PR #221 is the strongest branch because it implements workspace reaping in the
 current `follow-up-jobs` module, covers completed/failed/stopped terminal jobs,
 handles stopped-archive lookups, isolates per-workspace failures, preserves

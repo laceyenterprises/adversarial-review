@@ -32,7 +32,7 @@
 // behavior — only the daemon's own subprocess churn.
 
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,6 +51,7 @@ import {
   resolveInProgressStuckThresholdMs,
   sweepStuckInProgressClaims,
 } from '../src/follow-up-stuck-claim-sweep.mjs';
+import { writeFileAtomic } from '../src/atomic-write.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -94,8 +95,10 @@ async function runStep(label, fn) {
   try {
     await fn();
     logTick(label, 'ok');
+    return true;
   } catch (err) {
     logTick(label, `threw: ${err?.message || err}`);
+    return false;
   }
 }
 
@@ -111,10 +114,7 @@ function readMaintenanceSweepState(statePath = MAINTENANCE_SWEEP_STATE_PATH) {
 
 function writeMaintenanceSweepState(state, statePath = MAINTENANCE_SWEEP_STATE_PATH) {
   try {
-    mkdirSync(dirname(statePath), { recursive: true });
-    const tmpPath = `${statePath}.${process.pid}.tmp`;
-    writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-    renameSync(tmpPath, statePath);
+    writeFileAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`);
   } catch (err) {
     logError(`could not write maintenance sweep state ${statePath}: ${err?.message || err}`);
   }
@@ -125,25 +125,29 @@ function resolveInitialStoppedArchiveSweepMs(statePath = MAINTENANCE_SWEEP_STATE
 }
 
 let lastStoppedArchiveSweepMs = resolveInitialStoppedArchiveSweepMs();
-async function runStoppedArchiveSweepIfDue({ nowMs = Date.now() } = {}) {
-  if (lastStoppedArchiveSweepMs && (nowMs - lastStoppedArchiveSweepMs) < STOPPED_ARCHIVE_INTERVAL_MS) {
+async function runStoppedArchiveSweepIfDue({
+  nowMs = Date.now(),
+  statePath = MAINTENANCE_SWEEP_STATE_PATH,
+  archiveStoppedFollowUpJobsImpl = archiveStoppedFollowUpJobs,
+  reapTerminalFollowUpWorkspacesImpl = reapTerminalFollowUpWorkspaces,
+  resolveRemediationWorkspaceRootImpl = resolveRemediationWorkspaceRoot,
+} = {}) {
+  const previousSweepMs = statePath === MAINTENANCE_SWEEP_STATE_PATH
+    ? lastStoppedArchiveSweepMs
+    : resolveInitialStoppedArchiveSweepMs(statePath);
+  if (previousSweepMs && (nowMs - previousSweepMs) < STOPPED_ARCHIVE_INTERVAL_MS) {
     return;
   }
-  lastStoppedArchiveSweepMs = nowMs;
-  writeMaintenanceSweepState({
-    lastStoppedArchiveSweepMs: nowMs,
-    lastStoppedArchiveSweepAt: new Date(nowMs).toISOString(),
-  });
-  await runStep('archive-stopped', () => {
-    const result = archiveStoppedFollowUpJobs({ rootDir: ROOT, nowMs });
+  const archiveOk = await runStep('archive-stopped', () => {
+    const result = archiveStoppedFollowUpJobsImpl({ rootDir: ROOT, nowMs });
     logTick(
       'archive-stopped',
       `scanned=${result.scanned} archived=${result.archived} skipped=${result.skipped} collisions=${result.collisions}`
     );
   });
-  await runStep('reap-workspaces', () => {
-    const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir: ROOT });
-    const result = reapTerminalFollowUpWorkspaces({
+  const reapOk = await runStep('reap-workspaces', () => {
+    const workspaceRootDir = resolveRemediationWorkspaceRootImpl({ rootDir: ROOT });
+    const result = reapTerminalFollowUpWorkspacesImpl({
       rootDir: ROOT,
       workspaceRootDir,
       nowMs,
@@ -158,6 +162,14 @@ async function runStoppedArchiveSweepIfDue({ nowMs = Date.now() } = {}) {
       `unreadableJobRecords=${result.unreadableJobRecords} errors=${result.errors}`
     );
   });
+  if (!archiveOk || !reapOk) return;
+  if (statePath === MAINTENANCE_SWEEP_STATE_PATH) {
+    lastStoppedArchiveSweepMs = nowMs;
+  }
+  writeMaintenanceSweepState({
+    lastStoppedArchiveSweepMs: nowMs,
+    lastStoppedArchiveSweepAt: new Date(nowMs).toISOString(),
+  }, statePath);
 }
 
 let stopping = false;

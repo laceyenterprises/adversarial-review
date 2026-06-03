@@ -65,6 +65,8 @@ const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 // pass `--worker-class` at the call site to escape this constraint.
 const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'claude-code', 'merge-agent'];
 const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
+const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
+const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];
 const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
 const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
 const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
@@ -143,6 +145,98 @@ function schemaV1() {
             __default: 'agent_os_ledger',
             __pattern: PATTERN_SQL_IDENTIFIER,
             __pattern_description: PATTERN_SQL_IDENTIFIER_DESCRIPTION,
+          },
+          // CFG-04 dual-write nested block — mirrors agent_os_config
+          // `_schema_v1()` (Python loader, line ~276). Added 2026-06-02
+          // after operator's config.local.yaml set `session_ledger.dual_write.mode`
+          // and the watcher crash-skipped every PR with `routeSubject returned
+          // config-broken ... session_ledger.dual_write: unknown key (strict schema)
+          // — skipping this PR for the tick`. Same multi-language CFG drift
+          // class as the 2026-05-31 incident; keep this block in lockstep
+          // with the Python schema.
+          dual_write: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              mode: {
+                __type: TYPE_STRING,
+                __default: null,
+                __nullable: true,
+                __enum: ENUM_SESSION_LEDGER_DUAL_WRITE_MODE,
+              },
+              failure_threshold: { __type: TYPE_INT, __default: 5 },
+              failure_cooldown_seconds: { __type: TYPE_FLOAT, __default: 300.0 },
+              queue_max_batches: { __type: TYPE_INT, __default: 1000 },
+              slow_write_ms: { __type: TYPE_INT, __default: 1000 },
+            },
+          },
+          // Service / shadow-read / refresh / alert_bridge: same multi-loader
+          // parity rationale. Mirrors the Python `_schema_v1()` `session_ledger.*`
+          // sub-blocks. Defaults track Python; types must match.
+          service: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              refresh_interval_seconds: { __type: TYPE_INT, __default: null, __nullable: true },
+              stale_threshold_seconds: { __type: TYPE_INT, __default: null, __nullable: true },
+              log_level: {
+                __type: TYPE_STRING,
+                __default: 'INFO',
+                __enum: ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL,
+              },
+              log_max_bytes: { __type: TYPE_INT, __default: 10 * 1024 * 1024 },
+              log_retention_days: { __type: TYPE_INT, __default: null, __nullable: true },
+              doctor_launchctl_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: null,
+                __nullable: true,
+              },
+            },
+          },
+          shadow_read: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              max_rows: { __type: TYPE_INT, __default: 1000 },
+              failure_threshold: { __type: TYPE_INT, __default: 5 },
+              failure_cooldown_seconds: { __type: TYPE_FLOAT, __default: 300.0 },
+              slow_ms: { __type: TYPE_INT, __default: 1000 },
+              log_backup_count: { __type: TYPE_INT, __default: 128 },
+            },
+          },
+          refresh: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              per_source_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: null,
+                __nullable: true,
+              },
+              source_batch_before_conn_reset: {
+                __type: TYPE_INT,
+                __default: null,
+                __nullable: true,
+              },
+              stuck_refresh_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: null,
+                __nullable: true,
+              },
+              analyze_refresh_interval: {
+                __type: TYPE_INT,
+                __default: null,
+                __nullable: true,
+              },
+            },
+          },
+          alert_bridge: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              url: { __type: TYPE_STRING, __default: null, __nullable: true },
+              allow_remote: { __type: TYPE_BOOL, __default: false },
+            },
           },
         },
       },

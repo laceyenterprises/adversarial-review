@@ -754,6 +754,72 @@ test('reapTerminalFollowUpWorkspaces logs permission context when a delete failu
   assert.match(errors[0], new RegExp(workspaceDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
+test('reapTerminalFollowUpWorkspaces records a structured anomaly for permission delete failures', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
+  mkdirSync(completedDir, { recursive: true });
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const nowMs = Date.parse('2026-06-03T12:10:00.000Z');
+  const jobId = 'laceyenterprises__agent-os-pr-1318-2026-06-01T11-00-00-000Z';
+  const jobPath = path.join(completedDir, `${jobId}.json`);
+  writeFollowUpJob(jobPath, {
+    ...buildFollowUpJob({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 1318,
+      reviewerModel: 'codex',
+      reviewBody: '## Summary\nCompleted job',
+      reviewPostedAt: '2026-06-01T10:00:00.000Z',
+      critical: false,
+    }),
+    jobId,
+    status: 'completed',
+    completedAt: '2026-06-02T10:00:00.000Z',
+  });
+  const workspaceDir = path.join(workspaceRootDir, jobId);
+  mkdirSync(path.join(workspaceDir, '.adversarial-follow-up'), { recursive: true });
+  const errors = [];
+
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir,
+    workspaceRootDir,
+    nowMs,
+    rmSyncImpl: () => {
+      const err = new Error('permission denied');
+      err.code = 'EACCES';
+      throw err;
+    },
+    logErrorImpl: (...args) => {
+      errors.push(args.map((entry) => String(entry)).join(' '));
+    },
+    env: {
+      HQ_ROOT: '/tmp/hq-root-for-test',
+      LOGNAME: 'daemon-user',
+      USER: 'daemon-user',
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reaped, 0);
+  assert.equal(result.errors, 1);
+  assert.equal(existsSync(workspaceDir), true);
+  assert.equal(result.anomalyPaths.length, 1);
+  assert.match(result.anomalyPaths[0], /data\/archive-anomalies\//);
+  const anomaly = JSON.parse(readFileSync(result.anomalyPaths[0], 'utf8'));
+  assert.equal(anomaly.type, 'terminal-workspace-reap-permission-denied');
+  assert.equal(anomaly.name, jobId);
+  assert.equal(anomaly.workspacePath, workspaceDir);
+  assert.equal(anomaly.hqRoot, '/tmp/hq-root-for-test');
+  assert.deepEqual(anomaly.error, {
+    code: 'EACCES',
+    message: 'permission denied',
+  });
+  assert.equal(anomaly.runtime.user, 'daemon-user');
+  assert.equal(anomaly.action, 'left-workspace-in-place');
+  assert.equal(anomaly.workspace.runtimeUidMatchesOwner, true);
+  assert.equal(errors.length, 1);
+});
+
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const input = makeJobInput(rootDir);

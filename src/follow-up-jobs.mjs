@@ -1168,6 +1168,52 @@ function workspaceReapErrorDetails(workspacePath, err, env = process.env) {
   );
 }
 
+function workspaceReapPermissionAnomaly(rootDir, nowMs, workspacePath, err, env = process.env) {
+  const runtimeUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const hqRoot = String(env.HQ_ROOT || '').trim() || '(unset)';
+  const runtimeUser = runtimeUsername(env);
+  const anomaly = {
+    ts: new Date(nowMs).toISOString(),
+    type: 'terminal-workspace-reap-permission-denied',
+    name: basename(workspacePath),
+    workspacePath,
+    hqRoot,
+    runtime: {
+      user: runtimeUser,
+      uid: runtimeUid,
+    },
+    error: {
+      code: err?.code || null,
+      message: err?.message || String(err),
+    },
+    action: 'left-workspace-in-place',
+  };
+
+  try {
+    const workspaceStat = statSync(workspacePath);
+    anomaly.workspace = {
+      uid: workspaceStat.uid,
+      gid: workspaceStat.gid,
+      mode: `0${(workspaceStat.mode & 0o777).toString(8)}`,
+      runtimeUidMatchesOwner: (
+        Number.isInteger(runtimeUid)
+          && Number.isInteger(workspaceStat.uid)
+          ? workspaceStat.uid === runtimeUid
+          : null
+      ),
+    };
+  } catch (statErr) {
+    anomaly.workspace = {
+      statError: {
+        code: statErr?.code || null,
+        message: statErr?.message || String(statErr),
+      },
+    };
+  }
+
+  return anomaly;
+}
+
 function reapTerminalFollowUpWorkspaces({
   rootDir,
   workspaceRootDir,
@@ -1176,6 +1222,7 @@ function reapTerminalFollowUpWorkspaces({
   readFollowUpJobImpl = readFollowUpJob,
   rmSyncImpl = rmSync,
   logErrorImpl = console.error,
+  env = process.env,
 } = {}) {
   if (!workspaceRootDir || !existsSync(workspaceRootDir)) {
     return {
@@ -1189,6 +1236,7 @@ function reapTerminalFollowUpWorkspaces({
       unreadableJobRecords: 0,
       missingTerminalTimestampPaths: [],
       reapedPaths: [],
+      anomalyPaths: [],
     };
   }
 
@@ -1202,6 +1250,7 @@ function reapTerminalFollowUpWorkspaces({
   let unreadableJobRecords = 0;
   const missingTerminalTimestampPaths = [];
   const reapedPaths = [];
+  const anomalyPaths = [];
 
   for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
@@ -1248,8 +1297,22 @@ function reapTerminalFollowUpWorkspaces({
       errors += 1;
       logErrorImpl(
         `[follow-up-jobs] Failed to reap terminal workspace ${workspacePath}: ` +
-          `${workspaceReapErrorDetails(workspacePath, err)}`,
+          `${workspaceReapErrorDetails(workspacePath, err, env)}`,
       );
+      if (err?.code === 'EACCES' || err?.code === 'EPERM') {
+        try {
+          anomalyPaths.push(writeArchiveAnomaly(
+            rootDir,
+            nowMs,
+            workspaceReapPermissionAnomaly(rootDir, nowMs, workspacePath, err, env),
+          ));
+        } catch (anomalyErr) {
+          logErrorImpl(
+            `[follow-up-jobs] Failed to record terminal workspace reap anomaly ${workspacePath}: ` +
+              `${anomalyErr?.message || anomalyErr}`,
+          );
+        }
+      }
       continue;
     }
   }
@@ -1265,6 +1328,7 @@ function reapTerminalFollowUpWorkspaces({
     unreadableJobRecords,
     missingTerminalTimestampPaths,
     reapedPaths,
+    anomalyPaths,
   };
 }
 

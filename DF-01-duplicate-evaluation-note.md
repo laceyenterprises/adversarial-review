@@ -26,3 +26,9 @@ is closer to the selected module shape than #222, but it is thinner: it lacks th
 prior remediation hardening and leaves more edge cases for terminal lookup,
 unreadable records, and archive interaction. Given the duplicate set, #221 has
 the best code shape and the lowest remaining operational risk.
+
+Final remediation kept this module-root note intentionally, split the daemon's
+archive/reaper maintenance cursors so persistent reaper failures no longer force
+archive reruns every tick, added a five-minute failed-step retry cooldown, and
+records structured permission-denied workspace-reap anomalies for operator
+follow-up instead of attempting privileged deletion from the gatekeeper daemon.

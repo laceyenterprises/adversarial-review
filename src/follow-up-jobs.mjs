@@ -898,6 +898,78 @@ function stoppedAgeMs(job, st, nowMs) {
   return Number.isFinite(stoppedAtMs) ? nowMs - stoppedAtMs : nowMs - st.mtimeMs;
 }
 
+function terminalJobAgeMs(job, st, nowMs) {
+  const terminalAtMs = parseIsoTimestamp(job?.completedAt)
+    ?? parseIsoTimestamp(job?.failedAt)
+    ?? parseIsoTimestamp(job?.stoppedAt);
+  return terminalAtMs == null ? nowMs - st.mtimeMs : nowMs - terminalAtMs;
+}
+
+function readTerminalFollowUpJob(rootDir, jobId) {
+  const fileName = `${jobId}.json`;
+  for (const key of ['completed', 'failed', 'stopped']) {
+    const jobPath = join(getFollowUpJobDir(rootDir, key), fileName);
+    if (existsSync(jobPath)) {
+      return { key, jobPath, job: readFollowUpJob(jobPath) };
+    }
+  }
+
+  const archivedRoot = getFollowUpJobDir(rootDir, 'stoppedArchived');
+  if (!existsSync(archivedRoot)) {
+    return null;
+  }
+
+  for (const entry of readdirSync(archivedRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const jobPath = join(archivedRoot, entry.name, fileName);
+    if (existsSync(jobPath)) {
+      return { key: 'stoppedArchived', jobPath, job: readFollowUpJob(jobPath) };
+    }
+  }
+
+  return null;
+}
+
+function reapTerminalFollowUpWorkspaces({
+  rootDir,
+  workspaceRootDir = getFollowUpJobDir(rootDir, 'workspaces'),
+  nowMs = Date.now(),
+  ttlMs = 24 * 60 * 60 * 1000,
+} = {}) {
+  if (!existsSync(workspaceRootDir)) {
+    return { scanned: 0, reaped: 0, skipped: 0, reapedPaths: [] };
+  }
+
+  let scanned = 0;
+  let reaped = 0;
+  let skipped = 0;
+  const reapedPaths = [];
+
+  for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    scanned += 1;
+
+    const workspaceDir = join(workspaceRootDir, entry.name);
+    const terminal = readTerminalFollowUpJob(rootDir, entry.name);
+    if (!terminal) {
+      skipped += 1;
+      continue;
+    }
+
+    const ageMs = terminalJobAgeMs(terminal.job, statSync(workspaceDir), nowMs);
+    if (ageMs < ttlMs) {
+      skipped += 1;
+      continue;
+    }
+
+    rmSync(workspaceDir, { recursive: true, force: true });
+    reaped += 1;
+    reapedPaths.push(workspaceDir);
+  }
+
+  return { scanned, reaped, skipped, reapedPaths };
+}
+
 function archiveStoppedFollowUpJobs({
   rootDir,
   nowMs = Date.now(),
@@ -2244,15 +2316,16 @@ export {
   listPendingFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
-  requeueInProgressFollowUpJobForRetry,
   markFollowUpJobSpawned,
   markFollowUpJobStopped,
   readRemediationReplyArtifact,
-  salvagePartialRemediationReply,
   readFollowUpJob,
+  reapTerminalFollowUpWorkspaces,
+  requeueInProgressFollowUpJobForRetry,
   remediationAttemptNumber,
   resolveRoundBudgetForJob,
   requeueFollowUpJobForNextRound,
+  salvagePartialRemediationReply,
   stopFollowUpJob,
   summarizePRRemediationLedger,
   validateRemediationReply,

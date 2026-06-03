@@ -21,6 +21,7 @@ import {
   markFollowUpJobFailed,
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
+  reapTerminalFollowUpWorkspaces,
   readRemediationReplyArtifact,
   requeueInProgressFollowUpJobForRetry,
   salvagePartialRemediationReply,
@@ -53,6 +54,9 @@ function writeLedgerTerminalJob(rootDir, {
   remediationWorker = MISSING_REMEDIATION_WORKER,
   currentRound = 1,
   status = 'completed',
+  completedAt = '2026-05-04T12:05:00.000Z',
+  failedAt = null,
+  stoppedAt = null,
 } = {}) {
   const dir = getFollowUpJobDir(rootDir, status);
   mkdirSync(dir, { recursive: true });
@@ -63,7 +67,9 @@ function writeLedgerTerminalJob(rootDir, {
     status,
     jobId: fileName.replace(/\.json$/, ''),
     createdAt: '2026-05-04T12:00:00.000Z',
-    completedAt: '2026-05-04T12:05:00.000Z',
+    completedAt,
+    failedAt,
+    stoppedAt,
     repo: 'laceyenterprises/agent-os',
     prNumber: 199,
     reviewerModel: 'codex',
@@ -413,6 +419,57 @@ test('archiveStoppedFollowUpJobs deduplicates identical archive collisions only'
   const anomaly = JSON.parse(readFileSync(result.anomalyPaths[0], 'utf8'));
   assert.equal(anomaly.type, 'stopped-archive-duplicate');
   assert.equal(anomaly.related[0].action, 'removed-identical-source');
+});
+
+test('reapTerminalFollowUpWorkspaces removes only terminal workspaces at least 24h old', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const workspaceRootDir = path.join(rootDir, 'hq', 'adversarial-review', 'follow-up-workspaces');
+  mkdirSync(workspaceRootDir, { recursive: true });
+  const nowMs = Date.parse('2026-06-03T12:00:00.000Z');
+
+  function writeWorkspace(jobId, ageHours) {
+    const workspaceDir = path.join(workspaceRootDir, jobId);
+    const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(path.join(artifactDir, 'codex-last-message.md'), 'worker finished\n', 'utf8');
+    const mtime = new Date(nowMs - (ageHours * 60 * 60 * 1000));
+    utimesSync(workspaceDir, mtime, mtime);
+    utimesSync(artifactDir, mtime, mtime);
+    return workspaceDir;
+  }
+
+  const oldCompletedId = 'laceyenterprises__agent-os-pr-1306-2026-06-02T10-00-00-000Z';
+  const freshCompletedId = 'laceyenterprises__agent-os-pr-1307-2026-06-03T08-00-00-000Z';
+  const orphanId = 'laceyenterprises__agent-os-pr-1308-2026-06-02T09-00-00-000Z';
+
+  const oldCompletedWorkspace = writeWorkspace(oldCompletedId, 30);
+  const freshCompletedWorkspace = writeWorkspace(freshCompletedId, 2);
+  const orphanWorkspace = writeWorkspace(orphanId, 30);
+
+  writeLedgerTerminalJob(rootDir, {
+    fileName: `${oldCompletedId}.json`,
+    status: 'completed',
+    completedAt: '2026-06-02T06:00:00.000Z',
+  });
+  writeLedgerTerminalJob(rootDir, {
+    fileName: `${freshCompletedId}.json`,
+    status: 'completed',
+    completedAt: '2026-06-03T11:00:00.000Z',
+  });
+
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir,
+    workspaceRootDir,
+    nowMs,
+  });
+
+  assert.equal(result.scanned, 3);
+  assert.equal(result.reaped, 1);
+  assert.equal(result.skipped, 2);
+  assert.deepEqual(result.reapedPaths, [oldCompletedWorkspace]);
+  assert.equal(existsSync(oldCompletedWorkspace), false);
+  assert.equal(existsSync(freshCompletedWorkspace), true);
+  assert.equal(existsSync(orphanWorkspace), true);
 });
 
 test('createFollowUpJob does not overwrite an existing job file when ids collide', () => {

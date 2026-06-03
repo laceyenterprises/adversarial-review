@@ -127,12 +127,12 @@ function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = 
 // throw-on-bad-config behavior should use the explicit boot-time
 // validator (`validateDefaultReviewerRouteConfig`) at startup, which is
 // already wired in `watcher.mjs:main()`.
-function routeSubject(subject, { env = process.env, topPath, loaderImpl } = {}) {
+function routeSubject(subject, { env = process.env, topPath, modulePaths, loaderImpl } = {}) {
   const builderClass = normalizeBuilderClass(subject?.builderClass);
   if (!builderClass) return null;
   let route;
   try {
-    route = defaultReviewerRouteFromEnv(env, { topPath, loaderImpl })
+    route = defaultReviewerRouteFromEnv(env, { topPath, modulePaths, loaderImpl })
       || ROUTE_BY_BUILDER_CLASS[builderClass];
   } catch (err) {
     if (err && err.name === 'AgentOSConfigError') {

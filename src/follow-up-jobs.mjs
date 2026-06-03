@@ -1115,9 +1115,17 @@ function readTerminalWorkspaceJobForId(
       continue;
     }
 
-    const terminalTimestamp = terminalFollowUpJobTimestamp(job) || '';
-    const existingTimestamp = terminalFollowUpJobTimestamp(terminalJob) || '';
-    if (!terminalJob || terminalTimestamp >= existingTimestamp) {
+    const terminalTimestamp = terminalFollowUpJobTimestamp(job);
+    const terminalTimestampMs = terminalTimestamp ? Date.parse(terminalTimestamp) : NaN;
+    const existingTimestamp = terminalFollowUpJobTimestamp(terminalJob);
+    const existingTimestampMs = existingTimestamp ? Date.parse(existingTimestamp) : NaN;
+    if (
+      !terminalJob ||
+      (
+        Number.isFinite(terminalTimestampMs) &&
+        (!Number.isFinite(existingTimestampMs) || terminalTimestampMs > existingTimestampMs)
+      )
+    ) {
       terminalJob = job;
     }
   }
@@ -1179,6 +1187,7 @@ function reapTerminalFollowUpWorkspaces({
       missingTerminalTimestamp: 0,
       recentTerminalJob: 0,
       unreadableJobRecords: 0,
+      missingTerminalTimestampPaths: [],
       reapedPaths: [],
     };
   }
@@ -1191,6 +1200,7 @@ function reapTerminalFollowUpWorkspaces({
   let missingTerminalTimestamp = 0;
   let recentTerminalJob = 0;
   let unreadableJobRecords = 0;
+  const missingTerminalTimestampPaths = [];
   const reapedPaths = [];
 
   for (const entry of readdirSync(workspaceRootDir, { withFileTypes: true })) {
@@ -1215,6 +1225,13 @@ function reapTerminalFollowUpWorkspaces({
       if (!Number.isFinite(terminalAtMs)) {
         skipped += 1;
         missingTerminalTimestamp += 1;
+        if (missingTerminalTimestampPaths.length < 5) {
+          missingTerminalTimestampPaths.push(workspacePath);
+        }
+        logErrorImpl(
+          `[follow-up-jobs] Skipping terminal workspace ${workspacePath}: ` +
+            `job ${terminalJob.jobId} is terminal but has no parseable completedAt/failedAt/stoppedAt timestamp`,
+        );
         continue;
       }
 
@@ -1246,6 +1263,7 @@ function reapTerminalFollowUpWorkspaces({
     missingTerminalTimestamp,
     recentTerminalJob,
     unreadableJobRecords,
+    missingTerminalTimestampPaths,
     reapedPaths,
   };
 }

@@ -31,6 +31,10 @@ function writeYaml(path, body) {
   writeFileSync(path, body, { encoding: 'utf8' });
 }
 
+function yamlLoadCountFor(spy, sourcePath) {
+  return spy.mock.calls.filter((call) => call.arguments?.[1]?.filename === sourcePath).length;
+}
+
 // ── Per-tick reset: two ticks with different env both see fresh resolution ──
 
 test('CFG-09 per-tick reset: two ticks with different env both resolve env value', () => {
@@ -94,7 +98,7 @@ test('CFG-09 cache hit: repeated loadRoleConfig within a tick does not re-parse'
       loadRoleConfig(callArgs);
     }
     assert.equal(
-      yamlLoadSpy.mock.callCount(),
+      yamlLoadCountFor(yamlLoadSpy, modulePath),
       0,
       'repeated loadRoleConfig calls within a tick must hit cache (no YAML parses)',
     );
@@ -159,38 +163,44 @@ test('CFG-09 env mutation without reset returns stale cached value (documented c
 // ── N2 hot path regression: routeSubject × ~10 PRs × repeated ticks ──
 
 test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) => {
-  // routeSubject does not accept `modulePaths`, so it always consults
-  // the real adversarial-review module config. We pin `topPath` to
-  // `/dev/null` to keep the top layer empty + deterministic. The cache
-  // key is therefore (null|topPath: '/dev/null', modulePaths:
-  // [MODULE_CONFIG_PATH]) which is stable across all PRs in a tick.
-  const env = { AGENT_OS_CONFIG_PATH: '/dev/null' };
-  const callOpts = { env, topPath: '/dev/null' };
-  const subjects = [];
-  for (let i = 0; i < 10; i++) {
-    subjects.push({ builderClass: i % 2 === 0 ? 'codex' : 'claude-code' });
-  }
-
-  for (let tick = 0; tick < 3; tick++) {
-    resetRoleConfigCache();
-    // Prime the tick.
-    const firstRoute = routeSubject(subjects[0], callOpts);
-    assert.ok(firstRoute, `tick ${tick}: first routeSubject must succeed`);
-
-    // Now count parses for the remaining 9 PRs. Each should be a cache hit.
-    const yamlLoadSpy = t.mock.method(yaml, 'load');
-    try {
-      for (let i = 1; i < subjects.length; i++) {
-        routeSubject(subjects[i], callOpts);
-      }
-      assert.equal(
-        yamlLoadSpy.mock.callCount(),
-        0,
-        `tick ${tick}: PRs 2-10 must all hit cache; saw ${yamlLoadSpy.mock.callCount()} parses`,
-      );
-    } finally {
-      yamlLoadSpy.mock.restore();
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, 'roles:\n  reviewer: adversarial\n');
+    // Pin `topPath` to `/dev/null` and `modulePaths` to this test's
+    // private module config so full-suite YAML parsing in other files
+    // cannot leak into the spy count.
+    const env = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+    const callOpts = { env, topPath: '/dev/null', modulePaths: [modulePath] };
+    const subjects = [];
+    for (let i = 0; i < 10; i++) {
+      subjects.push({ builderClass: i % 2 === 0 ? 'codex' : 'claude-code' });
     }
+
+    for (let tick = 0; tick < 3; tick++) {
+      resetRoleConfigCache();
+      // Prime the tick.
+      const firstRoute = routeSubject(subjects[0], callOpts);
+      assert.ok(firstRoute, `tick ${tick}: first routeSubject must succeed`);
+
+      // Now count parses for the remaining 9 PRs. Each should be a cache hit.
+      const yamlLoadSpy = t.mock.method(yaml, 'load');
+      try {
+        for (let i = 1; i < subjects.length; i++) {
+          routeSubject(subjects[i], callOpts);
+        }
+        const parseCount = yamlLoadCountFor(yamlLoadSpy, modulePath);
+        assert.equal(
+          parseCount,
+          0,
+          `tick ${tick}: PRs 2-10 must all hit cache; saw ${parseCount} parses`,
+        );
+      } finally {
+        yamlLoadSpy.mock.restore();
+      }
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });
 

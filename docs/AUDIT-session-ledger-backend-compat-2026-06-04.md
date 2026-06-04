@@ -2,9 +2,9 @@
 
 ## Executive summary
 
-- 11 implementation/test files in scope (5 with findings, 6 backend-agnostic)
+- 11 implementation/test files in scope (5 with findings, 4 caller-migration consumers of changed exports, 2 backend-agnostic)
 - 6 findings total: 3 critical-at-cutover, 2 high, 1 medium-at-cutover
-- 5 fix-area groupings identified
+- 5 remediation workstreams listed under Fix-area groupings
 - No production code was edited for this audit; this PR should contain this document only
 - The critical severities below are cutover severities. Today's direct production risk remains low while `AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME=on` is off by default in Agent OS (`platform/session-ledger/src/session_ledger/db_path.py#postgres_runtime_enabled`), but these paths must be closed before Postgres becomes read-authoritative.
 
@@ -15,10 +15,10 @@
 | `src/follow-up-merge-agent.mjs` | has-findings | A, C, F | Reads session-ledger `worker_runs` through SQLite path discovery and `better-sqlite3`. |
 | `src/reviewer-pass-tokens.mjs` | has-findings | C, F | Exports `beginReviewerPass`, `readWorkerRunTokenUsage`, and `readReviewerSessionTokenUsage`; reads session-ledger tables through SQLite. |
 | `scripts/backfill-reviewer-passes.mjs` | has-findings | C | Public CLI exposes `--ledger-db <path>` and passes `ledgerDbPath` into reviewer-pass token reads. |
-| `src/follow-up-jobs.mjs` | backend-agnostic | none | In scope because it imports `beginReviewerPass` from `src/reviewer-pass-tokens.mjs`; it contains no direct ledger backend coupling, but reviewer-pass API changes must preserve or migrate this caller. |
-| `src/watcher.mjs` | backend-agnostic | none | In scope because it imports `beginReviewerPass` from `src/reviewer-pass-tokens.mjs`; watcher launch flow depends on that API but does not read the session ledger directly. |
-| `src/tokens-cli.mjs` | backend-agnostic | none | In scope because it imports `reviewerPassRows` from `src/reviewer-pass-tokens.mjs`; it contains no direct session-ledger access. |
-| `test/review-body-capture.test.mjs` | backend-agnostic | none | In scope because it exercises `beginReviewerPass`; it does not seed or read the session ledger directly. |
+| `src/follow-up-jobs.mjs` | caller-of-changed-export | C | Imports `beginReviewerPass` from `src/reviewer-pass-tokens.mjs`; any async/signature change must preserve or migrate this caller. |
+| `src/watcher.mjs` | caller-of-changed-export | C | Imports `beginReviewerPass` from `src/reviewer-pass-tokens.mjs`; watcher launch flow depends on that API even though it does not read the session ledger directly. |
+| `src/tokens-cli.mjs` | caller-of-changed-export | C | Imports `reviewerPassRows` from `src/reviewer-pass-tokens.mjs`; token report CLI must preserve the new backend-neutral contract. |
+| `test/review-body-capture.test.mjs` | caller-of-changed-export | E | Exercises `beginReviewerPass` and must stay aligned with the reviewer-pass caller migration. |
 | `src/config-loader.mjs` | backend-agnostic | none | Only parses `session_ledger.*` config keys; no DB connection or table access. |
 | `test/follow-up-merge-agent.test.mjs` | has-findings | E | Seeds session-ledger-shaped SQLite `worker_runs` fixtures and asserts path precedence. |
 | `test/reviewer-pass-tokens.test.mjs` | has-findings | E | Seeds SQLite `runtime_sessions` / `worker_runs`, passes `ledgerDbPath`, and asserts SQLite schema details. |
@@ -224,6 +224,7 @@ The proposed code sketches intentionally describe the desired caller shape, not 
 
 ## Notes
 
-- The backend-agnostic in-scope files are `src/config-loader.mjs`, `test/config-loader.test.mjs`, `src/follow-up-jobs.mjs`, `src/watcher.mjs`, `src/tokens-cli.mjs`, and `test/review-body-capture.test.mjs`. They are in scope because they parse `session_ledger.*` config or consume ledger-facing exports, but they do not directly touch session-ledger connections or issue ledger SQL.
+- The backend-agnostic in-scope files are `src/config-loader.mjs` and `test/config-loader.test.mjs`. They only define and validate `session_ledger.*` config keys, including the `postgres_runtime` alias, and do not directly touch ledger connections.
+- The caller-migration-only files are `src/follow-up-jobs.mjs`, `src/watcher.mjs`, `src/tokens-cli.mjs`, and `test/review-body-capture.test.mjs`. They do not issue ledger SQL themselves, but they consume reviewer-pass exports whose contract changes in `reviewer-pass-token-ledger-adapter`, so they must remain grep-visible in the cutover plan.
 - The main risk concentration is Node-side ledger access. Every operational finding came from code that currently treats the canonical ledger as a SQLite file instead of a backend-neutral service target.
 - The adapter prerequisite and reviewer-pass caller migration may exceed the repo's 300 LOC split threshold if combined. Prefer landing the canonical adapter first, then migrating merge-agent and reviewer-pass consumers in separate follow-up PRs.

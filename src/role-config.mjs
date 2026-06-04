@@ -265,12 +265,14 @@ export function resolveDefaultRemediator({
 export function resolveDefaultReviewer({
   env = process.env,
   topPath,
+  modulePaths,
   loaderImpl,
   reviewerRouteByModel,
 } = {}) {
   const cfg = loadRoleConfig({
     env,
     topPath,
+    modulePaths,
     loaderImpl,
     contextKey: 'roles.reviewer',
   });

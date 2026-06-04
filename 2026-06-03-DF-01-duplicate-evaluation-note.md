@@ -1,0 +1,47 @@
+# 2026-06-03 DF-01 duplicate PR evaluation
+
+Compared on 2026-06-03:
+
+- PR #221 (`codex-df-01-r2/DF-01`): 8.3/10 after remediation
+- PR #222 (`codex-df-01-r3/DF-01`): 6.5/10
+- PR #223 (`codex-df-01/DF-01`): 6.9/10
+
+I selected PR #221 for final remediation and merge.
+
+This date-prefixed note is intentionally committed at the module root as the
+durable operator-requested duplicate-PR evaluation artifact for this sweep. It
+is a one-shot merge decision note, not a reusable runbook page under `docs/`;
+the filename keeps future sweep artifacts ordered and pruneable.
+
+PR #221 is the strongest branch because it implements workspace reaping in the
+current `follow-up-jobs` module, covers completed/failed/stopped terminal jobs,
+handles stopped-archive lookups, isolates per-workspace failures, preserves
+counters for operator visibility, and already had a meaningful test/runbook
+surface before this final pass. This remediation adds explicit duplicate
+timestamp ordering, missing-timestamp sample paths, permission-denied diagnostics,
+and persisted daemon sweep state.
+
+PR #222 carries the same general idea through the older
+`follow-up-remediation` surface and leaves more behavioral risk around archive
+ordering, deletion guarding, hard-coded cadence, and skip observability. PR #223
+is closer to the selected module shape than #222, but it is thinner: it lacks the
+prior remediation hardening and leaves more edge cases for terminal lookup,
+unreadable records, and archive interaction. Given the duplicate set, #221 has
+the best code shape and the lowest remaining operational risk.
+
+Final remediation kept this module-root note intentionally, split the daemon's
+archive/reaper maintenance cursors so persistent reaper failures no longer force
+archive reruns every tick, added a five-minute failed-step retry cooldown, and
+records structured permission-denied workspace-reap anomalies for operator
+follow-up instead of attempting privileged deletion from the gatekeeper daemon.
+
+Cleanup checklist: keep this root note through the duplicate-sweep merge window,
+then move or prune it with other dated evaluation artifacts once the selected PR
+has landed and the closed duplicate branches are no longer active review inputs.
+
+Scheduled cleanup TODO (`DF-01-duplicate-note-cleanup`): after PR #221 has
+merged and PRs #222/#223 have remained closed for seven days (target:
+2026-06-10), move this file to
+`docs/notes/2026-06-03-DF-01-duplicate-evaluation.md` or delete it in the next
+cleanup PR. The file remains at the module root for this sweep only because the
+operator explicitly requested a root-level duplicate-evaluation artifact.

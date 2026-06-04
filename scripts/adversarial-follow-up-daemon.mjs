@@ -32,23 +32,26 @@
 // behavior — only the daemon's own subprocess churn.
 
 import { setTimeout as sleep } from 'node:timers/promises';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   consumeFollowUpJobsUntilCapacity,
   isWorkerProcessRunning,
+  resolveRemediationWorkspaceRoot,
   resolveRemediationMaxConcurrentJobs,
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
-import { archiveStoppedFollowUpJobs } from '../src/follow-up-jobs.mjs';
+import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
   resolveInProgressStuckThresholdMs,
   sweepStuckInProgressClaims,
 } from '../src/follow-up-stuck-claim-sweep.mjs';
+import { writeFileAtomic } from '../src/atomic-write.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -56,6 +59,12 @@ const ROOT = resolve(__dirname, '..');
 const TICK_INTERVAL_SECONDS = Number(process.env.TICK_INTERVAL_SECONDS) || 120;
 const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
 const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
+const STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = positiveNumberEnv(
+  'STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS',
+  5 * 60,
+);
+const STOPPED_ARCHIVE_FAILURE_RETRY_MS = STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS * 1000;
+const MAINTENANCE_SWEEP_STATE_PATH = join(ROOT, 'data', 'follow-up-jobs', 'maintenance-sweeps.json');
 
 function ts() {
   return new Date().toISOString();
@@ -71,6 +80,11 @@ function logTick(label, msg) {
 
 function logError(msg) {
   console.error(`[follow-up-daemon ${ts()}] ${msg}`);
+}
+
+function positiveNumberEnv(name, fallback) {
+  const parsed = Number(process.env[name] || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 const MAX_CONCURRENT_REMEDIATION_JOBS = resolveRemediationMaxConcurrentJobs(process.env, {
@@ -91,24 +105,238 @@ async function runStep(label, fn) {
   try {
     await fn();
     logTick(label, 'ok');
+    return true;
   } catch (err) {
     logTick(label, `threw: ${err?.message || err}`);
+    return false;
   }
 }
 
-let lastStoppedArchiveSweepMs = 0;
-async function runStoppedArchiveSweepIfDue({ nowMs = Date.now() } = {}) {
-  if (lastStoppedArchiveSweepMs && (nowMs - lastStoppedArchiveSweepMs) < STOPPED_ARCHIVE_INTERVAL_MS) {
+function readMaintenanceSweepState(statePath = MAINTENANCE_SWEEP_STATE_PATH) {
+  if (!existsSync(statePath)) return {};
+  try {
+    return JSON.parse(readFileSync(statePath, 'utf8'));
+  } catch (err) {
+    logError(`could not read maintenance sweep state ${statePath}: ${err?.message || err}`);
+    return {};
+  }
+}
+
+function writeMaintenanceSweepState(state, statePath = MAINTENANCE_SWEEP_STATE_PATH) {
+  try {
+    writeFileAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    return true;
+  } catch (err) {
+    logError(`could not write maintenance sweep state ${statePath}: ${err?.message || err}`);
+    return false;
+  }
+}
+
+function normalizeMs(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function normalizeMaintenanceSweepState(state = {}) {
+  const legacySweepMs = normalizeMs(state.lastStoppedArchiveSweepMs);
+  return {
+    ...state,
+    lastArchiveStoppedSweepMs: normalizeMs(state.lastArchiveStoppedSweepMs) || legacySweepMs,
+    lastReapTerminalWorkspacesSweepMs: (
+      normalizeMs(state.lastReapTerminalWorkspacesSweepMs) || legacySweepMs
+    ),
+    lastArchiveStoppedSweepFailedMs: normalizeMs(state.lastArchiveStoppedSweepFailedMs),
+    lastReapTerminalWorkspacesSweepFailedMs: normalizeMs(state.lastReapTerminalWorkspacesSweepFailedMs),
+  };
+}
+
+function serializeMaintenanceSweepState(state = {}) {
+  const normalized = normalizeMaintenanceSweepState(state);
+  const serialized = { ...state };
+  delete serialized.lastStoppedArchiveSweepMs;
+  delete serialized.lastStoppedArchiveSweepAt;
+
+  for (const key of [
+    'lastArchiveStoppedSweep',
+    'lastArchiveStoppedSweepFailed',
+    'lastReapTerminalWorkspacesSweep',
+    'lastReapTerminalWorkspacesSweepFailed',
+  ]) {
+    const msKey = `${key}Ms`;
+    const atKey = `${key}At`;
+    const ms = normalizeMs(normalized[msKey]);
+    if (ms) {
+      serialized[msKey] = ms;
+      serialized[atKey] = typeof state[atKey] === 'string'
+        ? state[atKey]
+        : new Date(ms).toISOString();
+    } else {
+      delete serialized[msKey];
+      delete serialized[atKey];
+    }
+  }
+
+  return serialized;
+}
+
+let defaultMaintenanceSweepState = null;
+let defaultMaintenanceSweepStateMtimeMs = null;
+
+function maintenanceSweepStateMtimeMs(statePath = MAINTENANCE_SWEEP_STATE_PATH) {
+  try {
+    return statSync(statePath).mtimeMs;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      logError(`could not stat maintenance sweep state ${statePath}: ${err?.message || err}`);
+    }
+    return null;
+  }
+}
+
+function getDefaultMaintenanceSweepState() {
+  const fileMtimeMs = maintenanceSweepStateMtimeMs();
+  if (
+    defaultMaintenanceSweepState === null
+    || fileMtimeMs !== defaultMaintenanceSweepStateMtimeMs
+  ) {
+    defaultMaintenanceSweepState = normalizeMaintenanceSweepState(readMaintenanceSweepState());
+    defaultMaintenanceSweepStateMtimeMs = fileMtimeMs;
+  }
+  return defaultMaintenanceSweepState;
+}
+
+function rememberDefaultMaintenanceSweepState(state) {
+  defaultMaintenanceSweepState = normalizeMaintenanceSweepState(state);
+  defaultMaintenanceSweepStateMtimeMs = maintenanceSweepStateMtimeMs();
+}
+
+function readCurrentMaintenanceSweepState(statePath) {
+  return statePath === MAINTENANCE_SWEEP_STATE_PATH
+    ? { ...getDefaultMaintenanceSweepState() }
+    : normalizeMaintenanceSweepState(readMaintenanceSweepState(statePath));
+}
+
+function updateCurrentMaintenanceSweepState(state, statePath) {
+  const persisted = writeMaintenanceSweepState(serializeMaintenanceSweepState(state), statePath);
+  if (statePath === MAINTENANCE_SWEEP_STATE_PATH) {
+    if (persisted) {
+      rememberDefaultMaintenanceSweepState(state);
+    }
+  }
+  return persisted;
+}
+
+function shouldRunMaintenanceStep(state, nowMs, sweepKey, failedKey) {
+  const lastSweepMs = normalizeMs(state[`${sweepKey}Ms`]);
+  if (lastSweepMs && (nowMs - lastSweepMs) < STOPPED_ARCHIVE_INTERVAL_MS) {
+    return false;
+  }
+
+  const lastFailedMs = normalizeMs(state[`${failedKey}Ms`]);
+  return !lastFailedMs || (nowMs - lastFailedMs) >= STOPPED_ARCHIVE_FAILURE_RETRY_MS;
+}
+
+function markMaintenanceStepSuccess(state, nowMs, sweepKey, failedKey) {
+  state[`${sweepKey}Ms`] = nowMs;
+  state[`${sweepKey}At`] = new Date(nowMs).toISOString();
+  delete state[`${failedKey}Ms`];
+  delete state[`${failedKey}At`];
+}
+
+function markMaintenanceStepFailure(state, nowMs, failedKey) {
+  state[`${failedKey}Ms`] = nowMs;
+  state[`${failedKey}At`] = new Date(nowMs).toISOString();
+}
+
+async function runStoppedArchiveSweepIfDue({
+  nowMs = Date.now(),
+  statePath = MAINTENANCE_SWEEP_STATE_PATH,
+  archiveStoppedFollowUpJobsImpl = archiveStoppedFollowUpJobs,
+  reapTerminalFollowUpWorkspacesImpl = reapTerminalFollowUpWorkspaces,
+  resolveRemediationWorkspaceRootImpl = resolveRemediationWorkspaceRoot,
+} = {}) {
+  const state = readCurrentMaintenanceSweepState(statePath);
+  const archiveDue = shouldRunMaintenanceStep(
+    state,
+    nowMs,
+    'lastArchiveStoppedSweep',
+    'lastArchiveStoppedSweepFailed',
+  );
+  const reapDue = shouldRunMaintenanceStep(
+    state,
+    nowMs,
+    'lastReapTerminalWorkspacesSweep',
+    'lastReapTerminalWorkspacesSweepFailed',
+  );
+  if (!archiveDue && !reapDue) {
     return;
   }
-  lastStoppedArchiveSweepMs = nowMs;
-  await runStep('archive-stopped', () => {
-    const result = archiveStoppedFollowUpJobs({ rootDir: ROOT, nowMs });
-    logTick(
-      'archive-stopped',
-      `scanned=${result.scanned} archived=${result.archived} skipped=${result.skipped} collisions=${result.collisions}`
-    );
-  });
+
+  const nextState = { ...state };
+  if (archiveDue) {
+    const archiveOk = await runStep('archive-stopped', () => {
+      const result = archiveStoppedFollowUpJobsImpl({ rootDir: ROOT, nowMs });
+      logTick(
+        'archive-stopped',
+        `scanned=${result.scanned} archived=${result.archived} skipped=${result.skipped} collisions=${result.collisions}`
+      );
+    });
+    if (archiveOk) {
+      markMaintenanceStepSuccess(
+        nextState,
+        nowMs,
+        'lastArchiveStoppedSweep',
+        'lastArchiveStoppedSweepFailed',
+      );
+    } else {
+      markMaintenanceStepFailure(nextState, nowMs, 'lastArchiveStoppedSweepFailed');
+    }
+  }
+
+  if (reapDue) {
+    const reapOk = await runStep('reap-workspaces', () => {
+      const workspaceRootDir = resolveRemediationWorkspaceRootImpl({ rootDir: ROOT });
+      const result = reapTerminalFollowUpWorkspacesImpl({
+        rootDir: ROOT,
+        workspaceRootDir,
+        nowMs,
+      });
+      logTick(
+        'reap-workspaces',
+        `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
+        `missingTerminalJob=${result.missingTerminalJob} ` +
+        `missingTerminalTimestamp=${result.missingTerminalTimestamp} ` +
+        `missingTerminalTimestampSamples=${JSON.stringify(result.missingTerminalTimestampPaths)} ` +
+        `recentTerminalJob=${result.recentTerminalJob} ` +
+        `unreadableJobRecords=${result.unreadableJobRecords} errors=${result.errors}`
+      );
+    });
+    if (reapOk) {
+      markMaintenanceStepSuccess(
+        nextState,
+        nowMs,
+        'lastReapTerminalWorkspacesSweep',
+        'lastReapTerminalWorkspacesSweepFailed',
+      );
+    } else {
+      markMaintenanceStepFailure(nextState, nowMs, 'lastReapTerminalWorkspacesSweepFailed');
+    }
+  }
+
+  const persisted = updateCurrentMaintenanceSweepState(
+    normalizeMaintenanceSweepState(nextState),
+    statePath,
+  );
+  if (!persisted && statePath === MAINTENANCE_SWEEP_STATE_PATH) {
+    const failedState = { ...state };
+    if (archiveDue) {
+      markMaintenanceStepFailure(failedState, nowMs, 'lastArchiveStoppedSweepFailed');
+    }
+    if (reapDue) {
+      markMaintenanceStepFailure(failedState, nowMs, 'lastReapTerminalWorkspacesSweepFailed');
+    }
+    rememberDefaultMaintenanceSweepState(failedState);
+  }
 }
 
 let stopping = false;
@@ -202,4 +430,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   });
 }
 
-export { main, runStoppedArchiveSweepIfDue };
+export {
+  main,
+  normalizeMaintenanceSweepState,
+  readMaintenanceSweepState,
+  runStoppedArchiveSweepIfDue,
+  writeMaintenanceSweepState,
+};

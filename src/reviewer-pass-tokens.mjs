@@ -514,15 +514,33 @@ function readClaudeTranscriptTokenUsage({
       transcriptPath,
       sessionId: summary.sessionId,
       usage: summary.tokenUsage,
+      endedAt: summary.endedAt || null,
+      sessionMatched,
     });
   }
-  if (matches.length !== 1) return null;
-  const match = matches[0];
+  if (matches.length === 0) return null;
+  // Disambiguate when multiple transcripts match (e.g. reattached reviewer
+  // sessions, large transcripts split across files, or workspace-only matches
+  // that happen to overlap the pass window). Prefer transcripts whose
+  // sessionId matches a known reviewer session key over workspace-only
+  // matches, then prefer the most-recent endedAt. Pre-fix this branch
+  // silently returned null and 94% of recent reviewer_passes rows recorded
+  // token_total=NULL with token_source='unknown'.
+  let chosen = matches[0];
+  if (matches.length > 1) {
+    const sessionMatches = matches.filter((m) => m.sessionMatched);
+    const pool = sessionMatches.length > 0 ? sessionMatches : matches;
+    chosen = pool.reduce((best, m) => {
+      const a = Date.parse(m.endedAt || '') || 0;
+      const b = Date.parse(best.endedAt || '') || 0;
+      return a > b ? m : best;
+    }, pool[0]);
+  }
   return {
-    ...match.usage,
+    ...chosen.usage,
     source: 'claude-transcript',
-    adapterSessionKey: match.sessionId || null,
-    transcriptPath: match.transcriptPath,
+    adapterSessionKey: chosen.sessionId || null,
+    transcriptPath: chosen.transcriptPath,
   };
 }
 

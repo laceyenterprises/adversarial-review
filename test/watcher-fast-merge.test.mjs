@@ -274,6 +274,7 @@ function runWatcherScenario(scenario, { skipEnabled = false } = {}) {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
           FML_WATCHER_SKIP_ENABLED: skipEnabled ? 'true' : 'false',
+          WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '1',
         },
       }
     );

@@ -4,7 +4,7 @@
 // transient cascade path rather than silently releasing the claim.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { probeRoutingTierReadiness } from '../src/watcher.mjs';
+import { probeRoutingTierReadiness } from '../src/routing-tier-readiness.mjs';
 
 function mockResponse({ status = 200 } = {}) {
   return { status, ok: status >= 200 && status < 300 };

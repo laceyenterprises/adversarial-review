@@ -776,6 +776,124 @@ test('claude transcript fallback prefers a session-key match over a workspace-on
   assert.equal(usage.output, 11);
 });
 
+test('claude transcript fallback returns null for same-session files that extend beyond the requested pass window', () => {
+  const rootDir = tempRoot();
+  const claudeRoot = path.join(rootDir, 'claude-sessions');
+  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-rereview-adjacent-session');
+  const projectDir = path.join(claudeRoot, '-tmp-job-rereview-adjacent-session');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(projectDir, { recursive: true });
+
+  const inWindowPath = path.join(projectDir, 'claude-session-pass-1.jsonl');
+  writeFileSync(inWindowPath, [
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2026-06-04T10:00:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-reviewer',
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-06-04T10:02:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-reviewer',
+      message: { usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 1, cache_read_input_tokens: 2 } },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const graceWindowSiblingPath = path.join(projectDir, 'claude-session-pass-2.jsonl');
+  writeFileSync(graceWindowSiblingPath, [
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2026-06-04T10:12:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-reviewer',
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-06-04T10:13:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-reviewer',
+      message: { usage: { input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 } },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const usage = readClaudeTranscriptTokenUsage({
+    sessionKeys: ['claude-reviewer'],
+    workspacePath: workspace,
+    startedAt: '2026-06-04T09:58:00.000Z',
+    endedAt: '2026-06-04T10:05:00.000Z',
+    sessionRoots: [claudeRoot],
+    rootDir,
+  });
+
+  assert.equal(usage, null);
+  assert.ok(inWindowPath);
+  assert.ok(graceWindowSiblingPath);
+});
+
+test('claude transcript fallback returns null for same-session files from another workspace', () => {
+  const rootDir = tempRoot();
+  const claudeRoot = path.join(rootDir, 'claude-sessions');
+  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-rereview-session-key-workspace');
+  const otherWorkspace = path.join(rootDir, 'follow-up-workspaces', 'job-rereview-session-key-other-workspace');
+  const projectDir = path.join(claudeRoot, '-tmp-job-rereview-session-key-workspace');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(otherWorkspace, { recursive: true });
+  mkdirSync(projectDir, { recursive: true });
+
+  const requestedWorkspacePath = path.join(projectDir, 'claude-session-requested-workspace.jsonl');
+  writeFileSync(requestedWorkspacePath, [
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2026-06-04T10:00:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-reviewer',
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-06-04T10:01:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-reviewer',
+      message: { usage: { input_tokens: 7, output_tokens: 11, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const otherWorkspacePath = path.join(projectDir, 'claude-session-other-workspace.jsonl');
+  writeFileSync(otherWorkspacePath, [
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2026-06-04T10:02:00.000Z',
+      cwd: otherWorkspace,
+      sessionId: 'claude-reviewer',
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-06-04T10:03:00.000Z',
+      cwd: otherWorkspace,
+      sessionId: 'claude-reviewer',
+      message: { usage: { input_tokens: 70, output_tokens: 110, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const usage = readClaudeTranscriptTokenUsage({
+    sessionKeys: ['claude-reviewer'],
+    workspacePath: workspace,
+    startedAt: '2026-06-04T09:58:00.000Z',
+    endedAt: '2026-06-04T10:05:00.000Z',
+    sessionRoots: [claudeRoot],
+    rootDir,
+  });
+
+  assert.equal(usage, null);
+  assert.ok(requestedWorkspacePath);
+  assert.ok(otherWorkspacePath);
+});
+
 test('claude transcript fallback returns null for ambiguous workspace-only matches', () => {
   const rootDir = tempRoot();
   const claudeRoot = path.join(rootDir, 'claude-sessions');

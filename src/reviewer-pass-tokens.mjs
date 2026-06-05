@@ -514,12 +514,18 @@ function readClaudeTranscriptTokenUsage({
       transcriptPath,
       sessionId: summary.sessionId,
       usage: summary.tokenUsage,
+      startedAt: summary.startedAt || null,
       endedAt: summary.endedAt || null,
+      workspaceMatched,
       sessionMatched,
     });
   }
   if (matches.length === 0) return null;
-  const groupedMatches = groupClaudeTranscriptMatches(matches);
+  const groupedMatches = groupClaudeTranscriptMatches(matches, {
+    workspacePaths,
+    startedAt,
+    endedAt,
+  });
   const sessionMatches = groupedMatches.filter((match) => match.sessionMatched);
   if (sessionMatches.length > 1) return null;
   if (sessionMatches.length === 0 && groupedMatches.length !== 1) return null;
@@ -532,7 +538,11 @@ function readClaudeTranscriptTokenUsage({
   };
 }
 
-function groupClaudeTranscriptMatches(matches) {
+function groupClaudeTranscriptMatches(matches, {
+  workspacePaths = [],
+  startedAt = null,
+  endedAt = null,
+} = {}) {
   const grouped = new Map();
   const ungrouped = [];
   for (const match of matches) {
@@ -541,31 +551,53 @@ function groupClaudeTranscriptMatches(matches) {
       continue;
     }
     const key = String(match.sessionId);
-    const existing = grouped.get(key);
-    if (!existing) {
-      grouped.set(key, {
-        ...match,
-        usage: { ...match.usage },
-      });
+    const group = grouped.get(key);
+    if (group) {
+      group.push(match);
       continue;
     }
-    existing.usage = normalizeTokenUsage({
-      input: (existing.usage?.input || 0) + (match.usage?.input || 0),
-      output: (existing.usage?.output || 0) + (match.usage?.output || 0),
-      cacheRead: (existing.usage?.cacheRead || 0) + (match.usage?.cacheRead || 0),
-      cacheWrite: (existing.usage?.cacheWrite || 0) + (match.usage?.cacheWrite || 0),
-      total: (existing.usage?.total || 0) + (match.usage?.total || 0),
-      costUSD: (existing.usage?.costUSD || 0) + (match.usage?.costUSD || 0),
-      source: 'claude-transcript',
-    });
-    existing.startedAt = earlierTimestamp(existing.startedAt, match.startedAt);
-    existing.endedAt = laterTimestamp(existing.endedAt, match.endedAt);
-    existing.sessionMatched = existing.sessionMatched || match.sessionMatched;
-    if ((Date.parse(match.endedAt || '') || 0) >= (Date.parse(existing.endedAt || '') || 0)) {
-      existing.transcriptPath = match.transcriptPath;
-    }
+    grouped.set(key, [match]);
   }
-  return [...grouped.values(), ...ungrouped];
+  const exactWindowKnown = Boolean(parseDate(startedAt) || parseDate(endedAt));
+  const aggregated = [];
+  for (const sessionMatches of grouped.values()) {
+    if (sessionMatches.length === 1) {
+      aggregated.push(sessionMatches[0]);
+      continue;
+    }
+    const spansKnownWorkspace = workspacePaths.length === 0
+      || sessionMatches.every((match) => match.workspaceMatched);
+    const staysInsidePassWindow = exactWindowKnown
+      && sessionMatches.every((match) => timestampWithinWindow(match.startedAt, match.endedAt, startedAt, endedAt));
+    if (!spansKnownWorkspace || !staysInsidePassWindow) {
+      aggregated.push(...sessionMatches);
+      continue;
+    }
+    const [first, ...rest] = sessionMatches;
+    const combined = {
+      ...first,
+      usage: { ...first.usage },
+    };
+    for (const match of rest) {
+      combined.usage = normalizeTokenUsage({
+        input: (combined.usage?.input || 0) + (match.usage?.input || 0),
+        output: (combined.usage?.output || 0) + (match.usage?.output || 0),
+        cacheRead: (combined.usage?.cacheRead || 0) + (match.usage?.cacheRead || 0),
+        cacheWrite: (combined.usage?.cacheWrite || 0) + (match.usage?.cacheWrite || 0),
+        total: (combined.usage?.total || 0) + (match.usage?.total || 0),
+        costUSD: (combined.usage?.costUSD || 0) + (match.usage?.costUSD || 0),
+        source: 'claude-transcript',
+      });
+      combined.startedAt = earlierTimestamp(combined.startedAt, match.startedAt);
+      combined.endedAt = laterTimestamp(combined.endedAt, match.endedAt);
+      combined.sessionMatched = combined.sessionMatched || match.sessionMatched;
+      if ((Date.parse(match.endedAt || '') || 0) >= (Date.parse(combined.endedAt || '') || 0)) {
+        combined.transcriptPath = match.transcriptPath;
+      }
+    }
+    aggregated.push(combined);
+  }
+  return [...aggregated, ...ungrouped];
 }
 
 function earlierTimestamp(a, b) {
@@ -968,6 +1000,17 @@ function timestampOverlapsWindow(startedAt, endedAt, windowStart, windowEnd) {
   const high = parseDate(windowEnd) || low;
   if (low && end < new Date(low.getTime() - graceMs)) return false;
   if (high && start > new Date(high.getTime() + graceMs)) return false;
+  return true;
+}
+
+function timestampWithinWindow(startedAt, endedAt, windowStart, windowEnd) {
+  const start = parseDate(startedAt);
+  const end = parseDate(endedAt) || start;
+  if (!start) return false;
+  const low = parseDate(windowStart);
+  const high = parseDate(windowEnd) || low;
+  if (low && start < low) return false;
+  if (high && end > high) return false;
   return true;
 }
 

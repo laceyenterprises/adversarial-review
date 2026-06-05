@@ -191,6 +191,79 @@ function schemaV1() {
           },
         },
       },
+      // DRP-01N — retention policy block. Strict-shape parity matters here
+      // because the adversarial watcher consumes this Node loader and must
+      // tolerate the top-level Agent OS `retention:` surface before the
+      // Python-side reaper starts using it.
+      retention: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          policies: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              standard_backup: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  daily: { __type: TYPE_INT, __default: 7, __min: 0 },
+                  weekly: { __type: TYPE_INT, __default: 4, __min: 0 },
+                  monthly: { __type: TYPE_INT, __default: 3, __min: 0 },
+                },
+              },
+            },
+          },
+          cadence: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              weekly_day_of_week: { __type: TYPE_INT, __default: 0, __min: 0 },
+              monthly_day_of_month: { __type: TYPE_INT, __default: 1, __min: 0 },
+            },
+          },
+          surfaces: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              postgres_backups: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  policy: { __type: TYPE_STRING, __default: 'standard_backup' },
+                },
+              },
+            },
+          },
+          ephemeral: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              worker_worktrees_keep_hours: { __type: TYPE_INT, __default: 168, __min: 0 },
+              follow_up_workspaces_keep_hours: { __type: TYPE_INT, __default: 72, __min: 0 },
+              acpx_sessions_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
+              openclaw_sessions_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
+              openclaw_sessions_min_idle_minutes: { __type: TYPE_INT, __default: 60, __min: 0 },
+              claude_code_sessions_keep_days: { __type: TYPE_INT, __default: 90, __min: 0 },
+              dispatch_audit_keep_days: { __type: TYPE_INT, __default: 365, __min: 0 },
+            },
+          },
+          sentinel: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              disk_headroom: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  threshold_pct: { __type: TYPE_INT, __default: 85, __min: 0 },
+                  threshold_gib_free: { __type: TYPE_INT, __default: 10, __min: 0 },
+                },
+              },
+            },
+          },
+        },
+      },
       session_ledger: {
         __type: TYPE_DICT,
         __strict: true,

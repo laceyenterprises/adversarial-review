@@ -34,6 +34,39 @@ const FALLBACK_ROLE_CLASSES = [
   'merge-agent-failure-recovery',
   'clio-agent',
 ];
+const RETENTION_DEFAULTS = {
+  policies: {
+    standard_backup: {
+      daily: 7,
+      weekly: 4,
+      monthly: 3,
+    },
+  },
+  cadence: {
+    weekly_day_of_week: 0,
+    monthly_day_of_month: 1,
+  },
+  surfaces: {
+    postgres_backups: {
+      policy: 'standard_backup',
+    },
+  },
+  ephemeral: {
+    worker_worktrees_keep_hours: 168,
+    follow_up_workspaces_keep_hours: 72,
+    acpx_sessions_keep_days: 30,
+    openclaw_sessions_keep_days: 30,
+    openclaw_sessions_min_idle_minutes: 60,
+    claude_code_sessions_keep_days: 90,
+    dispatch_audit_keep_days: 365,
+  },
+  sentinel: {
+    disk_headroom: {
+      threshold_pct: 85,
+      threshold_gib_free: 10,
+    },
+  },
+};
 
 function freshTmp() {
   return mkdtempSync(join(tmpdir(), 'cfg-loader-'));
@@ -362,6 +395,257 @@ test('local.yaml overrides top', () => {
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roots.hq'), '/from-local');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention full block accepts schema-default values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 7
+            weekly: 4
+            monthly: 3
+        cadence:
+          weekly_day_of_week: 0
+          monthly_day_of_month: 1
+        surfaces:
+          postgres_backups:
+            policy: standard_backup
+        ephemeral:
+          worker_worktrees_keep_hours: 168
+          follow_up_workspaces_keep_hours: 72
+          acpx_sessions_keep_days: 30
+          openclaw_sessions_keep_days: 30
+          openclaw_sessions_min_idle_minutes: 60
+          claude_code_sessions_keep_days: 90
+          dispatch_audit_keep_days: 365
+        sentinel:
+          disk_headroom:
+            threshold_pct: 85
+            threshold_gib_free: 10
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('retention'), RETENTION_DEFAULTS);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention partial override keeps non-overridden schema defaults', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        ephemeral:
+          acpx_sessions_keep_days: 14
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('retention'), {
+      ...RETENTION_DEFAULTS,
+      ephemeral: {
+        ...RETENTION_DEFAULTS.ephemeral,
+        acpx_sessions_keep_days: 14,
+      },
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention surfaces reject unknown keys with structured path', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        surfaces:
+          foo:
+            policy: standard_backup
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'retention.surfaces.foo');
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention rejects unknown top-level nested blocks', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        unknown_block: {}
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'retention.unknown_block');
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention rejects negative keep_days values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        ephemeral:
+          acpx_sessions_keep_days: -1
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'retention.ephemeral.acpx_sessions_keep_days');
+        assert.equal(err.got, -1);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention rejects negative policy cadence counts', () => {
+  const tmp = freshTmp();
+  try {
+    for (const key of ['daily', 'weekly', 'monthly']) {
+      const top = join(tmp, `${key}.yaml`);
+      writeFile(top, `
+        version: 1
+        retention:
+          policies:
+            standard_backup:
+              ${key}: -1
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, `retention.policies.standard_backup.${key}`);
+          assert.equal(err.got, -1);
+          return true;
+        },
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention surface policy stays shape-only at loader layer', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        surfaces:
+          postgres_backups:
+            policy: nonexistent
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    // Cross-reference validation belongs to the reaper, not this loader.
+    assert.equal(cfg.get('retention.surfaces.postgres_backups.policy'), 'nonexistent');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention full block resolves identically from config.yaml and config.local.yaml', () => {
+  const tmp = freshTmp();
+  try {
+    const topOnly = join(tmp, 'top-only.yaml');
+    writeFile(topOnly, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 7
+            weekly: 4
+            monthly: 3
+        cadence:
+          weekly_day_of_week: 0
+          monthly_day_of_month: 1
+        surfaces:
+          postgres_backups:
+            policy: standard_backup
+        ephemeral:
+          worker_worktrees_keep_hours: 168
+          follow_up_workspaces_keep_hours: 72
+          acpx_sessions_keep_days: 30
+          openclaw_sessions_keep_days: 30
+          openclaw_sessions_min_idle_minutes: 60
+          claude_code_sessions_keep_days: 90
+          dispatch_audit_keep_days: 365
+        sentinel:
+          disk_headroom:
+            threshold_pct: 85
+            threshold_gib_free: 10
+    `);
+    const splitTop = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(splitTop, `
+      version: 1
+    `);
+    writeFile(local, `
+      retention:
+        policies:
+          standard_backup:
+            daily: 7
+            weekly: 4
+            monthly: 3
+        cadence:
+          weekly_day_of_week: 0
+          monthly_day_of_month: 1
+        surfaces:
+          postgres_backups:
+            policy: standard_backup
+        ephemeral:
+          worker_worktrees_keep_hours: 168
+          follow_up_workspaces_keep_hours: 72
+          acpx_sessions_keep_days: 30
+          openclaw_sessions_keep_days: 30
+          openclaw_sessions_min_idle_minutes: 60
+          claude_code_sessions_keep_days: 90
+          dispatch_audit_keep_days: 365
+        sentinel:
+          disk_headroom:
+            threshold_pct: 85
+            threshold_gib_free: 10
+    `);
+    const topCfg = loadConfig({ topPath: topOnly, env: {} });
+    const localCfg = loadConfig({ topPath: splitTop, env: {} });
+    assert.deepEqual(topCfg.get('retention'), RETENTION_DEFAULTS);
+    assert.deepEqual(localCfg.get('retention'), RETENTION_DEFAULTS);
+    assert.deepEqual(localCfg.get('retention'), topCfg.get('retention'));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

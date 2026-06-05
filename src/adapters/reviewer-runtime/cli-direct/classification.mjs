@@ -42,11 +42,40 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const mentionsReal429 =
     /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
   const mentionsRateLimit = /rate.?limit/.test(lower);
+  // Routing-tier unavailability: the LiteLLM proxy on 127.0.0.1:4000 is the
+  // single bottleneck every Claude/Codex CLI reviewer goes through. When the
+  // proxy bounces (os-restart, main-catchup classification, post-reboot
+  // RunAtLoad, --force-recreate cycle) the CLI emits localized markers that
+  // do not contain the word "litellm" or any HTTP status — so the legacy
+  // cascade regex misclassifies them as unknown failures and burns the
+  // attempt budget. 2026-06-04 data: 18 reviewer failures with
+  // "API Error: Unable to connect to API (ConnectionRefused)" against
+  // 6 successful reviews in the same 500-log-line window, all attributable
+  // to the proxy restart cycle (LaunchDaemon runs=8, last terminating
+  // signal=SIGTERM clean) — every one of those 18 burned a real attempt
+  // and several PRs ran out of budget mid-restart, posting permanent
+  // "FINAL — lenient threshold" verdicts despite the absence of any actual
+  // review work. The patterns below match the literal CLI surface:
+  //   - "Unable to connect to API" / "Unable to connect" (Claude CLI)
+  //   - "connection refused" / ECONNREFUSED (Node net layer)
+  //   - "socket hang up" (TCP RST mid-stream, observed when LiteLLM workers
+  //     get SIGTERM'd while a request is in flight)
+  //   - bare HTTP 502 / 503 / 504 (upstream-tier proxies)
+  // These are bucketed into the existing 'cascade' class so they ride the
+  // existing backoff path that does NOT consume the per-attempt budget
+  // (`row.review_attempts` stays put — see watcher-cascade-resilience.test.mjs
+  // "cascade retries must not burn the normal attempt counter").
+  const mentionsRoutingTierUnavailable =
+    /unable to connect to api|unable to connect to/.test(lower) ||
+    /\bconnection refused\b|econnrefused|connectionrefused/.test(lower) ||
+    /\bsocket hang up\b/.test(lower) ||
+    /(http|status|response)[\s/=:]+50[234]\b/.test(lower);
   const mentionsCascade =
     /all upstream attempts failed|upstream[._ -]?failed|cascade/.test(lower) ||
     (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
     /timeout.*retries|retries.*timeout/.test(lower) ||
-    /(http|status|response)[\s/=:]+5\d\d\b/.test(lower);
+    /(http|status|response)[\s/=:]+5\d\d\b/.test(lower) ||
+    mentionsRoutingTierUnavailable;
   const mentionsOauthBroken = lower.split(/\r?\n/).some((line) => (
     /\bnot logged in\b|\blogin required\b/.test(line) ||
     /\boauth token (?:expired|invalid|missing)\b/.test(line) ||

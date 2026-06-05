@@ -262,6 +262,61 @@ function resolveBotTokenEnvForIdentity(identity) {
   return null;
 }
 
+// Routing-tier readiness probe — small pre-spawn check against the LiteLLM
+// proxy that every Claude/Codex CLI reviewer goes through. When the proxy is
+// bouncing (post-reboot RunAtLoad, os-restart, main-catchup classification),
+// spawning a reviewer wastes ~30s on a connection that's going to fail with
+// `Unable to connect to API (ConnectionRefused)`. The new classifier patterns
+// (cli-direct/classification.mjs) ensure those failures don't burn the
+// per-attempt budget anymore — this probe is the additional optimization
+// that AVOIDS the wasted spawn entirely when readiness is known-bad.
+//
+// Disable via WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED=1 for tests
+// that don't run a LiteLLM proxy.
+function resolveRoutingTierReadinessUrl(env = process.env) {
+  const raw = env.WATCHER_ROUTING_TIER_READINESS_URL;
+  return raw && String(raw).trim().length > 0
+    ? String(raw).trim()
+    : 'http://127.0.0.1:4000/health/readiness';
+}
+
+function resolveRoutingTierReadinessTimeoutMs(env = process.env) {
+  const v = Number(env.WATCHER_ROUTING_TIER_READINESS_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 2000;
+}
+
+function isRoutingTierReadinessProbeDisabled(env = process.env) {
+  return /^(1|true|yes|on)$/i.test(env.WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED || '');
+}
+
+async function probeRoutingTierReadiness({ env = process.env, fetchFn = globalThis.fetch } = {}) {
+  if (isRoutingTierReadinessProbeDisabled(env)) {
+    return { ready: true, skipped: true };
+  }
+  const url = resolveRoutingTierReadinessUrl(env);
+  const timeoutMs = resolveRoutingTierReadinessTimeoutMs(env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchFn(url, { signal: controller.signal, method: 'GET' });
+    if (!res || typeof res.status !== 'number' || res.status < 200 || res.status >= 300) {
+      return { ready: false, reason: `readiness_http_${res?.status ?? 'no_response'}` };
+    }
+    return { ready: true };
+  } catch (err) {
+    const code = err?.cause?.code || err?.code || '';
+    if (err?.name === 'AbortError') {
+      return { ready: false, reason: 'readiness_timeout' };
+    }
+    if (code === 'ECONNREFUSED') {
+      return { ready: false, reason: 'routing_tier_connection_refused' };
+    }
+    return { ready: false, reason: `readiness_error_${code || 'unknown'}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function resolvePendingDraftRespawnAgeSeconds(env = process.env) {
   const raw = env.ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS;
   const rawText = raw === undefined ? null : String(raw).trim();
@@ -4265,6 +4320,25 @@ async function pollOnce(
               ? 'rereview'
               : 'first-pass';
 
+            // Pre-spawn routing-tier readiness probe. Avoids burning ~30s
+            // on a reviewer subprocess when the LiteLLM proxy is in the
+            // middle of a bounce cycle. When the probe reports not-ready,
+            // we release the reviewer claim and return — next tick will
+            // re-claim and re-probe naturally. NOTHING is recorded as a
+            // failure: no failure_message, no attempt counter change, no
+            // cascade state mutation. This mirrors the existing
+            // `preSpawnReconciliation.skipSpawn` early-return pattern above.
+            const routingTierReadiness = await probeRoutingTierReadiness();
+            if (!routingTierReadiness.ready) {
+              console.log(
+                `[watcher] Skipping reviewer spawn for ${repoPath}#${prNumber}: ` +
+                `routing tier (LiteLLM proxy) not ready (${routingTierReadiness.reason}). ` +
+                `Deferring to next tick; no attempt budget consumed.`
+              );
+              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+              return;
+            }
+
             const result = await spawnReviewer({
               repo: repoPath,
               prNumber,
@@ -4547,6 +4621,7 @@ if (isMain) {
 export {
   classifyReviewerFailure,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
+  probeRoutingTierReadiness,
   evaluateRoundBudgetForReview,
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,

@@ -179,6 +179,31 @@ best-effort diagnostic for the DB row being claimed. The remediation ledger is
 the source of truth for reviewer round budgeting; the claim compare-and-swap
 and GitHub freshness checks remain the load-bearing concurrency protections.
 
+## Routing-Tier Readiness Gate
+
+Before spawning a reviewer, the watcher may probe the local routing tier
+(LiteLLM) so a known-bad proxy does not waste a full reviewer launch. The
+probe surface is operator-configurable:
+
+- `WATCHER_ROUTING_TIER_READINESS_URL` overrides the default
+  `http://127.0.0.1:4000/health/readiness`.
+- `WATCHER_ROUTING_TIER_READINESS_TIMEOUT_MS` overrides the default `2000ms`
+  per probe attempt.
+- `WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED=1` disables the pre-spawn
+  readiness gate entirely.
+
+Failure semantics are intentionally transient: probe failures settle through
+the existing `cascade` path and must not increment `review_attempts`. The
+watcher retries failed probes with short bounded backoff before it defers a
+spawn, caches successful probe results for the rest of the current poll tick,
+and caches failed results only for a very short TTL so later PRs in the same
+tick can re-check after a momentary proxy bounce. Classifier heuristics that
+bucket reviewer stderr into the same routing-tier `cascade` class must stay
+scoped to explicit local-routing context such as `127.0.0.1:4000`,
+`localhost:4000`, `LiteLLM`, or equivalent routing-tier markers; generic
+non-local API connectivity failures remain `unknown` unless another more
+specific classifier matches.
+
 ## Remediation Reply Contract
 
 The durable remediation reply schema is the public contract between the worker,

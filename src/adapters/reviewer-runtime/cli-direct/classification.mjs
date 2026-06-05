@@ -60,13 +60,16 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // the routing-tier cascade bucket.
   const mentionsApiConnectFailure = /unable to connect to api\b/.test(lower);
   const mentionsProxyAddress = /127\.0\.0\.1:4000|localhost:4000|\[::1\]:4000/.test(lower);
+  const mentionsLocalRoutingContext =
+    mentionsProxyAddress ||
+    /\blitellm\b|\blocal proxy\b|\brouting[- ]tier\b|\breadiness probe\b/.test(lower);
   const mentionsProxyConnectionRefused =
-    /\beconnrefused\b/.test(lower) && mentionsProxyAddress
-    || /\bconnection refused\b/.test(lower) && (mentionsProxyAddress || /\bapi\b/.test(lower))
-    || /unable to connect to api\s*\(connectionrefused\)/.test(lower);
+    /\beconnrefused\b/.test(lower) && mentionsLocalRoutingContext
+    || /\bconnection refused\b/.test(lower) && mentionsLocalRoutingContext
+    || /unable to connect to api\s*\(connectionrefused\)/.test(lower) && mentionsLocalRoutingContext;
   const mentionsApiSocketHangup =
     /\bsocket hang up\b/.test(lower) &&
-    (mentionsProxyAddress || /\bapi\b/.test(lower) || /\blitellm\b/.test(lower));
+    mentionsLocalRoutingContext;
   const mentionsRoutingTier5xx =
     /\bapi error\b.*\b50[234]\b/.test(lower) ||
     /(http|status|response)[\s/=:]+50[234]\b.*\b(api|gateway|upstream|litellm)\b/.test(lower) ||
@@ -76,7 +79,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // (`row.review_attempts` stays put — see watcher-cascade-resilience.test.mjs
   // "cascade retries must not burn the normal attempt counter").
   const mentionsRoutingTierUnavailable =
-    mentionsApiConnectFailure ||
+    (mentionsApiConnectFailure && mentionsLocalRoutingContext) ||
     mentionsProxyConnectionRefused ||
     mentionsApiSocketHangup ||
     mentionsRoutingTier5xx;

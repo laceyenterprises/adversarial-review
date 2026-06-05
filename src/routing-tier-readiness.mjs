@@ -1,3 +1,8 @@
+import { setTimeout as sleep } from 'node:timers/promises';
+
+const ROUTING_TIER_READINESS_RETRY_DELAYS_MS = [200, 500];
+const ROUTING_TIER_READINESS_FAILURE_CACHE_TTL_MS = 500;
+
 // Routing-tier readiness probe: small pre-spawn check against the LiteLLM
 // proxy that every Claude/Codex CLI reviewer goes through. When the proxy is
 // bouncing (post-reboot RunAtLoad, os-restart, main-catchup classification),
@@ -76,10 +81,69 @@ async function probeRoutingTierReadiness({ env = process.env, fetchFn = globalTh
   }
 }
 
+async function probeRoutingTierReadinessWithRetry({
+  env = process.env,
+  fetchFn = globalThis.fetch,
+  retryDelaysMs = ROUTING_TIER_READINESS_RETRY_DELAYS_MS,
+  sleepFn = sleep,
+} = {}) {
+  let result = await probeRoutingTierReadiness({ env, fetchFn });
+  for (const delayMs of retryDelaysMs) {
+    if (result.ready) {
+      return result;
+    }
+    await sleepFn(delayMs);
+    result = await probeRoutingTierReadiness({ env, fetchFn });
+  }
+  return result;
+}
+
+function createRoutingTierReadinessProbeCache({
+  probeFn = probeRoutingTierReadinessWithRetry,
+  failureTtlMs = ROUTING_TIER_READINESS_FAILURE_CACHE_TTL_MS,
+  nowFn = Date.now,
+} = {}) {
+  let cachedSuccess = null;
+  let cachedFailure = null;
+  let inFlightPromise = null;
+
+  return async function getRoutingTierReadiness() {
+    if (cachedSuccess) {
+      return cachedSuccess;
+    }
+    const now = nowFn();
+    if (cachedFailure && now < cachedFailure.expiresAt) {
+      return cachedFailure.result;
+    }
+    if (!inFlightPromise) {
+      inFlightPromise = (async () => {
+        const result = await probeFn();
+        if (result.ready) {
+          cachedSuccess = result;
+          cachedFailure = null;
+        } else {
+          cachedFailure = {
+            result,
+            expiresAt: nowFn() + failureTtlMs,
+          };
+        }
+        return result;
+      })().finally(() => {
+        inFlightPromise = null;
+      });
+    }
+    return inFlightPromise;
+  };
+}
+
 export {
+  ROUTING_TIER_READINESS_FAILURE_CACHE_TTL_MS,
+  ROUTING_TIER_READINESS_RETRY_DELAYS_MS,
   buildRoutingTierReadinessFailure,
+  createRoutingTierReadinessProbeCache,
   isRoutingTierReadinessProbeDisabled,
   probeRoutingTierReadiness,
+  probeRoutingTierReadinessWithRetry,
   resolveRoutingTierReadinessTimeoutMs,
   resolveRoutingTierReadinessUrl,
 };

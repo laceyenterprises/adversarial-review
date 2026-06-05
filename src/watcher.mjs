@@ -156,6 +156,7 @@ import {
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
 import {
+  createRoutingTierReadinessProbeCache,
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
 
@@ -3465,13 +3466,7 @@ async function pollOnce(
   const reviewerDispatchCandidates = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({ logger: console });
-  let routingTierReadinessForTickPromise = null;
-  function getRoutingTierReadinessForTick() {
-    if (!routingTierReadinessForTickPromise) {
-      routingTierReadinessForTickPromise = probeRoutingTierReadiness();
-    }
-    return routingTierReadinessForTickPromise;
-  }
+  const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
 
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
@@ -4275,11 +4270,10 @@ async function pollOnce(
               ? 'rereview'
               : 'first-pass';
 
-            // Pre-spawn routing-tier readiness probe. Cache one decision per
-            // watcher tick so an outage produces one probe, not one identical
-            // GET per eligible PR. Probe failures still settle through the
-            // existing transient cascade path instead of silently flipping the
-            // row back to plain `pending`.
+            // Pre-spawn routing-tier readiness probe. Successful probes are
+            // cached for the rest of the tick; failed probes get bounded
+            // retries plus a very short cache so later PRs can re-check after
+            // a brief proxy bounce instead of inheriting a whole-tick outage.
             const routingTierReadiness = await getRoutingTierReadinessForTick();
             if (!routingTierReadiness.ready) {
               console.log(

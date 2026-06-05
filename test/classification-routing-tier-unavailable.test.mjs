@@ -11,19 +11,19 @@ import {
   classifyReviewerFailure,
 } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
-test('claude CLI "Unable to connect to API (ConnectionRefused)" classifies as cascade', () => {
+test('claude CLI "Unable to connect to API (ConnectionRefused)" stays unknown without local-routing context', () => {
   // Verbatim shape of the failure observed in the 2026-06-04 watcher log.
   const stderr = `[reviewer] DEBUG: starting claude review...
 [reviewer] AI review failed for laceyenterprises/agent-os#1354: Command failed with code 1
 stdout tail:
 API Error: Unable to connect to API (ConnectionRefused)`;
-  assert.equal(classifyReviewerFailure(stderr, 1), 'cascade');
+  assert.equal(classifyReviewerFailure(stderr, 1), 'unknown');
 });
 
-test('bare "Unable to connect to API" classifies as cascade', () => {
+test('bare "Unable to connect to API" stays unknown', () => {
   assert.equal(
     classifyReviewerFailure('Unable to connect to API', 1),
-    'cascade'
+    'unknown'
   );
 });
 
@@ -37,14 +37,16 @@ test('node-style ECONNREFUSED string classifies as cascade', () => {
 
 test('connection-refused traces require API or proxy context', () => {
   assert.equal(classifyReviewerFailure('Connection Refused', 1), 'unknown');
-  assert.equal(classifyReviewerFailure('connection refused while connecting to API', 1), 'cascade');
+  assert.equal(classifyReviewerFailure('connection refused while connecting to API', 1), 'unknown');
   assert.equal(classifyReviewerFailure('CONNECTION REFUSED 127.0.0.1:4000', 1), 'cascade');
+  assert.equal(classifyReviewerFailure('LiteLLM API Error: Unable to connect to API (ConnectionRefused)', 1), 'cascade');
 });
 
 test('"socket hang up" requires API or proxy context', () => {
   // Observed when LiteLLM workers receive SIGTERM mid-request.
   assert.equal(classifyReviewerFailure('socket hang up', 1), 'unknown');
-  assert.equal(classifyReviewerFailure('API Error: socket hang up', 1), 'cascade');
+  assert.equal(classifyReviewerFailure('API Error: socket hang up', 1), 'unknown');
+  assert.equal(classifyReviewerFailure('LiteLLM API Error: socket hang up', 1), 'cascade');
 });
 
 test('HTTP 502/503/504 require routing-tier context', () => {

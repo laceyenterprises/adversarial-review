@@ -4,7 +4,11 @@
 // transient cascade path rather than silently releasing the claim.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { probeRoutingTierReadiness } from '../src/routing-tier-readiness.mjs';
+import {
+  createRoutingTierReadinessProbeCache,
+  probeRoutingTierReadiness,
+  probeRoutingTierReadinessWithRetry,
+} from '../src/routing-tier-readiness.mjs';
 
 function mockResponse({ status = 200 } = {}) {
   return { status, ok: status >= 200 && status < 300 };
@@ -91,6 +95,56 @@ test('other network errors surface their error code', async () => {
   assert.equal(result.reason, 'readiness_error_ECONNRESET');
   assert.equal(result.failureClass, 'cascade');
   assert.match(result.failureMessage, /ECONNRESET/);
+});
+
+test('probe retries transient readiness failures before returning', async () => {
+  let attempts = 0;
+  const result = await probeRoutingTierReadinessWithRetry({
+    env: { WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '' },
+    sleepFn: async () => {},
+    fetchFn: async () => {
+      attempts += 1;
+      return mockResponse({ status: attempts === 1 ? 503 : 200 });
+    },
+  });
+  assert.equal(attempts, 2);
+  assert.equal(result.ready, true);
+});
+
+test('negative readiness cache expires quickly while success stays cached', async () => {
+  let now = 1_000;
+  let probes = 0;
+  const results = [
+    { ready: false, reason: 'readiness_http_503', failureClass: 'cascade' },
+    { ready: true },
+  ];
+  const getRoutingTierReadiness = createRoutingTierReadinessProbeCache({
+    nowFn: () => now,
+    failureTtlMs: 500,
+    probeFn: async () => {
+      probes += 1;
+      return results[Math.min(probes - 1, results.length - 1)];
+    },
+  });
+
+  const first = await getRoutingTierReadiness();
+  assert.equal(first.ready, false);
+  assert.equal(probes, 1);
+
+  now += 100;
+  const second = await getRoutingTierReadiness();
+  assert.equal(second.ready, false);
+  assert.equal(probes, 1);
+
+  now += 600;
+  const third = await getRoutingTierReadiness();
+  assert.equal(third.ready, true);
+  assert.equal(probes, 2);
+
+  now += 10_000;
+  const fourth = await getRoutingTierReadiness();
+  assert.equal(fourth.ready, true);
+  assert.equal(probes, 2);
 });
 
 test('WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED=1 short-circuits to ready: true', async () => {

@@ -461,6 +461,20 @@ test('retention partial override keeps non-overridden schema defaults', () => {
   }
 });
 
+test('retention absent block materializes schema defaults', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('retention'), RETENTION_DEFAULTS);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('retention surfaces reject unknown keys with structured path', () => {
   const tmp = freshTmp();
   try {
@@ -504,6 +518,37 @@ test('retention rejects unknown top-level nested blocks', () => {
         return true;
       },
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention rejects out-of-range calendar and percentage values', () => {
+  const cases = [
+    ['retention.cadence.weekly_day_of_week', '          cadence:\n            weekly_day_of_week: 7', 7],
+    ['retention.cadence.monthly_day_of_month', '          cadence:\n            monthly_day_of_month: 0', 0],
+    ['retention.cadence.monthly_day_of_month', '          cadence:\n            monthly_day_of_month: 32', 32],
+    ['retention.sentinel.disk_headroom.threshold_pct', '          sentinel:\n            disk_headroom:\n              threshold_pct: 101', 101],
+  ];
+  const tmp = freshTmp();
+  try {
+    for (const [keyPath, yaml, got] of cases) {
+      const top = join(tmp, `${keyPath}-${got}.yaml`);
+      writeFile(top, `
+        version: 1
+        retention:
+${yaml}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, keyPath);
+          assert.equal(err.got, got);
+          return true;
+        },
+      );
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

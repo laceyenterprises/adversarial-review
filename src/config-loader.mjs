@@ -193,8 +193,9 @@ function schemaV1() {
       },
       // DRP-01N — retention policy block. Strict-shape parity matters here
       // because the adversarial watcher consumes this Node loader and must
-      // tolerate the top-level Agent OS `retention:` surface before the
-      // Python-side reaper starts using it.
+      // tolerate the top-level Agent OS `retention:` surface. Policy names are
+      // intentionally fixed to the Python reaper's current schema; adding a new
+      // named policy requires a lockstep Node/Python schema rollout.
       retention: {
         __type: TYPE_DICT,
         __strict: true,
@@ -218,8 +219,8 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
-              weekly_day_of_week: { __type: TYPE_INT, __default: 0, __min: 0 },
-              monthly_day_of_month: { __type: TYPE_INT, __default: 1, __min: 0 },
+              weekly_day_of_week: { __type: TYPE_INT, __default: 0, __min: 0, __max: 6 },
+              monthly_day_of_month: { __type: TYPE_INT, __default: 1, __min: 1, __max: 31 },
             },
           },
           surfaces: {
@@ -256,7 +257,7 @@ function schemaV1() {
                 __type: TYPE_DICT,
                 __strict: true,
                 __keys: {
-                  threshold_pct: { __type: TYPE_INT, __default: 85, __min: 0 },
+                  threshold_pct: { __type: TYPE_INT, __default: 85, __min: 0, __max: 100 },
                   threshold_gib_free: { __type: TYPE_INT, __default: 10, __min: 0 },
                 },
               },

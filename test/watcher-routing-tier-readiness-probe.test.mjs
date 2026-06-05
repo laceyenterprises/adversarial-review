@@ -1,10 +1,7 @@
 // watcher-routing-tier-readiness-probe.test.mjs — proves the pre-spawn
-// readiness probe skips spawn cleanly when LiteLLM is down (no attempt
-// counter burn, no failure recorded, no cascade state mutation) and proceeds
-// to spawn normally when LiteLLM is healthy. Companion to the classifier
-// extension in classification-routing-tier-unavailable.test.mjs: the
-// classifier handles failures that happen anyway; this probe avoids the
-// wasted ~30s spawn cycle entirely.
+// readiness probe returns a ready/not-ready decision before spawn. When the
+// routing tier is down, the watcher now feeds that failure into the existing
+// transient cascade path rather than silently releasing the claim.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { probeRoutingTierReadiness } from '../src/watcher.mjs';
@@ -31,6 +28,8 @@ test('503 Service Unavailable → ready: false with readiness_http_503', async (
   });
   assert.equal(result.ready, false);
   assert.equal(result.reason, 'readiness_http_503');
+  assert.equal(result.failureClass, 'cascade');
+  assert.match(result.failureMessage, /HTTP 503/);
 });
 
 test('502 / 504 also produce readiness_http_{status}', async () => {
@@ -42,6 +41,7 @@ test('502 / 504 also produce readiness_http_{status}', async () => {
     });
     assert.equal(result.ready, false);
     assert.equal(result.reason, `readiness_http_${status}`);
+    assert.equal(result.failureClass, 'cascade');
   }
 });
 
@@ -57,6 +57,8 @@ test('ECONNREFUSED → ready: false with routing_tier_connection_refused', async
   });
   assert.equal(result.ready, false);
   assert.equal(result.reason, 'routing_tier_connection_refused');
+  assert.equal(result.failureClass, 'cascade');
+  assert.match(result.failureMessage, /could not connect/i);
 });
 
 test('AbortError (timeout) → ready: false with readiness_timeout', async () => {
@@ -71,6 +73,8 @@ test('AbortError (timeout) → ready: false with readiness_timeout', async () =>
   });
   assert.equal(result.ready, false);
   assert.equal(result.reason, 'readiness_timeout');
+  assert.equal(result.failureClass, 'cascade');
+  assert.match(result.failureMessage, /timed out/i);
 });
 
 test('other network errors surface their error code', async () => {
@@ -85,6 +89,8 @@ test('other network errors surface their error code', async () => {
   });
   assert.equal(result.ready, false);
   assert.equal(result.reason, 'readiness_error_ECONNRESET');
+  assert.equal(result.failureClass, 'cascade');
+  assert.match(result.failureMessage, /ECONNRESET/);
 });
 
 test('WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED=1 short-circuits to ready: true', async () => {

@@ -55,26 +55,36 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // signal=SIGTERM clean) — every one of those 18 burned a real attempt
   // and several PRs ran out of budget mid-restart, posting permanent
   // "FINAL — lenient threshold" verdicts despite the absence of any actual
-  // review work. The patterns below match the literal CLI surface:
-  //   - "Unable to connect to API" / "Unable to connect" (Claude CLI)
-  //   - "connection refused" / ECONNREFUSED (Node net layer)
-  //   - "socket hang up" (TCP RST mid-stream, observed when LiteLLM workers
-  //     get SIGTERM'd while a request is in flight)
-  //   - bare HTTP 502 / 503 / 504 (upstream-tier proxies)
+  // review work. Keep the patterns scoped to the known proxy/API surface so
+  // unrelated reviewer-side network/config failures do not get folded into
+  // the routing-tier cascade bucket.
+  const mentionsApiConnectFailure = /unable to connect to api\b/.test(lower);
+  const mentionsProxyAddress = /127\.0\.0\.1:4000|localhost:4000|\[::1\]:4000/.test(lower);
+  const mentionsProxyConnectionRefused =
+    /\beconnrefused\b/.test(lower) && mentionsProxyAddress
+    || /\bconnection refused\b/.test(lower) && (mentionsProxyAddress || /\bapi\b/.test(lower))
+    || /unable to connect to api\s*\(connectionrefused\)/.test(lower);
+  const mentionsApiSocketHangup =
+    /\bsocket hang up\b/.test(lower) &&
+    (mentionsProxyAddress || /\bapi\b/.test(lower) || /\blitellm\b/.test(lower));
+  const mentionsRoutingTier5xx =
+    /\bapi error\b.*\b50[234]\b/.test(lower) ||
+    /(http|status|response)[\s/=:]+50[234]\b.*\b(api|gateway|upstream|litellm)\b/.test(lower) ||
+    /\b(api|gateway|upstream|litellm)\b.*(http|status|response)[\s/=:]+50[234]\b/.test(lower);
   // These are bucketed into the existing 'cascade' class so they ride the
   // existing backoff path that does NOT consume the per-attempt budget
   // (`row.review_attempts` stays put — see watcher-cascade-resilience.test.mjs
   // "cascade retries must not burn the normal attempt counter").
   const mentionsRoutingTierUnavailable =
-    /unable to connect to api|unable to connect to/.test(lower) ||
-    /\bconnection refused\b|econnrefused|connectionrefused/.test(lower) ||
-    /\bsocket hang up\b/.test(lower) ||
-    /(http|status|response)[\s/=:]+50[234]\b/.test(lower);
+    mentionsApiConnectFailure ||
+    mentionsProxyConnectionRefused ||
+    mentionsApiSocketHangup ||
+    mentionsRoutingTier5xx;
   const mentionsCascade =
     /all upstream attempts failed|upstream[._ -]?failed|cascade/.test(lower) ||
     (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
     /timeout.*retries|retries.*timeout/.test(lower) ||
-    /(http|status|response)[\s/=:]+5\d\d\b/.test(lower) ||
+    /(http|status|response)[\s/=:]+5\d\d\b/.test(lower) && /\blitellm\b/.test(lower) ||
     mentionsRoutingTierUnavailable;
   const mentionsOauthBroken = lower.split(/\r?\n/).some((line) => (
     /\bnot logged in\b|\blogin required\b/.test(line) ||

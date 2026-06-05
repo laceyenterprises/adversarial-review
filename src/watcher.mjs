@@ -289,6 +289,15 @@ function isRoutingTierReadinessProbeDisabled(env = process.env) {
   return /^(1|true|yes|on)$/i.test(env.WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED || '');
 }
 
+function buildRoutingTierReadinessFailure(reason, failureMessage) {
+  return {
+    ready: false,
+    reason,
+    failureClass: 'cascade',
+    failureMessage,
+  };
+}
+
 async function probeRoutingTierReadiness({ env = process.env, fetchFn = globalThis.fetch } = {}) {
   if (isRoutingTierReadinessProbeDisabled(env)) {
     return { ready: true, skipped: true };
@@ -300,18 +309,31 @@ async function probeRoutingTierReadiness({ env = process.env, fetchFn = globalTh
   try {
     const res = await fetchFn(url, { signal: controller.signal, method: 'GET' });
     if (!res || typeof res.status !== 'number' || res.status < 200 || res.status >= 300) {
-      return { ready: false, reason: `readiness_http_${res?.status ?? 'no_response'}` };
+      const status = res?.status ?? 'no_response';
+      return buildRoutingTierReadinessFailure(
+        `readiness_http_${status}`,
+        `Routing-tier readiness probe returned HTTP ${status}.`
+      );
     }
     return { ready: true };
   } catch (err) {
     const code = err?.cause?.code || err?.code || '';
     if (err?.name === 'AbortError') {
-      return { ready: false, reason: 'readiness_timeout' };
+      return buildRoutingTierReadinessFailure(
+        'readiness_timeout',
+        `Routing-tier readiness probe timed out after ${timeoutMs}ms.`
+      );
     }
     if (code === 'ECONNREFUSED') {
-      return { ready: false, reason: 'routing_tier_connection_refused' };
+      return buildRoutingTierReadinessFailure(
+        'routing_tier_connection_refused',
+        `Routing-tier readiness probe could not connect to ${url}.`
+      );
     }
-    return { ready: false, reason: `readiness_error_${code || 'unknown'}` };
+    return buildRoutingTierReadinessFailure(
+      `readiness_error_${code || 'unknown'}`,
+      `Routing-tier readiness probe failed${code ? ` (${code})` : ''}.`
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -3517,6 +3539,13 @@ async function pollOnce(
   const reviewerDispatchCandidates = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({ logger: console });
+  let routingTierReadinessForTickPromise = null;
+  function getRoutingTierReadinessForTick() {
+    if (!routingTierReadinessForTickPromise) {
+      routingTierReadinessForTickPromise = probeRoutingTierReadiness();
+    }
+    return routingTierReadinessForTickPromise;
+  }
 
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
@@ -4320,22 +4349,31 @@ async function pollOnce(
               ? 'rereview'
               : 'first-pass';
 
-            // Pre-spawn routing-tier readiness probe. Avoids burning ~30s
-            // on a reviewer subprocess when the LiteLLM proxy is in the
-            // middle of a bounce cycle. When the probe reports not-ready,
-            // we release the reviewer claim and return — next tick will
-            // re-claim and re-probe naturally. NOTHING is recorded as a
-            // failure: no failure_message, no attempt counter change, no
-            // cascade state mutation. This mirrors the existing
-            // `preSpawnReconciliation.skipSpawn` early-return pattern above.
-            const routingTierReadiness = await probeRoutingTierReadiness();
+            // Pre-spawn routing-tier readiness probe. Cache one decision per
+            // watcher tick so an outage produces one probe, not one identical
+            // GET per eligible PR. Probe failures still settle through the
+            // existing transient cascade path instead of silently flipping the
+            // row back to plain `pending`.
+            const routingTierReadiness = await getRoutingTierReadinessForTick();
             if (!routingTierReadiness.ready) {
               console.log(
                 `[watcher] Skipping reviewer spawn for ${repoPath}#${prNumber}: ` +
                 `routing tier (LiteLLM proxy) not ready (${routingTierReadiness.reason}). ` +
-                `Deferring to next tick; no attempt budget consumed.`
+                `Deferring via transient-failure backoff; no attempt budget consumed.`
               );
-              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+              settleReviewerAttempt({
+                rootDir: ROOT,
+                repoPath,
+                prNumber,
+                result: {
+                  ok: false,
+                  failureClass: routingTierReadiness.failureClass || 'cascade',
+                  error: routingTierReadiness.failureMessage
+                    || `Routing-tier readiness probe reported ${routingTierReadiness.reason}.`,
+                },
+                failureAt: attemptAt,
+                maxRemediationRounds,
+              });
               return;
             }
 

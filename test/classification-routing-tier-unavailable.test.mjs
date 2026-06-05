@@ -35,21 +35,23 @@ test('node-style ECONNREFUSED string classifies as cascade', () => {
   );
 });
 
-test('bare "connection refused" classifies as cascade (case-insensitive)', () => {
-  assert.equal(classifyReviewerFailure('Connection Refused', 1), 'cascade');
-  assert.equal(classifyReviewerFailure('CONNECTION REFUSED', 1), 'cascade');
-  assert.equal(classifyReviewerFailure('connection refused', 1), 'cascade');
+test('connection-refused traces require API or proxy context', () => {
+  assert.equal(classifyReviewerFailure('Connection Refused', 1), 'unknown');
+  assert.equal(classifyReviewerFailure('connection refused while connecting to API', 1), 'cascade');
+  assert.equal(classifyReviewerFailure('CONNECTION REFUSED 127.0.0.1:4000', 1), 'cascade');
 });
 
-test('"socket hang up" classifies as cascade', () => {
+test('"socket hang up" requires API or proxy context', () => {
   // Observed when LiteLLM workers receive SIGTERM mid-request.
-  assert.equal(classifyReviewerFailure('socket hang up', 1), 'cascade');
+  assert.equal(classifyReviewerFailure('socket hang up', 1), 'unknown');
+  assert.equal(classifyReviewerFailure('API Error: socket hang up', 1), 'cascade');
 });
 
-test('HTTP 502/503/504 (bare, no other context) classify as cascade', () => {
+test('HTTP 502/503/504 require routing-tier context', () => {
+  assert.equal(classifyReviewerFailure('status 502', 1), 'unknown');
   assert.equal(classifyReviewerFailure('upstream returned status 502', 1), 'cascade');
-  assert.equal(classifyReviewerFailure('HTTP/503 from origin', 1), 'cascade');
-  assert.equal(classifyReviewerFailure('response: 504 from gateway', 1), 'cascade');
+  assert.equal(classifyReviewerFailure('HTTP/503 from API gateway', 1), 'cascade');
+  assert.equal(classifyReviewerFailure('response: 504 from LiteLLM upstream', 1), 'cascade');
 });
 
 test('OAuth-broken still wins over routing-tier patterns when both match', () => {
@@ -98,4 +100,15 @@ test('unrelated CLI error still classifies as unknown / bug (regression guard)',
     1
   );
   assert.equal(unknownCls, 'unknown');
+});
+
+test('unrelated helper/network failures do not get folded into cascade', () => {
+  assert.equal(
+    classifyReviewerFailure('unable to connect to linear webhook endpoint', 1),
+    'unknown'
+  );
+  assert.equal(
+    classifyReviewerFailure('database connection refused for local sqlite helper', 1),
+    'unknown'
+  );
 });

@@ -519,29 +519,69 @@ function readClaudeTranscriptTokenUsage({
     });
   }
   if (matches.length === 0) return null;
-  // Disambiguate when multiple transcripts match (e.g. reattached reviewer
-  // sessions, large transcripts split across files, or workspace-only matches
-  // that happen to overlap the pass window). Prefer transcripts whose
-  // sessionId matches a known reviewer session key over workspace-only
-  // matches, then prefer the most-recent endedAt. Pre-fix this branch
-  // silently returned null and 94% of recent reviewer_passes rows recorded
-  // token_total=NULL with token_source='unknown'.
-  let chosen = matches[0];
-  if (matches.length > 1) {
-    const sessionMatches = matches.filter((m) => m.sessionMatched);
-    const pool = sessionMatches.length > 0 ? sessionMatches : matches;
-    chosen = pool.reduce((best, m) => {
-      const a = Date.parse(m.endedAt || '') || 0;
-      const b = Date.parse(best.endedAt || '') || 0;
-      return a > b ? m : best;
-    }, pool[0]);
-  }
+  const groupedMatches = groupClaudeTranscriptMatches(matches);
+  const sessionMatches = groupedMatches.filter((match) => match.sessionMatched);
+  if (sessionMatches.length > 1) return null;
+  if (sessionMatches.length === 0 && groupedMatches.length !== 1) return null;
+  const chosen = sessionMatches[0] || groupedMatches[0];
   return {
     ...chosen.usage,
     source: 'claude-transcript',
     adapterSessionKey: chosen.sessionId || null,
     transcriptPath: chosen.transcriptPath,
   };
+}
+
+function groupClaudeTranscriptMatches(matches) {
+  const grouped = new Map();
+  const ungrouped = [];
+  for (const match of matches) {
+    if (!match.sessionId) {
+      ungrouped.push(match);
+      continue;
+    }
+    const key = String(match.sessionId);
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, {
+        ...match,
+        usage: { ...match.usage },
+      });
+      continue;
+    }
+    existing.usage = normalizeTokenUsage({
+      input: (existing.usage?.input || 0) + (match.usage?.input || 0),
+      output: (existing.usage?.output || 0) + (match.usage?.output || 0),
+      cacheRead: (existing.usage?.cacheRead || 0) + (match.usage?.cacheRead || 0),
+      cacheWrite: (existing.usage?.cacheWrite || 0) + (match.usage?.cacheWrite || 0),
+      total: (existing.usage?.total || 0) + (match.usage?.total || 0),
+      costUSD: (existing.usage?.costUSD || 0) + (match.usage?.costUSD || 0),
+      source: 'claude-transcript',
+    });
+    existing.startedAt = earlierTimestamp(existing.startedAt, match.startedAt);
+    existing.endedAt = laterTimestamp(existing.endedAt, match.endedAt);
+    existing.sessionMatched = existing.sessionMatched || match.sessionMatched;
+    if ((Date.parse(match.endedAt || '') || 0) >= (Date.parse(existing.endedAt || '') || 0)) {
+      existing.transcriptPath = match.transcriptPath;
+    }
+  }
+  return [...grouped.values(), ...ungrouped];
+}
+
+function earlierTimestamp(a, b) {
+  const aTime = Date.parse(a || '');
+  const bTime = Date.parse(b || '');
+  if (!Number.isFinite(aTime)) return b || a || null;
+  if (!Number.isFinite(bTime)) return a || b || null;
+  return aTime <= bTime ? a : b;
+}
+
+function laterTimestamp(a, b) {
+  const aTime = Date.parse(a || '');
+  const bTime = Date.parse(b || '');
+  if (!Number.isFinite(aTime)) return b || a || null;
+  if (!Number.isFinite(bTime)) return a || b || null;
+  return aTime >= bTime ? a : b;
 }
 
 function readCachedClaudeTranscriptSummary(transcriptPath, cache) {

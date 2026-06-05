@@ -652,55 +652,50 @@ test('claude transcript fallback links input output and cache token counts', () 
   }
 });
 
-test('claude transcript fallback picks the most recent match when multiple transcripts share a workspace', () => {
+test('claude transcript fallback aggregates split files for one logical workspace session', () => {
   const rootDir = tempRoot();
   const claudeRoot = path.join(rootDir, 'claude-sessions');
-  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-rereview-multi');
-  const projectDir = path.join(claudeRoot, '-tmp-job-rereview-multi');
+  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-rereview-split-session');
+  const projectDir = path.join(claudeRoot, '-tmp-job-rereview-split-session');
   mkdirSync(workspace, { recursive: true });
   mkdirSync(projectDir, { recursive: true });
 
-  // Older transcript — first reviewer attempt for this PR
-  const olderPath = path.join(projectDir, 'claude-older.jsonl');
-  writeFileSync(olderPath, [
+  const firstSegmentPath = path.join(projectDir, 'claude-session-part-1.jsonl');
+  writeFileSync(firstSegmentPath, [
     JSON.stringify({
       type: 'user',
       timestamp: '2026-06-04T10:00:00.000Z',
       cwd: workspace,
-      sessionId: 'claude-older',
+      sessionId: 'claude-reviewer',
     }),
     JSON.stringify({
       type: 'assistant',
       timestamp: '2026-06-04T10:01:00.000Z',
       cwd: workspace,
-      sessionId: 'claude-older',
-      message: { usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+      sessionId: 'claude-reviewer',
+      message: { usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 1, cache_read_input_tokens: 2 } },
     }),
     '',
   ].join('\n'), 'utf8');
 
-  // Newer transcript — the rereview we actually want to attribute
-  const newerPath = path.join(projectDir, 'claude-newer.jsonl');
-  writeFileSync(newerPath, [
+  const secondSegmentPath = path.join(projectDir, 'claude-session-part-2.jsonl');
+  writeFileSync(secondSegmentPath, [
     JSON.stringify({
       type: 'user',
       timestamp: '2026-06-04T11:00:00.000Z',
       cwd: workspace,
-      sessionId: 'claude-newer',
+      sessionId: 'claude-reviewer',
     }),
     JSON.stringify({
       type: 'assistant',
       timestamp: '2026-06-04T11:02:00.000Z',
       cwd: workspace,
-      sessionId: 'claude-newer',
-      message: { usage: { input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+      sessionId: 'claude-reviewer',
+      message: { usage: { input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 } },
     }),
     '',
   ].join('\n'), 'utf8');
 
-  // Workspace-only match (no session key passed). Pre-fix this returned
-  // null because matches.length !== 1; should now disambiguate to the
-  // most-recent endedAt and return the newer transcript's usage.
   const usage = readClaudeTranscriptTokenUsage({
     workspacePath: workspace,
     startedAt: '2026-06-04T09:30:00.000Z',
@@ -709,12 +704,15 @@ test('claude transcript fallback picks the most recent match when multiple trans
     rootDir,
   });
 
-  assert.ok(usage, 'expected disambiguation to return a usage record, got null');
+  assert.ok(usage, 'expected grouped workspace-only session to return a usage record, got null');
   assert.equal(usage.source, 'claude-transcript');
-  assert.equal(usage.adapterSessionKey, 'claude-newer');
-  assert.equal(usage.transcriptPath, newerPath);
-  assert.equal(usage.input, 100);
-  assert.equal(usage.output, 200);
+  assert.equal(usage.adapterSessionKey, 'claude-reviewer');
+  assert.equal(usage.transcriptPath, secondSegmentPath);
+  assert.equal(usage.input, 110);
+  assert.equal(usage.output, 220);
+  assert.equal(usage.cacheRead, 6);
+  assert.equal(usage.cacheWrite, 4);
+  assert.equal(usage.total, 340);
 });
 
 test('claude transcript fallback prefers a session-key match over a workspace-only match', () => {
@@ -776,6 +774,63 @@ test('claude transcript fallback prefers a session-key match over a workspace-on
   assert.equal(usage.adapterSessionKey, 'claude-reviewer', 'should prefer session-key match over workspace-only match');
   assert.equal(usage.input, 7);
   assert.equal(usage.output, 11);
+});
+
+test('claude transcript fallback returns null for ambiguous workspace-only matches', () => {
+  const rootDir = tempRoot();
+  const claudeRoot = path.join(rootDir, 'claude-sessions');
+  const workspace = path.join(rootDir, 'follow-up-workspaces', 'job-rereview-ambiguous-workspace');
+  const projectDir = path.join(claudeRoot, '-tmp-job-rereview-ambiguous-workspace');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(projectDir, { recursive: true });
+
+  const olderPath = path.join(projectDir, 'claude-older.jsonl');
+  writeFileSync(olderPath, [
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2026-06-04T10:00:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-older',
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-06-04T10:01:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-older',
+      message: { usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const newerPath = path.join(projectDir, 'claude-newer.jsonl');
+  writeFileSync(newerPath, [
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2026-06-04T11:00:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-newer',
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-06-04T11:02:00.000Z',
+      cwd: workspace,
+      sessionId: 'claude-newer',
+      message: { usage: { input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  const usage = readClaudeTranscriptTokenUsage({
+    workspacePath: workspace,
+    startedAt: '2026-06-04T09:30:00.000Z',
+    endedAt: '2026-06-04T12:00:00.000Z',
+    sessionRoots: [claudeRoot],
+    rootDir,
+  });
+
+  assert.equal(usage, null);
+  assert.ok(olderPath);
+  assert.ok(newerPath);
 });
 
 test('claude transcript fallback returns null when no transcripts match', () => {

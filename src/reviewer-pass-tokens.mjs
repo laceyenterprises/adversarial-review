@@ -514,16 +514,106 @@ function readClaudeTranscriptTokenUsage({
       transcriptPath,
       sessionId: summary.sessionId,
       usage: summary.tokenUsage,
+      startedAt: summary.startedAt || null,
+      endedAt: summary.endedAt || null,
+      workspaceMatched,
+      sessionMatched,
     });
   }
-  if (matches.length !== 1) return null;
-  const match = matches[0];
+  if (matches.length === 0) return null;
+  const groupedMatches = groupClaudeTranscriptMatches(matches, {
+    workspacePaths,
+    startedAt,
+    endedAt,
+  });
+  const sessionMatches = groupedMatches.filter((match) => match.sessionMatched);
+  if (sessionMatches.length > 1) return null;
+  if (sessionMatches.length === 0 && groupedMatches.length !== 1) return null;
+  const chosen = sessionMatches[0] || groupedMatches[0];
   return {
-    ...match.usage,
+    ...chosen.usage,
     source: 'claude-transcript',
-    adapterSessionKey: match.sessionId || null,
-    transcriptPath: match.transcriptPath,
+    adapterSessionKey: chosen.sessionId || null,
+    transcriptPath: chosen.transcriptPath,
   };
+}
+
+function groupClaudeTranscriptMatches(matches, {
+  workspacePaths = [],
+  startedAt = null,
+  endedAt = null,
+} = {}) {
+  const grouped = new Map();
+  const ungrouped = [];
+  for (const match of matches) {
+    if (!match.sessionId) {
+      ungrouped.push(match);
+      continue;
+    }
+    const key = String(match.sessionId);
+    const group = grouped.get(key);
+    if (group) {
+      group.push(match);
+      continue;
+    }
+    grouped.set(key, [match]);
+  }
+  const exactWindowKnown = Boolean(parseDate(startedAt) || parseDate(endedAt));
+  const aggregated = [];
+  for (const sessionMatches of grouped.values()) {
+    if (sessionMatches.length === 1) {
+      aggregated.push(sessionMatches[0]);
+      continue;
+    }
+    const spansKnownWorkspace = workspacePaths.length === 0
+      || sessionMatches.every((match) => match.workspaceMatched);
+    const staysInsidePassWindow = exactWindowKnown
+      && sessionMatches.every((match) => timestampWithinWindow(match.startedAt, match.endedAt, startedAt, endedAt));
+    if (!spansKnownWorkspace || !staysInsidePassWindow) {
+      aggregated.push(...sessionMatches);
+      continue;
+    }
+    const [first, ...rest] = sessionMatches;
+    const combined = {
+      ...first,
+      usage: { ...first.usage },
+    };
+    for (const match of rest) {
+      combined.usage = normalizeTokenUsage({
+        input: (combined.usage?.input || 0) + (match.usage?.input || 0),
+        output: (combined.usage?.output || 0) + (match.usage?.output || 0),
+        cacheRead: (combined.usage?.cacheRead || 0) + (match.usage?.cacheRead || 0),
+        cacheWrite: (combined.usage?.cacheWrite || 0) + (match.usage?.cacheWrite || 0),
+        total: (combined.usage?.total || 0) + (match.usage?.total || 0),
+        costUSD: (combined.usage?.costUSD || 0) + (match.usage?.costUSD || 0),
+        source: 'claude-transcript',
+      });
+      combined.startedAt = earlierTimestamp(combined.startedAt, match.startedAt);
+      combined.endedAt = laterTimestamp(combined.endedAt, match.endedAt);
+      combined.sessionMatched = combined.sessionMatched || match.sessionMatched;
+      if ((Date.parse(match.endedAt || '') || 0) >= (Date.parse(combined.endedAt || '') || 0)) {
+        combined.transcriptPath = match.transcriptPath;
+      }
+    }
+    aggregated.push(combined);
+  }
+  return [...aggregated, ...ungrouped];
+}
+
+function earlierTimestamp(a, b) {
+  const aTime = Date.parse(a || '');
+  const bTime = Date.parse(b || '');
+  if (!Number.isFinite(aTime)) return b || a || null;
+  if (!Number.isFinite(bTime)) return a || b || null;
+  return aTime <= bTime ? a : b;
+}
+
+function laterTimestamp(a, b) {
+  const aTime = Date.parse(a || '');
+  const bTime = Date.parse(b || '');
+  if (!Number.isFinite(aTime)) return b || a || null;
+  if (!Number.isFinite(bTime)) return a || b || null;
+  return aTime >= bTime ? a : b;
 }
 
 function readCachedClaudeTranscriptSummary(transcriptPath, cache) {
@@ -910,6 +1000,17 @@ function timestampOverlapsWindow(startedAt, endedAt, windowStart, windowEnd) {
   const high = parseDate(windowEnd) || low;
   if (low && end < new Date(low.getTime() - graceMs)) return false;
   if (high && start > new Date(high.getTime() + graceMs)) return false;
+  return true;
+}
+
+function timestampWithinWindow(startedAt, endedAt, windowStart, windowEnd) {
+  const start = parseDate(startedAt);
+  const end = parseDate(endedAt) || start;
+  if (!start) return false;
+  const low = parseDate(windowStart);
+  const high = parseDate(windowEnd) || low;
+  if (low && start < low) return false;
+  if (high && end > high) return false;
   return true;
 }
 

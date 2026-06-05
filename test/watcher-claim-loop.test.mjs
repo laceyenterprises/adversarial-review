@@ -9,6 +9,15 @@ import { spawnSync } from 'node:child_process';
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const SUMMARY_MARKER = '@@WATCHER_CLAIM_LOOP_SUMMARY@@';
 
+function fixtureEnv(overrides = {}) {
+  return {
+    ...process.env,
+    GITHUB_TOKEN: 'fixture-token',
+    WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '1',
+    ...overrides,
+  };
+}
+
 function fileUrl(...parts) {
   return pathToFileURL(path.join(REPO_ROOT, ...parts)).href;
 }
@@ -376,10 +385,7 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          GITHUB_TOKEN: 'fixture-token',
-        },
+        env: fixtureEnv(),
       }
     );
 
@@ -452,10 +458,7 @@ test('watcher pollOnce isolates fast-merge poll exceptions and still claims norm
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          GITHUB_TOKEN: 'fixture-token',
-        },
+        env: fixtureEnv(),
       }
     );
 
@@ -494,10 +497,7 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          GITHUB_TOKEN: 'fixture-token',
-        },
+        env: fixtureEnv(),
       }
     );
 
@@ -538,11 +538,9 @@ test('watcher pollOnce serial fallback preserves stop-on-first-spawn-failure beh
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          GITHUB_TOKEN: 'fixture-token',
+        env: fixtureEnv({
           ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_ENABLED: 'false',
-        },
+        }),
       }
     );
 

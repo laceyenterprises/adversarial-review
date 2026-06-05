@@ -155,6 +155,10 @@ import {
   isReviewerLeaseExpired,
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
+import {
+  createRoutingTierReadinessProbeCache,
+  probeRoutingTierReadiness,
+} from './routing-tier-readiness.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -3462,6 +3466,7 @@ async function pollOnce(
   const reviewerDispatchCandidates = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({ logger: console });
+  const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
 
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
@@ -4265,6 +4270,33 @@ async function pollOnce(
               ? 'rereview'
               : 'first-pass';
 
+            // Pre-spawn routing-tier readiness probe. Successful probes are
+            // cached for the rest of the tick; failed probes get bounded
+            // retries plus a very short cache so later PRs can re-check after
+            // a brief proxy bounce instead of inheriting a whole-tick outage.
+            const routingTierReadiness = await getRoutingTierReadinessForTick();
+            if (!routingTierReadiness.ready) {
+              console.log(
+                `[watcher] Skipping reviewer spawn for ${repoPath}#${prNumber}: ` +
+                `routing tier (LiteLLM proxy) not ready (${routingTierReadiness.reason}). ` +
+                `Deferring via transient-failure backoff; no attempt budget consumed.`
+              );
+              settleReviewerAttempt({
+                rootDir: ROOT,
+                repoPath,
+                prNumber,
+                result: {
+                  ok: false,
+                  failureClass: routingTierReadiness.failureClass || 'cascade',
+                  error: routingTierReadiness.failureMessage
+                    || `Routing-tier readiness probe reported ${routingTierReadiness.reason}.`,
+                },
+                failureAt: attemptAt,
+                maxRemediationRounds,
+              });
+              return;
+            }
+
             const result = await spawnReviewer({
               repo: repoPath,
               prNumber,
@@ -4547,6 +4579,7 @@ if (isMain) {
 export {
   classifyReviewerFailure,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
+  probeRoutingTierReadiness,
   evaluateRoundBudgetForReview,
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,

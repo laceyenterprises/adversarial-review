@@ -18,6 +18,7 @@ import {
   shouldBackoffReviewerSpawn,
 } from '../src/reviewer-cascade.mjs';
 import {
+  probeRoutingTierReadiness,
   selectReviewerRouteForAttempt,
   settleReviewerAttempt,
 } from '../src/watcher.mjs';
@@ -88,6 +89,60 @@ test('cascade simulator backs off and does not increment attempt counter', () =>
       }).shouldBackoff,
       true
     );
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('routing-tier probe failures settle through cascade backoff without burning attempts', async () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const probe = await probeRoutingTierReadiness({
+      env: { WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '' },
+      fetchFn: async () => ({ status: 503, ok: false }),
+    });
+    assert.equal(probe.ready, false);
+    assert.equal(probe.failureClass, 'cascade');
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: 'laceyenterprises/adversarial-review',
+      prNumber: 195,
+      result: {
+        ok: false,
+        failureClass: probe.failureClass,
+        error: probe.failureMessage,
+      },
+      failureAt: '2026-05-04T07:10:00.000Z',
+      maxRemediationRounds: 2,
+      statements: {
+        markPosted: db.prepare(
+          "UPDATE reviewed_prs SET review_status = 'posted', reviewed_at = ? WHERE repo = ? AND pr_number = ?"
+        ),
+        markFailed: stmtMarkBugFailed(db),
+        releaseReviewLease: stmtMarkCascadeFailed(db),
+        markCascadeFailed: stmtMarkCascadeFailed(db),
+        markPendingUpstream: stmtMarkPendingUpstream(db),
+        getReviewRow: db.prepare(
+          'SELECT review_status, review_attempts, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+        ),
+      },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/adversarial-review', 195);
+    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.failed_at, '2026-05-04T07:10:00.000Z');
+    assert.match(row.failure_message, /^\[cascade\] Routing-tier readiness probe returned HTTP 503\./);
+
+    const cascadeState = readCascadeState(rootDir, {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 195,
+    });
+    assert.equal(cascadeState?.consecutiveTransientFailures, 1);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

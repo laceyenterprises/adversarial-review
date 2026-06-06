@@ -91,6 +91,7 @@ const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
 const SESSION_LEDGER_LOOKUP_REASON_ALIASES = new Map([
   ['missing-ledger-target', 'missing-ledger-db'],
   ['ledger-read-failed', 'worker-run-lookup-failed'],
+  ['psql-not-installed', 'worker-run-lookup-failed'],
 ]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
@@ -551,6 +552,7 @@ async function lookupOriginalWorkerRunStatus({
   ledgerTarget = null,
   workspace = undefined,
   runRecord = undefined,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
 } = {}) {
   const resolvedWorkspace = workspace === undefined
     ? readWorkerWorkspace(workerDir).workspace || null
@@ -568,7 +570,7 @@ async function lookupOriginalWorkerRunStatus({
     return { found: false, reason: 'missing-launch-request-id' };
   }
 
-  const result = readLatestWorkerRunStatusFromLedger({
+  const result = readLatestWorkerRunStatusImpl({
     launchRequestId,
     ledgerTarget,
     env,

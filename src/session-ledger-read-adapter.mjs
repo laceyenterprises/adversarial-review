@@ -46,6 +46,39 @@ function sqliteTargetFromPath(path, source, extra = {}) {
   };
 }
 
+function sqliteTargetIsUsable(path, requiredTables = []) {
+  if (!existsSync(path)) return false;
+  return sessionLedgerDbHasTables(path, requiredTables);
+}
+
+function usableSqliteTargetFromPath(
+  path,
+  source,
+  { requiredTables = [], requireExisting = false, extra = {} } = {},
+) {
+  const result = sqliteTargetFromPath(path, source, extra);
+  if (!result.ok) return result;
+  if (requiredTables.length === 0 && !requireExisting) return result;
+  if (!existsSync(result.target.path)) {
+    return {
+      ok: false,
+      reason: 'missing-ledger-target',
+      detail: `sqlite ledger target does not exist: ${result.target.path}`,
+      target: result.target,
+    };
+  }
+  if (requiredTables.length === 0) return result;
+  if (!sqliteTargetIsUsable(result.target.path, requiredTables)) {
+    return {
+      ok: false,
+      reason: 'missing-ledger-target',
+      detail: `sqlite ledger target is missing required tables: ${result.target.path}`,
+      target: result.target,
+    };
+  }
+  return result;
+}
+
 function postgresTargetFromConfig({ cfg, env }) {
   const dsn = normalizeText(env.AGENT_OS_SESSION_LEDGER_DSN || cfg.get('session_ledger.dsn'));
   const databaseName = normalizeText(cfg.get('session_ledger.database_name'));
@@ -114,6 +147,13 @@ function normalizeExplicitLedgerTarget(ledgerTarget) {
     return sqliteTargetFromPath(text.slice('sqlite://'.length), 'explicit-ledger-target');
   }
   return sqliteTargetFromPath(text, 'explicit-ledger-target');
+}
+
+function usableLedgerTargetFromEnvValue(value, source, requiredTables) {
+  const result = normalizeExplicitLedgerTarget(value);
+  if (!result.ok) return result;
+  if (result.target.backend !== 'sqlite' || requiredTables.length === 0) return result;
+  return usableSqliteTargetFromPath(result.target.path, source, { requiredTables });
 }
 
 function sqliteTargetCandidates({ cfg, env, rootDir }) {
@@ -196,17 +236,35 @@ export function resolveSessionLedgerReadTarget({
     return sqliteTargetFromPath(ledgerDbPath, 'deprecated-ledger-db-path', { deprecatedAlias: true });
   }
   if (env.AGENT_OS_SESSION_LEDGER_TARGET) {
-    return normalizeExplicitLedgerTarget(env.AGENT_OS_SESSION_LEDGER_TARGET);
+    const result = usableLedgerTargetFromEnvValue(
+      env.AGENT_OS_SESSION_LEDGER_TARGET,
+      'env:AGENT_OS_SESSION_LEDGER_TARGET',
+      requiredTables,
+    );
+    if (result.ok || result.reason === 'malformed-ledger-target') return result;
   }
   if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
-    return sqliteTargetFromPath(env.AGENT_OS_SESSION_LEDGER_DB_PATH, 'env:AGENT_OS_SESSION_LEDGER_DB_PATH');
+    const result = usableSqliteTargetFromPath(
+      env.AGENT_OS_SESSION_LEDGER_DB_PATH,
+      'env:AGENT_OS_SESSION_LEDGER_DB_PATH',
+      { requiredTables },
+    );
+    if (result.ok || result.reason === 'malformed-ledger-target') return result;
   }
   if (env.SESSION_LEDGER_DB_PATH) {
-    return sqliteTargetFromPath(env.SESSION_LEDGER_DB_PATH, 'env:SESSION_LEDGER_DB_PATH');
+    const result = usableSqliteTargetFromPath(
+      env.SESSION_LEDGER_DB_PATH,
+      'env:SESSION_LEDGER_DB_PATH',
+      { requiredTables },
+    );
+    if (result.ok || result.reason === 'malformed-ledger-target') return result;
   }
   const legacyHqLedgerDbPath = readLegacyHqLedgerDbPath(hqRoot || env.HQ_ROOT);
   if (legacyHqLedgerDbPath) {
-    return sqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config');
+    const result = usableSqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config', {
+      requiredTables,
+    });
+    if (result.ok || result.reason === 'malformed-ledger-target') return result;
   }
   try {
     const cfg = loadConfig({ env });
@@ -215,9 +273,11 @@ export function resolveSessionLedgerReadTarget({
       return postgresTargetFromConfig({ cfg, env });
     }
     for (const candidate of sqliteTargetCandidates({ cfg, env, rootDir })) {
-      if (existsSync(candidate.path) && sessionLedgerDbHasTables(candidate.path, requiredTables)) {
-        return sqliteTargetFromPath(candidate.path, candidate.source);
-      }
+      const result = usableSqliteTargetFromPath(candidate.path, candidate.source, {
+        requiredTables,
+        requireExisting: true,
+      });
+      if (result.ok) return result;
     }
     return {
       ok: false,
@@ -311,9 +371,9 @@ export function readLatestWorkerRunStatusFromLedger({
   const queried = querySqliteRows(
     resolution.target,
     `SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
-       FROM worker_runs
-      WHERE launch_request_id = @launchRequestId
-      ORDER BY COALESCE(updated_at, ended_at, started_at, '') DESC, rowid DESC
+      FROM worker_runs
+     WHERE launch_request_id = @launchRequestId
+      ORDER BY rowid DESC
       LIMIT 1`,
     { launchRequestId: normalizedLaunchRequestId },
   );

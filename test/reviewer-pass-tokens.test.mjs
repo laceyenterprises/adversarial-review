@@ -360,6 +360,36 @@ test('worker-run lookup prefers explicit workerRunId over a newer launch request
   assert.equal(usage.output, 45);
 });
 
+test('token rollup logs unsupported postgres backend once per scope', () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const workerUsage = readWorkerRunTokenUsage({
+      workerRunId: 'wr_1',
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+    });
+    const workerUsageAgain = readWorkerRunTokenUsage({
+      workerRunId: 'wr_2',
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+    });
+    const reviewerUsage = readReviewerSessionTokenUsage({
+      adapterSessionKey: 'session-1',
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+    });
+
+    assert.equal(workerUsage, null);
+    assert.equal(workerUsageAgain, null);
+    assert.equal(reviewerUsage, null);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /unsupported-ledger-backend.*worker-run/);
+  assert.match(warnings[1], /unsupported-ledger-backend.*reviewer-session/);
+});
+
 test('backfill is idempotent for historical follow-up workspaces', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');

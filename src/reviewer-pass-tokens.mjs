@@ -250,14 +250,16 @@ function coerceNonNegativeFloat(value) {
   return parsed;
 }
 
-function resolveSessionLedgerDbPath({ env = process.env, hqRoot = null, rootDir = process.cwd(), explicitPath = null } = {}) {
-  const resolution = resolveSessionLedgerReadTarget({
-    ledgerDbPath: explicitPath,
-    env,
-    hqRoot,
-    rootDir,
-  });
-  return resolution.ok && resolution.target.backend === 'sqlite' ? resolution.target.path : null;
+const tokenRollupWarnings = new Set();
+
+function warnTokenRollupDegraded(scope, result) {
+  if (result?.reason !== 'unsupported-ledger-backend') return;
+  const key = `${scope}:${result.target?.backend || 'unknown'}`;
+  if (tokenRollupWarnings.has(key)) return;
+  tokenRollupWarnings.add(key);
+  console.warn(
+    `[reviewer-pass-tokens] unsupported-ledger-backend for ${scope}; token rollup unavailable for backend=${result.target?.backend || 'unknown'}`
+  );
 }
 
 function readReviewerSessionTokenUsage({
@@ -282,6 +284,7 @@ function readReviewerSessionTokenUsage({
     env,
     rootDir,
   });
+  warnTokenRollupDegraded('reviewer-session', result);
   return result.ok ? tokenUsageFromRuntimeSession(result.row) : null;
 }
 
@@ -301,6 +304,7 @@ function readWorkerRunTokenUsage({
     env,
     rootDir,
   });
+  warnTokenRollupDegraded('worker-run', result);
   return result.ok ? tokenUsageFromWorkerRun(result.row, { workerRunId, launchRequestId }) : null;
 }
 
@@ -1202,5 +1206,4 @@ export {
   readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,
   reviewerPassRows,
-  resolveSessionLedgerDbPath,
 };

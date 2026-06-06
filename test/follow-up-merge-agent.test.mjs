@@ -3260,6 +3260,39 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
   assert.equal(result.runId, 'run_alias');
 });
 
+test('lookupOriginalWorkerRunStatus ignores cwd-rooted ledger candidates during merge prep', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const workerDir = path.join(hqRoot, 'workers', 'codex-pr-401');
+  const cwdLedger = path.join(rootDir, '.agent-os', 'session-ledger', 'ledger.db');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(
+    path.join(workerDir, 'workspace.json'),
+    JSON.stringify({ workerId: 'codex-pr-401', branch: 'codex-pr-401', launchRequestId: 'lrq_1' }),
+    'utf8',
+  );
+  mkdirSync(path.dirname(cwdLedger), { recursive: true });
+  const db = new Database(cwdLedger);
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('wr_cwd', 'lrq_1', 'succeeded', null, null, null);
+  db.close();
+
+  const previousCwd = process.cwd();
+  process.chdir(rootDir);
+  try {
+    const result = await lookupOriginalWorkerRunStatus({
+      workerDir,
+      hqRoot,
+      env: { ...HERMETIC_CONFIG_ENV, HOME: path.join(rootDir, 'empty-home') },
+    });
+    assert.equal(result.found, false);
+    assert.equal(result.reason, 'missing-ledger-db');
+  } finally {
+    process.chdir(previousCwd);
+  }
+});
+
 // Regression for the 2026-05-18 outage where merge-agent emitted false
 // `original-worker-run-row-missing-but-worktree-present` deferrals for
 // every newly-provisioned worker (PRs #661 #664 #665 stuck >6h).

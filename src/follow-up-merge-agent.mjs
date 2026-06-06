@@ -573,6 +573,7 @@ async function lookupOriginalWorkerRunStatus({
     ledgerTarget,
     env,
     hqRoot,
+    rootDir: null,
   });
   if (!result.ok) {
     return {

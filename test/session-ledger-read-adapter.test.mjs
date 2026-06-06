@@ -139,6 +139,59 @@ test('resolveSessionLedgerReadTarget keeps env sqlite overrides independent from
   assert.equal(result.target.source, 'env:AGENT_OS_SESSION_LEDGER_DB_PATH');
 });
 
+test('resolveSessionLedgerReadTarget falls through env sqlite stubs that lack required tables', () => {
+  const rootDir = tempRoot();
+  const homeDir = tempRoot();
+  const stubLedger = path.join(rootDir, 'env-stub.db');
+  const runtimeLedger = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
+  new Database(stubLedger).close();
+  createLedgerDb(runtimeLedger);
+
+  const result = resolveSessionLedgerReadTarget({
+    requiredTables: ['worker_runs'],
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_DB_PATH: stubLedger,
+      HOME: homeDir,
+    },
+    rootDir: null,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, runtimeLedger);
+  assert.equal(result.target.source, 'roots.runtime_home');
+});
+
+test('resolveSessionLedgerReadTarget falls through stale legacy HQ ledgerDbPath values', () => {
+  const rootDir = tempRoot();
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const homeDir = path.join(rootDir, 'runtime-home');
+  const staleLegacyLedger = path.join(rootDir, 'stale-legacy.db');
+  const runtimeLedger = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  writeFileSync(
+    path.join(hqRoot, '.hq', 'config.json'),
+    JSON.stringify({ ledgerDbPath: staleLegacyLedger }),
+    'utf8',
+  );
+  new Database(staleLegacyLedger).close();
+  createLedgerDb(runtimeLedger);
+
+  const result = resolveSessionLedgerReadTarget({
+    requiredTables: ['worker_runs'],
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      HQ_ROOT: hqRoot,
+      HOME: homeDir,
+    },
+    rootDir: null,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, runtimeLedger);
+  assert.equal(result.target.source, 'roots.runtime_home');
+});
+
 test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newest row', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
@@ -149,13 +202,13 @@ test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newe
        run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
        token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('wr_old', 'lrq_1', 'rs_1', 'running', 1, 2, 0.1, 'session-ledger', '2026-06-04T00:00:00.000Z', null, '2026-06-04T00:01:00.000Z');
+  ).run('wr_old', 'lrq_1', 'rs_1', 'running', 1, 2, 0.1, 'session-ledger', '2026-06-04T00:00:00.000Z', null, '2026-06-04T00:03:00.000Z');
   db.prepare(
     `INSERT INTO worker_runs (
        run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
        token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('wr_new', 'lrq_1', 'rs_2', 'cancelled', 3, 4, 0.2, 'session-ledger', '2026-06-04T00:00:00.000Z', null, '2026-06-04T00:02:00.000Z');
+  ).run('wr_new', 'lrq_1', 'rs_2', 'cancelled', 3, 4, 0.2, 'session-ledger', '2026-06-04T00:00:00.000Z', null, null);
   db.close();
 
   const result = readLatestWorkerRunStatusFromLedger({

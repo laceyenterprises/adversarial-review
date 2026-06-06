@@ -24,6 +24,21 @@ if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
   export AGENT_OS_CFG_MODULES="$REPO_ROOT/tools/adversarial-review/config.yaml${AGENT_OS_CFG_MODULES:+:$AGENT_OS_CFG_MODULES}"
   eval "$(agent_os_config_export)"
 fi
+
+# OPH-01: route `op read` through the rate-limit backoff helper so a
+# 1Password account-level quota exhaustion sleeps 15 min before exit
+# instead of tight-looping launchd respawns. Helper sourced from the
+# agent-os tree (REPO_ROOT resolved above). Only the no-retry exports
+# (lines 123-125) are wrapped; `resolve_alert_to_optional` has its own
+# 3-attempt retry + end-of-line 3600s fail-soft and is left alone.
+# Source-of-truth: projects/oph/SPEC.md §3 OPH-01. Tunable via
+# OP_RATE_LIMIT_BACKOFF_S env.
+if [[ -r "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh" ]]; then
+  source "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+else
+  # Fail-open passthrough when helper is missing (pre-PR checkout).
+  op_resolve_with_rate_limit_backoff() { "$@"; }
+fi
 # Per-user err-file path. The original `/tmp/adversarial-watcher-native-check.err`
 # was a single shared path across users, which silently broke the airlock-side
 # launch when an old placey-owned file existed (cross-user redirect denied,
@@ -120,9 +135,14 @@ fi
 # 1Password popup storm. The service-account token in the env makes these
 # calls non-interactive; the cache only memoizes the resolution and does
 # not change auth strength.
-export LINEAR_API_KEY=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
-export GH_CLAUDE_REVIEWER_TOKEN=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
-export GH_CODEX_REVIEWER_TOKEN=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+# OPH-01: route through op_resolve_with_rate_limit_backoff so a
+# 1Password rate-limit gets a 15-min sleep before exit (vs. the
+# existing fail-open path that turned into a 30-second respawn storm
+# under launchd KeepAlive+ThrottleInterval=30 — the 2026-05-19
+# incident produced 1349 watcher restarts in 8h).
+export LINEAR_API_KEY=$(op_resolve_with_rate_limit_backoff "$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
+export GH_CLAUDE_REVIEWER_TOKEN=$(op_resolve_with_rate_limit_backoff "$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
+export GH_CODEX_REVIEWER_TOKEN=$(op_resolve_with_rate_limit_backoff "$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
 
 resolve_alert_to_optional() {
   local attempt=1

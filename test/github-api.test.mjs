@@ -203,6 +203,7 @@ function makeGraphqlExecStub(expected, { pagination = false } = {}) {
     assert.equal(args[0], 'api');
     assert.equal(args[1], 'graphql');
     const vars = parseGhArgs(args);
+    const query = String(vars.query || '');
     if (!pagination || (!vars.commentsAfter && !vars.reviewsAfter && !vars.checksAfter)) {
       return {
         stdout: JSON.stringify(buildGraphqlResponse(expected, {
@@ -215,6 +216,36 @@ function makeGraphqlExecStub(expected, { pagination = false } = {}) {
           commentsEndCursor: pagination ? 'comments-100' : null,
           reviewsEndCursor: pagination ? 'reviews-100' : null,
           checksEndCursor: pagination ? 'checks-100' : null,
+        })),
+      };
+    }
+    if (query.includes('query PullRequestRollupComments(')) {
+      assert.equal(vars.commentsAfter, 'comments-100');
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: secondComments,
+          reviews: [],
+          checks: [],
+        })),
+      };
+    }
+    if (query.includes('query PullRequestRollupReviews(')) {
+      assert.equal(vars.reviewsAfter, 'reviews-100');
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: [],
+          reviews: secondReviews,
+          checks: [],
+        })),
+      };
+    }
+    if (query.includes('query PullRequestRollupChecks(')) {
+      assert.equal(vars.checksAfter, 'checks-100');
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: [],
+          reviews: [],
+          checks: secondChecks,
         })),
       };
     }
@@ -265,36 +296,31 @@ function makeAsymmetricPaginationExecStub(expected) {
       };
     }
 
-    if (vars.reviewsAfter === 'reviews-100') {
-      assert.equal(Object.hasOwn(vars, 'commentsFirst'), false);
-      assert.equal(Object.hasOwn(vars, 'commentsAfter'), false);
+    if (String(vars.query || '').includes('query PullRequestRollup(')) {
+      throw new Error("You must provide a `first` or `last` value to properly paginate the `comments` connection.");
+    }
+
+    if (String(vars.query || '').includes('query PullRequestRollupReviews(') && vars.reviewsAfter === 'reviews-100') {
       assert.equal(vars.reviewsFirst, '100');
-      assert.equal(Object.hasOwn(vars, 'checksFirst'), false);
-      assert.equal(Object.hasOwn(vars, 'checksAfter'), false);
       return {
         stdout: JSON.stringify(buildGraphqlResponse(expected, {
-          comments: commentsPage,
+          comments: [],
           reviews: reviewsPage2,
-          checks: checksPage,
-          commentsHasNextPage: false,
+          checks: [],
           reviewsHasNextPage: true,
-          checksHasNextPage: false,
           reviewsEndCursor: 'reviews-200',
         })),
       };
     }
 
+    assert.match(String(vars.query || ''), /query PullRequestRollupReviews\(/);
     assert.equal(vars.reviewsAfter, 'reviews-200');
-    assert.equal(Object.hasOwn(vars, 'commentsFirst'), false);
-    assert.equal(Object.hasOwn(vars, 'commentsAfter'), false);
     assert.equal(vars.reviewsFirst, '100');
-    assert.equal(Object.hasOwn(vars, 'checksFirst'), false);
-    assert.equal(Object.hasOwn(vars, 'checksAfter'), false);
     return {
       stdout: JSON.stringify(buildGraphqlResponse(expected, {
-        comments: commentsPage,
+        comments: [],
         reviews: reviewsPage3,
-        checks: checksPage,
+        checks: [],
       })),
     };
   }
@@ -395,6 +421,85 @@ function makeComplexityFallbackExecStub(expected) {
           checks: checksPages[page],
           checksHasNextPage: page === 0,
           checksEndCursor: page === 0 ? 'checks-100' : null,
+        })),
+      };
+    }
+
+    throw new Error(`Unexpected GraphQL query: ${query}`);
+  }
+
+  return { calls, execFileImpl };
+}
+
+function makeStructuredComplexityFallbackExecStub(expected) {
+  const calls = [];
+
+  async function execFileImpl(command, args) {
+    calls.push({ command, args: [...args] });
+    const vars = parseGhArgs(args);
+    const query = String(vars.query || '');
+
+    if (query.includes('query PullRequestRollup(')) {
+      const err = new Error('gh api graphql failed');
+      err.stdout = JSON.stringify({
+        errors: [{
+          type: 'MAX_NODE_LIMIT_EXCEEDED',
+          message: 'rollup too large',
+        }],
+      });
+      throw err;
+    }
+
+    if (query.includes('query PullRequestRollupMetadata(')) {
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                id: expected.id,
+                number: expected.number,
+                title: expected.title,
+                body: expected.body,
+                state: expected.state,
+                mergedAt: expected.mergedAt,
+                closedAt: expected.closedAt,
+                createdAt: expected.createdAt,
+                updatedAt: expected.updatedAt,
+                headRefName: expected.headRefName,
+                baseRefName: expected.baseRefName,
+                headRefOid: expected.headRefOid,
+                mergeable: expected.mergeable,
+                mergeStateStatus: expected.mergeStateStatus,
+                author: expected.author,
+                labels: {
+                  nodes: expected.labels,
+                },
+              },
+            },
+          },
+        }),
+      };
+    }
+
+    if (query.includes('query PullRequestRollupComments(')) {
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected)),
+      };
+    }
+
+    if (query.includes('query PullRequestRollupReviews(')) {
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: [],
+        })),
+      };
+    }
+
+    if (query.includes('query PullRequestRollupChecks(')) {
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: [],
+          reviews: [],
         })),
       };
     }
@@ -839,10 +944,10 @@ test('feature flag fallback runs the legacy cluster path and preserves shape', a
   const legacyMod = await importGithubApiFresh({ disableGraphqlRollup: true });
   const legacyTelemetry = makeTelemetrySink();
   const legacyExec = makeLegacyExecStub(expected);
-  const legacyResult = await legacyMod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+  const legacyResult = await withEnv({ GHO_DISABLE_GRAPHQL_ROLLUP: '1' }, async () => legacyMod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
     execFileImpl: legacyExec.execFileImpl,
     recordApiCallImpl: legacyTelemetry.recordApiCallImpl,
-  });
+  }));
 
   assert.deepEqual(legacyResult, graphqlResult);
   assert.deepEqual(
@@ -868,7 +973,18 @@ test('pagination cursor handling returns all comments, reviews, and checks witho
   assert.equal(result.comments.length, 150);
   assert.equal(result.reviews.length, 145);
   assert.equal(result.checks.length, 135);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 4);
+  assert.deepEqual(
+    calls.map(({ args }) => {
+      const query = String(parseGhArgs(args).query || '');
+      if (query.includes('query PullRequestRollup(')) return 'rollup';
+      if (query.includes('query PullRequestRollupComments(')) return 'comments';
+      if (query.includes('query PullRequestRollupReviews(')) return 'reviews';
+      if (query.includes('query PullRequestRollupChecks(')) return 'checks';
+      return 'unknown';
+    }),
+    ['rollup', 'comments', 'reviews', 'checks'],
+  );
 });
 
 test('multiplexed pagination does not duplicate exhausted connections while another list continues', async () => {
@@ -888,6 +1004,15 @@ test('multiplexed pagination does not duplicate exhausted connections while anot
   assert.equal(new Set(result.reviews.map((review) => review.id)).size, 250);
   assert.equal(new Set(result.checks.map((check) => check.name)).size, 25);
   assert.equal(calls.length, 3);
+  assert.deepEqual(
+    calls.map(({ args }) => {
+      const query = String(parseGhArgs(args).query || '');
+      if (query.includes('query PullRequestRollup(')) return 'rollup';
+      if (query.includes('query PullRequestRollupReviews(')) return 'reviews';
+      return 'unknown';
+    }),
+    ['rollup', 'reviews', 'reviews'],
+  );
 });
 
 test('complexity fallback switches to metadata plus per-list pagination without replaying page one', async () => {
@@ -916,6 +1041,51 @@ test('complexity fallback switches to metadata plus per-list pagination without 
     }),
     ['rollup', 'metadata', 'comments', 'comments', 'reviews', 'reviews', 'checks', 'checks'],
   );
+});
+
+test('complexity fallback also triggers on structured GraphQL error types', async () => {
+  const expected = makeExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const { calls, execFileImpl } = makeStructuredComplexityFallbackExecStub(expected);
+
+  const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+
+  assert.equal(result.comments.length, expected.comments.length);
+  assert.equal(result.reviews.length, expected.reviews.length);
+  assert.equal(result.checks.length, expected.checks.length);
+  assert.deepEqual(
+    calls.map(({ args }) => {
+      const query = String(parseGhArgs(args).query || '');
+      if (query.includes('query PullRequestRollupMetadata(')) return 'metadata';
+      if (query.includes('query PullRequestRollupComments(')) return 'comments';
+      if (query.includes('query PullRequestRollupReviews(')) return 'reviews';
+      if (query.includes('query PullRequestRollupChecks(')) return 'checks';
+      if (query.includes('query PullRequestRollup(')) return 'rollup';
+      return 'unknown';
+    }),
+    ['rollup', 'metadata', 'comments', 'reviews', 'checks'],
+  );
+});
+
+test('GraphQL rollup kill-switch is read at call time', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const legacyExec = makeLegacyExecStub(expected);
+
+  process.env.GHO_DISABLE_GRAPHQL_ROLLUP = '1';
+  try {
+    const result = await mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+      execFileImpl: legacyExec.execFileImpl,
+      recordApiCallImpl: () => {},
+    });
+    assert.equal(result.headRefOid, expected.headRefOid);
+    assert.equal(legacyExec.calls.length > 0, true);
+  } finally {
+    delete process.env.GHO_DISABLE_GRAPHQL_ROLLUP;
+  }
 });
 
 test('head/state helper uses the lightweight GraphQL query and telemetry category', async () => {

@@ -314,16 +314,11 @@ test('follow-up-stop CLI signals a live spawned worker before stopping', async (
   );
   receiptPath = stdout.match(/receipt=(\S+)/)?.[1] || null;
 
-  assert.match(stdout, /workerSignalDelivered=(true|false)/);
+  assert.match(stdout, /workerSignalDelivered=true/);
   assert.ok(receiptPath);
   const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
-  assert.equal(typeof receipt.result.signalled, 'boolean');
-  if (receipt.result.signalled) {
-    assert.match(stdout, /workerExitedAfterSignal=(true|false)/);
-  }
-  if (!receipt.result.signalled) {
-    assert.match(String(receipt.result.error || ''), /process-group-not-found|identity-unconfirmed/);
-  }
+  assert.equal(receipt.result.signalled, true);
+  assert.match(stdout, /workerExitedAfterSignal=(true|false)/);
   const stopped = JSON.parse(readFileSync(stoppedPath, 'utf8'));
   assert.equal(stopped.status, 'stopped');
 });

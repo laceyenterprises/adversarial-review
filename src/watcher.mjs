@@ -451,7 +451,7 @@ async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = cons
   }
 }
 
-async function fetchLivePRHeadSha(octokit, { owner, repo, prNumber, fallbackHeadSha = null, logger = console } = {}) {
+async function fetchLivePRHeadSha({ owner, repo, prNumber, fallbackHeadSha = null, logger = console } = {}) {
   try {
     const pr = await fetchPullRequestHeadAndState(`${owner}/${repo}`, prNumber, {
       execFileImpl: execFileAsync,
@@ -3943,7 +3943,7 @@ async function pollOnce(
         if (liveLabels) {
           const fastMergeDecision = fastMergeDecisionFromLabels(liveLabels);
           if (fastMergeDecision.hasFastMergeLabel && !fastMergeDecision.hasVeto) {
-            const authorizedHeadSha = await fetchLivePRHeadSha(octokit, {
+            const authorizedHeadSha = await fetchLivePRHeadSha({
               owner,
               repo,
               prNumber,

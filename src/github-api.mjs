@@ -4,10 +4,10 @@ import { promisify } from 'node:util';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 
 const execFileAsync = promisify(execFile);
-const GRAPHQL_ROLLUP_DISABLED = process.env.GHO_DISABLE_GRAPHQL_ROLLUP === '1';
 const PAGE_SIZE = 100;
 const GH_MAX_BUFFER = 10 * 1024 * 1024;
 const GRAPHQL_COMPLEXITY_PATTERN = /\b(complexity|cost limit|maximum cost|resource limit)\b/i;
+const GRAPHQL_COMPLEXITY_TYPE_PATTERN = /(complexity|cost|resource|limit|max(?:imum)?|node)/i;
 
 const GRAPHQL_ROLLUP_QUERY = `
 query PullRequestRollup(
@@ -351,8 +351,16 @@ function normalizeRollup(pr, {
 }
 
 async function execGhJson(execFileImpl, args) {
-  const { stdout } = await execFileImpl('gh', args, { maxBuffer: GH_MAX_BUFFER });
-  return JSON.parse(String(stdout || 'null'));
+  try {
+    const { stdout } = await execFileImpl('gh', args, { maxBuffer: GH_MAX_BUFFER });
+    return JSON.parse(String(stdout || 'null'));
+  } catch (err) {
+    const payload = tryParseGraphqlErrorPayload(err);
+    if (payload?.errors) {
+      err.graphqlErrors = payload.errors;
+    }
+    throw err;
+  }
 }
 
 async function runGraphql(execFileImpl, query, variables) {
@@ -496,6 +504,50 @@ function appendGraphqlPage(target, nodes, normalize) {
   }
 }
 
+function tryParseJson(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function tryParseGraphqlErrorPayload(err) {
+  const candidates = [
+    err?.stdout,
+    err?.stderr,
+    err?.cause?.stdout,
+    err?.cause?.stderr,
+  ];
+  for (const candidate of candidates) {
+    const parsed = tryParseJson(candidate);
+    if (parsed?.errors) return parsed;
+  }
+  return null;
+}
+
+function isGraphqlComplexityError(err) {
+  const errors = Array.isArray(err?.graphqlErrors) ? err.graphqlErrors : [];
+  for (const entry of errors) {
+    const typeCandidates = [
+      entry?.type,
+      entry?.extensions?.type,
+      entry?.extensions?.code,
+      entry?.code,
+    ];
+    if (typeCandidates.some((value) => GRAPHQL_COMPLEXITY_TYPE_PATTERN.test(String(value || '')))) {
+      return true;
+    }
+  }
+  return GRAPHQL_COMPLEXITY_PATTERN.test(String(err?.message || ''));
+}
+
+function isGraphqlRollupDisabled(env = process.env) {
+  return env.GHO_DISABLE_GRAPHQL_ROLLUP === '1';
+}
+
 async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
   execFileImpl,
 } = {}) {
@@ -504,53 +556,56 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
   const reviews = [];
   const checks = [];
   let prData = null;
-  let commentsAfter = null;
-  let reviewsAfter = null;
-  let checksAfter = null;
-  let commentsFirst = PAGE_SIZE;
-  let reviewsFirst = PAGE_SIZE;
-  let checksFirst = PAGE_SIZE;
-  let hasNextComments = true;
-  let hasNextReviews = true;
-  let hasNextChecks = true;
-  let isFirstIteration = true;
+  const payload = await runGraphql(execFileImpl, GRAPHQL_ROLLUP_QUERY, {
+    owner,
+    repo: repoName,
+    prNumber,
+    commentsFirst: PAGE_SIZE,
+    commentsAfter: null,
+    reviewsFirst: PAGE_SIZE,
+    reviewsAfter: null,
+    checksFirst: PAGE_SIZE,
+    checksAfter: null,
+  });
+  const pr = extractGraphqlPr(payload);
+  prData = pr;
 
-  while (hasNextComments || hasNextReviews || hasNextChecks) {
-    const payload = await runGraphql(execFileImpl, GRAPHQL_ROLLUP_QUERY, {
-      owner,
-      repo: repoName,
-      prNumber,
-      commentsFirst,
-      commentsAfter,
-      reviewsFirst,
-      reviewsAfter,
-      checksFirst,
-      checksAfter,
-    });
-    const pr = extractGraphqlPr(payload);
-    if (!prData) prData = pr;
+  appendGraphqlPage(comments, pr?.comments?.nodes, normalizeComment);
+  appendGraphqlPage(reviews, pr?.reviews?.nodes, normalizeReview);
+  appendGraphqlPage(checks, extractChecksConnection(pr)?.nodes, normalizeCheck);
 
-    if (isFirstIteration || hasNextComments) {
-      appendGraphqlPage(comments, pr?.comments?.nodes, normalizeComment);
-    }
-    if (isFirstIteration || hasNextReviews) {
-      appendGraphqlPage(reviews, pr?.reviews?.nodes, normalizeReview);
-    }
-    if (isFirstIteration || hasNextChecks) {
-      appendGraphqlPage(checks, extractChecksConnection(pr)?.nodes, normalizeCheck);
-    }
-
-    hasNextComments = Boolean(pr?.comments?.pageInfo?.hasNextPage);
-    hasNextReviews = Boolean(pr?.reviews?.pageInfo?.hasNextPage);
-    hasNextChecks = Boolean(extractChecksConnection(pr)?.pageInfo?.hasNextPage);
-    commentsAfter = hasNextComments ? pr?.comments?.pageInfo?.endCursor || null : null;
-    reviewsAfter = hasNextReviews ? pr?.reviews?.pageInfo?.endCursor || null : null;
-    checksAfter = hasNextChecks ? extractChecksConnection(pr)?.pageInfo?.endCursor || null : null;
-    commentsFirst = hasNextComments ? PAGE_SIZE : null;
-    reviewsFirst = hasNextReviews ? PAGE_SIZE : null;
-    checksFirst = hasNextChecks ? PAGE_SIZE : null;
-    isFirstIteration = false;
-    if (!hasNextComments && !hasNextReviews && !hasNextChecks) break;
+  if (pr?.comments?.pageInfo?.hasNextPage) {
+    comments.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
+      execFileImpl,
+      query: GRAPHQL_COMMENTS_ONLY_QUERY,
+      firstVariable: 'commentsFirst',
+      afterVariable: 'commentsAfter',
+      startAfter: pr?.comments?.pageInfo?.endCursor || null,
+      extractConnection: (value) => value?.comments,
+      normalize: normalizeComment,
+    }));
+  }
+  if (pr?.reviews?.pageInfo?.hasNextPage) {
+    reviews.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
+      execFileImpl,
+      query: GRAPHQL_REVIEWS_ONLY_QUERY,
+      firstVariable: 'reviewsFirst',
+      afterVariable: 'reviewsAfter',
+      startAfter: pr?.reviews?.pageInfo?.endCursor || null,
+      extractConnection: (value) => value?.reviews,
+      normalize: normalizeReview,
+    }));
+  }
+  if (extractChecksConnection(pr)?.pageInfo?.hasNextPage) {
+    checks.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
+      execFileImpl,
+      query: GRAPHQL_CHECKS_ONLY_QUERY,
+      firstVariable: 'checksFirst',
+      afterVariable: 'checksAfter',
+      startAfter: extractChecksConnection(pr)?.pageInfo?.endCursor || null,
+      extractConnection: extractChecksConnection,
+      normalize: normalizeCheck,
+    }));
   }
 
   return normalizeRollup(prData, { comments, reviews, checks });
@@ -667,7 +722,7 @@ async function fetchPullRequestRollup(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
 } = {}) {
-  if (GRAPHQL_ROLLUP_DISABLED) {
+  if (isGraphqlRollupDisabled()) {
     return fetchLegacyWithTelemetry(repo, prNumber, { execFileImpl, recordApiCallImpl });
   }
 
@@ -677,7 +732,7 @@ async function fetchPullRequestRollup(repo, prNumber, {
     try {
       result = await fetchGraphqlRollupMultiplexed(repo, prNumber, { execFileImpl });
     } catch (err) {
-      if (!GRAPHQL_COMPLEXITY_PATTERN.test(String(err?.message || ''))) throw err;
+      if (!isGraphqlComplexityError(err)) throw err;
       result = await fetchGraphqlRollupPerList(repo, prNumber, { execFileImpl });
     }
     recordApiCallImpl({
@@ -714,7 +769,8 @@ const __test__ = {
   normalizeRollup,
   runGraphql,
   splitRepo,
-  GRAPHQL_ROLLUP_DISABLED,
+  isGraphqlComplexityError,
+  isGraphqlRollupDisabled,
 };
 
 export {

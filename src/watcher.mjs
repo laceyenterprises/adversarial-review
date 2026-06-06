@@ -4,7 +4,6 @@
  * Also tracks PR lifecycle (merged/closed) and syncs status to Linear automatically.
  */
 
-import { Octokit } from '@octokit/rest';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -120,6 +119,11 @@ import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import {
+  createWatcherOctokit,
+  fetchConditionalRestPage,
+} from './conditional-request.mjs';
+import { sweepEtagCache } from './etag-cache.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -191,6 +195,7 @@ const DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS = 900;
 const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_ON = 60;
 const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF = 300;
 const PENDING_DRAFT_RESPAWN_AGE_MAX_SECONDS = 1800;
+const ETAG_CACHE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
   claude: {
     reviewerModel: 'claude',
@@ -205,6 +210,7 @@ const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
 });
+let lastEtagCacheSweepAtMs = 0;
 
 // Stuck-pre-spawn alert debounce. Once we've alerted on a particular
 // (repo, PR, dispatchedAt) tuple, suppress the next alert for this
@@ -269,6 +275,7 @@ async function withApiTelemetry(category, { repo = null, prNumber = null, succes
     throw err;
   }
 }
+
 
 function isFastMergeSkipEnabled() {
   return process.env.FML_WATCHER_SKIP_ENABLED === 'true';
@@ -430,17 +437,51 @@ function fastMergeDecisionFromLabels(labels) {
   };
 }
 
+function maybeSweepConditionalRequestCache({
+  rootDir = ROOT,
+  logger = console,
+  nowMs = Date.now(),
+} = {}) {
+  if ((nowMs - lastEtagCacheSweepAtMs) < ETAG_CACHE_SWEEP_INTERVAL_MS) return [];
+  lastEtagCacheSweepAtMs = nowMs;
+  try {
+    const deleted = sweepEtagCache(rootDir, { nowMs });
+    if (deleted.length > 0) {
+      logger.log?.(`[watcher] pruned ${deleted.length} expired conditional-request cache entries`);
+    }
+    return deleted;
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] conditional-request cache sweep failed; continuing poll tick: ${err?.message || err}`
+    );
+    return [];
+  }
+}
+
 async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = console } = {}) {
   try {
     if (typeof octokit?.rest?.issues?.listLabelsOnIssue !== 'function') {
       throw new Error('octokit.rest.issues.listLabelsOnIssue unavailable');
     }
-    const { data } = await withApiTelemetry('labels_list', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.issues.listLabelsOnIssue({
+    const params = {
       owner,
       repo,
       issue_number: prNumber,
       per_page: 100,
-    }));
+    };
+    const { data } = await fetchConditionalRestPage({
+      category: 'labels_list',
+      endpoint: 'issues.labels',
+      repo: `${owner}/${repo}`,
+      prNumber,
+      rootDir: ROOT,
+      logger,
+      params: { per_page: params.per_page },
+      request: (requestParams) => octokit.rest.issues.listLabelsOnIssue({
+        ...params,
+        ...requestParams,
+      }),
+    });
     return Array.isArray(data) ? data : [];
   } catch (err) {
     logger.warn?.(
@@ -618,7 +659,20 @@ async function fetchFastMergeAuthorizationFromTimeline(
     };
     const events = [];
     for (let page = 1; page <= FAST_MERGE_TIMELINE_MAX_PAGES; page += 1) {
-      const response = await withApiTelemetry('timeline_events', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.issues.listEventsForTimeline({ ...params, page }));
+      const response = await fetchConditionalRestPage({
+        category: 'timeline_events',
+        endpoint: 'issues.timeline',
+        repo: `${owner}/${repo}`,
+        prNumber,
+        rootDir: ROOT,
+        logger,
+        params: { page, per_page: params.per_page },
+        request: (requestParams) => octokit.rest.issues.listEventsForTimeline({
+          ...params,
+          ...requestParams,
+          page,
+        }),
+      });
       const pageEvents = Array.isArray(response?.data) ? response.data : [];
       events.push(...pageEvents);
       if (pageEvents.length < params.per_page) break;
@@ -2959,12 +3013,14 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 }
 
 async function attemptMergeCloseoutCapture({
+  octokit,
   repo,
   prNumber,
   mergedAt,
   now = new Date(),
   logger = console,
 } = {}) {
+  const [owner, repoName] = String(repo || '').split('/');
   const result = await scrapeMergeCloseout({
     db,
     repo,
@@ -2973,6 +3029,43 @@ async function attemptMergeCloseoutCapture({
     now,
     execFileImpl: execFileAsync,
     logger,
+    fetchIssueCommentsImpl: async () => {
+      if (typeof octokit?.rest?.issues?.listComments !== 'function') {
+        throw new Error('octokit.rest.issues.listComments unavailable');
+      }
+      const comments = [];
+      const params = {
+        owner,
+        repo: repoName,
+        issue_number: prNumber,
+        per_page: 100,
+      };
+      for (let page = 1; ; page += 1) {
+        const response = await fetchConditionalRestPage({
+          category: 'other',
+          endpoint: 'issues.comments',
+          repo,
+          prNumber,
+          rootDir: ROOT,
+          logger,
+          params: { page, per_page: params.per_page },
+          request: (requestParams) => octokit.rest.issues.listComments({
+            ...params,
+            ...requestParams,
+            page,
+          }),
+        });
+        const pageComments = Array.isArray(response?.data) ? response.data : [];
+        comments.push(...pageComments.map((comment) => ({
+          id: comment?.node_id ?? null,
+          login: comment?.user?.login ?? null,
+          created_at: comment?.created_at ?? null,
+          body: comment?.body ?? '',
+        })));
+        if (pageComments.length < params.per_page) break;
+      }
+      return comments;
+    },
   });
   if (!result.ok) {
     logger.warn?.(
@@ -3005,6 +3098,7 @@ const PENDING_MERGE_CLOSEOUTS_PER_TICK = 20;
 const PENDING_MERGE_CLOSEOUTS_BUDGET_MS = 60_000;
 
 async function retryPendingMergeCloseouts({
+  octokit,
   limit = PENDING_MERGE_CLOSEOUTS_PER_TICK,
   budgetMs = PENDING_MERGE_CLOSEOUTS_BUDGET_MS,
   logger = console,
@@ -3025,6 +3119,7 @@ async function retryPendingMergeCloseouts({
       break;
     }
     await attemptMergeCloseoutCapture({
+      octokit,
       repo: row.repo,
       prNumber: row.pr_number,
       mergedAt: row.merged_at,
@@ -3448,20 +3543,21 @@ async function pollOnce(
   resetRoleConfigCache();
   const healthTick = healthProbe?.beginTick?.();
   try {
-  const operatorSurface = createWatcherOperatorSurface();
-  await refreshOrgRepos(octokit);
-  const reattach = await reconcileReviewerSessions({
-    db,
-    octokit,
-    maxRows: resolveStaleReviewerReconcilePerPoll(),
-    shouldReconcileRow: (row, now) => shouldReconcileReviewerSession(row, now),
-    leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
-    onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
-      sessionUuid: row?.reviewer_session_uuid,
-      state,
-      settledAt,
-    }),
-  });
+    maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
+    const operatorSurface = createWatcherOperatorSurface();
+    await refreshOrgRepos(octokit);
+    const reattach = await reconcileReviewerSessions({
+      db,
+      octokit,
+      maxRows: resolveStaleReviewerReconcilePerPoll(),
+      shouldReconcileRow: (row, now) => shouldReconcileReviewerSession(row, now),
+      leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
+      onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
+        sessionUuid: row?.reviewer_session_uuid,
+        state,
+        settledAt,
+      }),
+    });
   if (reattach.skipped > 0) {
     console.log(
       `[watcher] stale reviewer reattach capped: reconciled=${reattach.reconciled} skipped=${reattach.skipped}`
@@ -3479,7 +3575,7 @@ async function pollOnce(
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit, operatorSurface);
-  await retryPendingMergeCloseouts();
+  await retryPendingMergeCloseouts({ octokit });
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);
   await runFastMergeClosePathIsolated();
@@ -4530,7 +4626,7 @@ async function main() {
     throw err;
   }
 
-  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+  const octokit = createWatcherOctokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;
   const configuredDeadlineMs = config.pollDeadlineMs;
 
@@ -4639,9 +4735,11 @@ if (isMain) {
 
 export {
   classifyReviewerFailure,
+  createWatcherOctokit,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   probeRoutingTierReadiness,
   evaluateRoundBudgetForReview,
+  fetchConditionalRestPage,
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,
   fetchLivePRLabels,

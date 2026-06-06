@@ -204,6 +204,41 @@ scoped to explicit local-routing context such as `127.0.0.1:4000`,
 non-local API connectivity failures remain `unknown` unless another more
 specific classifier matches.
 
+## Conditional Request Cache
+
+Watcher-owned GitHub REST reads for labels, timeline events, and merge-closeout
+comments run through `createWatcherOctokit()` plus
+`fetchConditionalRestPage()`. The cache root is
+`data/api-cache/etags/`, with one fixed-length SHA-256 filename per normalized
+`(repo, prNumber, category, endpoint, params)` call key. Each entry stores:
+
+- `call_key` for human/debug readability
+- `etag`
+- `cached_at`
+- `body` when the serialized body stays within the configured size cap
+
+`conditional_304` is a watcher telemetry category, not a GitHub endpoint. It
+is emitted only when GitHub answers `304 Not Modified` and the watcher serves a
+cached body instead of re-recording the underlying endpoint category.
+
+The cache is a best-effort optimization. A cache write failure must never turn
+an otherwise-successful `200` GitHub response into a watcher error; the watcher
+logs a warning and continues with the live response.
+
+Retention and body-capping policy:
+
+- The watcher runs an age-based sweep no more than once per hour, from the main
+  poll loop, deleting cache entries whose `cached_at` is older than
+  `WATCHER_ETAG_CACHE_MAX_AGE_DAYS` days. The default is `7`. Sweep failures
+  are warning-only and must not abort the poll tick.
+- Cached bodies larger than `WATCHER_ETAG_CACHE_MAX_BODY_BYTES` bytes are
+  dropped from the entry while keeping the `etag`. The default cap is
+  `262144` bytes.
+- Entries whose body was previously dropped are not conditional-read
+  candidates. The watcher skips `If-None-Match` for those entries and goes
+  straight to an unconditional request, avoiding a permanent `304` + `200`
+  double round-trip on oversized resources.
+
 ## Remediation Reply Contract
 
 The durable remediation reply schema is the public contract between the worker,
@@ -771,7 +806,7 @@ Failure mode this addresses (live, 2026-05-31): the merge-agent legitimately dis
 
 ### Merge closeout capture
 
-After a PR merges, the watcher runs a closeout-capture pass to fold any operator closeout comments into the durable `pr_merge_closeouts` table. The scrape window is `(latest completed reviewer pass ended_at, mergedAt + 24h]`; the lower bound falls back to the PR's GH-side `created_at` when no completed reviewer pass exists. `status='completed'` is load-bearing on the lower-bound query — failed/orphan passes with an `ended_at` do NOT shift the window forward, so commentary posted between a failed pass and the eventual successful re-review remains in the closeout window. Reviewer-bot logins and builder-bot logins are excluded from the closeout-authors set per the cross-model routing table.
+After a PR merges, the watcher runs a closeout-capture pass to fold any operator closeout comments into the durable `pr_merge_closeouts` table. The scrape window is `(latest completed reviewer pass ended_at, mergedAt + 24h]`; the lower bound falls back to the PR's GH-side `created_at` when no completed reviewer pass exists. `status='completed'` is load-bearing on the lower-bound query — failed/orphan passes with an `ended_at` do NOT shift the window forward, so commentary posted between a failed pass and the eventual successful re-review remains in the closeout window. Reviewer-bot logins and builder-bot logins are excluded from the closeout-authors set per the cross-model routing table. Watcher-side closeout comment reads use Octokit under the watcher's `GITHUB_TOKEN` and the conditional request cache; stored artifact refs preserve GitHub `node_id` strings only, matching the legacy gh CLI scrape shape.
 
 **Settled-empty path.** A scrape that returns zero closeout comments past the 10-minute post-merge settle window records `empty_confirmed_at` as a successful terminal state. Re-scrapes on a slower cadence (default 1h) up to 24h past merge keep a path open for late operator replies. The closeout `recordMergeCloseout` upsert resets `scrape_attempt_count` to 0 and clears `scrape_last_error` on ANY terminal success — body captured OR settled-empty confirmed — so triage dashboards keyed on those columns don't keep paging on rows that have already recovered.
 

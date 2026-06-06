@@ -22,6 +22,7 @@ const CATEGORY_ORDER = Object.freeze([
   'diff_fetch',
   'pr_view',
   'graphql_pr_rollup',
+  'pr_head_state',
   'comments_list',
   'checks_list',
   'reviews_list',

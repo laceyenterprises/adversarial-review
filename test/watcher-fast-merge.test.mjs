@@ -159,6 +159,15 @@ export async function load(url, context, nextLoad) {
           checks: [],
         };
       }
+      export async function fetchPullRequestHeadAndState(repo, prNumber) {
+        const key = String(prNumber);
+        return {
+          state: 'open',
+          mergedAt: null,
+          closedAt: null,
+          headRefOid: scenario.heads[String(prNumber)] || 'sha-live-' + key,
+        };
+      }
     `)},
   };
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {

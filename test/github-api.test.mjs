@@ -266,9 +266,11 @@ function makeAsymmetricPaginationExecStub(expected) {
     }
 
     if (vars.reviewsAfter === 'reviews-100') {
-      assert.equal(vars.commentsFirst, '0');
+      assert.equal(Object.hasOwn(vars, 'commentsFirst'), false);
+      assert.equal(Object.hasOwn(vars, 'commentsAfter'), false);
       assert.equal(vars.reviewsFirst, '100');
-      assert.equal(vars.checksFirst, '0');
+      assert.equal(Object.hasOwn(vars, 'checksFirst'), false);
+      assert.equal(Object.hasOwn(vars, 'checksAfter'), false);
       return {
         stdout: JSON.stringify(buildGraphqlResponse(expected, {
           comments: commentsPage,
@@ -283,9 +285,11 @@ function makeAsymmetricPaginationExecStub(expected) {
     }
 
     assert.equal(vars.reviewsAfter, 'reviews-200');
-    assert.equal(vars.commentsFirst, '0');
+    assert.equal(Object.hasOwn(vars, 'commentsFirst'), false);
+    assert.equal(Object.hasOwn(vars, 'commentsAfter'), false);
     assert.equal(vars.reviewsFirst, '100');
-    assert.equal(vars.checksFirst, '0');
+    assert.equal(Object.hasOwn(vars, 'checksFirst'), false);
+    assert.equal(Object.hasOwn(vars, 'checksAfter'), false);
     return {
       stdout: JSON.stringify(buildGraphqlResponse(expected, {
         comments: commentsPage,
@@ -293,6 +297,109 @@ function makeAsymmetricPaginationExecStub(expected) {
         checks: checksPage,
       })),
     };
+  }
+
+  return { calls, execFileImpl };
+}
+
+function makeComplexityFallbackExecStub(expected) {
+  const calls = [];
+  const commentsPages = [
+    expected.comments.slice(0, 100),
+    expected.comments.slice(100),
+  ];
+  const reviewsPages = [
+    expected.reviews.slice(0, 100),
+    expected.reviews.slice(100),
+  ];
+  const checksPages = [
+    expected.checks.slice(0, 100),
+    expected.checks.slice(100),
+  ];
+
+  async function execFileImpl(command, args) {
+    calls.push({ command, args: [...args] });
+    assert.equal(command, 'gh');
+    assert.equal(args[0], 'api');
+    assert.equal(args[1], 'graphql');
+    const vars = parseGhArgs(args);
+    const query = String(vars.query || '');
+
+    if (query.includes('query PullRequestRollup(')) {
+      throw new Error('Query exceeds complexity limit');
+    }
+
+    if (query.includes('query PullRequestRollupMetadata(')) {
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                id: expected.id,
+                number: expected.number,
+                title: expected.title,
+                body: expected.body,
+                state: expected.state,
+                mergedAt: expected.mergedAt,
+                closedAt: expected.closedAt,
+                createdAt: expected.createdAt,
+                updatedAt: expected.updatedAt,
+                headRefName: expected.headRefName,
+                baseRefName: expected.baseRefName,
+                headRefOid: expected.headRefOid,
+                mergeable: expected.mergeable,
+                mergeStateStatus: expected.mergeStateStatus,
+                author: expected.author,
+                labels: {
+                  nodes: expected.labels,
+                },
+              },
+            },
+          },
+        }),
+      };
+    }
+
+    if (query.includes('query PullRequestRollupComments(')) {
+      const page = vars.commentsAfter === 'comments-100' ? 1 : 0;
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: commentsPages[page],
+          reviews: [],
+          checks: [],
+          commentsHasNextPage: page === 0,
+          commentsEndCursor: page === 0 ? 'comments-100' : null,
+        })),
+      };
+    }
+
+    if (query.includes('query PullRequestRollupReviews(')) {
+      const page = vars.reviewsAfter === 'reviews-100' ? 1 : 0;
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: [],
+          reviews: reviewsPages[page],
+          checks: [],
+          reviewsHasNextPage: page === 0,
+          reviewsEndCursor: page === 0 ? 'reviews-100' : null,
+        })),
+      };
+    }
+
+    if (query.includes('query PullRequestRollupChecks(')) {
+      const page = vars.checksAfter === 'checks-100' ? 1 : 0;
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: [],
+          reviews: [],
+          checks: checksPages[page],
+          checksHasNextPage: page === 0,
+          checksEndCursor: page === 0 ? 'checks-100' : null,
+        })),
+      };
+    }
+
+    throw new Error(`Unexpected GraphQL query: ${query}`);
   }
 
   return { calls, execFileImpl };
@@ -612,7 +719,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "export function writeFileAtomic() {}",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid }; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
@@ -781,6 +888,56 @@ test('multiplexed pagination does not duplicate exhausted connections while anot
   assert.equal(new Set(result.reviews.map((review) => review.id)).size, 250);
   assert.equal(new Set(result.checks.map((check) => check.name)).size, 25);
   assert.equal(calls.length, 3);
+});
+
+test('complexity fallback switches to metadata plus per-list pagination without replaying page one', async () => {
+  const expected = makeLargeExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const { calls, execFileImpl } = makeComplexityFallbackExecStub(expected);
+
+  const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+
+  assert.equal(result.comments.length, 150);
+  assert.equal(result.reviews.length, 145);
+  assert.equal(result.checks.length, 135);
+  assert.deepEqual(
+    calls.map(({ args }) => {
+      const vars = parseGhArgs(args);
+      const query = String(vars.query || '');
+      if (query.includes('query PullRequestRollupMetadata(')) return 'metadata';
+      if (query.includes('query PullRequestRollupComments(')) return 'comments';
+      if (query.includes('query PullRequestRollupReviews(')) return 'reviews';
+      if (query.includes('query PullRequestRollupChecks(')) return 'checks';
+      if (query.includes('query PullRequestRollup(')) return 'rollup';
+      return 'unknown';
+    }),
+    ['rollup', 'metadata', 'comments', 'comments', 'reviews', 'reviews', 'checks', 'checks'],
+  );
+});
+
+test('head/state helper uses the lightweight GraphQL query and telemetry category', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  const { calls, execFileImpl } = makeGraphqlExecStub(expected);
+
+  const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+    execFileImpl,
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+  });
+
+  assert.deepEqual(result, {
+    state: expected.state,
+    mergedAt: expected.mergedAt,
+    closedAt: expected.closedAt,
+    headRefOid: expected.headRefOid,
+  });
+  const vars = parseGhArgs(calls[0].args);
+  assert.match(String(vars.query || ''), /query PullRequestHeadState/);
+  assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_head_state']);
 });
 
 test('watcher tick downstream output is unchanged when PR fetches come from the roll-up helper', () => {

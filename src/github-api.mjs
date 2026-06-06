@@ -14,11 +14,11 @@ query PullRequestRollup(
   $owner: String!
   $repo: String!
   $prNumber: Int!
-  $commentsFirst: Int!
+  $commentsFirst: Int
   $commentsAfter: String
-  $reviewsFirst: Int!
+  $reviewsFirst: Int
   $reviewsAfter: String
-  $checksFirst: Int!
+  $checksFirst: Int
   $checksAfter: String
 ) {
   repository(owner: $owner, name: $repo) {
@@ -100,6 +100,41 @@ query PullRequestRollup(
               }
             }
           }
+        }
+      }
+    }
+  }
+}
+`;
+
+const GRAPHQL_PR_METADATA_QUERY = `
+query PullRequestRollupMetadata(
+  $owner: String!
+  $repo: String!
+  $prNumber: Int!
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      id
+      number
+      title
+      body
+      state
+      mergedAt
+      closedAt
+      createdAt
+      updatedAt
+      headRefName
+      baseRefName
+      headRefOid
+      mergeable
+      mergeStateStatus
+      author {
+        login
+      }
+      labels(first: 100) {
+        nodes {
+          name
         }
       }
     }
@@ -209,6 +244,23 @@ query PullRequestRollupChecks(
 }
 `;
 
+const GRAPHQL_PR_HEAD_STATE_QUERY = `
+query PullRequestHeadState(
+  $owner: String!
+  $repo: String!
+  $prNumber: Int!
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      state
+      mergedAt
+      closedAt
+      headRefOid
+    }
+  }
+}
+`;
+
 function splitRepo(repo) {
   const match = /^([^/]+)\/([^/]+)$/.exec(String(repo || '').trim());
   if (!match) {
@@ -272,6 +324,8 @@ function normalizeRollup(pr, {
   reviews = [],
   checks = [],
 } = {}) {
+  // GraphQL exposes merged PRs as a distinct `merged` state; callers that
+  // care about merged-vs-closed should treat `state` as tri-state.
   const state = typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null;
   return {
     id: pr?.id ?? null,
@@ -489,12 +543,12 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
     hasNextComments = Boolean(pr?.comments?.pageInfo?.hasNextPage);
     hasNextReviews = Boolean(pr?.reviews?.pageInfo?.hasNextPage);
     hasNextChecks = Boolean(extractChecksConnection(pr)?.pageInfo?.hasNextPage);
-    commentsAfter = hasNextComments ? pr?.comments?.pageInfo?.endCursor || null : commentsAfter;
-    reviewsAfter = hasNextReviews ? pr?.reviews?.pageInfo?.endCursor || null : reviewsAfter;
-    checksAfter = hasNextChecks ? extractChecksConnection(pr)?.pageInfo?.endCursor || null : checksAfter;
-    commentsFirst = hasNextComments ? PAGE_SIZE : 0;
-    reviewsFirst = hasNextReviews ? PAGE_SIZE : 0;
-    checksFirst = hasNextChecks ? PAGE_SIZE : 0;
+    commentsAfter = hasNextComments ? pr?.comments?.pageInfo?.endCursor || null : null;
+    reviewsAfter = hasNextReviews ? pr?.reviews?.pageInfo?.endCursor || null : null;
+    checksAfter = hasNextChecks ? extractChecksConnection(pr)?.pageInfo?.endCursor || null : null;
+    commentsFirst = hasNextComments ? PAGE_SIZE : null;
+    reviewsFirst = hasNextReviews ? PAGE_SIZE : null;
+    checksFirst = hasNextChecks ? PAGE_SIZE : null;
     isFirstIteration = false;
     if (!hasNextComments && !hasNextReviews && !hasNextChecks) break;
   }
@@ -507,12 +561,13 @@ async function fetchGraphqlConnectionPages(repo, prNumber, {
   query,
   firstVariable,
   afterVariable,
+  startAfter = null,
   extractConnection,
   normalize,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
   const items = [];
-  let after = null;
+  let after = startAfter;
   let hasNextPage = true;
   while (hasNextPage) {
     const payload = await runGraphql(execFileImpl, query, {
@@ -535,55 +590,77 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
   execFileImpl,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
-  const initial = await runGraphql(execFileImpl, GRAPHQL_ROLLUP_QUERY, {
+  const initial = await runGraphql(execFileImpl, GRAPHQL_PR_METADATA_QUERY, {
     owner,
     repo: repoName,
     prNumber,
-    commentsFirst: PAGE_SIZE,
-    reviewsFirst: PAGE_SIZE,
-    checksFirst: PAGE_SIZE,
   });
   const pr = extractGraphqlPr(initial);
-  const comments = [];
-  const reviews = [];
-  const checks = [];
-
-  appendGraphqlPage(comments, pr?.comments?.nodes, normalizeComment);
-  appendGraphqlPage(reviews, pr?.reviews?.nodes, normalizeReview);
-  appendGraphqlPage(checks, extractChecksConnection(pr)?.nodes, normalizeCheck);
-
-  if (pr?.comments?.pageInfo?.hasNextPage) {
-    comments.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
-      execFileImpl,
-      query: GRAPHQL_COMMENTS_ONLY_QUERY,
-      firstVariable: 'commentsFirst',
-      afterVariable: 'commentsAfter',
-      extractConnection: (value) => value?.comments,
-      normalize: normalizeComment,
-    }).then((items) => items.slice(PAGE_SIZE)));
-  }
-  if (pr?.reviews?.pageInfo?.hasNextPage) {
-    reviews.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
-      execFileImpl,
-      query: GRAPHQL_REVIEWS_ONLY_QUERY,
-      firstVariable: 'reviewsFirst',
-      afterVariable: 'reviewsAfter',
-      extractConnection: (value) => value?.reviews,
-      normalize: normalizeReview,
-    }).then((items) => items.slice(PAGE_SIZE)));
-  }
-  if (extractChecksConnection(pr)?.pageInfo?.hasNextPage) {
-    checks.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
-      execFileImpl,
-      query: GRAPHQL_CHECKS_ONLY_QUERY,
-      firstVariable: 'checksFirst',
-      afterVariable: 'checksAfter',
-      extractConnection: extractChecksConnection,
-      normalize: normalizeCheck,
-    }).then((items) => items.slice(PAGE_SIZE)));
-  }
+  const comments = await fetchGraphqlConnectionPages(repo, prNumber, {
+    execFileImpl,
+    query: GRAPHQL_COMMENTS_ONLY_QUERY,
+    firstVariable: 'commentsFirst',
+    afterVariable: 'commentsAfter',
+    extractConnection: (value) => value?.comments,
+    normalize: normalizeComment,
+  });
+  const reviews = await fetchGraphqlConnectionPages(repo, prNumber, {
+    execFileImpl,
+    query: GRAPHQL_REVIEWS_ONLY_QUERY,
+    firstVariable: 'reviewsFirst',
+    afterVariable: 'reviewsAfter',
+    extractConnection: (value) => value?.reviews,
+    normalize: normalizeReview,
+  });
+  const checks = await fetchGraphqlConnectionPages(repo, prNumber, {
+    execFileImpl,
+    query: GRAPHQL_CHECKS_ONLY_QUERY,
+    firstVariable: 'checksFirst',
+    afterVariable: 'checksAfter',
+    extractConnection: extractChecksConnection,
+    normalize: normalizeCheck,
+  });
 
   return normalizeRollup(pr, { comments, reviews, checks });
+}
+
+async function fetchPullRequestHeadAndState(repo, prNumber, {
+  execFileImpl = execFileAsync,
+  recordApiCallImpl = recordApiCall,
+} = {}) {
+  const { owner, repo: repoName } = splitRepo(repo);
+  const startedAt = Date.now();
+  try {
+    const payload = await runGraphql(execFileImpl, GRAPHQL_PR_HEAD_STATE_QUERY, {
+      owner,
+      repo: repoName,
+      prNumber,
+    });
+    const pr = extractGraphqlPr(payload);
+    const result = {
+      state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
+      mergedAt: pr?.mergedAt || null,
+      closedAt: pr?.closedAt || null,
+      headRefOid: pr?.headRefOid || null,
+    };
+    recordApiCallImpl({
+      category: 'pr_head_state',
+      repo,
+      prNumber,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (err) {
+    recordApiCallImpl({
+      category: 'pr_head_state',
+      repo,
+      prNumber,
+      status: apiStatusFromError(err),
+      durationMs: Date.now() - startedAt,
+    });
+    throw err;
+  }
 }
 
 async function fetchPullRequestRollup(repo, prNumber, {
@@ -642,5 +719,6 @@ const __test__ = {
 
 export {
   __test__,
+  fetchPullRequestHeadAndState,
   fetchPullRequestRollup,
 };

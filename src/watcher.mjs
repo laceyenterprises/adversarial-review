@@ -121,7 +121,7 @@ import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
-import { fetchPullRequestRollup } from './github-api.mjs';
+import { fetchPullRequestHeadAndState, fetchPullRequestRollup } from './github-api.mjs';
 import {
   appendFenceAuditEvent,
   classifyFenceOrphan,
@@ -453,7 +453,7 @@ async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = cons
 
 async function fetchLivePRHeadSha(octokit, { owner, repo, prNumber, fallbackHeadSha = null, logger = console } = {}) {
   try {
-    const pr = await fetchPullRequestRollup(`${owner}/${repo}`, prNumber, {
+    const pr = await fetchPullRequestHeadAndState(`${owner}/${repo}`, prNumber, {
       execFileImpl: execFileAsync,
     });
     return pr?.headRefOid ? String(pr.headRefOid) : fallbackHeadSha;
@@ -4247,7 +4247,7 @@ async function pollOnce(
             // the next PR's spawn in the serial loop. Re-fetch state directly
             // from GitHub right before the spawn and skip if no longer open.
             try {
-              const freshPR = await fetchPullRequestRollup(repoPath, prNumber, {
+              const freshPR = await fetchPullRequestHeadAndState(repoPath, prNumber, {
                 execFileImpl: execFileAsync,
               });
               if (freshPR.mergedAt) {

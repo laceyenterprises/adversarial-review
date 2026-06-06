@@ -551,6 +551,7 @@ async function lookupOriginalWorkerRunStatus({
   ledgerTarget = null,
   workspace = undefined,
   runRecord = undefined,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
 } = {}) {
   const resolvedWorkspace = workspace === undefined
     ? readWorkerWorkspace(workerDir).workspace || null
@@ -568,7 +569,7 @@ async function lookupOriginalWorkerRunStatus({
     return { found: false, reason: 'missing-launch-request-id' };
   }
 
-  const result = readLatestWorkerRunStatusFromLedger({
+  const result = readLatestWorkerRunStatusImpl({
     launchRequestId,
     ledgerTarget,
     env,

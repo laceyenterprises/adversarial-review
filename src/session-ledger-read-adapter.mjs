@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -337,6 +338,64 @@ function querySqliteRows(target, sql, params) {
   }
 }
 
+function quotePostgresLiteral(value) {
+  if (value === null || value === undefined) return 'NULL';
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function parsePostgresJsonRows(stdout) {
+  return String(stdout || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync } = {}) {
+  const locator = normalizeText(target.dsn) || normalizeText(target.databaseName);
+  if (!locator) {
+    return {
+      ok: false,
+      reason: 'malformed-ledger-target',
+      detail: 'postgres ledger target requires dsn or databaseName',
+      target,
+    };
+  }
+  try {
+    const args = ['-X', '--no-psqlrc', '-v', 'ON_ERROR_STOP=1', '-t', '-A', '-c', jsonSql];
+    if (target.dsn) {
+      args.splice(0, 0, target.dsn);
+    } else {
+      args.splice(0, 0, '-d', target.databaseName);
+    }
+    const result = spawnSyncImpl('psql', args, {
+      encoding: 'utf8',
+      env: process.env,
+    });
+    if (result.error) throw result.error;
+    if ((result.status ?? 0) !== 0) {
+      return {
+        ok: false,
+        reason: 'ledger-read-failed',
+        detail: String(result.stderr || result.stdout || `psql exited with status ${result.status}`),
+        target,
+      };
+    }
+    return {
+      ok: true,
+      rows: parsePostgresJsonRows(result.stdout),
+      target,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: err?.message || String(err),
+      target,
+    };
+  }
+}
+
 function unsupportedBackend(target) {
   return {
     ok: false,
@@ -353,6 +412,7 @@ export function readLatestWorkerRunStatusFromLedger({
   env = process.env,
   rootDir = process.cwd(),
   hqRoot = null,
+  spawnSyncImpl = spawnSync,
 } = {}) {
   const normalizedLaunchRequestId = normalizeText(launchRequestId);
   if (!normalizedLaunchRequestId) {
@@ -367,16 +427,48 @@ export function readLatestWorkerRunStatusFromLedger({
     hqRoot,
   });
   if (!resolution.ok) return resolution;
-  if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
-  const queried = querySqliteRows(
-    resolution.target,
-    `SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
-      FROM worker_runs
-     WHERE launch_request_id = @launchRequestId
-      ORDER BY rowid DESC
-      LIMIT 1`,
-    { launchRequestId: normalizedLaunchRequestId },
-  );
+  let queried;
+  if (resolution.target.backend === 'sqlite') {
+    queried = querySqliteRows(
+      resolution.target,
+      `SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
+         FROM worker_runs
+        WHERE launch_request_id = @launchRequestId
+        ORDER BY COALESCE(updated_at, ended_at, started_at, '') DESC,
+                 COALESCE(ended_at, started_at, '') DESC,
+                 COALESCE(started_at, '') DESC,
+                 run_id DESC,
+                 launch_request_id DESC
+        LIMIT 1`,
+      { launchRequestId: normalizedLaunchRequestId },
+    );
+  } else if (resolution.target.backend === 'postgres') {
+    queried = queryPostgresRows(
+      resolution.target,
+      `SELECT json_build_object(
+          'run_id', run_id,
+          'launch_request_id', launch_request_id,
+          'status', status,
+          'updated_at', updated_at,
+          'ended_at', ended_at,
+          'started_at', started_at
+        )
+         FROM (
+           SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
+             FROM worker_runs
+            WHERE launch_request_id = ${quotePostgresLiteral(normalizedLaunchRequestId)}
+            ORDER BY COALESCE(updated_at::text, ended_at::text, started_at::text, '') DESC,
+                     COALESCE(ended_at::text, started_at::text, '') DESC,
+                     COALESCE(started_at::text, '') DESC,
+                     run_id DESC,
+                     launch_request_id DESC
+            LIMIT 1
+         ) latest_worker_run`,
+      { spawnSyncImpl },
+    );
+  } else {
+    return unsupportedBackend(resolution.target);
+  }
   if (!queried.ok) return queried;
   const [row] = queried.rows;
   if (!row) {

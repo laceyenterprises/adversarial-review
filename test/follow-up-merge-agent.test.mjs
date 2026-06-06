@@ -3192,6 +3192,43 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical
   assert.equal(result.launchRequestId, 'lrq_home_lookup');
 });
 
+test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical postgres ledger target contract', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666pg');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-lac-666pg',
+    launchRequestId: 'lrq_pg_lookup',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_pg_lookup',
+  }));
+
+  const result = await lookupOriginalWorkerRunStatus({
+    workerDir,
+    hqRoot,
+    env: { ...HERMETIC_CONFIG_ENV },
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    readLatestWorkerRunStatusImpl: ({ launchRequestId, ledgerTarget }) => {
+      assert.equal(launchRequestId, 'lrq_pg_lookup');
+      assert.equal(ledgerTarget.backend, 'postgres');
+      return {
+        ok: true,
+        row: {
+          run_id: 'run_pg_lookup',
+          launch_request_id: 'lrq_pg_lookup',
+          status: 'failed',
+        },
+      };
+    },
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.launchRequestId, 'lrq_pg_lookup');
+  assert.equal(result.runId, 'run_pg_lookup');
+});
+
 test('lookupOriginalWorkerRunStatus requires launchRequestId and ignores unrelated newer rows for the same worker run id', async () => {
   const { default: Database } = await import('better-sqlite3');
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -3462,13 +3499,6 @@ test('lookupOriginalWorkerRunStatus maps adapter failure reasons onto teardown-s
       reason: 'worker-run-lookup-failed',
       options: {
         ledgerTarget: { backend: 'sqlite', path: brokenLedgerDbPath },
-        env: { ...HERMETIC_CONFIG_ENV },
-      },
-    },
-    {
-      reason: 'unsupported-ledger-backend',
-      options: {
-        ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
         env: { ...HERMETIC_CONFIG_ENV },
       },
     },

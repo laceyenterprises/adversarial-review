@@ -181,9 +181,25 @@ test('watcher launchers require explicit opt-in before running without ALERT_TO'
     assert.match(script, /ADVERSARIAL_REVIEW_OP_CLI/);
     assert.match(script, /command -v op/);
     assert.match(script, /OP_BIN="\$\(resolve_op_bin\)"/);
-    assert.match(script, /"\$OP_BIN" read/);
+    assert.match(script, /op_resolve_with_rate_limit_backoff "\$OP_BIN" read/);
     assert.doesNotMatch(script, /\/opt\/homebrew\/bin\/op read/);
     assert.doesNotMatch(script, /Cliovault/);
+  }
+});
+
+test('watcher launchers do not silently bypass OPH-01 backoff when the shared helper is absent', () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const script = readScript(scriptName);
+    assert.match(script, /op_resolve_with_rate_limit_backoff\(\)/);
+    assert.match(script, /mkfifo "\$stderr_fifo"/);
+    assert.match(script, /wait "\$tee_pid"/);
+    assert.match(script, /_op_rate_limit_descendant_pids/);
+    assert.match(script, /using vendored fallback/);
+    assert.doesNotMatch(script, /op_resolve_with_rate_limit_backoff\(\)\s*\{\s*"\$@";\s*\}/);
+    assert.doesNotMatch(script, /2> >\(/);
   }
 });
 

@@ -27,17 +27,115 @@ fi
 
 # OPH-01: route `op read` through the rate-limit backoff helper so a
 # 1Password account-level quota exhaustion sleeps 15 min before exit
-# instead of tight-looping launchd respawns. Helper sourced from the
-# agent-os tree (REPO_ROOT resolved above). Only the no-retry exports
-# (lines 123-125) are wrapped; `resolve_alert_to_optional` has its own
-# 3-attempt retry + end-of-line 3600s fail-soft and is left alone.
-# Source-of-truth: projects/oph/SPEC.md §3 OPH-01. Tunable via
-# OP_RATE_LIMIT_BACKOFF_S env.
+# instead of tight-looping launchd respawns. Prefer the shared Agent OS
+# helper, but keep a vendored fallback so partial deploys do not silently
+# fall back to raw `op read`.
+OP_RATE_LIMIT_SIGNATURE="Too many requests. Your client has been rate-limited"
+_OP_RATE_LIMIT_DEFAULT_BACKOFF_S=900
+_op_rate_limit_resolve_backoff_seconds() {
+  local raw="${OP_RATE_LIMIT_BACKOFF_S-}"
+  if [[ -z "$raw" ]]; then
+    printf '%s\n' "$_OP_RATE_LIMIT_DEFAULT_BACKOFF_S"
+    return 0
+  fi
+  case "$raw" in
+    (*[!0-9]*)
+      echo "op-rate-limit: OP_RATE_LIMIT_BACKOFF_S=${raw} is not a non-negative integer; using default ${_OP_RATE_LIMIT_DEFAULT_BACKOFF_S}s" >&2
+      printf '%s\n' "$_OP_RATE_LIMIT_DEFAULT_BACKOFF_S"
+      ;;
+    (*)
+      printf '%s\n' "$raw"
+      ;;
+  esac
+}
+op_resolve_with_rate_limit_backoff() {
+  local tmp_dir stderr_file stderr_fifo rc child_pid tee_pid interrupted_signal
+  tmp_dir="$(mktemp -d -t op-rate-limit.XXXXXX)" || return 1
+  stderr_file="${tmp_dir}/stderr"
+  stderr_fifo="${tmp_dir}/stderr.fifo"
+  : > "$stderr_file" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  mkfifo "$stderr_fifo" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  rc=0
+  child_pid=""
+  tee_pid=""
+  interrupted_signal=""
+
+  _op_rate_limit_descendant_pids() {
+    local parent="$1"
+    local child
+    pgrep -P "$parent" 2>/dev/null | while IFS= read -r child; do
+      [[ -z "$child" ]] && continue
+      printf '%s\n' "$child"
+      _op_rate_limit_descendant_pids "$child"
+    done
+  }
+
+  _op_rate_limit_forward_signal() {
+    local sig="$1"
+    local pid
+    local -a pids
+    interrupted_signal="$sig"
+    if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
+      pids=("$child_pid")
+      while IFS= read -r pid; do
+        [[ -z "$pid" ]] && continue
+        pids+=("$pid")
+      done < <(_op_rate_limit_descendant_pids "$child_pid")
+      for pid in "${pids[@]}"; do
+        kill "-$sig" "$pid" 2>/dev/null || true
+      done
+    fi
+  }
+
+  trap '_op_rate_limit_forward_signal TERM' TERM
+  trap '_op_rate_limit_forward_signal INT' INT
+  tee -a "$stderr_file" < "$stderr_fifo" >&2 &
+  tee_pid=$!
+  "$@" 2> "$stderr_fifo" &
+  child_pid=$!
+  wait "$child_pid" || rc=$?
+  if [[ -n "$interrupted_signal" ]]; then
+    wait "$child_pid" 2>/dev/null || true
+  fi
+  wait "$tee_pid" 2>/dev/null || true
+  trap - TERM INT
+  if [[ "$interrupted_signal" == "TERM" ]]; then
+    rm -rf "$tmp_dir"
+    return 143
+  fi
+  if [[ "$interrupted_signal" == "INT" ]]; then
+    rm -rf "$tmp_dir"
+    return 130
+  fi
+  if (( rc == 0 )); then
+    rm -rf "$tmp_dir"
+    return 0
+  fi
+  if ! grep -qF "$OP_RATE_LIMIT_SIGNATURE" "$stderr_file" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    return "$rc"
+  fi
+  local backoff_s
+  backoff_s="$(_op_rate_limit_resolve_backoff_seconds)"
+  rm -rf "$tmp_dir"
+  if (( backoff_s == 0 )); then
+    echo "op-rate-limit: rate-limit detected; OP_RATE_LIMIT_BACKOFF_S=0, exiting immediately (test/escape hatch)" >&2
+    return "$rc"
+  fi
+  echo "op-rate-limit: 1Password account-level rate-limit detected; sleeping ${backoff_s}s before exit so launchd KeepAlive cannot tight-loop into another op call against the exhausted quota" >&2
+  sleep "$backoff_s"
+  return "$rc"
+}
 if [[ -r "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh" ]]; then
   source "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
 else
-  # Fail-open passthrough when helper is missing (pre-PR checkout).
-  op_resolve_with_rate_limit_backoff() { "$@"; }
+  echo "[adversarial-watcher] WARN: OPH-01 helper missing at $REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh; using vendored fallback." >&2
 fi
 # Per-user err-file path. The original `/tmp/adversarial-watcher-native-check.err`
 # was a single shared path across users, which silently broke the airlock-side
@@ -155,7 +253,7 @@ resolve_alert_to_optional() {
   fi
   stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-alert-to.${UID}.$$.$RANDOM.err"
   while (( attempt <= max_attempts )); do
-    if alert_to_value=$("$OP_BIN" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
+    if alert_to_value=$(op_resolve_with_rate_limit_backoff "$OP_BIN" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
       if [[ -z "${alert_to_value//[[:space:]]/}" ]]; then
         echo "[adversarial-watcher] ERROR: ALERT_TO at $ALERT_TO_OP_REF resolved to an empty value." >&2
         rm -f "$stderr_path"

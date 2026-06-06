@@ -288,6 +288,11 @@ test('the four shipped templates render with sample bindings and leave no placeh
     if (name === 'adversarial-watcher-start.sh.template') {
       assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
       assert.match(rendered, /resolve_op_bin/);
+      assert.match(rendered, /op_resolve_with_rate_limit_backoff/);
+      assert.match(rendered, /mkfifo "\$stderr_fifo"/);
+      assert.match(rendered, /wait "\$tee_pid"/);
+      assert.doesNotMatch(rendered, /2> >\(/);
+      assert.match(rendered, /using vendored fallback/);
       assert.match(rendered, /\/usr\/local\/bin\/op/);
     }
   }

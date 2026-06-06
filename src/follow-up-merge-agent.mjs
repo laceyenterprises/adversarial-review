@@ -91,6 +91,7 @@ const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
 const SESSION_LEDGER_LOOKUP_REASON_ALIASES = new Map([
   ['missing-ledger-target', 'missing-ledger-db'],
   ['ledger-read-failed', 'worker-run-lookup-failed'],
+  ['psql-not-installed', 'worker-run-lookup-failed'],
 ]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say

@@ -3503,6 +3503,17 @@ test('lookupOriginalWorkerRunStatus maps adapter failure reasons onto teardown-s
       },
     },
     {
+      reason: 'worker-run-lookup-failed',
+      options: {
+        env: { ...HERMETIC_CONFIG_ENV },
+        readLatestWorkerRunStatusImpl: () => ({
+          ok: false,
+          reason: 'psql-not-installed',
+          detail: 'psql missing from PATH',
+        }),
+      },
+    },
+    {
       reason: 'malformed-ledger-target',
       options: {
         ledgerTarget: { backend: 'postgres' },
@@ -3563,6 +3574,54 @@ test('prepareOriginalWorkerForMergeAgent skips every teardown-safe adapter looku
     assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
     assert.equal(logs[0].reason, reason);
   }
+});
+
+test('dispatchMergeAgentForPR records psql-not-installed as a durable skipped dispatch', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const originalWorkerId = 'codex-lac-666psql';
+  const branch = `${originalWorkerId}/LAC-666psql-not-installed`;
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    branch,
+    launchRequestId: 'lrq_psql_not_installed',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_psql_not_installed',
+  }));
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({ branch }),
+    prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
+      ...opts,
+      hqPath: 'hq',
+      env: { HQ_ROOT: hqRoot, USER: 'placey', ...HERMETIC_CONFIG_ENV },
+      lookupRunStatusImpl: (lookupOpts) => lookupOriginalWorkerRunStatus({
+        ...lookupOpts,
+        readLatestWorkerRunStatusImpl: () => ({
+          ok: false,
+          reason: 'psql-not-installed',
+          detail: 'psql missing from PATH',
+        }),
+      }),
+    }),
+    execFileImpl: async () => {
+      throw new Error('merge-agent dispatch must not run when preflight skips');
+    },
+    now: '2026-06-06T22:34:30.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch-skipped');
+  assert.equal(result.reason, 'worker-run-lookup-failed');
+  const [skipRecord] = listMergeAgentSkippedDispatches(rootDir);
+  assert.equal(skipRecord.decision, 'skip-worker-run-lookup-failed');
 });
 
 test('prepareOriginalWorkerForMergeAgent records missing launchRequestId as a structured skip', async () => {

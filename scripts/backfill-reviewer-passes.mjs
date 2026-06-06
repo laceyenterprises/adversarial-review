@@ -33,10 +33,12 @@ function parseArgs(argv) {
       idx += 1;
       if (!argv[idx]) throw new Error(`${arg} requires a value`);
       if (arg === '--ledger-db') {
+        args.ledgerTarget = { backend: 'sqlite', path: argv[idx] };
         args.ledgerDbPath = argv[idx];
         args.ledgerDbDeprecated = true;
       } else {
         args.ledgerTarget = argv[idx];
+        args.ledgerDbPath = null;
       }
     } else if (arg === '--codex-session-root') {
       idx += 1;
@@ -77,7 +79,6 @@ function main(argv = process.argv.slice(2), io = {}) {
     }
     const result = backfillReviewerPasses(args.rootDir, {
       ledgerTarget: args.ledgerTarget,
-      ledgerDbPath: args.ledgerDbPath,
       codexSessionRoots: args.codexSessionRoots,
       claudeSessionRoots: args.claudeSessionRoots,
       transcriptFallback: args.transcriptFallback,

@@ -1,8 +1,12 @@
-import Database from 'better-sqlite3';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
+import {
+  readReviewerSessionUsageFromLedger,
+  readWorkerRunUsageFromLedger,
+  resolveSessionLedgerReadTarget,
+} from './session-ledger-read-adapter.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
 const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview']);
@@ -246,59 +250,16 @@ function coerceNonNegativeFloat(value) {
   return parsed;
 }
 
-function resolveSessionLedgerDbPath({
-  env = process.env,
-  hqRoot = null,
-  rootDir = process.cwd(),
-  explicitPath = null,
-  requiredTables = [],
-} = {}) {
-  const candidates = [];
-  if (explicitPath) candidates.push(explicitPath);
-  if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) candidates.push(env.AGENT_OS_SESSION_LEDGER_DB_PATH);
-  if (env.SESSION_LEDGER_DB_PATH) candidates.push(env.SESSION_LEDGER_DB_PATH);
-  if (env.AGENT_OS_DEPLOY_CHECKOUT) {
-    candidates.push(join(env.AGENT_OS_DEPLOY_CHECKOUT, '.agent-os', 'session-ledger', 'ledger.db'));
-  }
-  if (hqRoot || env.HQ_ROOT) {
-    const resolvedHqRoot = hqRoot || env.HQ_ROOT;
-    candidates.push(join(resolvedHqRoot, 'session-ledger', 'ledger.db'));
-  }
-  candidates.push(join(rootDir, '.agent-os', 'session-ledger', 'ledger.db'));
-  candidates.push(join(homedir(), '.agent-os', 'session-ledger', 'ledger.db'));
-  candidates.push(join(homedir(), 'agent-os', '.agent-os', 'session-ledger', 'ledger.db'));
+const tokenRollupWarnings = new Set();
 
-  const seen = new Set();
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const resolved = resolve(String(candidate));
-    if (seen.has(resolved)) continue;
-    seen.add(resolved);
-    if (!existsSync(resolved)) continue;
-    if (!sessionLedgerDbHasTables(resolved, requiredTables)) continue;
-    return resolved;
-  }
-  return null;
-}
-
-function sessionLedgerDbHasTables(dbPath, tableNames = []) {
-  const required = [...new Set((tableNames || []).filter(Boolean).map(String))];
-  if (required.length === 0) return true;
-  let db = null;
-  try {
-    db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const rows = db.prepare(
-      `SELECT name FROM sqlite_master
-        WHERE type = 'table'
-          AND name IN (${required.map((_, idx) => `@table${idx}`).join(', ')})`
-    ).all(Object.fromEntries(required.map((name, idx) => [`table${idx}`, name])));
-    const found = new Set(rows.map((row) => row.name));
-    return required.every((name) => found.has(name));
-  } catch {
-    return false;
-  } finally {
-    if (db) db.close();
-  }
+function warnTokenRollupDegraded(scope, result) {
+  if (result?.reason !== 'unsupported-ledger-backend') return;
+  const key = `${scope}:${result.target?.backend || 'unknown'}`;
+  if (tokenRollupWarnings.has(key)) return;
+  tokenRollupWarnings.add(key);
+  console.warn(
+    `[reviewer-pass-tokens] unsupported-ledger-backend for ${scope}; token rollup unavailable for backend=${result.target?.backend || 'unknown'}`
+  );
 }
 
 function readReviewerSessionTokenUsage({
@@ -307,121 +268,44 @@ function readReviewerSessionTokenUsage({
   workspacePath = null,
   startedAt = null,
   endedAt = null,
+  ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
   rootDir = process.cwd(),
 } = {}) {
-  const dbPath = resolveSessionLedgerDbPath({
-    explicitPath: ledgerDbPath,
+  const result = readReviewerSessionUsageFromLedger({
+    adapterSessionKey,
+    sessionKeys,
+    workspacePath,
+    startedAt,
+    endedAt,
+    ledgerTarget,
+    ledgerDbPath,
     env,
     rootDir,
-    requiredTables: ['runtime_sessions'],
   });
-  if (!dbPath) return null;
-  const keys = [...new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String))];
-  if (keys.length === 0 && !workspacePath) return null;
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  try {
-    const window = runtimeSessionWindowClause({ startedAt, endedAt });
-    let row = null;
-    if (keys.length > 0) {
-      const params = { ...window.params };
-      keys.forEach((key, idx) => { params[`key${idx}`] = key; });
-      row = db.prepare(
-        `SELECT adapter_session_key, total_input_tokens, total_output_tokens,
-                total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-                source_path, started_at, ended_at
-           FROM runtime_sessions
-          WHERE adapter_session_key IN (${keys.map((_, idx) => `@key${idx}`).join(', ')})
-            ${window.clause}
-          ORDER BY COALESCE(ended_at, started_at, '') DESC
-          LIMIT 1`
-      ).get(params);
-    }
-    if (!row && workspacePath) {
-      row = db.prepare(
-        `SELECT adapter_session_key, total_input_tokens, total_output_tokens,
-                total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-                source_path, started_at, ended_at
-           FROM runtime_sessions
-          WHERE source_path = @workspacePath
-            ${window.clause}
-          ORDER BY COALESCE(ended_at, started_at, '') DESC
-          LIMIT 1`
-      ).get({
-        workspacePath,
-        ...window.params,
-      });
-    }
-    return tokenUsageFromRuntimeSession(row);
-  } finally {
-    closeOwnedReviewDb(db);
-  }
+  warnTokenRollupDegraded('reviewer-session', result);
+  return result.ok ? tokenUsageFromRuntimeSession(result.row) : null;
 }
 
 function readWorkerRunTokenUsage({
   workerRunId,
   launchRequestId = null,
+  ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
   rootDir = process.cwd(),
 } = {}) {
-  const dbPath = resolveSessionLedgerDbPath({
-    explicitPath: ledgerDbPath,
+  const result = readWorkerRunUsageFromLedger({
+    workerRunId,
+    launchRequestId,
+    ledgerTarget,
+    ledgerDbPath,
     env,
     rootDir,
-    requiredTables: ['worker_runs'],
   });
-  if (!dbPath || (!workerRunId && !launchRequestId)) return null;
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  try {
-    if (workerRunId) {
-      const row = db.prepare(
-        `SELECT wr.run_id, wr.launch_request_id,
-                wr.token_usage_input, wr.token_usage_output,
-                wr.token_usage_cost_usd, wr.token_usage_source,
-                rs.total_cache_read_tokens, rs.total_cache_write_tokens
-           FROM worker_runs wr
-           LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
-          WHERE wr.run_id = @workerRunId
-          ORDER BY COALESCE(wr.ended_at, wr.updated_at, wr.started_at, '') DESC
-          LIMIT 1`
-      ).get({ workerRunId });
-      if (row) return tokenUsageFromWorkerRun(row, { workerRunId, launchRequestId });
-    }
-    if (!launchRequestId) return null;
-    const row = db.prepare(
-      `SELECT wr.run_id, wr.launch_request_id,
-              wr.token_usage_input, wr.token_usage_output,
-              wr.token_usage_cost_usd, wr.token_usage_source,
-              rs.total_cache_read_tokens, rs.total_cache_write_tokens
-         FROM worker_runs wr
-         LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
-        WHERE wr.launch_request_id = @launchRequestId
-        ORDER BY COALESCE(wr.ended_at, wr.updated_at, wr.started_at, '') DESC
-        LIMIT 1`
-    ).get({ launchRequestId });
-    return tokenUsageFromWorkerRun(row, { workerRunId, launchRequestId });
-  } finally {
-    closeOwnedReviewDb(db);
-  }
-}
-
-function runtimeSessionWindowClause({ startedAt = null, endedAt = null } = {}) {
-  const params = {};
-  const clauses = [];
-  if (endedAt) {
-    params.windowEnd = endedAt;
-    clauses.push(`COALESCE(started_at, '') <= @windowEnd`);
-  }
-  if (startedAt) {
-    params.windowStart = startedAt;
-    clauses.push(`COALESCE(ended_at, started_at, '') >= @windowStart`);
-  }
-  return {
-    clause: clauses.length > 0 ? ` AND ${clauses.join(' AND ')}` : '',
-    params,
-  };
+  warnTokenRollupDegraded('worker-run', result);
+  return result.ok ? tokenUsageFromWorkerRun(result.row, { workerRunId, launchRequestId }) : null;
 }
 
 function tokenUsageFromWorkerRun(row, { workerRunId = null, launchRequestId = null } = {}) {
@@ -928,6 +812,7 @@ function readBestReviewerEvidenceTokenUsage({
   workspacePath = null,
   startedAt = null,
   endedAt = null,
+  ledgerTarget = null,
   ledgerDbPath = null,
   rootDir = process.cwd(),
   reviewerModel = null,
@@ -939,6 +824,7 @@ function readBestReviewerEvidenceTokenUsage({
   const ledgerUsage = readWorkerRunTokenUsage({
     workerRunId,
     launchRequestId,
+    ledgerTarget,
     ledgerDbPath,
     rootDir,
   }) || readReviewerSessionTokenUsage({
@@ -947,6 +833,7 @@ function readBestReviewerEvidenceTokenUsage({
     workspacePath,
     startedAt,
     endedAt,
+    ledgerTarget,
     ledgerDbPath,
     rootDir,
   });
@@ -1101,6 +988,7 @@ function readHistoricalFollowUpJobs(rootDir) {
 }
 
 function backfillReviewerPasses(rootDir, {
+  ledgerTarget = null,
   ledgerDbPath = null,
   codexSessionRoots = [],
   claudeSessionRoots = [],
@@ -1150,12 +1038,14 @@ function backfillReviewerPasses(rootDir, {
     const usage = readWorkerRunTokenUsage({
       workerRunId: worker.workerRunId || worker.runId || null,
       launchRequestId,
+      ledgerTarget,
       ledgerDbPath,
       rootDir,
     }) || readReviewerSessionTokenUsage({
       workspacePath,
       startedAt,
       endedAt,
+      ledgerTarget,
       ledgerDbPath,
       rootDir,
     }) || (transcriptFallback ? readTranscriptTokenUsageForModel({
@@ -1316,5 +1206,4 @@ export {
   readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,
   reviewerPassRows,
-  resolveSessionLedgerDbPath,
 };

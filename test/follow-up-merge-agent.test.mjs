@@ -43,9 +43,9 @@ import {
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
-  resolveSessionLedgerDbPath,
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
+import { resolveSessionLedgerReadTarget } from '../src/session-ledger-read-adapter.mjs';
 // CFG-09 (2026-05-30, round-2): role-config cascade caches by
 // (topPath, modulePaths) — not env. Tests in this file rotate env
 // between cases (codex vs claude-code vs merge-agent vs invalid)
@@ -3135,12 +3135,7 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666');
   const ledgerDbPath = path.join(hqRoot, 'session-ledger.sqlite');
-  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
   mkdirSync(workerDir, { recursive: true });
-  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
-    ownerUser: 'placey',
-    ledgerDbPath,
-  }));
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
     workerId: 'codex-lac-666',
     launchRequestId: 'lrq_lookup',
@@ -3150,15 +3145,16 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   }));
 
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_lookup', 'lrq_lookup', 'cancelled');
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_lookup', 'lrq_lookup', 'cancelled', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
   db.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
-    env: {},
+    env: { ...HERMETIC_CONFIG_ENV },
+    ledgerTarget: { backend: 'sqlite', path: ledgerDbPath },
   });
 
   assert.equal(result.found, true);
@@ -3167,30 +3163,28 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   assert.equal(result.runId, 'run_lookup');
 });
 
-test('lookupOriginalWorkerRunStatus falls back to the canonical HOME session-ledger db', async () => {
+test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical sqlite ledger target contract', async () => {
   const { default: Database } = await import('better-sqlite3');
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
-  const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666home');
-  const ledgerDir = path.join(homeDir, '.agent-os', 'session-ledger');
-  const ledgerDbPath = path.join(ledgerDir, 'ledger.db');
+  const ledgerDbPath = path.join(hqRoot, 'session-ledger-home.sqlite');
   mkdirSync(workerDir, { recursive: true });
-  mkdirSync(ledgerDir, { recursive: true });
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
     workerId: 'codex-lac-666home',
     launchRequestId: 'lrq_home_lookup',
   }));
 
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_home_lookup', 'lrq_home_lookup', 'succeeded');
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_home_lookup', 'lrq_home_lookup', 'succeeded', '2026-06-04T00:00:00.000Z', '2026-06-04T00:02:00.000Z', '2026-06-04T00:02:00.000Z');
   db.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
-    env: { HOME: homeDir },
+    env: { ...HERMETIC_CONFIG_ENV },
+    ledgerTarget: `sqlite://${ledgerDbPath}`,
   });
 
   assert.equal(result.found, true);
@@ -3203,12 +3197,7 @@ test('lookupOriginalWorkerRunStatus requires launchRequestId and ignores unrelat
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666a');
   const ledgerDbPath = path.join(hqRoot, 'session-ledger.sqlite');
-  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
   mkdirSync(workerDir, { recursive: true });
-  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
-    ownerUser: 'placey',
-    ledgerDbPath,
-  }));
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
     workerId: 'codex-lac-666a',
     launchRequestId: 'lrq_lookup_target',
@@ -3218,17 +3207,18 @@ test('lookupOriginalWorkerRunStatus requires launchRequestId and ignores unrelat
   }));
 
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_lookup_shared', 'lrq_lookup_target', 'running');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_lookup_shared', 'lrq_lookup_newer', 'cancelled');
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_lookup_shared', 'lrq_lookup_target', 'running', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_lookup_shared', 'lrq_lookup_newer', 'cancelled', '2026-06-04T00:03:00.000Z', '2026-06-04T00:04:00.000Z', '2026-06-04T00:04:00.000Z');
   db.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
-    env: {},
+    env: { ...HERMETIC_CONFIG_ENV },
+    ledgerTarget: { backend: 'sqlite', path: ledgerDbPath },
   });
 
   assert.equal(result.found, true);
@@ -3242,12 +3232,7 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666alias');
   const ledgerDbPath = path.join(hqRoot, 'session-ledger.sqlite');
-  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
   mkdirSync(workerDir, { recursive: true });
-  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
-    ownerUser: 'placey',
-    ledgerDbPath,
-  }));
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
     workerId: 'codex-lac-666alias',
     lrq: 'lrq_alias',
@@ -3257,15 +3242,16 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
   }));
 
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_alias', 'lrq_alias', 'failed');
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_alias', 'lrq_alias', 'failed', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
   db.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
-    env: {},
+    env: { ...HERMETIC_CONFIG_ENV },
+    ledgerTarget: { backend: 'sqlite', path: ledgerDbPath },
   });
 
   assert.equal(result.found, true);
@@ -3274,11 +3260,44 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
   assert.equal(result.runId, 'run_alias');
 });
 
+test('lookupOriginalWorkerRunStatus ignores cwd-rooted ledger candidates during merge prep', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const workerDir = path.join(hqRoot, 'workers', 'codex-pr-401');
+  const cwdLedger = path.join(rootDir, '.agent-os', 'session-ledger', 'ledger.db');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(
+    path.join(workerDir, 'workspace.json'),
+    JSON.stringify({ workerId: 'codex-pr-401', branch: 'codex-pr-401', launchRequestId: 'lrq_1' }),
+    'utf8',
+  );
+  mkdirSync(path.dirname(cwdLedger), { recursive: true });
+  const db = new Database(cwdLedger);
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('wr_cwd', 'lrq_1', 'succeeded', null, null, null);
+  db.close();
+
+  const previousCwd = process.cwd();
+  process.chdir(rootDir);
+  try {
+    const result = await lookupOriginalWorkerRunStatus({
+      workerDir,
+      hqRoot,
+      env: { ...HERMETIC_CONFIG_ENV, HOME: path.join(rootDir, 'empty-home') },
+    });
+    assert.equal(result.found, false);
+    assert.equal(result.reason, 'missing-ledger-db');
+  } finally {
+    process.chdir(previousCwd);
+  }
+});
+
 // Regression for the 2026-05-18 outage where merge-agent emitted false
 // `original-worker-run-row-missing-but-worktree-present` deferrals for
 // every newly-provisioned worker (PRs #661 #664 #665 stuck >6h).
 //
-// Root cause: resolveSessionLedgerDbPath picked the managed-service-root
+// Root cause: the ledger target resolver picked the managed-service-root
 // DB (/Users/<owner>/.agent-os/session-ledger/ledger.db, updated only by
 // the session-ledger service-refresh loop) ahead of the deploy-checkout
 // DB (<deploy>/.agent-os/session-ledger/ledger.db, where the dispatch
@@ -3286,7 +3305,7 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
 // wedged, the merge-agent read a stale snapshot and never saw the rows
 // the daemon had just written.
 
-test('resolveSessionLedgerDbPath prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/session-ledger/ledger.db over managed-service-root fallback', () => {
+test('resolveSessionLedgerReadTarget prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/session-ledger/ledger.db over managed-service-root fallback', () => {
   const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
   const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-'));
   const deployLedgerDir = path.join(deployCheckout, '.agent-os', 'session-ledger');
@@ -3295,21 +3314,27 @@ test('resolveSessionLedgerDbPath prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/sess
   const homeLedgerDbPath = path.join(homeLedgerDir, 'ledger.db');
   mkdirSync(deployLedgerDir, { recursive: true });
   mkdirSync(homeLedgerDir, { recursive: true });
-  writeFileSync(deployLedgerDbPath, '');
-  writeFileSync(homeLedgerDbPath, '');
+  const deployDb = new Database(deployLedgerDbPath);
+  deployDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  deployDb.close();
+  const homeDb = new Database(homeLedgerDbPath);
+  homeDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  homeDb.close();
 
-  const result = resolveSessionLedgerDbPath({
+  const result = resolveSessionLedgerReadTarget({
     hqRoot: '/Users/airlock/agent-os-hq',
-    env: { AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
+    requiredTables: ['worker_runs'],
+    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
   });
 
-  assert.equal(result, deployLedgerDbPath,
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, deployLedgerDbPath,
     'When both deploy-checkout DB and managed-service-root DB exist, the '
     + 'deploy-checkout DB must win — the dispatch daemon writes worker_runs '
     + 'there, and reading the managed-service-root DB returns a stale snapshot.');
 });
 
-test('resolveSessionLedgerDbPath falls back to HOME-based ledger.db when no deploy-checkout DB exists', () => {
+test('resolveSessionLedgerReadTarget falls back to HOME-based ledger.db when no deploy-checkout DB exists', () => {
   // Pre-fix behavior must still work when there is no repo-rooted DB
   // (e.g., fresh install, or repo-rooted DB legitimately absent).
   // hqRoot uses a tmpdir path (outside /Users/) so the hqRootOwnerHome
@@ -3320,14 +3345,18 @@ test('resolveSessionLedgerDbPath falls back to HOME-based ledger.db when no depl
   const homeLedgerDir = path.join(homeDir, '.agent-os', 'session-ledger');
   const homeLedgerDbPath = path.join(homeLedgerDir, 'ledger.db');
   mkdirSync(homeLedgerDir, { recursive: true });
-  writeFileSync(homeLedgerDbPath, '');
+  const homeDb = new Database(homeLedgerDbPath);
+  homeDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  homeDb.close();
 
-  const result = resolveSessionLedgerDbPath({
+  const result = resolveSessionLedgerReadTarget({
     hqRoot,
-    env: { HOME: homeDir },
+    requiredTables: ['worker_runs'],
+    env: { ...HERMETIC_CONFIG_ENV, HOME: homeDir },
   });
 
-  assert.equal(result, homeLedgerDbPath,
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, homeLedgerDbPath,
     'When no deploy-checkout DB exists, the lookup must still find the '
     + 'HOME-based fallback DB so the merge-agent can operate on hosts '
     + 'where only the service-refresh DB is provisioned.');
@@ -3359,9 +3388,9 @@ test('lookupOriginalWorkerRunStatus finds a worker_run row in the deploy-checkou
   // writes). Mirrors the live SQL we verified on 2026-05-18 from
   // /Users/airlock/agent-os/.agent-os/session-ledger/ledger.db.
   const deployDb = new Database(deployLedgerDbPath);
-  deployDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  deployDb.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('wrun_2e08dd49-ce66-43cf-9c5f-6acac8bbc227', 'lrq_f80d593f-44b5-4cf2-9bbf-fd7cfdf002be', 'succeeded');
+  deployDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  deployDb.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('wrun_2e08dd49-ce66-43cf-9c5f-6acac8bbc227', 'lrq_f80d593f-44b5-4cf2-9bbf-fd7cfdf002be', 'succeeded', '2026-06-04T00:00:00.000Z', '2026-06-04T00:02:00.000Z', '2026-06-04T00:02:00.000Z');
   deployDb.close();
 
   // Managed-service-root DB is empty for this LRQ (simulates a stale
@@ -3369,13 +3398,13 @@ test('lookupOriginalWorkerRunStatus finds a worker_run row in the deploy-checkou
   // Pre-fix the merge-agent would read this DB and emit
   // `missing-worker-run-row` → false deferral.
   const staleDb = new Database(staleLedgerDbPath);
-  staleDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
+  staleDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
   staleDb.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
-    env: { AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
+    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
   });
 
   assert.equal(result.found, true,
@@ -3399,11 +3428,111 @@ test('lookupOriginalWorkerRunStatus defers when launchRequestId is missing even 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
-    env: {},
+    env: { ...HERMETIC_CONFIG_ENV },
   });
 
   assert.equal(result.found, false);
   assert.equal(result.reason, 'missing-launch-request-id');
+});
+
+test('lookupOriginalWorkerRunStatus maps adapter failure reasons onto teardown-safe merge-agent codes', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666map');
+  const brokenLedgerDbPath = path.join(hqRoot, 'broken-ledger.db');
+  const missingLedgerRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-empty-root-'));
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-lac-666map',
+    launchRequestId: 'lrq_lookup_map',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_lookup_map',
+  }));
+  writeFileSync(brokenLedgerDbPath, '');
+
+  const cases = [
+    {
+      reason: 'missing-ledger-db',
+      options: {
+        env: { ...HERMETIC_CONFIG_ENV, HOME: mkdtempSync(path.join(tmpdir(), 'agent-os-empty-home-')) },
+        rootDir: missingLedgerRoot,
+      },
+    },
+    {
+      reason: 'worker-run-lookup-failed',
+      options: {
+        ledgerTarget: { backend: 'sqlite', path: brokenLedgerDbPath },
+        env: { ...HERMETIC_CONFIG_ENV },
+      },
+    },
+    {
+      reason: 'unsupported-ledger-backend',
+      options: {
+        ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+        env: { ...HERMETIC_CONFIG_ENV },
+      },
+    },
+    {
+      reason: 'malformed-ledger-target',
+      options: {
+        ledgerTarget: { backend: 'postgres' },
+        env: { ...HERMETIC_CONFIG_ENV },
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const result = await lookupOriginalWorkerRunStatus({
+      workerDir,
+      hqRoot,
+      ...testCase.options,
+    });
+    assert.equal(result.found, false);
+    assert.equal(result.reason, testCase.reason);
+  }
+});
+
+test('prepareOriginalWorkerForMergeAgent skips every teardown-safe adapter lookup failure reason', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const originalWorkerId = 'codex-lac-666skip';
+  const branch = `${originalWorkerId}/LAC-666skip-lookup-reasons`;
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    branch,
+    launchRequestId: 'lrq_skip_lookup_reasons',
+  }));
+
+  for (const reason of ['missing-ledger-db', 'worker-run-lookup-failed', 'unsupported-ledger-backend', 'malformed-ledger-target']) {
+    const logs = [];
+    let execCalled = false;
+    const result = await prepareOriginalWorkerForMergeAgent({
+      job: makeJob({ branch }),
+      hqPath: 'hq',
+      env: { HQ_ROOT: hqRoot, USER: 'placey', ...HERMETIC_CONFIG_ENV },
+      logger: { info: (line) => logs.push(JSON.parse(line)) },
+      lookupRunStatusImpl: async () => ({
+        found: false,
+        reason,
+        detail: `${reason} detail`,
+        launchRequestId: 'lrq_skip_lookup_reasons',
+      }),
+      execFileImpl: async () => {
+        execCalled = true;
+        throw new Error('execFileImpl must not run after teardown-safe skip');
+      },
+    });
+
+    assert.equal(result.decision, 'skip');
+    assert.equal(result.reason, reason);
+    assert.equal(execCalled, false);
+    assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
+    assert.equal(logs[0].reason, reason);
+  }
 });
 
 test('prepareOriginalWorkerForMergeAgent records missing launchRequestId as a structured skip', async () => {

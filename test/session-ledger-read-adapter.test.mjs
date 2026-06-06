@@ -1,0 +1,290 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import {
+  readLatestWorkerRunStatusFromLedger,
+  readReviewerSessionUsageFromLedger,
+  readWorkerRunUsageFromLedger,
+  resolveSessionLedgerReadTarget,
+} from '../src/session-ledger-read-adapter.mjs';
+
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
+function tempRoot() {
+  return mkdtempSync(path.join(tmpdir(), 'session-ledger-adapter-'));
+}
+
+function createLedgerDb(dbPath) {
+  mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.exec(`
+    CREATE TABLE runtime_sessions (
+      session_id TEXT PRIMARY KEY,
+      adapter_session_key TEXT,
+      total_input_tokens INTEGER,
+      total_output_tokens INTEGER,
+      total_cache_read_tokens INTEGER,
+      total_cache_write_tokens INTEGER,
+      total_cost_usd REAL,
+      source_path TEXT,
+      started_at TEXT,
+      ended_at TEXT
+    );
+    CREATE TABLE worker_runs (
+      run_id TEXT,
+      launch_request_id TEXT,
+      session_id TEXT,
+      status TEXT,
+      token_usage_input INTEGER,
+      token_usage_output INTEGER,
+      token_usage_cost_usd REAL,
+      token_usage_source TEXT,
+      started_at TEXT,
+      ended_at TEXT,
+      updated_at TEXT
+    );
+  `);
+  db.close();
+}
+
+test('resolveSessionLedgerReadTarget accepts backend-neutral explicit sqlite and postgres targets', () => {
+  const sqlite = resolveSessionLedgerReadTarget({
+    ledgerTarget: { backend: 'sqlite', path: '/tmp/ledger.db' },
+  });
+  const postgres = resolveSessionLedgerReadTarget({
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+      AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger',
+    },
+  });
+
+  assert.equal(sqlite.ok, true);
+  assert.equal(sqlite.target.backend, 'sqlite');
+  assert.match(sqlite.target.path, /\/tmp\/ledger\.db$/);
+  assert.equal(postgres.ok, true);
+  assert.equal(postgres.target.backend, 'postgres');
+  assert.equal(postgres.target.dsn, 'postgres://ledger.example/agent_os_ledger');
+});
+
+test('resolveSessionLedgerReadTarget keeps --ledger-db compatibility as a deprecated alias', () => {
+  const result = resolveSessionLedgerReadTarget({ ledgerDbPath: '/tmp/legacy-ledger.db' });
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'sqlite');
+  assert.equal(result.target.deprecatedAlias, true);
+  assert.match(result.target.path, /legacy-ledger\.db$/);
+});
+
+test('resolveSessionLedgerReadTarget fails explicitly for missing or malformed targets', () => {
+  const missing = resolveSessionLedgerReadTarget({
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      HOME: tempRoot(),
+    },
+    rootDir: tempRoot(),
+  });
+  const malformed = resolveSessionLedgerReadTarget({
+    ledgerTarget: { backend: 'postgres' },
+  });
+
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reason, 'missing-ledger-target');
+  assert.equal(malformed.ok, false);
+  assert.equal(malformed.reason, 'malformed-ledger-target');
+});
+
+test('resolveSessionLedgerReadTarget skips earlier sqlite stub candidates that do not contain session-ledger tables', () => {
+  const rootDir = tempRoot();
+  const deployCheckout = tempRoot();
+  const homeDir = tempRoot();
+  const stubLedger = path.join(deployCheckout, '.agent-os', 'session-ledger', 'ledger.db');
+  const runtimeLedger = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
+  mkdirSync(path.dirname(stubLedger), { recursive: true });
+  new Database(stubLedger).close();
+  createLedgerDb(runtimeLedger);
+
+  const result = resolveSessionLedgerReadTarget({
+    requiredTables: ['runtime_sessions'],
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_DEPLOY_CHECKOUT: deployCheckout,
+      HOME: homeDir,
+    },
+    rootDir,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, runtimeLedger);
+  assert.equal(result.target.source, 'roots.runtime_home');
+});
+
+test('resolveSessionLedgerReadTarget keeps env sqlite overrides independent from config parse failures', () => {
+  const invalidConfigPath = path.join(tempRoot(), 'config.local.yaml');
+  writeFileSync(invalidConfigPath, 'session_ledger: [\n');
+
+  const result = resolveSessionLedgerReadTarget({
+    env: {
+      AGENT_OS_CONFIG_PATH: invalidConfigPath,
+      AGENT_OS_SESSION_LEDGER_DB_PATH: '/tmp/env-ledger.db',
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'sqlite');
+  assert.match(result.target.path, /env-ledger\.db$/);
+  assert.equal(result.target.source, 'env:AGENT_OS_SESSION_LEDGER_DB_PATH');
+});
+
+test('resolveSessionLedgerReadTarget falls through env sqlite stubs that lack required tables', () => {
+  const rootDir = tempRoot();
+  const homeDir = tempRoot();
+  const stubLedger = path.join(rootDir, 'env-stub.db');
+  const runtimeLedger = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
+  new Database(stubLedger).close();
+  createLedgerDb(runtimeLedger);
+
+  const result = resolveSessionLedgerReadTarget({
+    requiredTables: ['worker_runs'],
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_DB_PATH: stubLedger,
+      HOME: homeDir,
+    },
+    rootDir: null,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, runtimeLedger);
+  assert.equal(result.target.source, 'roots.runtime_home');
+});
+
+test('resolveSessionLedgerReadTarget falls through stale legacy HQ ledgerDbPath values', () => {
+  const rootDir = tempRoot();
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const homeDir = path.join(rootDir, 'runtime-home');
+  const staleLegacyLedger = path.join(rootDir, 'stale-legacy.db');
+  const runtimeLedger = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  writeFileSync(
+    path.join(hqRoot, '.hq', 'config.json'),
+    JSON.stringify({ ledgerDbPath: staleLegacyLedger }),
+    'utf8',
+  );
+  new Database(staleLegacyLedger).close();
+  createLedgerDb(runtimeLedger);
+
+  const result = resolveSessionLedgerReadTarget({
+    requiredTables: ['worker_runs'],
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      HQ_ROOT: hqRoot,
+      HOME: homeDir,
+    },
+    rootDir: null,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, runtimeLedger);
+  assert.equal(result.target.source, 'roots.runtime_home');
+});
+
+test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newest row', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createLedgerDb(ledgerDb);
+  const db = new Database(ledgerDb);
+  db.prepare(
+    `INSERT INTO worker_runs (
+       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
+       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('wr_old', 'lrq_1', 'rs_1', 'running', 1, 2, 0.1, 'session-ledger', '2026-06-04T00:00:00.000Z', null, '2026-06-04T00:03:00.000Z');
+  db.prepare(
+    `INSERT INTO worker_runs (
+       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
+       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('wr_new', 'lrq_1', 'rs_2', 'cancelled', 3, 4, 0.2, 'session-ledger', '2026-06-04T00:00:00.000Z', null, null);
+  db.close();
+
+  const result = readLatestWorkerRunStatusFromLedger({
+    launchRequestId: 'lrq_1',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.run_id, 'wr_new');
+  assert.equal(result.row.status, 'cancelled');
+});
+
+test('readReviewerSessionUsageFromLedger keeps runtime_sessions lookups bounded to the newest row', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createLedgerDb(ledgerDb);
+  const db = new Database(ledgerDb);
+  db.prepare(
+    `INSERT INTO runtime_sessions (
+       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
+       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+       source_path, started_at, ended_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('rs_old', 'session-1', 10, 11, 1, 2, 0.1, '/tmp/review-workspace', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z');
+  db.prepare(
+    `INSERT INTO runtime_sessions (
+       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
+       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+       source_path, started_at, ended_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('rs_new', 'session-1', 20, 21, 3, 4, 0.2, '/tmp/review-workspace', '2026-06-04T00:00:00.000Z', '2026-06-04T00:02:00.000Z');
+  db.close();
+
+  const result = readReviewerSessionUsageFromLedger({
+    adapterSessionKey: 'session-1',
+    workspacePath: '/tmp/review-workspace',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.session_id, 'rs_new');
+  assert.equal(result.row.total_input_tokens, 20);
+});
+
+test('adapter exposes the same ledger target contract to worker-run and runtime-session readers', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createLedgerDb(ledgerDb);
+  const db = new Database(ledgerDb);
+  db.prepare(
+    `INSERT INTO runtime_sessions (
+       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
+       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+       source_path, started_at, ended_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('rs_1', 'session-1', 120, 45, 11, 7, 0.35, '/tmp/review-workspace', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z');
+  db.prepare(
+    `INSERT INTO worker_runs (
+       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
+       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('wr_1', 'lrq_1', 'rs_1', 'succeeded', 120, 45, 0.35, 'session-ledger', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
+  db.close();
+
+  const ledgerTarget = { backend: 'sqlite', path: ledgerDb };
+  const workerUsage = readWorkerRunUsageFromLedger({ workerRunId: 'wr_1', ledgerTarget });
+  const sessionUsage = readReviewerSessionUsageFromLedger({
+    adapterSessionKey: 'session-1',
+    workspacePath: '/tmp/review-workspace',
+    startedAt: '2026-06-04T00:00:00.000Z',
+    endedAt: '2026-06-04T00:02:00.000Z',
+    ledgerTarget,
+  });
+
+  assert.equal(workerUsage.ok, true);
+  assert.equal(workerUsage.target.path, ledgerDb);
+  assert.equal(sessionUsage.ok, true);
+  assert.equal(sessionUsage.target.path, ledgerDb);
+});

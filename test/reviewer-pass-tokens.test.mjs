@@ -261,7 +261,7 @@ test('worker-run rollup join reads token columns and cache totals from runtime s
 
   const usage = readWorkerRunTokenUsage({
     workerRunId: 'wr_1',
-    ledgerDbPath: ledgerDb,
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
     rootDir,
   });
 
@@ -288,6 +288,7 @@ test('reviewer session lookup skips empty HQ_ROOT ledger stubs', () => {
     workspacePath: '/tmp/review-workspace',
     startedAt: '2026-05-18T00:59:00.000Z',
     endedAt: '2026-05-18T01:03:00.000Z',
+    ledgerTarget: { backend: 'sqlite', path: realLedger },
     env: { HQ_ROOT: hqRoot },
     rootDir,
   });
@@ -309,6 +310,7 @@ test('worker-run lookup skips empty HQ_ROOT ledger stubs', () => {
 
   const usage = readWorkerRunTokenUsage({
     workerRunId: 'wr_1',
+    ledgerTarget: { backend: 'sqlite', path: realLedger },
     env: { HQ_ROOT: hqRoot },
     rootDir,
   });
@@ -331,7 +333,7 @@ test('reviewer session lookup prefers adapter session keys over newer workspace 
     workspacePath: '/tmp/review-workspace',
     startedAt: '2026-05-18T00:59:00.000Z',
     endedAt: '2026-05-18T01:03:00.000Z',
-    ledgerDbPath: ledgerDb,
+    ledgerTarget: `sqlite://${ledgerDb}`,
     rootDir,
   });
 
@@ -348,7 +350,7 @@ test('worker-run lookup prefers explicit workerRunId over a newer launch request
   const usage = readWorkerRunTokenUsage({
     workerRunId: 'wr_1_shared',
     launchRequestId: 'shared-lrq',
-    ledgerDbPath: ledgerDb,
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
     rootDir,
   });
 
@@ -356,6 +358,36 @@ test('worker-run lookup prefers explicit workerRunId over a newer launch request
   assert.equal(usage.launchRequestId, 'shared-lrq-old');
   assert.equal(usage.input, 120);
   assert.equal(usage.output, 45);
+});
+
+test('token rollup logs unsupported postgres backend once per scope', () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const workerUsage = readWorkerRunTokenUsage({
+      workerRunId: 'wr_1',
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+    });
+    const workerUsageAgain = readWorkerRunTokenUsage({
+      workerRunId: 'wr_2',
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+    });
+    const reviewerUsage = readReviewerSessionTokenUsage({
+      adapterSessionKey: 'session-1',
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+    });
+
+    assert.equal(workerUsage, null);
+    assert.equal(workerUsageAgain, null);
+    assert.equal(reviewerUsage, null);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /unsupported-ledger-backend.*worker-run/);
+  assert.match(warnings[1], /unsupported-ledger-backend.*reviewer-session/);
 });
 
 test('backfill is idempotent for historical follow-up workspaces', () => {
@@ -381,8 +413,8 @@ test('backfill is idempotent for historical follow-up workspaces', () => {
     },
   }), 'utf8');
 
-  const first = backfillReviewerPasses(rootDir, { ledgerDbPath: ledgerDb });
-  const second = backfillReviewerPasses(rootDir, { ledgerDbPath: ledgerDb });
+  const first = backfillReviewerPasses(rootDir, { ledgerTarget: { backend: 'sqlite', path: ledgerDb } });
+  const second = backfillReviewerPasses(rootDir, { ledgerTarget: { backend: 'sqlite', path: ledgerDb } });
 
   assert.equal(first.considered, 1);
   assert.equal(second.considered, 1);
@@ -424,7 +456,7 @@ test('backfill dry-run reports eligible live-shaped jobs without writing reviewe
     },
   }), 'utf8');
 
-  const result = backfillReviewerPasses(rootDir, { ledgerDbPath: ledgerDb, dryRun: true });
+  const result = backfillReviewerPasses(rootDir, { ledgerTarget: { backend: 'sqlite', path: ledgerDb }, dryRun: true });
 
   assert.equal(result.considered, 1);
   assert.equal(result.wouldInsertOrUpdate, 1);

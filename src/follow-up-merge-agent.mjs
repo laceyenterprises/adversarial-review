@@ -51,6 +51,10 @@ import { loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
+import {
+  readLatestWorkerRunStatusFromLedger,
+  resolveSessionLedgerReadTarget,
+} from './session-ledger-read-adapter.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -81,6 +85,12 @@ const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
   'worker-run-lookup-failed',
   'worker-run-lookup-threw',
   'missing-launch-request-id',
+  'unsupported-ledger-backend',
+  'malformed-ledger-target',
+]);
+const SESSION_LEDGER_LOOKUP_REASON_ALIASES = new Map([
+  ['missing-ledger-target', 'missing-ledger-db'],
+  ['ledger-read-failed', 'worker-run-lookup-failed'],
 ]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
@@ -526,58 +536,19 @@ function validateWorkerWorkspaceForBranch(workspace, originalWorkerId, branch) {
   return { ok: true, workspaceWorkerId, workspaceBranch };
 }
 
-function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
-  if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
-    return String(env.AGENT_OS_SESSION_LEDGER_DB_PATH);
-  }
-  const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
-  if (config.ok && config.value?.ledgerDbPath) {
-    return String(config.value.ledgerDbPath);
-  }
-  // The dispatch daemon (cwp_dispatch.daemon) writes worker_runs into the
-  // REPO-ROOTED DB under the deploy checkout
-  // (<deploy>/.agent-os/session-ledger/ledger.db). The MANAGED-SERVICE-ROOT
-  // DB at $HOME/.agent-os/session-ledger/ledger.db is updated by a separate
-  // service-refresh loop and lags (or stops entirely if that LaunchAgent
-  // wedges). The merge-agent MUST read from the deploy-checkout DB, otherwise
-  // a stale snapshot causes false `original-worker-run-row-missing-but-
-  // worktree-present` deferrals for every newly-provisioned worker.
-  // See CLAUDE.md §"Session Ledger — Data paths — two roots, on purpose".
-  const candidates = [];
-  const hqRootOwnerHome = String(hqRoot || '').match(/^\/Users\/([^/]+)/)?.[1];
-  const deployCheckoutEnv = String(env.AGENT_OS_DEPLOY_CHECKOUT || '').trim();
-  if (deployCheckoutEnv) {
-    candidates.push(join(deployCheckoutEnv, '.agent-os', 'session-ledger', 'ledger.db'));
-  }
-  if (hqRootOwnerHome) {
-    // Convention: the deploy checkout is the sibling of agent-os-hq under
-    // the hq owner's home (/Users/<owner>/agent-os/). This is the daemon's
-    // canonical write target.
-    candidates.push(join('/Users', hqRootOwnerHome, 'agent-os', '.agent-os', 'session-ledger', 'ledger.db'));
-  }
-  if (hqRootOwnerHome) {
-    // Fallback: managed-service-root DB. Kept for back-compat but lower
-    // priority than the deploy-checkout DB above for the reasons above.
-    candidates.push(join('/Users', hqRootOwnerHome, '.agent-os', 'session-ledger', 'ledger.db'));
-  }
-  const runtimeHome = String(env.HOME || '').trim();
-  if (runtimeHome) {
-    candidates.push(join(runtimeHome, '.agent-os', 'session-ledger', 'ledger.db'));
-  }
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
 function normalizeWorkerRunStatus(status) {
   return String(status || '').trim().toLowerCase();
+}
+
+function normalizeDeferredLookupFailureReason(reason) {
+  return SESSION_LEDGER_LOOKUP_REASON_ALIASES.get(reason) || reason;
 }
 
 async function lookupOriginalWorkerRunStatus({
   workerDir,
   hqRoot,
   env,
+  ledgerTarget = null,
   workspace = undefined,
   runRecord = undefined,
 } = {}) {
@@ -597,54 +568,28 @@ async function lookupOriginalWorkerRunStatus({
     return { found: false, reason: 'missing-launch-request-id' };
   }
 
-  const dbPath = resolveSessionLedgerDbPath({ hqRoot, env });
-  if (!dbPath || !existsSync(dbPath)) {
-    return { found: false, reason: 'missing-ledger-db', launchRequestId, runId };
-  }
-
-  let Database;
-  try {
-    Database = (await import('better-sqlite3')).default;
-  } catch (err) {
+  const result = readLatestWorkerRunStatusFromLedger({
+    launchRequestId,
+    ledgerTarget,
+    env,
+    hqRoot,
+    rootDir: null,
+  });
+  if (!result.ok) {
     return {
       found: false,
-      reason: 'better-sqlite3-unavailable',
-      detail: err?.message || String(err),
+      reason: normalizeDeferredLookupFailureReason(result.reason),
+      detail: result.detail || null,
       launchRequestId,
       runId,
     };
   }
-
-  let db;
-  try {
-    db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const row = db.prepare(`
-      SELECT run_id, launch_request_id, status
-      FROM worker_runs
-      WHERE launch_request_id = @launchRequestId
-      ORDER BY rowid DESC
-      LIMIT 1
-    `).get({ launchRequestId });
-    if (!row) {
-      return { found: false, reason: 'missing-worker-run-row', launchRequestId, runId };
-    }
-    return {
-      found: true,
-      status: normalizeWorkerRunStatus(row.status),
-      launchRequestId: row.launch_request_id || launchRequestId || null,
-      runId: row.run_id || runId || null,
-    };
-  } catch (err) {
-    return {
-      found: false,
-      reason: 'worker-run-lookup-failed',
-      detail: err?.message || String(err),
-      launchRequestId,
-      runId,
-    };
-  } finally {
-    if (db) db.close();
-  }
+  return {
+    found: true,
+    status: normalizeWorkerRunStatus(result.row.status),
+    launchRequestId: result.row.launch_request_id || launchRequestId || null,
+    runId: result.row.run_id || runId || null,
+  };
 }
 
 async function prepareOriginalWorkerForMergeAgent({
@@ -5198,7 +5143,6 @@ export {
   lookupOriginalWorkerRunStatus,
   prepareOriginalWorkerForMergeAgent,
   resolveFastMergePerPollCap,
-  resolveSessionLedgerDbPath,
   recordMergeAgentDispatch,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,

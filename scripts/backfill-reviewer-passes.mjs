@@ -9,13 +9,13 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const USAGE = `\
 Usage:
-  node scripts/backfill-reviewer-passes.mjs [--root-dir <path>] [--ledger-db <path>] [--codex-session-root <path>] [--claude-session-root <path>] [--transcript-fallback] [--dry-run] [--json]
+  node scripts/backfill-reviewer-passes.mjs [--root-dir <path>] [--ledger-target <target>] [--ledger-db <deprecated-path>] [--codex-session-root <path>] [--claude-session-root <path>] [--transcript-fallback] [--dry-run] [--json]
 `;
 
 function parseArgs(argv) {
   const args = {
     rootDir: ROOT,
-    ledgerDbPath: null,
+    ledgerTarget: null,
     codexSessionRoots: [],
     claudeSessionRoots: [],
     transcriptFallback: false,
@@ -28,10 +28,13 @@ function parseArgs(argv) {
       idx += 1;
       if (!argv[idx]) throw new Error('--root-dir requires a value');
       args.rootDir = argv[idx];
-    } else if (arg === '--ledger-db') {
+    } else if (arg === '--ledger-target' || arg === '--ledger-db') {
       idx += 1;
-      if (!argv[idx]) throw new Error('--ledger-db requires a value');
-      args.ledgerDbPath = argv[idx];
+      if (!argv[idx]) throw new Error(`${arg} requires a value`);
+      args.ledgerTarget = argv[idx];
+      if (arg === '--ledger-db') {
+        args.ledgerDbDeprecated = true;
+      }
     } else if (arg === '--codex-session-root') {
       idx += 1;
       if (!argv[idx]) throw new Error('--codex-session-root requires a value');
@@ -66,8 +69,12 @@ function main(argv = process.argv.slice(2), io = {}) {
       stdout.write(USAGE);
       return 0;
     }
+    if (args.ledgerDbDeprecated) {
+      stderr.write('warning: --ledger-db is deprecated; use --ledger-target instead\n');
+    }
     const result = backfillReviewerPasses(args.rootDir, {
-      ledgerDbPath: args.ledgerDbPath,
+      ledgerTarget: args.ledgerTarget,
+      ledgerDbPath: args.ledgerDbDeprecated ? args.ledgerTarget : null,
       codexSessionRoots: args.codexSessionRoots,
       claudeSessionRoots: args.claudeSessionRoots,
       transcriptFallback: args.transcriptFallback,

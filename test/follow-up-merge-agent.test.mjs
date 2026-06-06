@@ -3135,12 +3135,7 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666');
   const ledgerDbPath = path.join(hqRoot, 'session-ledger.sqlite');
-  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
   mkdirSync(workerDir, { recursive: true });
-  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
-    ownerUser: 'placey',
-    ledgerDbPath,
-  }));
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
     workerId: 'codex-lac-666',
     launchRequestId: 'lrq_lookup',
@@ -3150,15 +3145,16 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   }));
 
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_lookup', 'lrq_lookup', 'cancelled');
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_lookup', 'lrq_lookup', 'cancelled', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
   db.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
     env: {},
+    ledgerTarget: { backend: 'sqlite', path: ledgerDbPath },
   });
 
   assert.equal(result.found, true);
@@ -3167,30 +3163,28 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   assert.equal(result.runId, 'run_lookup');
 });
 
-test('lookupOriginalWorkerRunStatus falls back to the canonical HOME session-ledger db', async () => {
+test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical sqlite ledger target contract', async () => {
   const { default: Database } = await import('better-sqlite3');
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
-  const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666home');
-  const ledgerDir = path.join(homeDir, '.agent-os', 'session-ledger');
-  const ledgerDbPath = path.join(ledgerDir, 'ledger.db');
+  const ledgerDbPath = path.join(hqRoot, 'session-ledger-home.sqlite');
   mkdirSync(workerDir, { recursive: true });
-  mkdirSync(ledgerDir, { recursive: true });
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
     workerId: 'codex-lac-666home',
     launchRequestId: 'lrq_home_lookup',
   }));
 
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_home_lookup', 'lrq_home_lookup', 'succeeded');
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_home_lookup', 'lrq_home_lookup', 'succeeded', '2026-06-04T00:00:00.000Z', '2026-06-04T00:02:00.000Z', '2026-06-04T00:02:00.000Z');
   db.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
-    env: { HOME: homeDir },
+    env: {},
+    ledgerTarget: `sqlite://${ledgerDbPath}`,
   });
 
   assert.equal(result.found, true);
@@ -3203,12 +3197,7 @@ test('lookupOriginalWorkerRunStatus requires launchRequestId and ignores unrelat
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666a');
   const ledgerDbPath = path.join(hqRoot, 'session-ledger.sqlite');
-  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
   mkdirSync(workerDir, { recursive: true });
-  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
-    ownerUser: 'placey',
-    ledgerDbPath,
-  }));
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
     workerId: 'codex-lac-666a',
     launchRequestId: 'lrq_lookup_target',
@@ -3218,17 +3207,18 @@ test('lookupOriginalWorkerRunStatus requires launchRequestId and ignores unrelat
   }));
 
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_lookup_shared', 'lrq_lookup_target', 'running');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_lookup_shared', 'lrq_lookup_newer', 'cancelled');
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_lookup_shared', 'lrq_lookup_target', 'running', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_lookup_shared', 'lrq_lookup_newer', 'cancelled', '2026-06-04T00:03:00.000Z', '2026-06-04T00:04:00.000Z', '2026-06-04T00:04:00.000Z');
   db.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
     env: {},
+    ledgerTarget: { backend: 'sqlite', path: ledgerDbPath },
   });
 
   assert.equal(result.found, true);
@@ -3242,12 +3232,7 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666alias');
   const ledgerDbPath = path.join(hqRoot, 'session-ledger.sqlite');
-  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
   mkdirSync(workerDir, { recursive: true });
-  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({
-    ownerUser: 'placey',
-    ledgerDbPath,
-  }));
   writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
     workerId: 'codex-lac-666alias',
     lrq: 'lrq_alias',
@@ -3257,15 +3242,16 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
   }));
 
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('run_alias', 'lrq_alias', 'failed');
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('run_alias', 'lrq_alias', 'failed', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
   db.close();
 
   const result = await lookupOriginalWorkerRunStatus({
     workerDir,
     hqRoot,
     env: {},
+    ledgerTarget: { backend: 'sqlite', path: ledgerDbPath },
   });
 
   assert.equal(result.found, true);
@@ -3359,9 +3345,9 @@ test('lookupOriginalWorkerRunStatus finds a worker_run row in the deploy-checkou
   // writes). Mirrors the live SQL we verified on 2026-05-18 from
   // /Users/airlock/agent-os/.agent-os/session-ledger/ledger.db.
   const deployDb = new Database(deployLedgerDbPath);
-  deployDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
-  deployDb.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status) VALUES (?, ?, ?)')
-    .run('wrun_2e08dd49-ce66-43cf-9c5f-6acac8bbc227', 'lrq_f80d593f-44b5-4cf2-9bbf-fd7cfdf002be', 'succeeded');
+  deployDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  deployDb.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('wrun_2e08dd49-ce66-43cf-9c5f-6acac8bbc227', 'lrq_f80d593f-44b5-4cf2-9bbf-fd7cfdf002be', 'succeeded', '2026-06-04T00:00:00.000Z', '2026-06-04T00:02:00.000Z', '2026-06-04T00:02:00.000Z');
   deployDb.close();
 
   // Managed-service-root DB is empty for this LRQ (simulates a stale
@@ -3369,7 +3355,7 @@ test('lookupOriginalWorkerRunStatus finds a worker_run row in the deploy-checkou
   // Pre-fix the merge-agent would read this DB and emit
   // `missing-worker-run-row` → false deferral.
   const staleDb = new Database(staleLedgerDbPath);
-  staleDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT)');
+  staleDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
   staleDb.close();
 
   const result = await lookupOriginalWorkerRunStatus({

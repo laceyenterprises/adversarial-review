@@ -24,6 +24,25 @@ if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
   export AGENT_OS_CFG_MODULES="$REPO_ROOT/tools/adversarial-review/config.yaml${AGENT_OS_CFG_MODULES:+:$AGENT_OS_CFG_MODULES}"
   eval "$(agent_os_config_export)"
 fi
+
+# OPH-01: route `op read` through the repo-local shared helper so a
+# 1Password account-level quota exhaustion sleeps before exit instead
+# of tight-looping launchd respawns. Fail closed if the helper cannot
+# be sourced; semantic skew across duplicated cooldown wrappers caused
+# the original respawn-loop regression.
+_OP_RATE_LIMIT_HELPER="$WATCHER_DIR/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+fail_op_helper_load() {
+  echo "[adversarial-watcher] ERROR: $1" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; restore the OPH-01 helper and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 78
+}
+if [[ ! -r "$_OP_RATE_LIMIT_HELPER" ]]; then
+  fail_op_helper_load "OPH-01 helper missing at $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
+fi
+if ! source "$_OP_RATE_LIMIT_HELPER"; then
+  fail_op_helper_load "OPH-01 helper failed to load from $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
+fi
 # Per-user err-file path. The original `/tmp/adversarial-watcher-native-check.err`
 # was a single shared path across users, which silently broke the airlock-side
 # launch when an old placey-owned file existed (cross-user redirect denied,
@@ -120,9 +139,75 @@ fi
 # 1Password popup storm. The service-account token in the env makes these
 # calls non-interactive; the cache only memoizes the resolution and does
 # not change auth strength.
-export LINEAR_API_KEY=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
-export GH_CLAUDE_REVIEWER_TOKEN=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
-export GH_CODEX_REVIEWER_TOKEN=$("$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+resolve_required_op_secret() {
+  local name="$1"
+  local ref="$2"
+  local stdout_path
+  local stderr_path
+  local value
+  local rc
+  stdout_path="${TMPDIR:-/tmp}/adversarial-watcher-${name}.${UID}.$$.$RANDOM.value"
+  stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-${name}.${UID}.$$.$RANDOM.err"
+  if op_resolve_with_rate_limit_backoff "$OP_BIN" read "$ref" >"$stdout_path" 2>"$stderr_path"; then
+    value="$(<"$stdout_path")"
+    if [[ -n "${value//[[:space:]]/}" ]]; then
+      rm -f "$stdout_path" "$stderr_path"
+      printf '%s' "$value"
+      return 0
+    fi
+    echo "[adversarial-watcher] ERROR: $name at $ref resolved to an empty value." >&2
+    rm -f "$stdout_path" "$stderr_path"
+    echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
+    sleep 3600
+    return 1
+  else
+    rc=$?
+  fi
+  sed 's/^/  /' "$stderr_path" >&2
+  if op_rate_limit_stderr_indicates_rate_limit "$stderr_path"; then
+    rm -f "$stdout_path" "$stderr_path"
+    return 5
+  fi
+  rm -f "$stdout_path" "$stderr_path"
+  echo "[adversarial-watcher] ERROR: failed to resolve $name from 1Password" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
+  sleep 3600
+  return "$rc"
+}
+
+resolve_and_export_required_op_secret() {
+  local name="$1"
+  local ref="$2"
+  local stdout_path
+  local value
+  local secret_status
+  stdout_path="${TMPDIR:-/tmp}/adversarial-watcher-${name}.${UID}.$$.$RANDOM.out"
+  set +e
+  resolve_required_op_secret "$name" "$ref" >"$stdout_path"
+  secret_status=$?
+  set -e
+  if [[ $secret_status -eq 0 ]]; then
+    value="$(<"$stdout_path")"
+    rm -f "$stdout_path"
+    export "$name=$value"
+    return 0
+  fi
+  rm -f "$stdout_path"
+  if [[ $secret_status -eq 5 ]]; then
+    echo "[adversarial-watcher] ERROR: $name resolution hit the 1Password rate-limit path; the helper already performed OPH-01 backoff, so exiting without an additional launcher sleep." >&2
+  fi
+  exit 1
+}
+
+# OPH-01: route through op_resolve_with_rate_limit_backoff so a
+# 1Password rate-limit gets a 15-min sleep before exit (vs. the
+# previous fail-open path that turned into a 30-second respawn storm
+# under launchd KeepAlive+ThrottleInterval=30). Non-rate-limit failures
+# get the same explicit launchd backoff here instead of relying on
+# `set -e` to abort during command substitution.
+resolve_and_export_required_op_secret LINEAR_API_KEY 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential'
+resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential'
+resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential'
 
 resolve_alert_to_optional() {
   local attempt=1
@@ -135,7 +220,7 @@ resolve_alert_to_optional() {
   fi
   stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-alert-to.${UID}.$$.$RANDOM.err"
   while (( attempt <= max_attempts )); do
-    if alert_to_value=$("$OP_BIN" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
+    if alert_to_value=$(op_resolve_with_rate_limit_backoff "$OP_BIN" read "$ALERT_TO_OP_REF" 2>"$stderr_path"); then
       if [[ -z "${alert_to_value//[[:space:]]/}" ]]; then
         echo "[adversarial-watcher] ERROR: ALERT_TO at $ALERT_TO_OP_REF resolved to an empty value." >&2
         rm -f "$stderr_path"
@@ -148,6 +233,10 @@ resolve_alert_to_optional() {
     if grep -Eiq "not found|does not exist|isn't an item|unknown object type|no item|no field" "$stderr_path"; then
       rm -f "$stderr_path"
       return 3
+    fi
+    if op_rate_limit_stderr_indicates_rate_limit "$stderr_path"; then
+      rm -f "$stderr_path"
+      return 5
     fi
     if (( attempt < max_attempts )); then
       echo "[adversarial-watcher] WARN: failed to resolve ALERT_TO from 1Password (attempt $attempt/$max_attempts); retrying in 5s." >&2
@@ -163,33 +252,6 @@ resolve_alert_to_optional() {
   done
 }
 
-# Secret-resolution failures (most commonly: 1Password CLI rate-limit "Too
-# many requests") MUST sleep before exit. Without the sleep, launchd
-# KeepAlive+ThrottleInterval=30 turns a single failed `op read` into a
-# 30-second respawn storm that hammers 1Password and *prolongs* the
-# rate-limit instead of clearing it. The 2026-05-19 incident produced
-# 1349 watcher restarts in 8h (~21s cadence, ~4000 op calls) and froze
-# the review pipeline for the operator's full workday.
-# Same fail-once shape as the better-sqlite3 ABI gate and the
-# OP_SERVICE_ACCOUNT_TOKEN secret-source resolver above.
-if [[ -z "${LINEAR_API_KEY:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: failed to resolve LINEAR_API_KEY from 1Password" >&2
-  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
-  sleep 3600
-  exit 1
-fi
-if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: failed to resolve GH_CLAUDE_REVIEWER_TOKEN from 1Password" >&2
-  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
-  sleep 3600
-  exit 1
-fi
-if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from 1Password" >&2
-  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
-  sleep 3600
-  exit 1
-fi
 if [[ -n "${ALERT_TO:-}" && -z "${ALERT_TO//[[:space:]]/}" ]]; then
   unset ALERT_TO
 fi
@@ -216,6 +278,9 @@ if [[ -z "${ALERT_TO:-}" ]]; then
         sleep 3600
         exit 1
       fi
+    elif [[ $alert_to_status -eq 5 ]]; then
+      echo "[adversarial-watcher] ERROR: ALERT_TO resolution hit the 1Password rate-limit path; the helper already performed OPH-01 backoff, so exiting without extra ALERT_TO retries or an additional launcher sleep." >&2
+      exit 1
     else
       echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the ALERT_TO secret-source and bootout the agent to recover sooner." >&2
       sleep 3600

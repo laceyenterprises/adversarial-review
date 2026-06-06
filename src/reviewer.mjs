@@ -26,6 +26,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import { getCachedDiff, putCachedDiff } from './diff-cache.mjs';
 import {
   createFollowUpJob,
   resolveRoundBudgetForJob,
@@ -679,28 +680,55 @@ function queueFollowUpForPostedReview({
 
 // ── PR diff fetch ────────────────────────────────────────────────────────────
 
-async function fetchPRDiff(repo, prNumber) {
+async function fetchPRDiff(repo, prNumber, headSha, {
+  execFileImpl = execFileAsync,
+  getCachedDiffImpl = getCachedDiff,
+  putCachedDiffImpl = putCachedDiff,
+  recordApiCallImpl = recordApiCall,
+  apiStatusFromErrorImpl = apiStatusFromError,
+  log = console,
+} = {}) {
+  const cacheLookupStartedAt = Date.now();
+  const cached = headSha ? getCachedDiffImpl(repo, prNumber, headSha) : null;
+  if (cached) {
+    recordApiCallImpl({
+      category: 'cache_hit_diff_fetch',
+      repo,
+      prNumber,
+      status: 'hit',
+      durationMs: Date.now() - cacheLookupStartedAt,
+    });
+    return cached.bytes;
+  }
+
   const startedAt = Date.now();
   try {
-    const { stdout } = await execFileAsync(
+    const { stdout } = await execFileImpl(
       'gh',
       ['pr', 'diff', String(prNumber), '--repo', repo],
-      { maxBuffer: 10 * 1024 * 1024 }
+      { encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
     );
-    recordApiCall({
+    recordApiCallImpl({
       category: 'diff_fetch',
       repo,
       prNumber,
       status: 200,
       durationMs: Date.now() - startedAt,
     });
+    if (headSha) {
+      try {
+        putCachedDiffImpl(repo, prNumber, headSha, stdout);
+      } catch (err) {
+        log.warn?.(`[reviewer] WARN: failed to write diff cache for ${repo}#${prNumber}@${headSha}: ${err?.message || err}`);
+      }
+    }
     return stdout;
   } catch (err) {
-    recordApiCall({
+    recordApiCallImpl({
       category: 'diff_fetch',
       repo,
       prNumber,
-      status: apiStatusFromError(err),
+      status: apiStatusFromErrorImpl(err),
       durationMs: Date.now() - startedAt,
     });
     throw err;
@@ -1315,8 +1343,9 @@ async function main() {
   let diff;
   try {
     console.error(`[reviewer] DEBUG: fetching diff for ${repo}#${prNumber}...`);
-    diff = await fetchPRDiff(repo, prNumber);
-    console.error(`[reviewer] DEBUG: fetched diff (${diff.length} bytes)`);
+    const diffBytes = await fetchPRDiff(repo, prNumber, reviewerHeadSha);
+    diff = diffBytes.toString('utf8');
+    console.error(`[reviewer] DEBUG: fetched diff (${diffBytes.byteLength} bytes)`);
   } catch (err) {
     console.error(`[reviewer] Failed to fetch diff for ${repo}#${prNumber}:`, err.message);
     process.exit(1);
@@ -1520,6 +1549,7 @@ const __test__ = {
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
   spawnCaptured,
+  fetchPRDiff,
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
   parseCodexJsonTokenUsage,

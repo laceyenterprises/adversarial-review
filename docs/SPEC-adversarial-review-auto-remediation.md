@@ -51,6 +51,26 @@ Invalid non-empty override values are configuration errors. The runtime must
 not silently fall back from an invalid value because that can route work to an
 expensive, unavailable, or intentionally locked-out agent.
 
+## GitHub Diff Cache Contract
+
+Reviewer diff caching is keyed by `(repo, prNumber, headSha)`, where `repo`
+must be an exact `owner/name` slug and the fixed-head key components must not
+contain path separators, NUL bytes, or `..` traversal segments. Cache paths are
+repo-local under `data/api-cache/diffs/`; patch and metadata files are written
+atomically with non-world-readable permissions.
+
+The patch bytes are the source of truth. Metadata stores only `cached_at` for
+LRU ordering; it must not duplicate byte counts or stale ETag state. Reads for
+a fixed head are immutable and refresh `cached_at` without re-fetching from
+GitHub. `GHO_DIFF_CACHE_TTL_HOURS` is therefore a garbage-collection horizon,
+not a read-miss rule. Budget eviction uses the on-disk patch size, and expired
+entries are swept during writes.
+
+Telemetry distinguishes cache hits from HTTP calls: cache hits report
+`cache_hit_diff_fetch` with `status=hit`, while misses emit only the real
+`diff_fetch` GitHub call status. The cache layer must not add a second miss
+event for the same network fetch.
+
 ## SIGTERM Fence Contract
 
 When `ADVERSARIAL_REVIEW_SIGTERM_FENCE` is not `off`, reviewer subprocesses

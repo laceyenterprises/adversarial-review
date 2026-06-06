@@ -16,7 +16,6 @@ function parseArgs(argv) {
   const args = {
     rootDir: ROOT,
     ledgerTarget: null,
-    ledgerDbPath: null,
     codexSessionRoots: [],
     claudeSessionRoots: [],
     transcriptFallback: false,
@@ -33,10 +32,16 @@ function parseArgs(argv) {
       idx += 1;
       if (!argv[idx]) throw new Error(`${arg} requires a value`);
       if (arg === '--ledger-db') {
-        args.ledgerDbPath = argv[idx];
+        args.ledgerTarget = {
+          backend: 'sqlite',
+          path: argv[idx],
+          source: 'deprecated-ledger-db-path',
+          deprecatedAlias: true,
+        };
         args.ledgerDbDeprecated = true;
       } else {
         args.ledgerTarget = argv[idx];
+        args.ledgerDbDeprecated = false;
       }
     } else if (arg === '--codex-session-root') {
       idx += 1;
@@ -77,7 +82,6 @@ function main(argv = process.argv.slice(2), io = {}) {
     }
     const result = backfillReviewerPasses(args.rootDir, {
       ledgerTarget: args.ledgerTarget,
-      ledgerDbPath: args.ledgerDbPath,
       codexSessionRoots: args.codexSessionRoots,
       claudeSessionRoots: args.claudeSessionRoots,
       transcriptFallback: args.transcriptFallback,

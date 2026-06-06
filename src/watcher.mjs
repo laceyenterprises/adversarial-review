@@ -4,7 +4,6 @@
  * Also tracks PR lifecycle (merged/closed) and syncs status to Linear automatically.
  */
 
-import { Octokit } from '@octokit/rest';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -120,6 +119,10 @@ import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import {
+  createWatcherOctokit,
+  fetchConditionalRestPage,
+} from './conditional-request.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -269,6 +272,7 @@ async function withApiTelemetry(category, { repo = null, prNumber = null, succes
     throw err;
   }
 }
+
 
 function isFastMergeSkipEnabled() {
   return process.env.FML_WATCHER_SKIP_ENABLED === 'true';
@@ -435,12 +439,25 @@ async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = cons
     if (typeof octokit?.rest?.issues?.listLabelsOnIssue !== 'function') {
       throw new Error('octokit.rest.issues.listLabelsOnIssue unavailable');
     }
-    const { data } = await withApiTelemetry('labels_list', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.issues.listLabelsOnIssue({
+    const params = {
       owner,
       repo,
       issue_number: prNumber,
       per_page: 100,
-    }));
+    };
+    const { data } = await fetchConditionalRestPage({
+      octokit,
+      category: 'labels_list',
+      endpoint: 'issues.labels',
+      repo: `${owner}/${repo}`,
+      prNumber,
+      rootDir: ROOT,
+      params: { per_page: params.per_page },
+      request: (requestParams) => octokit.rest.issues.listLabelsOnIssue({
+        ...params,
+        ...requestParams,
+      }),
+    });
     return Array.isArray(data) ? data : [];
   } catch (err) {
     logger.warn?.(
@@ -618,7 +635,20 @@ async function fetchFastMergeAuthorizationFromTimeline(
     };
     const events = [];
     for (let page = 1; page <= FAST_MERGE_TIMELINE_MAX_PAGES; page += 1) {
-      const response = await withApiTelemetry('timeline_events', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.issues.listEventsForTimeline({ ...params, page }));
+      const response = await fetchConditionalRestPage({
+        octokit,
+        category: 'timeline_events',
+        endpoint: 'issues.timeline',
+        repo: `${owner}/${repo}`,
+        prNumber,
+        rootDir: ROOT,
+        params: { page, per_page: params.per_page },
+        request: (requestParams) => octokit.rest.issues.listEventsForTimeline({
+          ...params,
+          ...requestParams,
+          page,
+        }),
+      });
       const pageEvents = Array.isArray(response?.data) ? response.data : [];
       events.push(...pageEvents);
       if (pageEvents.length < params.per_page) break;
@@ -2959,12 +2989,14 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 }
 
 async function attemptMergeCloseoutCapture({
+  octokit,
   repo,
   prNumber,
   mergedAt,
   now = new Date(),
   logger = console,
 } = {}) {
+  const [owner, repoName] = String(repo || '').split('/');
   const result = await scrapeMergeCloseout({
     db,
     repo,
@@ -2973,6 +3005,43 @@ async function attemptMergeCloseoutCapture({
     now,
     execFileImpl: execFileAsync,
     logger,
+    fetchIssueCommentsImpl: async () => {
+      if (typeof octokit?.rest?.issues?.listComments !== 'function') {
+        throw new Error('octokit.rest.issues.listComments unavailable');
+      }
+      const comments = [];
+      const params = {
+        owner,
+        repo: repoName,
+        issue_number: prNumber,
+        per_page: 100,
+      };
+      for (let page = 1; ; page += 1) {
+        const response = await fetchConditionalRestPage({
+          octokit,
+          category: 'other',
+          endpoint: 'issues.comments',
+          repo,
+          prNumber,
+          rootDir: ROOT,
+          params: { page, per_page: params.per_page },
+          request: (requestParams) => octokit.rest.issues.listComments({
+            ...params,
+            ...requestParams,
+            page,
+          }),
+        });
+        const pageComments = Array.isArray(response?.data) ? response.data : [];
+        comments.push(...pageComments.map((comment) => ({
+          id: comment?.node_id ?? comment?.id ?? null,
+          login: comment?.user?.login ?? null,
+          created_at: comment?.created_at ?? null,
+          body: comment?.body ?? '',
+        })));
+        if (pageComments.length < params.per_page) break;
+      }
+      return comments;
+    },
   });
   if (!result.ok) {
     logger.warn?.(
@@ -3005,6 +3074,7 @@ const PENDING_MERGE_CLOSEOUTS_PER_TICK = 20;
 const PENDING_MERGE_CLOSEOUTS_BUDGET_MS = 60_000;
 
 async function retryPendingMergeCloseouts({
+  octokit,
   limit = PENDING_MERGE_CLOSEOUTS_PER_TICK,
   budgetMs = PENDING_MERGE_CLOSEOUTS_BUDGET_MS,
   logger = console,
@@ -3025,6 +3095,7 @@ async function retryPendingMergeCloseouts({
       break;
     }
     await attemptMergeCloseoutCapture({
+      octokit,
       repo: row.repo,
       prNumber: row.pr_number,
       mergedAt: row.merged_at,
@@ -3479,7 +3550,7 @@ async function pollOnce(
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit, operatorSurface);
-  await retryPendingMergeCloseouts();
+  await retryPendingMergeCloseouts({ octokit });
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);
   await runFastMergeClosePathIsolated();
@@ -4530,7 +4601,7 @@ async function main() {
     throw err;
   }
 
-  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+  const octokit = createWatcherOctokit({ auth: process.env.GITHUB_TOKEN });
   const intervalMs = config.pollIntervalMs ?? 300_000;
   const configuredDeadlineMs = config.pollDeadlineMs;
 
@@ -4639,9 +4710,11 @@ if (isMain) {
 
 export {
   classifyReviewerFailure,
+  createWatcherOctokit,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   probeRoutingTierReadiness,
   evaluateRoundBudgetForReview,
+  fetchConditionalRestPage,
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,
   fetchLivePRLabels,

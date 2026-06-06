@@ -294,6 +294,67 @@ test('readLatestWorkerRunStatusFromLedger strips a password-bearing postgres DSN
   assert.equal(result.ok, true);
 });
 
+test('readLatestWorkerRunStatusFromLedger strips a password-bearing libpq DSN out of argv', () => {
+  const result = readLatestWorkerRunStatusFromLedger({
+    launchRequestId: 'lrq_pg',
+    ledgerTarget: {
+      backend: 'postgres',
+      dsn: "host=ledger.example user=ledger-user password='s3 cret' dbname=agent_os_ledger",
+    },
+    spawnSyncImpl: (_command, args, options) => {
+      assert.ok(args.includes('host=ledger.example user=ledger-user dbname=agent_os_ledger'));
+      assert.ok(!args.some((arg) => String(arg).includes('s3 cret')));
+      assert.equal(options.env.PGPASSWORD, 's3 cret');
+      return {
+        status: 0,
+        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"cancelled","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('readLatestWorkerRunStatusFromLedger supports databaseName-only postgres targets', () => {
+  const result = readLatestWorkerRunStatusFromLedger({
+    launchRequestId: 'lrq_pg',
+    ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+    spawnSyncImpl: (_command, args, options) => {
+      assert.deepEqual(args.slice(0, 3), ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1']);
+      assert.ok(args.includes('-d'));
+      assert.ok(args.includes('agent_os_ledger'));
+      assert.ok(!args.some((arg) => String(arg).startsWith('postgres://')));
+      assert.notEqual(options.env, process.env);
+      return {
+        status: 0,
+        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"succeeded","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.status, 'succeeded');
+});
+
+test('readLatestWorkerRunStatusFromLedger reports unparseable psql stdout with context', () => {
+  const result = readLatestWorkerRunStatusFromLedger({
+    launchRequestId: 'lrq_pg',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: () => ({
+      status: 0,
+      stdout: 'NOTICE: extension already exists\n{"run_id":"wr_pg"}\n',
+      stderr: '',
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'ledger-read-failed');
+  assert.match(result.detail, /unparseable psql stdout/);
+  assert.match(result.detail, /NOTICE: extension already exists/);
+});
+
 test('readLatestWorkerRunStatusFromLedger fails closed when psql is terminated by signal', () => {
   const result = readLatestWorkerRunStatusFromLedger({
     launchRequestId: 'lrq_pg',

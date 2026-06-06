@@ -341,12 +341,98 @@ function querySqliteRows(target, sql, params) {
   }
 }
 
+function truncateForDetail(value, limit = 200) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}...`;
+}
+
 function parsePostgresJsonRows(stdout) {
-  return String(stdout || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  const raw = String(stdout || '');
+  const rows = [];
+  for (const line of raw.split('\n').map((entry) => entry.trim()).filter(Boolean)) {
+    try {
+      rows.push(JSON.parse(line));
+    } catch {
+      throw new Error(`unparseable psql stdout: ${truncateForDetail(raw)}`);
+    }
+  }
+  return rows;
+}
+
+function parseLibpqKeyValueDsn(dsn) {
+  const text = String(dsn || '');
+  const tokens = [];
+  let password = null;
+  let idx = 0;
+
+  function skipWhitespace() {
+    while (idx < text.length && /\s/.test(text[idx])) idx += 1;
+  }
+
+  function parseValue() {
+    if (text[idx] === "'") {
+      idx += 1;
+      let value = '';
+      while (idx < text.length) {
+        const char = text[idx];
+        if (char === '\\') {
+          idx += 1;
+          if (idx >= text.length) return null;
+          value += text[idx];
+          idx += 1;
+          continue;
+        }
+        if (char === "'") {
+          idx += 1;
+          return value;
+        }
+        value += char;
+        idx += 1;
+      }
+      return null;
+    }
+
+    let value = '';
+    while (idx < text.length && !/\s/.test(text[idx])) {
+      if (text[idx] === '\\') {
+        idx += 1;
+        if (idx >= text.length) return null;
+        value += text[idx];
+        idx += 1;
+        continue;
+      }
+      value += text[idx];
+      idx += 1;
+    }
+    return value;
+  }
+
+  while (idx < text.length) {
+    skipWhitespace();
+    if (idx >= text.length) break;
+    const tokenStart = idx;
+    while (idx < text.length && text[idx] !== '=' && !/\s/.test(text[idx])) idx += 1;
+    const key = text.slice(tokenStart, idx);
+    if (!key) return null;
+    skipWhitespace();
+    if (text[idx] !== '=') return null;
+    idx += 1;
+    skipWhitespace();
+    const value = parseValue();
+    if (value === null) return null;
+    const raw = text.slice(tokenStart, idx).trim();
+    if (key.toLowerCase() === 'password') {
+      password = value;
+    } else {
+      tokens.push(raw);
+    }
+  }
+
+  return {
+    password,
+    dsn: tokens.join(' '),
+  };
 }
 
 function buildPostgresSpawnConfig(target) {
@@ -354,14 +440,30 @@ function buildPostgresSpawnConfig(target) {
     return {
       ok: true,
       args: ['-d', target.databaseName],
-      env: process.env,
+      env: { ...process.env },
     };
   }
   if (!/^postgres(?:ql)?:\/\//.test(target.dsn)) {
+    if (/\bpassword\s*=/i.test(target.dsn)) {
+      const parsed = parseLibpqKeyValueDsn(target.dsn);
+      if (!parsed || parsed.password === null) {
+        return {
+          ok: false,
+          reason: 'malformed-ledger-target',
+          detail: 'postgres libpq DSN contains a password but could not be safely sanitized',
+          target,
+        };
+      }
+      return {
+        ok: true,
+        args: [parsed.dsn],
+        env: { ...process.env, PGPASSWORD: parsed.password },
+      };
+    }
     return {
       ok: true,
       args: [target.dsn],
-      env: process.env,
+      env: { ...process.env },
     };
   }
   let parsed;
@@ -432,13 +534,11 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
   const spawnConfig = buildPostgresSpawnConfig(target);
   if (!spawnConfig.ok) return spawnConfig;
   try {
-    const args = ['-X', '--no-psqlrc', '-v', 'ON_ERROR_STOP=1'];
+    const args = ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1'];
     for (const [name, value] of psqlVars) {
       args.push('-v', `${name}=${value}`);
     }
-    args.push('-t', '-A');
-    args.splice(args.length - 2, 0, ...spawnConfig.args);
-    args.push('-c', jsonSql);
+    args.push(...spawnConfig.args, '-t', '-A', '-c', jsonSql);
     const result = spawnSyncImpl('psql', args, {
       encoding: 'utf8',
       env: spawnConfig.env,

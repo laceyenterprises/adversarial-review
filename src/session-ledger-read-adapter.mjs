@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -104,7 +105,8 @@ function normalizeExplicitLedgerTarget(ledgerTarget) {
   if (ledgerTarget && typeof ledgerTarget === 'object' && !Array.isArray(ledgerTarget)) {
     const backend = normalizeText(ledgerTarget.backend)?.toLowerCase();
     if (backend === 'sqlite') {
-      return sqliteTargetFromPath(ledgerTarget.path, ledgerTarget.source || 'explicit-ledger-target');
+      const extra = ledgerTarget.deprecatedAlias ? { deprecatedAlias: true } : {};
+      return sqliteTargetFromPath(ledgerTarget.path, ledgerTarget.source || 'explicit-ledger-target', extra);
     }
     if (backend === 'postgres') {
       const dsn = normalizeText(ledgerTarget.dsn);
@@ -306,6 +308,9 @@ function loadBetterSqlite3() {
   }
 }
 
+const PSQL_TIMEOUT_MS = 30_000;
+const PSQL_TIMEOUT_SIGNAL = 'SIGKILL';
+
 function querySqliteRows(target, sql, params) {
   if (!existsSync(target.path)) {
     return {
@@ -337,6 +342,227 @@ function querySqliteRows(target, sql, params) {
   }
 }
 
+function truncateForDetail(value, limit = 200) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}...`;
+}
+
+function parsePostgresJsonRows(stdout) {
+  const raw = String(stdout || '');
+  const rows = [];
+  for (const line of raw.split('\n').map((entry) => entry.trim()).filter(Boolean)) {
+    try {
+      rows.push(JSON.parse(line));
+    } catch {
+      throw new Error(`unparseable psql stdout: ${truncateForDetail(raw)}`);
+    }
+  }
+  return rows;
+}
+
+function parseLibpqKeyValueDsn(dsn) {
+  const text = String(dsn || '');
+  const tokens = [];
+  let password = null;
+  let idx = 0;
+
+  function skipWhitespace() {
+    while (idx < text.length && /\s/.test(text[idx])) idx += 1;
+  }
+
+  function parseValue() {
+    if (text[idx] === "'") {
+      idx += 1;
+      let value = '';
+      while (idx < text.length) {
+        const char = text[idx];
+        if (char === '\\') {
+          idx += 1;
+          if (idx >= text.length) return null;
+          value += text[idx];
+          idx += 1;
+          continue;
+        }
+        if (char === "'") {
+          idx += 1;
+          return value;
+        }
+        value += char;
+        idx += 1;
+      }
+      return null;
+    }
+
+    let value = '';
+    while (idx < text.length && !/\s/.test(text[idx])) {
+      if (text[idx] === '\\') {
+        idx += 1;
+        if (idx >= text.length) return null;
+        value += text[idx];
+        idx += 1;
+        continue;
+      }
+      value += text[idx];
+      idx += 1;
+    }
+    return value;
+  }
+
+  while (idx < text.length) {
+    skipWhitespace();
+    if (idx >= text.length) break;
+    const tokenStart = idx;
+    while (idx < text.length && text[idx] !== '=' && !/\s/.test(text[idx])) idx += 1;
+    const key = text.slice(tokenStart, idx);
+    if (!key) return null;
+    skipWhitespace();
+    if (text[idx] !== '=') return null;
+    idx += 1;
+    skipWhitespace();
+    const value = parseValue();
+    if (value === null) return null;
+    const raw = text.slice(tokenStart, idx).trim();
+    if (key.toLowerCase() === 'password') {
+      password = value;
+    } else {
+      tokens.push(raw);
+    }
+  }
+
+  return {
+    password,
+    dsn: tokens.join(' '),
+  };
+}
+
+function buildPostgresSpawnConfig(target) {
+  if (!target.dsn) {
+    return {
+      ok: true,
+      args: ['-d', target.databaseName],
+      env: { ...process.env },
+    };
+  }
+  if (!/^postgres(?:ql)?:\/\//.test(target.dsn)) {
+    if (/\bpassword\s*=/i.test(target.dsn)) {
+      const parsed = parseLibpqKeyValueDsn(target.dsn);
+      if (!parsed || parsed.password === null) {
+        return {
+          ok: false,
+          reason: 'malformed-ledger-target',
+          detail: 'postgres libpq DSN contains a password but could not be safely sanitized',
+          target,
+        };
+      }
+      return {
+        ok: true,
+        args: [parsed.dsn],
+        env: { ...process.env, PGPASSWORD: parsed.password },
+      };
+    }
+    return {
+      ok: true,
+      args: [target.dsn],
+      env: { ...process.env },
+    };
+  }
+  let parsed;
+  try {
+    parsed = new URL(target.dsn);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'malformed-ledger-target',
+      detail: err?.message || String(err),
+      target,
+    };
+  }
+  const env = { ...process.env };
+  if (parsed.password) {
+    env.PGPASSWORD = decodeURIComponent(parsed.password);
+    parsed.password = '';
+  }
+  return {
+    ok: true,
+    args: [parsed.toString()],
+    env,
+  };
+}
+
+function describePostgresSpawnFailure(result) {
+  if (result.error?.code === 'ENOENT') {
+    return {
+      ok: false,
+      reason: 'psql-not-installed',
+      detail: 'psql is not installed or not on PATH',
+    };
+  }
+  if (result.error?.code === 'ETIMEDOUT') {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: `psql timed out after ${PSQL_TIMEOUT_MS}ms`,
+    };
+  }
+  if (result.signal || result.status === null) {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: `psql terminated by signal ${result.signal || 'unknown'}`,
+    };
+  }
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: String(result.stderr || result.stdout || `psql exited with status ${result.status}`),
+    };
+  }
+  return null;
+}
+
+function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [] } = {}) {
+  const locator = normalizeText(target.dsn) || normalizeText(target.databaseName);
+  if (!locator) {
+    return {
+      ok: false,
+      reason: 'malformed-ledger-target',
+      detail: 'postgres ledger target requires dsn or databaseName',
+      target,
+    };
+  }
+  const spawnConfig = buildPostgresSpawnConfig(target);
+  if (!spawnConfig.ok) return spawnConfig;
+  try {
+    const args = ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1'];
+    for (const [name, value] of psqlVars) {
+      args.push('-v', `${name}=${value}`);
+    }
+    args.push(...spawnConfig.args, '-t', '-A', '-c', jsonSql);
+    const result = spawnSyncImpl('psql', args, {
+      encoding: 'utf8',
+      env: spawnConfig.env,
+      timeout: PSQL_TIMEOUT_MS,
+      killSignal: PSQL_TIMEOUT_SIGNAL,
+    });
+    const failure = describePostgresSpawnFailure(result);
+    if (failure) return { ...failure, target };
+    return {
+      ok: true,
+      rows: parsePostgresJsonRows(result.stdout),
+      target,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: err?.message || String(err),
+      target,
+    };
+  }
+}
+
 function unsupportedBackend(target) {
   return {
     ok: false,
@@ -353,6 +579,7 @@ export function readLatestWorkerRunStatusFromLedger({
   env = process.env,
   rootDir = process.cwd(),
   hqRoot = null,
+  spawnSyncImpl = spawnSync,
 } = {}) {
   const normalizedLaunchRequestId = normalizeText(launchRequestId);
   if (!normalizedLaunchRequestId) {
@@ -367,16 +594,51 @@ export function readLatestWorkerRunStatusFromLedger({
     hqRoot,
   });
   if (!resolution.ok) return resolution;
-  if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
-  const queried = querySqliteRows(
-    resolution.target,
-    `SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
-      FROM worker_runs
-     WHERE launch_request_id = @launchRequestId
-      ORDER BY rowid DESC
-      LIMIT 1`,
-    { launchRequestId: normalizedLaunchRequestId },
-  );
+  let queried;
+  if (resolution.target.backend === 'sqlite') {
+    queried = querySqliteRows(
+      resolution.target,
+      `SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
+         FROM worker_runs
+        WHERE launch_request_id = @launchRequestId
+        ORDER BY COALESCE(updated_at, ended_at, started_at, '') DESC,
+                 COALESCE(ended_at, started_at, '') DESC,
+                 COALESCE(started_at, '') DESC,
+                 run_id DESC,
+                 launch_request_id DESC
+        LIMIT 1`,
+      { launchRequestId: normalizedLaunchRequestId },
+    );
+  } else if (resolution.target.backend === 'postgres') {
+    queried = queryPostgresRows(
+      resolution.target,
+      `SELECT json_build_object(
+          'run_id', run_id,
+          'launch_request_id', launch_request_id,
+          'status', status,
+          'updated_at', updated_at,
+          'ended_at', ended_at,
+          'started_at', started_at
+        )
+         FROM (
+           SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
+             FROM worker_runs
+            WHERE launch_request_id = :'lrq'
+            ORDER BY COALESCE(updated_at::text, ended_at::text, started_at::text, '') DESC,
+                     COALESCE(ended_at::text, started_at::text, '') DESC,
+                     COALESCE(started_at::text, '') DESC,
+                     run_id DESC,
+                     launch_request_id DESC
+            LIMIT 1
+         ) latest_worker_run`,
+      {
+        spawnSyncImpl,
+        psqlVars: [['lrq', normalizedLaunchRequestId]],
+      },
+    );
+  } else {
+    return unsupportedBackend(resolution.target);
+  }
   if (!queried.ok) return queried;
   const [row] = queried.rows;
   if (!row) {

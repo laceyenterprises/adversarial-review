@@ -36,6 +36,22 @@ REPO_RENDER_REVIEWER_AUTH="${REVIEWER_AUTH_ROOT}"
 
 mkdir -p "$REPO_RENDER_LOG_ROOT"
 
+# OPH-01: use the repo-local shared helper as the sole cooldown
+# implementation and fail closed if it cannot be sourced.
+OP_RATE_LIMIT_HELPER="$REPO_RENDER_REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+fail_op_helper_load() {
+  echo "[adversarial-watcher] ERROR: $1" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; restore the OPH-01 helper and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 78
+}
+if [ ! -r "$OP_RATE_LIMIT_HELPER" ]; then
+  fail_op_helper_load "OPH-01 helper missing at $OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
+fi
+if ! . "$OP_RATE_LIMIT_HELPER"; then
+  fail_op_helper_load "OPH-01 helper failed to load from $OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
+fi
+
 # 1. Native module gate.
 NATIVE_CHECK_ERR="$REPO_RENDER_LOG_ROOT/adversarial-watcher-native-check.err"
 NODE_BIN="$(command -v node || true)"
@@ -109,7 +125,7 @@ resolve_alert_to_optional() {
     return 4
   fi
   while [ "$attempt" -le "$max_attempts" ]; do
-    if alert_to_value="$("$op_bin" read "$ALERT_TO_OP_REF" 2>"$stderr_path")"; then
+    if alert_to_value="$(op_resolve_with_rate_limit_backoff "$op_bin" read "$ALERT_TO_OP_REF" 2>"$stderr_path")"; then
       if [ -z "${alert_to_value//[[:space:]]/}" ]; then
         echo "[adversarial-watcher] ERROR: ALERT_TO at $ALERT_TO_OP_REF resolved to an empty value." >&2
         rm -f "$stderr_path"
@@ -122,6 +138,10 @@ resolve_alert_to_optional() {
     if grep -Eiq "not found|does not exist|isn't an item|unknown object type|no item|no field" "$stderr_path"; then
       rm -f "$stderr_path"
       return 3
+    fi
+    if op_rate_limit_stderr_indicates_rate_limit "$stderr_path"; then
+      rm -f "$stderr_path"
+      return 5
     fi
     if [ "$attempt" -lt "$max_attempts" ]; then
       echo "[adversarial-watcher] WARN: failed to resolve ALERT_TO from 1Password (attempt $attempt/$max_attempts); retrying in 5s." >&2
@@ -146,6 +166,8 @@ if [ -z "${GITHUB_TOKEN:-}" ]; then
 fi
 if [ -z "${GITHUB_TOKEN:-}" ]; then
   echo "[adversarial-watcher] ERROR: GITHUB_TOKEN not set and gh auth token returned nothing" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the gh credential or set GITHUB_TOKEN, then bootout the agent to recover sooner." >&2
+  sleep 3600
   exit 1
 fi
 
@@ -184,6 +206,9 @@ if [ -z "${ALERT_TO:-}" ] && [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
         sleep 3600
         exit 1
       fi
+    elif [ "$status" -eq 5 ]; then
+      echo "[adversarial-watcher] ERROR: ALERT_TO resolution hit the 1Password rate-limit path; the helper already performed OPH-01 backoff, so exiting without extra ALERT_TO retries or an additional launcher sleep." >&2
+      exit 1
     else
       echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the ALERT_TO secret-source and bootout the agent to recover sooner." >&2
       sleep 3600

@@ -3215,6 +3215,43 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical
   assert.equal(result.launchRequestId, 'lrq_home_lookup');
 });
 
+test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical postgres ledger target contract', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666pg');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-lac-666pg',
+    launchRequestId: 'lrq_pg_lookup',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_pg_lookup',
+  }));
+
+  const result = await lookupOriginalWorkerRunStatus({
+    workerDir,
+    hqRoot,
+    env: { ...HERMETIC_CONFIG_ENV },
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    readLatestWorkerRunStatusImpl: ({ launchRequestId, ledgerTarget }) => {
+      assert.equal(launchRequestId, 'lrq_pg_lookup');
+      assert.equal(ledgerTarget.backend, 'postgres');
+      return {
+        ok: true,
+        row: {
+          run_id: 'run_pg_lookup',
+          launch_request_id: 'lrq_pg_lookup',
+          status: 'failed',
+        },
+      };
+    },
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.launchRequestId, 'lrq_pg_lookup');
+  assert.equal(result.runId, 'run_pg_lookup');
+});
+
 test('lookupOriginalWorkerRunStatus requires launchRequestId and ignores unrelated newer rows for the same worker run id', async () => {
   const { default: Database } = await import('better-sqlite3');
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -3489,10 +3526,14 @@ test('lookupOriginalWorkerRunStatus maps adapter failure reasons onto teardown-s
       },
     },
     {
-      reason: 'unsupported-ledger-backend',
+      reason: 'worker-run-lookup-failed',
       options: {
-        ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
         env: { ...HERMETIC_CONFIG_ENV },
+        readLatestWorkerRunStatusImpl: () => ({
+          ok: false,
+          reason: 'psql-not-installed',
+          detail: 'psql missing from PATH',
+        }),
       },
     },
     {
@@ -3556,6 +3597,54 @@ test('prepareOriginalWorkerForMergeAgent skips every teardown-safe adapter looku
     assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
     assert.equal(logs[0].reason, reason);
   }
+});
+
+test('dispatchMergeAgentForPR records psql-not-installed as a durable skipped dispatch', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const originalWorkerId = 'codex-lac-666psql';
+  const branch = `${originalWorkerId}/LAC-666psql-not-installed`;
+  const workerDir = path.join(hqRoot, 'workers', originalWorkerId);
+  const worktreePath = path.join(workerDir, 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: originalWorkerId,
+    workspacePath: worktreePath,
+    worktreePath,
+    branch,
+    launchRequestId: 'lrq_psql_not_installed',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_psql_not_installed',
+  }));
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    rootDir,
+    ...makeJob({ branch }),
+    prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
+      ...opts,
+      hqPath: 'hq',
+      env: { HQ_ROOT: hqRoot, USER: 'placey', ...HERMETIC_CONFIG_ENV },
+      lookupRunStatusImpl: (lookupOpts) => lookupOriginalWorkerRunStatus({
+        ...lookupOpts,
+        readLatestWorkerRunStatusImpl: () => ({
+          ok: false,
+          reason: 'psql-not-installed',
+          detail: 'psql missing from PATH',
+        }),
+      }),
+    }),
+    execFileImpl: async () => {
+      throw new Error('merge-agent dispatch must not run when preflight skips');
+    },
+    now: '2026-06-06T22:34:30.000Z',
+  });
+
+  assert.equal(result.decision, 'dispatch-skipped');
+  assert.equal(result.reason, 'worker-run-lookup-failed');
+  const [skipRecord] = listMergeAgentSkippedDispatches(rootDir);
+  assert.equal(skipRecord.decision, 'skip-worker-run-lookup-failed');
 });
 
 test('prepareOriginalWorkerForMergeAgent records missing launchRequestId as a structured skip', async () => {

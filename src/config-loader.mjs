@@ -531,6 +531,8 @@ function schemaV1() {
             __enum: ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS,
           },
           hermes: {
+            // Mirrors the Python `roles.hermes.provider` schema so the
+            // shared host config remains loadable by both CFG loaders.
             __type: TYPE_DICT,
             __strict: true,
             __keys: {

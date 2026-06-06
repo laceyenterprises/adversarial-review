@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -373,6 +373,106 @@ test('oversized cache bodies are dropped while preserving the ETag', () => {
   }
 });
 
+test('bodyless cache entries skip conditional headers and avoid permanent 304+200 double-fetches', async () => {
+  const rootDir = makeRootDir();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 9877;
+    const params = { page: 1, per_page: 100 };
+    const callKey = buildEtagCallKey({
+      repo,
+      prNumber,
+      category: 'timeline_events',
+      endpoint: 'issues.timeline',
+      params,
+    });
+    putCachedEtag(rootDir, callKey, '"huge"', { payload: 'x'.repeat(256) }, {
+      maxBodyBytes: 32,
+    });
+
+    const requestParamsSeen = [];
+    const telemetry = [];
+    const response = await fetchConditionalRestPage({
+      category: 'timeline_events',
+      endpoint: 'issues.timeline',
+      repo,
+      prNumber,
+      rootDir,
+      params,
+      recordApiCallImpl: (row) => telemetry.push(row),
+      request: async (requestParams) => {
+        requestParamsSeen.push(requestParams);
+        assert.equal(requestParams.headers, undefined);
+        return {
+          status: 200,
+          headers: { etag: '"huge-v2"' },
+          data: [{ id: 'fresh-large-page' }],
+        };
+      },
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(requestParamsSeen.length, 1);
+    assert.deepEqual(telemetry.map((row) => [row.category, row.status]), [['timeline_events', 200]]);
+    assert.deepEqual(getCachedEtag(rootDir, callKey), {
+      etag: '"huge-v2"',
+      body: [{ id: 'fresh-large-page' }],
+    });
+  } finally {
+    cleanup(rootDir);
+  }
+});
+
+test('cache paths use a fixed hash filename while retaining call_key in payload', () => {
+  const rootDir = makeRootDir();
+  try {
+    const callKey = buildEtagCallKey({
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 4321,
+      category: 'timeline_events',
+      endpoint: 'issues.timeline',
+      params: {
+        page: 1,
+        per_page: 100,
+        since: '2026-06-06T00:00:00.000Z',
+        opaque: 'x'.repeat(512),
+      },
+    });
+    putCachedEtag(rootDir, callKey, '"hash-me"', [{ id: 'entry' }]);
+    const cachePath = getEtagCachePath(rootDir, callKey);
+    assert.match(path.basename(cachePath), /^[a-f0-9]{64}\.json$/);
+    const raw = JSON.parse(readFileSync(cachePath, 'utf8'));
+    assert.equal(raw.call_key, callKey);
+    assert.deepEqual(raw.body, [{ id: 'entry' }]);
+  } finally {
+    cleanup(rootDir);
+  }
+});
+
+test('repeated writes use unique temp names and leave no shared tmp file behind', () => {
+  const rootDir = makeRootDir();
+  try {
+    const callKey = buildEtagCallKey({
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 7789,
+      category: 'labels_list',
+      endpoint: 'issues.labels',
+      params: { per_page: 100 },
+    });
+    putCachedEtag(rootDir, callKey, '"one"', [{ name: 'one' }]);
+    putCachedEtag(rootDir, callKey, '"two"', [{ name: 'two' }]);
+
+    const names = readdirSync(path.dirname(getEtagCachePath(rootDir, callKey)));
+    assert.deepEqual(names.filter((name) => name.includes('.tmp')), []);
+    assert.deepEqual(getCachedEtag(rootDir, callKey), {
+      etag: '"two"',
+      body: [{ name: 'two' }],
+    });
+  } finally {
+    cleanup(rootDir);
+  }
+});
+
 test('sweepEtagCache removes entries older than the configured retention window', () => {
   const rootDir = makeRootDir();
   try {
@@ -413,13 +513,14 @@ test('sweepEtagCache removes entries older than the configured retention window'
   }
 });
 
-test('Octokit conditional hook surfaces an explicit 304 response from a thrown RequestError-style object', async () => {
-  let wrappedRequest = null;
+test('createWatcherOctokit does not install a global 304 rewrite hook', () => {
+  let hookInstalled = false;
   const fakeOctokit = {
     hook: {
       wrap(name, callback) {
         assert.equal(name, 'request');
-        wrappedRequest = callback;
+        assert.equal(typeof callback, 'function');
+        hookInstalled = true;
       },
     },
   };
@@ -429,21 +530,5 @@ test('Octokit conditional hook surfaces an explicit 304 response from a thrown R
     octokitFactory: () => fakeOctokit,
   });
   assert.equal(octokit, fakeOctokit);
-  assert.equal(typeof wrappedRequest, 'function');
-
-  // Octokit v22 can surface a 304 as a thrown RequestError. The watcher
-  // must convert that into an explicit status-bearing response so the
-  // call site can branch on `status === 304` instead of empty-body quirks.
-  const response = await wrappedRequest(
-    async () => {
-      const err = new Error('Not modified');
-      err.status = 304;
-      err.response = { status: 304, headers: { etag: '"fixture-304"' }, data: null };
-      throw err;
-    },
-    { headers: { 'if-none-match': '"fixture-304"' } },
-  );
-
-  assert.equal(response.status, 304);
-  assert.deepEqual(response.headers, { etag: '"fixture-304"' });
+  assert.equal(hookInstalled, false);
 });

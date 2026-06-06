@@ -444,11 +444,18 @@ function maybeSweepConditionalRequestCache({
 } = {}) {
   if ((nowMs - lastEtagCacheSweepAtMs) < ETAG_CACHE_SWEEP_INTERVAL_MS) return [];
   lastEtagCacheSweepAtMs = nowMs;
-  const deleted = sweepEtagCache(rootDir, { nowMs });
-  if (deleted.length > 0) {
-    logger.log?.(`[watcher] pruned ${deleted.length} expired conditional-request cache entries`);
+  try {
+    const deleted = sweepEtagCache(rootDir, { nowMs });
+    if (deleted.length > 0) {
+      logger.log?.(`[watcher] pruned ${deleted.length} expired conditional-request cache entries`);
+    }
+    return deleted;
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] conditional-request cache sweep failed; continuing poll tick: ${err?.message || err}`
+    );
+    return [];
   }
-  return deleted;
 }
 
 async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = console } = {}) {
@@ -3050,7 +3057,7 @@ async function attemptMergeCloseoutCapture({
         });
         const pageComments = Array.isArray(response?.data) ? response.data : [];
         comments.push(...pageComments.map((comment) => ({
-          id: comment?.node_id ?? comment?.id ?? null,
+          id: comment?.node_id ?? null,
           login: comment?.user?.login ?? null,
           created_at: comment?.created_at ?? null,
           body: comment?.body ?? '',

@@ -10,6 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 const ETAG_CACHE_DIR_PARTS = ['data', 'api-cache', 'etags'];
@@ -75,7 +76,8 @@ function buildEtagCallKey({
 
 function getEtagCachePath(rootDir, callKey) {
   const normalizedCallKey = normalizeRequiredText(callKey, 'callKey');
-  return join(resolveEtagCacheDir(rootDir), `${normalizedCallKey}.json`);
+  const digest = createHash('sha256').update(normalizedCallKey).digest('hex');
+  return join(resolveEtagCacheDir(rootDir), `${digest}.json`);
 }
 
 function getCachedEtag(rootDir, callKey) {
@@ -116,21 +118,28 @@ function putCachedEtag(rootDir, callKey, etag, body, {
   if (!normalizedEtag) return null;
   const path = getEtagCachePath(rootDir, callKey);
   mkdirSync(resolveEtagCacheDir(rootDir), { recursive: true });
-  const tmpPath = `${path}.tmp`;
+  const tmpPath = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   const cachedBody = shouldDropCachedBody(body, { maxBodyBytes }) ? null : body;
   const payload = `${JSON.stringify({
+    call_key: callKey,
     etag: normalizedEtag,
     cached_at: now(),
     body: cachedBody,
   }, null, 2)}\n`;
   const tmpFd = openSync(tmpPath, 'w');
+  let shouldCleanupTmp = true;
   try {
     writeFileSync(tmpFd, payload, 'utf8');
     fsyncSync(tmpFd);
   } finally {
     closeSync(tmpFd);
   }
-  renameSync(tmpPath, path);
+  try {
+    renameSync(tmpPath, path);
+    shouldCleanupTmp = false;
+  } finally {
+    if (shouldCleanupTmp) rmSync(tmpPath, { force: true });
+  }
   return {
     etag: normalizedEtag,
     body: cachedBody,

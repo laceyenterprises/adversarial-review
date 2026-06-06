@@ -80,7 +80,8 @@ async function fetchConditionalRestPage({
   });
   const cached = getCachedEtag(rootDir, callKey);
   const startedAt = Date.now();
-  const conditionalHeaders = allowConditionalRequest && cached?.etag
+  const hasReusableCachedBody = cached?.body !== null && cached?.body !== undefined;
+  const conditionalHeaders = allowConditionalRequest && cached?.etag && hasReusableCachedBody
     ? { 'if-none-match': cached.etag }
     : null;
   const requestParams = conditionalHeaders
@@ -168,24 +169,7 @@ function createWatcherOctokit({
   auth = process.env.GITHUB_TOKEN,
   octokitFactory = defaultOctokitFactory,
 } = {}) {
-  const octokit = octokitFactory({ auth });
-  if (octokit?.hook?.wrap) {
-    octokit.hook.wrap('request', async (request, options) => {
-      try {
-        return await request(options);
-      } catch (err) {
-        if (apiStatusFromError(err) === 304) {
-          return {
-            status: 304,
-            headers: err?.response?.headers || {},
-            data: err?.response?.data ?? null,
-          };
-        }
-        throw err;
-      }
-    });
-  }
-  return octokit;
+  return octokitFactory({ auth });
 }
 
 export {

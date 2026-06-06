@@ -25,6 +25,13 @@ is configured:
   `GH_CLAUDE_REVIEWER_TOKEN`.
 - `[claude-code]` and `[clio-agent]` PRs route first-pass review to Codex and
   use `GH_CODEX_REVIEWER_TOKEN`.
+- `[gemini]`, `[pi]`, and `[hermes]` PRs also route first-pass review to Codex
+  and use `GH_CODEX_REVIEWER_TOKEN`.
+
+The canonical GitHub-PR title-prefix allowlist is therefore:
+`[codex]`, `[claude-code]`, `[clio-agent]`, `[gemini]`, `[pi]`, and `[hermes]`.
+Any other prefix is malformed and must fail loud instead of silently falling
+back to same-model review or an unregistered worker class.
 
 Operators may deliberately pin the reviewer with
 `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude`. A non-empty override wins

@@ -10,7 +10,6 @@ const TAG_PREFIXES = {
   'clio-agent': '[clio-agent]',
   gemini: '[gemini]',
   pi: '[pi]',
-  opencode: '[opencode]',
   hermes: '[hermes]',
 };
 
@@ -22,7 +21,6 @@ const TAG_ALIASES = {
   'clio-agent': 'clio-agent',
   gemini: 'gemini',
   pi: 'pi',
-  opencode: 'opencode',
   hermes: 'hermes',
 };
 
@@ -32,7 +30,6 @@ const BUILDER_CLASS_BY_TAG = {
   'clio-agent': 'clio-agent',
   gemini: 'gemini',
   pi: 'pi',
-  opencode: 'opencode',
   hermes: 'hermes',
 };
 
@@ -90,7 +87,7 @@ function buildTaggedTitle(tagInput, rawTitle) {
   const prefix = getPrefixForTag(tagInput);
   if (!prefix) {
     throw new Error(
-      `Invalid or missing tag "${tagInput ?? ''}". Allowed: codex, claude-code, clio-agent, gemini, pi, opencode, hermes.`
+      `Invalid or missing tag "${tagInput ?? ''}". Allowed: ${KNOWN_TAGS.join(', ')}.`
     );
   }
 

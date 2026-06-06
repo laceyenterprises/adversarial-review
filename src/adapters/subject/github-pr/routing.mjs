@@ -37,12 +37,6 @@ const ROUTE_BY_BUILDER_CLASS = {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
-  opencode: {
-    // Opencode defaults to a Claude-family backend, so Codex preserves the
-    // cross-model review guarantee for the default route.
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-  },
   hermes: {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
@@ -68,10 +62,6 @@ const REVIEWER_ROUTE_BY_MODEL = {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
-  opencode: {
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-  },
   hermes: {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
@@ -89,7 +79,6 @@ const REVIEWER_FAMILY_BY_BUILDER_CLASS = {
   'clio-agent': 'codex',
   gemini: 'gemini',
   pi: 'pi',
-  opencode: 'claude',
   hermes: 'hermes',
 };
 
@@ -106,7 +95,6 @@ function normalizeReviewerModel(reviewerInput) {
   switch (reviewer) {
     case 'claude':
     case 'claude-code':
-    case 'opencode':
       return 'claude';
     case 'codex':
     case 'gemini':

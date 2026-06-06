@@ -65,9 +65,9 @@ function normalizeEnvName(value) {
 
 // -------- Schema declaration -----------------------------------------------
 
-const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial', 'gemini', 'pi', 'opencode', 'hermes'];
+const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
-const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code', 'gemini', 'pi', 'opencode', 'hermes'];
+const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 // Keep this per-role fallback surface in lockstep with the Python
@@ -91,7 +91,7 @@ const ROLE_FALLBACK_CLASSES = [
 // the coding-family classes that make sense as a TASK-KIND DEFAULT plus
 // `merge-agent` for the merge family. Operators can still pass
 // `--worker-class` at the call site to escape this constraint.
-const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'claude-code', 'merge-agent', 'gemini', 'pi', 'opencode', 'hermes'];
+const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'claude-code', 'merge-agent'];
 const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
 const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
 const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];

@@ -37,6 +37,10 @@ const ROUTE_BY_BUILDER_CLASS = {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
+  opencode: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
   hermes: {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
@@ -62,6 +66,10 @@ const REVIEWER_ROUTE_BY_MODEL = {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
+  opencode: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
   hermes: {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
@@ -79,6 +87,9 @@ const REVIEWER_FAMILY_BY_BUILDER_CLASS = {
   'clio-agent': 'codex',
   gemini: 'gemini',
   pi: 'pi',
+  // opencode defaults to Anthropic Claude, so a Claude reviewer pin is
+  // same-family even though the routed reviewer bot remains Codex.
+  opencode: 'claude',
   hermes: 'hermes',
 };
 
@@ -99,8 +110,9 @@ function normalizeReviewerModel(reviewerInput) {
     case 'codex':
     case 'gemini':
     case 'pi':
+    case 'opencode':
     case 'hermes':
-      return reviewer;
+      return 'codex';
     default:
       return null;
   }

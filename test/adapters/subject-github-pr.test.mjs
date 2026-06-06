@@ -195,6 +195,9 @@ test('github-pr routing exposes same-family review waiver detection for override
   assert.equal(isCrossModelReviewWaived('clio-agent', 'codex'), true);
   assert.equal(isCrossModelReviewWaived('clio-agent', 'claude'), false);
   assert.equal(isCrossModelReviewWaived('codex', 'claude'), false);
+  assert.equal(isCrossModelReviewWaived('gemini', 'gemini'), false);
+  assert.equal(isCrossModelReviewWaived('opencode', 'opencode'), false);
+  assert.equal(isCrossModelReviewWaived('opencode', 'claude'), true);
 
   const reason = describeCrossModelReviewWaiver(
     'codex',
@@ -220,6 +223,13 @@ test('github-pr routing assigns supported MHX-09 builder tags to the expected cr
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
     linearTicketId: 'LAC-484',
   });
+  assert.deepEqual(routePR('[opencode] LAC-484: route opencode', null, { env: HERMETIC_CONFIG_ENV }), {
+    builderClass: 'opencode',
+    tag: 'opencode',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
   assert.deepEqual(routePR('[hermes] LAC-484: route hermes', null, { env: HERMETIC_CONFIG_ENV }), {
     builderClass: 'hermes',
     tag: 'hermes',
@@ -241,10 +251,6 @@ test('github-pr routing startup validation rejects unknown default reviewer env 
       return true;
     }
   );
-});
-
-test('github-pr routing rejects unsupported opencode title prefixes', () => {
-  assert.equal(routePR('[opencode] LAC-484: route opencode', null, { env: HERMETIC_CONFIG_ENV }), null);
 });
 
 test('watcher startup prints a fatal config banner for invalid default reviewer env values', () => {

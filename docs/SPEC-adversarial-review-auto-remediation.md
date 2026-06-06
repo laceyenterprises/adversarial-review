@@ -25,19 +25,21 @@ is configured:
   `GH_CLAUDE_REVIEWER_TOKEN`.
 - `[claude-code]` and `[clio-agent]` PRs route first-pass review to Codex and
   use `GH_CODEX_REVIEWER_TOKEN`.
-- `[gemini]`, `[pi]`, and `[hermes]` PRs also route first-pass review to Codex
-  and use `GH_CODEX_REVIEWER_TOKEN`.
+- `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs also route first-pass
+  review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
 
 The canonical GitHub-PR title-prefix allowlist is therefore:
-`[codex]`, `[claude-code]`, `[clio-agent]`, `[gemini]`, `[pi]`, and `[hermes]`.
+`[codex]`, `[claude-code]`, `[clio-agent]`, `[gemini]`, `[pi]`, `[opencode]`,
+and `[hermes]`.
 Any other prefix is malformed and must fail loud instead of silently falling
 back to same-model review or an unregistered worker class.
 
 Operators may deliberately pin the reviewer with
-`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude`. A non-empty override wins
-over the title-prefix route for every supported builder class and also selects
-the matching reviewer bot token. The alias `claude-code` is accepted for the
-Claude reviewer, but the canonical runtime reviewer model remains `claude`.
+`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|claude-code|gemini|pi|opencode|hermes`.
+A non-empty override wins over the title-prefix route for every supported
+builder class and also selects the matching reviewer bot token. The aliases
+`claude` and `claude-code` both normalize to the Claude reviewer route; the
+other MHX-09 tags normalize to the Codex reviewer route.
 Watcher startup validates this override once and exits non-zero on invalid
 values instead of discovering the typo mid-poll. When the override intentionally
 pins the same reviewer family as the builder, the posted review body carries an

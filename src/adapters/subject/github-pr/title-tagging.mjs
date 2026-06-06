@@ -10,6 +10,7 @@ const TAG_PREFIXES = {
   'clio-agent': '[clio-agent]',
   gemini: '[gemini]',
   pi: '[pi]',
+  opencode: '[opencode]',
   hermes: '[hermes]',
 };
 
@@ -21,6 +22,7 @@ const TAG_ALIASES = {
   'clio-agent': 'clio-agent',
   gemini: 'gemini',
   pi: 'pi',
+  opencode: 'opencode',
   hermes: 'hermes',
 };
 
@@ -30,6 +32,7 @@ const BUILDER_CLASS_BY_TAG = {
   'clio-agent': 'clio-agent',
   gemini: 'gemini',
   pi: 'pi',
+  opencode: 'opencode',
   hermes: 'hermes',
 };
 

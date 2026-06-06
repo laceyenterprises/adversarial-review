@@ -18,6 +18,7 @@ const REVIEWER_LOGIN_BY_CLASS = new Map([
   ['codex', 'codex-reviewer-lacey'],
   ['gemini', 'codex-reviewer-lacey'],
   ['pi', 'codex-reviewer-lacey'],
+  // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
   ['opencode', 'codex-reviewer-lacey'],
   ['hermes', 'codex-reviewer-lacey'],
 ]);

@@ -1,15 +1,20 @@
 import {
   closeSync,
+  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
 const ETAG_CACHE_DIR_PARTS = ['data', 'api-cache', 'etags'];
+const DEFAULT_ETAG_CACHE_MAX_AGE_DAYS = 7;
+const DEFAULT_ETAG_CACHE_MAX_BODY_BYTES = 256 * 1024;
 
 function resolveEtagCacheDir(rootDir) {
   if (!rootDir) throw new TypeError('rootDir is required for ETag cache');
@@ -88,18 +93,35 @@ function getCachedEtag(rootDir, callKey) {
   }
 }
 
+function resolveEtagCacheMaxAgeDays(env = process.env) {
+  const parsed = Number.parseInt(String(env.WATCHER_ETAG_CACHE_MAX_AGE_DAYS || ''), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_ETAG_CACHE_MAX_AGE_DAYS;
+}
+
+function resolveEtagCacheMaxBodyBytes(env = process.env) {
+  const parsed = Number.parseInt(String(env.WATCHER_ETAG_CACHE_MAX_BODY_BYTES || ''), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_ETAG_CACHE_MAX_BODY_BYTES;
+}
+
+function shouldDropCachedBody(body, { maxBodyBytes = resolveEtagCacheMaxBodyBytes() } = {}) {
+  const serialized = JSON.stringify(body ?? null);
+  return Buffer.byteLength(serialized, 'utf8') > maxBodyBytes;
+}
+
 function putCachedEtag(rootDir, callKey, etag, body, {
   now = () => new Date().toISOString(),
+  maxBodyBytes = resolveEtagCacheMaxBodyBytes(),
 } = {}) {
   const normalizedEtag = String(etag || '').trim();
   if (!normalizedEtag) return null;
   const path = getEtagCachePath(rootDir, callKey);
   mkdirSync(resolveEtagCacheDir(rootDir), { recursive: true });
   const tmpPath = `${path}.tmp`;
+  const cachedBody = shouldDropCachedBody(body, { maxBodyBytes }) ? null : body;
   const payload = `${JSON.stringify({
     etag: normalizedEtag,
     cached_at: now(),
-    body,
+    body: cachedBody,
   }, null, 2)}\n`;
   const tmpFd = openSync(tmpPath, 'w');
   try {
@@ -111,8 +133,36 @@ function putCachedEtag(rootDir, callKey, etag, body, {
   renameSync(tmpPath, path);
   return {
     etag: normalizedEtag,
-    body,
+    body: cachedBody,
   };
+}
+
+function sweepEtagCache(rootDir, {
+  nowMs = Date.now(),
+  maxAgeDays = resolveEtagCacheMaxAgeDays(),
+  existsSyncImpl = existsSync,
+  readdirSyncImpl = readdirSync,
+  readFileSyncImpl = readFileSync,
+  rmSyncImpl = rmSync,
+} = {}) {
+  const cacheDir = resolveEtagCacheDir(rootDir);
+  if (!existsSyncImpl(cacheDir)) return [];
+  const cutoffMs = nowMs - (Math.max(1, maxAgeDays) * 24 * 60 * 60 * 1000);
+  const deleted = [];
+  for (const name of readdirSyncImpl(cacheDir)) {
+    if (!name.endsWith('.json')) continue;
+    const filePath = join(cacheDir, name);
+    try {
+      const raw = JSON.parse(readFileSyncImpl(filePath, 'utf8'));
+      const cachedAtMs = Date.parse(String(raw?.cached_at || ''));
+      if (!Number.isFinite(cachedAtMs) || cachedAtMs >= cutoffMs) continue;
+      rmSyncImpl(filePath, { force: true });
+      deleted.push(filePath);
+    } catch {
+      continue;
+    }
+  }
+  return deleted;
 }
 
 export {
@@ -120,5 +170,8 @@ export {
   getCachedEtag,
   getEtagCachePath,
   putCachedEtag,
+  resolveEtagCacheMaxAgeDays,
+  resolveEtagCacheMaxBodyBytes,
   resolveEtagCacheDir,
+  sweepEtagCache,
 };

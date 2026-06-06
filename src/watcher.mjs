@@ -123,6 +123,7 @@ import {
   createWatcherOctokit,
   fetchConditionalRestPage,
 } from './conditional-request.mjs';
+import { sweepEtagCache } from './etag-cache.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -194,6 +195,7 @@ const DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS = 900;
 const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_ON = 60;
 const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF = 300;
 const PENDING_DRAFT_RESPAWN_AGE_MAX_SECONDS = 1800;
+const ETAG_CACHE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
   claude: {
     reviewerModel: 'claude',
@@ -208,6 +210,7 @@ const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
 });
+let lastEtagCacheSweepAtMs = 0;
 
 // Stuck-pre-spawn alert debounce. Once we've alerted on a particular
 // (repo, PR, dispatchedAt) tuple, suppress the next alert for this
@@ -434,6 +437,20 @@ function fastMergeDecisionFromLabels(labels) {
   };
 }
 
+function maybeSweepConditionalRequestCache({
+  rootDir = ROOT,
+  logger = console,
+  nowMs = Date.now(),
+} = {}) {
+  if ((nowMs - lastEtagCacheSweepAtMs) < ETAG_CACHE_SWEEP_INTERVAL_MS) return [];
+  lastEtagCacheSweepAtMs = nowMs;
+  const deleted = sweepEtagCache(rootDir, { nowMs });
+  if (deleted.length > 0) {
+    logger.log?.(`[watcher] pruned ${deleted.length} expired conditional-request cache entries`);
+  }
+  return deleted;
+}
+
 async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = console } = {}) {
   try {
     if (typeof octokit?.rest?.issues?.listLabelsOnIssue !== 'function') {
@@ -446,12 +463,12 @@ async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = cons
       per_page: 100,
     };
     const { data } = await fetchConditionalRestPage({
-      octokit,
       category: 'labels_list',
       endpoint: 'issues.labels',
       repo: `${owner}/${repo}`,
       prNumber,
       rootDir: ROOT,
+      logger,
       params: { per_page: params.per_page },
       request: (requestParams) => octokit.rest.issues.listLabelsOnIssue({
         ...params,
@@ -636,12 +653,12 @@ async function fetchFastMergeAuthorizationFromTimeline(
     const events = [];
     for (let page = 1; page <= FAST_MERGE_TIMELINE_MAX_PAGES; page += 1) {
       const response = await fetchConditionalRestPage({
-        octokit,
         category: 'timeline_events',
         endpoint: 'issues.timeline',
         repo: `${owner}/${repo}`,
         prNumber,
         rootDir: ROOT,
+        logger,
         params: { page, per_page: params.per_page },
         request: (requestParams) => octokit.rest.issues.listEventsForTimeline({
           ...params,
@@ -3018,12 +3035,12 @@ async function attemptMergeCloseoutCapture({
       };
       for (let page = 1; ; page += 1) {
         const response = await fetchConditionalRestPage({
-          octokit,
           category: 'other',
           endpoint: 'issues.comments',
           repo,
           prNumber,
           rootDir: ROOT,
+          logger,
           params: { page, per_page: params.per_page },
           request: (requestParams) => octokit.rest.issues.listComments({
             ...params,
@@ -3519,20 +3536,21 @@ async function pollOnce(
   resetRoleConfigCache();
   const healthTick = healthProbe?.beginTick?.();
   try {
-  const operatorSurface = createWatcherOperatorSurface();
-  await refreshOrgRepos(octokit);
-  const reattach = await reconcileReviewerSessions({
-    db,
-    octokit,
-    maxRows: resolveStaleReviewerReconcilePerPoll(),
-    shouldReconcileRow: (row, now) => shouldReconcileReviewerSession(row, now),
-    leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
-    onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
-      sessionUuid: row?.reviewer_session_uuid,
-      state,
-      settledAt,
-    }),
-  });
+    maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
+    const operatorSurface = createWatcherOperatorSurface();
+    await refreshOrgRepos(octokit);
+    const reattach = await reconcileReviewerSessions({
+      db,
+      octokit,
+      maxRows: resolveStaleReviewerReconcilePerPoll(),
+      shouldReconcileRow: (row, now) => shouldReconcileReviewerSession(row, now),
+      leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
+      onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
+        sessionUuid: row?.reviewer_session_uuid,
+        state,
+        settledAt,
+      }),
+    });
   if (reattach.skipped > 0) {
     console.log(
       `[watcher] stale reviewer reattach capped: reconciled=${reattach.reconciled} skipped=${reattach.skipped}`

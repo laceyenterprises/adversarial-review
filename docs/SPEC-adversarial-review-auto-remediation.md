@@ -204,6 +204,39 @@ scoped to explicit local-routing context such as `127.0.0.1:4000`,
 non-local API connectivity failures remain `unknown` unless another more
 specific classifier matches.
 
+## Conditional Request Cache
+
+Watcher-owned GitHub REST reads for labels, timeline events, and merge-closeout
+comments run through `createWatcherOctokit()` plus
+`fetchConditionalRestPage()`. The cache root is
+`data/api-cache/etags/`, with one JSON file per normalized
+`(repo, prNumber, category, endpoint, params)` call key. Each entry stores:
+
+- `etag`
+- `cached_at`
+- `body` when the serialized body stays within the configured size cap
+
+`conditional_304` is a watcher telemetry category, not a GitHub endpoint. It
+is emitted only when GitHub answers `304 Not Modified` and the watcher serves a
+cached body instead of re-recording the underlying endpoint category.
+
+The cache is a best-effort optimization. A cache write failure must never turn
+an otherwise-successful `200` GitHub response into a watcher error; the watcher
+logs a warning and continues with the live response.
+
+Retention and body-capping policy:
+
+- The watcher runs an age-based sweep no more than once per hour, from the main
+  poll loop, deleting cache entries whose `cached_at` is older than
+  `WATCHER_ETAG_CACHE_MAX_AGE_DAYS` days. The default is `7`.
+- Cached bodies larger than `WATCHER_ETAG_CACHE_MAX_BODY_BYTES` bytes are
+  dropped from the entry while keeping the `etag`. The default cap is
+  `262144` bytes.
+- When GitHub returns `304` for an entry whose cached body was previously
+  dropped or has already been swept, the watcher immediately retries that
+  request without the conditional header and repopulates the cache from the
+  fresh `200` response.
+
 ## Remediation Reply Contract
 
 The durable remediation reply schema is the public contract between the worker,

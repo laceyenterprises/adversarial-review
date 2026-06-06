@@ -13,6 +13,7 @@ import {
   getCachedEtag,
   getEtagCachePath,
   putCachedEtag,
+  sweepEtagCache,
 } from '../src/etag-cache.mjs';
 
 function makeRootDir() {
@@ -179,6 +180,39 @@ test('200 followed by 304 roundtrip reuses the body cached by the first call', a
   }
 });
 
+test('cache write failures do not turn a successful 200 response into an error', async () => {
+  const rootDir = makeRootDir();
+  try {
+    const warnings = [];
+    const telemetry = [];
+    const response = await fetchConditionalRestPage({
+      category: 'labels_list',
+      endpoint: 'issues.labels',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 1234,
+      rootDir,
+      params: { per_page: 100 },
+      logger: { warn: (message) => warnings.push(message) },
+      recordApiCallImpl: (row) => telemetry.push(row),
+      putCachedEtagImpl: () => {
+        throw new Error('disk full');
+      },
+      request: async () => ({
+        status: 200,
+        headers: { etag: '"labels-v2"' },
+        data: [{ name: 'fast-merge:ready' }],
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.data, [{ name: 'fast-merge:ready' }]);
+    assert.deepEqual(telemetry.map((row) => row.status), [200]);
+    assert.match(warnings[0], /conditional cache write failed/);
+  } finally {
+    cleanup(rootDir);
+  }
+});
+
 test('request-shape isolation keeps timeline pages and filtered comment queries from replaying each other', () => {
   const rootDir = makeRootDir();
   try {
@@ -311,6 +345,67 @@ test('missing cache file between fetches falls back to an unconditional 200 with
     assert.deepEqual(response.data, [{ name: 'new' }]);
     assert.deepEqual(getCachedEtag(rootDir, callKey), {
       etag: '"fresh-after-delete"',
+      body: [{ name: 'new' }],
+    });
+  } finally {
+    cleanup(rootDir);
+  }
+});
+
+test('oversized cache bodies are dropped while preserving the ETag', () => {
+  const rootDir = makeRootDir();
+  try {
+    const callKey = buildEtagCallKey({
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 9876,
+      category: 'timeline_events',
+      endpoint: 'issues.timeline',
+      params: { page: 1, per_page: 100 },
+    });
+    const cached = putCachedEtag(rootDir, callKey, '"huge"', { payload: 'x'.repeat(256) }, {
+      maxBodyBytes: 32,
+    });
+
+    assert.deepEqual(cached, { etag: '"huge"', body: null });
+    assert.deepEqual(getCachedEtag(rootDir, callKey), { etag: '"huge"', body: null });
+  } finally {
+    cleanup(rootDir);
+  }
+});
+
+test('sweepEtagCache removes entries older than the configured retention window', () => {
+  const rootDir = makeRootDir();
+  try {
+    const staleKey = buildEtagCallKey({
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 1111,
+      category: 'labels_list',
+      endpoint: 'issues.labels',
+      params: { per_page: 100 },
+    });
+    const freshKey = buildEtagCallKey({
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 2222,
+      category: 'labels_list',
+      endpoint: 'issues.labels',
+      params: { per_page: 100 },
+    });
+    putCachedEtag(rootDir, staleKey, '"stale"', [{ name: 'old' }], {
+      now: () => '2026-05-20T00:00:00.000Z',
+    });
+    putCachedEtag(rootDir, freshKey, '"fresh"', [{ name: 'new' }], {
+      now: () => '2026-06-05T00:00:00.000Z',
+    });
+
+    const deleted = sweepEtagCache(rootDir, {
+      nowMs: Date.parse('2026-06-06T00:00:00.000Z'),
+      maxAgeDays: 7,
+    });
+
+    assert.equal(deleted.length, 1);
+    assert.equal(getCachedEtag(rootDir, staleKey), null);
+    assert.deepEqual(getCachedEtag(rootDir, freshKey), {
+      etag: '"fresh"',
       body: [{ name: 'new' }],
     });
   } finally {

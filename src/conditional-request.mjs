@@ -61,9 +61,11 @@ async function fetchConditionalRestPage({
   params,
   request,
   rootDir,
+  logger = console,
   telemetryStatusFallback = 200,
   allowConditionalRequest = true,
   recordApiCallImpl = recordApiCall,
+  putCachedEtagImpl = putCachedEtag,
 } = {}) {
   if (!rootDir) throw new TypeError('rootDir is required for conditional REST cache');
   if (typeof request !== 'function') {
@@ -108,7 +110,15 @@ async function fetchConditionalRestPage({
     });
     if (status === 200) {
       const etag = getResponseHeader(response?.headers, 'etag');
-      if (etag) putCachedEtag(rootDir, callKey, etag, response?.data ?? null);
+      if (etag) {
+        try {
+          putCachedEtagImpl(rootDir, callKey, etag, response?.data ?? null);
+        } catch (err) {
+          logger.warn?.(
+            `[watcher] conditional cache write failed for ${repo}#${prNumber} ${endpoint}; continuing without cache update: ${err?.message || err}`
+          );
+        }
+      }
     }
     return response;
   } catch (err) {
@@ -136,9 +146,11 @@ async function fetchConditionalRestPage({
         params,
         request,
         rootDir,
+        logger,
         telemetryStatusFallback,
         allowConditionalRequest: false,
         recordApiCallImpl,
+        putCachedEtagImpl,
       });
     }
     recordApiCallImpl({

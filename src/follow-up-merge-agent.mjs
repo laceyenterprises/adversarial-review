@@ -85,6 +85,12 @@ const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
   'worker-run-lookup-failed',
   'worker-run-lookup-threw',
   'missing-launch-request-id',
+  'unsupported-ledger-backend',
+  'malformed-ledger-target',
+]);
+const SESSION_LEDGER_LOOKUP_REASON_ALIASES = new Map([
+  ['missing-ledger-target', 'missing-ledger-db'],
+  ['ledger-read-failed', 'worker-run-lookup-failed'],
 ]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
@@ -531,12 +537,16 @@ function validateWorkerWorkspaceForBranch(workspace, originalWorkerId, branch) {
 }
 
 function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
-  const resolution = resolveSessionLedgerReadTarget({ hqRoot, env });
+  const resolution = resolveSessionLedgerReadTarget({ hqRoot, env, requiredTables: ['worker_runs'] });
   return resolution.ok && resolution.target.backend === 'sqlite' ? resolution.target.path : null;
 }
 
 function normalizeWorkerRunStatus(status) {
   return String(status || '').trim().toLowerCase();
+}
+
+function normalizeDeferredLookupFailureReason(reason) {
+  return SESSION_LEDGER_LOOKUP_REASON_ALIASES.get(reason) || reason;
 }
 
 async function lookupOriginalWorkerRunStatus({
@@ -572,7 +582,7 @@ async function lookupOriginalWorkerRunStatus({
   if (!result.ok) {
     return {
       found: false,
-      reason: result.reason === 'missing-ledger-target' ? 'missing-ledger-db' : result.reason,
+      reason: normalizeDeferredLookupFailureReason(result.reason),
       detail: result.detail || null,
       launchRequestId,
       runId,

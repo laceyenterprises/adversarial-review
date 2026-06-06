@@ -111,8 +111,8 @@ function normalizeExplicitLedgerTarget(ledgerTarget) {
 }
 
 function sqliteTargetCandidates({ cfg, env, rootDir }) {
-  const deployRoot = normalizeText(cfg.get('roots.deploy') || env.AGENT_OS_DEPLOY_CHECKOUT);
-  const runtimeHome = normalizeText(cfg.get('roots.runtime_home') || env.HOME || homedir());
+  const deployRoot = normalizeText(env.AGENT_OS_DEPLOY_CHECKOUT || cfg.get('roots.deploy'));
+  const runtimeHome = normalizeText(env.HOME || cfg.get('roots.runtime_home') || homedir());
   const adminHome = normalizeText(cfg.get('roots.admin_home'));
   const candidates = [];
   if (deployRoot) {
@@ -142,9 +142,32 @@ function sqliteTargetCandidates({ cfg, env, rootDir }) {
   return candidates;
 }
 
+function sessionLedgerDbHasTables(dbPath, tableNames = []) {
+  const required = [...new Set((tableNames || []).filter(Boolean).map(String))];
+  if (required.length === 0) return true;
+  const loaded = loadBetterSqlite3();
+  if (!loaded.ok) return false;
+  let db = null;
+  try {
+    db = new loaded.Database(dbPath, { readonly: true, fileMustExist: true });
+    const rows = db.prepare(
+      `SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN (${required.map((_, idx) => `@table${idx}`).join(', ')})`
+    ).all(Object.fromEntries(required.map((name, idx) => [`table${idx}`, name])));
+    const found = new Set(rows.map((row) => row.name));
+    return required.every((name) => found.has(name));
+  } catch {
+    return false;
+  } finally {
+    if (db) db.close();
+  }
+}
+
 export function resolveSessionLedgerReadTarget({
   ledgerTarget = null,
   ledgerDbPath = null,
+  requiredTables = [],
   env = process.env,
   rootDir = process.cwd(),
   hqRoot = null,
@@ -175,7 +198,7 @@ export function resolveSessionLedgerReadTarget({
       return sqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config');
     }
     for (const candidate of sqliteTargetCandidates({ cfg, env, rootDir })) {
-      if (existsSync(candidate.path)) {
+      if (existsSync(candidate.path) && sessionLedgerDbHasTables(candidate.path, requiredTables)) {
         return sqliteTargetFromPath(candidate.path, candidate.source);
       }
     }
@@ -204,35 +227,6 @@ function loadBetterSqlite3() {
       detail: err?.message || String(err),
     };
   }
-}
-
-function compareIsoDesc(left, right) {
-  const a = normalizeText(left) || '';
-  const b = normalizeText(right) || '';
-  if (a === b) return 0;
-  return a > b ? -1 : 1;
-}
-
-function compareTextDesc(left, right) {
-  const a = normalizeText(left) || '';
-  const b = normalizeText(right) || '';
-  if (a === b) return 0;
-  return a > b ? -1 : 1;
-}
-
-function sortLedgerRows(rows, identityKeys = []) {
-  return [...rows].sort((left, right) => {
-    const timeCmp = compareIsoDesc(
-      left.updated_at || left.ended_at || left.started_at,
-      right.updated_at || right.ended_at || right.started_at,
-    );
-    if (timeCmp !== 0) return timeCmp;
-    for (const key of identityKeys) {
-      const cmp = compareTextDesc(left[key], right[key]);
-      if (cmp !== 0) return cmp;
-    }
-    return 0;
-  });
 }
 
 function querySqliteRows(target, sql, params) {
@@ -287,18 +281,27 @@ export function readLatestWorkerRunStatusFromLedger({
   if (!normalizedLaunchRequestId) {
     return { ok: false, reason: 'missing-launch-request-id' };
   }
-  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env, rootDir, hqRoot });
+  const resolution = resolveSessionLedgerReadTarget({
+    ledgerTarget,
+    ledgerDbPath,
+    requiredTables: ['worker_runs'],
+    env,
+    rootDir,
+    hqRoot,
+  });
   if (!resolution.ok) return resolution;
   if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
   const queried = querySqliteRows(
     resolution.target,
     `SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
        FROM worker_runs
-      WHERE launch_request_id = @launchRequestId`,
+      WHERE launch_request_id = @launchRequestId
+      ORDER BY COALESCE(updated_at, ended_at, started_at, '') DESC, rowid DESC
+      LIMIT 1`,
     { launchRequestId: normalizedLaunchRequestId },
   );
   if (!queried.ok) return queried;
-  const [row] = sortLedgerRows(queried.rows, ['run_id', 'launch_request_id']);
+  const [row] = queried.rows;
   if (!row) {
     return {
       ok: false,
@@ -319,10 +322,16 @@ export function readWorkerRunUsageFromLedger({
   rootDir = process.cwd(),
   hqRoot = null,
 } = {}) {
-  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env, rootDir, hqRoot });
+  const resolution = resolveSessionLedgerReadTarget({
+    ledgerTarget,
+    ledgerDbPath,
+    requiredTables: ['worker_runs'],
+    env,
+    rootDir,
+    hqRoot,
+  });
   if (!resolution.ok) return resolution;
   if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
-  const chooseLatest = (rows) => sortLedgerRows(rows, ['run_id', 'launch_request_id', 'session_id'])[0] || null;
   if (workerRunId) {
     const queried = querySqliteRows(
       resolution.target,
@@ -333,11 +342,13 @@ export function readWorkerRunUsageFromLedger({
               rs.total_cache_read_tokens, rs.total_cache_write_tokens
          FROM worker_runs wr
          LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
-        WHERE wr.run_id = @workerRunId`,
+        WHERE wr.run_id = @workerRunId
+        ORDER BY COALESCE(wr.updated_at, wr.ended_at, wr.started_at, '') DESC, wr.rowid DESC
+        LIMIT 1`,
       { workerRunId },
     );
     if (!queried.ok) return queried;
-    const row = chooseLatest(queried.rows);
+    const [row] = queried.rows;
     if (row) return { ok: true, row, target: queried.target };
   }
   const normalizedLaunchRequestId = normalizeText(launchRequestId);
@@ -351,11 +362,13 @@ export function readWorkerRunUsageFromLedger({
             rs.total_cache_read_tokens, rs.total_cache_write_tokens
        FROM worker_runs wr
        LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
-      WHERE wr.launch_request_id = @launchRequestId`,
+      WHERE wr.launch_request_id = @launchRequestId
+      ORDER BY COALESCE(wr.updated_at, wr.ended_at, wr.started_at, '') DESC, wr.rowid DESC
+      LIMIT 1`,
     { launchRequestId: normalizedLaunchRequestId },
   );
   if (!queried.ok) return queried;
-  const row = chooseLatest(queried.rows);
+  const [row] = queried.rows;
   return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-worker-run-row', target: queried.target };
 }
 
@@ -371,7 +384,14 @@ export function readReviewerSessionUsageFromLedger({
   rootDir = process.cwd(),
   hqRoot = null,
 } = {}) {
-  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env, rootDir, hqRoot });
+  const resolution = resolveSessionLedgerReadTarget({
+    ledgerTarget,
+    ledgerDbPath,
+    requiredTables: ['runtime_sessions'],
+    env,
+    rootDir,
+    hqRoot,
+  });
   if (!resolution.ok) return resolution;
   if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
 
@@ -386,7 +406,6 @@ export function readReviewerSessionUsageFromLedger({
     window.push(`COALESCE(ended_at, started_at, '') >= @windowStart`);
   }
   const keys = [...new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String))];
-  const chooseLatest = (rows) => sortLedgerRows(rows, ['session_id', 'adapter_session_key', 'source_path'])[0] || null;
 
   if (keys.length > 0) {
     keys.forEach((key, idx) => { params[`key${idx}`] = key; });
@@ -397,11 +416,13 @@ export function readReviewerSessionUsageFromLedger({
               source_path, started_at, ended_at, ended_at AS updated_at
          FROM runtime_sessions
         WHERE adapter_session_key IN (${keys.map((_, idx) => `@key${idx}`).join(', ')})
-          ${window.length ? `AND ${window.join(' AND ')}` : ''}`,
+          ${window.length ? `AND ${window.join(' AND ')}` : ''}
+        ORDER BY COALESCE(ended_at, started_at, '') DESC, rowid DESC
+        LIMIT 1`,
       params,
     );
     if (!queried.ok) return queried;
-    const row = chooseLatest(queried.rows);
+    const [row] = queried.rows;
     if (row) return { ok: true, row, target: queried.target };
   }
 
@@ -414,10 +435,12 @@ export function readReviewerSessionUsageFromLedger({
             source_path, started_at, ended_at, ended_at AS updated_at
        FROM runtime_sessions
       WHERE source_path = @workspacePath
-        ${window.length ? `AND ${window.join(' AND ')}` : ''}`,
+        ${window.length ? `AND ${window.join(' AND ')}` : ''}
+      ORDER BY COALESCE(ended_at, started_at, '') DESC, rowid DESC
+      LIMIT 1`,
     { workspacePath: normalizedWorkspacePath, ...params },
   );
   if (!queried.ok) return queried;
-  const row = chooseLatest(queried.rows);
+  const [row] = queried.rows;
   return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-runtime-session-row', target: queried.target };
 }

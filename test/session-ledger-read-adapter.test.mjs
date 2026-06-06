@@ -94,7 +94,32 @@ test('resolveSessionLedgerReadTarget fails explicitly for missing or malformed t
   assert.equal(malformed.reason, 'malformed-ledger-target');
 });
 
-test('readLatestWorkerRunStatusFromLedger uses deterministic ordering without rowid', () => {
+test('resolveSessionLedgerReadTarget skips earlier sqlite stub candidates that do not contain session-ledger tables', () => {
+  const rootDir = tempRoot();
+  const deployCheckout = tempRoot();
+  const homeDir = tempRoot();
+  const stubLedger = path.join(deployCheckout, '.agent-os', 'session-ledger', 'ledger.db');
+  const runtimeLedger = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
+  mkdirSync(path.dirname(stubLedger), { recursive: true });
+  new Database(stubLedger).close();
+  createLedgerDb(runtimeLedger);
+
+  const result = resolveSessionLedgerReadTarget({
+    requiredTables: ['runtime_sessions'],
+    env: {
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+      AGENT_OS_DEPLOY_CHECKOUT: deployCheckout,
+      HOME: homeDir,
+    },
+    rootDir,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, runtimeLedger);
+  assert.equal(result.target.source, 'roots.runtime_home');
+});
+
+test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newest row', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
   createLedgerDb(ledgerDb);
@@ -121,6 +146,38 @@ test('readLatestWorkerRunStatusFromLedger uses deterministic ordering without ro
   assert.equal(result.ok, true);
   assert.equal(result.row.run_id, 'wr_new');
   assert.equal(result.row.status, 'cancelled');
+});
+
+test('readReviewerSessionUsageFromLedger keeps runtime_sessions lookups bounded to the newest row', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createLedgerDb(ledgerDb);
+  const db = new Database(ledgerDb);
+  db.prepare(
+    `INSERT INTO runtime_sessions (
+       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
+       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+       source_path, started_at, ended_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('rs_old', 'session-1', 10, 11, 1, 2, 0.1, '/tmp/review-workspace', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z');
+  db.prepare(
+    `INSERT INTO runtime_sessions (
+       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
+       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+       source_path, started_at, ended_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('rs_new', 'session-1', 20, 21, 3, 4, 0.2, '/tmp/review-workspace', '2026-06-04T00:00:00.000Z', '2026-06-04T00:02:00.000Z');
+  db.close();
+
+  const result = readReviewerSessionUsageFromLedger({
+    adapterSessionKey: 'session-1',
+    workspacePath: '/tmp/review-workspace',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.session_id, 'rs_new');
+  assert.equal(result.row.total_input_tokens, 20);
 });
 
 test('adapter exposes the same ledger target contract to worker-run and runtime-session readers', () => {

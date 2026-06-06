@@ -25,7 +25,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { recordApiCall } from './api-telemetry.mjs';
+import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import {
   createFollowUpJob,
   resolveRoundBudgetForJob,
@@ -52,12 +52,6 @@ import { createLinearTriageAdapter } from './adapters/operator/linear-triage/ind
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const execFileAsync = promisify(execFile);
-
-function apiStatusFromError(err) {
-  if (Number.isFinite(Number(err?.status))) return Math.trunc(Number(err.status));
-  if (Number.isFinite(Number(err?.code))) return Math.trunc(Number(err.code));
-  return 'error';
-}
 
 async function spawnWithInput(command, args, {
   env,

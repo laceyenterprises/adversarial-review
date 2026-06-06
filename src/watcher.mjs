@@ -119,6 +119,7 @@ import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { recordApiCall } from './api-telemetry.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -239,6 +240,41 @@ const FAST_MERGE_CHANGED_FILES_MAX_PAGES = Math.max(
   1,
   Number.parseInt(process.env.FML_WATCHER_CHANGED_FILES_MAX_PAGES || '3', 10) || 3,
 );
+
+function apiStatusFromResult(result, fallback = 200) {
+  if (Number.isFinite(Number(result?.status))) return Math.trunc(Number(result.status));
+  return fallback;
+}
+
+function apiStatusFromError(err) {
+  if (Number.isFinite(Number(err?.status))) return Math.trunc(Number(err.status));
+  if (Number.isFinite(Number(err?.code))) return Math.trunc(Number(err.code));
+  return 'error';
+}
+
+async function withApiTelemetry(category, { repo = null, prNumber = null, successStatus = 200 } = {}, action) {
+  const startedAt = Date.now();
+  try {
+    const result = await action();
+    recordApiCall({
+      category,
+      repo,
+      prNumber,
+      status: apiStatusFromResult(result, successStatus),
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (err) {
+    recordApiCall({
+      category,
+      repo,
+      prNumber,
+      status: apiStatusFromError(err),
+      durationMs: Date.now() - startedAt,
+    });
+    throw err;
+  }
+}
 
 function isFastMergeSkipEnabled() {
   return process.env.FML_WATCHER_SKIP_ENABLED === 'true';
@@ -405,12 +441,12 @@ async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = cons
     if (typeof octokit?.rest?.issues?.listLabelsOnIssue !== 'function') {
       throw new Error('octokit.rest.issues.listLabelsOnIssue unavailable');
     }
-    const { data } = await octokit.rest.issues.listLabelsOnIssue({
+    const { data } = await withApiTelemetry('labels_list', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.issues.listLabelsOnIssue({
       owner,
       repo,
       issue_number: prNumber,
       per_page: 100,
-    });
+    }));
     return Array.isArray(data) ? data : [];
   } catch (err) {
     logger.warn?.(
@@ -425,11 +461,11 @@ async function fetchLivePRHeadSha(octokit, { owner, repo, prNumber, fallbackHead
     if (typeof octokit?.rest?.pulls?.get !== 'function') {
       throw new Error('octokit.rest.pulls.get unavailable');
     }
-    const { data } = await octokit.rest.pulls.get({
+    const { data } = await withApiTelemetry('pr_view', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.pulls.get({
       owner,
       repo,
       pull_number: prNumber,
-    });
+    }));
     return data?.head?.sha ? String(data.head.sha) : fallbackHeadSha;
   } catch (err) {
     logger.warn?.(
@@ -588,7 +624,7 @@ async function fetchFastMergeAuthorizationFromTimeline(
     };
     const events = [];
     for (let page = 1; page <= FAST_MERGE_TIMELINE_MAX_PAGES; page += 1) {
-      const response = await octokit.rest.issues.listEventsForTimeline({ ...params, page });
+      const response = await withApiTelemetry('timeline_events', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.issues.listEventsForTimeline({ ...params, page }));
       const pageEvents = Array.isArray(response?.data) ? response.data : [];
       events.push(...pageEvents);
       if (pageEvents.length < params.per_page) break;
@@ -615,7 +651,7 @@ async function fetchFastMergeChangedFiles(octokit, { owner, repo, prNumber, logg
     };
     const files = [];
     for (let page = 1; page <= FAST_MERGE_CHANGED_FILES_MAX_PAGES; page += 1) {
-      const response = await octokit.rest.pulls.listFiles({ ...params, page });
+      const response = await withApiTelemetry('files_list', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.pulls.listFiles({ ...params, page }));
       const pageFiles = Array.isArray(response?.data) ? response.data : [];
       files.push(...pageFiles);
       if (pageFiles.length < params.per_page) break;
@@ -2551,11 +2587,11 @@ async function refreshOrgRepos(octokit) {
   if (now - lastRepoRefresh < refreshInterval) return;
 
   try {
-    const all = await octokit.paginate(octokit.rest.repos.listForOrg, {
+    const all = await withApiTelemetry('other', { repo: config.org ? `${config.org}/*` : null }, () => octokit.paginate(octokit.rest.repos.listForOrg, {
       org: config.org,
       type: 'all',
       per_page: 100,
-    });
+    }));
 
     const excluded = new Set(config.excludeRepos ?? []);
     activeRepos = all
@@ -2849,7 +2885,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 
     let pr;
     try {
-      const { data } = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber });
+      const { data } = await withApiTelemetry('pr_view', { repo, prNumber }, () => octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber }));
       pr = data;
     } catch (err) {
       console.error(`[watcher] Failed to fetch PR ${repo}#${prNumber}:`, err.message);
@@ -3475,6 +3511,7 @@ async function pollOnce(
       repos: [repoPath],
       rootDir: ROOT,
       execFileImpl: execFileAsync,
+      recordApiCall,
     });
 
     let subjectRefs;
@@ -4190,11 +4227,11 @@ async function pollOnce(
             // the next PR's spawn in the serial loop. Re-fetch state directly
             // from GitHub right before the spawn and skip if no longer open.
             try {
-              const { data: freshPR } = await octokit.rest.pulls.get({
+              const { data: freshPR } = await withApiTelemetry('pr_view', { repo: repoPath, prNumber }, () => octokit.rest.pulls.get({
                 owner,
                 repo,
                 pull_number: prNumber,
-              });
+              }));
               if (freshPR.merged_at) {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`

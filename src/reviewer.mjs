@@ -25,6 +25,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { recordApiCall } from './api-telemetry.mjs';
 import {
   createFollowUpJob,
   resolveRoundBudgetForJob,
@@ -51,6 +52,12 @@ import { createLinearTriageAdapter } from './adapters/operator/linear-triage/ind
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const execFileAsync = promisify(execFile);
+
+function apiStatusFromError(err) {
+  if (Number.isFinite(Number(err?.status))) return Math.trunc(Number(err.status));
+  if (Number.isFinite(Number(err?.code))) return Math.trunc(Number(err.code));
+  return 'error';
+}
 
 async function spawnWithInput(command, args, {
   env,
@@ -678,21 +685,59 @@ function queueFollowUpForPostedReview({
 // ── PR diff fetch ────────────────────────────────────────────────────────────
 
 async function fetchPRDiff(repo, prNumber) {
-  const { stdout } = await execFileAsync(
-    'gh',
-    ['pr', 'diff', String(prNumber), '--repo', repo],
-    { maxBuffer: 10 * 1024 * 1024 }
-  );
-  return stdout;
+  const startedAt = Date.now();
+  try {
+    const { stdout } = await execFileAsync(
+      'gh',
+      ['pr', 'diff', String(prNumber), '--repo', repo],
+      { maxBuffer: 10 * 1024 * 1024 }
+    );
+    recordApiCall({
+      category: 'diff_fetch',
+      repo,
+      prNumber,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+    });
+    return stdout;
+  } catch (err) {
+    recordApiCall({
+      category: 'diff_fetch',
+      repo,
+      prNumber,
+      status: apiStatusFromError(err),
+      durationMs: Date.now() - startedAt,
+    });
+    throw err;
+  }
 }
 
 async function fetchPRContext(repo, prNumber) {
-  const { stdout } = await execFileAsync(
-    'gh',
-    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName,body,comments,headRefOid'],
-    { maxBuffer: 10 * 1024 * 1024 }
-  );
-  return JSON.parse(stdout);
+  const startedAt = Date.now();
+  try {
+    const { stdout } = await execFileAsync(
+      'gh',
+      ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName,body,comments,headRefOid'],
+      { maxBuffer: 10 * 1024 * 1024 }
+    );
+    recordApiCall({
+      category: 'pr_view',
+      repo,
+      prNumber,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+    });
+    return JSON.parse(stdout);
+  } catch (err) {
+    recordApiCall({
+      category: 'pr_view',
+      repo,
+      prNumber,
+      status: apiStatusFromError(err),
+      durationMs: Date.now() - startedAt,
+    });
+    throw err;
+  }
 }
 
 // ── AI review via CLI (OAuth only) ──────────────────────────────────────────
@@ -1072,6 +1117,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
       `[reviewer] reviewer fence unavailable; posting review without fence: ${err?.message || err}`
     );
   }
+  const startedAt = Date.now();
   try {
     await execFileImpl(
       'gh',
@@ -1081,6 +1127,22 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         maxBuffer: 5 * 1024 * 1024,
       }
     );
+    recordApiCall({
+      category: 'review_post',
+      repo,
+      prNumber,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+    });
+  } catch (err) {
+    recordApiCall({
+      category: 'review_post',
+      repo,
+      prNumber,
+      status: apiStatusFromError(err),
+      durationMs: Date.now() - startedAt,
+    });
+    throw err;
   } finally {
     reviewerFence?.clear();
   }

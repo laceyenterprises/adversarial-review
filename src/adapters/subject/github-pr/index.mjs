@@ -158,6 +158,17 @@ function resolveSubjectCacheTtlMs(env = process.env) {
   return parsed;
 }
 
+function telemetryStatusFromResult(result) {
+  if (Number.isFinite(Number(result?.status))) return Math.trunc(Number(result.status));
+  return 200;
+}
+
+function telemetryStatusFromError(err) {
+  if (Number.isFinite(Number(err?.status))) return Math.trunc(Number(err.status));
+  if (Number.isFinite(Number(err?.code))) return Math.trunc(Number(err.code));
+  return 'error';
+}
+
 function createGitHubPRSubjectAdapter({
   octokit,
   repos = [],
@@ -167,6 +178,7 @@ function createGitHubPRSubjectAdapter({
   now = () => new Date(),
   monotonicNowMs = () => performance.now(),
   cacheTtlMs = resolveSubjectCacheTtlMs(),
+  recordApiCall = null,
 } = {}) {
   // Per-adapter-instance scratch cache. Entries carry a monotonic
   // fetch timestamp and are rejected on read once older than
@@ -192,6 +204,30 @@ function createGitHubPRSubjectAdapter({
     return cached;
   }
 
+  async function withApiTelemetry(category, { repo = null, prNumber = null } = {}, action) {
+    const startedAt = monotonicNowMs();
+    try {
+      const result = await action();
+      recordApiCall?.({
+        category,
+        repo,
+        prNumber,
+        status: telemetryStatusFromResult(result),
+        durationMs: monotonicNowMs() - startedAt,
+      });
+      return result;
+    } catch (err) {
+      recordApiCall?.({
+        category,
+        repo,
+        prNumber,
+        status: telemetryStatusFromError(err),
+        durationMs: monotonicNowMs() - startedAt,
+      });
+      throw err;
+    }
+  }
+
   async function fetchPRSnapshot(ref) {
     const { repo, prNumber } = parseSubjectExternalId(ref.subjectExternalId);
     const cached = getFreshCache(ref.subjectExternalId);
@@ -200,11 +236,11 @@ function createGitHubPRSubjectAdapter({
       throw new Error(`No GitHub client available to fetch ${ref.subjectExternalId}`);
     }
     const { owner, repo: repoName } = splitRepo(repo);
-    const { data } = await octokit.rest.pulls.get({
+    const { data } = await withApiTelemetry('pr_view', { repo, prNumber }, () => octokit.rest.pulls.get({
       owner,
       repo: repoName,
       pull_number: prNumber,
-    });
+    }));
     const snapshot = normalizePRSnapshot(repo, data);
     setCache(snapshot);
     return snapshot;
@@ -219,14 +255,14 @@ function createGitHubPRSubjectAdapter({
       const refs = [];
       for (const repoPath of repos) {
         const { owner, repo } = splitRepo(repoPath);
-        const { data } = await octokit.rest.pulls.list({
+        const { data } = await withApiTelemetry('pr_view', { repo: repoPath }, () => octokit.rest.pulls.list({
           owner,
           repo,
           state: 'open',
           per_page: 50,
           sort: 'created',
           direction: 'desc',
-        });
+        }));
         for (const pr of data) {
           const snapshot = normalizePRSnapshot(repoPath, pr);
           setCache(snapshot);
@@ -247,15 +283,35 @@ function createGitHubPRSubjectAdapter({
 
     async fetchContent(ref) {
       const snapshot = await fetchPRSnapshot(ref);
-      const { stdout } = await execFileImpl('gh', [
-        'pr',
-        'diff',
-        String(snapshot.prNumber),
-        '--repo',
-        snapshot.repo,
-      ], {
-        maxBuffer: 10 * 1024 * 1024,
-      });
+      const startedAt = monotonicNowMs();
+      let stdout;
+      try {
+        ({ stdout } = await execFileImpl('gh', [
+          'pr',
+          'diff',
+          String(snapshot.prNumber),
+          '--repo',
+          snapshot.repo,
+        ], {
+          maxBuffer: 10 * 1024 * 1024,
+        }));
+        recordApiCall?.({
+          category: 'diff_fetch',
+          repo: snapshot.repo,
+          prNumber: snapshot.prNumber,
+          status: 200,
+          durationMs: monotonicNowMs() - startedAt,
+        });
+      } catch (err) {
+        recordApiCall?.({
+          category: 'diff_fetch',
+          repo: snapshot.repo,
+          prNumber: snapshot.prNumber,
+          status: telemetryStatusFromError(err),
+          durationMs: monotonicNowMs() - startedAt,
+        });
+        throw err;
+      }
       return {
         ref: {
           domainId: snapshot.domainId,

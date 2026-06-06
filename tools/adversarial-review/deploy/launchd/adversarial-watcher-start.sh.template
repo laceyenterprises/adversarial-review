@@ -44,7 +44,7 @@ OP_RATE_LIMIT_SIGNATURE="Too many requests. Your client has been rate-limited"
 _OP_RATE_LIMIT_DEFAULT_BACKOFF_S=900
 op_rate_limit_stderr_indicates_rate_limit() {
   local stderr_file="$1"
-  grep -Eiq 'too many requests|rate[- ]limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429' "$stderr_file" 2>/dev/null
+  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429|quota' "$stderr_file" 2>/dev/null
 }
 _op_rate_limit_resolve_backoff_seconds() {
   raw="${OP_RATE_LIMIT_BACKOFF_S-}"
@@ -146,13 +146,17 @@ op_resolve_with_rate_limit_backoff() {
   sleep "$backoff_s"
   return "$rc"
 }
-if [ -r "$AGENT_OS_PARENT_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh" ]; then
+OP_RATE_LIMIT_HELPER="$AGENT_OS_PARENT_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+if [ -r "$OP_RATE_LIMIT_HELPER" ]; then
   # shellcheck disable=SC1090
-  if ! . "$AGENT_OS_PARENT_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"; then
-    echo "[adversarial-watcher] WARN: OPH-01 helper failed to load from $AGENT_OS_PARENT_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh; using vendored fallback." >&2
+  if ( . "$OP_RATE_LIMIT_HELPER" ); then
+    # shellcheck disable=SC1090
+    . "$OP_RATE_LIMIT_HELPER"
+  else
+    echo "[adversarial-watcher] WARN: OPH-01 helper failed to load from $OP_RATE_LIMIT_HELPER; using vendored fallback." >&2
   fi
 else
-  echo "[adversarial-watcher] WARN: OPH-01 helper missing at $AGENT_OS_PARENT_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh; using vendored fallback." >&2
+  echo "[adversarial-watcher] WARN: OPH-01 helper missing at $OP_RATE_LIMIT_HELPER; using vendored fallback." >&2
 fi
 
 # 1. Native module gate.

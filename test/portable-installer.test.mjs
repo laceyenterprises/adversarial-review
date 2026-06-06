@@ -312,6 +312,7 @@ test('the four shipped templates render with sample bindings and leave no placeh
       assert.match(rendered, /resolve_op_bin/);
       assert.match(rendered, /op_resolve_with_rate_limit_backoff/);
       assert.match(rendered, /op_rate_limit_stderr_indicates_rate_limit/);
+      assert.match(rendered, /\(\s*\. "\$OP_RATE_LIMIT_HELPER"\s*\)/);
       assert.match(rendered, /mkfifo "\$stderr_fifo"/);
       assert.match(rendered, /wait "\$tee_pid"/);
       assert.doesNotMatch(rendered, /2> >\(/);

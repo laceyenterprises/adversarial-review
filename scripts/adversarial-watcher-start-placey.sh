@@ -37,7 +37,7 @@ OP_RATE_LIMIT_SIGNATURE="Too many requests. Your client has been rate-limited"
 _OP_RATE_LIMIT_DEFAULT_BACKOFF_S=900
 op_rate_limit_stderr_indicates_rate_limit() {
   local stderr_file="$1"
-  grep -Eiq 'too many requests|rate[- ]limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429' "$stderr_file" 2>/dev/null
+  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429|quota' "$stderr_file" 2>/dev/null
 }
 _op_rate_limit_resolve_backoff_seconds() {
   local raw="${OP_RATE_LIMIT_BACKOFF_S-}"
@@ -139,12 +139,15 @@ op_resolve_with_rate_limit_backoff() {
   sleep "$backoff_s"
   return "$rc"
 }
-if [[ -r "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh" ]]; then
-  if ! source "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"; then
-    echo "[adversarial-watcher] WARN: OPH-01 helper failed to load from $REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh; using vendored fallback." >&2
+_OP_RATE_LIMIT_HELPER="$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+if [[ -r "$_OP_RATE_LIMIT_HELPER" ]]; then
+  if ( source "$_OP_RATE_LIMIT_HELPER" ); then
+    source "$_OP_RATE_LIMIT_HELPER"
+  else
+    echo "[adversarial-watcher] WARN: OPH-01 helper failed to load from $_OP_RATE_LIMIT_HELPER; using vendored fallback." >&2
   fi
 else
-  echo "[adversarial-watcher] WARN: OPH-01 helper missing at $REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh; using vendored fallback." >&2
+  echo "[adversarial-watcher] WARN: OPH-01 helper missing at $_OP_RATE_LIMIT_HELPER; using vendored fallback." >&2
 fi
 
 WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"

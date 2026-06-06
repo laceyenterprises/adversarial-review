@@ -226,6 +226,7 @@ test('watcher launchers do not silently bypass OPH-01 backoff when the shared he
     const script = readScript(scriptName);
     assert.match(script, /op_resolve_with_rate_limit_backoff\(\)/);
     assert.match(script, /op_rate_limit_stderr_indicates_rate_limit/);
+    assert.match(script, /\(\s*source "\$_OP_RATE_LIMIT_HELPER"\s*\)/);
     assert.match(script, /mkfifo "\$stderr_fifo"/);
     assert.match(script, /wait "\$tee_pid"/);
     assert.match(script, /_op_rate_limit_descendant_pids/);

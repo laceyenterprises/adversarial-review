@@ -121,6 +121,7 @@ import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
+import { fetchPullRequestRollup } from './github-api.mjs';
 import {
   appendFenceAuditEvent,
   classifyFenceOrphan,
@@ -452,15 +453,10 @@ async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = cons
 
 async function fetchLivePRHeadSha(octokit, { owner, repo, prNumber, fallbackHeadSha = null, logger = console } = {}) {
   try {
-    if (typeof octokit?.rest?.pulls?.get !== 'function') {
-      throw new Error('octokit.rest.pulls.get unavailable');
-    }
-    const { data } = await withApiTelemetry('pr_view', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: prNumber,
-    }));
-    return data?.head?.sha ? String(data.head.sha) : fallbackHeadSha;
+    const pr = await fetchPullRequestRollup(`${owner}/${repo}`, prNumber, {
+      execFileImpl: execFileAsync,
+    });
+    return pr?.headRefOid ? String(pr.headRefOid) : fallbackHeadSha;
   } catch (err) {
     logger.warn?.(
       `[watcher] fast-merge head SHA fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
@@ -2782,7 +2778,7 @@ async function queueAndAttemptMergeAgentLifecycleCleanup({
     repo,
     prNumber,
     transition,
-    headSha: pr?.head?.sha || null,
+    headSha: pr?.headRefOid || pr?.head?.sha || null,
   });
   return attemptMergeAgentLifecycleCleanup({
     rootDir,
@@ -2905,23 +2901,23 @@ async function syncPRLifecycle(octokit, operatorSurface) {
   for (const row of openRows) {
     const { repo, pr_number: prNumber, linear_ticket: linearTicketId } = row;
     const labels = parseStoredLabels(row.labels_json);
-    const [owner, repoName] = repo.split('/');
 
     let pr;
     try {
-      const { data } = await withApiTelemetry('pr_view', { repo, prNumber }, () => octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber }));
-      pr = data;
+      pr = await fetchPullRequestRollup(repo, prNumber, {
+        execFileImpl: execFileAsync,
+      });
     } catch (err) {
       console.error(`[watcher] Failed to fetch PR ${repo}#${prNumber}:`, err.message);
       continue;
     }
 
-    if (pr.merged_at) {
+    if (pr.mergedAt) {
       console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
       await queueAndAttemptMergeAgentLifecycleCleanup({
         pr, repo, prNumber, transition: 'merged',
       });
-      stmtMarkMerged.run(pr.merged_at, repo, prNumber);
+      stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
       // Closeout capture is intentionally NOT awaited inline here. The
       // gh retry budget for a single scrape (~30–45s worst case) would
       // otherwise stall the gates-deletion and Linear triage sync for
@@ -2934,7 +2930,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         subjectRefWithLinearTicket({
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.head?.sha || null,
+          revisionRef: pr.headRefOid || null,
         }, linearTicketId, labels),
         'finalized'
       );
@@ -2943,13 +2939,13 @@ async function syncPRLifecycle(octokit, operatorSurface) {
       await queueAndAttemptMergeAgentLifecycleCleanup({
         pr, repo, prNumber, transition: 'closed',
       });
-      stmtMarkClosed.run(pr.closed_at ?? new Date().toISOString(), repo, prNumber);
+      stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await operatorSurface.syncTriageStatus(
         subjectRefWithLinearTicket({
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.head?.sha || null,
+          revisionRef: pr.headRefOid || null,
         }, linearTicketId, labels),
         'halted'
       );
@@ -4251,16 +4247,14 @@ async function pollOnce(
             // the next PR's spawn in the serial loop. Re-fetch state directly
             // from GitHub right before the spawn and skip if no longer open.
             try {
-              const { data: freshPR } = await withApiTelemetry('pr_view', { repo: repoPath, prNumber }, () => octokit.rest.pulls.get({
-                owner,
-                repo,
-                pull_number: prNumber,
-              }));
-              if (freshPR.merged_at) {
+              const freshPR = await fetchPullRequestRollup(repoPath, prNumber, {
+                execFileImpl: execFileAsync,
+              });
+              if (freshPR.mergedAt) {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
                 );
-                stmtMarkMerged.run(freshPR.merged_at, repoPath, prNumber);
+                stmtMarkMerged.run(freshPR.mergedAt, repoPath, prNumber);
                 return;
               }
               if (freshPR.state !== 'open') {

@@ -21,6 +21,10 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const CATEGORY_ORDER = Object.freeze([
   'diff_fetch',
   'pr_view',
+  'graphql_pr_rollup',
+  'comments_list',
+  'checks_list',
+  'reviews_list',
   'labels_list',
   'timeline_events',
   'files_list',

@@ -46,6 +46,7 @@ function buildLoaderSource(scenario) {
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
     [fileUrl('src', 'atomic-write.mjs')]: 'fixture:atomic-write',
+    [fileUrl('src', 'github-api.mjs')]: 'fixture:github-api',
   };
 
   return `
@@ -132,6 +133,33 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "globalThis.__fastMergeAuditWrites = []; export function writeFileAtomic(path, content, options) { if (globalThis.__fastMergeFailAuditWrites) { throw new Error('fixture audit write failed'); } globalThis.__fastMergeAuditWrites.push({ path, content, options }); }",
+    'fixture:github-api': ${JSON.stringify(`
+      const scenario = ${JSON.stringify(scenario)};
+      export async function fetchPullRequestRollup(repo, prNumber) {
+        const key = String(prNumber);
+        return {
+          id: 'fixture-pr-' + key,
+          number: Number(prNumber),
+          title: '[codex] fast merge test',
+          body: '',
+          state: 'open',
+          mergedAt: null,
+          closedAt: null,
+          createdAt: '2026-05-20T12:00:00.000Z',
+          updatedAt: '2026-05-20T12:00:00.000Z',
+          headRefName: 'fixture-branch-' + key,
+          baseRefName: 'main',
+          headRefOid: scenario.heads[String(prNumber)] || 'sha-live-' + key,
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+          author: { login: 'fixture-author' },
+          labels: scenario.labels[String(prNumber)] || [],
+          comments: [],
+          reviews: [],
+          checks: [],
+        };
+      }
+    `)},
   };
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
     return { format: 'module', shortCircuit: true, source: simpleStubs[url] };

@@ -43,9 +43,9 @@ import {
   recordMergeAgentDispatch,
   resolveMergeAgentParentSession,
   resolveMergeAgentProject,
-  resolveSessionLedgerDbPath,
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
+import { resolveSessionLedgerReadTarget } from '../src/session-ledger-read-adapter.mjs';
 // CFG-09 (2026-05-30, round-2): role-config cascade caches by
 // (topPath, modulePaths) — not env. Tests in this file rotate env
 // between cases (codex vs claude-code vs merge-agent vs invalid)
@@ -3264,7 +3264,7 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
 // `original-worker-run-row-missing-but-worktree-present` deferrals for
 // every newly-provisioned worker (PRs #661 #664 #665 stuck >6h).
 //
-// Root cause: resolveSessionLedgerDbPath picked the managed-service-root
+// Root cause: the ledger target resolver picked the managed-service-root
 // DB (/Users/<owner>/.agent-os/session-ledger/ledger.db, updated only by
 // the session-ledger service-refresh loop) ahead of the deploy-checkout
 // DB (<deploy>/.agent-os/session-ledger/ledger.db, where the dispatch
@@ -3272,7 +3272,7 @@ test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', a
 // wedged, the merge-agent read a stale snapshot and never saw the rows
 // the daemon had just written.
 
-test('resolveSessionLedgerDbPath prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/session-ledger/ledger.db over managed-service-root fallback', () => {
+test('resolveSessionLedgerReadTarget prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/session-ledger/ledger.db over managed-service-root fallback', () => {
   const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
   const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-'));
   const deployLedgerDir = path.join(deployCheckout, '.agent-os', 'session-ledger');
@@ -3288,18 +3288,20 @@ test('resolveSessionLedgerDbPath prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/sess
   homeDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
   homeDb.close();
 
-  const result = resolveSessionLedgerDbPath({
+  const result = resolveSessionLedgerReadTarget({
     hqRoot: '/Users/airlock/agent-os-hq',
+    requiredTables: ['worker_runs'],
     env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
   });
 
-  assert.equal(result, deployLedgerDbPath,
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, deployLedgerDbPath,
     'When both deploy-checkout DB and managed-service-root DB exist, the '
     + 'deploy-checkout DB must win — the dispatch daemon writes worker_runs '
     + 'there, and reading the managed-service-root DB returns a stale snapshot.');
 });
 
-test('resolveSessionLedgerDbPath falls back to HOME-based ledger.db when no deploy-checkout DB exists', () => {
+test('resolveSessionLedgerReadTarget falls back to HOME-based ledger.db when no deploy-checkout DB exists', () => {
   // Pre-fix behavior must still work when there is no repo-rooted DB
   // (e.g., fresh install, or repo-rooted DB legitimately absent).
   // hqRoot uses a tmpdir path (outside /Users/) so the hqRootOwnerHome
@@ -3314,12 +3316,14 @@ test('resolveSessionLedgerDbPath falls back to HOME-based ledger.db when no depl
   homeDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
   homeDb.close();
 
-  const result = resolveSessionLedgerDbPath({
+  const result = resolveSessionLedgerReadTarget({
     hqRoot,
+    requiredTables: ['worker_runs'],
     env: { ...HERMETIC_CONFIG_ENV, HOME: homeDir },
   });
 
-  assert.equal(result, homeLedgerDbPath,
+  assert.equal(result.ok, true);
+  assert.equal(result.target.path, homeLedgerDbPath,
     'When no deploy-checkout DB exists, the lookup must still find the '
     + 'HOME-based fallback DB so the merge-agent can operate on hosts '
     + 'where only the service-refresh DB is provisioned.');

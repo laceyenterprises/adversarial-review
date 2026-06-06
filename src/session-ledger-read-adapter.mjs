@@ -12,6 +12,12 @@ function normalizeText(value) {
   return text || null;
 }
 
+function deriveHqOwnerHome(hqRoot) {
+  const resolvedHqRoot = normalizeText(hqRoot);
+  const match = resolvedHqRoot?.match(/^\/Users\/([^/]+)(?:\/|$)/);
+  return match ? join('/Users', match[1]) : null;
+}
+
 function readLegacyHqLedgerDbPath(hqRoot) {
   const resolvedHqRoot = normalizeText(hqRoot);
   if (!resolvedHqRoot) return null;
@@ -114,6 +120,7 @@ function sqliteTargetCandidates({ cfg, env, rootDir }) {
   const deployRoot = normalizeText(env.AGENT_OS_DEPLOY_CHECKOUT || cfg.get('roots.deploy'));
   const runtimeHome = normalizeText(env.HOME || cfg.get('roots.runtime_home') || homedir());
   const adminHome = normalizeText(cfg.get('roots.admin_home'));
+  const hqOwnerHome = deriveHqOwnerHome(env.HQ_ROOT);
   const candidates = [];
   if (deployRoot) {
     candidates.push({
@@ -137,6 +144,16 @@ function sqliteTargetCandidates({ cfg, env, rootDir }) {
     candidates.push({
       path: join(adminHome, 'agent-os', '.agent-os', 'session-ledger', 'ledger.db'),
       source: 'roots.admin_home',
+    });
+  }
+  if (hqOwnerHome) {
+    candidates.push({
+      path: join(hqOwnerHome, 'agent-os', '.agent-os', 'session-ledger', 'ledger.db'),
+      source: 'hq-root-owner-home-deploy',
+    });
+    candidates.push({
+      path: join(hqOwnerHome, '.agent-os', 'session-ledger', 'ledger.db'),
+      source: 'hq-root-owner-home-runtime',
     });
   }
   return candidates;
@@ -181,21 +198,21 @@ export function resolveSessionLedgerReadTarget({
   if (env.AGENT_OS_SESSION_LEDGER_TARGET) {
     return normalizeExplicitLedgerTarget(env.AGENT_OS_SESSION_LEDGER_TARGET);
   }
+  if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
+    return sqliteTargetFromPath(env.AGENT_OS_SESSION_LEDGER_DB_PATH, 'env:AGENT_OS_SESSION_LEDGER_DB_PATH');
+  }
+  if (env.SESSION_LEDGER_DB_PATH) {
+    return sqliteTargetFromPath(env.SESSION_LEDGER_DB_PATH, 'env:SESSION_LEDGER_DB_PATH');
+  }
+  const legacyHqLedgerDbPath = readLegacyHqLedgerDbPath(hqRoot || env.HQ_ROOT);
+  if (legacyHqLedgerDbPath) {
+    return sqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config');
+  }
   try {
     const cfg = loadConfig({ env });
     const backend = normalizeText(cfg.get('session_ledger.backend'))?.toLowerCase();
     if (backend === 'postgres') {
       return postgresTargetFromConfig({ cfg, env });
-    }
-    if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
-      return sqliteTargetFromPath(env.AGENT_OS_SESSION_LEDGER_DB_PATH, 'env:AGENT_OS_SESSION_LEDGER_DB_PATH');
-    }
-    if (env.SESSION_LEDGER_DB_PATH) {
-      return sqliteTargetFromPath(env.SESSION_LEDGER_DB_PATH, 'env:SESSION_LEDGER_DB_PATH');
-    }
-    const legacyHqLedgerDbPath = readLegacyHqLedgerDbPath(hqRoot || env.HQ_ROOT);
-    if (legacyHqLedgerDbPath) {
-      return sqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config');
     }
     for (const candidate of sqliteTargetCandidates({ cfg, env, rootDir })) {
       if (existsSync(candidate.path) && sessionLedgerDbHasTables(candidate.path, requiredTables)) {

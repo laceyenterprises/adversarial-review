@@ -536,11 +536,6 @@ function validateWorkerWorkspaceForBranch(workspace, originalWorkerId, branch) {
   return { ok: true, workspaceWorkerId, workspaceBranch };
 }
 
-function resolveSessionLedgerDbPath({ hqRoot, env = {} } = {}) {
-  const resolution = resolveSessionLedgerReadTarget({ hqRoot, env, requiredTables: ['worker_runs'] });
-  return resolution.ok && resolution.target.backend === 'sqlite' ? resolution.target.path : null;
-}
-
 function normalizeWorkerRunStatus(status) {
   return String(status || '').trim().toLowerCase();
 }
@@ -5147,7 +5142,6 @@ export {
   lookupOriginalWorkerRunStatus,
   prepareOriginalWorkerForMergeAgent,
   resolveFastMergePerPollCap,
-  resolveSessionLedgerDbPath,
   recordMergeAgentDispatch,
   updateMergeAgentLifecycleCleanup,
   upsertMergeAgentLifecycleCleanup,

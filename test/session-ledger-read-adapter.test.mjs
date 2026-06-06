@@ -12,6 +12,8 @@ import {
   resolveSessionLedgerReadTarget,
 } from '../src/session-ledger-read-adapter.mjs';
 
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'session-ledger-adapter-'));
 }
@@ -55,6 +57,7 @@ test('resolveSessionLedgerReadTarget accepts backend-neutral explicit sqlite and
   });
   const postgres = resolveSessionLedgerReadTarget({
     env: {
+      ...HERMETIC_CONFIG_ENV,
       AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
       AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger',
     },
@@ -79,7 +82,7 @@ test('resolveSessionLedgerReadTarget keeps --ledger-db compatibility as a deprec
 test('resolveSessionLedgerReadTarget fails explicitly for missing or malformed targets', () => {
   const missing = resolveSessionLedgerReadTarget({
     env: {
-      AGENT_OS_CONFIG_PATH: '/dev/null',
+      ...HERMETIC_CONFIG_ENV,
       HOME: tempRoot(),
     },
     rootDir: tempRoot(),
@@ -107,7 +110,7 @@ test('resolveSessionLedgerReadTarget skips earlier sqlite stub candidates that d
   const result = resolveSessionLedgerReadTarget({
     requiredTables: ['runtime_sessions'],
     env: {
-      AGENT_OS_CONFIG_PATH: '/dev/null',
+      ...HERMETIC_CONFIG_ENV,
       AGENT_OS_DEPLOY_CHECKOUT: deployCheckout,
       HOME: homeDir,
     },
@@ -117,6 +120,23 @@ test('resolveSessionLedgerReadTarget skips earlier sqlite stub candidates that d
   assert.equal(result.ok, true);
   assert.equal(result.target.path, runtimeLedger);
   assert.equal(result.target.source, 'roots.runtime_home');
+});
+
+test('resolveSessionLedgerReadTarget keeps env sqlite overrides independent from config parse failures', () => {
+  const invalidConfigPath = path.join(tempRoot(), 'config.local.yaml');
+  writeFileSync(invalidConfigPath, 'session_ledger: [\n');
+
+  const result = resolveSessionLedgerReadTarget({
+    env: {
+      AGENT_OS_CONFIG_PATH: invalidConfigPath,
+      AGENT_OS_SESSION_LEDGER_DB_PATH: '/tmp/env-ledger.db',
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'sqlite');
+  assert.match(result.target.path, /env-ledger\.db$/);
+  assert.equal(result.target.source, 'env:AGENT_OS_SESSION_LEDGER_DB_PATH');
 });
 
 test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newest row', () => {

@@ -252,7 +252,7 @@ function coerceNonNegativeFloat(value) {
 
 const tokenRollupWarnings = new Set();
 
-function canonicalizeLedgerTarget({
+function selectLedgerTargetSource({
   ledgerTarget = null,
   ledgerDbPath = null,
 } = {}) {
@@ -283,14 +283,14 @@ function readReviewerSessionTokenUsage({
   env = process.env,
   rootDir = process.cwd(),
 } = {}) {
-  const canonicalLedgerTarget = canonicalizeLedgerTarget({ ledgerTarget, ledgerDbPath });
+  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
   const result = readReviewerSessionUsageFromLedger({
     adapterSessionKey,
     sessionKeys,
     workspacePath,
     startedAt,
     endedAt,
-    ledgerTarget: canonicalLedgerTarget,
+    ledgerTarget: selectedLedgerTarget,
     env,
     rootDir,
   });
@@ -306,11 +306,11 @@ function readWorkerRunTokenUsage({
   env = process.env,
   rootDir = process.cwd(),
 } = {}) {
-  const canonicalLedgerTarget = canonicalizeLedgerTarget({ ledgerTarget, ledgerDbPath });
+  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
   const result = readWorkerRunUsageFromLedger({
     workerRunId,
     launchRequestId,
-    ledgerTarget: canonicalLedgerTarget,
+    ledgerTarget: selectedLedgerTarget,
     env,
     rootDir,
   });
@@ -831,11 +831,11 @@ function readBestReviewerEvidenceTokenUsage({
   transcriptFallback = true,
   workerLogPath = null,
 } = {}) {
-  const canonicalLedgerTarget = canonicalizeLedgerTarget({ ledgerTarget, ledgerDbPath });
+  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
   const ledgerUsage = readWorkerRunTokenUsage({
     workerRunId,
     launchRequestId,
-    ledgerTarget: canonicalLedgerTarget,
+    ledgerTarget: selectedLedgerTarget,
     rootDir,
   }) || readReviewerSessionTokenUsage({
     adapterSessionKey,
@@ -843,7 +843,7 @@ function readBestReviewerEvidenceTokenUsage({
     workspacePath,
     startedAt,
     endedAt,
-    ledgerTarget: canonicalLedgerTarget,
+    ledgerTarget: selectedLedgerTarget,
     rootDir,
   });
   if (ledgerUsage) return ledgerUsage;
@@ -1005,7 +1005,7 @@ function backfillReviewerPasses(rootDir, {
   now = () => new Date().toISOString(),
   dryRun = false,
 } = {}) {
-  const canonicalLedgerTarget = canonicalizeLedgerTarget({ ledgerTarget, ledgerDbPath });
+  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
   const jobs = readHistoricalFollowUpJobs(rootDir);
   let considered = 0;
   let insertedOrUpdated = 0;
@@ -1048,13 +1048,13 @@ function backfillReviewerPasses(rootDir, {
     const usage = readWorkerRunTokenUsage({
       workerRunId: worker.workerRunId || worker.runId || null,
       launchRequestId,
-      ledgerTarget: canonicalLedgerTarget,
+      ledgerTarget: selectedLedgerTarget,
       rootDir,
     }) || readReviewerSessionTokenUsage({
       workspacePath,
       startedAt,
       endedAt,
-      ledgerTarget: canonicalLedgerTarget,
+      ledgerTarget: selectedLedgerTarget,
       rootDir,
     }) || (transcriptFallback ? readTranscriptTokenUsageForModel({
       reviewerModel: worker.model || worker.workerClass,

@@ -104,7 +104,8 @@ function normalizeExplicitLedgerTarget(ledgerTarget) {
   if (ledgerTarget && typeof ledgerTarget === 'object' && !Array.isArray(ledgerTarget)) {
     const backend = normalizeText(ledgerTarget.backend)?.toLowerCase();
     if (backend === 'sqlite') {
-      return sqliteTargetFromPath(ledgerTarget.path, ledgerTarget.source || 'explicit-ledger-target');
+      const extra = ledgerTarget.deprecatedAlias ? { deprecatedAlias: true } : {};
+      return sqliteTargetFromPath(ledgerTarget.path, ledgerTarget.source || 'explicit-ledger-target', extra);
     }
     if (backend === 'postgres') {
       const dsn = normalizeText(ledgerTarget.dsn);

@@ -272,12 +272,13 @@ function normalizeRollup(pr, {
   reviews = [],
   checks = [],
 } = {}) {
+  const state = typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null;
   return {
     id: pr?.id ?? null,
     number: Number.isInteger(Number(pr?.number)) ? Number(pr.number) : null,
     title: String(pr?.title || ''),
     body: String(pr?.body || ''),
-    state: pr?.state || null,
+    state,
     mergedAt: pr?.mergedAt || null,
     closedAt: pr?.closedAt || null,
     createdAt: pr?.createdAt || null,
@@ -452,28 +453,38 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
   let commentsAfter = null;
   let reviewsAfter = null;
   let checksAfter = null;
+  let commentsFirst = PAGE_SIZE;
+  let reviewsFirst = PAGE_SIZE;
+  let checksFirst = PAGE_SIZE;
   let hasNextComments = true;
   let hasNextReviews = true;
   let hasNextChecks = true;
+  let isFirstIteration = true;
 
   while (hasNextComments || hasNextReviews || hasNextChecks) {
     const payload = await runGraphql(execFileImpl, GRAPHQL_ROLLUP_QUERY, {
       owner,
       repo: repoName,
       prNumber,
-      commentsFirst: PAGE_SIZE,
+      commentsFirst,
       commentsAfter,
-      reviewsFirst: PAGE_SIZE,
+      reviewsFirst,
       reviewsAfter,
-      checksFirst: PAGE_SIZE,
+      checksFirst,
       checksAfter,
     });
     const pr = extractGraphqlPr(payload);
     if (!prData) prData = pr;
 
-    appendGraphqlPage(comments, pr?.comments?.nodes, normalizeComment);
-    appendGraphqlPage(reviews, pr?.reviews?.nodes, normalizeReview);
-    appendGraphqlPage(checks, extractChecksConnection(pr)?.nodes, normalizeCheck);
+    if (isFirstIteration || hasNextComments) {
+      appendGraphqlPage(comments, pr?.comments?.nodes, normalizeComment);
+    }
+    if (isFirstIteration || hasNextReviews) {
+      appendGraphqlPage(reviews, pr?.reviews?.nodes, normalizeReview);
+    }
+    if (isFirstIteration || hasNextChecks) {
+      appendGraphqlPage(checks, extractChecksConnection(pr)?.nodes, normalizeCheck);
+    }
 
     hasNextComments = Boolean(pr?.comments?.pageInfo?.hasNextPage);
     hasNextReviews = Boolean(pr?.reviews?.pageInfo?.hasNextPage);
@@ -481,6 +492,10 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
     commentsAfter = hasNextComments ? pr?.comments?.pageInfo?.endCursor || null : commentsAfter;
     reviewsAfter = hasNextReviews ? pr?.reviews?.pageInfo?.endCursor || null : reviewsAfter;
     checksAfter = hasNextChecks ? extractChecksConnection(pr)?.pageInfo?.endCursor || null : checksAfter;
+    commentsFirst = hasNextComments ? PAGE_SIZE : 0;
+    reviewsFirst = hasNextReviews ? PAGE_SIZE : 0;
+    checksFirst = hasNextChecks ? PAGE_SIZE : 0;
+    isFirstIteration = false;
     if (!hasNextComments && !hasNextReviews && !hasNextChecks) break;
   }
 

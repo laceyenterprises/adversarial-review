@@ -41,7 +41,7 @@ function makeExpectedRollup() {
     number: FIXTURE_PR,
     title: '[codex] GHO-03: GraphQL roll-up for PR view + comments + checks + reviews',
     body: 'Links docs/SPEC-gho.md and README.md for context.',
-    state: 'OPEN',
+    state: 'open',
     mergedAt: null,
     closedAt: null,
     createdAt: '2026-06-06T08:00:00.000Z',
@@ -233,6 +233,71 @@ function makeGraphqlExecStub(expected, { pagination = false } = {}) {
   return { calls, execFileImpl };
 }
 
+function makeAsymmetricPaginationExecStub(expected) {
+  const calls = [];
+  const commentsPage = expected.comments.slice(0, 50);
+  const reviewsPage1 = expected.reviews.slice(0, 100);
+  const reviewsPage2 = expected.reviews.slice(100, 200);
+  const reviewsPage3 = expected.reviews.slice(200);
+  const checksPage = expected.checks.slice(0, 25);
+
+  async function execFileImpl(command, args) {
+    calls.push({ command, args: [...args] });
+    assert.equal(command, 'gh');
+    assert.equal(args[0], 'api');
+    assert.equal(args[1], 'graphql');
+    const vars = parseGhArgs(args);
+
+    if (!vars.commentsAfter && !vars.reviewsAfter && !vars.checksAfter) {
+      assert.equal(vars.commentsFirst, '100');
+      assert.equal(vars.reviewsFirst, '100');
+      assert.equal(vars.checksFirst, '100');
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: commentsPage,
+          reviews: reviewsPage1,
+          checks: checksPage,
+          commentsHasNextPage: false,
+          reviewsHasNextPage: true,
+          checksHasNextPage: false,
+          reviewsEndCursor: 'reviews-100',
+        })),
+      };
+    }
+
+    if (vars.reviewsAfter === 'reviews-100') {
+      assert.equal(vars.commentsFirst, '0');
+      assert.equal(vars.reviewsFirst, '100');
+      assert.equal(vars.checksFirst, '0');
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: commentsPage,
+          reviews: reviewsPage2,
+          checks: checksPage,
+          commentsHasNextPage: false,
+          reviewsHasNextPage: true,
+          checksHasNextPage: false,
+          reviewsEndCursor: 'reviews-200',
+        })),
+      };
+    }
+
+    assert.equal(vars.reviewsAfter, 'reviews-200');
+    assert.equal(vars.commentsFirst, '0');
+    assert.equal(vars.reviewsFirst, '100');
+    assert.equal(vars.checksFirst, '0');
+    return {
+      stdout: JSON.stringify(buildGraphqlResponse(expected, {
+        comments: commentsPage,
+        reviews: reviewsPage3,
+        checks: checksPage,
+      })),
+    };
+  }
+
+  return { calls, execFileImpl };
+}
+
 function makeLegacyExecStub(expected) {
   const calls = [];
   async function execFileImpl(command, args) {
@@ -311,6 +376,31 @@ function makeLargeExpectedRollup() {
       submittedAt: `2026-06-06T09:${String(index % 60).padStart(2, '0')}:00.000Z`,
     })),
     checks: Array.from({ length: 135 }, (_, index) => ({
+      name: `check-${index + 1}`,
+      conclusion: 'SUCCESS',
+      completedAt: `2026-06-06T10:${String(index % 60).padStart(2, '0')}:00.000Z`,
+    })),
+  };
+}
+
+function makeAsymmetricExpectedRollup() {
+  const base = makeExpectedRollup();
+  return {
+    ...base,
+    comments: Array.from({ length: 50 }, (_, index) => ({
+      id: `IC_${index + 1}`,
+      author: { login: `commenter-${index + 1}` },
+      body: `Comment ${index + 1}`,
+      createdAt: `2026-06-06T08:${String(index % 60).padStart(2, '0')}:00.000Z`,
+    })),
+    reviews: Array.from({ length: 250 }, (_, index) => ({
+      id: `PRR_${index + 1}`,
+      author: { login: `reviewer-${index + 1}` },
+      body: `Review ${index + 1}`,
+      state: index % 2 === 0 ? 'COMMENTED' : 'APPROVED',
+      submittedAt: `2026-06-06T09:${String(index % 60).padStart(2, '0')}:00.000Z`,
+    })),
+    checks: Array.from({ length: 25 }, (_, index) => ({
       name: `check-${index + 1}`,
       conclusion: 'SUCCESS',
       completedAt: `2026-06-06T10:${String(index % 60).padStart(2, '0')}:00.000Z`,
@@ -674,10 +764,29 @@ test('pagination cursor handling returns all comments, reviews, and checks witho
   assert.equal(calls.length, 2);
 });
 
+test('multiplexed pagination does not duplicate exhausted connections while another list continues', async () => {
+  const expected = makeAsymmetricExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const { calls, execFileImpl } = makeAsymmetricPaginationExecStub(expected);
+
+  const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+
+  assert.equal(result.comments.length, 50);
+  assert.equal(result.reviews.length, 250);
+  assert.equal(result.checks.length, 25);
+  assert.equal(new Set(result.comments.map((comment) => comment.id)).size, 50);
+  assert.equal(new Set(result.reviews.map((review) => review.id)).size, 250);
+  assert.equal(new Set(result.checks.map((check) => check.name)).size, 25);
+  assert.equal(calls.length, 3);
+});
+
 test('watcher tick downstream output is unchanged when PR fetches come from the roll-up helper', () => {
   const rollup = {
     ...makeExpectedRollup(),
-    state: 'OPEN',
+    state: 'open',
     mergedAt: '2026-06-06T08:45:00.000Z',
     labels: [{ name: 'automerge' }],
   };

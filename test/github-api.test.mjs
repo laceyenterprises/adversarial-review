@@ -99,12 +99,15 @@ function makeExpectedRollup() {
 }
 
 function buildGraphqlResponse(expected, {
+  labels = expected.labels,
   comments = expected.comments,
   reviews = expected.reviews,
   checks = expected.checks,
+  labelsHasNextPage = false,
   commentsHasNextPage = false,
   reviewsHasNextPage = false,
   checksHasNextPage = false,
+  labelsEndCursor = labelsHasNextPage ? 'labels-cursor' : null,
   commentsEndCursor = commentsHasNextPage ? 'comments-cursor' : null,
   reviewsEndCursor = reviewsHasNextPage ? 'reviews-cursor' : null,
   checksEndCursor = checksHasNextPage ? 'checks-cursor' : null,
@@ -129,7 +132,11 @@ function buildGraphqlResponse(expected, {
           mergeStateStatus: expected.mergeStateStatus,
           author: expected.author,
           labels: {
-            nodes: expected.labels,
+            nodes: labels,
+            pageInfo: {
+              hasNextPage: labelsHasNextPage,
+              endCursor: labelsEndCursor,
+            },
           },
           comments: {
             nodes: comments,
@@ -165,6 +172,35 @@ function buildGraphqlResponse(expected, {
                 },
               },
             }],
+          },
+        },
+      },
+    },
+  };
+}
+
+function buildGraphqlChecksOnlyResponse(checks, {
+  hasNextPage = false,
+  endCursor = null,
+} = {}) {
+  return {
+    data: {
+      repository: {
+        object: {
+          statusCheckRollup: {
+            contexts: {
+              nodes: checks.map((check) => ({
+                __typename: 'CheckRun',
+                name: check.name,
+                conclusion: check.conclusion,
+                completedAt: check.completedAt,
+                status: 'COMPLETED',
+              })),
+              pageInfo: {
+                hasNextPage,
+                endCursor,
+              },
+            },
           },
         },
       },
@@ -240,13 +276,10 @@ function makeGraphqlExecStub(expected, { pagination = false } = {}) {
       };
     }
     if (query.includes('query PullRequestRollupChecks(')) {
+      assert.equal(vars.headRefOid, expected.headRefOid);
       assert.equal(vars.checksAfter, 'checks-100');
       return {
-        stdout: JSON.stringify(buildGraphqlResponse(expected, {
-          comments: [],
-          reviews: [],
-          checks: secondChecks,
-        })),
+        stdout: JSON.stringify(buildGraphqlChecksOnlyResponse(secondChecks)),
       };
     }
     assert.equal(vars.commentsAfter, 'comments-100');
@@ -378,6 +411,10 @@ function makeComplexityFallbackExecStub(expected) {
                 author: expected.author,
                 labels: {
                   nodes: expected.labels,
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null,
+                  },
                 },
               },
             },
@@ -413,14 +450,12 @@ function makeComplexityFallbackExecStub(expected) {
     }
 
     if (query.includes('query PullRequestRollupChecks(')) {
+      assert.equal(vars.headRefOid, expected.headRefOid);
       const page = vars.checksAfter === 'checks-100' ? 1 : 0;
       return {
-        stdout: JSON.stringify(buildGraphqlResponse(expected, {
-          comments: [],
-          reviews: [],
-          checks: checksPages[page],
-          checksHasNextPage: page === 0,
-          checksEndCursor: page === 0 ? 'checks-100' : null,
+        stdout: JSON.stringify(buildGraphqlChecksOnlyResponse(checksPages[page], {
+          hasNextPage: page === 0,
+          endCursor: page === 0 ? 'checks-100' : null,
         })),
       };
     }
@@ -473,6 +508,10 @@ function makeStructuredComplexityFallbackExecStub(expected) {
                 author: expected.author,
                 labels: {
                   nodes: expected.labels,
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null,
+                  },
                 },
               },
             },
@@ -496,11 +535,9 @@ function makeStructuredComplexityFallbackExecStub(expected) {
     }
 
     if (query.includes('query PullRequestRollupChecks(')) {
+      assert.equal(vars.headRefOid, expected.headRefOid);
       return {
-        stdout: JSON.stringify(buildGraphqlResponse(expected, {
-          comments: [],
-          reviews: [],
-        })),
+        stdout: JSON.stringify(buildGraphqlChecksOnlyResponse(expected.checks)),
       };
     }
 
@@ -552,8 +589,8 @@ function makeLegacyExecStub(expected) {
         }),
       };
     }
-    if (joined === `api repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/status`) {
-      return { stdout: JSON.stringify({ statuses: [] }) };
+    if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/statuses?`)) {
+      return { stdout: JSON.stringify([]) };
     }
     throw new Error(`Unexpected gh invocation: ${joined}`);
   }
@@ -824,7 +861,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "export function writeFileAtomic() {}",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid }; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid }; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
@@ -877,6 +914,8 @@ const rows = db.prepare('SELECT repo, pr_number, pr_state, merged_at, closed_at 
 console.log(${JSON.stringify(WATCHER_SUMMARY_MARKER)} + JSON.stringify({
   rows,
   triage: globalThis.__githubApiWatcherTriage || [],
+  headStateCalls: globalThis.__githubApiWatcherHeadStateCalls || 0,
+  rollupCalls: globalThis.__githubApiWatcherRollupCalls || 0,
 }));
 `;
 }
@@ -1070,6 +1109,144 @@ test('complexity fallback also triggers on structured GraphQL error types', asyn
   );
 });
 
+test('structured non-complexity GraphQL errors do not trigger per-list amplification', async () => {
+  const mod = await importGithubApiFresh();
+  assert.equal(
+    mod.__test__.isGraphqlComplexityError({
+      graphqlErrors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded' }],
+      message: 'API rate limit exceeded',
+    }),
+    false,
+  );
+  assert.equal(
+    mod.__test__.isGraphqlComplexityError({
+      graphqlErrors: [{ type: 'RESOURCE_NOT_ACCESSIBLE', message: 'Resource not accessible by integration' }],
+      message: 'Resource not accessible by integration',
+    }),
+    false,
+  );
+  assert.equal(
+    mod.__test__.isGraphqlComplexityError({
+      graphqlErrors: [{ type: 'MAX_NODE_LIMIT_EXCEEDED', message: 'rollup too large' }],
+      message: 'rollup too large',
+    }),
+    true,
+  );
+});
+
+test('gh invocations reuse GITHUB_TOKEN as GH_TOKEN when no gh token is set', async () => {
+  const mod = await importGithubApiFresh();
+  await withEnv({ GH_TOKEN: undefined, GITHUB_TOKEN: 'github-token-for-watcher' }, async () => {
+    await mod.__test__.runGraphql(async (_command, _args, options) => {
+      assert.equal(options.env.GH_TOKEN, 'github-token-for-watcher');
+      return { stdout: JSON.stringify({ data: { repository: { pullRequest: {} } } }) };
+    }, 'query Empty { rateLimit { cost } }', {});
+  });
+});
+
+test('connection pagination fails closed when GitHub repeats the cursor', async () => {
+  const mod = await importGithubApiFresh();
+  await assert.rejects(
+    () => mod.__test__.fetchGraphqlConnectionPages(FIXTURE_REPO, FIXTURE_PR, {
+      execFileImpl: async () => ({
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                comments: {
+                  nodes: [],
+                  pageInfo: {
+                    hasNextPage: true,
+                    endCursor: 'same-cursor',
+                  },
+                },
+              },
+            },
+          },
+        }),
+      }),
+      query: 'query Comments {}',
+      firstVariable: 'commentsFirst',
+      afterVariable: 'commentsAfter',
+      startAfter: 'same-cursor',
+      extractConnection: (pr) => pr?.comments,
+      normalize: (comment) => comment,
+      connectionName: 'comments',
+    }),
+    /cursor did not advance/,
+  );
+});
+
+test('GraphQL rollup paginates labels beyond the first page', async () => {
+  const expected = {
+    ...makeExpectedRollup(),
+    labels: Array.from({ length: 150 }, (_, index) => ({ name: `label-${index + 1}` })),
+  };
+  const firstLabels = expected.labels.slice(0, 100);
+  const secondLabels = expected.labels.slice(100);
+  const calls = [];
+  const mod = await importGithubApiFresh();
+
+  const result = await mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    recordApiCallImpl: () => {},
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      const vars = parseGhArgs(args);
+      const query = String(vars.query || '');
+      if (query.includes('query PullRequestRollup(')) {
+        return {
+          stdout: JSON.stringify(buildGraphqlResponse(expected, {
+            labels: firstLabels,
+            labelsHasNextPage: true,
+            labelsEndCursor: 'labels-100',
+          })),
+        };
+      }
+      assert.match(query, /query PullRequestRollupLabels\(/);
+      assert.equal(vars.labelsAfter, 'labels-100');
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          labels: secondLabels,
+        })),
+      };
+    },
+  });
+
+  assert.equal(result.labels.length, 150);
+  assert.equal(result.labels.at(-1).name, 'label-150');
+  assert.equal(calls.length, 2);
+});
+
+test('legacy fallback paginates commit statuses instead of reading only the combined status page', async () => {
+  const mod = await importGithubApiFresh();
+  const statuses = Array.from({ length: 150 }, (_, index) => ({
+    context: `status-${index + 1}`,
+    state: 'success',
+    updated_at: `2026-06-06T11:${String(index % 60).padStart(2, '0')}:00.000Z`,
+  }));
+  const calls = [];
+
+  const result = await mod.__test__.fetchLegacyChecks(async (command, args) => {
+    calls.push({ command, args: [...args] });
+    assert.equal(command, 'gh');
+    const joined = args.join(' ');
+    if (joined.includes('/check-runs?')) {
+      return { stdout: JSON.stringify({ check_runs: [] }) };
+    }
+    if (joined.includes('/statuses?') && /[?&]page=1(?:\D|$)/.test(joined)) {
+      return { stdout: JSON.stringify(statuses.slice(0, 100)) };
+    }
+    if (joined.includes('/statuses?') && /[?&]page=2(?:\D|$)/.test(joined)) {
+      return { stdout: JSON.stringify(statuses.slice(100)) };
+    }
+    throw new Error(`unexpected call ${joined}`);
+  }, FIXTURE_REPO, 'abc123def456');
+
+  assert.equal(result.length, 150);
+  assert.equal(result.at(-1).name, 'status-150');
+  assert.equal(calls.filter(({ args }) => args.join(' ').includes('/statuses?')).length, 2);
+});
+
 test('GraphQL rollup kill-switch is read at call time', async () => {
   const expected = makeExpectedRollup();
   const mod = await importGithubApiFresh();
@@ -1135,4 +1312,6 @@ test('watcher tick downstream output is unchanged when PR fetches come from the 
     },
     state: 'finalized',
   }]);
+  assert.equal(summary.headStateCalls, 1);
+  assert.equal(summary.rollupCalls, 0);
 });

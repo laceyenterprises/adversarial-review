@@ -5,9 +5,15 @@ import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 
 const execFileAsync = promisify(execFile);
 const PAGE_SIZE = 100;
+const MAX_GRAPHQL_CONNECTION_PAGES = 100;
 const GH_MAX_BUFFER = 10 * 1024 * 1024;
 const GRAPHQL_COMPLEXITY_PATTERN = /\b(complexity|cost limit|maximum cost|resource limit)\b/i;
-const GRAPHQL_COMPLEXITY_TYPE_PATTERN = /(complexity|cost|resource|limit|max(?:imum)?|node)/i;
+const GRAPHQL_COMPLEXITY_ERROR_TYPES = new Set([
+  'MAX_COMPLEXITY_EXCEEDED',
+  'MAX_NODE_LIMIT_EXCEEDED',
+  'MAX_QUERY_COST_EXCEEDED',
+  'RESOURCE_LIMIT_EXCEEDED',
+]);
 
 const GRAPHQL_ROLLUP_QUERY = `
 query PullRequestRollup(
@@ -43,6 +49,10 @@ query PullRequestRollup(
       labels(first: 100) {
         nodes {
           name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
       comments(first: $commentsFirst, after: $commentsAfter) {
@@ -136,6 +146,34 @@ query PullRequestRollupMetadata(
         nodes {
           name
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
+`;
+
+const GRAPHQL_LABELS_ONLY_QUERY = `
+query PullRequestRollupLabels(
+  $owner: String!
+  $repo: String!
+  $prNumber: Int!
+  $labelsFirst: Int!
+  $labelsAfter: String
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      labels(first: $labelsFirst, after: $labelsAfter) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
     }
   }
@@ -205,36 +243,32 @@ const GRAPHQL_CHECKS_ONLY_QUERY = `
 query PullRequestRollupChecks(
   $owner: String!
   $repo: String!
-  $prNumber: Int!
+  $headRefOid: GitObjectID!
   $checksFirst: Int!
   $checksAfter: String
 ) {
   repository(owner: $owner, name: $repo) {
-    pullRequest(number: $prNumber) {
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: $checksFirst, after: $checksAfter) {
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name
-                    conclusion
-                    completedAt
-                    status
-                  }
-                  ... on StatusContext {
-                    context
-                    state
-                    createdAt
-                  }
-                }
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
+    object(oid: $headRefOid) {
+      ... on Commit {
+        statusCheckRollup {
+          contexts(first: $checksFirst, after: $checksAfter) {
+            nodes {
+              __typename
+              ... on CheckRun {
+                name
+                conclusion
+                completedAt
+                status
               }
+              ... on StatusContext {
+                context
+                state
+                createdAt
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
             }
           }
         }
@@ -274,14 +308,18 @@ function normalizeAuthor(author) {
   return login ? { login } : null;
 }
 
+function normalizeLabel(label) {
+  const name = String(label?.name || '').trim();
+  return name ? { name } : null;
+}
+
 function normalizeLabels(labelsConnection) {
   const source = Array.isArray(labelsConnection)
     ? labelsConnection
     : (labelsConnection?.nodes || []);
   return source
-    .map((label) => String(label?.name || '').trim())
-    .filter(Boolean)
-    .map((name) => ({ name }));
+    .map(normalizeLabel)
+    .filter(Boolean);
 }
 
 function normalizeComment(comment) {
@@ -320,12 +358,14 @@ function normalizeCheck(node) {
 }
 
 function normalizeRollup(pr, {
+  labels = null,
   comments = [],
   reviews = [],
   checks = [],
 } = {}) {
-  // GraphQL exposes merged PRs as a distinct `merged` state; callers that
-  // care about merged-vs-closed should treat `state` as tri-state.
+  // The exported contract is normalized across GraphQL and legacy fallback:
+  // node ids are string-or-null, authors are {login}-or-null, collections are
+  // arrays, and state is lower-case open/closed/merged.
   const state = typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null;
   return {
     id: pr?.id ?? null,
@@ -343,16 +383,27 @@ function normalizeRollup(pr, {
     mergeable: pr?.mergeable || null,
     mergeStateStatus: pr?.mergeStateStatus || null,
     author: normalizeAuthor(pr?.author),
-    labels: normalizeLabels(pr?.labels),
+    labels: labels || normalizeLabels(pr?.labels),
     comments,
     reviews,
     checks,
   };
 }
 
+function buildGhEnv(env = process.env) {
+  const ghEnv = { ...env };
+  if (!ghEnv.GH_TOKEN && ghEnv.GITHUB_TOKEN) {
+    ghEnv.GH_TOKEN = ghEnv.GITHUB_TOKEN;
+  }
+  return ghEnv;
+}
+
 async function execGhJson(execFileImpl, args) {
   try {
-    const { stdout } = await execFileImpl('gh', args, { maxBuffer: GH_MAX_BUFFER });
+    const { stdout } = await execFileImpl('gh', args, {
+      maxBuffer: GH_MAX_BUFFER,
+      env: buildGhEnv(),
+    });
     return JSON.parse(String(stdout || 'null'));
   } catch (err) {
     const payload = tryParseGraphqlErrorPayload(err);
@@ -376,7 +427,8 @@ async function runGraphql(execFileImpl, query, variables) {
 async function paginateRest(execFileImpl, basePath, mapPage) {
   const rows = [];
   for (let page = 1; ; page += 1) {
-    const data = await execGhJson(execFileImpl, ['api', `${basePath}${basePath.includes('?') ? '&' : '?'}per_page=${PAGE_SIZE}&page=${page}`]);
+    const separator = basePath.includes('?') ? '&' : '?';
+    const data = await execGhJson(execFileImpl, ['api', `${basePath}${separator}per_page=${PAGE_SIZE}&page=${page}`]);
     const pageRows = mapPage(data);
     if (pageRows.length === 0) break;
     rows.push(...pageRows);
@@ -437,12 +489,15 @@ async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
   );
   let statuses = [];
   try {
-    const data = await execGhJson(execFileImpl, ['api', `repos/${repo}/commits/${headRefOid}/status`]);
-    statuses = (Array.isArray(data?.statuses) ? data.statuses : []).map((status) => ({
-      name: String(status?.context || '').trim() || null,
-      conclusion: status?.state || null,
-      completedAt: status?.updated_at || status?.created_at || null,
-    }));
+    statuses = await paginateRest(
+      execFileImpl,
+      `repos/${repo}/commits/${headRefOid}/statuses`,
+      (data) => (Array.isArray(data) ? data : []).map((status) => ({
+        name: String(status?.context || '').trim() || null,
+        conclusion: status?.state || null,
+        completedAt: status?.updated_at || status?.created_at || null,
+      })),
+    );
   } catch {
     statuses = [];
   }
@@ -493,8 +548,24 @@ function extractGraphqlPr(payload) {
   return pr;
 }
 
+function extractGraphqlRepository(payload) {
+  return payload?.data?.repository || payload?.repository || null;
+}
+
+function extractGraphqlCommitObject(payload) {
+  return extractGraphqlRepository(payload)?.object || null;
+}
+
 function extractChecksConnection(pr) {
   return pr?.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts || null;
+}
+
+function extractChecksConnectionFromCommitObject(payload) {
+  return extractGraphqlCommitObject(payload)?.statusCheckRollup?.contexts || null;
+}
+
+function extractLabelsConnection(pr) {
+  return pr?.labels || null;
 }
 
 function appendGraphqlPage(target, nodes, normalize) {
@@ -528,6 +599,16 @@ function tryParseGraphqlErrorPayload(err) {
   return null;
 }
 
+function isStructuredComplexityType(value) {
+  const type = String(value || '').trim().toUpperCase();
+  return GRAPHQL_COMPLEXITY_ERROR_TYPES.has(type);
+}
+
+function isRateLimitErrorType(value) {
+  const type = String(value || '').trim().toUpperCase();
+  return type === 'RATE_LIMITED' || type === 'RESOURCE_NOT_ACCESSIBLE';
+}
+
 function isGraphqlComplexityError(err) {
   const errors = Array.isArray(err?.graphqlErrors) ? err.graphqlErrors : [];
   for (const entry of errors) {
@@ -537,15 +618,105 @@ function isGraphqlComplexityError(err) {
       entry?.extensions?.code,
       entry?.code,
     ];
-    if (typeCandidates.some((value) => GRAPHQL_COMPLEXITY_TYPE_PATTERN.test(String(value || '')))) {
+    if (typeCandidates.some(isRateLimitErrorType)) {
+      return false;
+    }
+    if (typeCandidates.some(isStructuredComplexityType)) {
       return true;
     }
   }
-  return GRAPHQL_COMPLEXITY_PATTERN.test(String(err?.message || ''));
+  const message = String(err?.message || '');
+  if (/\brate[-_ ]?limit(?:ed)?\b/i.test(message)) return false;
+  return GRAPHQL_COMPLEXITY_PATTERN.test(message);
 }
 
 function isGraphqlRollupDisabled(env = process.env) {
   return env.GHO_DISABLE_GRAPHQL_ROLLUP === '1';
+}
+
+function assertGraphqlCursorProgress({ connectionName, page, after, nextAfter }) {
+  if (!nextAfter) {
+    throw new Error(`GraphQL ${connectionName} pagination did not return an endCursor on page ${page}`);
+  }
+  if (after && nextAfter === after) {
+    throw new Error(`GraphQL ${connectionName} pagination cursor did not advance on page ${page}`);
+  }
+}
+
+async function fetchGraphqlConnectionPages(repo, prNumber, {
+  execFileImpl,
+  query,
+  firstVariable,
+  afterVariable,
+  startAfter = null,
+  extractConnection,
+  normalize,
+  connectionName = firstVariable,
+  extraVariables = {},
+} = {}) {
+  const { owner, repo: repoName } = splitRepo(repo);
+  const items = [];
+  let after = startAfter;
+  let hasNextPage = true;
+  let page = 0;
+  while (hasNextPage) {
+    page += 1;
+    if (page > MAX_GRAPHQL_CONNECTION_PAGES) {
+      throw new Error(`GraphQL ${connectionName} pagination exceeded ${MAX_GRAPHQL_CONNECTION_PAGES} pages`);
+    }
+    const payload = await runGraphql(execFileImpl, query, {
+      owner,
+      repo: repoName,
+      prNumber,
+      ...extraVariables,
+      [firstVariable]: PAGE_SIZE,
+      [afterVariable]: after,
+    });
+    const pr = payload?.data?.repository?.pullRequest || payload?.repository?.pullRequest || null;
+    const connection = extractConnection(pr, payload);
+    appendGraphqlPage(items, connection?.nodes, normalize);
+    hasNextPage = Boolean(connection?.pageInfo?.hasNextPage);
+    const nextAfter = connection?.pageInfo?.endCursor || null;
+    if (hasNextPage) {
+      assertGraphqlCursorProgress({ connectionName, page, after, nextAfter });
+      after = nextAfter;
+    }
+  }
+  return items;
+}
+
+async function fetchGraphqlLabelPages(repo, prNumber, {
+  execFileImpl,
+  startAfter = null,
+} = {}) {
+  return fetchGraphqlConnectionPages(repo, prNumber, {
+    execFileImpl,
+    query: GRAPHQL_LABELS_ONLY_QUERY,
+    firstVariable: 'labelsFirst',
+    afterVariable: 'labelsAfter',
+    startAfter,
+    extractConnection: extractLabelsConnection,
+    normalize: normalizeLabel,
+    connectionName: 'labels',
+  });
+}
+
+async function fetchGraphqlCheckPages(repo, prNumber, headRefOid, {
+  execFileImpl,
+  startAfter = null,
+} = {}) {
+  if (!headRefOid) return [];
+  return fetchGraphqlConnectionPages(repo, prNumber, {
+    execFileImpl,
+    query: GRAPHQL_CHECKS_ONLY_QUERY,
+    firstVariable: 'checksFirst',
+    afterVariable: 'checksAfter',
+    startAfter,
+    extractConnection: (_pr, payload) => extractChecksConnectionFromCommitObject(payload),
+    normalize: normalizeCheck,
+    connectionName: 'checks',
+    extraVariables: { headRefOid },
+  });
 }
 
 async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
@@ -555,7 +726,6 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
   const comments = [];
   const reviews = [];
   const checks = [];
-  let prData = null;
   const payload = await runGraphql(execFileImpl, GRAPHQL_ROLLUP_QUERY, {
     owner,
     repo: repoName,
@@ -568,12 +738,18 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
     checksAfter: null,
   });
   const pr = extractGraphqlPr(payload);
-  prData = pr;
+  const labels = normalizeLabels(pr?.labels);
 
   appendGraphqlPage(comments, pr?.comments?.nodes, normalizeComment);
   appendGraphqlPage(reviews, pr?.reviews?.nodes, normalizeReview);
   appendGraphqlPage(checks, extractChecksConnection(pr)?.nodes, normalizeCheck);
 
+  if (pr?.labels?.pageInfo?.hasNextPage) {
+    labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
+      execFileImpl,
+      startAfter: pr?.labels?.pageInfo?.endCursor || null,
+    }));
+  }
   if (pr?.comments?.pageInfo?.hasNextPage) {
     comments.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
       execFileImpl,
@@ -583,6 +759,7 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
       startAfter: pr?.comments?.pageInfo?.endCursor || null,
       extractConnection: (value) => value?.comments,
       normalize: normalizeComment,
+      connectionName: 'comments',
     }));
   }
   if (pr?.reviews?.pageInfo?.hasNextPage) {
@@ -594,51 +771,17 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
       startAfter: pr?.reviews?.pageInfo?.endCursor || null,
       extractConnection: (value) => value?.reviews,
       normalize: normalizeReview,
+      connectionName: 'reviews',
     }));
   }
   if (extractChecksConnection(pr)?.pageInfo?.hasNextPage) {
-    checks.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
+    checks.push(...await fetchGraphqlCheckPages(repo, prNumber, pr?.headRefOid || null, {
       execFileImpl,
-      query: GRAPHQL_CHECKS_ONLY_QUERY,
-      firstVariable: 'checksFirst',
-      afterVariable: 'checksAfter',
       startAfter: extractChecksConnection(pr)?.pageInfo?.endCursor || null,
-      extractConnection: extractChecksConnection,
-      normalize: normalizeCheck,
     }));
   }
 
-  return normalizeRollup(prData, { comments, reviews, checks });
-}
-
-async function fetchGraphqlConnectionPages(repo, prNumber, {
-  execFileImpl,
-  query,
-  firstVariable,
-  afterVariable,
-  startAfter = null,
-  extractConnection,
-  normalize,
-} = {}) {
-  const { owner, repo: repoName } = splitRepo(repo);
-  const items = [];
-  let after = startAfter;
-  let hasNextPage = true;
-  while (hasNextPage) {
-    const payload = await runGraphql(execFileImpl, query, {
-      owner,
-      repo: repoName,
-      prNumber,
-      [firstVariable]: PAGE_SIZE,
-      [afterVariable]: after,
-    });
-    const pr = extractGraphqlPr(payload);
-    const connection = extractConnection(pr);
-    appendGraphqlPage(items, connection?.nodes, normalize);
-    hasNextPage = Boolean(connection?.pageInfo?.hasNextPage);
-    after = hasNextPage ? connection?.pageInfo?.endCursor || null : after;
-  }
-  return items;
+  return normalizeRollup(pr, { labels, comments, reviews, checks });
 }
 
 async function fetchGraphqlRollupPerList(repo, prNumber, {
@@ -651,6 +794,13 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
     prNumber,
   });
   const pr = extractGraphqlPr(initial);
+  const labels = normalizeLabels(pr?.labels);
+  if (pr?.labels?.pageInfo?.hasNextPage) {
+    labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
+      execFileImpl,
+      startAfter: pr?.labels?.pageInfo?.endCursor || null,
+    }));
+  }
   const comments = await fetchGraphqlConnectionPages(repo, prNumber, {
     execFileImpl,
     query: GRAPHQL_COMMENTS_ONLY_QUERY,
@@ -658,6 +808,7 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
     afterVariable: 'commentsAfter',
     extractConnection: (value) => value?.comments,
     normalize: normalizeComment,
+    connectionName: 'comments',
   });
   const reviews = await fetchGraphqlConnectionPages(repo, prNumber, {
     execFileImpl,
@@ -666,17 +817,13 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
     afterVariable: 'reviewsAfter',
     extractConnection: (value) => value?.reviews,
     normalize: normalizeReview,
+    connectionName: 'reviews',
   });
-  const checks = await fetchGraphqlConnectionPages(repo, prNumber, {
+  const checks = await fetchGraphqlCheckPages(repo, prNumber, pr?.headRefOid || null, {
     execFileImpl,
-    query: GRAPHQL_CHECKS_ONLY_QUERY,
-    firstVariable: 'checksFirst',
-    afterVariable: 'checksAfter',
-    extractConnection: extractChecksConnection,
-    normalize: normalizeCheck,
   });
 
-  return normalizeRollup(pr, { comments, reviews, checks });
+  return normalizeRollup(pr, { labels, comments, reviews, checks });
 }
 
 async function fetchPullRequestHeadAndState(repo, prNumber, {
@@ -756,7 +903,9 @@ async function fetchPullRequestRollup(repo, prNumber, {
 }
 
 const __test__ = {
+  buildGhEnv,
   extractChecksConnection,
+  fetchGraphqlConnectionPages,
   fetchGraphqlRollupMultiplexed,
   fetchGraphqlRollupPerList,
   fetchLegacyChecks,

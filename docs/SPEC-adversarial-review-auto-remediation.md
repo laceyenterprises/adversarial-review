@@ -204,6 +204,30 @@ scoped to explicit local-routing context such as `127.0.0.1:4000`,
 non-local API connectivity failures remain `unknown` unless another more
 specific classifier matches.
 
+## GitHub API Rollup
+
+`src/github-api.mjs` is the watcher/reviewer rollup helper for GitHub PR
+metadata, comments, reviews, labels, and checks. Its normalized contract is
+intentional: PR `state` is lower-case `open`, `closed`, or `merged`; node IDs
+are string-or-null; absent or ghost authors are `null`; and `labels`,
+`comments`, `reviews`, and `checks` are always arrays. Callers that only need
+fresh lifecycle state should use `fetchPullRequestHeadAndState` instead of the
+full rollup so lifecycle ticks do not paginate comments/reviews/checks for
+fields they never consume.
+
+The GraphQL path fetches one combined page and then paginates remaining
+connections with single-connection queries. Check pagination is anchored to the
+captured `headRefOid` rather than repeatedly resolving `commits(last: 1)`, so a
+force-push during pagination cannot switch the commit being paged. Label
+pagination must also continue beyond the first 100 labels so hold/veto labels
+are not silently truncated on crowded PRs.
+
+`GHO_DISABLE_GRAPHQL_ROLLUP=1` is the operator kill-switch for GraphQL rollups.
+It is read at call time and falls back to the legacy `gh pr view` plus REST list
+paths. `gh` invocations must pass `GH_TOKEN`, falling back to `GITHUB_TOKEN`
+when needed, so LaunchAgent environments that were already tokenized for
+Octokit do not need a separate `gh auth` store before the helper can run.
+
 ## Remediation Reply Contract
 
 The durable remediation reply schema is the public contract between the worker,

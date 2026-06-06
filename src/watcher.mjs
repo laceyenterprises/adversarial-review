@@ -2904,9 +2904,13 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 
     let pr;
     try {
-      pr = await fetchPullRequestRollup(repo, prNumber, {
+      const freshState = await fetchPullRequestHeadAndState(repo, prNumber, {
         execFileImpl: execFileAsync,
       });
+      pr = {
+        ...freshState,
+        labels,
+      };
     } catch (err) {
       console.error(`[watcher] Failed to fetch PR ${repo}#${prNumber}:`, err.message);
       continue;

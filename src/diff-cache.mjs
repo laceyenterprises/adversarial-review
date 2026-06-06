@@ -8,6 +8,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -20,6 +21,8 @@ const MAX_MAX_BYTES = 10 * 1024 * 1024 * 1024;
 const DEFAULT_TTL_HOURS = 24;
 const MIN_TTL_HOURS = 1;
 const MAX_TTL_HOURS = 168;
+const CACHE_FILE_MODE = 0o640;
+const CACHE_DIR_MODE = 0o750;
 
 function resolveDefaultDiffCacheRootDir() {
   return join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -45,10 +48,23 @@ function resolveDiffCacheTtlHours(env = process.env) {
   return clampNumber(env.GHO_DIFF_CACHE_TTL_HOURS, DEFAULT_TTL_HOURS, MIN_TTL_HOURS, MAX_TTL_HOURS);
 }
 
+function assertSafeCacheComponent(value, fieldName) {
+  const text = String(value ?? '').trim();
+  if (!text) throw new TypeError(`${fieldName} is required for diff cache`);
+  if (text.includes('/') || text.includes('\\') || text.includes('\0') || text.includes('..')) {
+    throw new TypeError(`Unsafe ${fieldName} for diff cache: ${value}`);
+  }
+  return text;
+}
+
 function encodeRepo(repo) {
   const normalizedRepo = String(repo || '').trim();
-  if (!normalizedRepo) throw new TypeError('Repo slug is required for diff cache');
-  return normalizedRepo.replace('/', '%2F');
+  const parts = normalizedRepo.split('/');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new TypeError(`Invalid repo slug for diff cache: ${repo}`);
+  }
+  const encoded = `${encodeURIComponent(parts[0])}%2F${encodeURIComponent(parts[1])}`;
+  return assertSafeCacheComponent(encoded, 'repo slug');
 }
 
 function normalizePrNumber(prNumber) {
@@ -61,14 +77,14 @@ function normalizePrNumber(prNumber) {
 
 function normalizeHeadSha(headSha) {
   const normalizedHeadSha = String(headSha || '').trim();
-  if (!normalizedHeadSha) {
-    throw new TypeError('Head SHA is required for diff cache');
-  }
-  return normalizedHeadSha;
+  return assertSafeCacheComponent(normalizedHeadSha, 'head SHA');
 }
 
 function buildCacheStem(repo, prNumber, headSha) {
-  return `${encodeRepo(repo)}__${normalizePrNumber(prNumber)}__${normalizeHeadSha(headSha).slice(0, 12)}`;
+  return assertSafeCacheComponent(
+    `${encodeRepo(repo)}__${normalizePrNumber(prNumber)}__${normalizeHeadSha(headSha).slice(0, 12)}`,
+    'cache stem',
+  );
 }
 
 function getDiffCachePaths(rootDir, repo, prNumber, headSha) {
@@ -82,16 +98,27 @@ function getDiffCachePaths(rootDir, repo, prNumber, headSha) {
 }
 
 function atomicWriteFile(filePath, content) {
-  mkdirSync(dirname(filePath), { recursive: true });
+  mkdirSync(dirname(filePath), { recursive: true, mode: CACHE_DIR_MODE });
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-  const fd = openSync(tmpPath, 'w');
+  let fd;
   try {
+    fd = openSync(tmpPath, 'w', CACHE_FILE_MODE);
     writeFileSync(fd, content);
     fsyncSync(fd);
-  } finally {
     closeSync(fd);
+    fd = null;
+    renameSync(tmpPath, filePath);
+  } catch (err) {
+    if (fd !== undefined && fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Keep the original write/rename error.
+      }
+    }
+    rmSync(tmpPath, { force: true });
+    throw err;
   }
-  renameSync(tmpPath, filePath);
 }
 
 function removeCacheEntry({ patchPath, metaPath }) {
@@ -117,14 +144,30 @@ function listCacheEntries(rootDir, { readdirSyncImpl = readdirSync } = {}) {
       continue;
     }
     const patchPath = metaPath.slice(0, -'.meta.json'.length) + '.patch';
+    let bytes;
+    try {
+      bytes = statSync(patchPath).size;
+    } catch {
+      continue;
+    }
     entries.push({
       metaPath,
       patchPath,
       cachedAtMs: Number.isFinite(Date.parse(meta.cached_at)) ? Date.parse(meta.cached_at) : 0,
-      bytes: Number(meta.bytes) > 0 ? Number(meta.bytes) : 0,
+      bytes,
     });
   }
   return entries;
+}
+
+function evictExpiredEntries(rootDir, { env = process.env, now = Date.now() } = {}) {
+  const nowMs = normalizeNowMs(now);
+  const ttlMs = resolveDiffCacheTtlHours(env) * 60 * 60 * 1000;
+  for (const entry of listCacheEntries(rootDir)) {
+    if (!Number.isFinite(entry.cachedAtMs) || (nowMs - entry.cachedAtMs) > ttlMs) {
+      removeCacheEntry(entry);
+    }
+  }
 }
 
 function evictIfNeeded(rootDir, { env = process.env } = {}) {
@@ -140,54 +183,63 @@ function evictIfNeeded(rootDir, { env = process.env } = {}) {
   }
 }
 
+function normalizeNowMs(now) {
+  if (now instanceof Date) return now.getTime();
+  const parsed = Number(now);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function metadataPayload(now) {
+  return `${JSON.stringify({
+    cached_at: new Date(normalizeNowMs(now)).toISOString(),
+  }, null, 2)}\n`;
+}
+
 function getCachedDiff(repo, prNumber, headSha, {
   rootDir = resolveDefaultDiffCacheRootDir(),
-  env = process.env,
   now = Date.now(),
 } = {}) {
   const { patchPath, metaPath } = getDiffCachePaths(rootDir, repo, prNumber, headSha);
   if (!existsSync(patchPath) || !existsSync(metaPath)) return null;
 
-  let metadata;
   try {
-    metadata = readMetadata(metaPath);
+    readMetadata(metaPath);
   } catch {
     removeCacheEntry({ patchPath, metaPath });
     return null;
   }
 
-  const cachedAtMs = Date.parse(metadata.cached_at);
-  const ttlMs = resolveDiffCacheTtlHours(env) * 60 * 60 * 1000;
-  if (!Number.isFinite(cachedAtMs) || (now - cachedAtMs) > ttlMs) {
+  let bytes;
+  try {
+    bytes = readFileSync(patchPath);
+  } catch {
     removeCacheEntry({ patchPath, metaPath });
     return null;
   }
 
   try {
-    return {
-      bytes: readFileSync(patchPath),
-      source: 'cache',
-    };
+    atomicWriteFile(metaPath, metadataPayload(now));
   } catch {
-    removeCacheEntry({ patchPath, metaPath });
-    return null;
+    // A cache-hit metadata refresh must not turn immutable fixed-head diff
+    // bytes into a miss; the next put/eviction pass can repair the LRU stamp.
   }
+
+  return {
+    bytes,
+    source: 'cache',
+  };
 }
 
 function putCachedDiff(repo, prNumber, headSha, bytes, {
   rootDir = resolveDefaultDiffCacheRootDir(),
   env = process.env,
-  now = new Date(),
-  etag,
+  now = Date.now(),
 } = {}) {
   const payload = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? '');
   const { patchPath, metaPath } = getDiffCachePaths(rootDir, repo, prNumber, headSha);
   atomicWriteFile(patchPath, payload);
-  atomicWriteFile(metaPath, `${JSON.stringify({
-    cached_at: now.toISOString(),
-    bytes: payload.byteLength,
-    ...(etag ? { etag } : {}),
-  }, null, 2)}\n`);
+  atomicWriteFile(metaPath, metadataPayload(now));
+  evictExpiredEntries(rootDir, { env, now });
   evictIfNeeded(rootDir, { env });
 }
 

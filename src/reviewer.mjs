@@ -694,7 +694,7 @@ async function fetchPRDiff(repo, prNumber, headSha, {
       category: 'cache_hit_diff_fetch',
       repo,
       prNumber,
-      status: 200,
+      status: 'hit',
       durationMs: Date.now() - cacheLookupStartedAt,
     });
     return cached.bytes;
@@ -731,16 +731,6 @@ async function fetchPRDiff(repo, prNumber, headSha, {
       durationMs: Date.now() - startedAt,
     });
     throw err;
-  } finally {
-    if (headSha) {
-      recordApiCallImpl({
-        category: 'cache_miss_diff_fetch',
-        repo,
-        prNumber,
-        status: 'miss',
-        durationMs: Date.now() - cacheLookupStartedAt,
-      });
-    }
   }
 }
 
@@ -1373,8 +1363,9 @@ async function main() {
   let diff;
   try {
     console.error(`[reviewer] DEBUG: fetching diff for ${repo}#${prNumber}...`);
-    diff = (await fetchPRDiff(repo, prNumber, reviewerHeadSha)).toString('utf8');
-    console.error(`[reviewer] DEBUG: fetched diff (${Buffer.byteLength(diff, 'utf8')} bytes)`);
+    const diffBytes = await fetchPRDiff(repo, prNumber, reviewerHeadSha);
+    diff = diffBytes.toString('utf8');
+    console.error(`[reviewer] DEBUG: fetched diff (${diffBytes.byteLength} bytes)`);
   } catch (err) {
     console.error(`[reviewer] Failed to fetch diff for ${repo}#${prNumber}:`, err.message);
     process.exit(1);

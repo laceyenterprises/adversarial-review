@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,10 +34,11 @@ test('hit returns cached bytes without spawning gh', async () => {
   const repo = 'laceyenterprises/adversarial-review';
   const prNumber = 57;
   const headSha = '0123456789abcdef';
-  const expected = Buffer.from('diff --git a/a b/a\n');
-  try {
-    putCachedDiff(repo, prNumber, headSha, expected, { rootDir, now: new Date('2026-06-06T10:00:00.000Z') });
-    let execCalls = 0;
+    const expected = Buffer.from('diff --git a/a b/a\n');
+    const recordedCalls = [];
+    try {
+      putCachedDiff(repo, prNumber, headSha, expected, { rootDir, now: new Date('2026-06-06T10:00:00.000Z') });
+      let execCalls = 0;
     const diff = await fetchPRDiff(repo, prNumber, headSha, {
       execFileImpl: async () => {
         execCalls += 1;
@@ -44,11 +46,17 @@ test('hit returns cached bytes without spawning gh', async () => {
       },
       getCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha) => getCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, { rootDir }),
       putCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha, bytes) => putCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, bytes, { rootDir }),
-      recordApiCallImpl: () => null,
+      recordApiCallImpl: (call) => {
+        recordedCalls.push(call);
+        return null;
+      },
     });
 
     assert.equal(execCalls, 0);
     assert.deepEqual(diff, expected);
+    assert.deepEqual(recordedCalls.map(({ category, status }) => ({ category, status })), [
+      { category: 'cache_hit_diff_fetch', status: 'hit' },
+    ]);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -84,7 +92,40 @@ test('miss spawns gh, returns its output, and writes a cache entry', async () =>
     assert.deepEqual(diff, expected);
     assert.equal(existsSync(patchPath), true);
     assert.equal(existsSync(metaPath), true);
-    assert.deepEqual(recordedCategories, ['diff_fetch', 'cache_miss_diff_fetch']);
+    assert.deepEqual(recordedCategories, ['diff_fetch']);
+    assert.deepEqual(Object.keys(readMeta(rootDir, repo, prNumber, headSha)).sort(), ['cached_at']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cache paths validate repo and head components before touching disk', () => {
+  const rootDir = makeRootDir();
+  try {
+    for (const repo of ['laceyenterprises/adversarial-review/extra', '../adversarial-review', 'laceyenterprises\\adversarial-review']) {
+      assert.throws(() => getDiffCachePaths(rootDir, repo, 58, 'abcdef0123456789'), /diff cache/i);
+    }
+    for (const headSha of ['../abcdef', 'abc/def', 'abc\\def', '']) {
+      assert.throws(() => getDiffCachePaths(rootDir, 'laceyenterprises/adversarial-review', 58, headSha), /diff cache/i);
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cache writes use non-world-readable files and directories', () => {
+  const rootDir = makeRootDir();
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 59;
+  const headSha = 'modeheadshaabcdef';
+  try {
+    putCachedDiff(repo, prNumber, headSha, Buffer.from('mode-check'), { rootDir, now: new Date('2026-06-06T10:00:00.000Z') });
+    const { dir, patchPath, metaPath } = getDiffCachePaths(rootDir, repo, prNumber, headSha);
+    assert.equal(statSync(dir).mode & 0o007, 0);
+    assert.equal(statSync(patchPath).mode & 0o007, 0);
+    assert.equal(statSync(metaPath).mode & 0o007, 0);
+    assert.equal(statSync(patchPath).mode & 0o600, 0o600);
+    assert.equal(statSync(metaPath).mode & 0o600, 0o600);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -120,13 +161,12 @@ test('LRU eviction deletes the oldest entries until usage falls under budget', (
   }
 });
 
-test('TTL expiry treats a stale entry as a miss, refreshes via gh, and replaces the cached bytes', async () => {
+test('TTL expiry is GC-only: fixed-head reads return stale bytes and refresh LRU', async () => {
   const rootDir = makeRootDir();
   const repo = 'laceyenterprises/adversarial-review';
   const prNumber = 77;
   const headSha = 'ttlheadshaabcdef';
   const staleBytes = Buffer.from('stale');
-  const freshBytes = Buffer.from('fresh');
   const env = { GHO_DIFF_CACHE_TTL_HOURS: '24' };
   try {
     putCachedDiff(repo, prNumber, headSha, staleBytes, {
@@ -139,7 +179,7 @@ test('TTL expiry treats a stale entry as a miss, refreshes via gh, and replaces 
     const diff = await fetchPRDiff(repo, prNumber, headSha, {
       execFileImpl: async () => {
         execCalls += 1;
-        return { stdout: freshBytes, stderr: Buffer.alloc(0) };
+        throw new Error('gh must not be called for fixed-head cache reads');
       },
       getCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha) => getCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, {
         rootDir,
@@ -154,13 +194,13 @@ test('TTL expiry treats a stale entry as a miss, refreshes via gh, and replaces 
       recordApiCallImpl: () => null,
     });
 
-    assert.equal(execCalls, 1);
-    assert.deepEqual(diff, freshBytes);
+    assert.equal(execCalls, 0);
+    assert.deepEqual(diff, staleBytes);
     assert.deepEqual(getCachedDiff(repo, prNumber, headSha, {
       rootDir,
       env,
       now: Date.parse('2026-06-06T12:00:00.000Z'),
-    })?.bytes, freshBytes);
+    })?.bytes, staleBytes);
     assert.equal(readMeta(rootDir, repo, prNumber, headSha).cached_at, '2026-06-06T12:00:00.000Z');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

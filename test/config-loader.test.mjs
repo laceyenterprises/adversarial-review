@@ -715,6 +715,33 @@ test('env override canonical wins', () => {
   }
 });
 
+test('roles.hermes provider mirrors Python schema and env alias', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        hermes:
+          provider: openai-codex
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roles.hermes.provider'), 'openai-codex');
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_ROLES_HERMES_PROVIDER: 'nous-portal' },
+    });
+    assert.equal(envCfg.get('roles.hermes.provider'), 'nous-portal');
+    assert.equal(
+      envCfg.resolutionTrace('roles.hermes.provider').at(-1).source,
+      'env:AGENT_OS_ROLES_HERMES_PROVIDER',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('host and tailscale sections load through strict Node schema', () => {
   const tmp = freshTmp();
   try {

@@ -307,6 +307,9 @@ function loadBetterSqlite3() {
   }
 }
 
+const PSQL_TIMEOUT_MS = 30_000;
+const PSQL_TIMEOUT_SIGNAL = 'SIGKILL';
+
 function querySqliteRows(target, sql, params) {
   if (!existsSync(target.path)) {
     return {
@@ -338,11 +341,6 @@ function querySqliteRows(target, sql, params) {
   }
 }
 
-function quotePostgresLiteral(value) {
-  if (value === null || value === undefined) return 'NULL';
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
 function parsePostgresJsonRows(stdout) {
   return String(stdout || '')
     .split('\n')
@@ -351,7 +349,77 @@ function parsePostgresJsonRows(stdout) {
     .map((line) => JSON.parse(line));
 }
 
-function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync } = {}) {
+function buildPostgresSpawnConfig(target) {
+  if (!target.dsn) {
+    return {
+      ok: true,
+      args: ['-d', target.databaseName],
+      env: process.env,
+    };
+  }
+  if (!/^postgres(?:ql)?:\/\//.test(target.dsn)) {
+    return {
+      ok: true,
+      args: [target.dsn],
+      env: process.env,
+    };
+  }
+  let parsed;
+  try {
+    parsed = new URL(target.dsn);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'malformed-ledger-target',
+      detail: err?.message || String(err),
+      target,
+    };
+  }
+  const env = { ...process.env };
+  if (parsed.password) {
+    env.PGPASSWORD = decodeURIComponent(parsed.password);
+    parsed.password = '';
+  }
+  return {
+    ok: true,
+    args: [parsed.toString()],
+    env,
+  };
+}
+
+function describePostgresSpawnFailure(result) {
+  if (result.error?.code === 'ENOENT') {
+    return {
+      ok: false,
+      reason: 'psql-not-installed',
+      detail: 'psql is not installed or not on PATH',
+    };
+  }
+  if (result.error?.code === 'ETIMEDOUT') {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: `psql timed out after ${PSQL_TIMEOUT_MS}ms`,
+    };
+  }
+  if (result.signal || result.status === null) {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: `psql terminated by signal ${result.signal || 'unknown'}`,
+    };
+  }
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: String(result.stderr || result.stdout || `psql exited with status ${result.status}`),
+    };
+  }
+  return null;
+}
+
+function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [] } = {}) {
   const locator = normalizeText(target.dsn) || normalizeText(target.databaseName);
   if (!locator) {
     return {
@@ -361,26 +429,24 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync } = {}) 
       target,
     };
   }
+  const spawnConfig = buildPostgresSpawnConfig(target);
+  if (!spawnConfig.ok) return spawnConfig;
   try {
-    const args = ['-X', '--no-psqlrc', '-v', 'ON_ERROR_STOP=1', '-t', '-A', '-c', jsonSql];
-    if (target.dsn) {
-      args.splice(0, 0, target.dsn);
-    } else {
-      args.splice(0, 0, '-d', target.databaseName);
+    const args = ['-X', '--no-psqlrc', '-v', 'ON_ERROR_STOP=1'];
+    for (const [name, value] of psqlVars) {
+      args.push('-v', `${name}=${value}`);
     }
+    args.push('-t', '-A');
+    args.splice(args.length - 2, 0, ...spawnConfig.args);
+    args.push('-c', jsonSql);
     const result = spawnSyncImpl('psql', args, {
       encoding: 'utf8',
-      env: process.env,
+      env: spawnConfig.env,
+      timeout: PSQL_TIMEOUT_MS,
+      killSignal: PSQL_TIMEOUT_SIGNAL,
     });
-    if (result.error) throw result.error;
-    if ((result.status ?? 0) !== 0) {
-      return {
-        ok: false,
-        reason: 'ledger-read-failed',
-        detail: String(result.stderr || result.stdout || `psql exited with status ${result.status}`),
-        target,
-      };
-    }
+    const failure = describePostgresSpawnFailure(result);
+    if (failure) return { ...failure, target };
     return {
       ok: true,
       rows: parsePostgresJsonRows(result.stdout),
@@ -456,7 +522,7 @@ export function readLatestWorkerRunStatusFromLedger({
          FROM (
            SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
              FROM worker_runs
-            WHERE launch_request_id = ${quotePostgresLiteral(normalizedLaunchRequestId)}
+            WHERE launch_request_id = :'lrq'
             ORDER BY COALESCE(updated_at::text, ended_at::text, started_at::text, '') DESC,
                      COALESCE(ended_at::text, started_at::text, '') DESC,
                      COALESCE(started_at::text, '') DESC,
@@ -464,7 +530,10 @@ export function readLatestWorkerRunStatusFromLedger({
                      launch_request_id DESC
             LIMIT 1
          ) latest_worker_run`,
-      { spawnSyncImpl },
+      {
+        spawnSyncImpl,
+        psqlVars: [['lrq', normalizedLaunchRequestId]],
+      },
     );
   } else {
     return unsupportedBackend(resolution.target);

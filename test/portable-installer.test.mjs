@@ -53,6 +53,8 @@ async function runRenderedWatcherWrapper({
   opCliPath,
   opMode = 'ok',
   opValue = 'alerts@example.com',
+  ghMode = 'ok',
+  helperMode = 'healthy',
 } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'portable-installer-wrapper-'));
   const fakeBin = path.join(root, 'bin');
@@ -60,6 +62,8 @@ async function runRenderedWatcherWrapper({
   const fakeSecrets = path.join(root, 'secrets');
   const fakeLogs = path.join(root, 'logs');
   const fakeTmp = path.join(root, 'tmp');
+  const fakeSharedHelper = path.join(fakeRepo, 'scripts', 'lib', 'op-resolve-with-rate-limit-backoff.sh');
+  const sleepLog = path.join(fakeTmp, 'sleep.log');
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(path.join(fakeRepo, 'src'), { recursive: true });
   mkdirSync(fakeSecrets, { recursive: true });
@@ -102,12 +106,13 @@ async function runRenderedWatcherWrapper({
     path.join(fakeBin, 'gh'),
     '#!/bin/bash\n'
       + 'if [[ "$1" == "auth" && "$2" == "token" ]]; then\n'
+      + '  if [[ "${TEST_GH_MODE:-ok}" != "ok" ]]; then exit 1; fi\n'
       + '  echo "gh-token"\n'
       + '  exit 0\n'
       + 'fi\n'
       + 'exit 1\n',
   );
-  writeExecutable(path.join(fakeBin, 'sleep'), '#!/bin/bash\nexit 0\n');
+  writeExecutable(path.join(fakeBin, 'sleep'), `#!/bin/bash\nprintf '%s\\n' "$1" >>"${sleepLog}"\nexit 0\n`);
   writeExecutable(
     path.join(fakeBin, 'op'),
     '#!/bin/bash\n'
@@ -128,10 +133,49 @@ async function runRenderedWatcherWrapper({
       + '    echo "op failure" >&2\n'
       + '    exit 1\n'
       + '    ;;\n'
+      + '  rate-limit)\n'
+      + '    echo "Error: HTTP 429 too many requests from 1Password" >&2\n'
+      + '    exit 1\n'
+      + '    ;;\n'
+      + '  canonical-rate-limit)\n'
+      + '    echo "Too many requests. Your client has been rate-limited" >&2\n'
+      + '    exit 1\n'
+      + '    ;;\n'
       + 'esac\n'
       + 'echo "unexpected mode" >&2\n'
       + 'exit 1\n',
   );
+  if (helperMode === 'broken') {
+    mkdirSync(path.dirname(fakeSharedHelper), { recursive: true });
+    writeExecutable(
+      fakeSharedHelper,
+      '#!/bin/bash\n'
+        + 'echo "broken helper" >&2\n'
+        + 'return 9\n',
+    );
+  } else if (helperMode === 'healthy') {
+    mkdirSync(path.dirname(fakeSharedHelper), { recursive: true });
+    writeExecutable(
+      fakeSharedHelper,
+      '#!/bin/bash\n'
+        + 'op_rate_limit_stderr_indicates_rate_limit() {\n'
+        + '  local stderr_file="$1"\n'
+        + "  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429' \"$stderr_file\" 2>/dev/null\n"
+        + '}\n'
+        + 'op_resolve_with_rate_limit_backoff() {\n'
+        + '  local stderr_file\n'
+        + '  stderr_file="$(mktemp)" || return 1\n'
+        + '  "$@" 2>"$stderr_file"\n'
+        + '  rc=$?\n'
+        + '  cat "$stderr_file" >&2\n'
+        + '  if [[ "$rc" -ne 0 ]] && op_rate_limit_stderr_indicates_rate_limit "$stderr_file"; then\n'
+        + '    sleep "${OP_RATE_LIMIT_BACKOFF_S:-900}"\n'
+        + '  fi\n'
+        + '  rm -f "$stderr_file"\n'
+        + '  return "$rc"\n'
+        + '}\n',
+    );
+  }
 
   const env = {
     ...process.env,
@@ -146,16 +190,23 @@ async function runRenderedWatcherWrapper({
     TEST_OP_TOKEN_RESOLVER_VALUE: tokenResolverValue,
     TEST_OP_MODE: opMode,
     TEST_OP_VALUE: opValue,
+    TEST_GH_MODE: ghMode,
   };
 
   try {
     const result = await execFileAsync('/bin/bash', [wrapperPath], { env, cwd: root });
-    return { code: 0, stdout: result.stdout, stderr: result.stderr };
+    return {
+      code: 0,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      sleepLog: readdirSync(fakeTmp).includes('sleep.log') ? readFileSync(sleepLog, 'utf8') : '',
+    };
   } catch (error) {
     return {
       code: error.code ?? 1,
       stdout: error.stdout ?? '',
       stderr: error.stderr ?? '',
+      sleepLog: readdirSync(fakeTmp).includes('sleep.log') ? readFileSync(sleepLog, 'utf8') : '',
     };
   }
 }
@@ -288,7 +339,12 @@ test('the four shipped templates render with sample bindings and leave no placeh
     if (name === 'adversarial-watcher-start.sh.template') {
       assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
       assert.match(rendered, /resolve_op_bin/);
+      assert.match(rendered, /op_resolve_with_rate_limit_backoff/);
+      assert.match(rendered, /if ! \. "\$OP_RATE_LIMIT_HELPER"; then/);
+      assert.doesNotMatch(rendered, /\(\s*\. "\$OP_RATE_LIMIT_HELPER"\s*\)/);
+      assert.match(rendered, /refusing to start without the shared cooldown primitive/);
       assert.match(rendered, /\/usr\/local\/bin\/op/);
+      assert.doesNotMatch(rendered, /using vendored fallback/);
     }
   }
 });
@@ -401,6 +457,56 @@ test('rendered watcher wrapper allows blank ALERT_TO values from 1Password with 
   assert.equal(result.code, 0);
   assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
 });
+
+test('rendered watcher wrapper fails closed when the shared helper fails to load', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: 'direct-alert@example.com',
+    helperMode: 'broken',
+  });
+  assert.equal(result.code, 78);
+  assert.match(result.stderr, /broken helper/);
+  assert.match(result.stderr, /refusing to start without the shared cooldown primitive/);
+  assert.equal(result.sleepLog.trim(), '3600');
+});
+
+test('rendered watcher wrapper fails closed when the shared helper is missing', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: 'direct-alert@example.com',
+    helperMode: 'missing',
+  });
+  assert.equal(result.code, 78);
+  assert.match(result.stderr, /helper missing/);
+  assert.match(result.stderr, /refusing to start without the shared cooldown primitive/);
+  assert.equal(result.sleepLog.trim(), '3600');
+});
+
+test('rendered watcher wrapper sleeps when gh token fallback is unavailable', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: 'direct-alert@example.com',
+    ghMode: 'fail',
+    helperMode: 'healthy',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /GITHUB_TOKEN not set and gh auth token returned nothing/);
+  assert.equal(result.sleepLog.trim(), '3600');
+});
+
+for (const opMode of ['rate-limit', 'canonical-rate-limit']) {
+  test(`rendered watcher wrapper routes ${opMode} through the shared helper cooldown`, async () => {
+    const result = await runRenderedWatcherWrapper({
+      opServiceAccountToken: 'token',
+      opMode,
+      opCliPath: path.join('/missing', 'op'),
+      allowMissing: false,
+      helperMode: 'healthy',
+    });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /configured 1Password CLI '\/missing\/op' is not executable/);
+    assert.match(result.stderr, /without extra ALERT_TO retries or an additional launcher sleep/);
+    assert.doesNotMatch(result.stderr, /retrying in 5s/);
+    assert.equal(result.sleepLog.trim(), '900');
+  });
+}
 
 test('resolveRenderedCodexAuthPath matches the installer contract for default and override layouts', () => {
   assert.equal(

@@ -179,11 +179,11 @@ test('github-pr routing surfaces config-broken sentinel for unknown reviewer env
   // sentinel.
   const route = routeSubject(
     { builderClass: 'codex' },
-    { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini', AGENT_OS_CONFIG_PATH: '/dev/null' } }
+    { env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'unknown-reviewer', AGENT_OS_CONFIG_PATH: '/dev/null' } }
   );
   assert.equal(route.configBroken, true);
   assert.match(route.error.message, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
-  assert.match(route.error.message, /gemini/);
+  assert.match(route.error.message, /unknown-reviewer/);
 });
 
 test('github-pr routing exposes same-family review waiver detection for override pins', () => {
@@ -205,15 +205,46 @@ test('github-pr routing exposes same-family review waiver detection for override
   assert.match(reason, /cross-model review guarantee is waived/i);
 });
 
+test('github-pr routing assigns MHX-09 builder tags to the expected cross-model reviewers', () => {
+  assert.deepEqual(routePR('[gemini] LAC-484: route gemini', null, { env: HERMETIC_CONFIG_ENV }), {
+    builderClass: 'gemini',
+    tag: 'gemini',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
+  assert.deepEqual(routePR('[pi] LAC-484: route pi', null, { env: HERMETIC_CONFIG_ENV }), {
+    builderClass: 'pi',
+    tag: 'pi',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
+  assert.deepEqual(routePR('[opencode] LAC-484: route opencode', null, { env: HERMETIC_CONFIG_ENV }), {
+    builderClass: 'opencode',
+    tag: 'opencode',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
+  assert.deepEqual(routePR('[hermes] LAC-484: route hermes', null, { env: HERMETIC_CONFIG_ENV }), {
+    builderClass: 'hermes',
+    tag: 'hermes',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
+});
+
 test('github-pr routing startup validation rejects unknown default reviewer env values', () => {
   assert.throws(
     () => defaultReviewerRouteFromEnv({
-      ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+      ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'unknown-reviewer',
       AGENT_OS_CONFIG_PATH: '/dev/null',
     }),
     (err) => {
       assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
-      assert.match(err.message, /gemini/);
+      assert.match(err.message, /unknown-reviewer/);
       return true;
     }
   );
@@ -228,7 +259,7 @@ test('watcher startup prints a fatal config banner for invalid default reviewer 
       env: {
         ...process.env,
         GITHUB_TOKEN: 'test-token',
-        ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+        ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'unknown-reviewer',
         AGENT_OS_CONFIG_PATH: '/dev/null',
       },
       encoding: 'utf8',
@@ -238,7 +269,7 @@ test('watcher startup prints a fatal config banner for invalid default reviewer 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /FATAL config/);
   assert.match(result.stderr, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER/);
-  assert.match(result.stderr, /gemini/);
+  assert.match(result.stderr, /unknown-reviewer/);
 });
 
 test('watcher startup crashes with a fatal config banner for invalid fallback_path', () => {

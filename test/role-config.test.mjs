@@ -29,6 +29,10 @@ function writeYaml(path, body) {
 const REVIEWER_ROUTE_BY_MODEL = {
   claude: { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
   codex: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
+  gemini: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
+  pi: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
+  opencode: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
+  hermes: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
 };
 
 // ── §3 precedence: module file → env override ───────────────────────────
@@ -144,11 +148,11 @@ test('CFG-02 remediator: top-level beats module on canonical key', () => {
 
 // ── §10.3 enum violation: fails loud at startup with key+value+allowed set ──
 
-test('CFG-02 schema invalid (gemini) fails loud with key and allowed set', () => {
+test('CFG-02 schema invalid (unknown-reviewer) fails loud with key and allowed set', () => {
   const tmp = makeTmp();
   try {
     const topPath = join(tmp, 'top.yaml');
-    writeYaml(topPath, 'version: 1\nroles:\n  reviewer: gemini\n');
+    writeYaml(topPath, 'version: 1\nroles:\n  reviewer: unknown-reviewer\n');
     assert.throws(
       () => validateStartupRoleConfig({
         env: { AGENT_OS_CONFIG_PATH: topPath },
@@ -157,8 +161,8 @@ test('CFG-02 schema invalid (gemini) fails loud with key and allowed set', () =>
       }),
       (err) => {
         assert.match(err.message, /roles\.reviewer/);
-        assert.match(err.message, /gemini/);
-        assert.match(err.message, /claude-code|codex|adversarial/);
+        assert.match(err.message, /unknown-reviewer/);
+        assert.match(err.message, /claude-code|codex|adversarial|gemini|pi|opencode|hermes/);
         // The loader includes the source `path:line` on the error object.
         assert.ok(typeof err.source === 'string' && err.source.includes(topPath));
         return true;
@@ -335,6 +339,23 @@ test('CFG-02 resolveDefaultReviewer handles legacy `claude` value (normalized to
       reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
     });
     assert.deepEqual(route, REVIEWER_ROUTE_BY_MODEL.claude);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CFG-02 resolveDefaultReviewer accepts MHX-09 reviewer worker classes', () => {
+  const tmp = makeTmp();
+  try {
+    const topPath = join(tmp, 'top.yaml');
+    writeYaml(topPath, 'version: 1\nroles:\n  reviewer: opencode\n');
+    const route = resolveDefaultReviewer({
+      env: {},
+      topPath,
+      modulePaths: [],
+      reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+    });
+    assert.deepEqual(route, REVIEWER_ROUTE_BY_MODEL.opencode);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

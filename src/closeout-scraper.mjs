@@ -51,6 +51,10 @@ const REVIEWER_LOGIN_BY_CLASS = new Map([
   ['claude-code', 'codex-reviewer-lacey'],
   ['clio-agent', 'codex-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
+  ['gemini', 'codex-reviewer-lacey'],
+  ['pi', 'codex-reviewer-lacey'],
+  ['opencode', 'codex-reviewer-lacey'],
+  ['hermes', 'codex-reviewer-lacey'],
 ]);
 
 // Builder-bot identities that can self-comment on their own PRs (status

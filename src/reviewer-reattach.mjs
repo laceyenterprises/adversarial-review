@@ -27,6 +27,10 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
 const REVIEWER_BOT_LOGINS = new Map([
   ['claude', 'claude-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
+  ['gemini', 'codex-reviewer-lacey'],
+  ['pi', 'codex-reviewer-lacey'],
+  ['opencode', 'codex-reviewer-lacey'],
+  ['hermes', 'codex-reviewer-lacey'],
 ]);
 
 function splitRepoPath(repoPath) {

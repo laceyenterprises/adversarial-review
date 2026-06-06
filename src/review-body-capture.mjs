@@ -17,6 +17,10 @@ const REVIEWER_BOT_LOGINS = Object.freeze({
   claude: 'claude-reviewer-lacey',
   codex: 'codex-reviewer-lacey',
   'claude-code': 'claude-reviewer-lacey',
+  gemini: 'codex-reviewer-lacey',
+  pi: 'codex-reviewer-lacey',
+  opencode: 'codex-reviewer-lacey',
+  hermes: 'codex-reviewer-lacey',
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
 });

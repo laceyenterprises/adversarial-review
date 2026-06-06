@@ -861,7 +861,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "export function writeFileAtomic() {}",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid }; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
@@ -1247,6 +1247,26 @@ test('legacy fallback paginates commit statuses instead of reading only the comb
   assert.equal(calls.filter(({ args }) => args.join(' ').includes('/statuses?')).length, 2);
 });
 
+test('legacy fallback propagates commit status pagination failures', async () => {
+  const mod = await importGithubApiFresh();
+  const statusError = new Error('legacy status API outage');
+
+  await assert.rejects(
+    () => mod.__test__.fetchLegacyChecks(async (command, args) => {
+      assert.equal(command, 'gh');
+      const joined = args.join(' ');
+      if (joined.includes('/check-runs?')) {
+        return { stdout: JSON.stringify({ check_runs: [] }) };
+      }
+      if (joined.includes('/statuses?')) {
+        throw statusError;
+      }
+      throw new Error(`unexpected call ${joined}`);
+    }, FIXTURE_REPO, 'abc123def456'),
+    /legacy status API outage/,
+  );
+});
+
 test('GraphQL rollup kill-switch is read at call time', async () => {
   const expected = makeExpectedRollup();
   const mod = await importGithubApiFresh();
@@ -1281,10 +1301,52 @@ test('head/state helper uses the lightweight GraphQL query and telemetry categor
     mergedAt: expected.mergedAt,
     closedAt: expected.closedAt,
     headRefOid: expected.headRefOid,
+    labels: expected.labels,
   });
   const vars = parseGhArgs(calls[0].args);
   assert.match(String(vars.query || ''), /query PullRequestHeadState/);
   assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_head_state']);
+});
+
+test('head/state helper paginates labels beyond the first page', async () => {
+  const expected = {
+    ...makeExpectedRollup(),
+    labels: Array.from({ length: 125 }, (_, index) => ({ name: `live-label-${index + 1}` })),
+  };
+  const firstLabels = expected.labels.slice(0, 100);
+  const secondLabels = expected.labels.slice(100);
+  const calls = [];
+  const mod = await importGithubApiFresh();
+
+  const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+    recordApiCallImpl: () => {},
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, 'gh');
+      const vars = parseGhArgs(args);
+      const query = String(vars.query || '');
+      if (query.includes('query PullRequestHeadState(')) {
+        return {
+          stdout: JSON.stringify(buildGraphqlResponse(expected, {
+            labels: firstLabels,
+            labelsHasNextPage: true,
+            labelsEndCursor: 'head-labels-100',
+          })),
+        };
+      }
+      assert.match(query, /query PullRequestRollupLabels\(/);
+      assert.equal(vars.labelsAfter, 'head-labels-100');
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          labels: secondLabels,
+        })),
+      };
+    },
+  });
+
+  assert.equal(result.labels.length, 125);
+  assert.equal(result.labels.at(-1).name, 'live-label-125');
+  assert.equal(calls.length, 2);
 });
 
 test('watcher tick downstream output is unchanged when PR fetches come from the roll-up helper', () => {

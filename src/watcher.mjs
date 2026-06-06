@@ -2954,7 +2954,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 
   for (const row of openRows) {
     const { repo, pr_number: prNumber, linear_ticket: linearTicketId } = row;
-    const labels = parseStoredLabels(row.labels_json);
+    const storedLabels = parseStoredLabels(row.labels_json);
 
     let pr;
     try {
@@ -2963,7 +2963,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
       });
       pr = {
         ...freshState,
-        labels,
+        labels: Array.isArray(freshState.labels) ? freshState.labels : storedLabels,
       };
     } catch (err) {
       console.error(`[watcher] Failed to fetch PR ${repo}#${prNumber}:`, err.message);
@@ -2989,7 +2989,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.headRefOid || null,
-        }, linearTicketId, labels),
+        }, linearTicketId, storedLabels),
         'finalized'
       );
     } else if (pr.state === 'closed') {
@@ -3004,7 +3004,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.headRefOid || null,
-        }, linearTicketId, labels),
+        }, linearTicketId, storedLabels),
         'halted'
       );
     }

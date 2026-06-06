@@ -290,6 +290,15 @@ query PullRequestHeadState(
       mergedAt
       closedAt
       headRefOid
+      labels(first: 100) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
     }
   }
 }
@@ -487,20 +496,15 @@ async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
       completedAt: checkRun?.completed_at || null,
     })),
   );
-  let statuses = [];
-  try {
-    statuses = await paginateRest(
-      execFileImpl,
-      `repos/${repo}/commits/${headRefOid}/statuses`,
-      (data) => (Array.isArray(data) ? data : []).map((status) => ({
-        name: String(status?.context || '').trim() || null,
-        conclusion: status?.state || null,
-        completedAt: status?.updated_at || status?.created_at || null,
-      })),
-    );
-  } catch {
-    statuses = [];
-  }
+  const statuses = await paginateRest(
+    execFileImpl,
+    `repos/${repo}/commits/${headRefOid}/statuses`,
+    (data) => (Array.isArray(data) ? data : []).map((status) => ({
+      name: String(status?.context || '').trim() || null,
+      conclusion: status?.state || null,
+      completedAt: status?.updated_at || status?.created_at || null,
+    })),
+  );
   return [...checkRuns, ...statuses];
 }
 
@@ -839,11 +843,19 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
       prNumber,
     });
     const pr = extractGraphqlPr(payload);
+    const labels = normalizeLabels(pr?.labels);
+    if (pr?.labels?.pageInfo?.hasNextPage) {
+      labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
+        execFileImpl,
+        startAfter: pr?.labels?.pageInfo?.endCursor || null,
+      }));
+    }
     const result = {
       state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
       mergedAt: pr?.mergedAt || null,
       closedAt: pr?.closedAt || null,
       headRefOid: pr?.headRefOid || null,
+      labels,
     };
     recordApiCallImpl({
       category: 'pr_head_state',

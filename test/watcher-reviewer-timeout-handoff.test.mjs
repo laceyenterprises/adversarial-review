@@ -38,6 +38,7 @@ function buildLoaderSource() {
     [fileUrl('src', 'stale-drift.mjs')]: 'fixture:stale-drift',
     [fileUrl('src', 'watcher-fail-loud.mjs')]: 'fixture:watcher-fail-loud',
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
+    [fileUrl('src', 'github-api.mjs')]: 'fixture:github-api',
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
   };
 
@@ -130,6 +131,7 @@ export async function load(url, context, nextLoad) {
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed-title path'); }",
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
+    'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'timeout-head-164', labels: [] }; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
   };
 

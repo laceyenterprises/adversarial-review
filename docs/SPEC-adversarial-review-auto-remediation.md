@@ -228,12 +228,15 @@ specific classifier matches.
 
 `src/github-api.mjs` is the watcher/reviewer rollup helper for GitHub PR
 metadata, comments, reviews, labels, and checks. Its normalized contract is
-intentional: PR `state` is lower-case `open`, `closed`, or `merged`; node IDs
-are string-or-null; absent or ghost authors are `null`; and `labels`,
+intentional: PR `id` is the GraphQL node ID string-or-null, PR `state` is
+lower-case `open`, `closed`, or `merged`, `mergeable` is the GraphQL enum string
+(`MERGEABLE`, `CONFLICTING`, `UNKNOWN`) or `null`, `mergeStateStatus` is the
+GraphQL enum string-or-null, absent or ghost authors are `null`, and `labels`,
 `comments`, `reviews`, and `checks` are always arrays. Callers that only need
 fresh lifecycle state should use `fetchPullRequestHeadAndState` instead of the
 full rollup so lifecycle ticks do not paginate comments/reviews/checks for
-fields they never consume.
+fields they never consume; it still fetches live labels so merge-agent lifecycle
+cleanup does not rely on stale `reviewed_prs.labels_json` snapshots.
 
 The GraphQL path fetches one combined page and then paginates remaining
 connections with single-connection queries. Check pagination is anchored to the
@@ -247,6 +250,9 @@ It is read at call time and falls back to the legacy `gh pr view` plus REST list
 paths. `gh` invocations must pass `GH_TOKEN`, falling back to `GITHUB_TOKEN`
 when needed, so LaunchAgent environments that were already tokenized for
 Octokit do not need a separate `gh auth` store before the helper can run.
+Fast-merge HEAD SHA probes and tick-start freshness re-checks moved from the
+old `pr_view` telemetry category to `pr_head_state`; dashboards or budget alerts
+for those lightweight paths should track `pr_head_state` rather than `pr_view`.
 
 ## Conditional Request Cache
 

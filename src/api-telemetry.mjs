@@ -19,6 +19,7 @@ const LOG_DIR_PARTS = ['data', 'api-call-log'];
 const LOG_FILE_MODE = 0o640;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const CATEGORY_ORDER = Object.freeze([
+  'conditional_304',
   'diff_fetch',
   'pr_view',
   'graphql_pr_rollup',

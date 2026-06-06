@@ -228,6 +228,41 @@ paths. `gh` invocations must pass `GH_TOKEN`, falling back to `GITHUB_TOKEN`
 when needed, so LaunchAgent environments that were already tokenized for
 Octokit do not need a separate `gh auth` store before the helper can run.
 
+## Conditional Request Cache
+
+Watcher-owned GitHub REST reads for labels, timeline events, and merge-closeout
+comments run through `createWatcherOctokit()` plus
+`fetchConditionalRestPage()`. The cache root is
+`data/api-cache/etags/`, with one fixed-length SHA-256 filename per normalized
+`(repo, prNumber, category, endpoint, params)` call key. Each entry stores:
+
+- `call_key` for human/debug readability
+- `etag`
+- `cached_at`
+- `body` when the serialized body stays within the configured size cap
+
+`conditional_304` is a watcher telemetry category, not a GitHub endpoint. It
+is emitted only when GitHub answers `304 Not Modified` and the watcher serves a
+cached body instead of re-recording the underlying endpoint category.
+
+The cache is a best-effort optimization. A cache write failure must never turn
+an otherwise-successful `200` GitHub response into a watcher error; the watcher
+logs a warning and continues with the live response.
+
+Retention and body-capping policy:
+
+- The watcher runs an age-based sweep no more than once per hour, from the main
+  poll loop, deleting cache entries whose `cached_at` is older than
+  `WATCHER_ETAG_CACHE_MAX_AGE_DAYS` days. The default is `7`. Sweep failures
+  are warning-only and must not abort the poll tick.
+- Cached bodies larger than `WATCHER_ETAG_CACHE_MAX_BODY_BYTES` bytes are
+  dropped from the entry while keeping the `etag`. The default cap is
+  `262144` bytes.
+- Entries whose body was previously dropped are not conditional-read
+  candidates. The watcher skips `If-None-Match` for those entries and goes
+  straight to an unconditional request, avoiding a permanent `304` + `200`
+  double round-trip on oversized resources.
+
 ## Remediation Reply Contract
 
 The durable remediation reply schema is the public contract between the worker,
@@ -701,8 +736,9 @@ Before `src/follow-up-merge-agent.mjs::dispatchMergeAgentForPR` launches `hq dis
 - If the workspace file cannot be read for a reason other than `ENOENT` (for example permissions drift or malformed JSON), prep logs `merge_agent.workspace_read_failed` with the errno/detail and returns `decision: 'deferred'`. Read failures are not treated as proof that the branch is free.
 - If `workspace.json` is present, prep validates both `workspace.workerId` and `workspace.branch` against the derived worker id and PR branch before any teardown. Mismatches emit `merge_agent.tear_down_skipped` and return `decision: 'ready'` without touching the worker.
 - If the worker directory and worktree still exist, prep consults `worker_runs.status` from the session ledger, resolving the DB from `AGENT_OS_SESSION_LEDGER_DB_PATH`, `HQ_ROOT/.hq/config.json#ledgerDbPath`, the deploy-checkout ledger, the HQ-root owner's canonical `$HOME/.agent-os/session-ledger/ledger.db`, or the runtime user's canonical ledger path. Every sqlite candidate, including env overrides and legacy HQ config, must exist and contain the requested session-ledger tables before it wins; stale stubs fall through to the next candidate. The merge-agent lookup does not use `process.cwd()` as a ledger root because watcher cwd/worktree cwd is not authoritative for merge prep. `worker_runs` lookups keep last-inserted semantics with `ORDER BY rowid DESC LIMIT 1`. When the row is missing but the worktree is still present, prep logs `merge_agent.dispatch_deferred` and returns `decision: 'deferred'` with reason `original-worker-run-row-missing-but-worktree-present`; ledger drift is not treated as branch freedom, and override-triggered dispatches do not bypass that fail-closed liveness check.
+- `src/session-ledger-read-adapter.mjs::readLatestWorkerRunStatusFromLedger` is the backend-neutral "latest worker run" reader for remediation and merge-prep callers. For both SQLite and Postgres it defines "latest" as the row with the greatest `COALESCE(updated_at, ended_at, started_at, '')`, then `COALESCE(ended_at, started_at, '')`, then `COALESCE(started_at, '')`, with `run_id DESC, launch_request_id DESC` as deterministic tiebreakers; the contract no longer depends on SQLite `rowid`. The Postgres path shells out synchronously to `psql` with `--no-psqlrc`, `ON_ERROR_STOP=1`, and a 30s hard timeout (`SIGKILL` on expiry); the synchronous call is intentionally bounded so the long-lived follow-up daemon cannot hang forever, but operators should treat a slow Postgres lookup as consuming up to one 30s event-loop stall per merge-prep attempt until this path graduates to an async client. `launch_request_id` is passed through `psql -v` substitution instead of SQL string concatenation. When a URL or libpq `key=value` Postgres DSN embeds credentials, the adapter strips the password from argv and injects it through `PGPASSWORD` so host-level process listings do not expose the secret; password-bearing libpq DSNs that cannot be parsed safely fail closed as malformed ledger targets.
 - Prep may tear down the original worker only when the current `worker_runs.status` is terminal according to the session-ledger contract (`succeeded`, `failed`, or `cancelled`). A non-terminal status logs `merge_agent.dispatch_deferred` with `reason: worker-run-status-<status>`.
-- Operational lookup failures such as `missing-ledger-db`, `better-sqlite3-unavailable`, `worker-run-lookup-failed`, `worker-run-lookup-threw`, `unsupported-ledger-backend`, `malformed-ledger-target`, and `missing-launch-request-id` become explicit skipped-dispatch records instead of unbounded silent deferrals. `worker-run-lookup-failed` remains the canonical merge-agent reason for adapter read faults even though the adapter itself may surface `ledger-read-failed`, and `better-sqlite3-unavailable` still logs a loud dependency error. `session_ledger.backend=postgres` is therefore a deliberate fail-closed gate today: until a Postgres reader lands, prep skips with `unsupported-ledger-backend` rather than falling through the ambiguous deferred path. Convergence parks caused by standing blockers (`skip-blockers-present`) in any verdict path, by the second blocked final-pass observation after the one automatic blocker-remediation dispatch has already been consumed, or by legacy/unknown blocker state (`skip-blocking-findings-unknown`) in the final-pass path write the same durable skipped-dispatch record under `data/follow-up-jobs/merge-agent-skips/` with the blocker count/state.
+- Operational lookup failures such as `missing-ledger-db`, `better-sqlite3-unavailable`, `worker-run-lookup-failed`, `worker-run-lookup-threw`, `unsupported-ledger-backend`, `malformed-ledger-target`, and `missing-launch-request-id` become explicit skipped-dispatch records instead of unbounded silent deferrals. `worker-run-lookup-failed` remains the canonical merge-agent reason for adapter read faults even when backend-specific adapters surface aliases such as `ledger-read-failed` or `psql-not-installed`, and `better-sqlite3-unavailable` still logs a loud dependency error. `session_ledger.backend=postgres` now reads through `psql` with the bounded/no-password-on-argv behavior above; `unsupported-ledger-backend` remains the deliberate fail-closed path for backend values other than `sqlite` or `postgres`, rather than falling through the ambiguous deferred path. Convergence parks caused by standing blockers (`skip-blockers-present`) in any verdict path, by the second blocked final-pass observation after the one automatic blocker-remediation dispatch has already been consumed, or by legacy/unknown blocker state (`skip-blocking-findings-unknown`) in the final-pass path write the same durable skipped-dispatch record under `data/follow-up-jobs/merge-agent-skips/` with the blocker count/state.
 - The mutating teardown call honors Agent OS ownership boundaries. If `HQ_ROOT` owner cannot be proven, the runtime user cannot be resolved, or the watcher user differs from the HQ owner, prep emits `merge_agent.tear_down_skipped` and returns `decision: 'deferred'` without attempting cross-user mutation. Successful teardown logs `merge_agent.original_worker_torn_down` with the PR number, original worker id, worker status, and launch request id.
 
 The four stable prep outcomes are therefore:
@@ -794,7 +830,7 @@ Failure mode this addresses (live, 2026-05-31): the merge-agent legitimately dis
 
 ### Merge closeout capture
 
-After a PR merges, the watcher runs a closeout-capture pass to fold any operator closeout comments into the durable `pr_merge_closeouts` table. The scrape window is `(latest completed reviewer pass ended_at, mergedAt + 24h]`; the lower bound falls back to the PR's GH-side `created_at` when no completed reviewer pass exists. `status='completed'` is load-bearing on the lower-bound query — failed/orphan passes with an `ended_at` do NOT shift the window forward, so commentary posted between a failed pass and the eventual successful re-review remains in the closeout window. Reviewer-bot logins and builder-bot logins are excluded from the closeout-authors set per the cross-model routing table.
+After a PR merges, the watcher runs a closeout-capture pass to fold any operator closeout comments into the durable `pr_merge_closeouts` table. The scrape window is `(latest completed reviewer pass ended_at, mergedAt + 24h]`; the lower bound falls back to the PR's GH-side `created_at` when no completed reviewer pass exists. `status='completed'` is load-bearing on the lower-bound query — failed/orphan passes with an `ended_at` do NOT shift the window forward, so commentary posted between a failed pass and the eventual successful re-review remains in the closeout window. Reviewer-bot logins and builder-bot logins are excluded from the closeout-authors set per the cross-model routing table. Watcher-side closeout comment reads use Octokit under the watcher's `GITHUB_TOKEN` and the conditional request cache; stored artifact refs preserve GitHub `node_id` strings only, matching the legacy gh CLI scrape shape.
 
 **Settled-empty path.** A scrape that returns zero closeout comments past the 10-minute post-merge settle window records `empty_confirmed_at` as a successful terminal state. Re-scrapes on a slower cadence (default 1h) up to 24h past merge keep a path open for late operator replies. The closeout `recordMergeCloseout` upsert resets `scrape_attempt_count` to 0 and clears `scrape_last_error` on ANY terminal success — body captured OR settled-empty confirmed — so triage dashboards keyed on those columns don't keep paging on rows that have already recovered.
 

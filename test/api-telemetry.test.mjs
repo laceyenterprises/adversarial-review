@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
+  apiStatusFromError,
   createApiCallRecorder,
+  resolveDefaultApiCallRootDir,
   resolveApiCallLogDir,
 } from '../src/api-telemetry.mjs';
 
@@ -36,6 +39,7 @@ test('recordApiCall writes one JSONL line with all required fields', () => {
       status: 200,
       durationMs: 123.4,
     });
+    recorder.flush();
 
     assert.deepEqual(readJsonl(filePath), [
       {
@@ -77,6 +81,7 @@ test('daily rotation writes to a new UTC file after midnight', () => {
       status: 200,
       durationMs: 20,
     });
+    recorder.flush();
 
     assert.match(firstPath, /2026-06-05\.jsonl$/);
     assert.match(secondPath, /2026-06-06\.jsonl$/);
@@ -109,6 +114,7 @@ test('retention sweep deletes files older than the configured window', () => {
       status: 200,
       durationMs: 10,
     });
+    recorder.flush();
 
     assert.equal(readdirSync(logDir).includes('2026-05-20.jsonl'), false);
     assert.equal(readdirSync(logDir).includes('2026-06-04.jsonl'), true);
@@ -152,6 +158,7 @@ test('rotation uses atomic rename and leaves clean JSONL files across boundary t
         durationMs: index,
       });
     }
+    recorder.flush();
 
     const logDir = resolveApiCallLogDir(rootDir);
     assert.equal(renameCalls.length >= 2, true);
@@ -164,4 +171,64 @@ test('rotation uses atomic rename and leaves clean JSONL files across boundary t
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('recordApiCall batches row writes until flush', () => {
+  const rootDir = makeRootDir();
+  const appendPayloads = [];
+  try {
+    const recorder = createApiCallRecorder({
+      rootDir,
+      nowMs: () => Date.parse('2026-06-05T08:15:00.000Z'),
+      timestampNow: () => '2026-06-05T08:15:00.000Z',
+      appendFileSyncImpl: (fd, payload, encoding) => {
+        if (payload) appendPayloads.push(payload);
+        return writeFileSync(fd, payload, encoding);
+      },
+    });
+
+    const filePath = recorder.recordApiCall({
+      category: 'pr_view',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 1388,
+      status: 200,
+      durationMs: 10,
+    });
+    recorder.recordApiCall({
+      category: 'files_list',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 1388,
+      status: 200,
+      durationMs: 20,
+    });
+
+    assert.equal(appendPayloads.length, 0);
+    assert.equal(recorder.getState().pendingRows, 2);
+
+    recorder.flush();
+
+    assert.equal(appendPayloads.length, 1);
+    assert.equal(readJsonl(filePath).length, 2);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('apiStatusFromError keeps HTTP and local execution failures distinct', () => {
+  assert.equal(apiStatusFromError({ status: 403 }), 403);
+  assert.equal(apiStatusFromError({ response: { status: 429 } }), 429);
+  assert.equal(apiStatusFromError({ code: 1 }), 'exec_error');
+  assert.equal(apiStatusFromError({ signal: 'SIGTERM' }), 'exec_error');
+  assert.equal(apiStatusFromError({ command: 'gh pr diff' }), 'exec_error');
+  assert.equal(apiStatusFromError({ code: 'ENOENT' }), 'ENOENT');
+  assert.equal(apiStatusFromError({}), 'error');
+});
+
+test('default API call root is disabled in tests and can be configured', () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  assert.equal(resolveDefaultApiCallRootDir({ NODE_ENV: 'test' }), null);
+  assert.equal(resolveDefaultApiCallRootDir({ NODE_TEST_CONTEXT: '1' }), null);
+  assert.equal(resolveDefaultApiCallRootDir({ GHO_API_CALL_LOG_DISABLE: '1', GHO_API_CALL_LOG_ROOT_DIR: '/tmp/ignored' }), null);
+  assert.equal(resolveDefaultApiCallRootDir({ GHO_API_CALL_LOG_ROOT_DIR: '/tmp/gho-api-log' }), '/tmp/gho-api-log');
+  assert.equal(resolveDefaultApiCallRootDir({}), repoRoot);
 });

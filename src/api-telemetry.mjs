@@ -20,18 +20,11 @@ const LOG_FILE_MODE = 0o640;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const CATEGORY_ORDER = Object.freeze([
   'diff_fetch',
-  'cache_hit_diff_fetch',
-  'cache_miss_diff_fetch',
   'pr_view',
-  'comments_list',
-  'checks_list',
-  'reviews_list',
   'labels_list',
   'timeline_events',
   'files_list',
   'review_post',
-  'conditional_304',
-  'graphql_pr_rollup',
   'other',
   'rate_limit_throttle_seconds',
 ]);
@@ -87,6 +80,21 @@ function normalizeStatus(status) {
   return Number.isFinite(Number(status)) ? Math.trunc(Number(status)) : String(status);
 }
 
+function apiStatusFromError(err) {
+  if (Number.isFinite(Number(err?.status))) return Math.trunc(Number(err.status));
+  if (Number.isFinite(Number(err?.response?.status))) return Math.trunc(Number(err.response.status));
+  if (
+    Number.isFinite(Number(err?.code))
+    || err?.signal !== undefined
+    || err?.cmd
+    || err?.command
+  ) {
+    return 'exec_error';
+  }
+  if (typeof err?.code === 'string' && err.code) return err.code;
+  return 'error';
+}
+
 function normalizeDurationMs(durationMs) {
   if (durationMs === null || durationMs === undefined || durationMs === '') return null;
   const parsed = Number(durationMs);
@@ -134,12 +142,16 @@ function writeRotationPlaceholder(filePath) {
   renameSync(tmpPath, filePath);
 }
 
-function cleanupOrphanRotationTmpFiles(rootDir) {
+function cleanupOrphanRotationTmpFiles(rootDir, {
+  existsSyncImpl = existsSync,
+  readdirSyncImpl = readdirSync,
+  rmSyncImpl = rmSync,
+} = {}) {
   const logDir = resolveApiCallLogDir(rootDir);
-  if (!existsSync(logDir)) return;
-  for (const name of readdirSync(logDir)) {
+  if (!existsSyncImpl(logDir)) return;
+  for (const name of readdirSyncImpl(logDir)) {
     if (name.endsWith('.jsonl.tmp')) {
-      rmSync(join(logDir, name), { force: true });
+      rmSyncImpl(join(logDir, name), { force: true });
     }
   }
 }
@@ -147,18 +159,21 @@ function cleanupOrphanRotationTmpFiles(rootDir) {
 function sweepRetention(rootDir, {
   nowMs = Date.now(),
   retentionDays = resolveRetentionDays(),
+  existsSyncImpl = existsSync,
+  readdirSyncImpl = readdirSync,
+  rmSyncImpl = rmSync,
 } = {}) {
   const logDir = resolveApiCallLogDir(rootDir);
-  if (!existsSync(logDir)) return [];
+  if (!existsSyncImpl(logDir)) return [];
   const cutoffDayId = utcDayIdFromMs(nowMs) - Math.max(0, retentionDays - 1);
   const deleted = [];
-  for (const name of readdirSync(logDir)) {
+  for (const name of readdirSyncImpl(logDir)) {
     const match = /^(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
     if (!match) continue;
     const dayId = utcDayIdFromMs(Date.parse(`${match[1]}T00:00:00.000Z`));
     if (!Number.isFinite(dayId) || dayId >= cutoffDayId) continue;
     const filePath = join(logDir, name);
-    rmSync(filePath, { force: true });
+    rmSyncImpl(filePath, { force: true });
     deleted.push(filePath);
   }
   return deleted;
@@ -185,6 +200,8 @@ function createApiCallRecorder({
   let currentPath = null;
   let currentFd = null;
   let initialized = false;
+  let pendingLines = [];
+  let flushScheduled = false;
   const retentionDays = resolveRetentionDays(env);
 
   function ensureLogDir() {
@@ -201,8 +218,28 @@ function createApiCallRecorder({
     currentFd = null;
   }
 
+  function flushPendingRows({ rethrow = false } = {}) {
+    flushScheduled = false;
+    if (pendingLines.length === 0 || currentFd === null) return;
+    const payload = pendingLines.join('');
+    try {
+      appendFileSyncImpl(currentFd, payload, 'utf8');
+      pendingLines = [];
+    } catch (err) {
+      if (rethrow) throw err;
+      process.stderr.write(`[api-telemetry] failed to flush API call rows: ${err?.message || err}\n`);
+    }
+  }
+
+  function scheduleFlush() {
+    if (flushScheduled) return;
+    flushScheduled = true;
+    setImmediate(() => flushPendingRows());
+  }
+
   function rotateToDay(dayId) {
     ensureLogDir();
+    flushPendingRows({ rethrow: true });
     const nextPath = logFilePathForDay(rootDir, dayId);
     const fileExists = existsSyncImpl(nextPath);
     if (!fileExists) {
@@ -229,19 +266,20 @@ function createApiCallRecorder({
   function ensureInitialized(dayId) {
     if (!initialized) {
       ensureLogDir();
-      cleanupOrphanRotationTmpFiles(rootDir);
-      sweepRetention(rootDir, { nowMs: nowMs(), retentionDays });
+      cleanupOrphanRotationTmpFiles(rootDir, { existsSyncImpl, readdirSyncImpl, rmSyncImpl });
+      sweepRetention(rootDir, { nowMs: nowMs(), retentionDays, existsSyncImpl, readdirSyncImpl, rmSyncImpl });
       initialized = true;
     }
     if (currentDayId !== dayId || currentFd === null) {
       rotateToDay(dayId);
-      sweepRetention(rootDir, { nowMs: nowMs(), retentionDays });
+      sweepRetention(rootDir, { nowMs: nowMs(), retentionDays, existsSyncImpl, readdirSyncImpl, rmSyncImpl });
     }
   }
 
   function appendRow(row) {
     const line = `${JSON.stringify(row)}\n`;
-    appendFileSyncImpl(currentFd, line, 'utf8');
+    pendingLines.push(line);
+    scheduleFlush();
   }
 
   return {
@@ -267,7 +305,11 @@ function createApiCallRecorder({
       }));
       return currentPath;
     },
+    flush() {
+      flushPendingRows({ rethrow: true });
+    },
     close() {
+      flushPendingRows({ rethrow: true });
       closeCurrentFd();
     },
     getState() {
@@ -276,17 +318,45 @@ function createApiCallRecorder({
         currentPath,
         currentFd,
         retentionDays,
+        pendingRows: pendingLines.length,
       };
     },
   };
 }
 
-const defaultRecorder = createApiCallRecorder({
-  rootDir: join(dirname(fileURLToPath(import.meta.url)), '..'),
-});
+function resolveDefaultApiCallRootDir(env = process.env) {
+  if (env.GHO_API_CALL_LOG_DISABLE === '1') return null;
+  if (env.NODE_ENV === 'test' || env.NODE_TEST_CONTEXT) return null;
+  const configured = String(env.GHO_API_CALL_LOG_ROOT_DIR || '').trim();
+  if (configured) return configured;
+  return join(dirname(fileURLToPath(import.meta.url)), '..');
+}
+
+let defaultRecorder = null;
+let defaultRecorderRootDir = null;
+let defaultRecorderBeforeExitRegistered = false;
+
+function flushDefaultApiCallRecorder() {
+  try {
+    defaultRecorder?.flush?.();
+  } catch (err) {
+    process.stderr.write(`[api-telemetry] failed to flush default recorder: ${err?.message || err}\n`);
+  }
+}
 
 function recordApiCall(args) {
   try {
+    const rootDir = resolveDefaultApiCallRootDir();
+    if (!rootDir) return null;
+    if (!defaultRecorder || defaultRecorderRootDir !== rootDir) {
+      defaultRecorder?.close?.();
+      defaultRecorder = createApiCallRecorder({ rootDir });
+      defaultRecorderRootDir = rootDir;
+      if (!defaultRecorderBeforeExitRegistered) {
+        process.once('beforeExit', flushDefaultApiCallRecorder);
+        defaultRecorderBeforeExitRegistered = true;
+      }
+    }
     return defaultRecorder.recordApiCall(args);
   } catch (err) {
     process.stderr.write(`[api-telemetry] failed to record API call: ${err?.message || err}\n`);
@@ -296,12 +366,15 @@ function recordApiCall(args) {
 
 export {
   CATEGORY_ORDER,
+  apiStatusFromError,
   buildApiCallRow,
   clampRetentionDays,
   createApiCallRecorder,
   dateStampFromTimestamp,
+  flushDefaultApiCallRecorder,
   formatUtcDateFromDayId,
   recordApiCall,
+  resolveDefaultApiCallRootDir,
   resolveApiCallLogDir,
   resolveRetentionDays,
   sweepRetention,

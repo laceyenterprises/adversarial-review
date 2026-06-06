@@ -179,7 +179,9 @@ async function main(argv = process.argv.slice(2), {
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
-  main().catch((err) => {
+  main().then((code) => {
+    process.exit(code ?? 0);
+  }).catch((err) => {
     process.stderr.write(`${err.message}\n`);
     process.stderr.write(`${usage()}\n`);
     process.exit(1);

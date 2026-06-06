@@ -12,6 +12,7 @@
 import { execFile } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
+import { apiStatusFromError } from '../../../api-telemetry.mjs';
 import { prepareWorkspaceForJob as defaultPrepareWorkspaceForJob } from '../../../follow-up-remediation.mjs';
 import { builderClassFromTitle } from './title-tagging.mjs';
 
@@ -163,12 +164,6 @@ function telemetryStatusFromResult(result) {
   return 200;
 }
 
-function telemetryStatusFromError(err) {
-  if (Number.isFinite(Number(err?.status))) return Math.trunc(Number(err.status));
-  if (Number.isFinite(Number(err?.code))) return Math.trunc(Number(err.code));
-  return 'error';
-}
-
 function createGitHubPRSubjectAdapter({
   octokit,
   repos = [],
@@ -221,7 +216,7 @@ function createGitHubPRSubjectAdapter({
         category,
         repo,
         prNumber,
-        status: telemetryStatusFromError(err),
+        status: apiStatusFromError(err),
         durationMs: monotonicNowMs() - startedAt,
       });
       throw err;
@@ -307,7 +302,7 @@ function createGitHubPRSubjectAdapter({
           category: 'diff_fetch',
           repo: snapshot.repo,
           prNumber: snapshot.prNumber,
-          status: telemetryStatusFromError(err),
+          status: apiStatusFromError(err),
           durationMs: monotonicNowMs() - startedAt,
         });
         throw err;

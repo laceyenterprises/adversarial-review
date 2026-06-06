@@ -119,7 +119,7 @@ import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { recordApiCall } from './api-telemetry.mjs';
+import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -244,12 +244,6 @@ const FAST_MERGE_CHANGED_FILES_MAX_PAGES = Math.max(
 function apiStatusFromResult(result, fallback = 200) {
   if (Number.isFinite(Number(result?.status))) return Math.trunc(Number(result.status));
   return fallback;
-}
-
-function apiStatusFromError(err) {
-  if (Number.isFinite(Number(err?.status))) return Math.trunc(Number(err.status));
-  if (Number.isFinite(Number(err?.code))) return Math.trunc(Number(err.code));
-  return 'error';
 }
 
 async function withApiTelemetry(category, { repo = null, prNumber = null, successStatus = 200 } = {}, action) {
@@ -2586,12 +2580,36 @@ async function refreshOrgRepos(octokit) {
   const refreshInterval = config.repoRefreshIntervalMs ?? 3_600_000;
   if (now - lastRepoRefresh < refreshInterval) return;
 
+  const repoLabel = config.org ? `${config.org}/*` : null;
+  const params = {
+    org: config.org,
+    type: 'all',
+    per_page: 100,
+  };
+
   try {
-    const all = await withApiTelemetry('other', { repo: config.org ? `${config.org}/*` : null }, () => octokit.paginate(octokit.rest.repos.listForOrg, {
-      org: config.org,
-      type: 'all',
-      per_page: 100,
-    }));
+    const all = [];
+    if (typeof octokit.paginate?.iterator === 'function') {
+      for await (const response of octokit.paginate.iterator(octokit.rest.repos.listForOrg, params)) {
+        recordApiCall({
+          category: 'other',
+          repo: repoLabel,
+          status: apiStatusFromResult(response),
+          durationMs: null,
+        });
+        all.push(...(response?.data || []));
+      }
+    } else {
+      const startedAt = Date.now();
+      const repos = await octokit.paginate(octokit.rest.repos.listForOrg, params);
+      recordApiCall({
+        category: 'other',
+        repo: repoLabel,
+        status: 200,
+        durationMs: Date.now() - startedAt,
+      });
+      all.push(...repos);
+    }
 
     const excluded = new Set(config.excludeRepos ?? []);
     activeRepos = all
@@ -2601,6 +2619,12 @@ async function refreshOrgRepos(octokit) {
     lastRepoRefresh = now;
     console.log(`[watcher] Org repos refreshed — watching ${activeRepos.length} repos: ${activeRepos.join(', ')}`);
   } catch (err) {
+    recordApiCall({
+      category: 'other',
+      repo: repoLabel,
+      status: apiStatusFromError(err),
+      durationMs: null,
+    });
     console.error(`[watcher] Failed to list org repos for ${config.org}:`, err.message);
   }
 }

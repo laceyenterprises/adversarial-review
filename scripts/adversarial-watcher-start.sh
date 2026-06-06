@@ -32,6 +32,10 @@ fi
 # fall back to raw `op read`.
 OP_RATE_LIMIT_SIGNATURE="Too many requests. Your client has been rate-limited"
 _OP_RATE_LIMIT_DEFAULT_BACKOFF_S=900
+op_rate_limit_stderr_indicates_rate_limit() {
+  local stderr_file="$1"
+  grep -Eiq 'too many requests|rate[- ]limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429' "$stderr_file" 2>/dev/null
+}
 _op_rate_limit_resolve_backoff_seconds() {
   local raw="${OP_RATE_LIMIT_BACKOFF_S-}"
   if [[ -z "$raw" ]]; then
@@ -117,7 +121,7 @@ op_resolve_with_rate_limit_backoff() {
     rm -rf "$tmp_dir"
     return 0
   fi
-  if ! grep -qF "$OP_RATE_LIMIT_SIGNATURE" "$stderr_file" 2>/dev/null; then
+  if ! op_rate_limit_stderr_indicates_rate_limit "$stderr_file"; then
     rm -rf "$tmp_dir"
     return "$rc"
   fi
@@ -133,7 +137,9 @@ op_resolve_with_rate_limit_backoff() {
   return "$rc"
 }
 if [[ -r "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh" ]]; then
-  source "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+  if ! source "$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"; then
+    echo "[adversarial-watcher] WARN: OPH-01 helper failed to load from $REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh; using vendored fallback." >&2
+  fi
 else
   echo "[adversarial-watcher] WARN: OPH-01 helper missing at $REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh; using vendored fallback." >&2
 fi
@@ -267,6 +273,10 @@ resolve_alert_to_optional() {
       rm -f "$stderr_path"
       return 3
     fi
+    if op_rate_limit_stderr_indicates_rate_limit "$stderr_path"; then
+      rm -f "$stderr_path"
+      return 5
+    fi
     if (( attempt < max_attempts )); then
       echo "[adversarial-watcher] WARN: failed to resolve ALERT_TO from 1Password (attempt $attempt/$max_attempts); retrying in 5s." >&2
       sed 's/^/  /' "$stderr_path" >&2
@@ -334,6 +344,9 @@ if [[ -z "${ALERT_TO:-}" ]]; then
         sleep 3600
         exit 1
       fi
+    elif [[ $alert_to_status -eq 5 ]]; then
+      echo "[adversarial-watcher] ERROR: ALERT_TO resolution hit the 1Password rate-limit path; the helper already performed OPH-01 backoff, so exiting without extra ALERT_TO retries or an additional launcher sleep." >&2
+      exit 1
     else
       echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the ALERT_TO secret-source and bootout the agent to recover sooner." >&2
       sleep 3600

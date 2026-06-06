@@ -45,12 +45,15 @@ async function runMaintainerWatcherLauncher(scriptName, {
   alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
   opCliPath = '/missing/op',
   opMode = 'ok',
+  helperMode = 'missing',
   extraEnv = {},
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'watcher-launch-wrapper-'));
   const fakeBin = join(root, 'bin');
   const fakeRepo = join(root, 'agent-os', 'tools', 'adversarial-review');
+  const fakeSharedHelper = join(root, 'agent-os', 'scripts', 'lib', 'op-resolve-with-rate-limit-backoff.sh');
   const fakeTmp = join(root, 'tmp');
+  const sleepLog = join(fakeTmp, 'sleep.log');
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(join(fakeRepo, 'src', 'secret-source'), { recursive: true });
   mkdirSync(fakeTmp, { recursive: true });
@@ -71,7 +74,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
       + 'if [[ "$1" == "auth" && "$2" == "token" ]]; then echo "gh-token"; exit 0; fi\n'
       + 'exit 1\n',
   );
-  writeExecutable(join(fakeBin, 'sleep'), '#!/bin/bash\nexit 0\n');
+  writeExecutable(join(fakeBin, 'sleep'), `#!/bin/bash\nprintf '%s\\n' "$1" >>"${sleepLog}"\nexit 0\n`);
   writeExecutable(
     join(fakeBin, 'op'),
     '#!/bin/bash\n'
@@ -93,12 +96,34 @@ async function runMaintainerWatcherLauncher(scriptName, {
       + '    missing-alert)\n'
       + '      echo "not found" >&2; exit 1\n'
       + '      ;;\n'
+      + '    rate-limit-alert)\n'
+      + '      echo "HTTP 429: too many requests for this account" >&2; exit 1\n'
+      + '      ;;\n'
       + '  esac\n'
       + 'fi\n'
       + 'printf "secret-value"; exit 0\n',
   );
+  if (helperMode === 'broken') {
+    mkdirSync(dirname(fakeSharedHelper), { recursive: true });
+    writeExecutable(
+      fakeSharedHelper,
+      '#!/bin/bash\n'
+        + 'echo "broken helper" >&2\n'
+        + 'return 7\n',
+    );
+  } else if (helperMode === 'healthy') {
+    mkdirSync(dirname(fakeSharedHelper), { recursive: true });
+    writeExecutable(
+      fakeSharedHelper,
+      '#!/bin/bash\n'
+        + 'op_resolve_with_rate_limit_backoff() {\n'
+        + '  "$@"\n'
+        + '}\n',
+    );
+  }
 
   const script = readScript(scriptName)
+    .replaceAll('/Users/airlock/agent-os', join(root, 'agent-os'))
     .replaceAll('/Users/airlock/agent-os/tools/adversarial-review', fakeRepo)
     .replaceAll('/opt/homebrew/bin/node', fakeNode)
     .replaceAll('/opt/homebrew/bin/gh', fakeGh)
@@ -117,12 +142,18 @@ async function runMaintainerWatcherLauncher(scriptName, {
   };
   try {
     const result = await execFileAsync('/bin/zsh', [wrapperPath], { env, cwd: root });
-    return { code: 0, stdout: result.stdout, stderr: result.stderr };
+    return {
+      code: 0,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
+    };
   } catch (error) {
     return {
       code: error.code ?? 1,
       stdout: error.stdout ?? '',
       stderr: error.stderr ?? '',
+      sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
     };
   }
 }
@@ -194,6 +225,7 @@ test('watcher launchers do not silently bypass OPH-01 backoff when the shared he
   ]) {
     const script = readScript(scriptName);
     assert.match(script, /op_resolve_with_rate_limit_backoff\(\)/);
+    assert.match(script, /op_rate_limit_stderr_indicates_rate_limit/);
     assert.match(script, /mkfifo "\$stderr_fifo"/);
     assert.match(script, /wait "\$tee_pid"/);
     assert.match(script, /_op_rate_limit_descendant_pids/);
@@ -257,5 +289,39 @@ test('maintainer watcher launchers honor config-derived allow-missing-alert flag
     assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
     assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
     assert.doesNotMatch(result.stderr, /ERROR: ALERT_TO is not provisioned/);
+  }
+});
+
+test('maintainer watcher launchers survive a broken shared OPH-01 helper by keeping the vendored fallback live', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const result = await runMaintainerWatcherLauncher(scriptName, { helperMode: 'broken' });
+    assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
+    assert.match(result.stderr, /broken helper/);
+    assert.match(result.stderr, /helper failed to load/);
+  }
+});
+
+test('maintainer watcher launchers treat broad 429 text as rate-limit and avoid stacked ALERT_TO retries', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const result = await runMaintainerWatcherLauncher(scriptName, {
+      opMode: 'rate-limit-alert',
+      extraEnv: {
+        OP_RATE_LIMIT_BACKOFF_S: '1',
+      },
+    });
+    assert.equal(result.code, 1, `${scriptName} stderr:\n${result.stderr}`);
+    assert.match(result.stderr, /without extra ALERT_TO retries or an additional launcher sleep/);
+    assert.doesNotMatch(result.stderr, /retrying in 5s/);
+    assert.equal(result.sleepLog.trim(), '1', `${scriptName} sleep log:\n${result.sleepLog}`);
   }
 });

@@ -53,6 +53,7 @@ async function runRenderedWatcherWrapper({
   opCliPath,
   opMode = 'ok',
   opValue = 'alerts@example.com',
+  helperMode = 'missing',
 } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'portable-installer-wrapper-'));
   const fakeBin = path.join(root, 'bin');
@@ -60,6 +61,8 @@ async function runRenderedWatcherWrapper({
   const fakeSecrets = path.join(root, 'secrets');
   const fakeLogs = path.join(root, 'logs');
   const fakeTmp = path.join(root, 'tmp');
+  const fakeSharedHelper = path.join(fakeRepo, 'scripts', 'lib', 'op-resolve-with-rate-limit-backoff.sh');
+  const sleepLog = path.join(fakeTmp, 'sleep.log');
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(path.join(fakeRepo, 'src'), { recursive: true });
   mkdirSync(fakeSecrets, { recursive: true });
@@ -107,7 +110,7 @@ async function runRenderedWatcherWrapper({
       + 'fi\n'
       + 'exit 1\n',
   );
-  writeExecutable(path.join(fakeBin, 'sleep'), '#!/bin/bash\nexit 0\n');
+  writeExecutable(path.join(fakeBin, 'sleep'), `#!/bin/bash\nprintf '%s\\n' "$1" >>"${sleepLog}"\nexit 0\n`);
   writeExecutable(
     path.join(fakeBin, 'op'),
     '#!/bin/bash\n'
@@ -128,10 +131,23 @@ async function runRenderedWatcherWrapper({
       + '    echo "op failure" >&2\n'
       + '    exit 1\n'
       + '    ;;\n'
+      + '  rate-limit)\n'
+      + '    echo "Error: HTTP 429 too many requests from 1Password" >&2\n'
+      + '    exit 1\n'
+      + '    ;;\n'
       + 'esac\n'
       + 'echo "unexpected mode" >&2\n'
       + 'exit 1\n',
   );
+  if (helperMode === 'broken') {
+    mkdirSync(path.dirname(fakeSharedHelper), { recursive: true });
+    writeExecutable(
+      fakeSharedHelper,
+      '#!/bin/bash\n'
+        + 'echo "broken helper" >&2\n'
+        + 'return 9\n',
+    );
+  }
 
   const env = {
     ...process.env,
@@ -150,12 +166,18 @@ async function runRenderedWatcherWrapper({
 
   try {
     const result = await execFileAsync('/bin/bash', [wrapperPath], { env, cwd: root });
-    return { code: 0, stdout: result.stdout, stderr: result.stderr };
+    return {
+      code: 0,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      sleepLog: readdirSync(fakeTmp).includes('sleep.log') ? readFileSync(sleepLog, 'utf8') : '',
+    };
   } catch (error) {
     return {
       code: error.code ?? 1,
       stdout: error.stdout ?? '',
       stderr: error.stderr ?? '',
+      sleepLog: readdirSync(fakeTmp).includes('sleep.log') ? readFileSync(sleepLog, 'utf8') : '',
     };
   }
 }
@@ -289,6 +311,7 @@ test('the four shipped templates render with sample bindings and leave no placeh
       assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
       assert.match(rendered, /resolve_op_bin/);
       assert.match(rendered, /op_resolve_with_rate_limit_backoff/);
+      assert.match(rendered, /op_rate_limit_stderr_indicates_rate_limit/);
       assert.match(rendered, /mkfifo "\$stderr_fifo"/);
       assert.match(rendered, /wait "\$tee_pid"/);
       assert.doesNotMatch(rendered, /2> >\(/);
@@ -405,6 +428,31 @@ test('rendered watcher wrapper allows blank ALERT_TO values from 1Password with 
   });
   assert.equal(result.code, 0);
   assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
+});
+
+test('rendered watcher wrapper keeps the vendored helper when the shared helper fails to load', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: 'direct-alert@example.com',
+    helperMode: 'broken',
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stderr, /broken helper/);
+  assert.match(result.stderr, /helper failed to load/);
+});
+
+test('rendered watcher wrapper classifies broad 429 text and avoids stacked ALERT_TO sleeps', async () => {
+  const result = await runRenderedWatcherWrapper({
+    opServiceAccountToken: 'token',
+    opMode: 'rate-limit',
+    opCliPath: path.join('/missing', 'op'),
+    allowMissing: false,
+    helperMode: 'missing',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /configured 1Password CLI '\/missing\/op' is not executable/);
+  assert.match(result.stderr, /without extra ALERT_TO retries or an additional launcher sleep/);
+  assert.doesNotMatch(result.stderr, /retrying in 5s/);
+  assert.equal(result.sleepLog.trim(), '900');
 });
 
 test('resolveRenderedCodexAuthPath matches the installer contract for default and override layouts', () => {

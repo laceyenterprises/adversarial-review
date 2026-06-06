@@ -39,16 +39,18 @@ mkdir -p "$REPO_RENDER_LOG_ROOT"
 # OPH-01: use the repo-local shared helper as the sole cooldown
 # implementation and fail closed if it cannot be sourced.
 OP_RATE_LIMIT_HELPER="$REPO_RENDER_REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+fail_op_helper_load() {
+  echo "[adversarial-watcher] ERROR: $1" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; restore the OPH-01 helper and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 78
+}
 if [ ! -r "$OP_RATE_LIMIT_HELPER" ]; then
-  echo "[adversarial-watcher] ERROR: OPH-01 helper missing at $OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive." >&2
-  exit 78
+  fail_op_helper_load "OPH-01 helper missing at $OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
 fi
-if ! ( . "$OP_RATE_LIMIT_HELPER" ); then
-  echo "[adversarial-watcher] ERROR: OPH-01 helper failed to load from $OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive." >&2
-  exit 78
+if ! . "$OP_RATE_LIMIT_HELPER"; then
+  fail_op_helper_load "OPH-01 helper failed to load from $OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
 fi
-# shellcheck disable=SC1090
-. "$OP_RATE_LIMIT_HELPER"
 
 # 1. Native module gate.
 NATIVE_CHECK_ERR="$REPO_RENDER_LOG_ROOT/adversarial-watcher-native-check.err"
@@ -164,6 +166,8 @@ if [ -z "${GITHUB_TOKEN:-}" ]; then
 fi
 if [ -z "${GITHUB_TOKEN:-}" ]; then
   echo "[adversarial-watcher] ERROR: GITHUB_TOKEN not set and gh auth token returned nothing" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the gh credential or set GITHUB_TOKEN, then bootout the agent to recover sooner." >&2
+  sleep 3600
   exit 1
 fi
 

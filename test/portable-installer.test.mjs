@@ -53,6 +53,7 @@ async function runRenderedWatcherWrapper({
   opCliPath,
   opMode = 'ok',
   opValue = 'alerts@example.com',
+  ghMode = 'ok',
   helperMode = 'healthy',
 } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'portable-installer-wrapper-'));
@@ -105,6 +106,7 @@ async function runRenderedWatcherWrapper({
     path.join(fakeBin, 'gh'),
     '#!/bin/bash\n'
       + 'if [[ "$1" == "auth" && "$2" == "token" ]]; then\n'
+      + '  if [[ "${TEST_GH_MODE:-ok}" != "ok" ]]; then exit 1; fi\n'
       + '  echo "gh-token"\n'
       + '  exit 0\n'
       + 'fi\n'
@@ -158,7 +160,7 @@ async function runRenderedWatcherWrapper({
       '#!/bin/bash\n'
         + 'op_rate_limit_stderr_indicates_rate_limit() {\n'
         + '  local stderr_file="$1"\n'
-        + "  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429|quota' \"$stderr_file\" 2>/dev/null\n"
+        + "  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429' \"$stderr_file\" 2>/dev/null\n"
         + '}\n'
         + 'op_resolve_with_rate_limit_backoff() {\n'
         + '  local stderr_file\n'
@@ -188,6 +190,7 @@ async function runRenderedWatcherWrapper({
     TEST_OP_TOKEN_RESOLVER_VALUE: tokenResolverValue,
     TEST_OP_MODE: opMode,
     TEST_OP_VALUE: opValue,
+    TEST_GH_MODE: ghMode,
   };
 
   try {
@@ -337,7 +340,8 @@ test('the four shipped templates render with sample bindings and leave no placeh
       assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
       assert.match(rendered, /resolve_op_bin/);
       assert.match(rendered, /op_resolve_with_rate_limit_backoff/);
-      assert.match(rendered, /\(\s*\. "\$OP_RATE_LIMIT_HELPER"\s*\)/);
+      assert.match(rendered, /if ! \. "\$OP_RATE_LIMIT_HELPER"; then/);
+      assert.doesNotMatch(rendered, /\(\s*\. "\$OP_RATE_LIMIT_HELPER"\s*\)/);
       assert.match(rendered, /refusing to start without the shared cooldown primitive/);
       assert.match(rendered, /\/usr\/local\/bin\/op/);
       assert.doesNotMatch(rendered, /using vendored fallback/);
@@ -462,6 +466,7 @@ test('rendered watcher wrapper fails closed when the shared helper fails to load
   assert.equal(result.code, 78);
   assert.match(result.stderr, /broken helper/);
   assert.match(result.stderr, /refusing to start without the shared cooldown primitive/);
+  assert.equal(result.sleepLog.trim(), '3600');
 });
 
 test('rendered watcher wrapper fails closed when the shared helper is missing', async () => {
@@ -472,6 +477,18 @@ test('rendered watcher wrapper fails closed when the shared helper is missing', 
   assert.equal(result.code, 78);
   assert.match(result.stderr, /helper missing/);
   assert.match(result.stderr, /refusing to start without the shared cooldown primitive/);
+  assert.equal(result.sleepLog.trim(), '3600');
+});
+
+test('rendered watcher wrapper sleeps when gh token fallback is unavailable', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: 'direct-alert@example.com',
+    ghMode: 'fail',
+    helperMode: 'healthy',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /GITHUB_TOKEN not set and gh auth token returned nothing/);
+  assert.equal(result.sleepLog.trim(), '3600');
 });
 
 for (const opMode of ['rate-limit', 'canonical-rate-limit']) {

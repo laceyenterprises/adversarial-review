@@ -6,7 +6,7 @@ _OP_RATE_LIMIT_DEFAULT_BACKOFF_S=900
 
 op_rate_limit_stderr_indicates_rate_limit() {
   local stderr_file="$1"
-  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429|quota' "$stderr_file" 2>/dev/null
+  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429' "$stderr_file" 2>/dev/null
 }
 
 _op_rate_limit_resolve_backoff_seconds() {

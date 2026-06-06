@@ -34,15 +34,18 @@ fi
 # missing or broken. Keeping per-wrapper cooldown copies caused the
 # helper-present and helper-missing branches to diverge semantically.
 _OP_RATE_LIMIT_HELPER="$WATCHER_DIR/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+fail_op_helper_load() {
+  echo "[adversarial-watcher] ERROR: $1" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; restore the OPH-01 helper and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 78
+}
 if [[ ! -r "$_OP_RATE_LIMIT_HELPER" ]]; then
-  echo "[adversarial-watcher] ERROR: OPH-01 helper missing at $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive." >&2
-  exit 78
+  fail_op_helper_load "OPH-01 helper missing at $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
 fi
-if ! ( source "$_OP_RATE_LIMIT_HELPER" ); then
-  echo "[adversarial-watcher] ERROR: OPH-01 helper failed to load from $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive." >&2
-  exit 78
+if ! source "$_OP_RATE_LIMIT_HELPER"; then
+  fail_op_helper_load "OPH-01 helper failed to load from $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
 fi
-source "$_OP_RATE_LIMIT_HELPER"
 
 WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"
 if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$WATCHER_NATIVE_CHECK_ERR" 2>&1; then
@@ -72,6 +75,8 @@ export OP_SERVICE_ACCOUNT_TOKEN
 export GITHUB_TOKEN=$(/opt/homebrew/bin/gh auth token 2>/dev/null)
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN from gh keychain" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the gh credential and bootout the agent to recover sooner." >&2
+  sleep 3600
   exit 1
 fi
 
@@ -113,15 +118,76 @@ if ! OP_BIN="$(resolve_op_bin)"; then
   exit 1
 fi
 
+resolve_required_op_secret() {
+  local name="$1"
+  local ref="$2"
+  local stdout_path
+  local stderr_path
+  local value
+  local rc
+  stdout_path="${TMPDIR:-/tmp}/adversarial-watcher-${name}.${UID}.$$.$RANDOM.value"
+  stderr_path="${TMPDIR:-/tmp}/adversarial-watcher-${name}.${UID}.$$.$RANDOM.err"
+  if op_resolve_with_rate_limit_backoff "$OP_BIN" read "$ref" >"$stdout_path" 2>"$stderr_path"; then
+    value="$(<"$stdout_path")"
+    if [[ -n "${value//[[:space:]]/}" ]]; then
+      rm -f "$stdout_path" "$stderr_path"
+      printf '%s' "$value"
+      return 0
+    fi
+    echo "[adversarial-watcher] ERROR: $name at $ref resolved to an empty value." >&2
+    rm -f "$stdout_path" "$stderr_path"
+    echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
+    sleep 3600
+    return 1
+  else
+    rc=$?
+  fi
+  sed 's/^/  /' "$stderr_path" >&2
+  if op_rate_limit_stderr_indicates_rate_limit "$stderr_path"; then
+    rm -f "$stdout_path" "$stderr_path"
+    return 5
+  fi
+  rm -f "$stdout_path" "$stderr_path"
+  echo "[adversarial-watcher] ERROR: failed to resolve $name from 1Password" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the secret-source and bootout the agent to recover sooner." >&2
+  sleep 3600
+  return "$rc"
+}
+
+resolve_and_export_required_op_secret() {
+  local name="$1"
+  local ref="$2"
+  local stdout_path
+  local value
+  local secret_status
+  stdout_path="${TMPDIR:-/tmp}/adversarial-watcher-${name}.${UID}.$$.$RANDOM.out"
+  set +e
+  resolve_required_op_secret "$name" "$ref" >"$stdout_path"
+  secret_status=$?
+  set -e
+  if [[ $secret_status -eq 0 ]]; then
+    value="$(<"$stdout_path")"
+    rm -f "$stdout_path"
+    export "$name=$value"
+    return 0
+  fi
+  rm -f "$stdout_path"
+  if [[ $secret_status -eq 5 ]]; then
+    echo "[adversarial-watcher] ERROR: $name resolution hit the 1Password rate-limit path; the helper already performed OPH-01 backoff, so exiting without an additional launcher sleep." >&2
+  fi
+  exit 1
+}
+
 # Resolve only the 1Password-backed secrets needed by watcher.mjs + reviewer.mjs.
 # `--cache=false` was dropped on 2026-05-01: forcing a fresh auth on every
 # call turned a transient watcher crash-loop (Node ABI mismatch) into a
 # 1Password popup storm. The service-account token in the env makes these
 # calls non-interactive; the cache only memoizes the resolution and does
-# not change auth strength.
-export LINEAR_API_KEY=$(op_resolve_with_rate_limit_backoff "$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential')
-export GH_CLAUDE_REVIEWER_TOKEN=$(op_resolve_with_rate_limit_backoff "$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential')
-export GH_CODEX_REVIEWER_TOKEN=$(op_resolve_with_rate_limit_backoff "$OP_BIN" read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential')
+# not change auth strength. Non-rate-limit failures get an explicit
+# launchd backoff instead of relying on `set -e` during command substitution.
+resolve_and_export_required_op_secret LINEAR_API_KEY 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential'
+resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential'
+resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential'
 
 resolve_alert_to_optional() {
   local attempt=1
@@ -166,18 +232,6 @@ resolve_alert_to_optional() {
   done
 }
 
-if [[ -z "${LINEAR_API_KEY:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: failed to resolve LINEAR_API_KEY from 1Password" >&2
-  exit 1
-fi
-if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: failed to resolve GH_CLAUDE_REVIEWER_TOKEN from 1Password" >&2
-  exit 1
-fi
-if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from 1Password" >&2
-  exit 1
-fi
 if [[ -n "${ALERT_TO:-}" && -z "${ALERT_TO//[[:space:]]/}" ]]; then
   unset ALERT_TO
 fi

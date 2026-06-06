@@ -105,6 +105,10 @@ test('defangUntrustedMarkdown neutralizes block-level markdown starts', () => {
 test('resolveCommentBotTokenEnv maps known worker classes to their bot env vars', () => {
   assert.equal(resolveCommentBotTokenEnv('codex'), 'GH_CODEX_REVIEWER_TOKEN');
   assert.equal(resolveCommentBotTokenEnv('claude-code'), 'GH_CLAUDE_REVIEWER_TOKEN');
+  assert.equal(resolveCommentBotTokenEnv('gemini'), 'GH_CODEX_REVIEWER_TOKEN');
+  assert.equal(resolveCommentBotTokenEnv('pi'), 'GH_CODEX_REVIEWER_TOKEN');
+  assert.equal(resolveCommentBotTokenEnv('opencode'), 'GH_CODEX_REVIEWER_TOKEN');
+  assert.equal(resolveCommentBotTokenEnv('hermes'), 'GH_CODEX_REVIEWER_TOKEN');
 });
 
 test('resolveCommentBotTokenEnv returns null for unknown worker classes', () => {
@@ -117,7 +121,7 @@ test('WORKER_CLASS_TO_BOT_TOKEN_ENV covers every known remediation worker class'
   // in src/follow-up-remediation.mjs. If a new class lands there but no
   // bot-token mapping exists here, comment posting will silently skip for
   // that class — which the test surfaces immediately.
-  const knownClasses = new Set(['codex', 'claude-code']);
+  const knownClasses = new Set(['codex', 'claude-code', 'gemini', 'pi', 'opencode', 'hermes']);
   for (const cls of knownClasses) {
     assert.ok(
       WORKER_CLASS_TO_BOT_TOKEN_ENV[cls],
@@ -558,7 +562,7 @@ test('postRemediationOutcomeComment skips with no-token-mapping for unknown work
   const result = await postRemediationOutcomeComment({
     repo: 'laceyenterprises/demo',
     prNumber: 7,
-    workerClass: 'gemini', // not in WORKER_CLASS_TO_BOT_TOKEN_ENV today
+    workerClass: 'condex',
     body: 'whatever',
     env: {},
     execFileImpl: async () => {
@@ -568,7 +572,7 @@ test('postRemediationOutcomeComment skips with no-token-mapping for unknown work
   });
   assert.equal(result.posted, false);
   assert.equal(result.reason, 'no-token-mapping');
-  assert.equal(result.workerClass, 'gemini');
+  assert.equal(result.workerClass, 'condex');
 });
 
 test('postRemediationOutcomeComment swallows gh-cli failures and reports them in the result', async () => {

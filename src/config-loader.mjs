@@ -530,6 +530,16 @@ function schemaV1() {
             __default: 'codex',
             __enum: ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS,
           },
+          hermes: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              provider: {
+                __type: TYPE_STRING,
+                __default: 'nous-portal',
+              },
+            },
+          },
           ...buildRoleFallbackSchemaKeys(),
           quota_probe: {
             // Intentionally remains under `roles` to mirror the Python
@@ -732,6 +742,10 @@ export const ENV_ALIASES = {
   },
   'roles.build_pack_default_worker_class': {
     canonical: 'AGENT_OS_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS',
+    aliases: [],
+  },
+  'roles.hermes.provider': {
+    canonical: 'AGENT_OS_ROLES_HERMES_PROVIDER',
     aliases: [],
   },
   ...buildRoleFallbackEnvAliases(),

@@ -73,6 +73,8 @@ const WORKER_ID_CLASS_PREFIXES = [
   'codex',
   'gemini',
   'pi',
+  'opencode',
+  'hermes',
   'stub',
 ];
 // Must stay aligned with platform/session-ledger/src/session_ledger/models.py
@@ -122,6 +124,10 @@ const ALLOWED_MERGE_AGENT_WORKER_CLASSES = Object.freeze([
   'merge-agent',
   'codex',
   'claude-code',
+  'gemini',
+  'pi',
+  'opencode',
+  'hermes',
 ]);
 
 // Cascade-aware merge-agent worker class resolver. Consults config.yaml

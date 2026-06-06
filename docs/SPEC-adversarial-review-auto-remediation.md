@@ -46,6 +46,12 @@ pins the same reviewer family as the builder, the posted review body carries an
 explicit cross-model-waiver note so the audit trail shows the guarantee was
 deliberately suspended.
 
+In this fleet, `[opencode]` builder PRs are treated as Claude-family writers
+because opencode is provisioned against Anthropic Claude unless an operator
+changes that deployment contract. Therefore a Claude reviewer pin on an
+`[opencode]` PR is a same-family waiver, while the default route remains the
+Codex reviewer to preserve cross-model review.
+
 Follow-up remediation defaults to the `codex` worker class while the LAC-358
 codex override remains active. Operators may pin remediation with
 `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex|claude-code`; aliases
@@ -680,7 +686,7 @@ Because watcher and worker-pool can roll out independently, `src/follow-up-merge
 
 Before `src/follow-up-merge-agent.mjs::dispatchMergeAgentForPR` launches `hq dispatch --worker-class merge-agent`, it runs `prepareOriginalWorkerForMergeAgent` to free the PR branch from the original builder worktree without reaching for `git worktree add --force`.
 
-- The original worker id is derived from the PR branch prefix, then validated against the recognized worker-id shape before any filesystem probe or `hq` invocation. Human branches like `paul/my-feature` do not opt into teardown; suspicious or non-worker-shaped prefixes emit `merge_agent.tear_down_skipped` with reason `unrecognized-worker-id-shape`.
+- The original worker id is derived from the PR branch prefix, then validated against the recognized worker-id shape before any filesystem probe or `hq` invocation. Recognized worker-id prefixes include the canonical reviewer/builder worker classes (`codex`, `claude-code`, `clio-agent`, `gemini`, `pi`, `opencode`, `hermes`) plus merge-agent and test stub prefixes. Human branches like `paul/my-feature` do not opt into teardown; suspicious or non-worker-shaped prefixes emit `merge_agent.tear_down_skipped` with reason `unrecognized-worker-id-shape`.
 - If the worker directory is gone, or the recorded worktree path no longer exists on disk, prep returns `decision: 'ready'` with reason `original-worker-already-torn-down`. This is the idempotent "already gone" exit.
 - If `HQ_ROOT/workers/<workerId>/workspace.json` is missing while the worker directory still exists, prep logs `merge_agent.workspace_missing` and returns `decision: 'deferred'` with reason `workspace-json-missing-but-worker-dir-present`. A missing marker file is not treated as proof that the branch is free.
 - If the workspace file cannot be read for a reason other than `ENOENT` (for example permissions drift or malformed JSON), prep logs `merge_agent.workspace_read_failed` with the errno/detail and returns `decision: 'deferred'`. Read failures are not treated as proof that the branch is free.

@@ -46,6 +46,10 @@ const BULLET_LIST_MAX_ITEMS = 25;
 const WORKER_CLASS_TO_BOT_TOKEN_ENV = {
   codex: 'GH_CODEX_REVIEWER_TOKEN',
   'claude-code': 'GH_CLAUDE_REVIEWER_TOKEN',
+  gemini: 'GH_CODEX_REVIEWER_TOKEN',
+  pi: 'GH_CODEX_REVIEWER_TOKEN',
+  opencode: 'GH_CODEX_REVIEWER_TOKEN',
+  hermes: 'GH_CODEX_REVIEWER_TOKEN',
 };
 
 function resolveCommentBotTokenEnv(workerClass) {

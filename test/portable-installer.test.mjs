@@ -53,7 +53,7 @@ async function runRenderedWatcherWrapper({
   opCliPath,
   opMode = 'ok',
   opValue = 'alerts@example.com',
-  helperMode = 'missing',
+  helperMode = 'healthy',
 } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'portable-installer-wrapper-'));
   const fakeBin = path.join(root, 'bin');
@@ -135,6 +135,10 @@ async function runRenderedWatcherWrapper({
       + '    echo "Error: HTTP 429 too many requests from 1Password" >&2\n'
       + '    exit 1\n'
       + '    ;;\n'
+      + '  canonical-rate-limit)\n'
+      + '    echo "Too many requests. Your client has been rate-limited" >&2\n'
+      + '    exit 1\n'
+      + '    ;;\n'
       + 'esac\n'
       + 'echo "unexpected mode" >&2\n'
       + 'exit 1\n',
@@ -146,6 +150,28 @@ async function runRenderedWatcherWrapper({
       '#!/bin/bash\n'
         + 'echo "broken helper" >&2\n'
         + 'return 9\n',
+    );
+  } else if (helperMode === 'healthy') {
+    mkdirSync(path.dirname(fakeSharedHelper), { recursive: true });
+    writeExecutable(
+      fakeSharedHelper,
+      '#!/bin/bash\n'
+        + 'op_rate_limit_stderr_indicates_rate_limit() {\n'
+        + '  local stderr_file="$1"\n'
+        + "  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429|quota' \"$stderr_file\" 2>/dev/null\n"
+        + '}\n'
+        + 'op_resolve_with_rate_limit_backoff() {\n'
+        + '  local stderr_file\n'
+        + '  stderr_file="$(mktemp)" || return 1\n'
+        + '  "$@" 2>"$stderr_file"\n'
+        + '  rc=$?\n'
+        + '  cat "$stderr_file" >&2\n'
+        + '  if [[ "$rc" -ne 0 ]] && op_rate_limit_stderr_indicates_rate_limit "$stderr_file"; then\n'
+        + '    sleep "${OP_RATE_LIMIT_BACKOFF_S:-900}"\n'
+        + '  fi\n'
+        + '  rm -f "$stderr_file"\n'
+        + '  return "$rc"\n'
+        + '}\n',
     );
   }
 
@@ -311,13 +337,10 @@ test('the four shipped templates render with sample bindings and leave no placeh
       assert.match(rendered, /export CODEX_AUTH_PATH="\$HOME\/\.codex\/auth\.json"/);
       assert.match(rendered, /resolve_op_bin/);
       assert.match(rendered, /op_resolve_with_rate_limit_backoff/);
-      assert.match(rendered, /op_rate_limit_stderr_indicates_rate_limit/);
       assert.match(rendered, /\(\s*\. "\$OP_RATE_LIMIT_HELPER"\s*\)/);
-      assert.match(rendered, /mkfifo "\$stderr_fifo"/);
-      assert.match(rendered, /wait "\$tee_pid"/);
-      assert.doesNotMatch(rendered, /2> >\(/);
-      assert.match(rendered, /using vendored fallback/);
+      assert.match(rendered, /refusing to start without the shared cooldown primitive/);
       assert.match(rendered, /\/usr\/local\/bin\/op/);
+      assert.doesNotMatch(rendered, /using vendored fallback/);
     }
   }
 });
@@ -431,30 +454,42 @@ test('rendered watcher wrapper allows blank ALERT_TO values from 1Password with 
   assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
 });
 
-test('rendered watcher wrapper keeps the vendored helper when the shared helper fails to load', async () => {
+test('rendered watcher wrapper fails closed when the shared helper fails to load', async () => {
   const result = await runRenderedWatcherWrapper({
     alertTo: 'direct-alert@example.com',
     helperMode: 'broken',
   });
-  assert.equal(result.code, 0);
+  assert.equal(result.code, 78);
   assert.match(result.stderr, /broken helper/);
-  assert.match(result.stderr, /helper failed to load/);
+  assert.match(result.stderr, /refusing to start without the shared cooldown primitive/);
 });
 
-test('rendered watcher wrapper classifies broad 429 text and avoids stacked ALERT_TO sleeps', async () => {
+test('rendered watcher wrapper fails closed when the shared helper is missing', async () => {
   const result = await runRenderedWatcherWrapper({
-    opServiceAccountToken: 'token',
-    opMode: 'rate-limit',
-    opCliPath: path.join('/missing', 'op'),
-    allowMissing: false,
+    alertTo: 'direct-alert@example.com',
     helperMode: 'missing',
   });
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /configured 1Password CLI '\/missing\/op' is not executable/);
-  assert.match(result.stderr, /without extra ALERT_TO retries or an additional launcher sleep/);
-  assert.doesNotMatch(result.stderr, /retrying in 5s/);
-  assert.equal(result.sleepLog.trim(), '900');
+  assert.equal(result.code, 78);
+  assert.match(result.stderr, /helper missing/);
+  assert.match(result.stderr, /refusing to start without the shared cooldown primitive/);
 });
+
+for (const opMode of ['rate-limit', 'canonical-rate-limit']) {
+  test(`rendered watcher wrapper routes ${opMode} through the shared helper cooldown`, async () => {
+    const result = await runRenderedWatcherWrapper({
+      opServiceAccountToken: 'token',
+      opMode,
+      opCliPath: path.join('/missing', 'op'),
+      allowMissing: false,
+      helperMode: 'healthy',
+    });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /configured 1Password CLI '\/missing\/op' is not executable/);
+    assert.match(result.stderr, /without extra ALERT_TO retries or an additional launcher sleep/);
+    assert.doesNotMatch(result.stderr, /retrying in 5s/);
+    assert.equal(result.sleepLog.trim(), '900');
+  });
+}
 
 test('resolveRenderedCodexAuthPath matches the installer contract for default and override layouts', () => {
   assert.equal(

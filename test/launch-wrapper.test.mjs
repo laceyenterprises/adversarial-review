@@ -45,13 +45,13 @@ async function runMaintainerWatcherLauncher(scriptName, {
   alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
   opCliPath = '/missing/op',
   opMode = 'ok',
-  helperMode = 'missing',
+  helperMode = 'healthy',
   extraEnv = {},
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'watcher-launch-wrapper-'));
   const fakeBin = join(root, 'bin');
   const fakeRepo = join(root, 'agent-os', 'tools', 'adversarial-review');
-  const fakeSharedHelper = join(root, 'agent-os', 'scripts', 'lib', 'op-resolve-with-rate-limit-backoff.sh');
+  const fakeSharedHelper = join(fakeRepo, 'scripts', 'lib', 'op-resolve-with-rate-limit-backoff.sh');
   const fakeTmp = join(root, 'tmp');
   const sleepLog = join(fakeTmp, 'sleep.log');
   mkdirSync(fakeBin, { recursive: true });
@@ -99,6 +99,9 @@ async function runMaintainerWatcherLauncher(scriptName, {
       + '    rate-limit-alert)\n'
       + '      echo "HTTP 429: too many requests for this account" >&2; exit 1\n'
       + '      ;;\n'
+      + '    canonical-rate-limit-alert)\n'
+      + '      echo "Too many requests. Your client has been rate-limited" >&2; exit 1\n'
+      + '      ;;\n'
       + '  esac\n'
       + 'fi\n'
       + 'printf "secret-value"; exit 0\n',
@@ -116,8 +119,21 @@ async function runMaintainerWatcherLauncher(scriptName, {
     writeExecutable(
       fakeSharedHelper,
       '#!/bin/bash\n'
+        + 'op_rate_limit_stderr_indicates_rate_limit() {\n'
+        + '  local stderr_file="$1"\n'
+        + "  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429|quota' \"$stderr_file\" 2>/dev/null\n"
+        + '}\n'
         + 'op_resolve_with_rate_limit_backoff() {\n'
-        + '  "$@"\n'
+        + '  local stderr_file\n'
+        + '  stderr_file="$(mktemp)" || return 1\n'
+        + '  "$@" 2>"$stderr_file"\n'
+        + '  rc=$?\n'
+        + '  cat "$stderr_file" >&2\n'
+        + '  if [[ "$rc" -ne 0 ]] && op_rate_limit_stderr_indicates_rate_limit "$stderr_file"; then\n'
+        + '    sleep "${OP_RATE_LIMIT_BACKOFF_S:-900}"\n'
+        + '  fi\n'
+        + '  rm -f "$stderr_file"\n'
+        + '  return "$rc"\n'
         + '}\n',
     );
   }
@@ -224,15 +240,12 @@ test('watcher launchers do not silently bypass OPH-01 backoff when the shared he
     'adversarial-watcher-start-placey.sh',
   ]) {
     const script = readScript(scriptName);
-    assert.match(script, /op_resolve_with_rate_limit_backoff\(\)/);
-    assert.match(script, /op_rate_limit_stderr_indicates_rate_limit/);
     assert.match(script, /\(\s*source "\$_OP_RATE_LIMIT_HELPER"\s*\)/);
-    assert.match(script, /mkfifo "\$stderr_fifo"/);
-    assert.match(script, /wait "\$tee_pid"/);
-    assert.match(script, /_op_rate_limit_descendant_pids/);
-    assert.match(script, /using vendored fallback/);
-    assert.doesNotMatch(script, /op_resolve_with_rate_limit_backoff\(\)\s*\{\s*"\$@";\s*\}/);
-    assert.doesNotMatch(script, /2> >\(/);
+    assert.match(script, /refusing to start without the shared cooldown primitive/);
+    assert.match(script, /scripts\/lib\/op-resolve-with-rate-limit-backoff\.sh/);
+    assert.doesNotMatch(script, /using vendored fallback/);
+    assert.doesNotMatch(script, /op_resolve_with_rate_limit_backoff\(\)/);
+    assert.doesNotMatch(script, /op_rate_limit_stderr_indicates_rate_limit\(\)/);
   }
 });
 
@@ -293,7 +306,7 @@ test('maintainer watcher launchers honor config-derived allow-missing-alert flag
   }
 });
 
-test('maintainer watcher launchers survive a broken shared OPH-01 helper by keeping the vendored fallback live', {
+test('maintainer watcher launchers fail closed when the shared OPH-01 helper is broken', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
 }, async () => {
   for (const scriptName of [
@@ -301,28 +314,44 @@ test('maintainer watcher launchers survive a broken shared OPH-01 helper by keep
     'adversarial-watcher-start-placey.sh',
   ]) {
     const result = await runMaintainerWatcherLauncher(scriptName, { helperMode: 'broken' });
-    assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
+    assert.equal(result.code, 78, `${scriptName} stderr:\n${result.stderr}`);
     assert.match(result.stderr, /broken helper/);
-    assert.match(result.stderr, /helper failed to load/);
+    assert.match(result.stderr, /refusing to start without the shared cooldown primitive/);
   }
 });
 
-test('maintainer watcher launchers treat broad 429 text as rate-limit and avoid stacked ALERT_TO retries', {
+test('maintainer watcher launchers fail closed when the shared OPH-01 helper is missing', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
 }, async () => {
   for (const scriptName of [
     'adversarial-watcher-start.sh',
     'adversarial-watcher-start-placey.sh',
   ]) {
-    const result = await runMaintainerWatcherLauncher(scriptName, {
-      opMode: 'rate-limit-alert',
-      extraEnv: {
-        OP_RATE_LIMIT_BACKOFF_S: '1',
-      },
-    });
-    assert.equal(result.code, 1, `${scriptName} stderr:\n${result.stderr}`);
-    assert.match(result.stderr, /without extra ALERT_TO retries or an additional launcher sleep/);
-    assert.doesNotMatch(result.stderr, /retrying in 5s/);
-    assert.equal(result.sleepLog.trim(), '1', `${scriptName} sleep log:\n${result.sleepLog}`);
+    const result = await runMaintainerWatcherLauncher(scriptName, { helperMode: 'missing' });
+    assert.equal(result.code, 78, `${scriptName} stderr:\n${result.stderr}`);
+    assert.match(result.stderr, /helper missing/);
+    assert.match(result.stderr, /refusing to start without the shared cooldown primitive/);
   }
 });
+
+for (const opMode of ['rate-limit-alert', 'canonical-rate-limit-alert']) {
+  test(`maintainer watcher launchers route ${opMode} through the shared helper cooldown and avoid stacked ALERT_TO retries`, {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+    for (const scriptName of [
+      'adversarial-watcher-start.sh',
+      'adversarial-watcher-start-placey.sh',
+    ]) {
+      const result = await runMaintainerWatcherLauncher(scriptName, {
+        opMode,
+        extraEnv: {
+          OP_RATE_LIMIT_BACKOFF_S: '1',
+        },
+      });
+      assert.equal(result.code, 1, `${scriptName} stderr:\n${result.stderr}`);
+      assert.match(result.stderr, /without extra ALERT_TO retries or an additional launcher sleep/);
+      assert.doesNotMatch(result.stderr, /retrying in 5s/);
+      assert.equal(result.sleepLog.trim(), '1', `${scriptName} sleep log:\n${result.sleepLog}`);
+    }
+  });
+}

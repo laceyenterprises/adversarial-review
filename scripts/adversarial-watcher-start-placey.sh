@@ -30,125 +30,19 @@ if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
   eval "$(agent_os_config_export)"
 fi
 
-# OPH-01: prefer the shared Agent OS helper, but keep a vendored fallback so
-# this maintained legacy wrapper does not silently fall back to raw `op read`
-# during partial deploys.
-OP_RATE_LIMIT_SIGNATURE="Too many requests. Your client has been rate-limited"
-_OP_RATE_LIMIT_DEFAULT_BACKOFF_S=900
-op_rate_limit_stderr_indicates_rate_limit() {
-  local stderr_file="$1"
-  grep -Eiq 'too[[:space:]-]+many[[:space:]-]+requests|rate[[:space:]_-]*limit(ed)?|http[^[:alnum:]]*429|status[^[:alnum:]]*429|quota' "$stderr_file" 2>/dev/null
-}
-_op_rate_limit_resolve_backoff_seconds() {
-  local raw="${OP_RATE_LIMIT_BACKOFF_S-}"
-  if [[ -z "$raw" ]]; then
-    printf '%s\n' "$_OP_RATE_LIMIT_DEFAULT_BACKOFF_S"
-    return 0
-  fi
-  case "$raw" in
-    (*[!0-9]*)
-      echo "op-rate-limit: OP_RATE_LIMIT_BACKOFF_S=${raw} is not a non-negative integer; using default ${_OP_RATE_LIMIT_DEFAULT_BACKOFF_S}s" >&2
-      printf '%s\n' "$_OP_RATE_LIMIT_DEFAULT_BACKOFF_S"
-      ;;
-    (*)
-      printf '%s\n' "$raw"
-      ;;
-  esac
-}
-op_resolve_with_rate_limit_backoff() {
-  local tmp_dir stderr_file stderr_fifo rc child_pid tee_pid interrupted_signal
-  tmp_dir="$(mktemp -d -t op-rate-limit.XXXXXX)" || return 1
-  stderr_file="${tmp_dir}/stderr"
-  stderr_fifo="${tmp_dir}/stderr.fifo"
-  : > "$stderr_file" || {
-    rm -rf "$tmp_dir"
-    return 1
-  }
-  mkfifo "$stderr_fifo" || {
-    rm -rf "$tmp_dir"
-    return 1
-  }
-  rc=0
-  child_pid=""
-  tee_pid=""
-  interrupted_signal=""
-
-  _op_rate_limit_descendant_pids() {
-    local parent="$1"
-    local child
-    pgrep -P "$parent" 2>/dev/null | while IFS= read -r child; do
-      [[ -z "$child" ]] && continue
-      printf '%s\n' "$child"
-      _op_rate_limit_descendant_pids "$child"
-    done
-  }
-
-  _op_rate_limit_forward_signal() {
-    local sig="$1"
-    local pid
-    local -a pids
-    interrupted_signal="$sig"
-    if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
-      pids=("$child_pid")
-      while IFS= read -r pid; do
-        [[ -z "$pid" ]] && continue
-        pids+=("$pid")
-      done < <(_op_rate_limit_descendant_pids "$child_pid")
-      for pid in "${pids[@]}"; do
-        kill "-$sig" "$pid" 2>/dev/null || true
-      done
-    fi
-  }
-
-  trap '_op_rate_limit_forward_signal TERM' TERM
-  trap '_op_rate_limit_forward_signal INT' INT
-  tee -a "$stderr_file" < "$stderr_fifo" >&2 &
-  tee_pid=$!
-  "$@" 2> "$stderr_fifo" &
-  child_pid=$!
-  wait "$child_pid" || rc=$?
-  if [[ -n "$interrupted_signal" ]]; then
-    wait "$child_pid" 2>/dev/null || true
-  fi
-  wait "$tee_pid" 2>/dev/null || true
-  trap - TERM INT
-  if [[ "$interrupted_signal" == "TERM" ]]; then
-    rm -rf "$tmp_dir"
-    return 143
-  fi
-  if [[ "$interrupted_signal" == "INT" ]]; then
-    rm -rf "$tmp_dir"
-    return 130
-  fi
-  if (( rc == 0 )); then
-    rm -rf "$tmp_dir"
-    return 0
-  fi
-  if ! op_rate_limit_stderr_indicates_rate_limit "$stderr_file"; then
-    rm -rf "$tmp_dir"
-    return "$rc"
-  fi
-  local backoff_s
-  backoff_s="$(_op_rate_limit_resolve_backoff_seconds)"
-  rm -rf "$tmp_dir"
-  if (( backoff_s == 0 )); then
-    echo "op-rate-limit: rate-limit detected; OP_RATE_LIMIT_BACKOFF_S=0, exiting immediately (test/escape hatch)" >&2
-    return "$rc"
-  fi
-  echo "op-rate-limit: 1Password account-level rate-limit detected; sleeping ${backoff_s}s before exit so launchd KeepAlive cannot tight-loop into another op call against the exhausted quota" >&2
-  sleep "$backoff_s"
-  return "$rc"
-}
-_OP_RATE_LIMIT_HELPER="$REPO_ROOT/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
-if [[ -r "$_OP_RATE_LIMIT_HELPER" ]]; then
-  if ( source "$_OP_RATE_LIMIT_HELPER" ); then
-    source "$_OP_RATE_LIMIT_HELPER"
-  else
-    echo "[adversarial-watcher] WARN: OPH-01 helper failed to load from $_OP_RATE_LIMIT_HELPER; using vendored fallback." >&2
-  fi
-else
-  echo "[adversarial-watcher] WARN: OPH-01 helper missing at $_OP_RATE_LIMIT_HELPER; using vendored fallback." >&2
+# OPH-01: source the repo-local shared helper and fail closed if it is
+# missing or broken. Keeping per-wrapper cooldown copies caused the
+# helper-present and helper-missing branches to diverge semantically.
+_OP_RATE_LIMIT_HELPER="$WATCHER_DIR/scripts/lib/op-resolve-with-rate-limit-backoff.sh"
+if [[ ! -r "$_OP_RATE_LIMIT_HELPER" ]]; then
+  echo "[adversarial-watcher] ERROR: OPH-01 helper missing at $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive." >&2
+  exit 78
 fi
+if ! ( source "$_OP_RATE_LIMIT_HELPER" ); then
+  echo "[adversarial-watcher] ERROR: OPH-01 helper failed to load from $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive." >&2
+  exit 78
+fi
+source "$_OP_RATE_LIMIT_HELPER"
 
 WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"
 if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$WATCHER_NATIVE_CHECK_ERR" 2>&1; then

@@ -90,6 +90,22 @@
         <string>adversarial</string>
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
         <string>codex</string>
+        <!--
+          Operator kill-switch for the adversarial-gate GitHub status
+          check (2026-06-07). When set to `true`, the watcher skips
+          the `gh api POST repos/.../statuses/<headSha>` call in
+          `publishAdversarialGateStatus`. Reviews + remediation
+          continue to run; only the GitHub-side gating status check
+          is suppressed. To re-enable, change to `false` (or remove)
+          + `launchctl kickstart -k gui/502/ai.laceyenterprises.adversarial-watcher.airlock`.
+
+          Why this kill-switch exists: free-tier private repos cannot
+          enforce required status checks, but the watcher's posted
+          status was still appearing as a PENDING/SUCCESS context in
+          PR UIs and tripping operator workflow.
+        -->
+        <key>ADVERSARIAL_GATE_STATUS_DISABLED</key>
+        <string>true</string>
     </dict>
 
     <key>RunAtLoad</key>

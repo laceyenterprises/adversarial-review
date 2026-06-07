@@ -51,7 +51,7 @@ import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeReviewVerdict, nor
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
-import { fetchPullRequestRollup } from './github-api.mjs';
+import { fetchPullRequestReviewContext } from './github-api.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -736,7 +736,7 @@ async function fetchPRDiff(repo, prNumber, headSha, {
 }
 
 async function fetchPRContext(repo, prNumber) {
-  return fetchPullRequestRollup(repo, prNumber, {
+  return fetchPullRequestReviewContext(repo, prNumber, {
     execFileImpl: execFileAsync,
     recordApiCallImpl: recordApiCall,
   });

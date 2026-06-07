@@ -385,7 +385,10 @@ function makeComplexityFallbackExecStub(expected) {
     const query = String(vars.query || '');
 
     if (query.includes('query PullRequestRollup(')) {
-      throw new Error('Query exceeds complexity limit');
+      const err = new Error('Query exceeds complexity limit');
+      err.status = 400;
+      err.stderr = 'Query exceeds complexity limit';
+      throw err;
     }
 
     if (query.includes('query PullRequestRollupMetadata(')) {
@@ -589,8 +592,8 @@ function makeLegacyExecStub(expected) {
         }),
       };
     }
-    if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/statuses?`)) {
-      return { stdout: JSON.stringify([]) };
+    if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/status?`)) {
+      return { stdout: JSON.stringify({ statuses: [] }) };
     }
     throw new Error(`Unexpected gh invocation: ${joined}`);
   }
@@ -1003,10 +1006,11 @@ test('pagination cursor handling returns all comments, reviews, and checks witho
   const expected = makeLargeExpectedRollup();
   const { fetchPullRequestRollup } = await importGithubApiFresh();
   const { calls, execFileImpl } = makeGraphqlExecStub(expected, { pagination: true });
+  const telemetry = makeTelemetrySink();
 
   const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
     execFileImpl,
-    recordApiCallImpl: () => {},
+    recordApiCallImpl: telemetry.recordApiCallImpl,
   });
 
   assert.equal(result.comments.length, 150);
@@ -1023,6 +1027,10 @@ test('pagination cursor handling returns all comments, reviews, and checks witho
       return 'unknown';
     }),
     ['rollup', 'comments', 'reviews', 'checks'],
+  );
+  assert.deepEqual(
+    telemetry.events.map((entry) => entry.category),
+    ['graphql_pr_rollup', 'graphql_pr_rollup', 'graphql_pr_rollup', 'graphql_pr_rollup'],
   );
 });
 
@@ -1134,14 +1142,80 @@ test('structured non-complexity GraphQL errors do not trigger per-list amplifica
   );
 });
 
+test('regex complexity fallback requires an explicit GraphQL error status', async () => {
+  const mod = await importGithubApiFresh();
+  assert.equal(
+    mod.__test__.isGraphqlComplexityError(new Error('Query exceeds complexity limit')),
+    false,
+  );
+
+  const statusError = new Error('Query exceeds complexity limit');
+  statusError.status = 400;
+  assert.equal(
+    mod.__test__.isGraphqlComplexityError(statusError),
+    true,
+  );
+});
+
 test('gh invocations reuse GITHUB_TOKEN as GH_TOKEN when no gh token is set', async () => {
   const mod = await importGithubApiFresh();
-  await withEnv({ GH_TOKEN: undefined, GITHUB_TOKEN: 'github-token-for-watcher' }, async () => {
+  await withEnv({ GH_TOKEN: undefined, GITHUB_TOKEN: 'github-token-for-watcher', ANTHROPIC_API_KEY: 'do-not-forward' }, async () => {
     await mod.__test__.runGraphql(async (_command, _args, options) => {
       assert.equal(options.env.GH_TOKEN, 'github-token-for-watcher');
+      assert.equal(options.env.ANTHROPIC_API_KEY, undefined);
       return { stdout: JSON.stringify({ data: { repository: { pullRequest: {} } } }) };
     }, 'query Empty { rateLimit { cost } }', {});
   });
+});
+
+test('review context helper fetches only PR metadata and comments', async () => {
+  const expected = makeLargeExpectedRollup();
+  const firstComments = expected.comments.slice(0, 100);
+  const secondComments = expected.comments.slice(100);
+  const calls = [];
+  const telemetry = makeTelemetrySink();
+  const mod = await importGithubApiFresh();
+
+  const result = await mod.fetchPullRequestReviewContext(FIXTURE_REPO, FIXTURE_PR, {
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, 'gh');
+      const vars = parseGhArgs(args);
+      const query = String(vars.query || '');
+      assert.match(query, /query PullRequestReviewContext/);
+      assert.doesNotMatch(query, /\breviews\(/);
+      assert.doesNotMatch(query, /\bcontexts\(/);
+      assert.doesNotMatch(query, /\blabels\(/);
+      if (!vars.commentsAfter) {
+        return {
+          stdout: JSON.stringify(buildGraphqlResponse(expected, {
+            comments: firstComments,
+            commentsHasNextPage: true,
+            commentsEndCursor: 'comments-100',
+          })),
+        };
+      }
+      assert.equal(vars.commentsAfter, 'comments-100');
+      return {
+        stdout: JSON.stringify(buildGraphqlResponse(expected, {
+          comments: secondComments,
+        })),
+      };
+    },
+  });
+
+  assert.equal(result.body, expected.body);
+  assert.equal(result.baseRefName, expected.baseRefName);
+  assert.equal(result.headRefOid, expected.headRefOid);
+  assert.equal(result.comments.length, expected.comments.length);
+  assert.equal(result.reviews.length, 0);
+  assert.equal(result.checks.length, 0);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    telemetry.events.map((entry) => entry.category),
+    ['pr_review_context', 'pr_review_context'],
+  );
 });
 
 test('connection pagination fails closed when GitHub repeats the cursor', async () => {
@@ -1174,6 +1248,23 @@ test('connection pagination fails closed when GitHub repeats the cursor', async 
       connectionName: 'comments',
     }),
     /cursor did not advance/,
+  );
+});
+
+test('GraphQL payload errors distinguish missing repository from missing pull request', async () => {
+  const mod = await importGithubApiFresh();
+
+  assert.throws(
+    () => mod.__test__.extractGraphqlPr({ data: { repository: null }, errors: [{ type: 'NOT_FOUND' }] }),
+    (err) => err.code === 'graphql_repository_missing'
+      && /repository payload missing/.test(err.message)
+      && /NOT_FOUND/.test(err.message),
+  );
+
+  assert.throws(
+    () => mod.__test__.extractGraphqlPr({ data: { repository: { pullRequest: null } } }),
+    (err) => err.code === 'graphql_pull_request_missing'
+      && /pullRequest payload missing/.test(err.message),
   );
 });
 
@@ -1217,7 +1308,7 @@ test('GraphQL rollup paginates labels beyond the first page', async () => {
   assert.equal(calls.length, 2);
 });
 
-test('legacy fallback paginates commit statuses instead of reading only the combined status page', async () => {
+test('legacy fallback reads combined commit statuses', async () => {
   const mod = await importGithubApiFresh();
   const statuses = Array.from({ length: 150 }, (_, index) => ({
     context: `status-${index + 1}`,
@@ -1233,18 +1324,69 @@ test('legacy fallback paginates commit statuses instead of reading only the comb
     if (joined.includes('/check-runs?')) {
       return { stdout: JSON.stringify({ check_runs: [] }) };
     }
-    if (joined.includes('/statuses?') && /[?&]page=1(?:\D|$)/.test(joined)) {
-      return { stdout: JSON.stringify(statuses.slice(0, 100)) };
+    if (joined.includes('/status?') && /[?&]page=1(?:\D|$)/.test(joined)) {
+      return { stdout: JSON.stringify({ statuses: statuses.slice(0, 100) }) };
     }
-    if (joined.includes('/statuses?') && /[?&]page=2(?:\D|$)/.test(joined)) {
-      return { stdout: JSON.stringify(statuses.slice(100)) };
+    if (joined.includes('/status?') && /[?&]page=2(?:\D|$)/.test(joined)) {
+      return { stdout: JSON.stringify({ statuses: statuses.slice(100) }) };
     }
     throw new Error(`unexpected call ${joined}`);
   }, FIXTURE_REPO, 'abc123def456');
 
   assert.equal(result.length, 150);
   assert.equal(result.at(-1).name, 'status-150');
-  assert.equal(calls.filter(({ args }) => args.join(' ').includes('/statuses?')).length, 2);
+  assert.equal(calls.filter(({ args }) => args.join(' ').includes('/status?')).length, 2);
+});
+
+test('legacy fallback dedupes checks and follows check-run total_count past short pages', async () => {
+  const mod = await importGithubApiFresh();
+  const calls = [];
+
+  const result = await mod.__test__.fetchLegacyChecks(async (command, args) => {
+    calls.push({ command, args: [...args] });
+    assert.equal(command, 'gh');
+    const joined = args.join(' ');
+    if (joined.includes('/check-runs?') && /[?&]page=1(?:\D|$)/.test(joined)) {
+      return {
+        stdout: JSON.stringify({
+          total_count: 3,
+          check_runs: [
+            { name: 'ci', conclusion: 'success', completed_at: '2026-06-06T11:00:00.000Z' },
+            { name: 'lint', conclusion: 'success', completed_at: '2026-06-06T11:01:00.000Z' },
+          ],
+        }),
+      };
+    }
+    if (joined.includes('/check-runs?') && /[?&]page=2(?:\D|$)/.test(joined)) {
+      return {
+        stdout: JSON.stringify({
+          total_count: 3,
+          check_runs: [
+            { name: 'deploy', conclusion: 'success', completed_at: '2026-06-06T11:02:00.000Z' },
+          ],
+        }),
+      };
+    }
+    if (joined.includes('/status?')) {
+      return {
+        stdout: JSON.stringify({
+          statuses: [
+            { context: 'ci', state: 'failure', updated_at: '2026-06-06T11:03:00.000Z' },
+            { context: 'legacy-only', state: 'success', updated_at: '2026-06-06T11:04:00.000Z' },
+          ],
+        }),
+      };
+    }
+    throw new Error(`unexpected call ${joined}`);
+  }, FIXTURE_REPO, 'abc123def456');
+
+  assert.deepEqual(result.map((check) => [check.name, check.conclusion]), [
+    ['ci', 'success'],
+    ['lint', 'success'],
+    ['deploy', 'success'],
+    ['legacy-only', 'success'],
+  ]);
+  assert.equal(calls.filter(({ args }) => args.join(' ').includes('/check-runs?')).length, 2);
 });
 
 test('legacy fallback propagates commit status pagination failures', async () => {
@@ -1258,7 +1400,7 @@ test('legacy fallback propagates commit status pagination failures', async () =>
       if (joined.includes('/check-runs?')) {
         return { stdout: JSON.stringify({ check_runs: [] }) };
       }
-      if (joined.includes('/statuses?')) {
+      if (joined.includes('/status?')) {
         throw statusError;
       }
       throw new Error(`unexpected call ${joined}`);
@@ -1283,6 +1425,50 @@ test('GraphQL rollup kill-switch is read at call time', async () => {
   } finally {
     delete process.env.GHO_DISABLE_GRAPHQL_ROLLUP;
   }
+});
+
+test('head/state helper honors the GraphQL kill-switch with REST fallback', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  const calls = [];
+
+  await withEnv({ GHO_DISABLE_GRAPHQL_ROLLUP: '1' }, async () => {
+    const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+      recordApiCallImpl: telemetry.recordApiCallImpl,
+      execFileImpl: async (command, args) => {
+        calls.push({ command, args: [...args] });
+        assert.equal(command, 'gh');
+        const joined = args.join(' ');
+        assert.doesNotMatch(joined, /graphql/);
+        if (joined === `api repos/${FIXTURE_REPO}/pulls/${FIXTURE_PR}`) {
+          return {
+            stdout: JSON.stringify({
+              state: 'open',
+              merged_at: expected.mergedAt,
+              closed_at: expected.closedAt,
+              head: { sha: expected.headRefOid },
+            }),
+          };
+        }
+        if (joined.startsWith(`api repos/${FIXTURE_REPO}/issues/${FIXTURE_PR}/labels?`)) {
+          return { stdout: JSON.stringify(expected.labels) };
+        }
+        throw new Error(`unexpected call ${joined}`);
+      },
+    });
+
+    assert.deepEqual(result, {
+      state: expected.state,
+      mergedAt: expected.mergedAt,
+      closedAt: expected.closedAt,
+      headRefOid: expected.headRefOid,
+      labels: expected.labels,
+    });
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_head_state']);
 });
 
 test('head/state helper uses the lightweight GraphQL query and telemetry category', async () => {
@@ -1317,9 +1503,10 @@ test('head/state helper paginates labels beyond the first page', async () => {
   const secondLabels = expected.labels.slice(100);
   const calls = [];
   const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
 
   const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
-    recordApiCallImpl: () => {},
+    recordApiCallImpl: telemetry.recordApiCallImpl,
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       assert.equal(command, 'gh');
@@ -1347,6 +1534,10 @@ test('head/state helper paginates labels beyond the first page', async () => {
   assert.equal(result.labels.length, 125);
   assert.equal(result.labels.at(-1).name, 'live-label-125');
   assert.equal(calls.length, 2);
+  assert.deepEqual(
+    telemetry.events.map((entry) => entry.category),
+    ['pr_head_state', 'pr_head_state'],
+  );
 });
 
 test('watcher tick downstream output is unchanged when PR fetches come from the roll-up helper', () => {

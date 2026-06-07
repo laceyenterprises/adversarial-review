@@ -304,6 +304,52 @@ query PullRequestHeadState(
 }
 `;
 
+const GRAPHQL_REVIEW_CONTEXT_QUERY = `
+query PullRequestReviewContext(
+  $owner: String!
+  $repo: String!
+  $prNumber: Int!
+  $commentsFirst: Int!
+  $commentsAfter: String
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      id
+      number
+      title
+      body
+      state
+      mergedAt
+      closedAt
+      createdAt
+      updatedAt
+      headRefName
+      baseRefName
+      headRefOid
+      mergeable
+      mergeStateStatus
+      author {
+        login
+      }
+      comments(first: $commentsFirst, after: $commentsAfter) {
+        nodes {
+          id
+          author {
+            login
+          }
+          body
+          createdAt
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
+`;
+
 function splitRepo(repo) {
   const match = /^([^/]+)\/([^/]+)$/.exec(String(repo || '').trim());
   if (!match) {
@@ -399,8 +445,34 @@ function normalizeRollup(pr, {
   };
 }
 
+function copyEnvValue(source, target, key) {
+  if (source[key] !== undefined) target[key] = source[key];
+}
+
 function buildGhEnv(env = process.env) {
-  const ghEnv = { ...env };
+  const ghEnv = {};
+  for (const key of [
+    'PATH',
+    'HOME',
+    'USER',
+    'LOGNAME',
+    'TMPDIR',
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
+    'GH_CONFIG_DIR',
+    'GH_HOST',
+    'GITHUB_HOST',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'no_proxy',
+    'SSL_CERT_FILE',
+    'SSL_CERT_DIR',
+  ]) {
+    copyEnvValue(env, ghEnv, key);
+  }
   if (!ghEnv.GH_TOKEN && ghEnv.GITHUB_TOKEN) {
     ghEnv.GH_TOKEN = ghEnv.GITHUB_TOKEN;
   }
@@ -433,6 +505,36 @@ async function runGraphql(execFileImpl, query, variables) {
   return execGhJson(execFileImpl, args);
 }
 
+async function runGraphqlWithTelemetry(execFileImpl, query, variables, {
+  repo,
+  prNumber,
+  category,
+  recordApiCallImpl,
+} = {}) {
+  const startedAt = Date.now();
+  try {
+    const result = await runGraphql(execFileImpl, query, variables);
+    recordApiCallImpl?.({
+      category,
+      repo,
+      prNumber,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (err) {
+    recordApiCallImpl?.({
+      category,
+      repo,
+      prNumber,
+      status: apiStatusFromError(err),
+      durationMs: Date.now() - startedAt,
+    });
+    err.graphqlTelemetryRecorded = true;
+    throw err;
+  }
+}
+
 async function paginateRest(execFileImpl, basePath, mapPage) {
   const rows = [];
   for (let page = 1; ; page += 1) {
@@ -442,6 +544,25 @@ async function paginateRest(execFileImpl, basePath, mapPage) {
     if (pageRows.length === 0) break;
     rows.push(...pageRows);
     if (pageRows.length < PAGE_SIZE) break;
+  }
+  return rows;
+}
+
+async function paginateRestWithTotalCount(execFileImpl, basePath, mapPage, totalCountFromPage) {
+  const rows = [];
+  let expectedTotal = null;
+  for (let page = 1; ; page += 1) {
+    const separator = basePath.includes('?') ? '&' : '?';
+    const data = await execGhJson(execFileImpl, ['api', `${basePath}${separator}per_page=${PAGE_SIZE}&page=${page}`]);
+    const pageRows = mapPage(data);
+    const pageTotal = Number(totalCountFromPage(data));
+    if (Number.isFinite(pageTotal) && pageTotal >= 0) {
+      expectedTotal = pageTotal;
+    }
+    if (pageRows.length === 0) break;
+    rows.push(...pageRows);
+    if (expectedTotal !== null && rows.length >= expectedTotal) break;
+    if (expectedTotal === null && pageRows.length < PAGE_SIZE) break;
   }
   return rows;
 }
@@ -487,7 +608,7 @@ async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
 
 async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
   if (!headRefOid) return [];
-  const checkRuns = await paginateRest(
+  const checkRuns = await paginateRestWithTotalCount(
     execFileImpl,
     `repos/${repo}/commits/${headRefOid}/check-runs`,
     (data) => (Array.isArray(data?.check_runs) ? data.check_runs : []).map((checkRun) => ({
@@ -495,17 +616,44 @@ async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
       conclusion: checkRun?.conclusion || checkRun?.status || null,
       completedAt: checkRun?.completed_at || null,
     })),
+    (data) => data?.total_count,
   );
   const statuses = await paginateRest(
     execFileImpl,
-    `repos/${repo}/commits/${headRefOid}/statuses`,
-    (data) => (Array.isArray(data) ? data : []).map((status) => ({
+    `repos/${repo}/commits/${headRefOid}/status`,
+    (data) => (Array.isArray(data?.statuses) ? data.statuses : []).map((status) => ({
       name: String(status?.context || '').trim() || null,
       conclusion: status?.state || null,
       completedAt: status?.updated_at || status?.created_at || null,
     })),
   );
-  return [...checkRuns, ...statuses];
+  const byName = new Map();
+  for (const check of checkRuns) {
+    if (check?.name) byName.set(check.name, check);
+  }
+  for (const status of statuses) {
+    if (status?.name && !byName.has(status.name)) byName.set(status.name, status);
+  }
+  return [...byName.values()];
+}
+
+async function fetchLegacyHeadAndState(execFileImpl, repo, prNumber) {
+  const pr = await execGhJson(execFileImpl, [
+    'api',
+    `repos/${repo}/pulls/${prNumber}`,
+  ]);
+  const labels = await paginateRest(
+    execFileImpl,
+    `repos/${repo}/issues/${prNumber}/labels`,
+    (data) => normalizeLabels(Array.isArray(data) ? data : []),
+  );
+  return {
+    state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
+    mergedAt: pr?.merged_at || null,
+    closedAt: pr?.closed_at || null,
+    headRefOid: pr?.head?.sha || null,
+    labels,
+  };
 }
 
 async function fetchLegacyWithTelemetry(repo, prNumber, {
@@ -544,12 +692,67 @@ async function fetchLegacyWithTelemetry(repo, prNumber, {
   return normalizeRollup(pr, { comments, reviews, checks });
 }
 
-function extractGraphqlPr(payload) {
-  const pr = payload?.data?.repository?.pullRequest || payload?.repository?.pullRequest || null;
-  if (!pr) {
-    throw new Error('GitHub GraphQL pullRequest payload missing');
+async function fetchLegacyReviewContextWithTelemetry(repo, prNumber, {
+  execFileImpl,
+  recordApiCallImpl,
+} = {}) {
+  async function withLegacyTelemetry(category, action) {
+    const startedAt = Date.now();
+    try {
+      const result = await action();
+      recordApiCallImpl({
+        category,
+        repo,
+        prNumber,
+        status: 200,
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (err) {
+      recordApiCallImpl({
+        category,
+        repo,
+        prNumber,
+        status: apiStatusFromError(err),
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
   }
-  return pr;
+
+  const pr = await withLegacyTelemetry('pr_view', () => fetchLegacyPr(execFileImpl, repo, prNumber));
+  const comments = await withLegacyTelemetry('comments_list', () => fetchLegacyComments(execFileImpl, repo, prNumber));
+  return normalizeRollup(pr, { comments });
+}
+
+function describeGraphqlErrorTypes(payload) {
+  const errors = Array.isArray(payload?.errors) ? payload.errors : [];
+  const types = errors
+    .map((entry) => entry?.type || entry?.extensions?.type || entry?.extensions?.code || entry?.code)
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  return types.length ? `; error types: ${[...new Set(types)].join(', ')}` : '';
+}
+
+function extractGraphqlPr(payload) {
+  const repository = payload?.data?.repository || payload?.repository || null;
+  const suffix = describeGraphqlErrorTypes(payload);
+  if (!payload || (!payload.data && !payload.repository)) {
+    const err = new Error(`GitHub GraphQL payload missing${suffix}`);
+    err.code = 'graphql_payload_missing';
+    throw err;
+  }
+  if (!repository) {
+    const err = new Error(`GitHub GraphQL repository payload missing${suffix}`);
+    err.code = 'graphql_repository_missing';
+    throw err;
+  }
+  if (!repository.pullRequest) {
+    const err = new Error(`GitHub GraphQL pullRequest payload missing${suffix}`);
+    err.code = 'graphql_pull_request_missing';
+    throw err;
+  }
+  return repository.pullRequest;
 }
 
 function extractGraphqlRepository(payload) {
@@ -597,6 +800,9 @@ function tryParseGraphqlErrorPayload(err) {
     err?.cause?.stderr,
   ];
   for (const candidate of candidates) {
+    if (String(candidate || '').trim() && !tryParseJson(candidate)) {
+      err.graphqlErrorPayloadParseFailed = true;
+    }
     const parsed = tryParseJson(candidate);
     if (parsed?.errors) return parsed;
   }
@@ -611,6 +817,19 @@ function isStructuredComplexityType(value) {
 function isRateLimitErrorType(value) {
   const type = String(value || '').trim().toUpperCase();
   return type === 'RATE_LIMITED' || type === 'RESOURCE_NOT_ACCESSIBLE';
+}
+
+let warnedRegexComplexityFallback = false;
+
+function graphqlStatusFromError(err) {
+  const status = Number(err?.status ?? err?.response?.status);
+  return Number.isFinite(status) ? Math.trunc(status) : null;
+}
+
+function warnRegexComplexityFallbackOnce() {
+  if (warnedRegexComplexityFallback) return;
+  warnedRegexComplexityFallback = true;
+  console.warn('[github-api] WARN: falling back to GraphQL complexity regex detection because gh did not return structured GraphQL errors');
 }
 
 function isGraphqlComplexityError(err) {
@@ -631,7 +850,15 @@ function isGraphqlComplexityError(err) {
   }
   const message = String(err?.message || '');
   if (/\brate[-_ ]?limit(?:ed)?\b/i.test(message)) return false;
-  return GRAPHQL_COMPLEXITY_PATTERN.test(message);
+  const status = graphqlStatusFromError(err);
+  const explicitGraphqlFailure = status !== null && status >= 400 && status <= 599;
+  if (explicitGraphqlFailure && GRAPHQL_COMPLEXITY_PATTERN.test(message)) {
+    if (err?.graphqlErrorPayloadParseFailed || err?.stderr) {
+      warnRegexComplexityFallbackOnce();
+    }
+    return true;
+  }
+  return false;
 }
 
 function isGraphqlRollupDisabled(env = process.env) {
@@ -657,6 +884,8 @@ async function fetchGraphqlConnectionPages(repo, prNumber, {
   normalize,
   connectionName = firstVariable,
   extraVariables = {},
+  recordApiCallImpl,
+  telemetryCategory = 'graphql_pr_rollup',
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
   const items = [];
@@ -668,13 +897,18 @@ async function fetchGraphqlConnectionPages(repo, prNumber, {
     if (page > MAX_GRAPHQL_CONNECTION_PAGES) {
       throw new Error(`GraphQL ${connectionName} pagination exceeded ${MAX_GRAPHQL_CONNECTION_PAGES} pages`);
     }
-    const payload = await runGraphql(execFileImpl, query, {
+    const payload = await runGraphqlWithTelemetry(execFileImpl, query, {
       owner,
       repo: repoName,
       prNumber,
       ...extraVariables,
       [firstVariable]: PAGE_SIZE,
       [afterVariable]: after,
+    }, {
+      repo,
+      prNumber,
+      category: telemetryCategory,
+      recordApiCallImpl,
     });
     const pr = payload?.data?.repository?.pullRequest || payload?.repository?.pullRequest || null;
     const connection = extractConnection(pr, payload);
@@ -692,6 +926,8 @@ async function fetchGraphqlConnectionPages(repo, prNumber, {
 async function fetchGraphqlLabelPages(repo, prNumber, {
   execFileImpl,
   startAfter = null,
+  recordApiCallImpl,
+  telemetryCategory = 'graphql_pr_rollup',
 } = {}) {
   return fetchGraphqlConnectionPages(repo, prNumber, {
     execFileImpl,
@@ -702,12 +938,16 @@ async function fetchGraphqlLabelPages(repo, prNumber, {
     extractConnection: extractLabelsConnection,
     normalize: normalizeLabel,
     connectionName: 'labels',
+    recordApiCallImpl,
+    telemetryCategory,
   });
 }
 
 async function fetchGraphqlCheckPages(repo, prNumber, headRefOid, {
   execFileImpl,
   startAfter = null,
+  recordApiCallImpl,
+  telemetryCategory = 'graphql_pr_rollup',
 } = {}) {
   if (!headRefOid) return [];
   return fetchGraphqlConnectionPages(repo, prNumber, {
@@ -720,17 +960,20 @@ async function fetchGraphqlCheckPages(repo, prNumber, headRefOid, {
     normalize: normalizeCheck,
     connectionName: 'checks',
     extraVariables: { headRefOid },
+    recordApiCallImpl,
+    telemetryCategory,
   });
 }
 
 async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
   execFileImpl,
+  recordApiCallImpl,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
   const comments = [];
   const reviews = [];
   const checks = [];
-  const payload = await runGraphql(execFileImpl, GRAPHQL_ROLLUP_QUERY, {
+  const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_ROLLUP_QUERY, {
     owner,
     repo: repoName,
     prNumber,
@@ -740,6 +983,11 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
     reviewsAfter: null,
     checksFirst: PAGE_SIZE,
     checksAfter: null,
+  }, {
+    repo,
+    prNumber,
+    category: 'graphql_pr_rollup',
+    recordApiCallImpl,
   });
   const pr = extractGraphqlPr(payload);
   const labels = normalizeLabels(pr?.labels);
@@ -752,6 +1000,8 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
     labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
       execFileImpl,
       startAfter: pr?.labels?.pageInfo?.endCursor || null,
+      recordApiCallImpl,
+      telemetryCategory: 'graphql_pr_rollup',
     }));
   }
   if (pr?.comments?.pageInfo?.hasNextPage) {
@@ -764,6 +1014,8 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
       extractConnection: (value) => value?.comments,
       normalize: normalizeComment,
       connectionName: 'comments',
+      recordApiCallImpl,
+      telemetryCategory: 'graphql_pr_rollup',
     }));
   }
   if (pr?.reviews?.pageInfo?.hasNextPage) {
@@ -776,12 +1028,16 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
       extractConnection: (value) => value?.reviews,
       normalize: normalizeReview,
       connectionName: 'reviews',
+      recordApiCallImpl,
+      telemetryCategory: 'graphql_pr_rollup',
     }));
   }
   if (extractChecksConnection(pr)?.pageInfo?.hasNextPage) {
     checks.push(...await fetchGraphqlCheckPages(repo, prNumber, pr?.headRefOid || null, {
       execFileImpl,
       startAfter: extractChecksConnection(pr)?.pageInfo?.endCursor || null,
+      recordApiCallImpl,
+      telemetryCategory: 'graphql_pr_rollup',
     }));
   }
 
@@ -790,12 +1046,18 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
 
 async function fetchGraphqlRollupPerList(repo, prNumber, {
   execFileImpl,
+  recordApiCallImpl,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
-  const initial = await runGraphql(execFileImpl, GRAPHQL_PR_METADATA_QUERY, {
+  const initial = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_PR_METADATA_QUERY, {
     owner,
     repo: repoName,
     prNumber,
+  }, {
+    repo,
+    prNumber,
+    category: 'graphql_pr_rollup',
+    recordApiCallImpl,
   });
   const pr = extractGraphqlPr(initial);
   const labels = normalizeLabels(pr?.labels);
@@ -803,6 +1065,8 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
     labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
       execFileImpl,
       startAfter: pr?.labels?.pageInfo?.endCursor || null,
+      recordApiCallImpl,
+      telemetryCategory: 'graphql_pr_rollup',
     }));
   }
   const comments = await fetchGraphqlConnectionPages(repo, prNumber, {
@@ -813,6 +1077,8 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
     extractConnection: (value) => value?.comments,
     normalize: normalizeComment,
     connectionName: 'comments',
+    recordApiCallImpl,
+    telemetryCategory: 'graphql_pr_rollup',
   });
   const reviews = await fetchGraphqlConnectionPages(repo, prNumber, {
     execFileImpl,
@@ -822,12 +1088,61 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
     extractConnection: (value) => value?.reviews,
     normalize: normalizeReview,
     connectionName: 'reviews',
+    recordApiCallImpl,
+    telemetryCategory: 'graphql_pr_rollup',
   });
   const checks = await fetchGraphqlCheckPages(repo, prNumber, pr?.headRefOid || null, {
     execFileImpl,
+    recordApiCallImpl,
+    telemetryCategory: 'graphql_pr_rollup',
   });
 
   return normalizeRollup(pr, { labels, comments, reviews, checks });
+}
+
+async function fetchGraphqlReviewContext(repo, prNumber, {
+  execFileImpl,
+  recordApiCallImpl,
+} = {}) {
+  const { owner, repo: repoName } = splitRepo(repo);
+  const comments = [];
+  let after = null;
+  let hasNextPage = true;
+  let page = 0;
+  let pr = null;
+  while (hasNextPage) {
+    page += 1;
+    if (page > MAX_GRAPHQL_CONNECTION_PAGES) {
+      throw new Error(`GraphQL review-context comments pagination exceeded ${MAX_GRAPHQL_CONNECTION_PAGES} pages`);
+    }
+    const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_REVIEW_CONTEXT_QUERY, {
+      owner,
+      repo: repoName,
+      prNumber,
+      commentsFirst: PAGE_SIZE,
+      commentsAfter: after,
+    }, {
+      repo,
+      prNumber,
+      category: 'pr_review_context',
+      recordApiCallImpl,
+    });
+    pr = extractGraphqlPr(payload);
+    const connection = pr?.comments || null;
+    appendGraphqlPage(comments, connection?.nodes, normalizeComment);
+    hasNextPage = Boolean(connection?.pageInfo?.hasNextPage);
+    const nextAfter = connection?.pageInfo?.endCursor || null;
+    if (hasNextPage) {
+      assertGraphqlCursorProgress({
+        connectionName: 'review-context comments',
+        page,
+        after,
+        nextAfter,
+      });
+      after = nextAfter;
+    }
+  }
+  return normalizeRollup(pr, { comments });
 }
 
 async function fetchPullRequestHeadAndState(repo, prNumber, {
@@ -835,46 +1150,57 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
   recordApiCallImpl = recordApiCall,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
-  const startedAt = Date.now();
-  try {
-    const payload = await runGraphql(execFileImpl, GRAPHQL_PR_HEAD_STATE_QUERY, {
+  if (isGraphqlRollupDisabled()) {
+    const startedAt = Date.now();
+    try {
+      const result = await fetchLegacyHeadAndState(execFileImpl, repo, prNumber);
+      recordApiCallImpl({
+        category: 'pr_head_state',
+        repo,
+        prNumber,
+        status: 200,
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (err) {
+      recordApiCallImpl({
+        category: 'pr_head_state',
+        repo,
+        prNumber,
+        status: apiStatusFromError(err),
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
+  }
+
+  const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_PR_HEAD_STATE_QUERY, {
       owner,
       repo: repoName,
       prNumber,
-    });
-    const pr = extractGraphqlPr(payload);
-    const labels = normalizeLabels(pr?.labels);
-    if (pr?.labels?.pageInfo?.hasNextPage) {
-      labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
-        execFileImpl,
-        startAfter: pr?.labels?.pageInfo?.endCursor || null,
-      }));
-    }
-    const result = {
-      state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
-      mergedAt: pr?.mergedAt || null,
-      closedAt: pr?.closedAt || null,
-      headRefOid: pr?.headRefOid || null,
-      labels,
-    };
-    recordApiCallImpl({
-      category: 'pr_head_state',
+    }, {
       repo,
       prNumber,
-      status: 200,
-      durationMs: Date.now() - startedAt,
-    });
-    return result;
-  } catch (err) {
-    recordApiCallImpl({
       category: 'pr_head_state',
-      repo,
-      prNumber,
-      status: apiStatusFromError(err),
-      durationMs: Date.now() - startedAt,
+      recordApiCallImpl,
     });
-    throw err;
+  const pr = extractGraphqlPr(payload);
+  const labels = normalizeLabels(pr?.labels);
+  if (pr?.labels?.pageInfo?.hasNextPage) {
+    labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
+      execFileImpl,
+      startAfter: pr?.labels?.pageInfo?.endCursor || null,
+      recordApiCallImpl,
+      telemetryCategory: 'pr_head_state',
+    }));
   }
+  return {
+    state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
+    mergedAt: pr?.mergedAt || null,
+    closedAt: pr?.closedAt || null,
+    headRefOid: pr?.headRefOid || null,
+    labels,
+  };
 }
 
 async function fetchPullRequestRollup(repo, prNumber, {
@@ -889,21 +1215,14 @@ async function fetchPullRequestRollup(repo, prNumber, {
   try {
     let result;
     try {
-      result = await fetchGraphqlRollupMultiplexed(repo, prNumber, { execFileImpl });
+      result = await fetchGraphqlRollupMultiplexed(repo, prNumber, { execFileImpl, recordApiCallImpl });
     } catch (err) {
       if (!isGraphqlComplexityError(err)) throw err;
-      result = await fetchGraphqlRollupPerList(repo, prNumber, { execFileImpl });
+      result = await fetchGraphqlRollupPerList(repo, prNumber, { execFileImpl, recordApiCallImpl });
     }
-    recordApiCallImpl({
-      category: 'graphql_pr_rollup',
-      repo,
-      prNumber,
-      status: 200,
-      durationMs: Date.now() - startedAt,
-    });
     return result;
   } catch (err) {
-    recordApiCallImpl({
+    if (!err?.graphqlTelemetryRecorded) recordApiCallImpl({
       category: 'graphql_pr_rollup',
       repo,
       prNumber,
@@ -914,15 +1233,29 @@ async function fetchPullRequestRollup(repo, prNumber, {
   }
 }
 
+async function fetchPullRequestReviewContext(repo, prNumber, {
+  execFileImpl = execFileAsync,
+  recordApiCallImpl = recordApiCall,
+} = {}) {
+  if (isGraphqlRollupDisabled()) {
+    return fetchLegacyReviewContextWithTelemetry(repo, prNumber, { execFileImpl, recordApiCallImpl });
+  }
+  return fetchGraphqlReviewContext(repo, prNumber, { execFileImpl, recordApiCallImpl });
+}
+
 const __test__ = {
   buildGhEnv,
   extractChecksConnection,
+  extractGraphqlPr,
   fetchGraphqlConnectionPages,
+  fetchGraphqlReviewContext,
   fetchGraphqlRollupMultiplexed,
   fetchGraphqlRollupPerList,
   fetchLegacyChecks,
   fetchLegacyComments,
+  fetchLegacyHeadAndState,
   fetchLegacyPr,
+  fetchLegacyReviewContextWithTelemetry,
   fetchLegacyReviews,
   normalizeCheck,
   normalizeComment,
@@ -932,10 +1265,12 @@ const __test__ = {
   splitRepo,
   isGraphqlComplexityError,
   isGraphqlRollupDisabled,
+  runGraphqlWithTelemetry,
 };
 
 export {
   __test__,
   fetchPullRequestHeadAndState,
+  fetchPullRequestReviewContext,
   fetchPullRequestRollup,
 };

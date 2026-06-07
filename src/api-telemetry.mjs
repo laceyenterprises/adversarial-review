@@ -23,6 +23,7 @@ const CATEGORY_ORDER = Object.freeze([
   'conditional_304',
   'diff_fetch',
   'pr_view',
+  'pr_review_context',
   'graphql_pr_rollup',
   'pr_head_state',
   'comments_list',

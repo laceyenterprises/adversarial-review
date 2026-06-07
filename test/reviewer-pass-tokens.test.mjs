@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import Database from 'better-sqlite3';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,6 +8,11 @@ import {
   main as backfillReviewerPassesMain,
   parseArgs as parseBackfillReviewerPassArgs,
 } from '../scripts/backfill-reviewer-passes.mjs';
+import {
+  createEmptySqliteDb,
+  createSessionLedgerDb,
+  reviewerPassTokenReaderFixtures,
+} from './helpers/session-ledger-fixtures.mjs';
 import { main as tokensMain } from '../src/tokens-cli.mjs';
 import {
   backfillReviewerPasses,
@@ -34,146 +38,6 @@ function countReviewerPasses(rootDir) {
   } finally {
     db.close();
   }
-}
-
-function createLedgerDb(dbPath) {
-  mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.exec(`
-    CREATE TABLE runtime_sessions (
-      session_id TEXT PRIMARY KEY,
-      adapter_session_key TEXT,
-      total_input_tokens INTEGER,
-      total_output_tokens INTEGER,
-      total_cache_read_tokens INTEGER,
-      total_cache_write_tokens INTEGER,
-      total_cost_usd REAL,
-      source_path TEXT,
-      started_at TEXT,
-      ended_at TEXT
-    );
-    CREATE TABLE worker_runs (
-      run_id TEXT PRIMARY KEY,
-      launch_request_id TEXT,
-      session_id TEXT,
-      token_usage_input INTEGER,
-      token_usage_output INTEGER,
-      token_usage_cost_usd REAL,
-      token_usage_source TEXT,
-      started_at TEXT,
-      ended_at TEXT,
-      updated_at TEXT
-    );
-  `);
-  db.prepare(
-    `INSERT INTO runtime_sessions (
-       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
-       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-       source_path, started_at, ended_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    'rs_1',
-    'session-1',
-    120,
-    45,
-    11,
-    7,
-    0.35,
-    '/tmp/review-workspace',
-    '2026-05-18T01:00:00.000Z',
-    '2026-05-18T01:02:00.000Z'
-  );
-  db.prepare(
-    `INSERT INTO runtime_sessions (
-       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
-       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-       source_path, started_at, ended_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    'rs_2',
-    'session-2',
-    999,
-    333,
-    44,
-    22,
-    1.11,
-    '/tmp/review-workspace',
-    '2026-05-18T03:00:00.000Z',
-    '2026-05-18T03:05:00.000Z'
-  );
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, token_usage_input,
-       token_usage_output, token_usage_cost_usd, token_usage_source,
-       started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    'wr_1',
-    'lrq_1',
-    'rs_1',
-    120,
-    45,
-    0.35,
-    'session-ledger',
-    '2026-05-18T01:00:00.000Z',
-    '2026-05-18T01:02:00.000Z',
-    '2026-05-18T01:02:00.000Z'
-  );
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, token_usage_input,
-       token_usage_output, token_usage_cost_usd, token_usage_source,
-       started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    'wr_2',
-    'lrq_2',
-    'rs_2',
-    999,
-    333,
-    1.11,
-    'session-ledger',
-    '2026-05-18T03:00:00.000Z',
-    '2026-05-18T03:05:00.000Z',
-    '2026-05-18T03:05:00.000Z'
-  );
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, token_usage_input,
-       token_usage_output, token_usage_cost_usd, token_usage_source,
-       started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    'wr_3',
-    'shared-lrq',
-    'rs_2',
-    999,
-    333,
-    1.11,
-    'session-ledger',
-    '2026-05-18T03:00:00.000Z',
-    '2026-05-18T03:05:00.000Z',
-    '2026-05-18T03:05:00.000Z'
-  );
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, token_usage_input,
-       token_usage_output, token_usage_cost_usd, token_usage_source,
-       started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    'wr_1_shared',
-    'shared-lrq-old',
-    'rs_1',
-    120,
-    45,
-    0.35,
-    'session-ledger',
-    '2026-05-18T01:00:00.000Z',
-    '2026-05-18T01:02:00.000Z',
-    '2026-05-18T01:02:00.000Z'
-  );
-  db.close();
 }
 
 function makeCaptureStream() {
@@ -270,49 +134,48 @@ test('reviewer pass writer inserts running row, completes it, and unique key pre
   assert.equal(row.reviewer_model, 'claude-sonnet');
 });
 
-test('worker-run rollup join reads token columns and cache totals from runtime session', () => {
+test('worker-run and reviewer-session readers accept ledger target object, URI, and --ledger-db alias', () => {
   const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  for (const fixture of reviewerPassTokenReaderFixtures(rootDir)) {
+    const workerUsage = readWorkerRunTokenUsage({
+      workerRunId: 'wr_1',
+      rootDir,
+      ...fixture.apply(),
+    });
+    const failedWorkerUsage = readWorkerRunTokenUsage({
+      workerRunId: 'wr_2',
+      rootDir,
+      ...fixture.apply(),
+    });
+    const reviewerUsage = readReviewerSessionTokenUsage({
+      adapterSessionKey: 'session-1',
+      workspacePath: '/tmp/review-workspace',
+      startedAt: '2026-05-18T00:59:00.000Z',
+      endedAt: '2026-05-18T01:03:00.000Z',
+      rootDir,
+      ...fixture.apply(),
+    });
 
-  const usage = readWorkerRunTokenUsage({
-    workerRunId: 'wr_1',
-    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
-    rootDir,
-  });
+    assert.equal(workerUsage.workerRunId, 'wr_1', fixture.name);
+    assert.equal(workerUsage.input, 120, fixture.name);
+    assert.equal(workerUsage.output, 45, fixture.name);
+    assert.equal(workerUsage.cacheRead, 11, fixture.name);
+    assert.equal(workerUsage.cacheWrite, 7, fixture.name);
+    assert.equal(workerUsage.costUSD, 0.35, fixture.name);
+    assert.equal(workerUsage.source, 'session-ledger', fixture.name);
+    assert.equal(failedWorkerUsage.workerRunId, 'wr_2', fixture.name);
+    assert.equal(failedWorkerUsage.input, 999, fixture.name);
+    assert.equal(failedWorkerUsage.output, 333, fixture.name);
+    assert.equal(failedWorkerUsage.source, 'session-ledger', fixture.name);
 
-  assert.equal(usage.workerRunId, 'wr_1');
-  assert.equal(usage.input, 120);
-  assert.equal(usage.output, 45);
-  assert.equal(usage.cacheRead, 11);
-  assert.equal(usage.cacheWrite, 7);
-  assert.equal(usage.costUSD, 0.35);
-  assert.equal(usage.source, 'session-ledger');
-});
-
-test('preserved public token readers keep --ledger-db compatibility through the canonical ledger target', () => {
-  const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
-
-  const workerUsage = readWorkerRunTokenUsage({
-    workerRunId: 'wr_1',
-    ledgerDbPath: ledgerDb,
-    rootDir,
-  });
-  const reviewerUsage = readReviewerSessionTokenUsage({
-    adapterSessionKey: 'session-1',
-    workspacePath: '/tmp/review-workspace',
-    startedAt: '2026-05-18T00:59:00.000Z',
-    endedAt: '2026-05-18T01:03:00.000Z',
-    ledgerDbPath: ledgerDb,
-    rootDir,
-  });
-
-  assert.equal(workerUsage.workerRunId, 'wr_1');
-  assert.equal(workerUsage.input, 120);
-  assert.equal(reviewerUsage.adapterSessionKey, 'session-1');
-  assert.equal(reviewerUsage.input, 120);
+    assert.equal(reviewerUsage.adapterSessionKey, 'session-1', fixture.name);
+    assert.equal(reviewerUsage.input, 120, fixture.name);
+    assert.equal(reviewerUsage.output, 45, fixture.name);
+    assert.equal(reviewerUsage.cacheRead, 11, fixture.name);
+    assert.equal(reviewerUsage.cacheWrite, 7, fixture.name);
+    assert.equal(reviewerUsage.costUSD, 0.35, fixture.name);
+    assert.equal(reviewerUsage.source, 'session-ledger', fixture.name);
+  }
 });
 
 test('reviewer session lookup skips empty HQ_ROOT ledger stubs', () => {
@@ -321,8 +184,8 @@ test('reviewer session lookup skips empty HQ_ROOT ledger stubs', () => {
   const stubLedger = path.join(hqRoot, 'session-ledger', 'ledger.db');
   const realLedger = path.join(rootDir, '.agent-os', 'session-ledger', 'ledger.db');
   mkdirSync(path.dirname(stubLedger), { recursive: true });
-  new Database(stubLedger).close();
-  createLedgerDb(realLedger);
+  createEmptySqliteDb(stubLedger);
+  createSessionLedgerDb(realLedger);
 
   const usage = readReviewerSessionTokenUsage({
     adapterSessionKey: 'session-1',
@@ -346,8 +209,8 @@ test('worker-run lookup skips empty HQ_ROOT ledger stubs', () => {
   const stubLedger = path.join(hqRoot, 'session-ledger', 'ledger.db');
   const realLedger = path.join(rootDir, '.agent-os', 'session-ledger', 'ledger.db');
   mkdirSync(path.dirname(stubLedger), { recursive: true });
-  new Database(stubLedger).close();
-  createLedgerDb(realLedger);
+  createEmptySqliteDb(stubLedger);
+  createSessionLedgerDb(realLedger);
 
   const usage = readWorkerRunTokenUsage({
     workerRunId: 'wr_1',
@@ -367,7 +230,7 @@ test('worker-run lookup skips empty HQ_ROOT ledger stubs', () => {
 test('reviewer session lookup prefers adapter session keys over newer workspace siblings', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb);
 
   const usage = readReviewerSessionTokenUsage({
     adapterSessionKey: 'session-1',
@@ -386,7 +249,7 @@ test('reviewer session lookup prefers adapter session keys over newer workspace 
 test('worker-run lookup prefers explicit workerRunId over a newer launch request sibling', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb);
 
   const usage = readWorkerRunTokenUsage({
     workerRunId: 'wr_1_shared',
@@ -473,7 +336,7 @@ test('backfill reviewer-pass CLI warns for deprecated --ledger-db and still read
   const stderr = makeCaptureStream();
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb);
   const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(completedDir, { recursive: true });
   writeFileSync(path.join(completedDir, 'job-cli.json'), JSON.stringify({
@@ -510,7 +373,7 @@ test('backfill reviewer-pass CLI warns for deprecated --ledger-db and still read
 test('backfill is idempotent for historical follow-up workspaces', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb);
   const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(completedDir, { recursive: true });
   writeFileSync(path.join(completedDir, 'job-1.json'), JSON.stringify({
@@ -553,7 +416,7 @@ test('backfill is idempotent for historical follow-up workspaces', () => {
 test('backfill dry-run reports eligible live-shaped jobs without writing reviewer passes', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb);
   const archiveDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped-archived', '2026-05');
   mkdirSync(archiveDir, { recursive: true });
   writeFileSync(path.join(archiveDir, 'job-archive.json'), JSON.stringify({

@@ -475,6 +475,78 @@ test('retention absent block materializes schema defaults', () => {
   }
 });
 
+test('sentinel routing-tier outage detector loads through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      sentinel:
+        detectors:
+          litellm_routing_tier_outage:
+            enabled: false
+            log_path: /tmp/adversarial-watcher.log
+            window_seconds: 180
+            event_count_threshold: 5
+            severity: SEV-1
+            comms_channels:
+              - email
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('sentinel.detectors.litellm_routing_tier_outage.enabled'), false);
+    assert.equal(cfg.get('sentinel.detectors.litellm_routing_tier_outage.log_path'), '/tmp/adversarial-watcher.log');
+    assert.equal(cfg.get('sentinel.detectors.litellm_routing_tier_outage.window_seconds'), 180);
+    assert.equal(cfg.get('sentinel.detectors.litellm_routing_tier_outage.event_count_threshold'), 5);
+    assert.equal(cfg.get('sentinel.detectors.litellm_routing_tier_outage.severity'), 'SEV-1');
+    assert.deepEqual(cfg.get('sentinel.detectors.litellm_routing_tier_outage.comms_channels'), ['email']);
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_ENABLED: 'true',
+        AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_LOG_PATH: '/tmp/env-adversarial-watcher.log',
+        AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_WINDOW_SECONDS: '120',
+        AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_EVENT_COUNT_THRESHOLD: '4',
+        AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_SEVERITY: 'SEV-3',
+        AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_COMMS_CHANNELS: 'email,telegram',
+      },
+    });
+    assert.equal(envCfg.get('sentinel.detectors.litellm_routing_tier_outage.enabled'), true);
+    assert.equal(envCfg.get('sentinel.detectors.litellm_routing_tier_outage.log_path'), '/tmp/env-adversarial-watcher.log');
+    assert.equal(envCfg.get('sentinel.detectors.litellm_routing_tier_outage.window_seconds'), 120);
+    assert.equal(envCfg.get('sentinel.detectors.litellm_routing_tier_outage.event_count_threshold'), 4);
+    assert.equal(envCfg.get('sentinel.detectors.litellm_routing_tier_outage.severity'), 'SEV-3');
+    assert.deepEqual(envCfg.get('sentinel.detectors.litellm_routing_tier_outage.comms_channels'), ['email', 'telegram']);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('top-level sentinel disk headroom loads through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      sentinel:
+        disk_headroom:
+          top_consumer_roots: /Users/airlock,/Users/placey
+          top_consumer_limit: 4
+          df_timeout_seconds: 1.5
+          du_timeout_seconds: 35.0
+          sensor_failure_page_threshold: 3
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('sentinel.disk_headroom.top_consumer_roots'), '/Users/airlock,/Users/placey');
+    assert.equal(cfg.get('sentinel.disk_headroom.top_consumer_limit'), 4);
+    assert.equal(cfg.get('sentinel.disk_headroom.df_timeout_seconds'), 1.5);
+    assert.equal(cfg.get('sentinel.disk_headroom.du_timeout_seconds'), 35.0);
+    assert.equal(cfg.get('sentinel.disk_headroom.sensor_failure_page_threshold'), 3);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('retention surfaces reject unknown keys with structured path', () => {
   const tmp = freshTmp();
   try {

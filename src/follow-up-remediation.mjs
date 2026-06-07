@@ -1488,6 +1488,74 @@ function buildCodexStartupPolicyViolation({ reason, requestedValue = null, resol
   };
 }
 
+const MERGE_AGENT_BROKER_TRUTHY = new Set(['1', 'true', 'yes', 'on']);
+const MERGE_AGENT_BROKER_FALSEY = new Set(['0', 'false', 'no', 'off']);
+const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
+const DEFAULT_OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4097';
+const DEFAULT_MERGE_AGENT_BROKER_PROVIDER = 'github-app-merge-agent';
+
+function parseMergeAgentBrokerFlag(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) {
+    return { enabled: false, recognized: true, raw };
+  }
+  const normalized = raw.toLowerCase();
+  if (MERGE_AGENT_BROKER_TRUTHY.has(normalized)) {
+    return { enabled: true, recognized: true, raw };
+  }
+  if (MERGE_AGENT_BROKER_FALSEY.has(normalized)) {
+    return { enabled: false, recognized: true, raw };
+  }
+  return { enabled: false, recognized: false, raw };
+}
+
+function applyMergeAgentBrokerEnv(env, sourceEnv = process.env) {
+  const parsedFlag = parseMergeAgentBrokerFlag(sourceEnv.MERGE_AGENT_AUTH_VIA_BROKER);
+  const evidence = {
+    enabled: parsedFlag.enabled,
+    flagValue: parsedFlag.raw || null,
+    warning: parsedFlag.recognized
+      ? null
+      : 'MERGE_AGENT_AUTH_VIA_BROKER value not recognized; broker env not propagated',
+  };
+
+  if (!parsedFlag.enabled) {
+    return evidence;
+  }
+
+  const brokerUrl = sourceEnv.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL;
+  const standbyUrl = sourceEnv.OAUTH_BROKER_STANDBY_URL || DEFAULT_OAUTH_BROKER_STANDBY_URL;
+  const provider = sourceEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER || DEFAULT_MERGE_AGENT_BROKER_PROVIDER;
+
+  env.MERGE_AGENT_AUTH_VIA_BROKER = 'true';
+  env.OAUTH_BROKER_URL = brokerUrl;
+  env.OAUTH_BROKER_STANDBY_URL = standbyUrl;
+  env.OAUTH_BROKER_MERGE_AGENT_PROVIDER = provider;
+
+  if (sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID) {
+    env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID =
+      sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID;
+  }
+  if (sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID) {
+    env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID =
+      sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID;
+  }
+  if (sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE) {
+    env.OAUTH_BROKER_SHARED_SECRET_FILE = sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE;
+  }
+
+  return {
+    ...evidence,
+    brokerUrl,
+    standbyUrl,
+    provider,
+    providerOverridden: Boolean(sourceEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER),
+    expectedAppId: sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID || null,
+    expectedInstallationId: sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID || null,
+    sharedSecretFile: sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE || null,
+  };
+}
+
 function prepareCodexRemediationStartupEnv({ gitIdentity = null } = {}) {
   const authPath = resolveCodexAuthPath();
   const authHome = resolveCodexAuthHome(authPath);
@@ -1602,6 +1670,11 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null } = {}) {
       env[key] = value;
     }
   }
+
+  // This spawn boundary is intentional: the Codex remediation worker can hand
+  // off final comment-only remediation through HQ/merge-agent, so the
+  // merge-agent broker contract must survive into that child environment.
+  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env);
 
   return {
     authPath,
@@ -4774,6 +4847,7 @@ export {
   resolveRemediationMaxConcurrentJobs,
   summarizeWorkerFinalMessage,
   assessWorkerLiveness,
+  applyMergeAgentBrokerEnv,
   spawnCodexRemediationWorker,
   spawnClaudeCodeRemediationWorker,
   spawnRemediationWorker,

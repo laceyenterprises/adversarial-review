@@ -46,6 +46,13 @@ fi
 if ! source "$_OP_RATE_LIMIT_HELPER"; then
   fail_op_helper_load "OPH-01 helper failed to load from $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
 fi
+_REVIEWER_BROKER_HELPER="$WATCHER_DIR/scripts/lib/reviewer-broker.sh"
+if [[ ! -r "$_REVIEWER_BROKER_HELPER" ]]; then
+  fail_op_helper_load "reviewer-broker helper missing at $_REVIEWER_BROKER_HELPER; refusing to start without the broker primitive."
+fi
+if ! source "$_REVIEWER_BROKER_HELPER"; then
+  fail_op_helper_load "reviewer-broker helper failed to load from $_REVIEWER_BROKER_HELPER; refusing to start without the broker primitive."
+fi
 
 WATCHER_NATIVE_CHECK_ERR="${TMPDIR:-/tmp}/adversarial-watcher-native-check.${UID}.err"
 if ! ( cd "$WATCHER_DIR" && /opt/homebrew/bin/node -e "const Database=require('better-sqlite3'); new Database(':memory:').close();" ) >"$WATCHER_NATIVE_CHECK_ERR" 2>&1; then
@@ -186,8 +193,25 @@ resolve_and_export_required_op_secret() {
 # not change auth strength. Non-rate-limit failures get an explicit
 # launchd backoff instead of relying on `set -e` during command substitution.
 resolve_and_export_required_op_secret LINEAR_API_KEY 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential'
-resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential'
-resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential'
+
+# Reviewer tokens via broker (default-off, fails closed in broker mode).
+# See scripts/lib/reviewer-broker.sh for the full contract.
+if reviewer_broker_mode_enabled "claude-reviewer"; then
+  if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
+    echo "[adversarial-watcher] ERROR: CLAUDE_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
+    exit 1
+  fi
+else
+  resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential'
+fi
+if reviewer_broker_mode_enabled "codex-reviewer"; then
+  if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
+    echo "[adversarial-watcher] ERROR: CODEX_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
+    exit 1
+  fi
+else
+  resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential'
+fi
 
 resolve_alert_to_optional() {
   local attempt=1

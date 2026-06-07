@@ -43,6 +43,19 @@ fi
 if ! source "$_OP_RATE_LIMIT_HELPER"; then
   fail_op_helper_load "OPH-01 helper failed to load from $_OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
 fi
+# Reviewer-token broker helper (2026-06-07). When
+# <ROLE>_AUTH_VIA_BROKER=true is set, the watcher fetches reviewer
+# installation tokens from the OAuth broker (GAB-01 / GAB-02) instead
+# of the operator's shared PAT. Each role gets its own 15K/hr
+# installation-token bucket. Sourcing this helper is mandatory but the
+# broker path itself is default-off.
+_REVIEWER_BROKER_HELPER="$WATCHER_DIR/scripts/lib/reviewer-broker.sh"
+if [[ ! -r "$_REVIEWER_BROKER_HELPER" ]]; then
+  fail_op_helper_load "reviewer-broker helper missing at $_REVIEWER_BROKER_HELPER; refusing to start without the broker primitive."
+fi
+if ! source "$_REVIEWER_BROKER_HELPER"; then
+  fail_op_helper_load "reviewer-broker helper failed to load from $_REVIEWER_BROKER_HELPER; refusing to start without the broker primitive."
+fi
 # Per-user err-file path. The original `/tmp/adversarial-watcher-native-check.err`
 # was a single shared path across users, which silently broke the airlock-side
 # launch when an old placey-owned file existed (cross-user redirect denied,
@@ -206,8 +219,29 @@ resolve_and_export_required_op_secret() {
 # get the same explicit launchd backoff here instead of relying on
 # `set -e` to abort during command substitution.
 resolve_and_export_required_op_secret LINEAR_API_KEY 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential'
-resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential'
-resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential'
+
+# Reviewer tokens: try the OAuth broker path FIRST when the per-role
+# flag is set, fall back to op-read otherwise. Broker mode fails closed
+# (no silent op-read fallback) so a misconfigured broker is loud
+# instead of silently regressing to the shared-identity cascade. To
+# roll back: `unset CLAUDE_REVIEWER_AUTH_VIA_BROKER` /
+# `unset CODEX_REVIEWER_AUTH_VIA_BROKER` and bounce the watcher.
+if reviewer_broker_mode_enabled "claude-reviewer"; then
+  if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
+    echo "[adversarial-watcher] ERROR: CLAUDE_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
+    exit 1
+  fi
+else
+  resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential'
+fi
+if reviewer_broker_mode_enabled "codex-reviewer"; then
+  if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
+    echo "[adversarial-watcher] ERROR: CODEX_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
+    exit 1
+  fi
+else
+  resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential'
+fi
 
 resolve_alert_to_optional() {
   local attempt=1

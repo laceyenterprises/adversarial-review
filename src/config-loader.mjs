@@ -104,6 +104,7 @@ const TYPE_STRING = 'string';
 const TYPE_BOOL = 'bool';
 const TYPE_INT = 'int';
 const TYPE_FLOAT = 'float';
+const TYPE_LIST = 'list';
 const TYPE_DICT = 'dict';
 
 function buildRoleFallbackSchemaKeys() {
@@ -588,6 +589,45 @@ function schemaV1() {
           },
         },
       },
+      sentinel: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          disk_headroom: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              top_consumer_roots: { __type: TYPE_STRING, __default: '/Users/airlock,/Users/placey' },
+              top_consumer_limit: { __type: TYPE_INT, __default: 3, __min: 1 },
+              df_timeout_seconds: { __type: TYPE_FLOAT, __default: 1.0, __min: 0 },
+              du_timeout_seconds: { __type: TYPE_FLOAT, __default: 30.0, __min: 0 },
+              sensor_failure_page_threshold: { __type: TYPE_INT, __default: 2, __min: 1 },
+            },
+          },
+          detectors: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              litellm_routing_tier_outage: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: true },
+                  log_path: { __type: TYPE_STRING, __default: null, __nullable: true },
+                  window_seconds: { __type: TYPE_INT, __default: 300, __min: 1 },
+                  event_count_threshold: { __type: TYPE_INT, __default: 3, __min: 1 },
+                  severity: { __type: TYPE_STRING, __default: 'SEV-2', __enum: ['SEV-1', 'SEV-2', 'SEV-3'] },
+                  comms_channels: {
+                    __type: TYPE_LIST,
+                    __item: { __type: TYPE_STRING, __enum: ['telegram', 'email'] },
+                    __default: ['telegram', 'email'],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
       feature_flags: {
         __type: TYPE_DICT,
         __strict: true,
@@ -761,6 +801,50 @@ export const ENV_ALIASES = {
   },
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',
+    aliases: [],
+  },
+  'sentinel.detectors.litellm_routing_tier_outage.enabled': {
+    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_ENABLED',
+    aliases: [],
+  },
+  'sentinel.detectors.litellm_routing_tier_outage.log_path': {
+    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_LOG_PATH',
+    aliases: [],
+  },
+  'sentinel.detectors.litellm_routing_tier_outage.window_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_WINDOW_SECONDS',
+    aliases: [],
+  },
+  'sentinel.detectors.litellm_routing_tier_outage.event_count_threshold': {
+    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_EVENT_COUNT_THRESHOLD',
+    aliases: [],
+  },
+  'sentinel.detectors.litellm_routing_tier_outage.severity': {
+    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_SEVERITY',
+    aliases: [],
+  },
+  'sentinel.detectors.litellm_routing_tier_outage.comms_channels': {
+    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_COMMS_CHANNELS',
+    aliases: [],
+  },
+  'sentinel.disk_headroom.top_consumer_roots': {
+    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_TOP_CONSUMER_ROOTS',
+    aliases: [],
+  },
+  'sentinel.disk_headroom.top_consumer_limit': {
+    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_TOP_CONSUMER_LIMIT',
+    aliases: [],
+  },
+  'sentinel.disk_headroom.df_timeout_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_DF_TIMEOUT_SECONDS',
+    aliases: [],
+  },
+  'sentinel.disk_headroom.du_timeout_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_DU_TIMEOUT_SECONDS',
+    aliases: [],
+  },
+  'sentinel.disk_headroom.sensor_failure_page_threshold': {
+    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_SENSOR_FAILURE_PAGE_THRESHOLD',
     aliases: [],
   },
   'session_ledger.backend': {
@@ -1011,6 +1095,15 @@ function checkLeaf(value, schema, keyPath, source) {
         { key: keyPath, expected: expectedPattern, got: value, source },
       );
     }
+  } else if (expected === TYPE_LIST) {
+    if (!Array.isArray(value)) {
+      throw new AgentOSConfigError(
+        `${keyPath}: expected list, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
+        { key: keyPath, expected: 'list', got: value, source },
+      );
+    }
+    const itemSchema = schema.__item || {};
+    return value.map((item, index) => checkLeaf(item, itemSchema, `${keyPath}[${index}]`, source));
   }
   if (schema.__enum && !schema.__enum.includes(value)) {
     throw new AgentOSConfigError(
@@ -1427,6 +1520,9 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
       );
     }
     return n;
+  }
+  if (expected === TYPE_LIST) {
+    return value.split(',').map((part) => part.trim()).filter(Boolean);
   }
   return value;
 }

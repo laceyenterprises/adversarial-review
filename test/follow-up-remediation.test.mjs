@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
+  applyMergeAgentBrokerEnv,
   assertClaudeCodeOAuth,
   assertRemediationWorkerOAuth,
   assessWorkerLiveness,
@@ -97,6 +98,16 @@ function makeJob(overrides = {}) {
     ...overrides,
   };
 }
+
+const MERGE_AGENT_BROKER_ENV_KEYS = [
+  'MERGE_AGENT_AUTH_VIA_BROKER',
+  'OAUTH_BROKER_URL',
+  'OAUTH_BROKER_STANDBY_URL',
+  'OAUTH_BROKER_MERGE_AGENT_PROVIDER',
+  'OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID',
+  'OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID',
+  'OAUTH_BROKER_SHARED_SECRET_FILE',
+];
 
 async function cleanContaminationAudit() {
   return { suspect: [], error: null };
@@ -1919,6 +1930,119 @@ test('prepareCodexRemediationStartupEnv applies gitIdentity even with no inherit
     // displaced operator value.
     assert.deepEqual(startupEvidence.sanitizedEnv.gitIdentityOverrides, []);
     assert.deepEqual(startupEvidence.gitIdentity, { name: 'Worker Bot', email: 'worker-bot@example.invalid' });
+  } finally {
+    for (const key of snapshotKeys) {
+      if (snapshot[key] === undefined) delete process.env[key];
+      else process.env[key] = snapshot[key];
+    }
+  }
+});
+
+test('applyMergeAgentBrokerEnv propagates broker env from injected source env', () => {
+  const env = {};
+  const evidence = applyMergeAgentBrokerEnv(env, {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'yes',
+    OAUTH_BROKER_URL: 'http://127.0.0.1:4010',
+    OAUTH_BROKER_STANDBY_URL: 'http://127.0.0.1:4011',
+    OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'custom-merge-agent',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '12345',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '67890',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/merge-agent-secret',
+  });
+
+  assert.deepEqual(env, {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_URL: 'http://127.0.0.1:4010',
+    OAUTH_BROKER_STANDBY_URL: 'http://127.0.0.1:4011',
+    OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'custom-merge-agent',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '12345',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '67890',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/merge-agent-secret',
+  });
+  assert.deepEqual(evidence, {
+    enabled: true,
+    flagValue: 'yes',
+    warning: null,
+    brokerUrl: 'http://127.0.0.1:4010',
+    standbyUrl: 'http://127.0.0.1:4011',
+    provider: 'custom-merge-agent',
+    providerOverridden: true,
+    expectedAppId: '12345',
+    expectedInstallationId: '67890',
+    sharedSecretFile: '/tmp/merge-agent-secret',
+  });
+});
+
+test('applyMergeAgentBrokerEnv uses broker and standby defaults when enabled', () => {
+  const env = {};
+  const evidence = applyMergeAgentBrokerEnv(env, {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+  });
+
+  assert.equal(env.MERGE_AGENT_AUTH_VIA_BROKER, 'true');
+  assert.equal(env.OAUTH_BROKER_URL, 'http://127.0.0.1:4099');
+  assert.equal(env.OAUTH_BROKER_STANDBY_URL, 'http://127.0.0.1:4097');
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
+  assert.equal(evidence.providerOverridden, false);
+  assert.equal(evidence.expectedAppId, null);
+  assert.equal(evidence.sharedSecretFile, null);
+});
+
+test('applyMergeAgentBrokerEnv warns in evidence for unrecognized broker flag', () => {
+  const env = {};
+  const evidence = applyMergeAgentBrokerEnv(env, {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'ture',
+    OAUTH_BROKER_URL: 'http://127.0.0.1:4010',
+  });
+
+  assert.deepEqual(env, {});
+  assert.equal(evidence.enabled, false);
+  assert.equal(evidence.flagValue, 'ture');
+  assert.match(evidence.warning, /not recognized/);
+});
+
+test('prepareCodexRemediationStartupEnv records merge-agent broker evidence', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const codexHome = path.join(workspaceDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }), 'utf8');
+
+  const snapshotKeys = [
+    'CODEX_AUTH_PATH',
+    'CODEX_HOME',
+    'HOME',
+    ...MERGE_AGENT_BROKER_ENV_KEYS,
+  ];
+  const snapshot = Object.fromEntries(snapshotKeys.map((key) => [key, process.env[key]]));
+
+  process.env.CODEX_AUTH_PATH = authPath;
+  process.env.CODEX_HOME = codexHome;
+  process.env.HOME = workspaceDir;
+  process.env.MERGE_AGENT_AUTH_VIA_BROKER = 'true';
+  process.env.OAUTH_BROKER_URL = 'http://127.0.0.1:4010';
+  process.env.OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4011';
+  process.env.OAUTH_BROKER_MERGE_AGENT_PROVIDER = 'custom-merge-agent';
+  process.env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID = '12345';
+  process.env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID = '67890';
+  process.env.OAUTH_BROKER_SHARED_SECRET_FILE = '/tmp/merge-agent-secret';
+
+  try {
+    const { env, startupEvidence } = prepareCodexRemediationStartupEnv();
+    assert.equal(env.OAUTH_BROKER_URL, 'http://127.0.0.1:4010');
+    assert.equal(env.OAUTH_BROKER_STANDBY_URL, 'http://127.0.0.1:4011');
+    assert.deepEqual(startupEvidence.mergeAgentBroker, {
+      enabled: true,
+      flagValue: 'true',
+      warning: null,
+      brokerUrl: 'http://127.0.0.1:4010',
+      standbyUrl: 'http://127.0.0.1:4011',
+      provider: 'custom-merge-agent',
+      providerOverridden: true,
+      expectedAppId: '12345',
+      expectedInstallationId: '67890',
+      sharedSecretFile: '/tmp/merge-agent-secret',
+    });
   } finally {
     for (const key of snapshotKeys) {
       if (snapshot[key] === undefined) delete process.env[key];

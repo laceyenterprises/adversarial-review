@@ -47,7 +47,7 @@ const DEFAULT_WORKER_RUNS = [
     run_id: 'wr_2',
     launch_request_id: 'lrq_2',
     session_id: 'rs_2',
-    status: 'succeeded',
+    status: 'failed',
     token_usage_input: 999,
     token_usage_output: 333,
     token_usage_cost_usd: 1.11,
@@ -92,10 +92,17 @@ export function createEmptySqliteDb(dbPath) {
 
 export function createSessionLedgerDb(
   dbPath,
-  { runtimeSessions = DEFAULT_RUNTIME_SESSIONS, workerRuns = DEFAULT_WORKER_RUNS } = {},
+  {
+    runtimeSessions = DEFAULT_RUNTIME_SESSIONS,
+    workerRuns = DEFAULT_WORKER_RUNS,
+    // Production rows are keyed by run_id. Tests that intentionally model
+    // historical duplicate rows must opt into the looser fixture schema.
+    allowDuplicateWorkerRunIds = false,
+  } = {},
 ) {
   mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
+  const runIdConstraint = allowDuplicateWorkerRunIds ? '' : ' PRIMARY KEY';
   db.exec(`
     CREATE TABLE runtime_sessions (
       session_id TEXT PRIMARY KEY,
@@ -110,7 +117,7 @@ export function createSessionLedgerDb(
       ended_at TEXT
     );
     CREATE TABLE worker_runs (
-      run_id TEXT,
+      run_id TEXT${runIdConstraint},
       launch_request_id TEXT,
       session_id TEXT,
       status TEXT,

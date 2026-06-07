@@ -134,11 +134,16 @@ test('reviewer pass writer inserts running row, completes it, and unique key pre
   assert.equal(row.reviewer_model, 'claude-sonnet');
 });
 
-test('worker-run rollup join reads token columns and cache totals from runtime session', () => {
+test('worker-run and reviewer-session readers accept ledger target object, URI, and --ledger-db alias', () => {
   const rootDir = tempRoot();
   for (const fixture of reviewerPassTokenReaderFixtures(rootDir)) {
     const workerUsage = readWorkerRunTokenUsage({
       workerRunId: 'wr_1',
+      rootDir,
+      ...fixture.apply(),
+    });
+    const failedWorkerUsage = readWorkerRunTokenUsage({
+      workerRunId: 'wr_2',
       rootDir,
       ...fixture.apply(),
     });
@@ -158,6 +163,10 @@ test('worker-run rollup join reads token columns and cache totals from runtime s
     assert.equal(workerUsage.cacheWrite, 7, fixture.name);
     assert.equal(workerUsage.costUSD, 0.35, fixture.name);
     assert.equal(workerUsage.source, 'session-ledger', fixture.name);
+    assert.equal(failedWorkerUsage.workerRunId, 'wr_2', fixture.name);
+    assert.equal(failedWorkerUsage.input, 999, fixture.name);
+    assert.equal(failedWorkerUsage.output, 333, fixture.name);
+    assert.equal(failedWorkerUsage.source, 'session-ledger', fixture.name);
 
     assert.equal(reviewerUsage.adapterSessionKey, 'session-1', fixture.name);
     assert.equal(reviewerUsage.input, 120, fixture.name);

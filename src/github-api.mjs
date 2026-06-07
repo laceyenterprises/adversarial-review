@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const PAGE_SIZE = 100;
@@ -540,14 +541,57 @@ function buildGhEnv(env = process.env) {
   return ghEnv;
 }
 
+function parseGhApiHttpEnvelope(stdout) {
+  const text = String(stdout || '');
+  const crlfSeparator = text.indexOf('\r\n\r\n');
+  const lfSeparator = text.indexOf('\n\n');
+  let separator = -1;
+  let separatorLength = 0;
+  if (crlfSeparator >= 0 && (lfSeparator < 0 || crlfSeparator <= lfSeparator)) {
+    separator = crlfSeparator;
+    separatorLength = 4;
+  } else if (lfSeparator >= 0) {
+    separator = lfSeparator;
+    separatorLength = 2;
+  }
+  if (separator < 0) {
+    return { headers: {}, bodyText: text };
+  }
+  const headerText = text.slice(0, separator).replace(/\r\n/g, '\n');
+  const bodyText = text.slice(separator + separatorLength);
+  const headers = {};
+  for (const line of headerText.split('\n').slice(1)) {
+    const colon = line.indexOf(':');
+    if (colon <= 0) continue;
+    headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+  }
+  return { headers, bodyText };
+}
+
 async function execGhJson(execFileImpl, args) {
+  const headerAware = args[0] === 'api';
+  if (headerAware && args.includes('--paginate')) {
+    throw new Error('execGhJson does not support `gh api --paginate` with header-aware rate-limit parsing; use an explicit page loop instead');
+  }
+  const throttleResource = args[0] === 'api' && args[1] === 'graphql' ? 'graphql' : 'core';
   try {
-    const { stdout } = await execFileImpl('gh', args, {
+    await awaitThrottleIfNeeded(throttleResource);
+    const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
+    const { stdout } = await execFileImpl('gh', effectiveArgs, {
       maxBuffer: GH_MAX_BUFFER,
       env: buildGhEnv(),
     });
+    if (headerAware) {
+      const response = parseGhApiHttpEnvelope(stdout);
+      await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+      return JSON.parse(String(response.bodyText || 'null'));
+    }
     return JSON.parse(String(stdout || 'null'));
   } catch (err) {
+    if (headerAware) {
+      const response = parseGhApiHttpEnvelope(err?.stdout || '');
+      await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+    }
     const payload = tryParseGraphqlErrorPayload(err);
     if (payload?.errors) {
       err.graphqlErrors = payload.errors;
@@ -1344,6 +1388,7 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
 const __test__ = {
   buildGhEnv,
   extractChecksConnection,
+  execGhJson,
   extractGraphqlPr,
   fetchGraphqlConnectionPages,
   fetchGraphqlReviewContext,
@@ -1360,6 +1405,7 @@ const __test__ = {
   normalizePrNumber,
   normalizeReview,
   normalizeRollup,
+  parseGhApiHttpEnvelope,
   runGraphql,
   splitRepo,
   isGraphqlComplexityError,

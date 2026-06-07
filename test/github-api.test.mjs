@@ -212,6 +212,7 @@ function parseGhArgs(args) {
   const parsed = {};
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === '-i') continue;
     if ((arg === '-f' || arg === '-F') && typeof args[index + 1] === 'string') {
       const pair = args[index + 1];
       const eq = pair.indexOf('=');
@@ -237,7 +238,7 @@ function makeGraphqlExecStub(expected, { pagination = false } = {}) {
     calls.push({ command, args: [...args] });
     assert.equal(command, 'gh');
     assert.equal(args[0], 'api');
-    assert.equal(args[1], 'graphql');
+    assert.equal(args.includes('graphql'), true);
     const vars = parseGhArgs(args);
     const query = String(vars.query || '');
     if (!pagination || (!vars.commentsAfter && !vars.reviewsAfter && !vars.checksAfter)) {
@@ -309,7 +310,7 @@ function makeAsymmetricPaginationExecStub(expected) {
     calls.push({ command, args: [...args] });
     assert.equal(command, 'gh');
     assert.equal(args[0], 'api');
-    assert.equal(args[1], 'graphql');
+    assert.equal(args.includes('graphql'), true);
     const vars = parseGhArgs(args);
 
     if (!vars.commentsAfter && !vars.reviewsAfter && !vars.checksAfter) {
@@ -380,7 +381,7 @@ function makeComplexityFallbackExecStub(expected) {
     calls.push({ command, args: [...args] });
     assert.equal(command, 'gh');
     assert.equal(args[0], 'api');
-    assert.equal(args[1], 'graphql');
+    assert.equal(args.includes('graphql'), true);
     const vars = parseGhArgs(args);
     const query = String(vars.query || '');
 
@@ -560,6 +561,16 @@ function makeLegacyExecStub(expected) {
       const { comments, reviews, checks, ...pr } = expected;
       return { stdout: JSON.stringify(pr) };
     }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/issues/${FIXTURE_PR}/comments?`)) {
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify(expected.comments.map((comment) => ({
+          id: comment.id,
+          user: comment.author,
+          body: comment.body,
+          created_at: comment.createdAt,
+        })))}`
+      };
+    }
     if (joined.startsWith(`api repos/${FIXTURE_REPO}/issues/${FIXTURE_PR}/comments?`)) {
       return {
         stdout: JSON.stringify(expected.comments.map((comment) => ({
@@ -568,6 +579,17 @@ function makeLegacyExecStub(expected) {
           body: comment.body,
           created_at: comment.createdAt,
         }))),
+      };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/pulls/${FIXTURE_PR}/reviews?`)) {
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify(expected.reviews.map((review) => ({
+          id: review.id,
+          user: review.author,
+          body: review.body,
+          state: review.state,
+          submitted_at: review.submittedAt,
+        })))}`
       };
     }
     if (joined.startsWith(`api repos/${FIXTURE_REPO}/pulls/${FIXTURE_PR}/reviews?`)) {
@@ -581,6 +603,17 @@ function makeLegacyExecStub(expected) {
         }))),
       };
     }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/check-runs?`)) {
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify({
+          check_runs: expected.checks.map((check) => ({
+            name: check.name,
+            conclusion: check.conclusion,
+            completed_at: check.completedAt,
+          })),
+        })}`
+      };
+    }
     if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/check-runs?`)) {
       return {
         stdout: JSON.stringify({
@@ -590,6 +623,11 @@ function makeLegacyExecStub(expected) {
             completed_at: check.completedAt,
           })),
         }),
+      };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/status?`)) {
+      return {
+        stdout: 'HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n{"statuses":[]}',
       };
     }
     if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/status?`)) {
@@ -1180,6 +1218,30 @@ test('gh invocations reuse GITHUB_TOKEN as GH_TOKEN when no gh token is set', as
   });
 });
 
+test('execGhJson rejects gh api --paginate with a clear local error', async () => {
+  const mod = await importGithubApiFresh();
+  await assert.rejects(
+    () => mod.__test__.execGhJson(async () => {
+      throw new Error('exec should not be called');
+    }, ['api', 'repos/laceyenterprises/agent-os/pulls', '--paginate']),
+    /does not support `gh api --paginate`/,
+  );
+});
+
+test('parseGhApiHttpEnvelope normalizes only headers and preserves body text', async () => {
+  const mod = await importGithubApiFresh();
+  const body = '{"message":"line\\r\\ninside body"}';
+  const parsed = mod.__test__.parseGhApiHttpEnvelope(
+    `HTTP/2 200\r\nx-ratelimit-resource: core\r\nx-ratelimit-remaining: 4999\r\n\r\n${body}`,
+  );
+
+  assert.deepEqual(parsed.headers, {
+    'x-ratelimit-resource': 'core',
+    'x-ratelimit-remaining': '4999',
+  });
+  assert.equal(parsed.bodyText, body);
+});
+
 test('review context helper fetches only PR metadata and comments', async () => {
   const expected = makeLargeExpectedRollup();
   const firstComments = expected.comments.slice(0, 100);
@@ -1529,18 +1591,18 @@ test('head/state helper honors the GraphQL kill-switch with REST fallback', asyn
         assert.equal(command, 'gh');
         const joined = args.join(' ');
         assert.doesNotMatch(joined, /graphql/);
-        if (joined === `api repos/${FIXTURE_REPO}/pulls/${FIXTURE_PR}`) {
+        if (joined === `api -i repos/${FIXTURE_REPO}/pulls/${FIXTURE_PR}`) {
           return {
-            stdout: JSON.stringify({
+            stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify({
               state: 'open',
               merged_at: expected.mergedAt,
               closed_at: expected.closedAt,
               head: { sha: expected.headRefOid },
-            }),
+            })}`,
           };
         }
-        if (joined.startsWith(`api repos/${FIXTURE_REPO}/issues/${FIXTURE_PR}/labels?`)) {
-          return { stdout: JSON.stringify(expected.labels) };
+        if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/issues/${FIXTURE_PR}/labels?`)) {
+          return { stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify(expected.labels)}` };
         }
         throw new Error(`unexpected call ${joined}`);
       },

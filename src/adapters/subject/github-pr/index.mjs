@@ -14,6 +14,7 @@ import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { apiStatusFromError } from '../../../api-telemetry.mjs';
 import { prepareWorkspaceForJob as defaultPrepareWorkspaceForJob } from '../../../follow-up-remediation.mjs';
+import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from '../../../rate-limit-throttle.mjs';
 import { builderClassFromTitle } from './title-tagging.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -202,7 +203,9 @@ function createGitHubPRSubjectAdapter({
   async function withApiTelemetry(category, { repo = null, prNumber = null } = {}, action) {
     const startedAt = monotonicNowMs();
     try {
+      await awaitThrottleIfNeeded();
       const result = await action();
+      await recordResponseRateLimit(extractRateLimitObservation(result?.headers));
       recordApiCall?.({
         category,
         repo,
@@ -212,6 +215,7 @@ function createGitHubPRSubjectAdapter({
       });
       return result;
     } catch (err) {
+      await recordResponseRateLimit(extractRateLimitObservation(err?.response?.headers));
       recordApiCall?.({
         category,
         repo,

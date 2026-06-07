@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
+import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
@@ -638,6 +639,7 @@ async function fetchLivePRLifecycle({
   if (!repo || !prNumber) return null;
   let stdout;
   try {
+    await awaitThrottleIfNeeded();
     const result = await execFileImpl(
       'gh',
       [

@@ -125,8 +125,10 @@ function buildApiCallRow({
   prNumber,
   status,
   durationMs,
+  extra = null,
 }) {
   return {
+    ...(extra && typeof extra === 'object' && !Array.isArray(extra) ? extra : {}),
     timestamp,
     category: normalizeCategory(category),
     repo: normalizeRepo(repo),
@@ -298,6 +300,7 @@ function createApiCallRecorder({
       status = null,
       durationMs = null,
       timestamp = null,
+      extra = null,
     }) {
       const effectiveTimestamp = timestamp || timestampNow();
       const now = nowMs();
@@ -310,6 +313,7 @@ function createApiCallRecorder({
         prNumber,
         status,
         durationMs,
+        extra,
       }));
       return currentPath;
     },

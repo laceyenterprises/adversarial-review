@@ -125,6 +125,7 @@ function buildApiCallRow({
   prNumber,
   status,
   durationMs,
+  extra = null,
 }) {
   return {
     timestamp,
@@ -133,6 +134,7 @@ function buildApiCallRow({
     pr: normalizePrNumber(prNumber),
     status: normalizeStatus(status),
     durationMs: normalizeDurationMs(durationMs),
+    ...(extra && typeof extra === 'object' && !Array.isArray(extra) ? extra : {}),
   };
 }
 
@@ -298,6 +300,7 @@ function createApiCallRecorder({
       status = null,
       durationMs = null,
       timestamp = null,
+      extra = null,
     }) {
       const effectiveTimestamp = timestamp || timestampNow();
       const now = nowMs();
@@ -310,6 +313,7 @@ function createApiCallRecorder({
         prNumber,
         status,
         durationMs,
+        extra,
       }));
       return currentPath;
     },

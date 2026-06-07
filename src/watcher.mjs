@@ -120,6 +120,12 @@ import { createWatcherHealthProbe } from './health-probe.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import {
+  awaitThrottleIfNeeded,
+  extractRateLimitObservation,
+  recordResponseRateLimit,
+  resolveRateLimitSharedStatePath,
+} from './rate-limit-throttle.mjs';
+import {
   createWatcherOctokit,
   fetchConditionalRestPage,
 } from './conditional-request.mjs';
@@ -256,7 +262,9 @@ function apiStatusFromResult(result, fallback = 200) {
 async function withApiTelemetry(category, { repo = null, prNumber = null, successStatus = 200 } = {}, action) {
   const startedAt = Date.now();
   try {
+    await awaitThrottleIfNeeded();
     const result = await action();
+    await recordResponseRateLimit(extractRateLimitObservation(result?.headers));
     recordApiCall({
       category,
       repo,
@@ -266,6 +274,7 @@ async function withApiTelemetry(category, { repo = null, prNumber = null, succes
     });
     return result;
   } catch (err) {
+    await recordResponseRateLimit(extractRateLimitObservation(err?.response?.headers));
     recordApiCall({
       category,
       repo,
@@ -4601,6 +4610,7 @@ function requireEnv(name) {
 
 async function main() {
   requireEnv('GITHUB_TOKEN');
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {
     // CFG-02: defaultReviewerRouteFromEnv now consults the loader, which
     // validates the full config.yaml schema. Validate merge-agent here too

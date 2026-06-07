@@ -21,6 +21,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from '../../../follow-up-jobs.mjs';
+import { awaitThrottleIfNeeded } from '../../../rate-limit-throttle.mjs';
 import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -900,6 +901,7 @@ async function findExistingRemediationComment({
 }) {
   if (!marker) return { found: false };
   try {
+    await awaitThrottleIfNeeded();
     const { stdout } = await execFileImpl(
       'gh',
       [
@@ -1030,6 +1032,7 @@ async function postRemediationOutcomeComment({
   }
 
   try {
+    await awaitThrottleIfNeeded();
     const ghResult = await execFileImpl(
       'gh',
       ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],

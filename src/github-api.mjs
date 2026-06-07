@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const PAGE_SIZE = 100;
@@ -540,14 +541,43 @@ function buildGhEnv(env = process.env) {
   return ghEnv;
 }
 
+function parseGhApiHttpEnvelope(stdout) {
+  const text = String(stdout || '').replace(/\r\n/g, '\n');
+  const separator = text.indexOf('\n\n');
+  if (separator < 0) {
+    return { headers: {}, bodyText: text };
+  }
+  const headerText = text.slice(0, separator);
+  const bodyText = text.slice(separator + 2);
+  const headers = {};
+  for (const line of headerText.split('\n').slice(1)) {
+    const colon = line.indexOf(':');
+    if (colon <= 0) continue;
+    headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+  }
+  return { headers, bodyText };
+}
+
 async function execGhJson(execFileImpl, args) {
+  const headerAware = args[0] === 'api' && !(process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test');
   try {
-    const { stdout } = await execFileImpl('gh', args, {
+    await awaitThrottleIfNeeded();
+    const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
+    const { stdout } = await execFileImpl('gh', effectiveArgs, {
       maxBuffer: GH_MAX_BUFFER,
       env: buildGhEnv(),
     });
+    if (headerAware) {
+      const response = parseGhApiHttpEnvelope(stdout);
+      await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+      return JSON.parse(String(response.bodyText || 'null'));
+    }
     return JSON.parse(String(stdout || 'null'));
   } catch (err) {
+    if (headerAware) {
+      const response = parseGhApiHttpEnvelope(err?.stdout || '');
+      await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+    }
     const payload = tryParseGraphqlErrorPayload(err);
     if (payload?.errors) {
       err.graphqlErrors = payload.errors;

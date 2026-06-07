@@ -26,6 +26,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { getCachedDiff, putCachedDiff } from './diff-cache.mjs';
 import {
   createFollowUpJob,
@@ -1121,6 +1122,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   }
   const startedAt = Date.now();
   try {
+    await awaitThrottleIfNeeded();
     await execFileImpl(
       'gh',
       ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],

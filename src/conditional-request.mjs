@@ -6,6 +6,7 @@ import {
   getCachedEtag,
   putCachedEtag,
 } from './etag-cache.mjs';
+import { awaitThrottleIfNeeded, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -89,11 +90,17 @@ async function fetchConditionalRestPage({
     : { ...params };
 
   async function runRequest(activeParams) {
+    await awaitThrottleIfNeeded();
     return request(activeParams);
   }
 
   try {
     let response = await runRequest(requestParams);
+    await recordResponseRateLimit({
+      remaining: getResponseHeader(response?.headers, 'x-ratelimit-remaining'),
+      resetAt: getResponseHeader(response?.headers, 'x-ratelimit-reset'),
+      observedAt: new Date().toISOString(),
+    });
     if (responseStatus(response) === 304) {
       if (cached?.body !== null && cached?.body !== undefined) {
         recordConditional304Telemetry({ repo, prNumber, startedAt, recordApiCallImpl });
@@ -123,6 +130,11 @@ async function fetchConditionalRestPage({
     }
     return response;
   } catch (err) {
+    await recordResponseRateLimit({
+      remaining: getResponseHeader(err?.response?.headers, 'x-ratelimit-remaining'),
+      resetAt: getResponseHeader(err?.response?.headers, 'x-ratelimit-reset'),
+      observedAt: new Date().toISOString(),
+    });
     const status = apiStatusFromError(err);
     if (status === 304) {
       if (cached?.body !== null && cached?.body !== undefined) {

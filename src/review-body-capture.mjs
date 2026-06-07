@@ -2,6 +2,7 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 
 import { openReviewStateDb, ensureReviewStateSchema } from './review-state.mjs';
+import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_CAPTURE_LOOKBACK_MS = 2 * 60 * 1000;
@@ -106,6 +107,7 @@ async function lookupRecentReviewArtifact({
   timestampField = 'created_at',
 } = {}) {
   if (!repo || !prNumber || !endpoint || !login || !postedAt) return null;
+  await awaitThrottleIfNeeded();
   // `-f per_page=100` makes `gh api` send the field as a JSON body which
   // forces method=POST and the comments endpoint returns HTTP 422
   // ("body wasn't supplied"). `-X GET` keeps the method explicit so the

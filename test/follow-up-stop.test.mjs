@@ -24,6 +24,18 @@ function makeJobFile(relativeDir, name = 'job.json') {
   return filePath;
 }
 
+async function waitForDetachedProcessGroup(pid, { timeoutMs = 2_000, pollMs = 25 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch {}
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  } while (true);
+}
+
 test('resolveFollowUpJobPath accepts stoppable follow-up job records under the repo root', (t) => {
   const createdPaths = [
     makeJobFile('data/follow-up-jobs/pending', 'resolve-pending.json'),
@@ -249,6 +261,7 @@ test('follow-up-stop CLI signals a live spawned worker before stopping', async (
     detached: true,
     stdio: 'ignore',
   });
+  assert.equal(await waitForDetachedProcessGroup(child.pid), true);
   const inProgressDir = path.join(ROOT, 'data', 'follow-up-jobs', 'in-progress');
   const stoppedDir = path.join(ROOT, 'data', 'follow-up-jobs', 'stopped');
   mkdirSync(inProgressDir, { recursive: true });
@@ -302,10 +315,10 @@ test('follow-up-stop CLI signals a live spawned worker before stopping', async (
   receiptPath = stdout.match(/receipt=(\S+)/)?.[1] || null;
 
   assert.match(stdout, /workerSignalDelivered=true/);
-  assert.match(stdout, /workerExitedAfterSignal=(true|false)/);
   assert.ok(receiptPath);
   const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
   assert.equal(receipt.result.signalled, true);
+  assert.match(stdout, /workerExitedAfterSignal=(true|false)/);
   const stopped = JSON.parse(readFileSync(stoppedPath, 'utf8'));
   assert.equal(stopped.status, 'stopped');
 });

@@ -51,6 +51,7 @@ import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeReviewVerdict, nor
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
+import { fetchPullRequestReviewContext } from './github-api.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -735,31 +736,10 @@ async function fetchPRDiff(repo, prNumber, headSha, {
 }
 
 async function fetchPRContext(repo, prNumber) {
-  const startedAt = Date.now();
-  try {
-    const { stdout } = await execFileAsync(
-      'gh',
-      ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName,body,comments,headRefOid'],
-      { maxBuffer: 10 * 1024 * 1024 }
-    );
-    recordApiCall({
-      category: 'pr_view',
-      repo,
-      prNumber,
-      status: 200,
-      durationMs: Date.now() - startedAt,
-    });
-    return JSON.parse(stdout);
-  } catch (err) {
-    recordApiCall({
-      category: 'pr_view',
-      repo,
-      prNumber,
-      status: apiStatusFromError(err),
-      durationMs: Date.now() - startedAt,
-    });
-    throw err;
-  }
+  return fetchPullRequestReviewContext(repo, prNumber, {
+    execFileImpl: execFileAsync,
+    recordApiCallImpl: recordApiCall,
+  });
 }
 
 // ── AI review via CLI (OAuth only) ──────────────────────────────────────────

@@ -1064,7 +1064,7 @@ test('canonical + alias same value ok', () => {
   }
 });
 
-test('new reviewer and worker-class enum entries load through the schema', () => {
+test('MHX title tags do not widen Python-backed role and dispatch enums', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -1078,11 +1078,16 @@ test('new reviewer and worker-class enum entries load through the schema', () =>
           coding: opencode
           research: pi
     `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('roles.reviewer'), 'gemini');
-    assert.equal(cfg.get('roles.merge_agent_worker_class'), 'hermes');
-    assert.equal(cfg.get('dispatch.default_worker_class_by_task_kind.coding'), 'opencode');
-    assert.equal(cfg.get('dispatch.default_worker_class_by_task_kind.research'), 'pi');
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /roles\.reviewer/);
+        assert.match(err.message, /gemini/);
+        assert.match(err.message, /claude-code|codex|claude|adversarial/);
+        return true;
+      },
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1467,23 +1472,28 @@ test('validateSchema returns present keys only', () => {
   assert.deepEqual(validated, { version: 1, roots: { hq: '/foo' } });
 });
 
-test('validateSchema accepts MHX-09 reviewer and dispatch enum values', () => {
-  const validated = validateSchema({
-    version: 1,
-    roles: {
-      reviewer: 'pi',
-      merge_agent_worker_class: 'gemini',
-    },
-    dispatch: {
-      default_worker_class_by_task_kind: {
-        coding: 'opencode',
-        merge: 'merge-agent',
+test('validateSchema rejects MHX title tags in shared CFG enums', () => {
+  assert.throws(
+    () => validateSchema({
+      version: 1,
+      roles: {
+        reviewer: 'pi',
+        merge_agent_worker_class: 'gemini',
       },
+      dispatch: {
+        default_worker_class_by_task_kind: {
+          coding: 'opencode',
+          merge: 'merge-agent',
+        },
+      },
+    }),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /roles\.reviewer/);
+      assert.match(err.message, /pi/);
+      return true;
     },
-  });
-  assert.equal(validated.roles.reviewer, 'pi');
-  assert.equal(validated.roles.merge_agent_worker_class, 'gemini');
-  assert.equal(validated.dispatch.default_worker_class_by_task_kind.coding, 'opencode');
+  );
 });
 
 test('validateSchema strict at top-level', () => {

@@ -197,7 +197,7 @@ test('github-pr routing exposes same-family review waiver detection for override
   assert.equal(isCrossModelReviewWaived('codex', 'claude'), false);
   assert.equal(isCrossModelReviewWaived('gemini', 'gemini'), false);
   assert.equal(isCrossModelReviewWaived('opencode', 'opencode'), false);
-  assert.equal(isCrossModelReviewWaived('opencode', 'claude'), true);
+  assert.equal(isCrossModelReviewWaived('opencode', 'claude'), false);
 
   const reason = describeCrossModelReviewWaiver(
     'codex',

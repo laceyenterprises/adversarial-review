@@ -125,10 +125,6 @@ const ALLOWED_MERGE_AGENT_WORKER_CLASSES = Object.freeze([
   'merge-agent',
   'codex',
   'claude-code',
-  'gemini',
-  'pi',
-  'opencode',
-  'hermes',
 ]);
 
 // Cascade-aware merge-agent worker class resolver. Consults config.yaml

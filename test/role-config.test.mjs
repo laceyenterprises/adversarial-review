@@ -28,11 +28,8 @@ function writeYaml(path, body) {
 
 const REVIEWER_ROUTE_BY_MODEL = {
   claude: { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
+  'claude-code': { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
   codex: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
-  gemini: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
-  pi: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
-  opencode: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
-  hermes: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
 };
 
 // ── §3 precedence: module file → env override ───────────────────────────
@@ -344,18 +341,25 @@ test('CFG-02 resolveDefaultReviewer handles legacy `claude` value (normalized to
   }
 });
 
-test('CFG-02 resolveDefaultReviewer maps MHX-09 reviewer tags onto the codex route', () => {
+test('CFG-02 resolveDefaultReviewer rejects MHX-09 title tags as config reviewer pins', () => {
   const tmp = makeTmp();
   try {
     const topPath = join(tmp, 'top.yaml');
     writeYaml(topPath, 'version: 1\nroles:\n  reviewer: opencode\n');
-    const route = resolveDefaultReviewer({
-      env: {},
-      topPath,
-      modulePaths: [],
-      reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
-    });
-    assert.deepEqual(route, REVIEWER_ROUTE_BY_MODEL.opencode);
+    assert.throws(
+      () => resolveDefaultReviewer({
+        env: {},
+        topPath,
+        modulePaths: [],
+        reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+      }),
+      (err) => {
+        assert.match(err.message, /roles\.reviewer/);
+        assert.match(err.message, /opencode/);
+        assert.match(err.message, /claude-code|codex|claude|adversarial/);
+        return true;
+      },
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

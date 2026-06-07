@@ -35,22 +35,23 @@ Any other prefix is malformed and must fail loud instead of silently falling
 back to same-model review or an unregistered worker class.
 
 Operators may deliberately pin the reviewer with
-`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|claude-code|gemini|pi|opencode|hermes`.
+`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|claude-code`.
 A non-empty override wins over the title-prefix route for every supported
 builder class and also selects the matching reviewer bot token. The aliases
-`claude` and `claude-code` both normalize to the Claude reviewer route; the
-other MHX-09 tags normalize to the Codex reviewer route.
+`claude` and `claude-code` both normalize to the Claude reviewer route.
 Watcher startup validates this override once and exits non-zero on invalid
 values instead of discovering the typo mid-poll. When the override intentionally
 pins the same reviewer family as the builder, the posted review body carries an
 explicit cross-model-waiver note so the audit trail shows the guarantee was
 deliberately suspended.
 
-In this fleet, `[opencode]` builder PRs are treated as Claude-family writers
-because opencode is provisioned against Anthropic Claude unless an operator
-changes that deployment contract. Therefore a Claude reviewer pin on an
-`[opencode]` PR is a same-family waiver, while the default route remains the
-Codex reviewer to preserve cross-model review.
+The MHX-09 `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` values are
+GitHub-PR title-prefix builder tags, not shared CFG role enum values. They must
+not be accepted in `roles.reviewer`,
+`roles.merge_agent_worker_class`, or
+`dispatch.default_worker_class_by_task_kind` until the Python
+`agent_os_config` loader widens the same enums. No same-family waiver is
+inferred for `[opencode]` without a future explicit writer-family config knob.
 
 Follow-up remediation defaults to the `codex` worker class while the LAC-358
 codex override remains active. Operators may pin remediation with

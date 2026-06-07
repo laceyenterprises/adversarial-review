@@ -3033,7 +3033,7 @@ test('prepareOriginalWorkerForMergeAgent ignores unrecognized worker-id branch p
 });
 
 test('prepareOriginalWorkerForMergeAgent recognizes MHX-09 worker-id branch prefixes', async () => {
-  for (const workerPrefix of ['opencode', 'hermes']) {
+  for (const workerPrefix of ['pi', 'opencode', 'hermes']) {
     const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
     const originalWorkerId = `${workerPrefix}-lac-664mhx`;
     const result = await prepareOriginalWorkerForMergeAgent({
@@ -5881,7 +5881,7 @@ test('resolveMergeAgentWorkerClass honors claude-code pin', () => {
 test('resolveMergeAgentWorkerClass rejects unknown worker class', () => {
   assert.throws(
     () => resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'condex' }),
-    /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS must be one of: merge-agent, codex, claude-code, gemini, pi, opencode, hermes/
+    /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS must be one of: merge-agent, codex, claude-code/
   );
 });
 
@@ -5891,10 +5891,6 @@ test('DEFAULT_MERGE_AGENT_WORKER_CLASS is in the allowlist', () => {
     'merge-agent',
     'codex',
     'claude-code',
-    'gemini',
-    'pi',
-    'opencode',
-    'hermes',
   ]);
 });
 

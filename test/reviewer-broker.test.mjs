@@ -28,6 +28,23 @@ function runHelperShell(snippet, env = {}) {
   );
 }
 
+test('reviewer-broker helper sources cleanly under zsh (regression: bash-only ${!var} bad-substitution)', () => {
+  // Watcher entry scripts use #!/bin/zsh, so the sourced helper must
+  // avoid bash-only indirect-variable expansion. Smoke under zsh.
+  const onOut = execFileSync(
+    '/bin/zsh',
+    ['-c', `source "${HELPER}"; reviewer_broker_mode_enabled claude-reviewer && echo enabled || echo disabled`],
+    { env: { ...process.env, CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true' }, encoding: 'utf8' },
+  );
+  assert.equal(onOut.trim(), 'enabled');
+  const offOut = execFileSync(
+    '/bin/zsh',
+    ['-c', `source "${HELPER}"; reviewer_broker_mode_enabled claude-reviewer && echo enabled || echo disabled`],
+    { env: { ...process.env, CLAUDE_REVIEWER_AUTH_VIA_BROKER: '' }, encoding: 'utf8' },
+  );
+  assert.equal(offOut.trim(), 'disabled');
+});
+
 test('reviewer_broker_mode_enabled returns 0 (truthy) when the role flag is "true"', () => {
   const out = runHelperShell(
     'reviewer_broker_mode_enabled claude-reviewer && echo "yes" || echo "no"',

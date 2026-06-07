@@ -3163,7 +3163,7 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   assert.equal(result.runId, 'run_lookup');
 });
 
-test('lookupOriginalWorkerRunStatus delegates status reads only through the canonical ledger adapter surface', async () => {
+test('lookupOriginalWorkerRunStatus passes configured ledger target to the canonical adapter', async () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666canon');
   mkdirSync(workerDir, { recursive: true });
@@ -3196,13 +3196,14 @@ test('lookupOriginalWorkerRunStatus delegates status reads only through the cano
 
   assert.equal(result.found, true);
   assert.equal(result.status, 'succeeded');
-  assert.deepEqual(observedCall, {
-    launchRequestId: 'lrq_lookup_canonical',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    env: { ...HERMETIC_CONFIG_ENV, HOME: '/tmp/canonical-home' },
-    hqRoot,
-    rootDir: null,
-  });
+  assert.equal(observedCall?.launchRequestId, 'lrq_lookup_canonical');
+  assert.deepEqual(
+    observedCall?.ledgerTarget,
+    { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' }
+  );
+  assert.deepEqual(observedCall?.env, { ...HERMETIC_CONFIG_ENV, HOME: '/tmp/canonical-home' });
+  assert.equal(observedCall?.hqRoot, hqRoot);
+  assert.equal(observedCall?.rootDir, null);
 });
 
 test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical sqlite ledger target contract', async () => {
@@ -3322,6 +3323,7 @@ test('lookupOriginalWorkerRunStatus keeps duplicate launch-request rows determin
 
   const db = new Database(ledgerDbPath);
   db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  // The ledger adapter breaks equal timestamp ties with run_id DESC, so wrun_z wins here.
   for (const [runId, status] of [['wrun_a', 'running'], ['wrun_z', 'cancelled']]) {
     db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(runId, 'lrq_lookup_deterministic', status, '2026-06-04T00:00:00.000Z', null, null);

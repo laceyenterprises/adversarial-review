@@ -377,6 +377,24 @@ async function publishAdversarialGateStatus(rootDir, {
   const normalizedPrNumber = normalizePrNumber(prNumber);
   const context = decision.context || resolveGateStatusContext(env);
 
+  // Operator kill-switch for the adversarial-gate status check.
+  // Set ADVERSARIAL_GATE_STATUS_DISABLED=true in the watcher's
+  // launchd plist (or the operator's local env) to skip the
+  // `gh api POST /statuses` call. The watcher's other behavior
+  // (reviews, remediation, audit) is unaffected; only the GitHub
+  // status-check posting is suppressed. To re-enable, unset the
+  // env var and bounce the watcher.
+  const disabledByConfig = String(env.ADVERSARIAL_GATE_STATUS_DISABLED ?? '')
+    .trim()
+    .toLowerCase() === 'true';
+  if (disabledByConfig) {
+    return {
+      posted: false,
+      reason: 'disabled-by-config',
+      record: { context, repo, prNumber: normalizedPrNumber, headSha, state: decision.state },
+    };
+  }
+
   const existingRecord = readGateRecord(
     rootDir,
     { repo, prNumber: normalizedPrNumber, headSha },

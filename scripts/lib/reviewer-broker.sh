@@ -41,12 +41,22 @@
 # is unchanged.
 
 # Returns 0 iff broker-mode is requested for the given role.
+# Portable indirect-variable read. Bash supports `${!varname}` but
+# zsh (which the watcher start scripts run under) does not. Use `eval`
+# for portability; safe because the variable name is locally
+# constructed from a fixed alphabet (uppercase + underscore).
+_reviewer_broker_indirect() {
+    local varname="$1"
+    eval "printf '%s' \"\${${varname}:-}\""
+}
+
 reviewer_broker_mode_enabled() {
     local role="$1"
     local role_upper
     role_upper="$(printf '%s' "$role" | tr '[:lower:]-' '[:upper:]_')"
     local flag_name="${role_upper}_AUTH_VIA_BROKER"
-    local flag_value="${!flag_name:-}"
+    local flag_value
+    flag_value="$(_reviewer_broker_indirect "$flag_name")"
     [[ "$flag_value" == "true" ]]
 }
 
@@ -66,12 +76,16 @@ resolve_reviewer_token_via_broker() {
 
     local broker_url="${OAUTH_BROKER_URL:-http://127.0.0.1:4099}"
     local provider_env="OAUTH_BROKER_${role_upper}_PROVIDER"
-    local broker_provider="${!provider_env:-github-app-${role}}"
+    local broker_provider
+    broker_provider="$(_reviewer_broker_indirect "$provider_env")"
+    [[ -n "$broker_provider" ]] || broker_provider="github-app-${role}"
     local secret_file="${OAUTH_BROKER_SHARED_SECRET_FILE:-}"
     local expected_app_id_env="OAUTH_BROKER_${role_upper}_EXPECTED_APP_ID"
-    local expected_app_id="${!expected_app_id_env:-}"
+    local expected_app_id
+    expected_app_id="$(_reviewer_broker_indirect "$expected_app_id_env")"
     local expected_installation_id_env="OAUTH_BROKER_${role_upper}_EXPECTED_INSTALLATION_ID"
-    local expected_installation_id="${!expected_installation_id_env:-}"
+    local expected_installation_id
+    expected_installation_id="$(_reviewer_broker_indirect "$expected_installation_id_env")"
 
     if [[ -z "$secret_file" ]]; then
         echo "[reviewer-broker] broker mode (${role}) requested but OAUTH_BROKER_SHARED_SECRET_FILE is empty" >&2

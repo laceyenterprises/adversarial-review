@@ -238,23 +238,29 @@ comments and deliberately leaves `reviews`, `checks`, and `labels` empty so a
 reviewer spawn does not page fields it never reads. Callers that only need fresh
 lifecycle state should use `fetchPullRequestHeadAndState` instead of the full
 rollup so lifecycle ticks do not paginate comments/reviews/checks for fields
-they never consume; it still fetches live labels so merge-agent lifecycle cleanup
-does not rely on stale `reviewed_prs.labels_json` snapshots.
+they never consume; it fetches live labels by default so merge-agent lifecycle
+cleanup does not rely on stale `reviewed_prs.labels_json` snapshots. Fast
+HEAD-SHA authorization probes pass `withLabels: false` so they do not paginate
+labels they will discard.
 
 The GraphQL path fetches one combined page and then paginates remaining
 connections with single-connection queries. Check pagination is anchored to the
 captured `headRefOid` rather than repeatedly resolving `commits(last: 1)`, so a
 force-push during pagination cannot switch the commit being paged. Label
 pagination must also continue beyond the first 100 labels so hold/veto labels
-are not silently truncated on crowded PRs.
+are not silently truncated on crowded PRs. A connection that reaches the
+configured GraphQL page cap returns the rows collected so far with
+`truncated: true` and `truncatedConnections`, plus a structured warning, rather
+than wedging the watcher on the same overlarge PR forever.
 
 `GHO_DISABLE_GRAPHQL_ROLLUP=1` is the operator kill-switch for GraphQL-backed PR
 helpers. It is read at call time and falls back to the legacy `gh pr view` plus
 REST list paths for full/reviewer contexts, and to REST `pulls` plus `issues`
 labels for lightweight head/state probes. `gh` invocations pass an allowlisted
-environment only: path/home/config/proxy basics plus `GH_TOKEN`, falling back to
-`GITHUB_TOKEN` when needed. Provider API keys and broker credentials must not be
-inherited by the `gh` child. Fast-merge HEAD SHA probes and tick-start freshness
+environment only: path/home/config/proxy basics, locale variables, custom CA
+bundle paths, and `GH_TOKEN`, falling back to `GITHUB_TOKEN` when needed.
+Provider API keys and broker credentials must not be inherited by the `gh`
+child. Fast-merge HEAD SHA probes and tick-start freshness
 re-checks moved from the old `pr_view` telemetry category to `pr_head_state`;
 reviewer prompt fetches use `pr_review_context`; full GraphQL rollups use
 `graphql_pr_rollup`. GraphQL telemetry records one event per `gh api graphql`
@@ -264,9 +270,11 @@ than only helper invocations.
 GraphQL missing-payload errors should distinguish a missing repository payload
 from a missing `pullRequest` payload and include GraphQL error types when
 available. The complexity fallback only treats regex-matched stderr as a
-complexity signal when the error has an explicit GraphQL HTTP status; malformed
+complexity signal when the error has an explicit GraphQL HTTP status, including
+the `HTTP 4XX/5XX` line from real `gh api graphql` exec failures; malformed
 structured stderr should produce a one-shot warning before falling back to the
-regex path. Legacy check fallback dedupes combined status contexts against
+regex path. PR numbers are normalized to positive integers before interpolation
+into REST paths or GraphQL flags. Legacy check fallback dedupes combined status contexts against
 check-runs by name with CheckRun data winning, and check-run pagination follows
 `total_count` so short non-final pages do not silently truncate later checks.
 

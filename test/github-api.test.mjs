@@ -1142,7 +1142,7 @@ test('structured non-complexity GraphQL errors do not trigger per-list amplifica
   );
 });
 
-test('regex complexity fallback requires an explicit GraphQL error status', async () => {
+test('regex complexity fallback recognizes execFile-shaped gh HTTP stderr', async () => {
   const mod = await importGithubApiFresh();
   assert.equal(
     mod.__test__.isGraphqlComplexityError(new Error('Query exceeds complexity limit')),
@@ -1150,7 +1150,7 @@ test('regex complexity fallback requires an explicit GraphQL error status', asyn
   );
 
   const statusError = new Error('Query exceeds complexity limit');
-  statusError.status = 400;
+  statusError.stderr = 'HTTP 400: GraphQL query exceeds complexity limit';
   assert.equal(
     mod.__test__.isGraphqlComplexityError(statusError),
     true,
@@ -1159,9 +1159,21 @@ test('regex complexity fallback requires an explicit GraphQL error status', asyn
 
 test('gh invocations reuse GITHUB_TOKEN as GH_TOKEN when no gh token is set', async () => {
   const mod = await importGithubApiFresh();
-  await withEnv({ GH_TOKEN: undefined, GITHUB_TOKEN: 'github-token-for-watcher', ANTHROPIC_API_KEY: 'do-not-forward' }, async () => {
+  await withEnv({
+    GH_TOKEN: undefined,
+    GITHUB_TOKEN: 'github-token-for-watcher',
+    LANG: 'en_US.UTF-8',
+    LC_ALL: 'en_US.UTF-8',
+    NODE_EXTRA_CA_CERTS: '/tmp/corp-ca.pem',
+    SSL_CERT_FILE_BUNDLE: '/tmp/legacy-ca.pem',
+    ANTHROPIC_API_KEY: 'do-not-forward',
+  }, async () => {
     await mod.__test__.runGraphql(async (_command, _args, options) => {
       assert.equal(options.env.GH_TOKEN, 'github-token-for-watcher');
+      assert.equal(options.env.LANG, 'en_US.UTF-8');
+      assert.equal(options.env.LC_ALL, 'en_US.UTF-8');
+      assert.equal(options.env.NODE_EXTRA_CA_CERTS, '/tmp/corp-ca.pem');
+      assert.equal(options.env.SSL_CERT_FILE_BUNDLE, '/tmp/legacy-ca.pem');
       assert.equal(options.env.ANTHROPIC_API_KEY, undefined);
       return { stdout: JSON.stringify({ data: { repository: { pullRequest: {} } } }) };
     }, 'query Empty { rateLimit { cost } }', {});
@@ -1211,11 +1223,28 @@ test('review context helper fetches only PR metadata and comments', async () => 
   assert.equal(result.comments.length, expected.comments.length);
   assert.equal(result.reviews.length, 0);
   assert.equal(result.checks.length, 0);
+  assert.equal(result.labels.length, 0);
   assert.equal(calls.length, 2);
   assert.deepEqual(
     telemetry.events.map((entry) => entry.category),
     ['pr_review_context', 'pr_review_context'],
   );
+});
+
+test('legacy review context matches GraphQL by leaving labels empty', async () => {
+  const expected = makeExpectedRollup();
+  const legacyExec = makeLegacyExecStub(expected);
+  const mod = await importGithubApiFresh();
+
+  const result = await mod.__test__.fetchLegacyReviewContextWithTelemetry(FIXTURE_REPO, FIXTURE_PR, {
+    execFileImpl: legacyExec.execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+
+  assert.equal(result.comments.length, expected.comments.length);
+  assert.equal(result.reviews.length, 0);
+  assert.equal(result.checks.length, 0);
+  assert.deepEqual(result.labels, []);
 });
 
 test('connection pagination fails closed when GitHub repeats the cursor', async () => {
@@ -1248,6 +1277,65 @@ test('connection pagination fails closed when GitHub repeats the cursor', async 
       connectionName: 'comments',
     }),
     /cursor did not advance/,
+  );
+});
+
+test('connection pagination marks partial results when GitHub exceeds the page cap', async () => {
+  const mod = await importGithubApiFresh();
+  const warnings = [];
+  const originalWarn = console.warn;
+  let calls = 0;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const result = await mod.__test__.fetchGraphqlConnectionPages(FIXTURE_REPO, FIXTURE_PR, {
+      execFileImpl: async () => {
+        calls += 1;
+        return {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  comments: {
+                    nodes: [{ id: `comment-${calls}` }],
+                    pageInfo: {
+                      hasNextPage: true,
+                      endCursor: `cursor-${calls}`,
+                    },
+                  },
+                },
+              },
+            },
+          }),
+        };
+      },
+      query: 'query Comments {}',
+      firstVariable: 'commentsFirst',
+      afterVariable: 'commentsAfter',
+      extractConnection: (pr) => pr?.comments,
+      normalize: (comment) => comment,
+      connectionName: 'comments',
+    });
+
+    assert.equal(calls, 100);
+    assert.equal(result.length, 100);
+    assert.equal(result.graphqlTruncated, true);
+    assert.deepEqual(result.graphqlTruncatedConnections, ['comments']);
+    assert.match(warnings[0], /truncated=true/);
+
+    const rollup = mod.__test__.normalizeRollup(makeExpectedRollup(), { comments: result });
+    assert.equal(rollup.truncated, true);
+    assert.deepEqual(rollup.truncatedConnections, ['comments']);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('PR number normalization rejects path-like values before gh invocation', async () => {
+  const mod = await importGithubApiFresh();
+  assert.equal(mod.__test__.normalizePrNumber('1388'), 1388);
+  assert.throws(
+    () => mod.__test__.normalizePrNumber('1?foo=bar'),
+    /Invalid GitHub PR number/,
   );
 });
 
@@ -1492,6 +1580,35 @@ test('head/state helper uses the lightweight GraphQL query and telemetry categor
   const vars = parseGhArgs(calls[0].args);
   assert.match(String(vars.query || ''), /query PullRequestHeadState/);
   assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_head_state']);
+});
+
+test('head/state helper skips labels for fast head probes', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const calls = [];
+
+  const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+    withLabels: false,
+    recordApiCallImpl: () => {},
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, 'gh');
+      const vars = parseGhArgs(args);
+      const query = String(vars.query || '');
+      assert.match(query, /query PullRequestHeadOnly/);
+      assert.doesNotMatch(query, /\blabels\(/);
+      return { stdout: JSON.stringify(buildGraphqlResponse(expected)) };
+    },
+  });
+
+  assert.deepEqual(result, {
+    state: expected.state,
+    mergedAt: expected.mergedAt,
+    closedAt: expected.closedAt,
+    headRefOid: expected.headRefOid,
+    labels: [],
+  });
+  assert.equal(calls.length, 1);
 });
 
 test('head/state helper paginates labels beyond the first page', async () => {

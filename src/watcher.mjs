@@ -496,6 +496,7 @@ async function fetchLivePRHeadSha({ owner, repo, prNumber, fallbackHeadSha = nul
   try {
     const pr = await fetchPullRequestHeadAndState(`${owner}/${repo}`, prNumber, {
       execFileImpl: execFileAsync,
+      withLabels: false,
     });
     return pr?.headRefOid ? String(pr.headRefOid) : fallbackHeadSha;
   } catch (err) {
@@ -2538,21 +2539,19 @@ function createWatcherOperatorSurface() {
   });
 }
 
-function parseStoredLabels(labelsJson) {
-  try {
-    const parsed = JSON.parse(labelsJson || '[]');
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 function subjectRefWithLinearTicket(subjectRef, linearTicketId, labels = []) {
   return {
     ...subjectRef,
     linearTicketId,
     labels: Array.isArray(labels) ? labels : [],
   };
+}
+
+function normalizeLabelNames(labels = []) {
+  return (Array.isArray(labels) ? labels : [])
+    .map((label) => (typeof label === 'string' ? label : label?.name))
+    .map((label) => String(label || '').trim())
+    .filter(Boolean);
 }
 
 // ── Org repo discovery ───────────────────────────────────────────────────────
@@ -2954,16 +2953,17 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 
   for (const row of openRows) {
     const { repo, pr_number: prNumber, linear_ticket: linearTicketId } = row;
-    const storedLabels = parseStoredLabels(row.labels_json);
 
     let pr;
+    let labelNames = [];
     try {
       const freshState = await fetchPullRequestHeadAndState(repo, prNumber, {
         execFileImpl: execFileAsync,
       });
+      labelNames = normalizeLabelNames(freshState.labels);
       pr = {
         ...freshState,
-        labels: Array.isArray(freshState.labels) ? freshState.labels : storedLabels,
+        labels: freshState.labels,
       };
     } catch (err) {
       console.error(`[watcher] Failed to fetch PR ${repo}#${prNumber}:`, err.message);
@@ -2989,7 +2989,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.headRefOid || null,
-        }, linearTicketId, storedLabels),
+        }, linearTicketId, labelNames),
         'finalized'
       );
     } else if (pr.state === 'closed') {
@@ -3004,7 +3004,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
           domainId: 'code-pr',
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.headRefOid || null,
-        }, linearTicketId, storedLabels),
+        }, linearTicketId, labelNames),
         'halted'
       );
     }

@@ -304,6 +304,23 @@ query PullRequestHeadState(
 }
 `;
 
+const GRAPHQL_PR_HEAD_ONLY_QUERY = `
+query PullRequestHeadOnly(
+  $owner: String!
+  $repo: String!
+  $prNumber: Int!
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      state
+      mergedAt
+      closedAt
+      headRefOid
+    }
+  }
+}
+`;
+
 const GRAPHQL_REVIEW_CONTEXT_QUERY = `
 query PullRequestReviewContext(
   $owner: String!
@@ -356,6 +373,14 @@ function splitRepo(repo) {
     throw new TypeError(`Invalid GitHub repo slug: ${repo}`);
   }
   return { owner: match[1], repo: match[2] };
+}
+
+function normalizePrNumber(prNumber) {
+  const normalized = Number(String(prNumber ?? '').trim());
+  if (!Number.isInteger(normalized) || normalized <= 0) {
+    throw new TypeError(`Invalid GitHub PR number: ${prNumber}`);
+  }
+  return normalized;
 }
 
 function normalizeAuthor(author) {
@@ -422,6 +447,7 @@ function normalizeRollup(pr, {
   // node ids are string-or-null, authors are {login}-or-null, collections are
   // arrays, and state is lower-case open/closed/merged.
   const state = typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null;
+  const truncatedConnections = collectGraphqlTruncatedConnections(labels, comments, reviews, checks);
   return {
     id: pr?.id ?? null,
     number: Number.isInteger(Number(pr?.number)) ? Number(pr.number) : null,
@@ -442,7 +468,38 @@ function normalizeRollup(pr, {
     comments,
     reviews,
     checks,
+    ...(truncatedConnections.length > 0
+      ? { truncated: true, truncatedConnections }
+      : {}),
   };
+}
+
+function markGraphqlTruncated(items, connectionName) {
+  const existing = Array.isArray(items?.graphqlTruncatedConnections)
+    ? items.graphqlTruncatedConnections
+    : [];
+  Object.defineProperty(items, 'graphqlTruncated', {
+    value: true,
+    configurable: true,
+  });
+  Object.defineProperty(items, 'graphqlTruncatedConnections', {
+    value: [...new Set([...existing, connectionName])],
+    configurable: true,
+  });
+  return items;
+}
+
+function appendGraphqlItemsPreservingTruncation(target, source, connectionName) {
+  target.push(...source);
+  if (source?.graphqlTruncated) {
+    markGraphqlTruncated(target, connectionName);
+  }
+}
+
+function collectGraphqlTruncatedConnections(...lists) {
+  return [...new Set(lists.flatMap((list) => (
+    Array.isArray(list?.graphqlTruncatedConnections) ? list.graphqlTruncatedConnections : []
+  )))];
 }
 
 function copyEnvValue(source, target, key) {
@@ -462,14 +519,18 @@ function buildGhEnv(env = process.env) {
     'GH_CONFIG_DIR',
     'GH_HOST',
     'GITHUB_HOST',
+    'LANG',
+    'LC_ALL',
     'HTTP_PROXY',
     'HTTPS_PROXY',
     'NO_PROXY',
     'http_proxy',
     'https_proxy',
     'no_proxy',
+    'NODE_EXTRA_CA_CERTS',
     'SSL_CERT_FILE',
     'SSL_CERT_DIR',
+    'SSL_CERT_FILE_BUNDLE',
   ]) {
     copyEnvValue(env, ghEnv, key);
   }
@@ -568,10 +629,11 @@ async function paginateRestWithTotalCount(execFileImpl, basePath, mapPage, total
 }
 
 async function fetchLegacyPr(execFileImpl, repo, prNumber) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   return execGhJson(execFileImpl, [
     'pr',
     'view',
-    String(prNumber),
+    String(normalizedPrNumber),
     '--repo',
     repo,
     '--json',
@@ -580,9 +642,10 @@ async function fetchLegacyPr(execFileImpl, repo, prNumber) {
 }
 
 async function fetchLegacyComments(execFileImpl, repo, prNumber) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   return paginateRest(
     execFileImpl,
-    `repos/${repo}/issues/${prNumber}/comments`,
+    `repos/${repo}/issues/${normalizedPrNumber}/comments`,
     (data) => (Array.isArray(data) ? data : []).map((comment) => ({
       id: comment?.id == null ? null : String(comment.id),
       author: normalizeAuthor(comment?.user),
@@ -593,9 +656,10 @@ async function fetchLegacyComments(execFileImpl, repo, prNumber) {
 }
 
 async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   return paginateRest(
     execFileImpl,
-    `repos/${repo}/pulls/${prNumber}/reviews`,
+    `repos/${repo}/pulls/${normalizedPrNumber}/reviews`,
     (data) => (Array.isArray(data) ? data : []).map((review) => ({
       id: review?.id == null ? null : String(review.id),
       author: normalizeAuthor(review?.user),
@@ -637,16 +701,19 @@ async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
   return [...byName.values()];
 }
 
-async function fetchLegacyHeadAndState(execFileImpl, repo, prNumber) {
+async function fetchLegacyHeadAndState(execFileImpl, repo, prNumber, { withLabels = true } = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   const pr = await execGhJson(execFileImpl, [
     'api',
-    `repos/${repo}/pulls/${prNumber}`,
+    `repos/${repo}/pulls/${normalizedPrNumber}`,
   ]);
-  const labels = await paginateRest(
-    execFileImpl,
-    `repos/${repo}/issues/${prNumber}/labels`,
-    (data) => normalizeLabels(Array.isArray(data) ? data : []),
-  );
+  const labels = withLabels
+    ? await paginateRest(
+      execFileImpl,
+      `repos/${repo}/issues/${normalizedPrNumber}/labels`,
+      (data) => normalizeLabels(Array.isArray(data) ? data : []),
+    )
+    : [];
   return {
     state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
     mergedAt: pr?.merged_at || null,
@@ -660,6 +727,7 @@ async function fetchLegacyWithTelemetry(repo, prNumber, {
   execFileImpl,
   recordApiCallImpl,
 } = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   async function withLegacyTelemetry(category, action) {
     const startedAt = Date.now();
     try {
@@ -667,7 +735,7 @@ async function fetchLegacyWithTelemetry(repo, prNumber, {
       recordApiCallImpl({
         category,
         repo,
-        prNumber,
+        prNumber: normalizedPrNumber,
         status: 200,
         durationMs: Date.now() - startedAt,
       });
@@ -676,7 +744,7 @@ async function fetchLegacyWithTelemetry(repo, prNumber, {
       recordApiCallImpl({
         category,
         repo,
-        prNumber,
+        prNumber: normalizedPrNumber,
         status: apiStatusFromError(err),
         durationMs: Date.now() - startedAt,
       });
@@ -684,9 +752,9 @@ async function fetchLegacyWithTelemetry(repo, prNumber, {
     }
   }
 
-  const pr = await withLegacyTelemetry('pr_view', () => fetchLegacyPr(execFileImpl, repo, prNumber));
-  const comments = await withLegacyTelemetry('comments_list', () => fetchLegacyComments(execFileImpl, repo, prNumber));
-  const reviews = await withLegacyTelemetry('reviews_list', () => fetchLegacyReviews(execFileImpl, repo, prNumber));
+  const pr = await withLegacyTelemetry('pr_view', () => fetchLegacyPr(execFileImpl, repo, normalizedPrNumber));
+  const comments = await withLegacyTelemetry('comments_list', () => fetchLegacyComments(execFileImpl, repo, normalizedPrNumber));
+  const reviews = await withLegacyTelemetry('reviews_list', () => fetchLegacyReviews(execFileImpl, repo, normalizedPrNumber));
   const checks = await withLegacyTelemetry('checks_list', () => fetchLegacyChecks(execFileImpl, repo, pr?.headRefOid || null));
 
   return normalizeRollup(pr, { comments, reviews, checks });
@@ -696,6 +764,7 @@ async function fetchLegacyReviewContextWithTelemetry(repo, prNumber, {
   execFileImpl,
   recordApiCallImpl,
 } = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   async function withLegacyTelemetry(category, action) {
     const startedAt = Date.now();
     try {
@@ -703,7 +772,7 @@ async function fetchLegacyReviewContextWithTelemetry(repo, prNumber, {
       recordApiCallImpl({
         category,
         repo,
-        prNumber,
+        prNumber: normalizedPrNumber,
         status: 200,
         durationMs: Date.now() - startedAt,
       });
@@ -712,7 +781,7 @@ async function fetchLegacyReviewContextWithTelemetry(repo, prNumber, {
       recordApiCallImpl({
         category,
         repo,
-        prNumber,
+        prNumber: normalizedPrNumber,
         status: apiStatusFromError(err),
         durationMs: Date.now() - startedAt,
       });
@@ -720,9 +789,9 @@ async function fetchLegacyReviewContextWithTelemetry(repo, prNumber, {
     }
   }
 
-  const pr = await withLegacyTelemetry('pr_view', () => fetchLegacyPr(execFileImpl, repo, prNumber));
-  const comments = await withLegacyTelemetry('comments_list', () => fetchLegacyComments(execFileImpl, repo, prNumber));
-  return normalizeRollup(pr, { comments });
+  const pr = await withLegacyTelemetry('pr_view', () => fetchLegacyPr(execFileImpl, repo, normalizedPrNumber));
+  const comments = await withLegacyTelemetry('comments_list', () => fetchLegacyComments(execFileImpl, repo, normalizedPrNumber));
+  return normalizeRollup(pr, { labels: [], comments });
 }
 
 function describeGraphqlErrorTypes(payload) {
@@ -822,8 +891,20 @@ function isRateLimitErrorType(value) {
 let warnedRegexComplexityFallback = false;
 
 function graphqlStatusFromError(err) {
-  const status = Number(err?.status ?? err?.response?.status);
+  const status = Number(
+    err?.status ??
+    err?.response?.status ??
+    graphqlStatusFromText(err?.stderr) ??
+    graphqlStatusFromText(err?.stdout) ??
+    graphqlStatusFromText(err?.cause?.stderr) ??
+    graphqlStatusFromText(err?.cause?.stdout)
+  );
   return Number.isFinite(status) ? Math.trunc(status) : null;
+}
+
+function graphqlStatusFromText(value) {
+  const match = String(value || '').match(/\bHTTP\s+([1-5][0-9]{2})\b/i);
+  return match ? Number(match[1]) : null;
 }
 
 function warnRegexComplexityFallbackOnce() {
@@ -888,6 +969,7 @@ async function fetchGraphqlConnectionPages(repo, prNumber, {
   telemetryCategory = 'graphql_pr_rollup',
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   const items = [];
   let after = startAfter;
   let hasNextPage = true;
@@ -895,18 +977,22 @@ async function fetchGraphqlConnectionPages(repo, prNumber, {
   while (hasNextPage) {
     page += 1;
     if (page > MAX_GRAPHQL_CONNECTION_PAGES) {
-      throw new Error(`GraphQL ${connectionName} pagination exceeded ${MAX_GRAPHQL_CONNECTION_PAGES} pages`);
+      console.warn(
+        `[github-api] WARN: GraphQL ${connectionName} pagination exceeded ${MAX_GRAPHQL_CONNECTION_PAGES} pages for ${repo}#${normalizedPrNumber}; returning partial results with truncated=true`
+      );
+      markGraphqlTruncated(items, connectionName);
+      break;
     }
     const payload = await runGraphqlWithTelemetry(execFileImpl, query, {
       owner,
       repo: repoName,
-      prNumber,
+      prNumber: normalizedPrNumber,
       ...extraVariables,
       [firstVariable]: PAGE_SIZE,
       [afterVariable]: after,
     }, {
       repo,
-      prNumber,
+      prNumber: normalizedPrNumber,
       category: telemetryCategory,
       recordApiCallImpl,
     });
@@ -970,13 +1056,14 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
   recordApiCallImpl,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   const comments = [];
   const reviews = [];
   const checks = [];
   const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_ROLLUP_QUERY, {
     owner,
     repo: repoName,
-    prNumber,
+    prNumber: normalizedPrNumber,
     commentsFirst: PAGE_SIZE,
     commentsAfter: null,
     reviewsFirst: PAGE_SIZE,
@@ -985,7 +1072,7 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
     checksAfter: null,
   }, {
     repo,
-    prNumber,
+    prNumber: normalizedPrNumber,
     category: 'graphql_pr_rollup',
     recordApiCallImpl,
   });
@@ -997,15 +1084,15 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
   appendGraphqlPage(checks, extractChecksConnection(pr)?.nodes, normalizeCheck);
 
   if (pr?.labels?.pageInfo?.hasNextPage) {
-    labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
+    appendGraphqlItemsPreservingTruncation(labels, await fetchGraphqlLabelPages(repo, normalizedPrNumber, {
       execFileImpl,
       startAfter: pr?.labels?.pageInfo?.endCursor || null,
       recordApiCallImpl,
       telemetryCategory: 'graphql_pr_rollup',
-    }));
+    }), 'labels');
   }
   if (pr?.comments?.pageInfo?.hasNextPage) {
-    comments.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
+    appendGraphqlItemsPreservingTruncation(comments, await fetchGraphqlConnectionPages(repo, normalizedPrNumber, {
       execFileImpl,
       query: GRAPHQL_COMMENTS_ONLY_QUERY,
       firstVariable: 'commentsFirst',
@@ -1016,10 +1103,10 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
       connectionName: 'comments',
       recordApiCallImpl,
       telemetryCategory: 'graphql_pr_rollup',
-    }));
+    }), 'comments');
   }
   if (pr?.reviews?.pageInfo?.hasNextPage) {
-    reviews.push(...await fetchGraphqlConnectionPages(repo, prNumber, {
+    appendGraphqlItemsPreservingTruncation(reviews, await fetchGraphqlConnectionPages(repo, normalizedPrNumber, {
       execFileImpl,
       query: GRAPHQL_REVIEWS_ONLY_QUERY,
       firstVariable: 'reviewsFirst',
@@ -1030,15 +1117,15 @@ async function fetchGraphqlRollupMultiplexed(repo, prNumber, {
       connectionName: 'reviews',
       recordApiCallImpl,
       telemetryCategory: 'graphql_pr_rollup',
-    }));
+    }), 'reviews');
   }
   if (extractChecksConnection(pr)?.pageInfo?.hasNextPage) {
-    checks.push(...await fetchGraphqlCheckPages(repo, prNumber, pr?.headRefOid || null, {
+    appendGraphqlItemsPreservingTruncation(checks, await fetchGraphqlCheckPages(repo, normalizedPrNumber, pr?.headRefOid || null, {
       execFileImpl,
       startAfter: extractChecksConnection(pr)?.pageInfo?.endCursor || null,
       recordApiCallImpl,
       telemetryCategory: 'graphql_pr_rollup',
-    }));
+    }), 'checks');
   }
 
   return normalizeRollup(pr, { labels, comments, reviews, checks });
@@ -1049,27 +1136,28 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
   recordApiCallImpl,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   const initial = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_PR_METADATA_QUERY, {
     owner,
     repo: repoName,
-    prNumber,
+    prNumber: normalizedPrNumber,
   }, {
     repo,
-    prNumber,
+    prNumber: normalizedPrNumber,
     category: 'graphql_pr_rollup',
     recordApiCallImpl,
   });
   const pr = extractGraphqlPr(initial);
   const labels = normalizeLabels(pr?.labels);
   if (pr?.labels?.pageInfo?.hasNextPage) {
-    labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
+    appendGraphqlItemsPreservingTruncation(labels, await fetchGraphqlLabelPages(repo, normalizedPrNumber, {
       execFileImpl,
       startAfter: pr?.labels?.pageInfo?.endCursor || null,
       recordApiCallImpl,
       telemetryCategory: 'graphql_pr_rollup',
-    }));
+    }), 'labels');
   }
-  const comments = await fetchGraphqlConnectionPages(repo, prNumber, {
+  const comments = await fetchGraphqlConnectionPages(repo, normalizedPrNumber, {
     execFileImpl,
     query: GRAPHQL_COMMENTS_ONLY_QUERY,
     firstVariable: 'commentsFirst',
@@ -1080,7 +1168,7 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
     recordApiCallImpl,
     telemetryCategory: 'graphql_pr_rollup',
   });
-  const reviews = await fetchGraphqlConnectionPages(repo, prNumber, {
+  const reviews = await fetchGraphqlConnectionPages(repo, normalizedPrNumber, {
     execFileImpl,
     query: GRAPHQL_REVIEWS_ONLY_QUERY,
     firstVariable: 'reviewsFirst',
@@ -1091,7 +1179,7 @@ async function fetchGraphqlRollupPerList(repo, prNumber, {
     recordApiCallImpl,
     telemetryCategory: 'graphql_pr_rollup',
   });
-  const checks = await fetchGraphqlCheckPages(repo, prNumber, pr?.headRefOid || null, {
+  const checks = await fetchGraphqlCheckPages(repo, normalizedPrNumber, pr?.headRefOid || null, {
     execFileImpl,
     recordApiCallImpl,
     telemetryCategory: 'graphql_pr_rollup',
@@ -1105,6 +1193,7 @@ async function fetchGraphqlReviewContext(repo, prNumber, {
   recordApiCallImpl,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   const comments = [];
   let after = null;
   let hasNextPage = true;
@@ -1113,17 +1202,21 @@ async function fetchGraphqlReviewContext(repo, prNumber, {
   while (hasNextPage) {
     page += 1;
     if (page > MAX_GRAPHQL_CONNECTION_PAGES) {
-      throw new Error(`GraphQL review-context comments pagination exceeded ${MAX_GRAPHQL_CONNECTION_PAGES} pages`);
+      console.warn(
+        `[github-api] WARN: GraphQL review-context comments pagination exceeded ${MAX_GRAPHQL_CONNECTION_PAGES} pages for ${repo}#${normalizedPrNumber}; returning partial results with truncated=true`
+      );
+      markGraphqlTruncated(comments, 'comments');
+      break;
     }
     const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_REVIEW_CONTEXT_QUERY, {
       owner,
       repo: repoName,
-      prNumber,
+      prNumber: normalizedPrNumber,
       commentsFirst: PAGE_SIZE,
       commentsAfter: after,
     }, {
       repo,
-      prNumber,
+      prNumber: normalizedPrNumber,
       category: 'pr_review_context',
       recordApiCallImpl,
     });
@@ -1142,22 +1235,24 @@ async function fetchGraphqlReviewContext(repo, prNumber, {
       after = nextAfter;
     }
   }
-  return normalizeRollup(pr, { comments });
+  return normalizeRollup(pr, { labels: [], comments });
 }
 
 async function fetchPullRequestHeadAndState(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
+  withLabels = true,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   if (isGraphqlRollupDisabled()) {
     const startedAt = Date.now();
     try {
-      const result = await fetchLegacyHeadAndState(execFileImpl, repo, prNumber);
+      const result = await fetchLegacyHeadAndState(execFileImpl, repo, normalizedPrNumber, { withLabels });
       recordApiCallImpl({
         category: 'pr_head_state',
         repo,
-        prNumber,
+        prNumber: normalizedPrNumber,
         status: 200,
         durationMs: Date.now() - startedAt,
       });
@@ -1166,7 +1261,7 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
       recordApiCallImpl({
         category: 'pr_head_state',
         repo,
-        prNumber,
+        prNumber: normalizedPrNumber,
         status: apiStatusFromError(err),
         durationMs: Date.now() - startedAt,
       });
@@ -1174,25 +1269,25 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
     }
   }
 
-  const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_PR_HEAD_STATE_QUERY, {
+  const payload = await runGraphqlWithTelemetry(execFileImpl, withLabels ? GRAPHQL_PR_HEAD_STATE_QUERY : GRAPHQL_PR_HEAD_ONLY_QUERY, {
       owner,
       repo: repoName,
-      prNumber,
+      prNumber: normalizedPrNumber,
     }, {
       repo,
-      prNumber,
+      prNumber: normalizedPrNumber,
       category: 'pr_head_state',
       recordApiCallImpl,
     });
   const pr = extractGraphqlPr(payload);
-  const labels = normalizeLabels(pr?.labels);
-  if (pr?.labels?.pageInfo?.hasNextPage) {
-    labels.push(...await fetchGraphqlLabelPages(repo, prNumber, {
+  const labels = withLabels ? normalizeLabels(pr?.labels) : [];
+  if (withLabels && pr?.labels?.pageInfo?.hasNextPage) {
+    appendGraphqlItemsPreservingTruncation(labels, await fetchGraphqlLabelPages(repo, normalizedPrNumber, {
       execFileImpl,
       startAfter: pr?.labels?.pageInfo?.endCursor || null,
       recordApiCallImpl,
       telemetryCategory: 'pr_head_state',
-    }));
+    }), 'labels');
   }
   return {
     state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
@@ -1200,6 +1295,7 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
     closedAt: pr?.closedAt || null,
     headRefOid: pr?.headRefOid || null,
     labels,
+    ...(labels.graphqlTruncated ? { truncated: true, truncatedConnections: labels.graphqlTruncatedConnections } : {}),
   };
 }
 
@@ -1207,25 +1303,26 @@ async function fetchPullRequestRollup(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
 } = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   if (isGraphqlRollupDisabled()) {
-    return fetchLegacyWithTelemetry(repo, prNumber, { execFileImpl, recordApiCallImpl });
+    return fetchLegacyWithTelemetry(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
   }
 
   const startedAt = Date.now();
   try {
     let result;
     try {
-      result = await fetchGraphqlRollupMultiplexed(repo, prNumber, { execFileImpl, recordApiCallImpl });
+      result = await fetchGraphqlRollupMultiplexed(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
     } catch (err) {
       if (!isGraphqlComplexityError(err)) throw err;
-      result = await fetchGraphqlRollupPerList(repo, prNumber, { execFileImpl, recordApiCallImpl });
+      result = await fetchGraphqlRollupPerList(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
     }
     return result;
   } catch (err) {
     if (!err?.graphqlTelemetryRecorded) recordApiCallImpl({
       category: 'graphql_pr_rollup',
       repo,
-      prNumber,
+      prNumber: normalizedPrNumber,
       status: apiStatusFromError(err),
       durationMs: Date.now() - startedAt,
     });
@@ -1237,10 +1334,11 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
 } = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   if (isGraphqlRollupDisabled()) {
-    return fetchLegacyReviewContextWithTelemetry(repo, prNumber, { execFileImpl, recordApiCallImpl });
+    return fetchLegacyReviewContextWithTelemetry(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
   }
-  return fetchGraphqlReviewContext(repo, prNumber, { execFileImpl, recordApiCallImpl });
+  return fetchGraphqlReviewContext(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
 }
 
 const __test__ = {
@@ -1259,6 +1357,7 @@ const __test__ = {
   fetchLegacyReviews,
   normalizeCheck,
   normalizeComment,
+  normalizePrNumber,
   normalizeReview,
   normalizeRollup,
   runGraphql,

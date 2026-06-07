@@ -3240,9 +3240,12 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical
       expectedStatus: 'failed',
       expectedLaunchRequestId: 'lrq_pg_lookup',
       expectedRunId: 'run_pg_lookup',
-      readLatestWorkerRunStatusImpl: ({ launchRequestId, ledgerTarget }) => {
+      readLatestWorkerRunStatusImpl: ({ launchRequestId, ledgerTarget, env, hqRoot: actualHqRoot, rootDir }) => {
         assert.equal(launchRequestId, 'lrq_pg_lookup');
-        assert.equal(ledgerTarget.backend, 'postgres');
+        assert.deepEqual(ledgerTarget, { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' });
+        assert.deepEqual(env, { ...HERMETIC_CONFIG_ENV });
+        assert.equal(actualHqRoot, hqRoot);
+        assert.equal(rootDir, null);
         return {
           ok: true,
           row: {
@@ -3432,7 +3435,9 @@ test('lookupOriginalWorkerRunStatus ignores cwd-rooted ledger candidates during 
 test('resolveSessionLedgerReadTarget treats explicit canonical targets as authoritative over discovered sqlite fallbacks', () => {
   const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
   const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-'));
-  const explicitLedgerDbPath = path.join(tmpdir(), 'session-ledger-explicit.db');
+  const explicitLedgerDir = mkdtempSync(path.join(tmpdir(), 'agent-os-explicit-'));
+  const explicitLedgerDbPath = path.join(explicitLedgerDir, 'session-ledger.db');
+  createWorkerRunsLedgerDb(explicitLedgerDbPath);
   createWorkerRunsLedgerDb(path.join(deployCheckout, '.agent-os', 'session-ledger', 'ledger.db'));
   createWorkerRunsLedgerDb(path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db'));
 

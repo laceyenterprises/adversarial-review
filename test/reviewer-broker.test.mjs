@@ -150,12 +150,12 @@ test('follow-up-tick script sources the broker helper + gates op-read on the fla
   // preserves existing behavior) but inside the `else` branch.
   assert.match(
     script,
-    /op read 'op:\/\/mem423y7ewrymvxv4ibh34zdk4\/jgyyk2upwnul4u7djztxhngygy\/credential'/,
+    /op read 'op:\/\/Cliovault\/claude-reviewer-pat\/credential'/,
     'follow-up-tick must preserve the claude-reviewer op-read fallback',
   );
   assert.match(
     script,
-    /op read 'op:\/\/mem423y7ewrymvxv4ibh34zdk4\/sdtrfnz53an6dbv47yymktpzb4\/credential'/,
+    /op read 'op:\/\/Cliovault\/codex-reviewer-pat\/credential'/,
     'follow-up-tick must preserve the codex-reviewer op-read fallback',
   );
 });

@@ -232,7 +232,7 @@ if reviewer_broker_mode_enabled "claude-reviewer"; then
     exit 1
   fi
 else
-  resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential'
+  resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://Cliovault/claude-reviewer-pat/credential'
 fi
 if reviewer_broker_mode_enabled "codex-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
@@ -240,7 +240,7 @@ if reviewer_broker_mode_enabled "codex-reviewer"; then
     exit 1
   fi
 else
-  resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential'
+  resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://Cliovault/codex-reviewer-pat/credential'
 fi
 
 resolve_alert_to_optional() {

@@ -143,7 +143,7 @@ if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
     exit 1
   fi
 else
-  GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential' 2>/dev/null || true)
+  GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://Cliovault/claude-reviewer-pat/credential' 2>/dev/null || true)
   export GH_CLAUDE_REVIEWER_TOKEN
 fi
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
@@ -153,7 +153,7 @@ if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
     exit 1
   fi
 else
-  GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential' 2>/dev/null || true)
+  GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://Cliovault/codex-reviewer-pat/credential' 2>/dev/null || true)
   export GH_CODEX_REVIEWER_TOKEN
 fi
 if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then

@@ -3186,6 +3186,49 @@ test('lookupOriginalWorkerRunStatus reads worker_runs rows from the configured l
   assert.equal(result.runId, 'run_lookup');
 });
 
+test('lookupOriginalWorkerRunStatus passes configured ledger target to the canonical adapter', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666canon');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-lac-666canon',
+    launchRequestId: 'lrq_lookup_canonical',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_lookup_canonical',
+  }));
+
+  let observedCall = null;
+  const result = await lookupOriginalWorkerRunStatus({
+    workerDir,
+    hqRoot,
+    env: { ...HERMETIC_CONFIG_ENV, HOME: '/tmp/canonical-home' },
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    readLatestWorkerRunStatusImpl: (args) => {
+      observedCall = args;
+      return {
+        ok: true,
+        row: {
+          run_id: 'run_lookup_canonical',
+          launch_request_id: 'lrq_lookup_canonical',
+          status: 'succeeded',
+        },
+      };
+    },
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.status, 'succeeded');
+  assert.equal(observedCall?.launchRequestId, 'lrq_lookup_canonical');
+  assert.deepEqual(
+    observedCall?.ledgerTarget,
+    { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' }
+  );
+  assert.deepEqual(observedCall?.env, { ...HERMETIC_CONFIG_ENV, HOME: '/tmp/canonical-home' });
+  assert.equal(observedCall?.hqRoot, hqRoot);
+  assert.equal(observedCall?.rootDir, null);
+});
+
 test('lookupOriginalWorkerRunStatus reads worker_runs rows through the canonical sqlite ledger target contract', async () => {
   const { default: Database } = await import('better-sqlite3');
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -3285,6 +3328,42 @@ test('lookupOriginalWorkerRunStatus requires launchRequestId and ignores unrelat
   assert.equal(result.status, 'running');
   assert.equal(result.launchRequestId, 'lrq_lookup_target');
   assert.equal(result.runId, 'run_lookup_shared');
+});
+
+test('lookupOriginalWorkerRunStatus keeps duplicate launch-request rows deterministic without sqlite rowid ordering', async () => {
+  const { default: Database } = await import('better-sqlite3');
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  const workerDir = path.join(hqRoot, 'workers', 'codex-lac-666det');
+  const ledgerDbPath = path.join(hqRoot, 'session-ledger.sqlite');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(path.join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'codex-lac-666det',
+    launchRequestId: 'lrq_lookup_deterministic',
+  }));
+  writeFileSync(path.join(workerDir, 'run.json'), JSON.stringify({
+    runId: 'run_lookup_deterministic',
+  }));
+
+  const db = new Database(ledgerDbPath);
+  db.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
+  // The ledger adapter breaks equal timestamp ties with run_id DESC, so wrun_z wins here.
+  for (const [runId, status] of [['wrun_a', 'running'], ['wrun_z', 'cancelled']]) {
+    db.prepare('INSERT INTO worker_runs (run_id, launch_request_id, status, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(runId, 'lrq_lookup_deterministic', status, '2026-06-04T00:00:00.000Z', null, null);
+  }
+  db.close();
+
+  const result = await lookupOriginalWorkerRunStatus({
+    workerDir,
+    hqRoot,
+    env: { ...HERMETIC_CONFIG_ENV },
+    ledgerTarget: { backend: 'sqlite', path: ledgerDbPath },
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.launchRequestId, 'lrq_lookup_deterministic');
+  assert.equal(result.runId, 'wrun_z');
 });
 
 test('lookupOriginalWorkerRunStatus accepts lrq aliases from worker metadata', async () => {

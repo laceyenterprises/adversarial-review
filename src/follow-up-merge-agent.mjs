@@ -53,7 +53,6 @@ import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kern
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
-  resolveSessionLedgerReadTarget,
 } from './session-ledger-read-adapter.mjs';
 
 const execFileAsync = promisify(execFile);

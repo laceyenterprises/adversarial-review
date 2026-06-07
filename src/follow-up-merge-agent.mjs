@@ -73,6 +73,8 @@ const WORKER_ID_CLASS_PREFIXES = [
   'codex',
   'gemini',
   'pi',
+  'opencode',
+  'hermes',
   'stub',
 ];
 // Must stay aligned with platform/session-ledger/src/session_ledger/models.py

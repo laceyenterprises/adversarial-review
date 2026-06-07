@@ -88,9 +88,9 @@ const ROLE_FALLBACK_CLASSES = [
 // Worker-class options for `dispatch.default_worker_class_by_task_kind` leaves.
 // Mirrors `_ENUM_DISPATCH_DEFAULT_WORKER_CLASS` in
 // `platform/agent-os-config/src/agent_os_config/__init__.py`. Constrained to
-// the three classes that make sense as a TASK-KIND DEFAULT — codex / claude-code
-// for the coding family, merge-agent for the merge family. Operators can still
-// pass `--worker-class` at the call site to escape this constraint.
+// the supported coding-family worker classes plus `merge-agent` for the merge
+// family. Operators can still pass
+// `--worker-class` at the call site to escape this constraint.
 const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'claude-code', 'merge-agent'];
 const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
 const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];

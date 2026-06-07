@@ -29,12 +29,32 @@ const ROUTE_BY_BUILDER_CLASS = {
     reviewerModel: 'claude',
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   },
+  gemini: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
+  pi: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
+  opencode: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
+  hermes: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
 };
 
 const DEFAULT_REVIEWER_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REVIEWER';
 
 const REVIEWER_ROUTE_BY_MODEL = {
   claude: {
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+  },
+  'claude-code': {
     reviewerModel: 'claude',
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   },
@@ -53,6 +73,10 @@ const REVIEWER_FAMILY_BY_BUILDER_CLASS = {
   codex: 'codex',
   'claude-code': 'claude',
   'clio-agent': 'codex',
+  gemini: 'gemini',
+  pi: 'pi',
+  opencode: 'opencode',
+  hermes: 'hermes',
 };
 
 function normalizeBuilderClass(builderClassInput) {

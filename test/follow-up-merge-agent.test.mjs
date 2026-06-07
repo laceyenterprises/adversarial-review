@@ -3032,6 +3032,29 @@ test('prepareOriginalWorkerForMergeAgent ignores unrecognized worker-id branch p
   assert.equal(logs[0].reason, 'unrecognized-worker-id-shape');
 });
 
+test('prepareOriginalWorkerForMergeAgent recognizes MHX-09 worker-id branch prefixes', async () => {
+  for (const workerPrefix of ['pi', 'opencode', 'hermes']) {
+    const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+    const originalWorkerId = `${workerPrefix}-lac-664mhx`;
+    const result = await prepareOriginalWorkerForMergeAgent({
+      job: makeJob({ branch: `${originalWorkerId}/LAC-664mhx-worker-prefix` }),
+      hqPath: 'hq',
+      env: { HQ_ROOT: hqRoot, USER: 'placey' },
+      lookupRunStatusImpl: async () => {
+        throw new Error('lookup must not run for already-torn-down workers');
+      },
+      execFileImpl: async () => {
+        throw new Error('execFileImpl must not run for already-torn-down workers');
+      },
+      now: '2026-05-17T14:33:51.000Z',
+    });
+
+    assert.equal(result.decision, 'ready');
+    assert.equal(result.reason, 'original-worker-already-torn-down');
+    assert.equal(result.originalWorkerId, originalWorkerId);
+  }
+});
+
 test('prepareOriginalWorkerForMergeAgent surfaces tear-down stderr/stdout and logs failure details', async () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const originalWorkerId = 'codex-lac-665';
@@ -5857,13 +5880,18 @@ test('resolveMergeAgentWorkerClass honors claude-code pin', () => {
 
 test('resolveMergeAgentWorkerClass rejects unknown worker class', () => {
   assert.throws(
-    () => resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'gemini' }),
+    () => resolveMergeAgentWorkerClass({ ...HERMETIC_CONFIG_ENV, [MERGE_AGENT_WORKER_CLASS_ENV]: 'condex' }),
     /ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS must be one of: merge-agent, codex, claude-code/
   );
 });
 
 test('DEFAULT_MERGE_AGENT_WORKER_CLASS is in the allowlist', () => {
   assert.ok(ALLOWED_MERGE_AGENT_WORKER_CLASSES.includes(DEFAULT_MERGE_AGENT_WORKER_CLASS));
+  assert.deepEqual(ALLOWED_MERGE_AGENT_WORKER_CLASSES, [
+    'merge-agent',
+    'codex',
+    'claude-code',
+  ]);
 });
 
 test('validateStartupMergeAgentConfig passes when env is unset', () => {

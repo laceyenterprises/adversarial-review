@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BUILDER_CLASS_BY_TAG,
+  builderClassFromTitle,
   buildTaggedTitle,
   getPrefixForTag,
   hasCanonicalTaggedTitle,
@@ -15,6 +17,10 @@ test('normalizeTag accepts canonical tags and aliases', () => {
   assert.equal(normalizeTag('claude'), 'claude-code');
   assert.equal(normalizeTag('clio-agent'), 'clio-agent');
   assert.equal(normalizeTag('clio'), 'clio-agent');
+  assert.equal(normalizeTag('gemini'), 'gemini');
+  assert.equal(normalizeTag('pi'), 'pi');
+  assert.equal(normalizeTag('opencode'), 'opencode');
+  assert.equal(normalizeTag('hermes'), 'hermes');
 });
 
 test('normalizeTag rejects unknown values', () => {
@@ -27,6 +33,10 @@ test('getPrefixForTag returns required prefixes', () => {
   assert.equal(getPrefixForTag('codex'), '[codex]');
   assert.equal(getPrefixForTag('claude'), '[claude-code]');
   assert.equal(getPrefixForTag('clio-agent'), '[clio-agent]');
+  assert.equal(getPrefixForTag('gemini'), '[gemini]');
+  assert.equal(getPrefixForTag('pi'), '[pi]');
+  assert.equal(getPrefixForTag('opencode'), '[opencode]');
+  assert.equal(getPrefixForTag('hermes'), '[hermes]');
 });
 
 test('buildTaggedTitle prepends canonical prefix', () => {
@@ -65,4 +75,15 @@ test('hasCanonicalTaggedTitle enforces single prefix and non-empty suffix', () =
   assert.equal(hasCanonicalTaggedTitle('[codex]'), false);
   assert.equal(hasCanonicalTaggedTitle('[codex]   '), false);
   assert.equal(hasCanonicalTaggedTitle('[codex] [claude-code] stacked'), false);
+});
+
+test('builderClassFromTitle resolves MHX-09 prefixes to worker classes', () => {
+  assert.equal(BUILDER_CLASS_BY_TAG.gemini, 'gemini');
+  assert.equal(builderClassFromTitle('[gemini] SMOKE: route gemini PRs'), 'gemini');
+  assert.equal(BUILDER_CLASS_BY_TAG.pi, 'pi');
+  assert.equal(builderClassFromTitle('[pi] SMOKE: route pi PRs'), 'pi');
+  assert.equal(BUILDER_CLASS_BY_TAG.opencode, 'opencode');
+  assert.equal(builderClassFromTitle('[opencode] SMOKE: route opencode PRs'), 'opencode');
+  assert.equal(BUILDER_CLASS_BY_TAG.hermes, 'hermes');
+  assert.equal(builderClassFromTitle('[hermes] SMOKE: route hermes PRs'), 'hermes');
 });

@@ -8,6 +8,10 @@ const TAG_PREFIXES = {
   codex: '[codex]',
   'claude-code': '[claude-code]',
   'clio-agent': '[clio-agent]',
+  gemini: '[gemini]',
+  pi: '[pi]',
+  opencode: '[opencode]',
+  hermes: '[hermes]',
 };
 
 const TAG_ALIASES = {
@@ -16,12 +20,20 @@ const TAG_ALIASES = {
   'claude-code': 'claude-code',
   clio: 'clio-agent',
   'clio-agent': 'clio-agent',
+  gemini: 'gemini',
+  pi: 'pi',
+  opencode: 'opencode',
+  hermes: 'hermes',
 };
 
 const BUILDER_CLASS_BY_TAG = {
   codex: 'codex',
   'claude-code': 'claude-code',
   'clio-agent': 'clio-agent',
+  gemini: 'gemini',
+  pi: 'pi',
+  opencode: 'opencode',
+  hermes: 'hermes',
 };
 
 const KNOWN_TAGS = Object.keys(TAG_PREFIXES);
@@ -78,7 +90,7 @@ function buildTaggedTitle(tagInput, rawTitle) {
   const prefix = getPrefixForTag(tagInput);
   if (!prefix) {
     throw new Error(
-      `Invalid or missing tag "${tagInput ?? ''}". Allowed: codex, claude-code, clio-agent.`
+      `Invalid or missing tag "${tagInput ?? ''}". Allowed: ${KNOWN_TAGS.join(', ')}.`
     );
   }
 

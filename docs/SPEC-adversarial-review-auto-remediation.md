@@ -25,17 +25,33 @@ is configured:
   `GH_CLAUDE_REVIEWER_TOKEN`.
 - `[claude-code]` and `[clio-agent]` PRs route first-pass review to Codex and
   use `GH_CODEX_REVIEWER_TOKEN`.
+- `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs also route first-pass
+  review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
+
+The canonical GitHub-PR title-prefix allowlist is therefore:
+`[codex]`, `[claude-code]`, `[clio-agent]`, `[gemini]`, `[pi]`, `[opencode]`,
+and `[hermes]`.
+Any other prefix is malformed and must fail loud instead of silently falling
+back to same-model review or an unregistered worker class.
 
 Operators may deliberately pin the reviewer with
-`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude`. A non-empty override wins
-over the title-prefix route for every supported builder class and also selects
-the matching reviewer bot token. The alias `claude-code` is accepted for the
-Claude reviewer, but the canonical runtime reviewer model remains `claude`.
+`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|claude-code`.
+A non-empty override wins over the title-prefix route for every supported
+builder class and also selects the matching reviewer bot token. The aliases
+`claude` and `claude-code` both normalize to the Claude reviewer route.
 Watcher startup validates this override once and exits non-zero on invalid
 values instead of discovering the typo mid-poll. When the override intentionally
 pins the same reviewer family as the builder, the posted review body carries an
 explicit cross-model-waiver note so the audit trail shows the guarantee was
 deliberately suspended.
+
+The MHX-09 `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` values are
+GitHub-PR title-prefix builder tags, not shared CFG role enum values. They must
+not be accepted in `roles.reviewer`,
+`roles.merge_agent_worker_class`, or
+`dispatch.default_worker_class_by_task_kind` until the Python
+`agent_os_config` loader widens the same enums. No same-family waiver is
+inferred for `[opencode]` without a future explicit writer-family config knob.
 
 Follow-up remediation defaults to the `codex` worker class while the LAC-358
 codex override remains active. Operators may pin remediation with
@@ -726,7 +742,7 @@ Because watcher and worker-pool can roll out independently, `src/follow-up-merge
 
 Before `src/follow-up-merge-agent.mjs::dispatchMergeAgentForPR` launches `hq dispatch --worker-class merge-agent`, it runs `prepareOriginalWorkerForMergeAgent` to free the PR branch from the original builder worktree without reaching for `git worktree add --force`.
 
-- The original worker id is derived from the PR branch prefix, then validated against the recognized worker-id shape before any filesystem probe or `hq` invocation. Human branches like `paul/my-feature` do not opt into teardown; suspicious or non-worker-shaped prefixes emit `merge_agent.tear_down_skipped` with reason `unrecognized-worker-id-shape`.
+- The original worker id is derived from the PR branch prefix, then validated against the recognized worker-id shape before any filesystem probe or `hq` invocation. Recognized worker-id prefixes include the canonical reviewer/builder worker classes (`codex`, `claude-code`, `clio-agent`, `gemini`, `pi`, `opencode`, `hermes`) plus merge-agent and test stub prefixes. Human branches like `paul/my-feature` do not opt into teardown; suspicious or non-worker-shaped prefixes emit `merge_agent.tear_down_skipped` with reason `unrecognized-worker-id-shape`.
 - If the worker directory is gone, or the recorded worktree path no longer exists on disk, prep returns `decision: 'ready'` with reason `original-worker-already-torn-down`. This is the idempotent "already gone" exit.
 - If `HQ_ROOT/workers/<workerId>/workspace.json` is missing while the worker directory still exists, prep logs `merge_agent.workspace_missing` and returns `decision: 'deferred'` with reason `workspace-json-missing-but-worker-dir-present`. A missing marker file is not treated as proof that the branch is free.
 - If the workspace file cannot be read for a reason other than `ENOENT` (for example permissions drift or malformed JSON), prep logs `merge_agent.workspace_read_failed` with the errno/detail and returns `decision: 'deferred'`. Read failures are not treated as proof that the branch is free.

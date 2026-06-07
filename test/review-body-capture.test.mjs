@@ -9,7 +9,7 @@ import { postRemediationCommentWithCapture } from '../src/follow-up-remediation.
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { __test__ as reviewerTest } from '../src/reviewer.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
-import { captureRemediationBodyAfterPost } from '../src/review-body-capture.mjs';
+import { captureRemediationBodyAfterPost, resolveReviewerBotLogin } from '../src/review-body-capture.mjs';
 
 const { postGitHubReviewWithCapture } = reviewerTest;
 
@@ -83,6 +83,13 @@ function makeLog() {
 test('normalizeReviewVerdict handles comment-only and request-changes fixtures', () => {
   assert.equal(normalizeReviewVerdict(extractReviewVerdict('## Verdict\n\nComment only')), 'comment-only');
   assert.equal(normalizeReviewVerdict(extractReviewVerdict('## Verdict\n\nRequest changes')), 'request-changes');
+});
+
+test('resolveReviewerBotLogin maps MHX-09 reviewer classes onto existing reviewer bots', () => {
+  assert.equal(resolveReviewerBotLogin('gemini'), 'codex-reviewer-lacey');
+  assert.equal(resolveReviewerBotLogin('pi'), 'codex-reviewer-lacey');
+  assert.equal(resolveReviewerBotLogin('opencode'), 'codex-reviewer-lacey');
+  assert.equal(resolveReviewerBotLogin('hermes'), 'codex-reviewer-lacey');
 });
 
 test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp', async () => {

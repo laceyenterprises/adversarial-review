@@ -128,13 +128,13 @@ function buildApiCallRow({
   extra = null,
 }) {
   return {
+    ...(extra && typeof extra === 'object' && !Array.isArray(extra) ? extra : {}),
     timestamp,
     category: normalizeCategory(category),
     repo: normalizeRepo(repo),
     pr: normalizePrNumber(prNumber),
     status: normalizeStatus(status),
     durationMs: normalizeDurationMs(durationMs),
-    ...(extra && typeof extra === 'object' && !Array.isArray(extra) ? extra : {}),
   };
 }
 

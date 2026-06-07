@@ -6,12 +6,22 @@ import path from 'node:path';
 
 import {
   createRateLimitThrottle,
+  DEFAULT_RESOURCE,
   DEFAULT_THROTTLE_FLOOR,
   resolveThrottleFloor,
 } from '../src/rate-limit-throttle.mjs';
 
 function makeRootDir(prefix = 'rate-limit-throttle-') {
   return mkdtempSync(path.join(tmpdir(), prefix));
+}
+
+async function waitFor(predicate, { timeoutMs = 200 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('timed out waiting for condition');
 }
 
 function makeThrottle({
@@ -114,6 +124,7 @@ test('multiple call sites share one in-process throttle activation', async () =>
 
     const first = throttle.awaitThrottleIfNeeded();
     const second = throttle.awaitThrottleIfNeeded();
+    await waitFor(() => sleepCalls === 1 && typeof releaseSleep === 'function');
     assert.equal(sleepCalls, 1);
     releaseSleep();
     await Promise.all([first, second]);
@@ -156,7 +167,34 @@ test('shared-state inheritance and monotonic merge keep the lower remaining budg
     });
 
     const stored = JSON.parse(readFileSync(path.join(rootDir, 'data', 'api-cache', 'rate-limit-state.json'), 'utf8'));
-    assert.equal(stored.remaining, 150);
+    assert.equal(stored.buckets.core.remaining, 150);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('different rate-limit buckets do not throttle each other', async () => {
+  const rootDir = makeRootDir();
+  try {
+    const sleeps = [];
+    const throttle = makeThrottle({
+      rootDir,
+      nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
+      sleepImpl: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+
+    await throttle.recordResponseRateLimit({
+      resource: 'search',
+      remaining: 1,
+      resetAt: '2026-06-06T12:00:42.000Z',
+      observedAt: '2026-06-06T12:00:00.000Z',
+    });
+
+    assert.equal(await throttle.awaitThrottleIfNeeded('core'), false);
+    assert.equal(await throttle.awaitThrottleIfNeeded('search'), true);
+    assert.equal(sleeps.length, 1);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -193,6 +231,59 @@ test('reset window resumes without a second throttle activation', async () => {
     assert.equal(await throttle.awaitThrottleIfNeeded(), true);
     assert.equal(await throttle.awaitThrottleIfNeeded(), false);
     assert.equal(sleepCalls, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('throttle recovers after a rejected sleep', async () => {
+  const rootDir = makeRootDir();
+  try {
+    let shouldReject = true;
+    const throttle = makeThrottle({
+      rootDir,
+      nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
+      sleepImpl: async () => {
+        if (shouldReject) throw new Error('cancelled');
+      },
+    });
+    await throttle.recordResponseRateLimit({
+      remaining: 1,
+      resetAt: '2026-06-06T12:00:05.000Z',
+      observedAt: '2026-06-06T12:00:00.000Z',
+    });
+
+    await assert.rejects(throttle.awaitThrottleIfNeeded(), /cancelled/);
+    shouldReject = false;
+    assert.equal(await throttle.awaitThrottleIfNeeded(), true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shared-state path is resolved lazily from env', async () => {
+  const rootDir = makeRootDir();
+  const env = {};
+  try {
+    const firstPath = path.join(rootDir, 'first', 'state.json');
+    const secondPath = path.join(rootDir, 'second', 'state.json');
+    env.GHO_RATE_LIMIT_SHARED_STATE_PATH = firstPath;
+    const throttle = createRateLimitThrottle({
+      env,
+      nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
+      sleepImpl: async () => {},
+    });
+    assert.equal(throttle.resolveSharedStatePath(), firstPath);
+    env.GHO_RATE_LIMIT_SHARED_STATE_PATH = secondPath;
+    assert.equal(throttle.resolveSharedStatePath(), secondPath);
+    await throttle.recordResponseRateLimit({
+      resource: DEFAULT_RESOURCE,
+      remaining: 100,
+      resetAt: '2026-06-06T12:00:42.000Z',
+      observedAt: '2026-06-06T12:00:00.000Z',
+    });
+    const stored = JSON.parse(readFileSync(secondPath, 'utf8'));
+    assert.equal(stored.buckets.core.remaining, 100);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

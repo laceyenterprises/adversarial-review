@@ -1,14 +1,6 @@
-import {
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { dirname, join, resolve } from 'node:path';
 import { recordApiCall } from './api-telemetry.mjs';
 
 const DEFAULT_THROTTLE_FLOOR = 200;
@@ -16,13 +8,10 @@ const MIN_THROTTLE_FLOOR = 50;
 const MAX_THROTTLE_FLOOR = 1000;
 const LOCK_RETRY_MS = 50;
 const LOCK_TIMEOUT_MS = 30_000;
+const DEFAULT_RESOURCE = 'core';
 
 function defaultSleep(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
-}
-
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function resolveRateLimitSharedStatePath(env = process.env, cwd = process.cwd()) {
@@ -57,12 +46,18 @@ function normalizeTimestamp(value) {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
+function normalizeResource(value) {
+  const resource = String(value || '').trim().toLowerCase();
+  return resource || DEFAULT_RESOURCE;
+}
+
 function normalizeObservation(observation = null) {
   if (!observation || typeof observation !== 'object') return null;
   const {
     remaining,
     resetAt,
     observedAt = new Date().toISOString(),
+    resource = DEFAULT_RESOURCE,
   } = observation;
   const normalizedRemaining = Number.parseInt(String(remaining ?? ''), 10);
   const normalizedResetAt = normalizeTimestamp(resetAt);
@@ -70,6 +65,7 @@ function normalizeObservation(observation = null) {
   if (!Number.isInteger(normalizedRemaining) || normalizedRemaining < 0) return null;
   if (!normalizedResetAt || !normalizedObservedAt) return null;
   return {
+    resource: normalizeResource(resource),
     remaining: normalizedRemaining,
     resetAt: normalizedResetAt,
     observedAt: normalizedObservedAt,
@@ -94,7 +90,7 @@ function sanitizeObservation(observation, nowMs = Date.now()) {
   return normalized;
 }
 
-function mergeObservations(current, incoming, nowMs = Date.now()) {
+function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
   const left = sanitizeObservation(current, nowMs);
   const right = sanitizeObservation(incoming, nowMs);
   if (!left) return right;
@@ -104,6 +100,7 @@ function mergeObservations(current, incoming, nowMs = Date.now()) {
   if (rightResetAtMs > leftResetAtMs) return right;
   if (rightResetAtMs < leftResetAtMs) return left;
   return {
+    resource: left.resource,
     remaining: Math.min(left.remaining, right.remaining),
     resetAt: left.resetAt,
     observedAt: observationObservedAtMs(right) > observationObservedAtMs(left)
@@ -112,69 +109,142 @@ function mergeObservations(current, incoming, nowMs = Date.now()) {
   };
 }
 
-function readStateFile(sharedStatePath, { nowMs = Date.now(), readFileSyncImpl = readFileSync } = {}) {
+function normalizeObservationMap(value, now = Date.now()) {
+  const normalized = {};
+  if (!value || typeof value !== 'object') return normalized;
+  if ('remaining' in value || 'resetAt' in value) {
+    const legacy = sanitizeObservation(value, now);
+    if (legacy) normalized[legacy.resource] = legacy;
+    return normalized;
+  }
+  const buckets = value?.buckets && typeof value.buckets === 'object' ? value.buckets : value;
+  for (const [resource, observation] of Object.entries(buckets)) {
+    const normalizedObservation = sanitizeObservation({ ...observation, resource }, now);
+    if (normalizedObservation) normalized[normalizedObservation.resource] = normalizedObservation;
+  }
+  return normalized;
+}
+
+function mergeObservationMaps(current, incoming, nowMs = Date.now()) {
+  const left = normalizeObservationMap(current, nowMs);
+  const right = normalizeObservationMap(incoming, nowMs);
+  const merged = { ...left };
+  for (const [resource, observation] of Object.entries(right)) {
+    merged[resource] = mergeResourceObservations(merged[resource], observation, nowMs);
+  }
+  return merged;
+}
+
+async function readStateFile(sharedStatePath, { nowMs = Date.now(), readFileImpl = readFile } = {}) {
   try {
-    return sanitizeObservation(JSON.parse(readFileSyncImpl(sharedStatePath, 'utf8')), nowMs);
+    return normalizeObservationMap(JSON.parse(await readFileImpl(sharedStatePath, 'utf8')), nowMs);
+  } catch {
+    return {};
+  }
+}
+
+async function writeStateFile(sharedStatePath, state, {
+  mkdirImpl = mkdir,
+  openImpl = open,
+  renameImpl = rename,
+} = {}) {
+  await mkdirImpl(dirname(sharedStatePath), { recursive: true, mode: 0o700 });
+  const tmpPath = `${sharedStatePath}.tmp`;
+  const handle = await openImpl(tmpPath, 'w', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify({ version: 1, buckets: state }, null, 2)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await renameImpl(tmpPath, sharedStatePath);
+}
+
+function isAlivePid(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+async function readLockOwner(ownerPath, { readFileImpl = readFile } = {}) {
+  try {
+    const payload = JSON.parse(await readFileImpl(ownerPath, 'utf8'));
+    return {
+      token: typeof payload?.token === 'string' ? payload.token : null,
+      pid: Number.isInteger(payload?.pid) ? payload.pid : Number.parseInt(String(payload?.pid ?? ''), 10),
+    };
   } catch {
     return null;
   }
 }
 
-function writeStateFile(sharedStatePath, state, {
-  mkdirSyncImpl = mkdirSync,
-  openFileSync = openSync,
-  writeFileSyncImpl = writeFileSync,
-  fsyncSyncImpl = fsyncSync,
-  closeFileSync = closeSync,
-  renameFileSync = renameSync,
-} = {}) {
-  mkdirSyncImpl(dirname(sharedStatePath), { recursive: true, mode: 0o700 });
-  const tmpPath = `${sharedStatePath}.tmp`;
-  const fd = openFileSync(tmpPath, 'w', 0o600);
-  try {
-    writeFileSyncImpl(fd, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-    fsyncSyncImpl(fd);
-  } finally {
-    closeFileSync(fd);
-  }
-  renameFileSync(tmpPath, sharedStatePath);
-}
-
-function withSharedStateLock(sharedStatePath, callback, {
-  mkdirSyncImpl = mkdirSync,
-  openFileSync = openSync,
-  closeFileSync = closeSync,
-  readFileSyncImpl = readFileSync,
-  writeFileSyncImpl = writeFileSync,
-  rmSyncImpl = rmSync,
+async function withSharedStateLock(sharedStatePath, callback, {
+  mkdirImpl = mkdir,
+  writeFileImpl = writeFile,
+  readFileImpl = readFile,
+  rmImpl = rm,
+  statImpl = stat,
+  sleepImpl = defaultSleep,
+  nowMs = () => Date.now(),
+  ownerToken = `${process.pid}:${randomUUID()}`,
 } = {}) {
   const lockPath = `${sharedStatePath}.lock`;
-  mkdirSyncImpl(dirname(lockPath), { recursive: true, mode: 0o700 });
-  const startedAt = Date.now();
-  let fd = null;
-  try {
-    while (fd === null) {
-      try {
-        fd = openFileSync(lockPath, 'wx', 0o600);
-        writeFileSyncImpl(fd, `${new Date().toISOString()}\n`, 'utf8');
-      } catch (err) {
-        if (err?.code !== 'EEXIST') throw err;
-        if ((Date.now() - startedAt) >= LOCK_TIMEOUT_MS) {
-          throw new Error(`Timed out waiting for rate-limit lock: ${lockPath}`);
-        }
-        try {
-          const lockAgeMs = Date.now() - Date.parse(String(readFileSyncImpl(lockPath, 'utf8')).trim() || '');
-          if (Number.isFinite(lockAgeMs) && lockAgeMs > LOCK_TIMEOUT_MS) {
-            rmSyncImpl(lockPath, { force: true });
-          }
-        } catch {}
-        sleepSync(LOCK_RETRY_MS);
-      }
+  const ownerPath = join(lockPath, 'owner.json');
+  await mkdirImpl(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const startedAt = nowMs();
+
+  async function shouldReclaimLock() {
+    let details;
+    try {
+      details = await statImpl(lockPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') return false;
+      throw err;
     }
-    return callback();
+    if ((nowMs() - details.mtimeMs) <= LOCK_TIMEOUT_MS) return false;
+    const owner = await readLockOwner(ownerPath, { readFileImpl });
+    if (owner?.pid && isAlivePid(owner.pid)) return false;
+    return true;
+  }
+
+  while (true) {
+    try {
+      await mkdirImpl(lockPath, { mode: 0o700 });
+      try {
+        await writeFileImpl(ownerPath, `${JSON.stringify({
+          token: ownerToken,
+          pid: process.pid,
+          acquiredAt: new Date(nowMs()).toISOString(),
+        })}\n`, { flag: 'wx', mode: 0o600 });
+      } catch (err) {
+        await rmImpl(lockPath, { recursive: true, force: true });
+        throw err;
+      }
+      break;
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      if ((nowMs() - startedAt) >= LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for rate-limit lock: ${lockPath}`);
+      }
+      if (await shouldReclaimLock()) {
+        await rmImpl(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      await sleepImpl(LOCK_RETRY_MS);
+    }
+  }
+
+  try {
+    return await callback();
   } finally {
-    if (fd !== null) closeFileSync(fd);
-    rmSyncImpl(lockPath, { force: true });
+    const owner = await readLockOwner(ownerPath, { readFileImpl });
+    if (owner?.token === ownerToken) {
+      await rmImpl(lockPath, { recursive: true, force: true });
+    }
   }
 }
 
@@ -190,6 +260,7 @@ function extractRateLimitObservation(headers, { observedAt = new Date().toISOStr
       return null;
     };
   return normalizeObservation({
+    resource: lookup('x-ratelimit-resource') || DEFAULT_RESOURCE,
     remaining: lookup('x-ratelimit-remaining'),
     resetAt: lookup('x-ratelimit-reset'),
     observedAt,
@@ -201,99 +272,116 @@ function createRateLimitThrottle({
   logger = console,
   nowMs = () => Date.now(),
   sleepImpl = defaultSleep,
-  sharedStatePath = resolveRateLimitSharedStatePath(env),
+  sharedStatePath,
   recordApiCallImpl = recordApiCall,
-  readFileSyncImpl = readFileSync,
-  mkdirSyncImpl = mkdirSync,
-  openFileSync = openSync,
-  writeFileSyncImpl = writeFileSync,
-  fsyncSyncImpl = fsyncSync,
-  closeFileSync = closeSync,
-  renameFileSync = renameSync,
-  rmSyncImpl = rmSync,
+  readFileImpl = readFile,
+  mkdirImpl = mkdir,
+  openImpl = open,
+  writeFileImpl = writeFile,
+  renameImpl = rename,
+  rmImpl = rm,
+  statImpl = stat,
 } = {}) {
-  let inMemoryObservation = null;
-  let activeThrottlePromise = null;
+  let inMemoryObservations = {};
+  const activeThrottlePromises = new Map();
 
-  function readSharedState() {
-    const shared = withSharedStateLock(sharedStatePath, () => readStateFile(sharedStatePath, {
+  function resolveSharedStatePathNow() {
+    return sharedStatePath || resolveRateLimitSharedStatePath(env);
+  }
+
+  async function readSharedState() {
+    const resolvedSharedStatePath = resolveSharedStatePathNow();
+    const shared = await withSharedStateLock(resolvedSharedStatePath, () => readStateFile(resolvedSharedStatePath, {
       nowMs: nowMs(),
-      readFileSyncImpl,
+      readFileImpl,
     }), {
-      mkdirSyncImpl,
-      openFileSync,
-      closeFileSync,
-      readFileSyncImpl,
-      writeFileSyncImpl,
-      rmSyncImpl,
+      mkdirImpl,
+      readFileImpl,
+      writeFileImpl,
+      rmImpl,
+      statImpl,
+      sleepImpl,
+      nowMs,
     });
-    inMemoryObservation = mergeObservations(inMemoryObservation, shared, nowMs());
-    return inMemoryObservation;
+    inMemoryObservations = mergeObservationMaps(inMemoryObservations, shared, nowMs());
+    return inMemoryObservations;
   }
 
   async function recordResponseRateLimit(observation) {
     const normalized = sanitizeObservation(observation, nowMs());
     if (!normalized) return null;
-    return withSharedStateLock(sharedStatePath, () => {
-      const current = readStateFile(sharedStatePath, { nowMs: nowMs(), readFileSyncImpl });
-      const merged = mergeObservations(current, normalized, nowMs());
-      if (merged) {
-        writeStateFile(sharedStatePath, merged, {
-          mkdirSyncImpl,
-          openFileSync,
-          writeFileSyncImpl,
-          fsyncSyncImpl,
-          closeFileSync,
-          renameFileSync,
+    const resolvedSharedStatePath = resolveSharedStatePathNow();
+    return withSharedStateLock(resolvedSharedStatePath, async () => {
+      const current = await readStateFile(resolvedSharedStatePath, { nowMs: nowMs(), readFileImpl });
+      const merged = mergeObservationMaps(current, { [normalized.resource]: normalized }, nowMs());
+      if (Object.keys(merged).length > 0) {
+        await writeStateFile(resolvedSharedStatePath, merged, {
+          mkdirImpl,
+          openImpl,
+          renameImpl,
         });
       }
-      inMemoryObservation = mergeObservations(inMemoryObservation, merged, nowMs());
-      return merged;
+      inMemoryObservations = mergeObservationMaps(inMemoryObservations, merged, nowMs());
+      return merged[normalized.resource] || null;
     }, {
-      mkdirSyncImpl,
-      openFileSync,
-      closeFileSync,
-      readFileSyncImpl,
-      writeFileSyncImpl,
-      rmSyncImpl,
+      mkdirImpl,
+      readFileImpl,
+      writeFileImpl,
+      rmImpl,
+      statImpl,
+      sleepImpl,
+      nowMs,
     });
   }
 
-  async function awaitThrottleIfNeeded() {
-    if (activeThrottlePromise) return activeThrottlePromise;
-    const floor = resolveThrottleFloor(env, logger);
-    const current = mergeObservations(inMemoryObservation, readSharedState(), nowMs());
-    if (!current || current.remaining >= floor) return false;
-    const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
-    recordApiCallImpl?.({
-      category: 'rate_limit_throttle_seconds',
-      durationMs: waitMs,
-      extra: {
-        duration_seconds: waitMs / 1000,
-        remaining_at_activation: current.remaining,
-        reset_at: current.resetAt,
-        floor,
-      },
-    });
-    activeThrottlePromise = (async () => {
-      await sleepImpl(waitMs);
-      activeThrottlePromise = null;
-      inMemoryObservation = sanitizeObservation(inMemoryObservation, nowMs());
-      return true;
+  async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE) {
+    const normalizedResource = normalizeResource(resource);
+    if (activeThrottlePromises.has(normalizedResource)) {
+      return activeThrottlePromises.get(normalizedResource);
+    }
+    const activePromise = (async () => {
+      try {
+        const floor = resolveThrottleFloor(env, logger);
+        const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
+        const current = currentObservations[normalizedResource] || null;
+        if (!current || current.remaining >= floor) return false;
+        const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
+        recordApiCallImpl?.({
+          category: 'rate_limit_throttle_seconds',
+          durationMs: waitMs,
+          extra: {
+            duration_seconds: waitMs / 1000,
+            remaining_at_activation: current.remaining,
+            reset_at: current.resetAt,
+            floor,
+            resource: normalizedResource,
+          },
+        });
+        await sleepImpl(waitMs);
+        inMemoryObservations = mergeObservationMaps(inMemoryObservations, {
+          [normalizedResource]: sanitizeObservation(currentObservations[normalizedResource], nowMs()),
+        }, nowMs());
+        return true;
+      } finally {
+        activeThrottlePromises.delete(normalizedResource);
+      }
     })();
-    return activeThrottlePromise;
+    activeThrottlePromises.set(normalizedResource, activePromise);
+    return activePromise;
   }
 
   return {
     awaitThrottleIfNeeded,
     recordResponseRateLimit,
     readSharedState,
-    resolveSharedStatePath: () => sharedStatePath,
+    resolveSharedStatePath: () => resolveSharedStatePathNow(),
     resolveThrottleFloor: () => resolveThrottleFloor(env, logger),
     __test__: {
-      mergeObservations,
+      mergeObservationMaps,
+      mergeObservations: mergeResourceObservations,
       normalizeObservation,
-      readStateFile: () => readStateFile(sharedStatePath, { nowMs: nowMs(), readFileSyncImpl }),
+      normalizeObservationMap,
+      readStateFile: () => readStateFile(resolveSharedStatePathNow(), { nowMs: nowMs(), readFileImpl }),
       sanitizeObservation,
     },
   };
@@ -301,8 +389,8 @@ function createRateLimitThrottle({
 
 const defaultThrottle = createRateLimitThrottle();
 
-function awaitThrottleIfNeeded() {
-  return defaultThrottle.awaitThrottleIfNeeded();
+function awaitThrottleIfNeeded(resource) {
+  return defaultThrottle.awaitThrottleIfNeeded(resource);
 }
 
 function recordResponseRateLimit(observation) {
@@ -312,10 +400,11 @@ function recordResponseRateLimit(observation) {
 export {
   awaitThrottleIfNeeded,
   createRateLimitThrottle,
+  DEFAULT_RESOURCE,
   DEFAULT_THROTTLE_FLOOR,
   extractRateLimitObservation,
   MAX_THROTTLE_FLOOR,
-  mergeObservations,
+  mergeObservationMaps,
   MIN_THROTTLE_FLOOR,
   normalizeObservation,
   recordResponseRateLimit,

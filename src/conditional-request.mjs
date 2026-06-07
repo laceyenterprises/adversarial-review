@@ -90,7 +90,7 @@ async function fetchConditionalRestPage({
     : { ...params };
 
   async function runRequest(activeParams) {
-    await awaitThrottleIfNeeded();
+    await awaitThrottleIfNeeded('core');
     return request(activeParams);
   }
 

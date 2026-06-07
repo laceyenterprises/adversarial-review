@@ -214,6 +214,43 @@ test('recordApiCall batches row writes until flush', () => {
   }
 });
 
+test('canonical telemetry columns are not overwritten by extra fields', () => {
+  const rootDir = makeRootDir();
+  try {
+    const recorder = createApiCallRecorder({
+      rootDir,
+      nowMs: () => Date.parse('2026-06-05T08:15:00.000Z'),
+      timestampNow: () => '2026-06-05T08:15:00.000Z',
+    });
+    const filePath = recorder.recordApiCall({
+      category: 'pr_view',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 1388,
+      status: 200,
+      durationMs: 123,
+      extra: {
+        status: 'rogue',
+        timestamp: '1999-01-01T00:00:00.000Z',
+        category: 'graphql_pr_rollup',
+      },
+    });
+    recorder.flush();
+
+    assert.deepEqual(readJsonl(filePath), [
+      {
+        timestamp: '2026-06-05T08:15:00.000Z',
+        category: 'pr_view',
+        repo: 'laceyenterprises/adversarial-review',
+        pr: 1388,
+        status: 200,
+        durationMs: 123,
+      },
+    ]);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('apiStatusFromError keeps HTTP and local execution failures distinct', () => {
   assert.equal(apiStatusFromError({ status: 403 }), 403);
   assert.equal(apiStatusFromError({ response: { status: 429 } }), 429);

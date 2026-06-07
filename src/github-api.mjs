@@ -559,9 +559,10 @@ function parseGhApiHttpEnvelope(stdout) {
 }
 
 async function execGhJson(execFileImpl, args) {
-  const headerAware = args[0] === 'api' && !(process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test');
+  const headerAware = args[0] === 'api';
+  const throttleResource = args[0] === 'api' && args[1] === 'graphql' ? 'graphql' : 'core';
   try {
-    await awaitThrottleIfNeeded();
+    await awaitThrottleIfNeeded(throttleResource);
     const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
     const { stdout } = await execFileImpl('gh', effectiveArgs, {
       maxBuffer: GH_MAX_BUFFER,

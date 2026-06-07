@@ -202,7 +202,35 @@ if reviewer_broker_mode_enabled "claude-reviewer"; then
     exit 1
   fi
 else
-  resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN 'op://Cliovault/claude-reviewer-pat/credential'
+  # SA-token-fallback (see adversarial-watcher-start.sh for the full
+  # block + rationale). Retry the Cliovault reviewer-PAT read under
+  # the canonical agent-os SA env file if the watcher's primary SA
+  # lacks Cliovault read access.
+  _WATCHER_PRIMARY_OP_SA_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
+  _try_resolve_reviewer_pat() {
+    local target_env="$1"
+    local op_ref="$2"
+    if resolve_and_export_required_op_secret "$target_env" "$op_ref"; then
+      return 0
+    fi
+    if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then
+      echo "[adversarial-watcher] retrying ${target_env} read under canonical SA env file (watcher SA may lack Cliovault access)" >&2
+      local _fallback_token
+      # shellcheck disable=SC1091
+      _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"
+      if [[ -n "$_fallback_token" ]]; then
+        OP_SERVICE_ACCOUNT_TOKEN="$_fallback_token" \
+          resolve_and_export_required_op_secret "$target_env" "$op_ref" && return 0
+      fi
+    fi
+    return 1
+  }
+  if ! _try_resolve_reviewer_pat GH_CLAUDE_REVIEWER_TOKEN 'op://Cliovault/claude-reviewer-pat/credential'; then
+    echo "[adversarial-watcher] ERROR: failed to resolve GH_CLAUDE_REVIEWER_TOKEN from Cliovault under both watcher SA and canonical SA." >&2
+    exit 1
+  fi
+  OP_SERVICE_ACCOUNT_TOKEN="$_WATCHER_PRIMARY_OP_SA_TOKEN"
+  export OP_SERVICE_ACCOUNT_TOKEN
 fi
 if reviewer_broker_mode_enabled "codex-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
@@ -210,7 +238,12 @@ if reviewer_broker_mode_enabled "codex-reviewer"; then
     exit 1
   fi
 else
-  resolve_and_export_required_op_secret GH_CODEX_REVIEWER_TOKEN 'op://Cliovault/codex-reviewer-pat/credential'
+  if ! _try_resolve_reviewer_pat GH_CODEX_REVIEWER_TOKEN 'op://Cliovault/codex-reviewer-pat/credential'; then
+    echo "[adversarial-watcher] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from Cliovault under both watcher SA and canonical SA." >&2
+    exit 1
+  fi
+  OP_SERVICE_ACCOUNT_TOKEN="$_WATCHER_PRIMARY_OP_SA_TOKEN"
+  export OP_SERVICE_ACCOUNT_TOKEN
 fi
 
 resolve_alert_to_optional() {

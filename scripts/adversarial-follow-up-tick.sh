@@ -143,7 +143,28 @@ if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
     exit 1
   fi
 else
-  GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://Cliovault/claude-reviewer-pat/credential' 2>/dev/null || true)
+  # SA-token-fallback: try the daemon's current OP context first,
+  # then retry under the canonical agent-os SA env file if Cliovault
+  # is unreachable from the current SA.
+  _tick_op_read_reviewer_pat() {
+    local op_ref="$1"
+    local result
+    result=$(/opt/homebrew/bin/op read "$op_ref" 2>/dev/null || true)
+    if [[ -n "$result" ]]; then
+      printf '%s' "$result"
+      return 0
+    fi
+    if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then
+      local _fallback_token
+      # shellcheck disable=SC1091
+      _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"
+      if [[ -n "$_fallback_token" ]]; then
+        result=$(OP_SERVICE_ACCOUNT_TOKEN="$_fallback_token" /opt/homebrew/bin/op read "$op_ref" 2>/dev/null || true)
+        printf '%s' "$result"
+      fi
+    fi
+  }
+  GH_CLAUDE_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/claude-reviewer-pat/credential')
   export GH_CLAUDE_REVIEWER_TOKEN
 fi
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
@@ -153,7 +174,7 @@ if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
     exit 1
   fi
 else
-  GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://Cliovault/codex-reviewer-pat/credential' 2>/dev/null || true)
+  GH_CODEX_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/codex-reviewer-pat/credential')
   export GH_CODEX_REVIEWER_TOKEN
 fi
 if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then

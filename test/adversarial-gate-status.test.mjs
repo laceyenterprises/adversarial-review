@@ -530,6 +530,43 @@ test('publishAdversarialGateStatus skips duplicate decisions already recorded fo
   assert.equal(record.description, decision.description);
 });
 
+test('publishAdversarialGateStatus early-returns disabled-by-config when ADVERSARIAL_GATE_STATUS_DISABLED=true', async () => {
+  const ghCalls = [];
+  const writeCalls = [];
+  const execFileImpl = async (command, args) => {
+    ghCalls.push({ command, args });
+    return { stdout: '', stderr: '' };
+  };
+  const writeRecordImpl = (filePath, content, options) => {
+    writeCalls.push({ filePath, content, options });
+    return filePath;
+  };
+
+  const result = await publishAdversarialGateStatus('/virtual/root', {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 99,
+    headSha: 'abc123',
+    decision: {
+      state: 'pending',
+      description: 'Queued.',
+      reason: 'review-queued',
+    },
+    execFileImpl,
+    writeRecordImpl,
+    env: {
+      GITHUB_TOKEN: 'token-123',
+      ADVERSARIAL_GATE_STATUS_DISABLED: 'true',
+    },
+  });
+
+  assert.equal(result.posted, false);
+  assert.equal(result.reason, 'disabled-by-config');
+  assert.equal(result.record.repo, 'laceyenterprises/adversarial-review');
+  assert.equal(result.record.headSha, 'abc123');
+  assert.equal(ghCalls.length, 0, 'kill-switch must NOT POST to /statuses/');
+  assert.equal(writeCalls.length, 0, 'kill-switch must NOT write a gate record');
+});
+
 test('publishAdversarialGateStatus rejects invalid PR numbers before path interpolation', async () => {
   await assert.rejects(
     publishAdversarialGateStatus('/virtual/root', {

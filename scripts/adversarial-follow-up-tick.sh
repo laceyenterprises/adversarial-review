@@ -126,10 +126,36 @@ fi
 # attempts hammering an obviously-broken token); the daemon picks up
 # the token on its next start once 1Password is back. R4 review
 # blocking #4 on PR #18.
-GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential' 2>/dev/null || true)
-GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential' 2>/dev/null || true)
-export GH_CLAUDE_REVIEWER_TOKEN
-export GH_CODEX_REVIEWER_TOKEN
+# Reviewer-broker helper (2026-06-07). When <ROLE>_AUTH_VIA_BROKER=true
+# we fetch installation tokens from the OAuth broker instead of via
+# op-read — each reviewer role gets its own 15K/hr GraphQL bucket.
+# Default-off; broker mode fails closed (no silent op-read fallback).
+_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER="$(dirname "$0")/lib/reviewer-broker.sh"
+if [[ -r "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER"
+fi
+
+if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
+   reviewer_broker_mode_enabled "claude-reviewer"; then
+  if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
+    echo "[follow-up-tick] ERROR: CLAUDE_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2
+    exit 1
+  fi
+else
+  GH_CLAUDE_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/jgyyk2upwnul4u7djztxhngygy/credential' 2>/dev/null || true)
+  export GH_CLAUDE_REVIEWER_TOKEN
+fi
+if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
+   reviewer_broker_mode_enabled "codex-reviewer"; then
+  if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
+    echo "[follow-up-tick] ERROR: CODEX_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2
+    exit 1
+  fi
+else
+  GH_CODEX_REVIEWER_TOKEN=$(/opt/homebrew/bin/op read 'op://mem423y7ewrymvxv4ibh34zdk4/sdtrfnz53an6dbv47yymktpzb4/credential' 2>/dev/null || true)
+  export GH_CODEX_REVIEWER_TOKEN
+fi
 if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then
   echo "[follow-up-tick] WARN: GH_CLAUDE_REVIEWER_TOKEN not resolved at startup — claude-code comment posts will be deferred to retry; consume/reconcile continue." >&2
 fi

@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { recordApiCall } from './api-telemetry.mjs';
 
 const DEFAULT_THROTTLE_FLOOR = 200;
@@ -9,14 +10,18 @@ const MAX_THROTTLE_FLOOR = 1000;
 const LOCK_RETRY_MS = 50;
 const LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_RESOURCE = 'core';
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const TOOL_ROOT = dirname(MODULE_DIR);
+const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-limit-state.json');
 
 function defaultSleep(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
 function resolveRateLimitSharedStatePath(env = process.env, cwd = process.cwd()) {
+  void cwd;
   const configured = String(env.GHO_RATE_LIMIT_SHARED_STATE_PATH || '').trim();
-  return configured || resolve(cwd, 'data', 'api-cache', 'rate-limit-state.json');
+  return configured || DEFAULT_SHARED_STATE_PATH;
 }
 
 function resolveThrottleFloor(env = process.env, logger = console) {
@@ -160,6 +165,20 @@ async function writeStateFile(sharedStatePath, state, {
   await renameImpl(tmpPath, sharedStatePath);
 }
 
+async function writeThrottleStatusFile(sharedStatePath, payload, {
+  mkdirImpl = mkdir,
+  writeFileImpl = writeFile,
+} = {}) {
+  const statusPath = `${sharedStatePath}.throttled.json`;
+  await mkdirImpl(dirname(statusPath), { recursive: true, mode: 0o700 });
+  await writeFileImpl(statusPath, `${JSON.stringify({ version: 1, ...payload }, null, 2)}\n`, { mode: 0o600 });
+  return statusPath;
+}
+
+async function clearThrottleStatusFile(sharedStatePath, { rmImpl = rm } = {}) {
+  await rmImpl(`${sharedStatePath}.throttled.json`, { force: true });
+}
+
 function isAlivePid(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -196,6 +215,7 @@ async function withSharedStateLock(sharedStatePath, callback, {
   const ownerPath = join(lockPath, 'owner.json');
   await mkdirImpl(dirname(lockPath), { recursive: true, mode: 0o700 });
   const startedAt = nowMs();
+  let acquiredLock = false;
 
   async function shouldReclaimLock() {
     let details;
@@ -220,6 +240,7 @@ async function withSharedStateLock(sharedStatePath, callback, {
           pid: process.pid,
           acquiredAt: new Date(nowMs()).toISOString(),
         })}\n`, { flag: 'wx', mode: 0o600 });
+        acquiredLock = true;
       } catch (err) {
         await rmImpl(lockPath, { recursive: true, force: true });
         throw err;
@@ -241,8 +262,7 @@ async function withSharedStateLock(sharedStatePath, callback, {
   try {
     return await callback();
   } finally {
-    const owner = await readLockOwner(ownerPath, { readFileImpl });
-    if (owner?.token === ownerToken) {
+    if (acquiredLock) {
       await rmImpl(lockPath, { recursive: true, force: true });
     }
   }
@@ -314,7 +334,10 @@ function createRateLimitThrottle({
     return withSharedStateLock(resolvedSharedStatePath, async () => {
       const current = await readStateFile(resolvedSharedStatePath, { nowMs: nowMs(), readFileImpl });
       const merged = mergeObservationMaps(current, { [normalized.resource]: normalized }, nowMs());
-      if (Object.keys(merged).length > 0) {
+      if (
+        Object.keys(merged).length > 0
+        && JSON.stringify(merged) !== JSON.stringify(current)
+      ) {
         await writeStateFile(resolvedSharedStatePath, merged, {
           mkdirImpl,
           openImpl,
@@ -346,6 +369,7 @@ function createRateLimitThrottle({
         const current = currentObservations[normalizedResource] || null;
         if (!current || current.remaining >= floor) return false;
         const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
+        const resolvedSharedStatePath = resolveSharedStatePathNow();
         recordApiCallImpl?.({
           category: 'rate_limit_throttle_seconds',
           durationMs: waitMs,
@@ -357,7 +381,26 @@ function createRateLimitThrottle({
             resource: normalizedResource,
           },
         });
-        await sleepImpl(waitMs);
+        if (waitMs > 0) {
+          await writeThrottleStatusFile(resolvedSharedStatePath, {
+            resource: normalizedResource,
+            remaining: current.remaining,
+            floor,
+            throttledUntil: current.resetAt,
+            startedAt: new Date(nowMs()).toISOString(),
+            waitMs,
+          }, {
+            mkdirImpl,
+            writeFileImpl,
+          });
+        }
+        try {
+          await sleepImpl(waitMs);
+        } finally {
+          if (waitMs > 0) {
+            await clearThrottleStatusFile(resolvedSharedStatePath, { rmImpl });
+          }
+        }
         inMemoryObservations = mergeObservationMaps(inMemoryObservations, {
           [normalizedResource]: sanitizeObservation(currentObservations[normalizedResource], nowMs()),
         }, nowMs());

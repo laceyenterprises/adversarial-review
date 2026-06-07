@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   createRateLimitThrottle,
   DEFAULT_RESOURCE,
   DEFAULT_THROTTLE_FLOOR,
+  resolveRateLimitSharedStatePath,
   resolveThrottleFloor,
 } from '../src/rate-limit-throttle.mjs';
 
@@ -210,6 +212,15 @@ test('out-of-range floor falls back to default with a warning', () => {
   assert.equal(warnings.length, 1);
 });
 
+test('default shared-state path is anchored to the module root, not process cwd', () => {
+  const testDir = path.dirname(fileURLToPath(import.meta.url));
+  const repoRoot = path.dirname(testDir);
+  assert.equal(
+    resolveRateLimitSharedStatePath({}, '/tmp/not-the-tool-root'),
+    path.join(repoRoot, 'data', 'api-cache', 'rate-limit-state.json'),
+  );
+});
+
 test('reset window resumes without a second throttle activation', async () => {
   const rootDir = makeRootDir();
   try {
@@ -284,6 +295,99 @@ test('shared-state path is resolved lazily from env', async () => {
     });
     const stored = JSON.parse(readFileSync(secondPath, 'utf8'));
     assert.equal(stored.buckets.core.remaining, 100);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('recordResponseRateLimit skips shared-state writes when the observation is unchanged', async () => {
+  const rootDir = makeRootDir();
+  try {
+    const statePath = path.join(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
+    let openCalls = 0;
+    const throttle = createRateLimitThrottle({
+      env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath },
+      nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
+      sleepImpl: async () => {},
+      openImpl: async (...args) => {
+        openCalls += 1;
+        const { open } = await import('node:fs/promises');
+        return open(...args);
+      },
+    });
+    const observation = {
+      remaining: 100,
+      resetAt: '2026-06-06T12:00:42.000Z',
+      observedAt: '2026-06-06T12:00:00.000Z',
+    };
+
+    await throttle.recordResponseRateLimit(observation);
+    await throttle.recordResponseRateLimit(observation);
+
+    assert.equal(openCalls, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('lock release does not depend on rereading owner metadata', async () => {
+  const rootDir = makeRootDir();
+  try {
+    const statePath = path.join(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
+    const rmCalls = [];
+    const throttle = createRateLimitThrottle({
+      env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath },
+      nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
+      sleepImpl: async () => {},
+      readFileImpl: async (targetPath) => {
+        if (String(targetPath).endsWith('owner.json')) throw new Error('transient owner read failure');
+        return '{}';
+      },
+      rmImpl: async (targetPath) => {
+        rmCalls.push(String(targetPath));
+      },
+    });
+
+    await throttle.recordResponseRateLimit({
+      remaining: 100,
+      resetAt: '2026-06-06T12:00:42.000Z',
+      observedAt: '2026-06-06T12:00:00.000Z',
+    });
+
+    assert.ok(rmCalls.some((targetPath) => targetPath.endsWith('rate-limit-state.json.lock')));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('long throttle waits publish and clear a sidecar status file', async () => {
+  const rootDir = makeRootDir();
+  try {
+    const statePath = path.join(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
+    let releaseSleep;
+    const throttle = createRateLimitThrottle({
+      env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath },
+      nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
+      sleepImpl: () => new Promise((resolve) => {
+        releaseSleep = resolve;
+      }),
+    });
+    await throttle.recordResponseRateLimit({
+      remaining: 1,
+      resetAt: '2026-06-06T12:05:00.000Z',
+      observedAt: '2026-06-06T12:00:00.000Z',
+    });
+
+    const pending = throttle.awaitThrottleIfNeeded();
+    const sidecarPath = `${statePath}.throttled.json`;
+    await waitFor(() => existsSync(sidecarPath));
+    const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+    assert.equal(sidecar.resource, DEFAULT_RESOURCE);
+    assert.equal(sidecar.throttledUntil, '2026-06-06T12:05:00.000Z');
+
+    releaseSleep();
+    await pending;
+    assert.equal(existsSync(sidecarPath), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

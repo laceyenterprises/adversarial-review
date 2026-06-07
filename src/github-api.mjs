@@ -542,13 +542,23 @@ function buildGhEnv(env = process.env) {
 }
 
 function parseGhApiHttpEnvelope(stdout) {
-  const text = String(stdout || '').replace(/\r\n/g, '\n');
-  const separator = text.indexOf('\n\n');
+  const text = String(stdout || '');
+  const crlfSeparator = text.indexOf('\r\n\r\n');
+  const lfSeparator = text.indexOf('\n\n');
+  let separator = -1;
+  let separatorLength = 0;
+  if (crlfSeparator >= 0 && (lfSeparator < 0 || crlfSeparator <= lfSeparator)) {
+    separator = crlfSeparator;
+    separatorLength = 4;
+  } else if (lfSeparator >= 0) {
+    separator = lfSeparator;
+    separatorLength = 2;
+  }
   if (separator < 0) {
     return { headers: {}, bodyText: text };
   }
-  const headerText = text.slice(0, separator);
-  const bodyText = text.slice(separator + 2);
+  const headerText = text.slice(0, separator).replace(/\r\n/g, '\n');
+  const bodyText = text.slice(separator + separatorLength);
   const headers = {};
   for (const line of headerText.split('\n').slice(1)) {
     const colon = line.indexOf(':');
@@ -560,6 +570,9 @@ function parseGhApiHttpEnvelope(stdout) {
 
 async function execGhJson(execFileImpl, args) {
   const headerAware = args[0] === 'api';
+  if (headerAware && args.includes('--paginate')) {
+    throw new Error('execGhJson does not support `gh api --paginate` with header-aware rate-limit parsing; use an explicit page loop instead');
+  }
   const throttleResource = args[0] === 'api' && args[1] === 'graphql' ? 'graphql' : 'core';
   try {
     await awaitThrottleIfNeeded(throttleResource);
@@ -1375,6 +1388,7 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
 const __test__ = {
   buildGhEnv,
   extractChecksConnection,
+  execGhJson,
   extractGraphqlPr,
   fetchGraphqlConnectionPages,
   fetchGraphqlReviewContext,
@@ -1391,6 +1405,7 @@ const __test__ = {
   normalizePrNumber,
   normalizeReview,
   normalizeRollup,
+  parseGhApiHttpEnvelope,
   runGraphql,
   splitRepo,
   isGraphqlComplexityError,

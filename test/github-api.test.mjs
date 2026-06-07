@@ -1218,6 +1218,30 @@ test('gh invocations reuse GITHUB_TOKEN as GH_TOKEN when no gh token is set', as
   });
 });
 
+test('execGhJson rejects gh api --paginate with a clear local error', async () => {
+  const mod = await importGithubApiFresh();
+  await assert.rejects(
+    () => mod.__test__.execGhJson(async () => {
+      throw new Error('exec should not be called');
+    }, ['api', 'repos/laceyenterprises/agent-os/pulls', '--paginate']),
+    /does not support `gh api --paginate`/,
+  );
+});
+
+test('parseGhApiHttpEnvelope normalizes only headers and preserves body text', async () => {
+  const mod = await importGithubApiFresh();
+  const body = '{"message":"line\\r\\ninside body"}';
+  const parsed = mod.__test__.parseGhApiHttpEnvelope(
+    `HTTP/2 200\r\nx-ratelimit-resource: core\r\nx-ratelimit-remaining: 4999\r\n\r\n${body}`,
+  );
+
+  assert.deepEqual(parsed.headers, {
+    'x-ratelimit-resource': 'core',
+    'x-ratelimit-remaining': '4999',
+  });
+  assert.equal(parsed.bodyText, body);
+});
+
 test('review context helper fetches only PR metadata and comments', async () => {
   const expected = makeLargeExpectedRollup();
   const firstComments = expected.comments.slice(0, 100);

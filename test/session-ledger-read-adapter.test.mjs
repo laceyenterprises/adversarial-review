@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { createEmptySqliteDb, createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
   readReviewerSessionUsageFromLedger,
@@ -16,39 +17,6 @@ const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'session-ledger-adapter-'));
-}
-
-function createLedgerDb(dbPath) {
-  mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.exec(`
-    CREATE TABLE runtime_sessions (
-      session_id TEXT PRIMARY KEY,
-      adapter_session_key TEXT,
-      total_input_tokens INTEGER,
-      total_output_tokens INTEGER,
-      total_cache_read_tokens INTEGER,
-      total_cache_write_tokens INTEGER,
-      total_cost_usd REAL,
-      source_path TEXT,
-      started_at TEXT,
-      ended_at TEXT
-    );
-    CREATE TABLE worker_runs (
-      run_id TEXT,
-      launch_request_id TEXT,
-      session_id TEXT,
-      status TEXT,
-      token_usage_input INTEGER,
-      token_usage_output INTEGER,
-      token_usage_cost_usd REAL,
-      token_usage_source TEXT,
-      started_at TEXT,
-      ended_at TEXT,
-      updated_at TEXT
-    );
-  `);
-  db.close();
 }
 
 test('resolveSessionLedgerReadTarget accepts backend-neutral explicit sqlite and postgres targets', () => {
@@ -104,8 +72,8 @@ test('resolveSessionLedgerReadTarget skips earlier sqlite stub candidates that d
   const stubLedger = path.join(deployCheckout, '.agent-os', 'session-ledger', 'ledger.db');
   const runtimeLedger = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
   mkdirSync(path.dirname(stubLedger), { recursive: true });
-  new Database(stubLedger).close();
-  createLedgerDb(runtimeLedger);
+  createEmptySqliteDb(stubLedger);
+  createSessionLedgerDb(runtimeLedger, { runtimeSessions: [], workerRuns: [] });
 
   const result = resolveSessionLedgerReadTarget({
     requiredTables: ['runtime_sessions'],
@@ -144,8 +112,8 @@ test('resolveSessionLedgerReadTarget falls through env sqlite stubs that lack re
   const homeDir = tempRoot();
   const stubLedger = path.join(rootDir, 'env-stub.db');
   const runtimeLedger = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
-  new Database(stubLedger).close();
-  createLedgerDb(runtimeLedger);
+  createEmptySqliteDb(stubLedger);
+  createSessionLedgerDb(runtimeLedger, { runtimeSessions: [], workerRuns: [] });
 
   const result = resolveSessionLedgerReadTarget({
     requiredTables: ['worker_runs'],
@@ -174,8 +142,8 @@ test('resolveSessionLedgerReadTarget falls through stale legacy HQ ledgerDbPath 
     JSON.stringify({ ledgerDbPath: staleLegacyLedger }),
     'utf8',
   );
-  new Database(staleLegacyLedger).close();
-  createLedgerDb(runtimeLedger);
+  createEmptySqliteDb(staleLegacyLedger);
+  createSessionLedgerDb(runtimeLedger, { runtimeSessions: [], workerRuns: [] });
 
   const result = resolveSessionLedgerReadTarget({
     requiredTables: ['worker_runs'],
@@ -195,7 +163,7 @@ test('resolveSessionLedgerReadTarget falls through stale legacy HQ ledgerDbPath 
 test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newest timestamped row', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
   const db = new Database(ledgerDb);
   db.prepare(
     `INSERT INTO worker_runs (
@@ -224,7 +192,7 @@ test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newe
 test('readLatestWorkerRunStatusFromLedger breaks timestamp ties deterministically without sqlite rowid ordering', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
   const db = new Database(ledgerDb);
   for (const [runId, status] of [['wr_a', 'running'], ['wr_z', 'succeeded']]) {
     db.prepare(
@@ -393,7 +361,7 @@ test('readLatestWorkerRunStatusFromLedger returns a timeout failure when psql ex
 test('readReviewerSessionUsageFromLedger keeps runtime_sessions lookups bounded to the newest row', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
   const db = new Database(ledgerDb);
   db.prepare(
     `INSERT INTO runtime_sessions (
@@ -425,7 +393,7 @@ test('readReviewerSessionUsageFromLedger keeps runtime_sessions lookups bounded 
 test('adapter exposes the same ledger target contract to worker-run and runtime-session readers', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
-  createLedgerDb(ledgerDb);
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
   const db = new Database(ledgerDb);
   db.prepare(
     `INSERT INTO runtime_sessions (

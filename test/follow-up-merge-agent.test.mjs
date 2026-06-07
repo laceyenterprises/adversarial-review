@@ -3484,6 +3484,9 @@ test('resolveSessionLedgerReadTarget prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/
   createWorkerRunsLedgerDb(deployLedgerDbPath);
   createWorkerRunsLedgerDb(homeLedgerDbPath);
 
+  // Regression guard for the 2026-05-18 outage: preferring the stale
+  // managed-service-root fallback here caused false
+  // `original-worker-run-row-missing-but-worktree-present` deferrals.
   const result = resolveSessionLedgerReadTarget({
     requiredTables: ['worker_runs'],
     env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },

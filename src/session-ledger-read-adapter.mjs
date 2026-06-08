@@ -535,17 +535,60 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
   const spawnConfig = buildPostgresSpawnConfig(target);
   if (!spawnConfig.ok) return spawnConfig;
   try {
+    // psql's `-v name=value` variable substitution is NOT applied to SQL
+    // passed via `-c` — `-c` sends the command directly to the server
+    // without psql-side preprocessing. That means `:'lrq'` style
+    // placeholders are forwarded literally, causing the server to raise
+    // `syntax error at or near ":"`. To make `:'name'` substitution work,
+    // either `-f /dev/stdin` (script mode) with `\set` prepended, or stdin
+    // piping.
+    //
+    // Surfaced 2026-06-08T18:24Z when the adversarial-watcher's
+    // merge-agent dispatcher began failing to look up worker-runs for
+    // PR #1569 and PR #1570 with this exact syntax error
+    // (`merge_agent.tear_down_skipped reason=worker-run-lookup-failed`).
+    // The merge-agent dispatch was getting skipped, leaving Comment-only
+    // verdicts stuck and operator-blocking the cutover-replay pack.
+    //
+    // Fix: when psqlVars are supplied, switch to stdin (`-f /dev/stdin`
+    // shape via the spawnSyncImpl `input` option) and prepend a
+    // `\set name 'value'` line per variable. Empty psqlVars keeps the
+    // `-c` fast path (no behavioral change for callers that don't
+    // declare variables).
     const args = ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1'];
     for (const [name, value] of psqlVars) {
       args.push('-v', `${name}=${value}`);
     }
-    args.push(...spawnConfig.args, '-t', '-A', '-c', jsonSql);
-    const result = spawnSyncImpl('psql', args, {
-      encoding: 'utf8',
-      env: spawnConfig.env,
-      timeout: PSQL_TIMEOUT_MS,
-      killSignal: PSQL_TIMEOUT_SIGNAL,
-    });
+    let result;
+    if (psqlVars.length > 0) {
+      const setStanzas = psqlVars
+        .map(([name, value]) =>
+          // Escape any single-quote in the value to keep the psql
+          // string literal balanced. Values originate from validated
+          // ledger identifiers so the surface area is small, but
+          // doubling single quotes is the canonical SQL escape and
+          // costs nothing.
+          `\\set ${name} '${String(value).replace(/'/g, "''")}'`,
+        )
+        .join('\n');
+      const script = `${setStanzas}\n${jsonSql}\n`;
+      args.push(...spawnConfig.args, '-t', '-A');
+      result = spawnSyncImpl('psql', args, {
+        encoding: 'utf8',
+        env: spawnConfig.env,
+        timeout: PSQL_TIMEOUT_MS,
+        killSignal: PSQL_TIMEOUT_SIGNAL,
+        input: script,
+      });
+    } else {
+      args.push(...spawnConfig.args, '-t', '-A', '-c', jsonSql);
+      result = spawnSyncImpl('psql', args, {
+        encoding: 'utf8',
+        env: spawnConfig.env,
+        timeout: PSQL_TIMEOUT_MS,
+        killSignal: PSQL_TIMEOUT_SIGNAL,
+      });
+    }
     const failure = describePostgresSpawnFailure(result);
     if (failure) return { ...failure, target };
     return {

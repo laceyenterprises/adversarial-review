@@ -245,6 +245,19 @@ else
   OP_SERVICE_ACCOUNT_TOKEN="$_WATCHER_PRIMARY_OP_SA_TOKEN"
   export OP_SERVICE_ACCOUNT_TOKEN
 fi
+if reviewer_broker_mode_enabled "gemini-reviewer"; then
+  if ! resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer; then
+    echo "[adversarial-watcher] ERROR: GEMINI_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
+    exit 1
+  fi
+else
+  if ! _try_resolve_reviewer_pat GH_GEMINI_REVIEWER_TOKEN 'op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/credential'; then
+    echo "[adversarial-watcher] ERROR: failed to resolve GH_GEMINI_REVIEWER_TOKEN from Cliovault under both watcher SA and canonical SA." >&2
+    exit 1
+  fi
+  OP_SERVICE_ACCOUNT_TOKEN="$_WATCHER_PRIMARY_OP_SA_TOKEN"
+  export OP_SERVICE_ACCOUNT_TOKEN
+fi
 
 resolve_alert_to_optional() {
   local attempt=1

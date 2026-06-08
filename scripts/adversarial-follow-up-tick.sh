@@ -177,11 +177,24 @@ else
   GH_CODEX_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/codex-reviewer-pat/credential')
   export GH_CODEX_REVIEWER_TOKEN
 fi
+if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
+   reviewer_broker_mode_enabled "gemini-reviewer"; then
+  if ! resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer; then
+    echo "[follow-up-tick] ERROR: GEMINI_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2
+    exit 1
+  fi
+else
+  GH_GEMINI_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/credential')
+  export GH_GEMINI_REVIEWER_TOKEN
+fi
 if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then
   echo "[follow-up-tick] WARN: GH_CLAUDE_REVIEWER_TOKEN not resolved at startup — claude-code comment posts will be deferred to retry; consume/reconcile continue." >&2
 fi
 if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   echo "[follow-up-tick] WARN: GH_CODEX_REVIEWER_TOKEN not resolved at startup — codex comment posts will be deferred to retry; consume/reconcile continue." >&2
+fi
+if [[ -z "${GH_GEMINI_REVIEWER_TOKEN:-}" ]]; then
+  echo "[follow-up-tick] WARN: GH_GEMINI_REVIEWER_TOKEN not resolved at startup — gemini comment posts will be deferred to retry; consume/reconcile continue." >&2
 fi
 
 # Codex auth file lives in the running user's home; let the env

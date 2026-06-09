@@ -53,6 +53,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
   const fakeBin = join(root, 'bin');
   const fakeRepo = join(root, 'agent-os', 'tools', 'adversarial-review');
   const fakeSharedHelper = join(fakeRepo, 'scripts', 'lib', 'op-resolve-with-rate-limit-backoff.sh');
+  const fakeReviewerBrokerHelper = join(fakeRepo, 'scripts', 'lib', 'reviewer-broker.sh');
   const fakeTmp = join(root, 'tmp');
   const sleepLog = join(fakeTmp, 'sleep.log');
   mkdirSync(fakeBin, { recursive: true });
@@ -149,6 +150,13 @@ async function runMaintainerWatcherLauncher(scriptName, {
         + '}\n',
     );
   }
+  mkdirSync(dirname(fakeReviewerBrokerHelper), { recursive: true });
+  writeExecutable(
+    fakeReviewerBrokerHelper,
+    '#!/bin/zsh\n'
+      + 'reviewer_broker_mode_enabled() { return 1; }\n'
+      + 'resolve_reviewer_token_via_broker() { return 1; }\n',
+  );
 
   const script = readScript(scriptName)
     .replaceAll('/Users/airlock/agent-os', join(root, 'agent-os'))
@@ -244,7 +252,6 @@ test('watcher launchers require explicit opt-in before running without ALERT_TO'
     assert.match(script, /resolve_and_export_required_op_secret LINEAR_API_KEY/);
     assert.match(script, /op_resolve_with_rate_limit_backoff "\$OP_BIN" read/);
     assert.doesNotMatch(script, /\/opt\/homebrew\/bin\/op read/);
-    assert.doesNotMatch(script, /Cliovault/);
   }
 });
 

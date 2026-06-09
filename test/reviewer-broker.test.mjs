@@ -6,13 +6,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const HELPER = join(__dirname, '..', 'scripts', 'lib', 'reviewer-broker.sh');
 const SCRIPTS_DIR = join(__dirname, '..', 'scripts');
+const ZSH_PATH = '/bin/zsh';
+const ZSH_AVAILABLE = existsSync(ZSH_PATH);
+const SKIP_REASON_NO_ZSH = `${ZSH_PATH} is not available on this host`;
 
 function runHelperShell(snippet, env = {}) {
   return execFileSync(
@@ -28,22 +31,26 @@ function runHelperShell(snippet, env = {}) {
   );
 }
 
-test('reviewer-broker helper sources cleanly under zsh (regression: bash-only ${!var} bad-substitution)', () => {
-  // Watcher entry scripts use #!/bin/zsh, so the sourced helper must
-  // avoid bash-only indirect-variable expansion. Smoke under zsh.
-  const onOut = execFileSync(
-    '/bin/zsh',
-    ['-c', `source "${HELPER}"; reviewer_broker_mode_enabled claude-reviewer && echo enabled || echo disabled`],
-    { env: { ...process.env, CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true' }, encoding: 'utf8' },
-  );
-  assert.equal(onOut.trim(), 'enabled');
-  const offOut = execFileSync(
-    '/bin/zsh',
-    ['-c', `source "${HELPER}"; reviewer_broker_mode_enabled claude-reviewer && echo enabled || echo disabled`],
-    { env: { ...process.env, CLAUDE_REVIEWER_AUTH_VIA_BROKER: '' }, encoding: 'utf8' },
-  );
-  assert.equal(offOut.trim(), 'disabled');
-});
+test(
+  'reviewer-broker helper sources cleanly under zsh (regression: bash-only ${!var} bad-substitution)',
+  { skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH },
+  () => {
+    // Watcher entry scripts use #!/bin/zsh, so the sourced helper must
+    // avoid bash-only indirect-variable expansion. Smoke under zsh.
+    const onOut = execFileSync(
+      ZSH_PATH,
+      ['-c', `source "${HELPER}"; reviewer_broker_mode_enabled claude-reviewer && echo enabled || echo disabled`],
+      { env: { ...process.env, CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true' }, encoding: 'utf8' },
+    );
+    assert.equal(onOut.trim(), 'enabled');
+    const offOut = execFileSync(
+      ZSH_PATH,
+      ['-c', `source "${HELPER}"; reviewer_broker_mode_enabled claude-reviewer && echo enabled || echo disabled`],
+      { env: { ...process.env, CLAUDE_REVIEWER_AUTH_VIA_BROKER: '' }, encoding: 'utf8' },
+    );
+    assert.equal(offOut.trim(), 'disabled');
+  },
+);
 
 test('reviewer_broker_mode_enabled returns 0 (truthy) when the role flag is "true"', () => {
   const out = runHelperShell(
@@ -167,12 +174,12 @@ test('follow-up-tick script sources the broker helper + gates op-read on the fla
   // preserves existing behavior) but inside the `else` branch.
   assert.match(
     script,
-    /op read 'op:\/\/Cliovault\/claude-reviewer-pat\/credential'/,
+    /_tick_op_read_reviewer_pat 'op:\/\/Cliovault\/claude-reviewer-pat\/credential'/,
     'follow-up-tick must preserve the claude-reviewer op-read fallback',
   );
   assert.match(
     script,
-    /op read 'op:\/\/Cliovault\/codex-reviewer-pat\/credential'/,
+    /_tick_op_read_reviewer_pat 'op:\/\/Cliovault\/codex-reviewer-pat\/credential'/,
     'follow-up-tick must preserve the codex-reviewer op-read fallback',
   );
 });

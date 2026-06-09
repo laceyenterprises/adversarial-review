@@ -55,6 +55,8 @@ const RETENTION_DEFAULTS = {
     worker_worktrees_keep_hours: 168,
     follow_up_workspaces_keep_hours: 72,
     acpx_sessions_keep_days: 30,
+    acpx_sessions_gib_cap: 10.0,
+    acpx_sessions_min_idle_minutes: 60,
     openclaw_sessions_keep_days: 30,
     openclaw_sessions_min_idle_minutes: 60,
     claude_code_sessions_keep_days: 90,
@@ -422,6 +424,8 @@ test('retention full block accepts schema-default values', () => {
           worker_worktrees_keep_hours: 168
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30
+          acpx_sessions_gib_cap: 10.0
+          acpx_sessions_min_idle_minutes: 60
           openclaw_sessions_keep_days: 30
           openclaw_sessions_min_idle_minutes: 60
           claude_code_sessions_keep_days: 90
@@ -718,6 +722,8 @@ test('retention full block resolves identically from config.yaml and config.loca
           worker_worktrees_keep_hours: 168
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30
+          acpx_sessions_gib_cap: 10.0
+          acpx_sessions_min_idle_minutes: 60
           openclaw_sessions_keep_days: 30
           openclaw_sessions_min_idle_minutes: 60
           claude_code_sessions_keep_days: 90
@@ -749,6 +755,8 @@ test('retention full block resolves identically from config.yaml and config.loca
           worker_worktrees_keep_hours: 168
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30
+          acpx_sessions_gib_cap: 10.0
+          acpx_sessions_min_idle_minutes: 60
           openclaw_sessions_keep_days: 30
           openclaw_sessions_min_idle_minutes: 60
           claude_code_sessions_keep_days: 90

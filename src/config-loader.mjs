@@ -261,7 +261,10 @@ function schemaV1() {
                 __strict: true,
                 __keys: {
                   threshold_pct: { __type: TYPE_INT, __default: 85, __min: 0, __max: 100 },
+                  threshold_pct_critical: { __type: TYPE_INT, __default: 95, __min: 0, __max: 100 },
                   threshold_gib_free: { __type: TYPE_INT, __default: 10, __min: 0 },
+                  threshold_gib_free_critical: { __type: TYPE_INT, __default: 2, __min: 0 },
+                  page_dedupe_seconds: { __type: TYPE_INT, __default: 3600, __min: 0 },
                 },
               },
             },

@@ -223,7 +223,8 @@ test('readLatestWorkerRunStatusFromLedger uses the canonical postgres reader pat
       assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
       assert.ok(args.includes('-v'));
       assert.ok(args.includes('lrq=lrq_pg'));
-      const sql = String(args.at(-1));
+      const sql = String(options.input);
+      assert.match(sql, /\\set lrq 'lrq_pg'/);
       assert.match(sql, /FROM worker_runs/);
       assert.match(sql, /WHERE launch_request_id = :'lrq'/);
       assert.match(sql, /ORDER BY COALESCE\(updated_at::text, ended_at::text, started_at::text, ''\) DESC/);

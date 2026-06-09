@@ -65,7 +65,10 @@ const RETENTION_DEFAULTS = {
   sentinel: {
     disk_headroom: {
       threshold_pct: 85,
+      threshold_pct_critical: 95,
       threshold_gib_free: 10,
+      threshold_gib_free_critical: 2,
+      page_dedupe_seconds: 3600,
     },
   },
 };
@@ -433,7 +436,10 @@ test('retention full block accepts schema-default values', () => {
         sentinel:
           disk_headroom:
             threshold_pct: 85
+            threshold_pct_critical: 95
             threshold_gib_free: 10
+            threshold_gib_free_critical: 2
+            page_dedupe_seconds: 3600
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.deepEqual(cfg.get('retention'), RETENTION_DEFAULTS);
@@ -605,6 +611,9 @@ test('retention rejects out-of-range calendar and percentage values', () => {
     ['retention.cadence.monthly_day_of_month', '          cadence:\n            monthly_day_of_month: 0', 0],
     ['retention.cadence.monthly_day_of_month', '          cadence:\n            monthly_day_of_month: 32', 32],
     ['retention.sentinel.disk_headroom.threshold_pct', '          sentinel:\n            disk_headroom:\n              threshold_pct: 101', 101],
+    ['retention.sentinel.disk_headroom.threshold_pct_critical', '          sentinel:\n            disk_headroom:\n              threshold_pct_critical: 101', 101],
+    ['retention.sentinel.disk_headroom.threshold_gib_free_critical', '          sentinel:\n            disk_headroom:\n              threshold_gib_free_critical: -1', -1],
+    ['retention.sentinel.disk_headroom.page_dedupe_seconds', '          sentinel:\n            disk_headroom:\n              page_dedupe_seconds: -1', -1],
   ];
   const tmp = freshTmp();
   try {
@@ -731,7 +740,10 @@ test('retention full block resolves identically from config.yaml and config.loca
         sentinel:
           disk_headroom:
             threshold_pct: 85
+            threshold_pct_critical: 95
             threshold_gib_free: 10
+            threshold_gib_free_critical: 2
+            page_dedupe_seconds: 3600
     `);
     const splitTop = join(tmp, 'config.yaml');
     const local = join(tmp, 'config.local.yaml');
@@ -764,7 +776,10 @@ test('retention full block resolves identically from config.yaml and config.loca
         sentinel:
           disk_headroom:
             threshold_pct: 85
+            threshold_pct_critical: 95
             threshold_gib_free: 10
+            threshold_gib_free_critical: 2
+            page_dedupe_seconds: 3600
     `);
     const topCfg = loadConfig({ topPath: topOnly, env: {} });
     const localCfg = loadConfig({ topPath: splitTop, env: {} });

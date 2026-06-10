@@ -43,6 +43,7 @@ import {
   readCascadeState,
 } from './reviewer-cascade.mjs';
 import {
+  loadRoleConfig,
   resolveDefaultMergeAgentWorkerClass,
   MODULE_CONFIG_PATH,
   validateStartupRoleConfig,
@@ -162,6 +163,32 @@ function resolveMergeAgentWorkerClass(env = process.env, opts = {}) {
 function validateStartupMergeAgentConfig(env = process.env, opts = {}) {
   validateStartupRoleConfig({ env, ...opts });
   resolveMergeAgentWorkerClass(env, opts);
+  resolveHqWorkerTearDownTimeoutMs(env, opts);
+  resolveHqDispatchTimeoutMs(env, opts);
+}
+
+function resolveHqWorkerTearDownTimeoutMs(env = process.env, options = {}) {
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'follow_up.hq_worker_tear_down_subprocess_timeout_ms',
+  }).get('follow_up.hq_worker_tear_down_subprocess_timeout_ms', HQ_WORKER_TEAR_DOWN_TIMEOUT_MS);
+  const parsed = Number(cfgValue);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_WORKER_TEAR_DOWN_TIMEOUT_MS;
+}
+
+function resolveHqDispatchTimeoutMs(env = process.env, options = {}) {
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'follow_up.hq_dispatch_subprocess_timeout_ms',
+  }).get('follow_up.hq_dispatch_subprocess_timeout_ms', HQ_DISPATCH_TIMEOUT_MS);
+  const parsed = Number(cfgValue);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_DISPATCH_TIMEOUT_MS;
 }
 
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
@@ -836,11 +863,12 @@ async function prepareOriginalWorkerForMergeAgent({
   }
 
   const args = ['worker', 'tear-down', originalWorkerId, '--force', '--root', hqRoot];
+  const tearDownTimeoutMs = resolveHqWorkerTearDownTimeoutMs(env);
   try {
     await execFileImpl(hqPath, args, {
       env,
       maxBuffer: 5 * 1024 * 1024,
-      timeout: HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
+      timeout: tearDownTimeoutMs,
       killSignal: 'SIGTERM',
     });
   } catch (err) {
@@ -853,7 +881,7 @@ async function prepareOriginalWorkerForMergeAgent({
       worker_status: runStatus.status || null,
       stderr: String(err?.stderr ?? '').trim() || null,
       stdout: String(err?.stdout ?? '').trim() || null,
-      timeout_ms: timedOut ? HQ_WORKER_TEAR_DOWN_TIMEOUT_MS : null,
+      timeout_ms: timedOut ? tearDownTimeoutMs : null,
       at: now,
     });
     throw formatExecFailure('hq worker tear-down', err);
@@ -3883,12 +3911,13 @@ async function dispatchMergeAgentForPR({
   ];
   let activeArgs = argsWithPriority;
   let transientRetryIndex = 0;
+  const dispatchTimeoutMs = resolveHqDispatchTimeoutMs(dispatchEnv);
   for (;;) {
     try {
       execResult = await execFileImpl(resolvedHqPath, activeArgs, {
         env: dispatchEnv,
         maxBuffer: 5 * 1024 * 1024,
-        timeout: HQ_DISPATCH_TIMEOUT_MS,
+        timeout: dispatchTimeoutMs,
         killSignal: 'SIGTERM',
       });
       break;
@@ -5109,6 +5138,8 @@ export {
   DEFAULT_MERGE_AGENT_WORKER_CLASS,
   ALLOWED_MERGE_AGENT_WORKER_CLASSES,
   resolveMergeAgentWorkerClass,
+  resolveHqDispatchTimeoutMs,
+  resolveHqWorkerTearDownTimeoutMs,
   validateStartupMergeAgentConfig,
   TERMINAL_WORKER_RUN_STATUSES,
   addMergeAgentDispatchedLabel,

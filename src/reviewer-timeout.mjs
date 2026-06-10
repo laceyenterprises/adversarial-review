@@ -4,31 +4,47 @@
 // classified as `reviewer-timeout`. The separate no-output progress watchdog
 // is intentionally 15 minutes for streaming subprocesses; non-streaming
 // cli-direct reviewer commands disable it and rely on the hard deadline.
+//
+// CFG promotion 2026-06-09: these are now CFG-01 knobs at
+// `reviewer.timeout_ms` and `reviewer.no_progress_timeout_ms`. The legacy
+// env names (`ADVERSARIAL_REVIEWER_TIMEOUT_MS`, `ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS`)
+// remain honored as aliases via the config-loader's ENV_ALIASES registry.
+import { loadRoleConfig } from './role-config.mjs';
+
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_PROGRESS_TIMEOUT_MS = 15 * 60 * 1000;
 
-function resolveReviewerTimeoutMs(env = process.env) {
-  const raw = env.ADVERSARIAL_REVIEWER_TIMEOUT_MS;
-  if (raw === undefined || raw === null || raw === '') {
-    return DEFAULT_REVIEWER_TIMEOUT_MS;
+function _resolvePositiveInt(value, fallback) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
   }
-  const parsed = Number(raw);
+  const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_REVIEWER_TIMEOUT_MS;
+    return fallback;
   }
   return Math.floor(parsed);
 }
 
-function resolveProgressTimeoutMs(env = process.env) {
-  const raw = env.ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS;
-  if (raw === undefined || raw === null || raw === '') {
-    return DEFAULT_PROGRESS_TIMEOUT_MS;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_PROGRESS_TIMEOUT_MS;
-  }
-  return Math.floor(parsed);
+function resolveReviewerTimeoutMs(env = process.env, options = {}) {
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'reviewer.timeout_ms',
+  }).get('reviewer.timeout_ms', DEFAULT_REVIEWER_TIMEOUT_MS);
+  return _resolvePositiveInt(cfgValue, DEFAULT_REVIEWER_TIMEOUT_MS);
+}
+
+function resolveProgressTimeoutMs(env = process.env, options = {}) {
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'reviewer.no_progress_timeout_ms',
+  }).get('reviewer.no_progress_timeout_ms', DEFAULT_PROGRESS_TIMEOUT_MS);
+  return _resolvePositiveInt(cfgValue, DEFAULT_PROGRESS_TIMEOUT_MS);
 }
 
 export {

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
+import { AgentOSConfigError } from '../src/config-loader.mjs';
 
 const {
   CLAUDE_STRIPPED_ENV_VARS,
@@ -352,7 +353,10 @@ test('reviewer timeout defaults to 20m and honors explicit positive env override
   assert.equal(resolveReviewerTimeoutMs({}), 20 * 60 * 1000);
   assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '12345' }), 12345);
   assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '0' }), 20 * 60 * 1000);
-  assert.equal(resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: 'not-a-number' }), 20 * 60 * 1000);
+  assert.throws(
+    () => resolveReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: 'not-a-number' }),
+    AgentOSConfigError
+  );
 });
 
 test('spawnClaude wraps claude in launchctl asuser on darwin', async () => {

@@ -170,12 +170,12 @@ function pruneBlankRoleEnvVars(env) {
 // for error-shaping when the loader rejects an env-sourced value.
 //
 // Caching (CFG-09): when no `loaderImpl` is injected, the call routes
-// through `loadConfigCached` in `config-loader.mjs`. That keeps a
-// single-slot cache per (topPath, modulePaths) shape and invalidates
-// when any watched file (top + top.local + each module + each
-// module.local) changes mtime/inode. The cache does NOT watch env
-// content — callers MUST call `resetRoleConfigCache()` at their
-// per-tick / per-job boundary so in-process env mutations propagate.
+// through `loadConfigCached` in `config-loader.mjs`. That keeps cache
+// slots per (topPath, modulePaths, declared env aliases) shape and
+// invalidates when any watched file (top + top.local + each module +
+// each module.local) changes mtime/inode. Callers still reset at their
+// per-tick / per-job boundary, but explicit env overlays now get their
+// own cache slots so aliases and conflict checks remain env-scoped.
 // This is the documented contract from CFG-09 (`LOADER-CONTRACT.md`
 // §Cache invalidation), not a regression of the failed naive cache
 // attempted in the CFG-02 round-1 remediation.

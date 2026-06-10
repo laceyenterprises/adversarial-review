@@ -7,11 +7,14 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import { loadConfig, ENV_ALIASES } from '../src/config-loader.mjs';
 import { resolveReviewerTimeoutMs, resolveProgressTimeoutMs } from '../src/reviewer-timeout.mjs';
 import { resolveFirstPassReviewerPoolConfig } from '../src/watcher-reviewer-pool.mjs';
-import { normalizeMaxConcurrentFollowUpJobs } from '../src/follow-up-remediation.mjs';
+import { normalizeMaxConcurrentFollowUpJobs, resolveRemediationMaxConcurrentJobs } from '../src/follow-up-remediation.mjs';
 
 const ALL_NEW_FLAT_KEYS = Object.freeze([
   'remediation.max_concurrent_jobs',
@@ -26,6 +29,18 @@ const ALL_NEW_FLAT_KEYS = Object.freeze([
   'follow_up.hq_worker_tear_down_subprocess_timeout_ms',
   'follow_up.hq_dispatch_subprocess_timeout_ms',
 ]);
+
+function createTempConfig(contents) {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'cfg-promotion-watcher-knobs-'));
+  const configPath = path.join(rootDir, 'config.yaml');
+  writeFileSync(configPath, contents, 'utf8');
+  return {
+    configPath,
+    cleanup() {
+      rmSync(rootDir, { recursive: true, force: true });
+    },
+  };
+}
 
 test('all promoted CFG keys are registered in ENV_ALIASES', () => {
   for (const key of ALL_NEW_FLAT_KEYS) {
@@ -43,7 +58,7 @@ test('schema defaults resolve to documented values when nothing is overridden', 
       delete scrubbedEnv[alias];
     }
   }
-  scrubbedEnv.AGENT_OS_CONFIG_PATH = '/Users/airlock/agent-os/config.yaml';
+  scrubbedEnv.AGENT_OS_CONFIG_PATH = '/dev/null';
 
   const cfg = loadConfig({ env: scrubbedEnv });
   const expected = {
@@ -81,6 +96,32 @@ test('reviewer.timeout_ms: defaults applied when env is absent', () => {
   assert.strictEqual(resolveReviewerTimeoutMs(env), 20 * 60 * 1000);
 });
 
+test('reviewer timeout helpers honor canonical env keys and env-scoped AGENT_OS_CONFIG_PATH', () => {
+  const { configPath, cleanup } = createTempConfig(`version: 1
+reviewer:
+  timeout_ms: 345000
+  no_progress_timeout_ms: 234000
+`);
+  try {
+    const env = {
+      AGENT_OS_CONFIG_PATH: configPath,
+    };
+    assert.strictEqual(resolveReviewerTimeoutMs(env), 345_000);
+    assert.strictEqual(resolveProgressTimeoutMs(env), 234_000);
+  } finally {
+    cleanup();
+  }
+});
+
+test('reviewer timeout helpers honor canonical AGENT_OS_* env overrides from the supplied env', () => {
+  const env = {
+    AGENT_OS_REVIEWER_TIMEOUT_MS: '456000',
+    AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS: '123000',
+  };
+  assert.strictEqual(resolveReviewerTimeoutMs(env), 456_000);
+  assert.strictEqual(resolveProgressTimeoutMs(env), 123_000);
+});
+
 test('first-pass reviewer pool: legacy ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT env still wins', () => {
   const env = { ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT: '7' };
   const cfg = resolveFirstPassReviewerPoolConfig({ env, watcherConfig: {} });
@@ -93,6 +134,32 @@ test('first-pass reviewer pool: falls back to internal default when CFG + env bo
   const cfg = resolveFirstPassReviewerPoolConfig({ env, watcherConfig: {} });
   // DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3
   assert.strictEqual(cfg.maxConcurrent, 3);
+});
+
+test('first-pass reviewer pool honors canonical env-scoped config path', () => {
+  const { configPath, cleanup } = createTempConfig(`version: 1
+watcher:
+  first_pass_reviewer_pool_max_concurrent_reviewers: 5
+`);
+  try {
+    const cfg = resolveFirstPassReviewerPoolConfig({
+      env: { AGENT_OS_CONFIG_PATH: configPath },
+      watcherConfig: {},
+    });
+    assert.strictEqual(cfg.enabled, true);
+    assert.strictEqual(cfg.maxConcurrent, 5);
+  } finally {
+    cleanup();
+  }
+});
+
+test('first-pass reviewer pool honors canonical AGENT_OS_* env overrides from the supplied env', () => {
+  const cfg = resolveFirstPassReviewerPoolConfig({
+    env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '6' },
+    watcherConfig: {},
+  });
+  assert.strictEqual(cfg.enabled, true);
+  assert.strictEqual(cfg.maxConcurrent, 6);
 });
 
 test('normalizeMaxConcurrentFollowUpJobs: clamps to CFG-resolved ceiling', () => {
@@ -113,4 +180,30 @@ test('normalizeMaxConcurrentFollowUpJobs: returns fallback for non-positive inpu
   assert.strictEqual(normalizeMaxConcurrentFollowUpJobs(0), 1);
   assert.strictEqual(normalizeMaxConcurrentFollowUpJobs(-5), 1);
   assert.strictEqual(normalizeMaxConcurrentFollowUpJobs('banana'), 1);
+});
+
+test('remediation concurrency honors canonical env-scoped config path for floor and ceiling', () => {
+  const { configPath, cleanup } = createTempConfig(`version: 1
+remediation:
+  max_concurrent_jobs: 4
+  max_concurrent_jobs_ceiling: 5
+`);
+  try {
+    const env = {
+      AGENT_OS_CONFIG_PATH: configPath,
+    };
+    assert.strictEqual(resolveRemediationMaxConcurrentJobs(env), 4);
+    assert.strictEqual(normalizeMaxConcurrentFollowUpJobs(9, { env }), 5);
+  } finally {
+    cleanup();
+  }
+});
+
+test('remediation concurrency honors canonical AGENT_OS_* env overrides from the supplied env', () => {
+  const env = {
+    AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS: '3',
+    AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING: '4',
+  };
+  assert.strictEqual(resolveRemediationMaxConcurrentJobs(env), 3);
+  assert.strictEqual(normalizeMaxConcurrentFollowUpJobs(9, { env }), 4);
 });

@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { getConfig } from './config-loader.mjs';
+import { loadConfig } from './config-loader.mjs';
 import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -1410,12 +1410,15 @@ async function dispatchRemediationViaHq({
   };
 }
 
-function _resolveRemediationCfgCeiling() {
+function _resolveRemediationCfgCeiling(env = process.env) {
   // CFG-01 anchor: `remediation.max_concurrent_jobs_ceiling` promoted
   // 2026-06-09. Default 8 — unchanged from MAX_REMEDIATION_MAX_CONCURRENT_JOBS.
   let cfgValue;
   try {
-    cfgValue = getConfig('remediation.max_concurrent_jobs_ceiling', MAX_REMEDIATION_MAX_CONCURRENT_JOBS);
+    cfgValue = loadConfig({ env }).get(
+      'remediation.max_concurrent_jobs_ceiling',
+      MAX_REMEDIATION_MAX_CONCURRENT_JOBS
+    );
   } catch (err) {
     cfgValue = MAX_REMEDIATION_MAX_CONCURRENT_JOBS;
   }
@@ -1429,11 +1432,12 @@ function _resolveRemediationCfgCeiling() {
 function normalizeMaxConcurrentFollowUpJobs(value, {
   fallback = DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
   max = null,
+  env = process.env,
   onClamp = null,
 } = {}) {
   // `max` resolved at call time so the CFG ceiling is consulted lazily and
   // tests can override via options.max without standing up a config loader.
-  const effectiveMax = max ?? _resolveRemediationCfgCeiling();
+  const effectiveMax = max ?? _resolveRemediationCfgCeiling(env);
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     return fallback;
@@ -1458,12 +1462,15 @@ function resolveRemediationMaxConcurrentJobs(env = process.env, options = {}) {
     || env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === ''
   ) {
     try {
-      cfgValue = getConfig('remediation.max_concurrent_jobs', null);
+      cfgValue = loadConfig({ env }).get('remediation.max_concurrent_jobs', null);
     } catch (err) {
       cfgValue = null;
     }
   }
-  return normalizeMaxConcurrentFollowUpJobs(env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] ?? cfgValue, options);
+  return normalizeMaxConcurrentFollowUpJobs(
+    env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] ?? cfgValue,
+    { ...options, env: options.env ?? env }
+  );
 }
 
 function followUpJobRepoPrKey(job) {

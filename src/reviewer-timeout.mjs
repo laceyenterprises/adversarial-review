@@ -9,7 +9,7 @@
 // `reviewer.timeout_ms` and `reviewer.no_progress_timeout_ms`. The legacy
 // env names (`ADVERSARIAL_REVIEWER_TIMEOUT_MS`, `ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS`)
 // remain honored as aliases via the config-loader's ENV_ALIASES registry.
-import { getConfig } from './config-loader.mjs';
+import { loadConfig } from './config-loader.mjs';
 
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_PROGRESS_TIMEOUT_MS = 15 * 60 * 1000;
@@ -33,7 +33,7 @@ function resolveReviewerTimeoutMs(env = process.env) {
   }
   let cfgValue;
   try {
-    cfgValue = getConfig('reviewer.timeout_ms', DEFAULT_REVIEWER_TIMEOUT_MS);
+    cfgValue = loadConfig({ env }).get('reviewer.timeout_ms', DEFAULT_REVIEWER_TIMEOUT_MS);
   } catch (err) {
     cfgValue = DEFAULT_REVIEWER_TIMEOUT_MS;
   }
@@ -46,7 +46,7 @@ function resolveProgressTimeoutMs(env = process.env) {
   }
   let cfgValue;
   try {
-    cfgValue = getConfig('reviewer.no_progress_timeout_ms', DEFAULT_PROGRESS_TIMEOUT_MS);
+    cfgValue = loadConfig({ env }).get('reviewer.no_progress_timeout_ms', DEFAULT_PROGRESS_TIMEOUT_MS);
   } catch (err) {
     cfgValue = DEFAULT_PROGRESS_TIMEOUT_MS;
   }

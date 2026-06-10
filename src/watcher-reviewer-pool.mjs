@@ -3,7 +3,7 @@ import {
   peakReviewerMemoryMbFor,
   readMemoryPressureSample,
 } from './watcher-memory-pressure.mjs';
-import { getConfig } from './config-loader.mjs';
+import { loadConfig } from './config-loader.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
@@ -22,14 +22,14 @@ function parsePositiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function _resolveFirstPassPoolMaxFromCfg() {
+function _resolveFirstPassPoolMaxFromCfg(env = process.env) {
   // CFG-01 anchor: `watcher.first_pass_reviewer_pool_max_concurrent_reviewers`
   // promoted 2026-06-09. Legacy `ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT`
   // (and its two earlier aliases) remain honored via ENV_ALIASES, so this CFG
   // branch only takes effect if no env value is set.
   let cfgValue;
   try {
-    cfgValue = getConfig('watcher.first_pass_reviewer_pool_max_concurrent_reviewers', null);
+    cfgValue = loadConfig({ env }).get('watcher.first_pass_reviewer_pool_max_concurrent_reviewers', null);
   } catch (err) {
     cfgValue = null;
   }
@@ -56,7 +56,7 @@ function resolveFirstPassReviewerPoolConfig({
   const configuredMax = watcherConfig.maxConcurrentFirstPassReviewers
     ?? watcherConfig.reviewerPoolMaxConcurrent
     ?? DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX;
-  const cfgMax = _resolveFirstPassPoolMaxFromCfg();
+  const cfgMax = _resolveFirstPassPoolMaxFromCfg(env);
   const maxConcurrent = parsePositiveInteger(
     env.ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT
       ?? env.ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT

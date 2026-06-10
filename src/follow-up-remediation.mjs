@@ -1,5 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { getConfig } from './config-loader.mjs';
 import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -1409,27 +1410,60 @@ async function dispatchRemediationViaHq({
   };
 }
 
+function _resolveRemediationCfgCeiling() {
+  // CFG-01 anchor: `remediation.max_concurrent_jobs_ceiling` promoted
+  // 2026-06-09. Default 8 — unchanged from MAX_REMEDIATION_MAX_CONCURRENT_JOBS.
+  let cfgValue;
+  try {
+    cfgValue = getConfig('remediation.max_concurrent_jobs_ceiling', MAX_REMEDIATION_MAX_CONCURRENT_JOBS);
+  } catch (err) {
+    cfgValue = MAX_REMEDIATION_MAX_CONCURRENT_JOBS;
+  }
+  const parsed = Number(cfgValue);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return MAX_REMEDIATION_MAX_CONCURRENT_JOBS;
+  }
+  return parsed;
+}
+
 function normalizeMaxConcurrentFollowUpJobs(value, {
   fallback = DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
-  max = MAX_REMEDIATION_MAX_CONCURRENT_JOBS,
+  max = null,
   onClamp = null,
 } = {}) {
+  // `max` resolved at call time so the CFG ceiling is consulted lazily and
+  // tests can override via options.max without standing up a config loader.
+  const effectiveMax = max ?? _resolveRemediationCfgCeiling();
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     return fallback;
   }
-  if (parsed > max) {
+  if (parsed > effectiveMax) {
     onClamp?.({
       requested: parsed,
-      clamped: max,
+      clamped: effectiveMax,
     });
-    return max;
+    return effectiveMax;
   }
   return parsed;
 }
 
 function resolveRemediationMaxConcurrentJobs(env = process.env, options = {}) {
-  return normalizeMaxConcurrentFollowUpJobs(env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV], options);
+  // CFG-01 anchor for the floor: `remediation.max_concurrent_jobs`.
+  // Legacy `ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS` env still wins.
+  let cfgValue = null;
+  if (
+    env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === undefined
+    || env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === null
+    || env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === ''
+  ) {
+    try {
+      cfgValue = getConfig('remediation.max_concurrent_jobs', null);
+    } catch (err) {
+      cfgValue = null;
+    }
+  }
+  return normalizeMaxConcurrentFollowUpJobs(env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] ?? cfgValue, options);
 }
 
 function followUpJobRepoPrKey(job) {
@@ -4856,6 +4890,7 @@ export {
   defaultRemediatorWorkerClassFromEnv,
   resolveDefaultRemediator,
   validateStartupRemediationConfig,
+  normalizeMaxConcurrentFollowUpJobs,
   normalizeRemediationWorkerClass,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,

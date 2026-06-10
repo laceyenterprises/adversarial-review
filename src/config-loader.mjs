@@ -658,6 +658,19 @@ function schemaV1() {
         __strict: true,
         __keys: {
           max_concurrent_jobs: { __type: TYPE_INT, __default: 1 },
+          // Upper bound the operator can dial `max_concurrent_jobs` up to
+          // via env / config. Existing helper at follow-up-remediation.mjs
+          // clamped to 8; promoting it lets operators on bigger hosts raise
+          // the ceiling without code edits.
+          max_concurrent_jobs_ceiling: { __type: TYPE_INT, __default: 8, __min: 1 },
+          // Lifecycle reconciliation watchdog — a remediation reservation
+          // older than this many ms is considered abandoned and reclaimed
+          // for re-dispatch. Default 6h (21_600_000 ms).
+          reconciliation_max_active_age_ms_before_abandon: {
+            __type: TYPE_INT,
+            __default: 21600000,
+            __min: 60000,
+          },
         },
       },
       merge_agent: {
@@ -672,6 +685,16 @@ function schemaV1() {
         __strict: true,
         __keys: {
           timeout_ms: { __type: TYPE_INT, __default: 1200000 },
+          // The reviewer is also killed if it makes no progress (no output
+          // event) for this many ms. Distinct from the total wall-clock
+          // timeout above — a 20-min reviewer that keeps producing output
+          // every 5 min should not be killed by `no_progress_timeout_ms`,
+          // but one that goes silent for 15 min should be. Default 15 min.
+          no_progress_timeout_ms: {
+            __type: TYPE_INT,
+            __default: 900000,
+            __min: 1000,
+          },
           fallback_threshold: { __type: TYPE_INT, __default: 2 },
         },
       },
@@ -683,6 +706,62 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: null,
             __nullable: true,
+          },
+          // Max ms the watcher will wait during drain before forcing exit.
+          // Default 1h. Lower for tighter restart windows on operator-driven
+          // restarts; raise for long-running PR backlogs.
+          max_drain_wait_ms: {
+            __type: TYPE_INT,
+            __default: 3600000,
+            __min: 1000,
+          },
+          // Pending-draft reviewer respawn-age gate. A pending draft review
+          // older than this many seconds is eligible for respawn. Default 15
+          // min. Floor enforced separately in the watcher code; this CFG
+          // value is the default before per-process floors apply.
+          pending_draft_review_respawn_age_seconds: {
+            __type: TYPE_INT,
+            __default: 900,
+            __min: 60,
+          },
+          // Debounce window for the stuck-dispatch alert. Default 1h: a
+          // stuck dispatch only fires the alert at most once per hour, even
+          // if every poll still sees the same stuck state.
+          stuck_dispatch_alert_debounce_ms: {
+            __type: TYPE_INT,
+            __default: 3600000,
+            __min: 60000,
+          },
+          // First-pass reviewer pool concurrency cap. Maximum number of
+          // concurrent first-pass review processes the watcher may have in
+          // flight. Currently env-only via `ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT`;
+          // promoting it gives operators a CFG anchor so the value is visible
+          // in `agent-os config doctor`. Null = use the watcher's internal
+          // default (currently dynamic based on review surface).
+          first_pass_reviewer_pool_max_concurrent_reviewers: {
+            __type: TYPE_INT,
+            __default: null,
+            __nullable: true,
+            __min: 1,
+          },
+        },
+      },
+      // Subprocess timeouts for the follow-up pipeline's calls into `hq`.
+      // Promoted from hardcoded constants in follow-up-merge-agent.mjs so
+      // operators can tune wall-clock budgets per-host.
+      follow_up: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          hq_worker_tear_down_subprocess_timeout_ms: {
+            __type: TYPE_INT,
+            __default: 60000,
+            __min: 1000,
+          },
+          hq_dispatch_subprocess_timeout_ms: {
+            __type: TYPE_INT,
+            __default: 90000,
+            __min: 1000,
           },
         },
       },
@@ -778,6 +857,57 @@ export const ENV_ALIASES = {
   'roles.reviewer': {
     canonical: 'AGENT_OS_ROLES_REVIEWER',
     aliases: [['ADVERSARIAL_REVIEW_DEFAULT_REVIEWER', identity]],
+  },
+  // CFG promotion of pre-CFG adversarial-review knobs. Pre-CFG operators
+  // pinned these names directly in plists; preserve them as aliases so the
+  // migration is invisible to anyone who had already set a value.
+  'remediation.max_concurrent_jobs': {
+    canonical: 'AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS',
+    aliases: [['ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS', identity]],
+  },
+  'remediation.max_concurrent_jobs_ceiling': {
+    canonical: 'AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING',
+    aliases: [['ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING', identity]],
+  },
+  'remediation.reconciliation_max_active_age_ms_before_abandon': {
+    canonical: 'AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON',
+    aliases: [['ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS', identity]],
+  },
+  'reviewer.timeout_ms': {
+    canonical: 'AGENT_OS_REVIEWER_TIMEOUT_MS',
+    aliases: [['ADVERSARIAL_REVIEWER_TIMEOUT_MS', identity]],
+  },
+  'reviewer.no_progress_timeout_ms': {
+    canonical: 'AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS',
+    aliases: [['ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS', identity]],
+  },
+  'watcher.max_drain_wait_ms': {
+    canonical: 'AGENT_OS_WATCHER_MAX_DRAIN_WAIT_MS',
+    aliases: [['ADVERSARIAL_WATCHER_DRAIN_MAX_MS', identity]],
+  },
+  'watcher.pending_draft_review_respawn_age_seconds': {
+    canonical: 'AGENT_OS_WATCHER_PENDING_DRAFT_REVIEW_RESPAWN_AGE_SECONDS',
+    aliases: [['ADVERSARIAL_PENDING_DRAFT_RESPAWN_AGE_SECONDS', identity]],
+  },
+  'watcher.stuck_dispatch_alert_debounce_ms': {
+    canonical: 'AGENT_OS_WATCHER_STUCK_DISPATCH_ALERT_DEBOUNCE_MS',
+    aliases: [['ADVERSARIAL_STUCK_DISPATCH_ALERT_DEBOUNCE_MS', identity]],
+  },
+  'watcher.first_pass_reviewer_pool_max_concurrent_reviewers': {
+    canonical: 'AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS',
+    aliases: [
+      ['ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT', identity],
+      ['ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT', identity],
+      ['ADVERSARIAL_REVIEWER_POOL_MAX_CONCURRENT', identity],
+    ],
+  },
+  'follow_up.hq_worker_tear_down_subprocess_timeout_ms': {
+    canonical: 'AGENT_OS_FOLLOW_UP_HQ_WORKER_TEAR_DOWN_SUBPROCESS_TIMEOUT_MS',
+    aliases: [['HQ_WORKER_TEAR_DOWN_TIMEOUT_MS', identity]],
+  },
+  'follow_up.hq_dispatch_subprocess_timeout_ms': {
+    canonical: 'AGENT_OS_FOLLOW_UP_HQ_DISPATCH_SUBPROCESS_TIMEOUT_MS',
+    aliases: [['HQ_DISPATCH_TIMEOUT_MS', identity]],
   },
   'roles.remediator': {
     canonical: 'AGENT_OS_ROLES_REMEDIATOR',

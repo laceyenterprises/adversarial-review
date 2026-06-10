@@ -1701,9 +1701,9 @@ test('submodules accepts arbitrary keys through validateSchema', () => {
   assert.deepEqual(validated.submodules, { anything_goes: { nested: true } });
 });
 
-// -------- Empty env-string for booleans must fail loud --------------------
+// -------- Empty env-string for booleans coerces to false ------------------
 
-test('empty-string env var for bool fails loud (does not silently coerce to false)', () => {
+test('empty-string env var for bool coerces to false', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -1712,18 +1712,14 @@ test('empty-string env var for bool fails loud (does not silently coerce to fals
       feature_flags:
         claude_code_ambient_auth_fallback: true
     `);
-    assert.throws(
-      () =>
-        loadConfig({
-          topPath: top,
-          env: { AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK: '' },
-        }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /claude_code_ambient_auth_fallback/);
-        assert.match(err.message, /not a recognized boolean/);
-        return true;
-      },
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK: '' },
+    });
+    assert.equal(cfg.get('feature_flags.claude_code_ambient_auth_fallback'), false);
+    assert.equal(
+      cfg.resolutionTrace('feature_flags.claude_code_ambient_auth_fallback').at(-1).source,
+      'env:AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -2078,7 +2074,7 @@ test('AgentOSConfigError normalizes derived envName tokens', () => {
   );
 });
 
-test('AMA merge_authority spec YAML and env alias load through strict Node schema', () => {
+test('AMA merge_authority spec YAML and env aliases load through strict Node schema', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -2127,6 +2123,23 @@ test('AMA merge_authority spec YAML and env alias load through strict Node schem
     assert.equal(
       legacyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
       'env:AMA_ENABLED',
+    );
+
+    const legacyEmptyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: '' } });
+    assert.equal(legacyEmptyEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
+    assert.equal(
+      legacyEmptyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+      'env:AMA_ENABLED',
+    );
+
+    const canonicalFalseEnvCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: '0' },
+    });
+    assert.equal(canonicalFalseEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
+    assert.equal(
+      canonicalFalseEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+      'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

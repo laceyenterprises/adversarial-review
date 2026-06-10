@@ -10,16 +10,12 @@
 // byte-equivalence. Deliberate divergences from the current Python sibling
 // (each one strictly tightens the contract; tracked for alignment in the
 // agent-os PR landing the Python helper):
-//   1. Empty-string boolean env vars: this loader rejects them with a loud
-//      AgentOSConfigError; the Python sibling currently coerces "" → false.
-//      Operators "unsetting" a security-relevant flag must remove the env
-//      var, not blank it.
-//   2. Explicit `~` / null on non-nullable keys: this loader fails the
+//   1. Explicit `~` / null on non-nullable keys: this loader fails the
 //      schema; the Python sibling reverts to defaults.
-//   3. Same-file alias conflict: this loader compares the canonical-target
+//   2. Same-file alias conflict: this loader compares the canonical-target
 //      values with deep structural equality (isDeepStrictEqual); the Python
 //      sibling uses identity. Trivially-deep-equal dicts merge cleanly here.
-//   4. localSibling for non-`.yaml`/`.yml` top-level paths: this loader
+//   3. localSibling for non-`.yaml`/`.yml` top-level paths: this loader
 //      refuses to compute a sibling and skips Layer 4 for that file; the
 //      Python sibling appends `.local` literally (producing odd siblings
 //      like `config.conf.local`).
@@ -1695,13 +1691,11 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
   const expected = schemaLeaf.__type;
   if (expected === TYPE_BOOL) {
     const lower = value.trim().toLowerCase();
+    if (lower === '') return false;
     if (lower === 'true' || lower === '1') return true;
     if (lower === 'false' || lower === '0') return false;
-    // Empty string is rejected (was previously silently coerced to false);
-    // operators "unsetting" a security-relevant flag by setting it empty
-    // must do so by removing the env var, not blanking it.
     throw new AgentOSConfigError(
-      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false' or '1'/'0'; unset the env var instead of blanking it)`,
+      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false', '1'/'0', or empty string for false)`,
       { key, expected: 'bool', got: value, source },
     );
   }

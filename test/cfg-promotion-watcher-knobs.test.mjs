@@ -52,6 +52,22 @@ function createTempConfig(contents) {
   };
 }
 
+function assertEnvAliasConflict(fn, expectedNames) {
+  assert.throws(
+    fn,
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError, `expected AgentOSConfigError, got ${err?.name}`);
+      for (const name of expectedNames) {
+        assert.ok(
+          err.conflictingEnvNames.includes(name),
+          `expected conflict to include ${name}; got ${JSON.stringify(err.conflictingEnvNames)}`
+        );
+      }
+      return true;
+    }
+  );
+}
+
 test.afterEach(() => {
   resetRoleConfigCache();
 });
@@ -61,6 +77,120 @@ test('all promoted CFG keys are registered in ENV_ALIASES', () => {
     assert.ok(ENV_ALIASES[key], `missing ENV_ALIASES entry: ${key}`);
     assert.ok(ENV_ALIASES[key].canonical, `missing canonical env name: ${key}`);
   }
+});
+
+test('pending-draft respawn uses the real legacy env alias', () => {
+  const aliasNames = ENV_ALIASES['watcher.pending_draft_review_respawn_age_seconds']
+    .aliases
+    .map(([name]) => name);
+  assert.ok(aliasNames.includes('ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS'));
+  assert.ok(!aliasNames.includes('ADVERSARIAL_PENDING_DRAFT_RESPAWN_AGE_SECONDS'));
+  assert.strictEqual(
+    resolvePendingDraftRespawnAgeSeconds({
+      ADVERSARIAL_REVIEW_SIGTERM_FENCE: 'on',
+      ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS: '601',
+    }),
+    601
+  );
+});
+
+test('promoted resolvers fail loud on canonical-vs-legacy env conflicts', () => {
+  assertEnvAliasConflict(
+    () => resolveReviewerTimeoutMs({
+      AGENT_OS_REVIEWER_TIMEOUT_MS: '600000',
+      ADVERSARIAL_REVIEWER_TIMEOUT_MS: '600001',
+    }),
+    ['AGENT_OS_REVIEWER_TIMEOUT_MS', 'ADVERSARIAL_REVIEWER_TIMEOUT_MS']
+  );
+  assertEnvAliasConflict(
+    () => resolveProgressTimeoutMs({
+      AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS: '300000',
+      ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '300001',
+    }),
+    ['AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS', 'ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS']
+  );
+  assertEnvAliasConflict(
+    () => resolveFirstPassReviewerPoolConfig({
+      env: {
+        AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '4',
+        ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT: '5',
+      },
+      watcherConfig: {},
+    }),
+    [
+      'AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS',
+      'ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT',
+    ]
+  );
+  assertEnvAliasConflict(
+    () => resolveRemediationMaxConcurrentJobs({
+      AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS: '3',
+      ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS: '4',
+    }),
+    ['AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS', 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS']
+  );
+  assertEnvAliasConflict(
+    () => normalizeMaxConcurrentFollowUpJobs(9, {
+      env: {
+        AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING: '4',
+        ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING: '5',
+      },
+    }),
+    [
+      'AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING',
+      'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING',
+    ]
+  );
+  assertEnvAliasConflict(
+    () => loadConfig({
+      env: {
+        AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON: '21600000',
+        ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS: '21600001',
+      },
+    }),
+    [
+      'AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON',
+      'ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS',
+    ]
+  );
+  assertEnvAliasConflict(
+    () => resolveWatcherDrainMaxMs({
+      AGENT_OS_WATCHER_MAX_DRAIN_WAIT_MS: '3600000',
+      ADVERSARIAL_WATCHER_DRAIN_MAX_MS: '3600001',
+    }),
+    ['AGENT_OS_WATCHER_MAX_DRAIN_WAIT_MS', 'ADVERSARIAL_WATCHER_DRAIN_MAX_MS']
+  );
+  assertEnvAliasConflict(
+    () => resolvePendingDraftRespawnAgeSeconds({
+      AGENT_OS_WATCHER_PENDING_DRAFT_REVIEW_RESPAWN_AGE_SECONDS: '600',
+      ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS: '601',
+    }),
+    [
+      'AGENT_OS_WATCHER_PENDING_DRAFT_REVIEW_RESPAWN_AGE_SECONDS',
+      'ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS',
+    ]
+  );
+  assertEnvAliasConflict(
+    () => resolveStuckDispatchAlertDebounceMs({
+      AGENT_OS_WATCHER_STUCK_DISPATCH_ALERT_DEBOUNCE_MS: '3600000',
+      ADVERSARIAL_STUCK_DISPATCH_ALERT_DEBOUNCE_MS: '3600001',
+    }),
+    ['AGENT_OS_WATCHER_STUCK_DISPATCH_ALERT_DEBOUNCE_MS', 'ADVERSARIAL_STUCK_DISPATCH_ALERT_DEBOUNCE_MS']
+  );
+  assertEnvAliasConflict(
+    () => resolveHqWorkerTearDownTimeoutMs({
+      AGENT_OS_FOLLOW_UP_HQ_WORKER_TEAR_DOWN_SUBPROCESS_TIMEOUT_MS: '60000',
+      HQ_WORKER_TEAR_DOWN_TIMEOUT_MS: '60001',
+    }),
+    ['AGENT_OS_FOLLOW_UP_HQ_WORKER_TEAR_DOWN_SUBPROCESS_TIMEOUT_MS', 'HQ_WORKER_TEAR_DOWN_TIMEOUT_MS']
+  );
+  assertEnvAliasConflict(
+    () => resolveHqDispatchTimeoutMs({
+      AGENT_OS_FOLLOW_UP_HQ_DISPATCH_SUBPROCESS_TIMEOUT_MS: '90000',
+      HQ_DISPATCH_TIMEOUT_MS: '90001',
+    }),
+    ['AGENT_OS_FOLLOW_UP_HQ_DISPATCH_SUBPROCESS_TIMEOUT_MS', 'HQ_DISPATCH_TIMEOUT_MS']
+  );
 });
 
 test('schema defaults resolve to documented values when nothing is overridden', () => {

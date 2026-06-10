@@ -887,7 +887,7 @@ export const ENV_ALIASES = {
   },
   'watcher.pending_draft_review_respawn_age_seconds': {
     canonical: 'AGENT_OS_WATCHER_PENDING_DRAFT_REVIEW_RESPAWN_AGE_SECONDS',
-    aliases: [['ADVERSARIAL_PENDING_DRAFT_RESPAWN_AGE_SECONDS', identity]],
+    aliases: [['ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS', identity]],
   },
   'watcher.stuck_dispatch_alert_debounce_ms': {
     canonical: 'AGENT_OS_WATCHER_STUCK_DISPATCH_ALERT_DEBOUNCE_MS',
@@ -1926,16 +1926,16 @@ function isEmptyDoc(doc) {
 // the top-level path + its `*.local.yaml` sibling + each module path in
 // the call + each module's `*.local.yaml` sibling.
 //
-// What this does NOT catch by mtime alone: env-var rotations (e.g.
-// AGENT_OS_ROLES_REMEDIATOR flipped in-process). The cache is keyed on
-// the *path shape* (env-resolved topPath + modulePaths), not env
-// content — so env mutations between calls return the stale cached
-// value. CFG-09's cache-invalidation contract makes that explicit:
-// per-tick / per-job callers MUST call `resetConfigCache()` (or
-// `resetRoleConfigCache()` from `role-config.mjs`) at their
-// reconfigure boundary.
+// Env-var rotations are part of the cache key for declared CFG aliases
+// (canonical + legacy names in ENV_ALIASES), so per-call env overlays
+// cannot reuse a config object resolved under a different env value.
+// Callers should still call `resetConfigCache()` (or
+// `resetRoleConfigCache()` from `role-config.mjs`) at their per-tick /
+// per-job boundary so removed env vars and unrelated process-global
+// changes cannot bleed across long-lived loops.
 //
-// Cache structure: a Map keyed by JSON({resolvedTopPath, modulePaths}),
+// Cache structure: a Map keyed by
+// JSON({resolvedTopPath, modulePaths, envAliases}),
 // each entry holding the resolved AgentOSConfig + the file signature it
 // was loaded under. The cache key ALWAYS uses the env-resolved top
 // (`topPath || env.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH`) so
@@ -1995,9 +1995,20 @@ function _cacheKeyFor({ topPath, modulePaths, env }) {
   // the slot on every env switch and the cache would never hit.
   const envView = env || process.env;
   const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
+  const envAliases = [];
+  for (const info of Object.values(ENV_ALIASES)) {
+    const names = [info.canonical, ...(info.aliases || []).map(([name]) => name)];
+    for (const name of names) {
+      if (Object.prototype.hasOwnProperty.call(envView, name)) {
+        envAliases.push([name, envView[name]]);
+      }
+    }
+  }
+  envAliases.sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify({
     resolvedTopPath: resolvedTop,
     modulePaths: [...(modulePaths || [])],
+    envAliases,
   });
 }
 

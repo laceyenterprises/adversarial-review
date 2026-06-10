@@ -7,6 +7,7 @@ import {
   reconcilePendingDraftsBeforeSpawn,
   resolvePendingDraftRespawnAgeSeconds,
 } from '../src/watcher.mjs';
+import { AgentOSConfigError } from '../src/config-loader.mjs';
 
 const WATCHER_SOURCE = new URL('../src/watcher.mjs', import.meta.url);
 
@@ -324,7 +325,7 @@ test('respawn age validation accepts fence-on values in [60, 1800] and rejects o
       ADVERSARIAL_REVIEW_SIGTERM_FENCE: 'on',
       ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS: '59',
     }),
-    (err) => err?.logKey === 'respawn_age_out_of_range'
+    (err) => err instanceof AgentOSConfigError
   );
   assert.throws(
     () => resolvePendingDraftRespawnAgeSeconds({
@@ -338,14 +339,14 @@ test('respawn age validation accepts fence-on values in [60, 1800] and rejects o
       ADVERSARIAL_REVIEW_SIGTERM_FENCE: 'on',
       ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS: '60xyz',
     }),
-    (err) => err?.logKey === 'respawn_age_out_of_range'
+    (err) => err instanceof AgentOSConfigError
   );
   assert.throws(
     () => resolvePendingDraftRespawnAgeSeconds({
       ADVERSARIAL_REVIEW_SIGTERM_FENCE: 'on',
       ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS: '15min',
     }),
-    (err) => err?.logKey === 'respawn_age_out_of_range'
+    (err) => err instanceof AgentOSConfigError
   );
 });
 

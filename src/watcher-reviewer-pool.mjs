@@ -25,8 +25,8 @@ function parsePositiveInteger(value, fallback) {
 function _resolveFirstPassPoolMaxFromCfg(env = process.env, options = {}) {
   // CFG-01 anchor: `watcher.first_pass_reviewer_pool_max_concurrent_reviewers`
   // promoted 2026-06-09. Legacy `ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT`
-  // (and its two earlier aliases) remain honored via ENV_ALIASES, so this CFG
-  // branch only takes effect if no env value is set.
+  // (and its two earlier aliases) remain honored via ENV_ALIASES, so canonical
+  // vs legacy conflicts are detected by the loader before runtime parsing.
   return loadRoleConfig({
     env,
     topPath: options.topPath,
@@ -52,19 +52,17 @@ function resolveFirstPassReviewerPoolConfig({
     Boolean(configuredEnabled)
   );
   // Precedence (highest → lowest):
-  //   1. Legacy env vars (ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT, …)
-  //   2. CFG-01 `watcher.first_pass_reviewer_pool_max_concurrent_reviewers`
-  //   3. watcherConfig kwarg
-  //   4. DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX
+  //   1. Loader-resolved CFG/env value, including canonical + legacy aliases
+  //      and their conflict checks.
+  //   2. watcherConfig kwarg
+  //   3. DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX
   const configuredMax = watcherConfig.maxConcurrentFirstPassReviewers
     ?? watcherConfig.reviewerPoolMaxConcurrent
     ?? DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX;
   const cfgMax = _resolveFirstPassPoolMaxFromCfg(env, { topPath, modulePaths, loaderImpl });
   const maxConcurrent = parsePositiveInteger(
-    env.ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT
-      ?? env.ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT
-      ?? env.ADVERSARIAL_REVIEWER_POOL_MAX_CONCURRENT,
-    parsePositiveInteger(cfgMax, parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX))
+    cfgMax,
+    parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX)
   );
   return {
     enabled,

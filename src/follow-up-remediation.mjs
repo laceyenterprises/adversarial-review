@@ -1457,23 +1457,17 @@ function normalizeMaxConcurrentFollowUpJobs(value, {
 
 function resolveRemediationMaxConcurrentJobs(env = process.env, options = {}) {
   // CFG-01 anchor for the floor: `remediation.max_concurrent_jobs`.
-  // Legacy `ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS` env still wins.
-  let cfgValue = null;
-  if (
-    env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === undefined
-    || env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === null
-    || env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === ''
-  ) {
-    cfgValue = loadRoleConfig({
-      env,
-      topPath: options.topPath,
-      modulePaths: options.modulePaths,
-      loaderImpl: options.loaderImpl,
-      contextKey: 'remediation.max_concurrent_jobs',
-    }).get('remediation.max_concurrent_jobs', null);
-  }
+  // Legacy env names are resolved by ENV_ALIASES in the loader so
+  // canonical-vs-legacy conflicts fail loud before runtime clamping.
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'remediation.max_concurrent_jobs',
+  }).get('remediation.max_concurrent_jobs', null);
   return normalizeMaxConcurrentFollowUpJobs(
-    env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] ?? cfgValue,
+    cfgValue,
     { ...options, env: options.env ?? env }
   );
 }

@@ -338,7 +338,7 @@ function resolveBotTokenEnvForIdentity(identity) {
 }
 
 function resolvePendingDraftRespawnAgeSeconds(env = process.env, options = {}) {
-  const raw = env.ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS ?? loadRoleConfig({
+  const raw = loadRoleConfig({
     env,
     topPath: options.topPath,
     modulePaths: options.modulePaths,

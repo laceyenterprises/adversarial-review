@@ -26,11 +26,6 @@ function _resolvePositiveInt(value, fallback) {
 }
 
 function resolveReviewerTimeoutMs(env = process.env, options = {}) {
-  // Prefer the legacy env name when explicitly set; otherwise consult CFG;
-  // CFG-driven defaults fall back to the hardcoded constant.
-  if (env.ADVERSARIAL_REVIEWER_TIMEOUT_MS) {
-    return _resolvePositiveInt(env.ADVERSARIAL_REVIEWER_TIMEOUT_MS, DEFAULT_REVIEWER_TIMEOUT_MS);
-  }
   const cfgValue = loadRoleConfig({
     env,
     topPath: options.topPath,
@@ -42,9 +37,6 @@ function resolveReviewerTimeoutMs(env = process.env, options = {}) {
 }
 
 function resolveProgressTimeoutMs(env = process.env, options = {}) {
-  if (env.ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS) {
-    return _resolvePositiveInt(env.ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS, DEFAULT_PROGRESS_TIMEOUT_MS);
-  }
   const cfgValue = loadRoleConfig({
     env,
     topPath: options.topPath,

@@ -2,11 +2,12 @@
 //
 // These tests exercise the documented cache-invalidation contract:
 //
-//   - The role-config cascade cache is keyed by (topPath, modulePaths)
-//     and watches file mtime/inode. Repeated calls with the same call
-//     shape are cache hits; file edits invalidate the slot.
-//   - Env mutations DO NOT auto-invalidate the cache. The caller MUST
-//     call `resetRoleConfigCache()` at the per-tick / per-job boundary.
+//   - The role-config cascade cache is keyed by (topPath, modulePaths,
+//     declared env aliases) and watches file mtime/inode. Repeated calls
+//     with the same call shape are cache hits; file edits and env-alias
+//     changes invalidate the slot.
+//   - Callers still reset at per-tick / per-job boundaries, but explicit
+//     env overlays must not reuse values resolved under a different env.
 //
 // Sibling: `test/helpers/role-config-cache-reset.mjs` exports a
 // `beforeEach`/`afterEach` helper for tests that want pristine cache
@@ -107,9 +108,9 @@ test('CFG-09 cache hit: repeated loadRoleConfig within a tick does not re-parse'
   }
 });
 
-// ── Env mutation without reset returns stale cached value (documented) ──
+// ── Env mutation without reset gets a distinct env-aware cache slot ──
 
-test('CFG-09 env mutation without reset returns stale cached value (documented contract)', () => {
+test('CFG-09 env mutation without reset resolves from the changed env alias slot', () => {
   const tmp = makeTmp();
   try {
     const modulePath = join(tmp, 'config.yaml');
@@ -126,10 +127,8 @@ test('CFG-09 env mutation without reset returns stale cached value (documented c
     });
     assert.equal(cfg1.get('roles.remediator'), 'codex');
 
-    // Same call shape (topPath + modulePaths) but env mutates. Without
-    // a reset, the cache returns the previously resolved AgentOSConfig.
-    // This is the CFG-09 documented behavior; callers that need fresh
-    // env reads MUST call resetRoleConfigCache() at their boundary.
+    // Same path shape, but env mutates. The declared alias values are
+    // now part of the cache key, so this must not reuse the prior slot.
     const cfg2 = loadRoleConfig({
       env: {
         AGENT_OS_ROLES_REMEDIATOR: 'claude-code',
@@ -140,8 +139,8 @@ test('CFG-09 env mutation without reset returns stale cached value (documented c
     });
     assert.equal(
       cfg2.get('roles.remediator'),
-      'codex',
-      'env mutation without resetRoleConfigCache must return the stale cached value',
+      'claude-code',
+      'env mutation without resetRoleConfigCache must use a distinct alias-aware cache slot',
     );
 
     // After reset, the new env wins.

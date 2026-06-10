@@ -11,10 +11,20 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { loadConfig, ENV_ALIASES } from '../src/config-loader.mjs';
+import { AgentOSConfigError, loadConfig, ENV_ALIASES } from '../src/config-loader.mjs';
+import {
+  resolveHqDispatchTimeoutMs,
+  resolveHqWorkerTearDownTimeoutMs,
+} from '../src/follow-up-merge-agent.mjs';
 import { resolveReviewerTimeoutMs, resolveProgressTimeoutMs } from '../src/reviewer-timeout.mjs';
 import { resolveFirstPassReviewerPoolConfig } from '../src/watcher-reviewer-pool.mjs';
 import { normalizeMaxConcurrentFollowUpJobs, resolveRemediationMaxConcurrentJobs } from '../src/follow-up-remediation.mjs';
+import {
+  resolvePendingDraftRespawnAgeSeconds,
+  resolveStuckDispatchAlertDebounceMs,
+  resolveWatcherDrainMaxMs,
+} from '../src/watcher.mjs';
+import { resetRoleConfigCache } from '../src/role-config.mjs';
 
 const ALL_NEW_FLAT_KEYS = Object.freeze([
   'remediation.max_concurrent_jobs',
@@ -41,6 +51,10 @@ function createTempConfig(contents) {
     },
   };
 }
+
+test.afterEach(() => {
+  resetRoleConfigCache();
+});
 
 test('all promoted CFG keys are registered in ENV_ALIASES', () => {
   for (const key of ALL_NEW_FLAT_KEYS) {
@@ -113,6 +127,25 @@ reviewer:
   }
 });
 
+test('reviewer timeout helpers honor module-local config cascade', () => {
+  const { configPath: moduleConfigPath, cleanup } = createTempConfig(`reviewer:
+  timeout_ms: 345000
+  no_progress_timeout_ms: 234000
+`);
+  try {
+    assert.strictEqual(
+      resolveReviewerTimeoutMs({}, { topPath: '/dev/null', modulePaths: [moduleConfigPath] }),
+      345_000
+    );
+    assert.strictEqual(
+      resolveProgressTimeoutMs({}, { topPath: '/dev/null', modulePaths: [moduleConfigPath] }),
+      234_000
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('reviewer timeout helpers honor canonical AGENT_OS_* env overrides from the supplied env', () => {
   const env = {
     AGENT_OS_REVIEWER_TIMEOUT_MS: '456000',
@@ -120,6 +153,13 @@ test('reviewer timeout helpers honor canonical AGENT_OS_* env overrides from the
   };
   assert.strictEqual(resolveReviewerTimeoutMs(env), 456_000);
   assert.strictEqual(resolveProgressTimeoutMs(env), 123_000);
+});
+
+test('reviewer timeout helpers fail loud on canonical env parse errors', () => {
+  assert.throws(
+    () => resolveReviewerTimeoutMs({ AGENT_OS_REVIEWER_TIMEOUT_MS: 'banana' }),
+    AgentOSConfigError
+  );
 });
 
 test('first-pass reviewer pool: legacy ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT env still wins', () => {
@@ -153,6 +193,24 @@ watcher:
   }
 });
 
+test('first-pass reviewer pool honors module-local config cascade', () => {
+  const { configPath: moduleConfigPath, cleanup } = createTempConfig(`watcher:
+  first_pass_reviewer_pool_max_concurrent_reviewers: 5
+`);
+  try {
+    const cfg = resolveFirstPassReviewerPoolConfig({
+      env: {},
+      watcherConfig: {},
+      topPath: '/dev/null',
+      modulePaths: [moduleConfigPath],
+    });
+    assert.strictEqual(cfg.enabled, true);
+    assert.strictEqual(cfg.maxConcurrent, 5);
+  } finally {
+    cleanup();
+  }
+});
+
 test('first-pass reviewer pool honors canonical AGENT_OS_* env overrides from the supplied env', () => {
   const cfg = resolveFirstPassReviewerPoolConfig({
     env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '6' },
@@ -160,6 +218,16 @@ test('first-pass reviewer pool honors canonical AGENT_OS_* env overrides from th
   });
   assert.strictEqual(cfg.enabled, true);
   assert.strictEqual(cfg.maxConcurrent, 6);
+});
+
+test('first-pass reviewer pool fails loud on canonical env parse errors', () => {
+  assert.throws(
+    () => resolveFirstPassReviewerPoolConfig({
+      env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: 'banana' },
+      watcherConfig: {},
+    }),
+    AgentOSConfigError
+  );
 });
 
 test('normalizeMaxConcurrentFollowUpJobs: clamps to CFG-resolved ceiling', () => {
@@ -199,6 +267,25 @@ remediation:
   }
 });
 
+test('remediation concurrency honors module-local config cascade for floor and ceiling', () => {
+  const { configPath: moduleConfigPath, cleanup } = createTempConfig(`remediation:
+  max_concurrent_jobs: 4
+  max_concurrent_jobs_ceiling: 5
+`);
+  try {
+    assert.strictEqual(
+      resolveRemediationMaxConcurrentJobs({}, { topPath: '/dev/null', modulePaths: [moduleConfigPath] }),
+      4
+    );
+    assert.strictEqual(
+      normalizeMaxConcurrentFollowUpJobs(9, { env: {}, topPath: '/dev/null', modulePaths: [moduleConfigPath] }),
+      5
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('remediation concurrency honors canonical AGENT_OS_* env overrides from the supplied env', () => {
   const env = {
     AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS: '3',
@@ -206,4 +293,32 @@ test('remediation concurrency honors canonical AGENT_OS_* env overrides from the
   };
   assert.strictEqual(resolveRemediationMaxConcurrentJobs(env), 3);
   assert.strictEqual(normalizeMaxConcurrentFollowUpJobs(9, { env }), 4);
+});
+
+test('remediation concurrency fails loud on canonical env parse errors', () => {
+  assert.throws(
+    () => resolveRemediationMaxConcurrentJobs({ AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS: 'banana' }),
+    AgentOSConfigError
+  );
+});
+
+test('watcher and follow-up runtime resolvers honor promoted module-local CFG knobs', () => {
+  const { configPath: moduleConfigPath, cleanup } = createTempConfig(`watcher:
+  max_drain_wait_ms: 120000
+  pending_draft_review_respawn_age_seconds: 601
+  stuck_dispatch_alert_debounce_ms: 240000
+follow_up:
+  hq_worker_tear_down_subprocess_timeout_ms: 45000
+  hq_dispatch_subprocess_timeout_ms: 135000
+`);
+  try {
+    const options = { topPath: '/dev/null', modulePaths: [moduleConfigPath] };
+    assert.strictEqual(resolveWatcherDrainMaxMs({}, options), 120_000);
+    assert.strictEqual(resolvePendingDraftRespawnAgeSeconds({}, options), 601);
+    assert.strictEqual(resolveStuckDispatchAlertDebounceMs({}, options), 240_000);
+    assert.strictEqual(resolveHqWorkerTearDownTimeoutMs({}, options), 45_000);
+    assert.strictEqual(resolveHqDispatchTimeoutMs({}, options), 135_000);
+  } finally {
+    cleanup();
+  }
 });

@@ -3,7 +3,7 @@ import {
   peakReviewerMemoryMbFor,
   readMemoryPressureSample,
 } from './watcher-memory-pressure.mjs';
-import { loadConfig } from './config-loader.mjs';
+import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
@@ -22,23 +22,26 @@ function parsePositiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function _resolveFirstPassPoolMaxFromCfg(env = process.env) {
+function _resolveFirstPassPoolMaxFromCfg(env = process.env, options = {}) {
   // CFG-01 anchor: `watcher.first_pass_reviewer_pool_max_concurrent_reviewers`
   // promoted 2026-06-09. Legacy `ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT`
   // (and its two earlier aliases) remain honored via ENV_ALIASES, so this CFG
   // branch only takes effect if no env value is set.
-  let cfgValue;
-  try {
-    cfgValue = loadConfig({ env }).get('watcher.first_pass_reviewer_pool_max_concurrent_reviewers', null);
-  } catch (err) {
-    cfgValue = null;
-  }
-  return cfgValue;
+  return loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'watcher.first_pass_reviewer_pool_max_concurrent_reviewers',
+  }).get('watcher.first_pass_reviewer_pool_max_concurrent_reviewers', null);
 }
 
 function resolveFirstPassReviewerPoolConfig({
   env = process.env,
   watcherConfig = {},
+  topPath,
+  modulePaths,
+  loaderImpl,
 } = {}) {
   const configuredEnabled = watcherConfig.firstPassReviewerPoolEnabled
     ?? watcherConfig.reviewerPoolEnabled
@@ -56,7 +59,7 @@ function resolveFirstPassReviewerPoolConfig({
   const configuredMax = watcherConfig.maxConcurrentFirstPassReviewers
     ?? watcherConfig.reviewerPoolMaxConcurrent
     ?? DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX;
-  const cfgMax = _resolveFirstPassPoolMaxFromCfg(env);
+  const cfgMax = _resolveFirstPassPoolMaxFromCfg(env, { topPath, modulePaths, loaderImpl });
   const maxConcurrent = parsePositiveInteger(
     env.ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT
       ?? env.ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT

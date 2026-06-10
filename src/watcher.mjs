@@ -19,7 +19,7 @@ import {
   isCrossModelReviewWaived,
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
-import { resetRoleConfigCache } from './role-config.mjs';
+import { loadRoleConfig, resetRoleConfigCache } from './role-config.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -254,6 +254,30 @@ const FAST_MERGE_CHANGED_FILES_MAX_PAGES = Math.max(
   Number.parseInt(process.env.FML_WATCHER_CHANGED_FILES_MAX_PAGES || '3', 10) || 3,
 );
 
+function resolveWatcherDrainMaxMs(env = process.env, options = {}) {
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'watcher.max_drain_wait_ms',
+  }).get('watcher.max_drain_wait_ms', WATCHER_DRAIN_MAX_MS);
+  const parsed = Number(cfgValue);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : WATCHER_DRAIN_MAX_MS;
+}
+
+function resolveStuckDispatchAlertDebounceMs(env = process.env, options = {}) {
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'watcher.stuck_dispatch_alert_debounce_ms',
+  }).get('watcher.stuck_dispatch_alert_debounce_ms', STUCK_DISPATCH_ALERT_DEBOUNCE_MS);
+  const parsed = Number(cfgValue);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : STUCK_DISPATCH_ALERT_DEBOUNCE_MS;
+}
+
 function apiStatusFromResult(result, fallback = 200) {
   if (Number.isFinite(Number(result?.status))) return Math.trunc(Number(result.status));
   return fallback;
@@ -313,8 +337,17 @@ function resolveBotTokenEnvForIdentity(identity) {
   return null;
 }
 
-function resolvePendingDraftRespawnAgeSeconds(env = process.env) {
-  const raw = env.ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS;
+function resolvePendingDraftRespawnAgeSeconds(env = process.env, options = {}) {
+  const raw = env.ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS ?? loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'watcher.pending_draft_review_respawn_age_seconds',
+  }).get(
+    'watcher.pending_draft_review_respawn_age_seconds',
+    DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS
+  );
   const rawText = raw === undefined ? null : String(raw).trim();
   const parsed = raw === undefined
     ? DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS
@@ -855,7 +888,7 @@ async function maybeFireMergeAgentStuckAlert({
   logger,
   now = Date.now(),
   alertStateDir = STUCK_DISPATCH_ALERT_STATE_DIR,
-  debounceMs = STUCK_DISPATCH_ALERT_DEBOUNCE_MS,
+  debounceMs = resolveStuckDispatchAlertDebounceMs(),
   fsImpl = { readFileSync, mkdirSync, writeFileSync, existsSync },
 }) {
   // The recorded dispatch object is on `dispatched` (via stuckDetail
@@ -1342,6 +1375,7 @@ async function maybeFireFleetWideFalseDeferralAlert({
 function readWatcherDrainState({
   drainFile = WATCHER_DRAIN_FILE,
   now = new Date(),
+  drainMaxMs = resolveWatcherDrainMaxMs(),
 } = {}) {
   let raw;
   let markerMtimeMs;
@@ -1359,7 +1393,7 @@ function readWatcherDrainState({
   }
 
   const nowMs = now.getTime();
-  const maxExpiresAt = markerMtimeMs + WATCHER_DRAIN_MAX_MS;
+  const maxExpiresAt = markerMtimeMs + drainMaxMs;
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -4619,7 +4653,9 @@ async function main() {
     // hours later at first merge-agent dispatch.
     defaultReviewerRouteFromEnv(process.env);
     validateStartupMergeAgentConfig(process.env);
+    resolveWatcherDrainMaxMs(process.env);
     resolvePendingDraftRespawnAgeSeconds(process.env);
+    resolveStuckDispatchAlertDebounceMs(process.env);
     validateFenceConfig(process.env);
     if (resolveSigtermFenceMode(process.env) !== 'off') {
       const exitTimeoutCheck = inspectWatcherExitTimeout(process.env);
@@ -4762,6 +4798,8 @@ export {
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
   resolvePendingDraftRespawnAgeSeconds,
+  resolveStuckDispatchAlertDebounceMs,
+  resolveWatcherDrainMaxMs,
   resolveFirstPassReviewerPoolConfig,
   runFastMergeClosePathIsolated,
   runBoundedReviewerDispatchQueue,

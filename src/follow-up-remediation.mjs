@@ -1,6 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { loadConfig } from './config-loader.mjs';
 import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -43,6 +42,7 @@ import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs'
 import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
+  loadRoleConfig,
   resetRoleConfigCache,
   resolveDefaultRemediator,
   validateStartupRoleConfig,
@@ -1171,8 +1171,7 @@ function defaultRemediatorWorkerClassFromEnv(env = process.env, opts = {}) {
 function validateStartupRemediationConfig(env = process.env, opts = {}) {
   // Single fail-loud entry point: the loader walks the entire schema, so
   // schema errors in any section (not just the role keys) fail loud at
-  // boot. The `resolveRemediationMaxConcurrentJobs` env-only knob is
-  // still validated here pending CFG-03's cascade refactor for it.
+  // boot, including the promoted remediation concurrency knobs.
   validateStartupRoleConfig({ env, ...opts });
   defaultRemediatorWorkerClassFromEnv(env, opts);
   resolveRemediationMaxConcurrentJobs(env);
@@ -1410,18 +1409,19 @@ async function dispatchRemediationViaHq({
   };
 }
 
-function _resolveRemediationCfgCeiling(env = process.env) {
+function _resolveRemediationCfgCeiling(env = process.env, options = {}) {
   // CFG-01 anchor: `remediation.max_concurrent_jobs_ceiling` promoted
   // 2026-06-09. Default 8 — unchanged from MAX_REMEDIATION_MAX_CONCURRENT_JOBS.
-  let cfgValue;
-  try {
-    cfgValue = loadConfig({ env }).get(
-      'remediation.max_concurrent_jobs_ceiling',
-      MAX_REMEDIATION_MAX_CONCURRENT_JOBS
-    );
-  } catch (err) {
-    cfgValue = MAX_REMEDIATION_MAX_CONCURRENT_JOBS;
-  }
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'remediation.max_concurrent_jobs_ceiling',
+  }).get(
+    'remediation.max_concurrent_jobs_ceiling',
+    MAX_REMEDIATION_MAX_CONCURRENT_JOBS
+  );
   const parsed = Number(cfgValue);
   if (!Number.isInteger(parsed) || parsed < 1) {
     return MAX_REMEDIATION_MAX_CONCURRENT_JOBS;
@@ -1434,10 +1434,13 @@ function normalizeMaxConcurrentFollowUpJobs(value, {
   max = null,
   env = process.env,
   onClamp = null,
+  topPath,
+  modulePaths,
+  loaderImpl,
 } = {}) {
   // `max` resolved at call time so the CFG ceiling is consulted lazily and
   // tests can override via options.max without standing up a config loader.
-  const effectiveMax = max ?? _resolveRemediationCfgCeiling(env);
+  const effectiveMax = max ?? _resolveRemediationCfgCeiling(env, { topPath, modulePaths, loaderImpl });
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     return fallback;
@@ -1461,11 +1464,13 @@ function resolveRemediationMaxConcurrentJobs(env = process.env, options = {}) {
     || env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === null
     || env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] === ''
   ) {
-    try {
-      cfgValue = loadConfig({ env }).get('remediation.max_concurrent_jobs', null);
-    } catch (err) {
-      cfgValue = null;
-    }
+    cfgValue = loadRoleConfig({
+      env,
+      topPath: options.topPath,
+      modulePaths: options.modulePaths,
+      loaderImpl: options.loaderImpl,
+      contextKey: 'remediation.max_concurrent_jobs',
+    }).get('remediation.max_concurrent_jobs', null);
   }
   return normalizeMaxConcurrentFollowUpJobs(
     env[REMEDIATION_MAX_CONCURRENT_JOBS_ENV] ?? cfgValue,

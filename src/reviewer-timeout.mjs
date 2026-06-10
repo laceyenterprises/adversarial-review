@@ -9,7 +9,7 @@
 // `reviewer.timeout_ms` and `reviewer.no_progress_timeout_ms`. The legacy
 // env names (`ADVERSARIAL_REVIEWER_TIMEOUT_MS`, `ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS`)
 // remain honored as aliases via the config-loader's ENV_ALIASES registry.
-import { loadConfig } from './config-loader.mjs';
+import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_PROGRESS_TIMEOUT_MS = 15 * 60 * 1000;
@@ -25,31 +25,33 @@ function _resolvePositiveInt(value, fallback) {
   return Math.floor(parsed);
 }
 
-function resolveReviewerTimeoutMs(env = process.env) {
+function resolveReviewerTimeoutMs(env = process.env, options = {}) {
   // Prefer the legacy env name when explicitly set; otherwise consult CFG;
   // CFG-driven defaults fall back to the hardcoded constant.
   if (env.ADVERSARIAL_REVIEWER_TIMEOUT_MS) {
     return _resolvePositiveInt(env.ADVERSARIAL_REVIEWER_TIMEOUT_MS, DEFAULT_REVIEWER_TIMEOUT_MS);
   }
-  let cfgValue;
-  try {
-    cfgValue = loadConfig({ env }).get('reviewer.timeout_ms', DEFAULT_REVIEWER_TIMEOUT_MS);
-  } catch (err) {
-    cfgValue = DEFAULT_REVIEWER_TIMEOUT_MS;
-  }
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'reviewer.timeout_ms',
+  }).get('reviewer.timeout_ms', DEFAULT_REVIEWER_TIMEOUT_MS);
   return _resolvePositiveInt(cfgValue, DEFAULT_REVIEWER_TIMEOUT_MS);
 }
 
-function resolveProgressTimeoutMs(env = process.env) {
+function resolveProgressTimeoutMs(env = process.env, options = {}) {
   if (env.ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS) {
     return _resolvePositiveInt(env.ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS, DEFAULT_PROGRESS_TIMEOUT_MS);
   }
-  let cfgValue;
-  try {
-    cfgValue = loadConfig({ env }).get('reviewer.no_progress_timeout_ms', DEFAULT_PROGRESS_TIMEOUT_MS);
-  } catch (err) {
-    cfgValue = DEFAULT_PROGRESS_TIMEOUT_MS;
-  }
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'reviewer.no_progress_timeout_ms',
+  }).get('reviewer.no_progress_timeout_ms', DEFAULT_PROGRESS_TIMEOUT_MS);
   return _resolvePositiveInt(cfgValue, DEFAULT_PROGRESS_TIMEOUT_MS);
 }
 

@@ -53,6 +53,7 @@ const RETENTION_DEFAULTS = {
   },
   ephemeral: {
     worker_worktrees_keep_hours: 168,
+    worker_worktrees_per_run_limit: 200,
     follow_up_workspaces_keep_hours: 72,
     acpx_sessions_keep_days: 30,
     acpx_sessions_gib_cap: 10.0,
@@ -425,6 +426,7 @@ test('retention full block accepts schema-default values', () => {
             policy: standard_backup
         ephemeral:
           worker_worktrees_keep_hours: 168
+          worker_worktrees_per_run_limit: 200
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30
           acpx_sessions_gib_cap: 10.0
@@ -729,6 +731,7 @@ test('retention full block resolves identically from config.yaml and config.loca
             policy: standard_backup
         ephemeral:
           worker_worktrees_keep_hours: 168
+          worker_worktrees_per_run_limit: 200
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30
           acpx_sessions_gib_cap: 10.0
@@ -765,6 +768,7 @@ test('retention full block resolves identically from config.yaml and config.loca
             policy: standard_backup
         ephemeral:
           worker_worktrees_keep_hours: 168
+          worker_worktrees_per_run_limit: 200
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30
           acpx_sessions_gib_cap: 10.0

@@ -69,6 +69,7 @@ const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
+const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a
@@ -549,6 +550,69 @@ function schemaV1() {
               },
             },
           },
+          adversarial: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              merge_authority: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: false },
+                  worker_class: {
+                    __type: TYPE_STRING,
+                    __default: 'codex',
+                    __enum: ['codex', 'claude-code'],
+                  },
+                  merge_method: {
+                    __type: TYPE_STRING,
+                    __default: 'squash',
+                    __enum: ['squash', 'merge'],
+                  },
+                  eligibility: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      risk_classes: {
+                        __type: TYPE_LIST,
+                        __item: {
+                          __type: TYPE_STRING,
+                          __enum: ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS,
+                        },
+                        __default: ['low'],
+                      },
+                      fast_merge_labels: {
+                        __type: TYPE_LIST,
+                        __item: { __type: TYPE_STRING },
+                        __default: ['fast-merge:test-fixtures', 'fast-merge:docs'],
+                      },
+                      reviewer_family_policy: {
+                        __type: TYPE_STRING,
+                        __default: 'audit_existing_gate_contract',
+                        __enum: ['audit_existing_gate_contract'],
+                      },
+                      ci_green_classifier: {
+                        __type: TYPE_STRING,
+                        __default: 'existingAdversarialMergeClassifier',
+                        __enum: ['existingAdversarialMergeClassifier'],
+                      },
+                    },
+                  },
+                  branch_protection: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      required_gate_context_source: {
+                        __type: TYPE_STRING,
+                        __default: 'resolveGateStatusContext',
+                        __enum: ['resolveGateStatusContext'],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
           ...buildRoleFallbackSchemaKeys(),
           quota_probe: {
             // Intentionally remains under `roles` to mirror the Python
@@ -925,6 +989,10 @@ export const ENV_ALIASES = {
   'roles.hermes.provider': {
     canonical: 'AGENT_OS_ROLES_HERMES_PROVIDER',
     aliases: [],
+  },
+  'roles.adversarial.merge_authority.enabled': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+    aliases: [['AMA_ENABLED', identity]],
   },
   ...buildRoleFallbackEnvAliases(),
   'roles.quota_probe.ok_tick_seconds': {

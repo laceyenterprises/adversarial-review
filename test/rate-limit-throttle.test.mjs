@@ -380,8 +380,16 @@ test('long throttle waits publish and clear a sidecar status file', async () => 
 
     const pending = throttle.awaitThrottleIfNeeded();
     const sidecarPath = `${statePath}.throttled.json`;
-    await waitFor(() => existsSync(sidecarPath));
-    const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+    let sidecar = null;
+    await waitFor(() => {
+      if (typeof releaseSleep !== 'function' || !existsSync(sidecarPath)) return false;
+      try {
+        sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+        return true;
+      } catch {
+        return false;
+      }
+    });
     assert.equal(sidecar.resource, DEFAULT_RESOURCE);
     assert.equal(sidecar.throttledUntil, '2026-06-06T12:05:00.000Z');
 

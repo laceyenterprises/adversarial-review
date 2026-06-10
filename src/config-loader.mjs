@@ -242,6 +242,7 @@ function schemaV1() {
             __strict: true,
             __keys: {
               worker_worktrees_keep_hours: { __type: TYPE_INT, __default: 168, __min: 0 },
+              worker_worktrees_per_run_limit: { __type: TYPE_INT, __default: 200, __min: 1 },
               follow_up_workspaces_keep_hours: { __type: TYPE_INT, __default: 72, __min: 0 },
               acpx_sessions_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
               acpx_sessions_gib_cap: { __type: TYPE_FLOAT, __default: 10.0, __min: 0 },

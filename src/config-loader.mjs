@@ -214,42 +214,6 @@ function schemaV1() {
                   monthly: { __type: TYPE_INT, __default: 3, __min: 0 },
                 },
               },
-              // WAL archive retention. Mirrors the Python schema at
-              // platform/agent-os-config/src/agent_os_config/__init__.py and
-              // the algorithm in
-              // platform/session-ledger/src/session_ledger/pg_ops.py
-              // (retention_plan). All three knobs are independently optional;
-              // when more than one is set, the TIGHTEST cutoff wins. Defaults
-              // are all null → pre-2026-06-10 behavior (full coupling to
-              // base-backup retention). Schema-parity-only on the adversarial-
-              // watcher side: the Node loader does not CONSUME these values,
-              // but it must ACCEPT them so an operator who pins values in a
-              // YAML the watcher reads does not crash-loop the watcher (live
-              // incident class — feedback_cfg_multi_language_schema_drift).
-              wal_archive: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  max_segments: {
-                    __type: TYPE_INT,
-                    __default: null,
-                    __nullable: true,
-                    __min: 1,
-                  },
-                  max_total_bytes: {
-                    __type: TYPE_INT,
-                    __default: null,
-                    __nullable: true,
-                    __min: 1,
-                  },
-                  max_age_seconds: {
-                    __type: TYPE_INT,
-                    __default: null,
-                    __nullable: true,
-                    __min: 60,
-                  },
-                },
-              },
             },
           },
           cadence: {

@@ -41,6 +41,11 @@ const RETENTION_DEFAULTS = {
       weekly: 4,
       monthly: 3,
     },
+    wal_archive: {
+      max_segments: null,
+      max_total_bytes: null,
+      max_age_seconds: null,
+    },
   },
   cadence: {
     weekly_day_of_week: 0,
@@ -683,6 +688,59 @@ test('retention rejects negative policy cadence counts', () => {
           assert.ok(err instanceof AgentOSConfigError);
           assert.equal(err.key, `retention.policies.standard_backup.${key}`);
           assert.equal(err.got, -1);
+          return true;
+        },
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention wal_archive accepts pinned operator values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        policies:
+          wal_archive:
+            max_segments: 2048
+            max_total_bytes: 32212254720
+            max_age_seconds: 86400
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('retention.policies.wal_archive.max_segments'), 2048);
+    assert.equal(cfg.get('retention.policies.wal_archive.max_total_bytes'), 32212254720);
+    assert.equal(cfg.get('retention.policies.wal_archive.max_age_seconds'), 86400);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention wal_archive rejects values below the lower bounds', () => {
+  const tmp = freshTmp();
+  try {
+    for (const [key, bad] of [
+      ['max_segments', 0],
+      ['max_total_bytes', 0],
+      ['max_age_seconds', 30],
+    ]) {
+      const top = join(tmp, `${key}.yaml`);
+      writeFile(top, `
+        version: 1
+        retention:
+          policies:
+            wal_archive:
+              ${key}: ${bad}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, `retention.policies.wal_archive.${key}`);
+          assert.equal(err.got, bad);
           return true;
         },
       );

@@ -1701,9 +1701,9 @@ test('submodules accepts arbitrary keys through validateSchema', () => {
   assert.deepEqual(validated.submodules, { anything_goes: { nested: true } });
 });
 
-// -------- Empty env-string for booleans must fail loud --------------------
+// -------- Empty env-string for booleans coerces to false ------------------
 
-test('empty-string env var for bool fails loud (does not silently coerce to false)', () => {
+test('empty-string env var for bool coerces to false', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -1712,18 +1712,14 @@ test('empty-string env var for bool fails loud (does not silently coerce to fals
       feature_flags:
         claude_code_ambient_auth_fallback: true
     `);
-    assert.throws(
-      () =>
-        loadConfig({
-          topPath: top,
-          env: { AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK: '' },
-        }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /claude_code_ambient_auth_fallback/);
-        assert.match(err.message, /not a recognized boolean/);
-        return true;
-      },
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK: '' },
+    });
+    assert.equal(cfg.get('feature_flags.claude_code_ambient_auth_fallback'), false);
+    assert.equal(
+      cfg.resolutionTrace('feature_flags.claude_code_ambient_auth_fallback').at(-1).source,
+      'env:AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -2076,6 +2072,104 @@ test('AgentOSConfigError normalizes derived envName tokens', () => {
     }).conflictingEnvNames,
     ['AGENT_OS_ROLES_CODEX_FALLBACK_PATH'],
   );
+});
+
+test('AMA merge_authority spec YAML and env aliases load through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            enabled: false
+            worker_class: codex
+            merge_method: squash
+            eligibility:
+              risk_classes: ["low"]
+              fast_merge_labels:
+                - "fast-merge:test-fixtures"
+                - "fast-merge:docs"
+              reviewer_family_policy: audit_existing_gate_contract
+              ci_green_classifier: existingAdversarialMergeClassifier
+            branch_protection:
+              required_gate_context_source: resolveGateStatusContext
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
+    assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'codex');
+    assert.equal(cfg.get('roles.adversarial.merge_authority.merge_method'), 'squash');
+    assert.deepEqual(cfg.get('roles.adversarial.merge_authority.eligibility.risk_classes'), ['low']);
+    assert.deepEqual(
+      cfg.get('roles.adversarial.merge_authority.eligibility.fast_merge_labels'),
+      ['fast-merge:test-fixtures', 'fast-merge:docs'],
+    );
+    assert.equal(
+      cfg.get('roles.adversarial.merge_authority.eligibility.reviewer_family_policy'),
+      'audit_existing_gate_contract',
+    );
+    assert.equal(
+      cfg.get('roles.adversarial.merge_authority.eligibility.ci_green_classifier'),
+      'existingAdversarialMergeClassifier',
+    );
+    assert.equal(
+      cfg.get('roles.adversarial.merge_authority.branch_protection.required_gate_context_source'),
+      'resolveGateStatusContext',
+    );
+
+    const legacyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: 'true' } });
+    assert.equal(legacyEnvCfg.get('roles.adversarial.merge_authority.enabled'), true);
+    assert.equal(
+      legacyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+      'env:AMA_ENABLED',
+    );
+
+    const legacyEmptyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: '' } });
+    assert.equal(legacyEmptyEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
+    assert.equal(
+      legacyEmptyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+      'env:AMA_ENABLED',
+    );
+
+    const canonicalFalseEnvCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: '0' },
+    });
+    assert.equal(canonicalFalseEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
+    assert.equal(
+      canonicalFalseEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+      'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA merge_authority risk_classes reject unsupported values in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            eligibility:
+              risk_classes: ["critical"]
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'roles.adversarial.merge_authority.eligibility.risk_classes[0]');
+        assert.equal(err.got, 'critical');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('quota_probe ok_tick_seconds enforces HRR-02a range bounds', () => {

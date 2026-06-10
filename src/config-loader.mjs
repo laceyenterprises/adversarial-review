@@ -10,16 +10,12 @@
 // byte-equivalence. Deliberate divergences from the current Python sibling
 // (each one strictly tightens the contract; tracked for alignment in the
 // agent-os PR landing the Python helper):
-//   1. Empty-string boolean env vars: this loader rejects them with a loud
-//      AgentOSConfigError; the Python sibling currently coerces "" → false.
-//      Operators "unsetting" a security-relevant flag must remove the env
-//      var, not blank it.
-//   2. Explicit `~` / null on non-nullable keys: this loader fails the
+//   1. Explicit `~` / null on non-nullable keys: this loader fails the
 //      schema; the Python sibling reverts to defaults.
-//   3. Same-file alias conflict: this loader compares the canonical-target
+//   2. Same-file alias conflict: this loader compares the canonical-target
 //      values with deep structural equality (isDeepStrictEqual); the Python
 //      sibling uses identity. Trivially-deep-equal dicts merge cleanly here.
-//   4. localSibling for non-`.yaml`/`.yml` top-level paths: this loader
+//   3. localSibling for non-`.yaml`/`.yml` top-level paths: this loader
 //      refuses to compute a sibling and skips Layer 4 for that file; the
 //      Python sibling appends `.local` literally (producing odd siblings
 //      like `config.conf.local`).
@@ -69,6 +65,7 @@ const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
+const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a
@@ -549,6 +546,69 @@ function schemaV1() {
               },
             },
           },
+          adversarial: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              merge_authority: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: false },
+                  worker_class: {
+                    __type: TYPE_STRING,
+                    __default: 'codex',
+                    __enum: ['codex', 'claude-code'],
+                  },
+                  merge_method: {
+                    __type: TYPE_STRING,
+                    __default: 'squash',
+                    __enum: ['squash', 'merge'],
+                  },
+                  eligibility: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      risk_classes: {
+                        __type: TYPE_LIST,
+                        __item: {
+                          __type: TYPE_STRING,
+                          __enum: ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS,
+                        },
+                        __default: ['low'],
+                      },
+                      fast_merge_labels: {
+                        __type: TYPE_LIST,
+                        __item: { __type: TYPE_STRING },
+                        __default: ['fast-merge:test-fixtures', 'fast-merge:docs'],
+                      },
+                      reviewer_family_policy: {
+                        __type: TYPE_STRING,
+                        __default: 'audit_existing_gate_contract',
+                        __enum: ['audit_existing_gate_contract'],
+                      },
+                      ci_green_classifier: {
+                        __type: TYPE_STRING,
+                        __default: 'existingAdversarialMergeClassifier',
+                        __enum: ['existingAdversarialMergeClassifier'],
+                      },
+                    },
+                  },
+                  branch_protection: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      required_gate_context_source: {
+                        __type: TYPE_STRING,
+                        __default: 'resolveGateStatusContext',
+                        __enum: ['resolveGateStatusContext'],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
           ...buildRoleFallbackSchemaKeys(),
           quota_probe: {
             // Intentionally remains under `roles` to mirror the Python
@@ -925,6 +985,10 @@ export const ENV_ALIASES = {
   'roles.hermes.provider': {
     canonical: 'AGENT_OS_ROLES_HERMES_PROVIDER',
     aliases: [],
+  },
+  'roles.adversarial.merge_authority.enabled': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+    aliases: [['AMA_ENABLED', identity]],
   },
   ...buildRoleFallbackEnvAliases(),
   'roles.quota_probe.ok_tick_seconds': {
@@ -1627,13 +1691,11 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
   const expected = schemaLeaf.__type;
   if (expected === TYPE_BOOL) {
     const lower = value.trim().toLowerCase();
+    if (lower === '') return false;
     if (lower === 'true' || lower === '1') return true;
     if (lower === 'false' || lower === '0') return false;
-    // Empty string is rejected (was previously silently coerced to false);
-    // operators "unsetting" a security-relevant flag by setting it empty
-    // must do so by removing the env var, not blanking it.
     throw new AgentOSConfigError(
-      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false' or '1'/'0'; unset the env var instead of blanking it)`,
+      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false', '1'/'0', or empty string for false)`,
       { key, expected: 'bool', got: value, source },
     );
   }

@@ -33,6 +33,11 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { amaAuditFilePath, amaAuditTraceRef, composeAmaTrailers, writeAmaAuditEntry } from './audit.mjs';
+import {
+  AMA_CLOSER_LEASE_STATUS,
+  acquireAmaCloserLease,
+  updateAmaCloserLease,
+} from './closer-lease.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -447,6 +452,35 @@ export async function maybeDispatchAmaCloser({
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
   const workerClass = String(cfg.workerClass || 'codex');
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
+
+  // AMA-07 — durable closer lease keyed by (repo, prNumber, headSha).
+  //
+  // Acquired BEFORE the AMA-03 dispatch record so two concurrent
+  // watcher ticks on the same eligible head cannot both spawn a
+  // closer. The lease is atomic per SPEC §4.9: `writeFileAtomic(..., {
+  // overwrite: false })` uses `linkSync` under the hood, which throws
+  // EEXIST on a race — exactly one acquirer wins.
+  //
+  // On `acquired: false`, return immediately with reason `lease-held`.
+  // The watcher's caller falls through to the merge-agent path on
+  // its next tick if the lease holder terminates without closure.
+  //
+  // Head-change naturally invalidates an older lease — a new head
+  // SHA gets a fresh file; the old lease persists for audit.
+  const leaseIdentity = { repo, prNumber, headSha: reviewedSha };
+  const leaseResult = acquireAmaCloserLease({
+    rootDir,
+    ...leaseIdentity,
+    watcherPid: typeof process !== 'undefined' ? process.pid : null,
+    now: dispatchContext.dispatchedAt,
+  });
+  if (!leaseResult.acquired) {
+    return {
+      dispatched: false,
+      reason: 'lease-held',
+      existingLease: leaseResult.existingLease,
+    };
+  }
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
   const ownerUser = dispatchContext.hqOwnerUser || resolveHqOwner(hqRoot);
@@ -711,6 +745,23 @@ export async function maybeDispatchAmaCloser({
     lastError: null,
   }));
 
+  // AMA-07 — promote the lease from `pending` to `dispatched` now
+  // that hq accepted the launch request. Failure here is best-effort:
+  // log via the result but do NOT undo the dispatch (the closer worker
+  // is already running). The next watcher tick will reconcile.
+  let leaseUpdateError = null;
+  try {
+    updateAmaCloserLease({
+      rootDir,
+      ...leaseIdentity,
+      status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+      lrqId: parsed.launchRequestId || parsed.dispatchId || 'unknown',
+      now: dispatchContext.dispatchedAt,
+    });
+  } catch (err) {
+    leaseUpdateError = String(err?.message || err);
+  }
+
   return {
     dispatched: true,
     workerClass,
@@ -718,5 +769,7 @@ export async function maybeDispatchAmaCloser({
     launchRequestId: parsed.launchRequestId || null,
     promptPath,
     eligibilityReasons: verdict.trace,
+    leasePath: leaseResult.leasePath,
+    ...(leaseUpdateError ? { leaseUpdateError } : {}),
   };
 }

@@ -464,7 +464,12 @@ test('dispatch parses machine-readable JSON stdout and records the launch reques
   assert.equal(result.launchRequestId, 'lrq_321');
 });
 
-test('existing AMA closer dispatch suppresses a duplicate launch for the same head', async (t) => {
+test('existing AMA closer dispatch suppresses a duplicate launch for the same head (AMA-07 lease)', async (t) => {
+  // AMA-07 — the closer lease is the upstream dedup. Once a launch is
+  // in-flight for `(repo, prNumber, headSha)`, the next tick sees
+  // `lease-held` BEFORE the AMA-03 dispatch-record / hq-status probe
+  // path. The lease's `linkSync` is atomic at the OS level, so two
+  // concurrent watchers also can't both pass this gate.
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-existing-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -503,13 +508,30 @@ test('existing AMA closer dispatch suppresses a duplicate launch for the same he
     readTemplateImpl: () => 'stubbed',
   });
   assert.equal(second.dispatched, false);
-  assert.equal(second.skipMergeAgent, true);
-  assert.equal(second.reason, 'existing-dispatch-running');
-  assert.equal(second.launchRequestId, 'lrq_123');
-  assert.equal(calls.length, 2, 'second call should probe status but not re-dispatch');
+  assert.equal(second.reason, 'lease-held');
+  // The existing lease is surfaced for audit-visibility on the watcher
+  // side; second.existingLease.lrqId carries the AMA-07 record's
+  // launch request id so the watcher can probe hq status itself when
+  // it wants to (the lease intentionally does not auto-probe — that's
+  // the AMA-03 dispatch record's job).
+  assert.equal(second.existingLease?.lrqId, 'lrq_123');
+  assert.equal(second.existingLease?.status, 'dispatched');
+  // No hq dispatch + no status probe — the lease blocks before either.
+  const hqStatusProbes = calls.filter((args) => args[0] === 'dispatch' && args[1] === 'status');
+  assert.equal(hqStatusProbes.length, 0);
 });
 
-test('existing AMA closer dispatch falls back instead of wedging on non-JSON status output', async (t) => {
+test('AMA-07 lease blocks regardless of how hq dispatch status would have responded', async (t) => {
+  // The AMA-07 lease is independent of hq dispatch status. Even if hq
+  // status probing would return malformed output (the old test's
+  // failure mode), the lease blocks at the file-system level before
+  // any status probe runs. The watcher gets a clean `lease-held`
+  // signal and falls through (or skips) on its own.
+  //
+  // The pre-AMA-07 test asserted on the hq-status probe retry count
+  // (4 = retries hit before degraded-unknown surfaced). That code
+  // path is now downstream of the lease; the assertion is replaced
+  // with the lease-held contract.
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-status-noise-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -520,6 +542,7 @@ test('existing AMA closer dispatch falls back instead of wedging on non-JSON sta
   const execImpl = async (_cmd, args) => {
     calls.push(args);
     if (args[0] === 'dispatch' && args[1] === 'status') {
+      // Old test exercised this path; it's unreachable now.
       return { stdout: 'warning: daemon bounced\nnot-json\n', stderr: '' };
     }
     return { stdout: '{"dispatchId":"dispatch-123","launchRequestId":"lrq_123"}', stderr: '' };
@@ -547,9 +570,10 @@ test('existing AMA closer dispatch falls back instead of wedging on non-JSON sta
     readTemplateImpl: () => 'stubbed',
   });
   assert.equal(second.dispatched, false);
-  assert.equal(second.skipMergeAgent, undefined);
-  assert.equal(second.reason, 'dispatch-status-unknown');
-  assert.equal(calls.filter((args) => args[0] === 'dispatch' && args[1] === 'status').length, 4);
+  assert.equal(second.reason, 'lease-held');
+  // The status probe noise path is now unreachable — the lease wins.
+  const hqStatusProbes = calls.filter((args) => args[0] === 'dispatch' && args[1] === 'status');
+  assert.equal(hqStatusProbes.length, 0);
 });
 
 test('ambiguous dispatch failure with launch request id suppresses merge-agent fallback', async (t) => {

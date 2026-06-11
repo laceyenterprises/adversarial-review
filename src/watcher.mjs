@@ -102,6 +102,15 @@ import {
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+// AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
+// (AMA-01 defaults to false). When the operator opts in AND the
+// canonical eligibility predicate from SPEC §4.2 returns
+// `eligible: true`, this fires INSTEAD of the merge-agent dispatch for
+// the current tick. Otherwise it's a no-op and the merge-agent path
+// runs unchanged. AMA-06A/06N flip the broader coexistence semantics
+// once the closer has soaked.
+import { maybeDispatchAmaCloser } from './ama/dispatch-closer.mjs';
+import { loadConfigCached } from './config-loader.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
   retryPendingRetriggerAckComments,
@@ -3173,6 +3182,114 @@ async function retryPendingMergeCloseouts({
   }
 }
 
+// ── AMA-03: closer dispatch pre-empt ─────────────────────────────────────────
+
+/**
+ * Resolve the AMA cfg subtree, build (reviewState, prMetadata)
+ * snapshots from the watcher's existing row + candidate data, and
+ * call `maybeDispatchAmaCloser`. Returns the dispatch result; the
+ * caller checks `.dispatched` and skips merge-agent on `true`.
+ *
+ * Cheap path: when `cfg.enabled === false` (the default), this
+ * function short-circuits in `maybeDispatchAmaCloser` before doing
+ * any I/O or fetches. The watcher's hot path pays only the cost of
+ * `loadConfigCached().getMergeAuthorityConfig()`, which is cached
+ * across ticks.
+ *
+ * Snapshot mapping is best-effort against the watcher's existing
+ * shapes. Fields the watcher doesn't already have (e.g. branch
+ * protection's resolved required contexts) are left empty, and the
+ * eligibility predicate fails-closed on them — meaning AMA dispatch
+ * won't fire in the watcher path until the operator wires those
+ * fetches in. That's intentional: AMA-03 lands the dispatch *path*;
+ * AMA-06A/06N wire in the full snapshot in the cutover ticket.
+ */
+async function maybeDispatchAmaClosureFor({
+  reviewStateRow,
+  candidate,
+  labelNames,
+  operatorApprovalEvent,
+  mergeAgentRequestEvent,
+  repoPath,
+  prNumber,
+  currentRevisionRef,
+  logger,
+  loadConfigImpl = loadConfigCached,
+  maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
+}) {
+  let cfg;
+  try {
+    cfg = loadConfigImpl().getMergeAuthorityConfig();
+  } catch (err) {
+    // CFG load failure isn't an AMA problem; let the existing
+    // merge-agent path handle the tick.
+    logger?.warn?.(`[watcher] AMA cfg load failed: ${err?.message || err}`);
+    return { dispatched: false, reason: 'cfg-load-failed' };
+  }
+  if (!cfg?.enabled) {
+    return { dispatched: false, reason: 'ama-disabled' };
+  }
+
+  const reviewState = {
+    verdict: String(reviewStateRow?.last_verdict || '').toLowerCase(),
+    headSha: candidate?.headSha || currentRevisionRef || null,
+    riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || 'unknown').toLowerCase(),
+    remediationPending: Boolean(reviewStateRow?.remediation_pending),
+    operatorApprovedEvidence: operatorApprovalEvent
+      ? {
+          applied: true,
+          observedRevisionRef: operatorApprovalEvent.headSha || operatorApprovalEvent.head_sha || null,
+          actor: operatorApprovalEvent.actor || null,
+          eventId: operatorApprovalEvent.id || operatorApprovalEvent.nodeId || null,
+          observedAt: operatorApprovalEvent.createdAt || operatorApprovalEvent.created_at || null,
+        }
+      : null,
+    prAuthor: candidate?.prAuthor || null,
+  };
+  const prMetadata = {
+    prNumber,
+    headSha: reviewState.headSha,
+    isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
+    isDraft: Boolean(candidate?.isDraft),
+    mergeableState: String(candidate?.mergeable || '').toUpperCase(),
+    labels: Array.isArray(labelNames) ? labelNames : [],
+    statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
+    branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
+    author: candidate?.prAuthor || null,
+  };
+
+  const [owner, name] = repoPath.split('/');
+  const dispatchContext = {
+    repo: repoPath,
+    prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
+    reviewedSha: reviewState.headSha,
+    riskClass: reviewState.riskClass,
+    requiredGateContext: resolveGateStatusContext(),
+    reviewedBy: reviewStateRow?.reviewer_login || '',
+    parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
+    dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  };
+
+  return maybeDispatchAmaCloserImpl({
+    reviewState,
+    prMetadata,
+    cfg,
+    options: {
+      env: process.env,
+      mergeAgentRequested: mergeAgentRequestEvent
+        ? {
+            applied: true,
+            observedRevisionRef: mergeAgentRequestEvent.headSha || mergeAgentRequestEvent.head_sha || null,
+            actor: mergeAgentRequestEvent.actor || null,
+            eventId: mergeAgentRequestEvent.id || mergeAgentRequestEvent.nodeId || null,
+            observedAt: mergeAgentRequestEvent.createdAt || mergeAgentRequestEvent.created_at || null,
+          }
+        : null,
+    },
+    dispatchContext,
+  });
+}
+
 // ── Poll loop (new PRs) ──────────────────────────────────────────────────────
 
 async function handlePostedReviewRow({
@@ -3220,6 +3337,44 @@ async function handlePostedReviewRow({
       mergeAgentRequestEvent,
     });
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
+
+    // AMA-03: pre-empt the merge-agent dispatch with an AMA closer
+    // when AMA is enabled AND the canonical SPEC §4.2 predicate
+    // returns eligible. Default-off: cfg.enabled is `false` per the
+    // AMA-01 schema; the whole pre-empt branch is a no-op until the
+    // operator opts in.
+    //
+    // When AMA fires:
+    //   - the closer worker is spawned with --task-kind=merge,
+    //     --completion-shape=decision-only, --project=adversarial-merge-authority;
+    //   - we skip merge-agent on this tick (the dispatched.decision
+    //     surfaces as `ama-closer-dispatched`);
+    //   - the closer re-runs the predicate at merge time and writes
+    //     the §4.4 audit JSON either way.
+    //
+    // When AMA does NOT fire (disabled OR not eligible OR dispatch
+    // failed), we fall through to the existing merge-agent dispatch
+    // path verbatim — no behavior change for hosts that haven't
+    // opted in.
+    const amaClosureResult = await maybeDispatchAmaClosureFor({
+      reviewStateRow: existing,
+      candidate,
+      labelNames,
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
+      repoPath,
+      prNumber,
+      currentRevisionRef,
+      logger,
+    });
+    if (amaClosureResult?.dispatched) {
+      logger.log(
+        `[watcher] AMA closer dispatched for ${repoPath}#${prNumber}: ` +
+        `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
+      );
+      return;
+    }
+
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,

@@ -1871,14 +1871,14 @@ export class AgentOSConfig {
         'squash',
       ),
       eligibility: {
-        riskClasses: this.get(
+        riskClasses: [...this.get(
           'roles.adversarial.merge_authority.eligibility.risk_classes',
           ['low'],
-        ),
-        fastMergeLabels: this.get(
+        )],
+        fastMergeLabels: [...this.get(
           'roles.adversarial.merge_authority.eligibility.fast_merge_labels',
           ['fast-merge:test-fixtures', 'fast-merge:docs'],
-        ),
+        )],
         reviewerFamilyPolicy: this.get(
           'roles.adversarial.merge_authority.eligibility.reviewer_family_policy',
           'audit_existing_gate_contract',

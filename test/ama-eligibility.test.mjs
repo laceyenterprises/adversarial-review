@@ -113,7 +113,7 @@ test('eligible: Request-changes with current-head operator-approved override', (
   assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
-test('eligible: same-login operator-approved override remains valid at single-operator scale', () => {
+test('not eligible: same-login operator-approved override is rejected for PR-author self-approval', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -127,8 +127,9 @@ test('eligible: same-login operator-approved override remains valid at single-op
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
-  assert.equal(result.trace.verdict.operatorOverride, true);
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
 });
 
 test('not eligible: stale operator-approved evidence (head changed since label) is ignored', () => {
@@ -190,8 +191,7 @@ test('eligible: medium risk class passes when the operator extends `risk_classes
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
-test('eligible: high-risk PR + current-head adversarial-merge-requested label override', () => {
-  // SPEC §4.2 #3 — risk-class is satisfied by the current-head AMA-05 label.
+test('not eligible: critical risk class still needs operator-approved when only adversarial-merge-requested is present', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { riskClass: 'critical' },
   });
@@ -205,8 +205,39 @@ test('eligible: high-risk PR + current-head adversarial-merge-requested label ov
       observedAt: '2026-06-10T20:00:00Z',
     },
   });
-  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.riskClass.permitted, false);
   assert.equal(result.trace.riskClass.mergeRequestedOverride, true);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+test('eligible: critical risk class requires current-head adversarial-merge-requested plus operator-approved', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      riskClass: 'critical',
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    mergeAgentRequested: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_merge_requested',
+      observedAt: '2026-06-10T20:01:00Z',
+    },
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.riskClass.permitted, true);
+  assert.equal(result.trace.riskClass.requiresTwoKey, true);
 });
 
 test('not eligible: `unknown` risk class is never in the default allowlist', () => {
@@ -350,6 +381,7 @@ test('eligible: `merge-agent-stuck` label cleared by current-head non-author rec
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     recoveryEvidence: {
+      kind: 'operator-approved',
       applied: true,
       observedRevisionRef: 'abc12345',
       actor: 'paul-the-operator',
@@ -359,6 +391,25 @@ test('eligible: `merge-agent-stuck` label cleared by current-head non-author rec
   });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.deepEqual(result.trace.blockLabels, []);
+});
+
+test('not eligible: `merge-agent-stuck` recovery rejects PR-author operator-approved evidence', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['merge-agent-stuck'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    recoveryEvidence: {
+      kind: 'operator-approved',
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'codex-worker-bot',
+      eventId: 'LE_self_recovery',
+      observedAt: '2026-06-10T20:30:00Z',
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
 });
 
 // ---------------------------------------------------------------------------
@@ -396,7 +447,7 @@ test('not eligible: GitHub mergeableState=CONFLICTING fails the mergeability gat
 // Remediation-pending gate
 // ---------------------------------------------------------------------------
 
-test('not eligible: remediation-pending=true fails closed even with Approved verdict', () => {
+test('not eligible: remediation-pending=true fails closed without operator-approved override', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { remediationPending: true },
   });
@@ -405,6 +456,42 @@ test('not eligible: remediation-pending=true fails closed even with Approved ver
   assert.ok(result.reasons.includes('remediation-pending'));
   // Verdict gate also fails because a settled-success requires not-pending.
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('eligible: operator-approved clears remediation-pending when structural gates still pass', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      remediationPending: true,
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_remediation_override',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(!result.reasons.includes('remediation-pending'));
+});
+
+test('not eligible: active fast-merge override state fails closed until AMA imports the FML contract', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['fast-merge:docs'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    fastMergeState: {
+      authorizedHeadSha: 'abc12345',
+      currentHeadAuthorized: true,
+      active: true,
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('fast-merge-state-unsupported'));
+  assert.equal(result.trace.fastMerge.active, true);
 });
 
 test('not eligible: comment-only review with structured blocking findings is not settled success', () => {

@@ -2273,6 +2273,27 @@ test('AMA_ENABLED retired env var fails loud only for enabling values in Node lo
   }
 });
 
+test('AMA getMergeAuthorityConfig returns defensive copies for collection fields', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({ topPath: top, env: {} });
+    const first = cfg.getMergeAuthorityConfig();
+    first.eligibility.riskClasses.push('medium');
+    first.eligibility.fastMergeLabels.push('fast-merge:submodule-bump');
+
+    const second = cfg.getMergeAuthorityConfig();
+    assert.deepEqual(second.eligibility.riskClasses, ['low']);
+    assert.deepEqual(
+      second.eligibility.fastMergeLabels,
+      ['fast-merge:test-fixtures', 'fast-merge:docs'],
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('quota_probe ok_tick_seconds enforces HRR-02a range bounds', () => {
   const tmp = freshTmp();
   try {

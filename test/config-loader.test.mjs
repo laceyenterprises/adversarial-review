@@ -2118,20 +2118,6 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       'resolveGateStatusContext',
     );
 
-    const legacyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: 'true' } });
-    assert.equal(legacyEnvCfg.get('roles.adversarial.merge_authority.enabled'), true);
-    assert.equal(
-      legacyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
-      'env:AMA_ENABLED',
-    );
-
-    const legacyEmptyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: '' } });
-    assert.equal(legacyEmptyEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
-    assert.equal(
-      legacyEmptyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
-      'env:AMA_ENABLED',
-    );
-
     const canonicalFalseEnvCfg = loadConfig({
       topPath: top,
       env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: '0' },
@@ -2139,6 +2125,16 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(canonicalFalseEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(
       canonicalFalseEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+      'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+    );
+
+    const canonicalBlankEnvCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: '' },
+    });
+    assert.equal(canonicalBlankEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
+    assert.equal(
+      canonicalBlankEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
       'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
     );
   } finally {

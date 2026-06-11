@@ -988,7 +988,7 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
-    aliases: [['AMA_ENABLED', identity]],
+    aliases: [],
   },
   ...buildRoleFallbackEnvAliases(),
   'roles.quota_probe.ok_tick_seconds': {

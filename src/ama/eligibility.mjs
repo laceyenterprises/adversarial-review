@@ -20,6 +20,10 @@
 
 import { summarizeChecksConclusion } from '../checks-summary.mjs';
 import { resolveGateStatusContext } from '../adversarial-gate-context.mjs';
+import {
+  ADVERSARIAL_MERGE_BLOCKED_LABEL,
+  ADVERSARIAL_MERGE_REQUESTED_LABEL,
+} from './labels.mjs';
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
@@ -40,7 +44,7 @@ const HARD_STOP_LABELS = Object.freeze([
   'do-not-merge',
   'no-merge-hold',
   'merge-agent-stuck',
-  'adversarial-merge-blocked',
+  ADVERSARIAL_MERGE_BLOCKED_LABEL,
 ]);
 
 /**
@@ -138,9 +142,20 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
 /**
  * @typedef {Object} EvaluateOptions
  * @property {Object=}        env                   Override `process.env` for the gate-context resolver.
- * @property {OperatorApprovalEvidence=} mergeAgentRequested Optional current-head merge-requested evidence. Same shape as operator-approved.
+ * @property {OperatorApprovalEvidence=} adversarialMergeRequested Optional current-head adversarial-merge-requested evidence. Same shape as operator-approved.
  * @property {MergeAgentRecoveryEvidence=} recoveryEvidence  Optional current-head recovery evidence for the `merge-agent-stuck` carve-out.
  * @property {Object=} fastMergeState                        Optional FML authorization/veto snapshot. AMA fails closed when the PR is in a fast-merge override state it does not import.
+ * @property {AdversarialMergeBlockedEvidence=} adversarialMergeBlocked Optional current-head evidence for the AMA-05
+ * `adversarial-merge-blocked` label. When a non-null evidence object is supplied:
+ *   - `applied=true && observedRevisionRef === current head` → block (label respected).
+ *   - `applied=false || stale revisionRef` → ignored (the label may be on the PR but its timeline
+ *     event scope is not current-head).
+ * When omitted or null, the predicate falls back to label-presence
+ * (`prMetadata.labels.includes('adversarial-merge-blocked')`) → blocks. Fail-closed default for
+ * watchers that have not yet wired the timeline-event fetch.
+ * Unlike `operator-approved` / `adversarial-merge-requested`, AMA-05 §C explicitly permits PR-author
+ * self-application of `adversarial-merge-blocked` (blocking your own PR is fine) so no author check
+ * is applied to this evidence.
  */
 
 /**
@@ -175,7 +190,7 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
 }
 
 /**
- * Detect a current-head `merge-agent-requested` operator label
+ * Detect a current-head `adversarial-merge-requested` operator label
  * (per SPEC §4.2 #3). Same evidence shape as
  * operator-approved — current-head + attributable.
  *
@@ -183,9 +198,12 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
  * @param {OperatorApprovalEvidence?} evidence
  * @returns {boolean}
  */
-function hasMergeRequestedOverride(prMetadata, evidence) {
+function hasAdversarialMergeRequestedOverride(prMetadata, evidence) {
   if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
-  if (!hasCurrentLabel(prMetadata, MERGE_AGENT_REQUESTED_LABEL)) return false;
+  if (!hasCurrentLabel(prMetadata, ADVERSARIAL_MERGE_REQUESTED_LABEL)) return false;
+  const actor = normalizeLogin(evidence.actor);
+  const author = normalizeLogin(prMetadata?.author || prMetadata?.prAuthor);
+  if (author && actor === author) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
@@ -268,7 +286,7 @@ function hasStuckRecoveryEvidence(evidence, reviewState, prMetadata) {
  * @param {OperatorApprovalEvidence?} recoveryEvidence
  * @returns {string[]}
  */
-function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence) {
+function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence, adversarialMergeBlockedEvidence) {
   const labels = currentLabelSet(prMetadata);
   const hits = [];
   for (const stop of HARD_STOP_LABELS) {
@@ -276,6 +294,24 @@ function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence) {
     if (stop === 'merge-agent-stuck' && hasStuckRecoveryEvidence(recoveryEvidence, reviewState, prMetadata)) {
       // Documented scoped recovery path per SPEC §4.2 #6.
       continue;
+    }
+    if (stop === 'adversarial-merge-blocked' && adversarialMergeBlockedEvidence !== undefined) {
+      // AMA-05 §B.1 — head-scoped evidence wins over bare label presence.
+      // Caller supplied evidence: only block when the latest timeline event
+      // for the label was scoped to the current head. Stale events (head
+      // advanced past the labeled commit) are ignored regardless of whether
+      // the label is still attached to the PR.
+      //
+      // Author self-application is intentionally NOT checked here: SPEC
+      // §4.5 + AMA-05 prompt §C carve out that the author may block their
+      // own PR (blocking is fine; requesting closure is not).
+      const evidence = adversarialMergeBlockedEvidence;
+      const headScoped = evidence
+        && evidence.applied === true
+        && String(evidence.observedRevisionRef || '') === String(prMetadata?.headSha || '');
+      if (!headScoped) {
+        continue;
+      }
     }
     hits.push(stop);
   }
@@ -416,9 +452,19 @@ function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
 export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = {}) {
   const reasons = [];
   const env = options?.env || process.env;
-  const mergeRequestedEvidence = options?.mergeAgentRequested || null;
+  const adversarialMergeRequestedEvidence = options?.adversarialMergeRequested || null;
   const recoveryEvidence = options?.recoveryEvidence || null;
   const fastMergeState = options?.fastMergeState || null;
+  // AMA-05 head-scoped evidence for `adversarial-merge-blocked`.
+  // Missing or null evidence falls back to label-presence (fail-closed).
+  // Only a non-null evidence object can prove the label is stale/unapplied
+  // and let the hard-stop gate ignore it.
+  const adversarialMergeBlockedEvidence =
+    options &&
+    Object.prototype.hasOwnProperty.call(options, 'adversarialMergeBlocked') &&
+    options.adversarialMergeBlocked !== null
+      ? options.adversarialMergeBlocked
+      : undefined;
 
   const amaEnabled = cfg?.enabled === true;
   if (!amaEnabled) {
@@ -475,17 +521,18 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('blocking-findings-present');
   }
 
-  // SPEC §4.2 #3 — risk-class allowlist OR merge-agent-requested
+  // SPEC §4.2 #3 — risk-class allowlist OR adversarial-merge-requested
   // override on the current head.
   const riskClass = String(reviewState?.riskClass || '').toLowerCase();
   const allowedRiskClasses = new Set(
     (cfg?.eligibility?.riskClasses || []).map((r) => String(r || '').toLowerCase()),
   );
   const riskAllowed = riskClass !== '' && allowedRiskClasses.has(riskClass);
-  const mergeRequestedOverride = hasMergeRequestedOverride(prMetadata, mergeRequestedEvidence);
+  const adversarialMergeRequestedOverride =
+    hasAdversarialMergeRequestedOverride(prMetadata, adversarialMergeRequestedEvidence);
   const riskClassRequiresTwoKey = ['high', 'critical', 'unknown', ''].includes(riskClass);
   const riskPermitted = riskClassRequiresTwoKey
-    ? mergeRequestedOverride && operatorOverride
+    ? adversarialMergeRequestedOverride && operatorOverride
     : riskAllowed;
   if (!riskPermitted) {
     reasons.push('risk-class-not-permitted');
@@ -505,8 +552,13 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   }
 
   // SPEC §4.2 #6 — hard-stop labels (with the merge-agent-stuck recovery
-  // carve-out).
-  const blockingLabels = presentHardStopLabels(reviewState, prMetadata, recoveryEvidence);
+  // carve-out and AMA-05 head-scoped `adversarial-merge-blocked` evidence).
+  const blockingLabels = presentHardStopLabels(
+    reviewState,
+    prMetadata,
+    recoveryEvidence,
+    adversarialMergeBlockedEvidence,
+  );
   for (const label of blockingLabels) {
     reasons.push(`label-${label}`);
   }
@@ -532,7 +584,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       allowed: riskAllowed,
       requiresTwoKey: riskClassRequiresTwoKey,
       permitted: riskPermitted,
-      mergeRequestedOverride,
+      adversarialMergeRequestedOverride,
+      mergeRequestedOverride: adversarialMergeRequestedOverride,
     },
     ciGreen: ci,
     branchProtection: {
@@ -566,7 +619,8 @@ export const __testables__ = {
   HARD_STOP_LABELS,
   SETTLED_SUCCESS_VERDICTS,
   hasOperatorApprovedOverride,
-  hasMergeRequestedOverride,
+  hasAdversarialMergeRequestedOverride,
+  hasMergeRequestedOverride: hasAdversarialMergeRequestedOverride,
   hasValidScopedOverrideEvidence,
   hasCurrentLabel,
   presentHardStopLabels,

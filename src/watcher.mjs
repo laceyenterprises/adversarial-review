@@ -27,6 +27,7 @@ import {
   OPERATOR_APPROVED_LABEL,
   legacyLabelEventFromControlResult,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
+import { ADVERSARIAL_MERGE_REQUESTED_LABEL } from './ama/labels.mjs';
 import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
@@ -3211,7 +3212,7 @@ async function maybeDispatchAmaClosureFor({
   candidate,
   labelNames,
   operatorApprovalEvent,
-  mergeAgentRequestEvent,
+  adversarialMergeRequestedEvent,
   repoPath,
   prNumber,
   currentRevisionRef,
@@ -3281,13 +3282,22 @@ async function maybeDispatchAmaClosureFor({
     cfg,
     options: {
       env: process.env,
-      mergeAgentRequested: mergeAgentRequestEvent
+      adversarialMergeRequested: adversarialMergeRequestedEvent
         ? {
             applied: true,
-            observedRevisionRef: mergeAgentRequestEvent.headSha || mergeAgentRequestEvent.head_sha || null,
-            actor: mergeAgentRequestEvent.actor || null,
-            eventId: mergeAgentRequestEvent.id || mergeAgentRequestEvent.nodeId || null,
-            observedAt: mergeAgentRequestEvent.createdAt || mergeAgentRequestEvent.created_at || null,
+            observedRevisionRef:
+              adversarialMergeRequestedEvent.headSha ||
+              adversarialMergeRequestedEvent.head_sha ||
+              null,
+            actor: adversarialMergeRequestedEvent.actor || null,
+            eventId:
+              adversarialMergeRequestedEvent.id ||
+              adversarialMergeRequestedEvent.nodeId ||
+              null,
+            observedAt:
+              adversarialMergeRequestedEvent.createdAt ||
+              adversarialMergeRequestedEvent.created_at ||
+              null,
           }
         : null,
     },
@@ -3318,6 +3328,7 @@ async function handlePostedReviewRow({
   try {
     let operatorApprovalEvent;
     let mergeAgentRequestEvent;
+    let adversarialMergeRequestedEvent;
     if (operatorSurface) {
       const controlSubjectRef = subjectRef || {
         domainId: 'code-pr',
@@ -3325,16 +3336,28 @@ async function handlePostedReviewRow({
         revisionRef: currentRevisionRef || null,
       };
       const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
-      const [operatorApproval, mergeAgentRequest] = await Promise.all([
+      const [operatorApproval, mergeAgentRequest, adversarialMergeRequest] = await Promise.all([
         labelNames.includes(OPERATOR_APPROVED_LABEL)
           ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
           : null,
         labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
           ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
           : null,
+        labelNames.includes(ADVERSARIAL_MERGE_REQUESTED_LABEL) &&
+          typeof operatorSurface.observeLabelControl === 'function'
+          ? operatorSurface.observeLabelControl(
+              controlSubjectRef,
+              revisionRef,
+              ADVERSARIAL_MERGE_REQUESTED_LABEL,
+            )
+          : null,
       ]);
       operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
       mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
+      adversarialMergeRequestedEvent = legacyLabelEventFromControlResult(
+        adversarialMergeRequest,
+        ADVERSARIAL_MERGE_REQUESTED_LABEL,
+      );
     }
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
       execFileImpl,
@@ -3368,7 +3391,7 @@ async function handlePostedReviewRow({
       candidate,
       labelNames,
       operatorApprovalEvent,
-      mergeAgentRequestEvent,
+      adversarialMergeRequestedEvent,
       repoPath,
       prNumber,
       currentRevisionRef,

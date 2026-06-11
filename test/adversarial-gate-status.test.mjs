@@ -766,9 +766,14 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
       branchProtection: { requiredContexts: ['agent-os/adversarial-gate', 'ci/test'] },
       isDraft: false,
     },
-    labelNames: [],
+    labelNames: ['adversarial-merge-requested'],
     operatorApprovalEvent: null,
-    mergeAgentRequestEvent: null,
+    adversarialMergeRequestedEvent: {
+      actor: 'VirtualPaul',
+      createdAt: '2026-06-11T23:20:00.000Z',
+      nodeId: 'LE_adversarial_merge_requested',
+      headSha: 'abc123',
+    },
     repoPath: 'laceyenterprises/adversarial-review',
     prNumber: 265,
     currentRevisionRef: 'abc123',
@@ -795,4 +800,11 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
     'agent-os/adversarial-gate',
     'ci/test',
   ]);
+  assert.deepEqual(observed.options.adversarialMergeRequested, {
+    applied: true,
+    observedRevisionRef: 'abc123',
+    actor: 'VirtualPaul',
+    eventId: 'LE_adversarial_merge_requested',
+    observedAt: '2026-06-11T23:20:00.000Z',
+  });
 });

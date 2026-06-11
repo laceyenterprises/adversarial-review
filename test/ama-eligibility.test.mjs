@@ -1,0 +1,478 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { isEligibleForAmaClosure, __testables__ } from '../src/ama/eligibility.mjs';
+import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
+
+const GATE_CONTEXT = DEFAULT_ADVERSARIAL_GATE_CONTEXT;
+const ENV = { ADV_GATE_STATUS_CONTEXT: GATE_CONTEXT };
+
+/**
+ * Default eligible fixture: every gate passes. Each test below mutates ONE
+ * gate at a time to verify the predicate fails on exactly that one gate
+ * (and that the other gates stay green in `result.trace`).
+ */
+function eligibleFixture(overrides = {}) {
+  const headSha = 'abc12345';
+  const reviewState = {
+    verdict: 'approved',
+    headSha,
+    riskClass: 'low',
+    remediationPending: false,
+    operatorApprovedEvidence: null,
+    prAuthor: 'codex-worker-bot',
+    reviewerFamily: 'claude',
+    ...overrides.reviewState,
+  };
+  const prMetadata = {
+    prNumber: 1234,
+    headSha,
+    isOpen: true,
+    isDraft: false,
+    mergeableState: 'MERGEABLE',
+    labels: [],
+    statusCheckRollup: [
+      { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+    ],
+    branchProtection: { requiredContexts: [GATE_CONTEXT] },
+    author: 'codex-worker-bot',
+    ...overrides.prMetadata,
+  };
+  const cfg = {
+    enabled: true,
+    workerClass: 'codex',
+    mergeMethod: 'squash',
+    eligibility: {
+      riskClasses: ['low'],
+      fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
+      reviewerFamilyPolicy: 'audit_existing_gate_contract',
+      ciGreenClassifier: 'existingAdversarialMergeClassifier',
+    },
+    branchProtection: { requiredGateContextSource: 'resolveGateStatusContext' },
+    ...overrides.cfg,
+  };
+  return { reviewState, prMetadata, cfg };
+}
+
+// ---------------------------------------------------------------------------
+// Truth-table sanity: the fully-eligible default fixture is eligible.
+// ---------------------------------------------------------------------------
+
+test('eligible: a settled-success Approved review with all gates green is eligible', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture();
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.deepEqual(result.reasons, []);
+  assert.equal(result.trace.verdict.settledSuccess, true);
+  assert.equal(result.trace.riskClass.allowed, true);
+  assert.equal(result.trace.ciGreen.green, true);
+  assert.equal(result.trace.branchProtection.ok, true);
+  assert.deepEqual(result.trace.blockLabels, []);
+});
+
+test('eligible: Comment-only (clean) settled-success is eligible', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'comment-only' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+});
+
+// ---------------------------------------------------------------------------
+// Verdict gate (SPEC §4.2 #1)
+// ---------------------------------------------------------------------------
+
+test('not eligible: Request-changes verdict without operator-approved override', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.verdict.settledSuccess, false);
+});
+
+test('eligible: Request-changes with current-head non-author operator-approved override', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_abc',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
+});
+
+test('not eligible: PR author cannot self-approve via operator-approved', () => {
+  // Author is `codex-worker-bot`; actor is the same login.
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'codex-worker-bot',
+        eventId: 'LE_self',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.verdict.operatorOverride, false);
+});
+
+test('not eligible: stale operator-approved evidence (head changed since label) is ignored', () => {
+  // SPEC §4.2 #4 / §6 AC#7 — operator-approved label events that were applied
+  // at a stale head do NOT clear the verdict gate. The review itself is still
+  // current (so the review-based head-match passes), but the override branch
+  // is unavailable because the evidence is no longer head-scoped.
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        // OLD head — does not match the PR's current head.
+        observedRevisionRef: 'OLD-head-1111111',
+        actor: 'paul-the-operator',
+        eventId: 'LE_stale',
+        observedAt: '2026-06-10T18:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  // Verdict gate falls through because the override is stale.
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  // The review-based head-match still passes (review head == current head),
+  // so stale-review-head is NOT in reasons — proves the stale label is
+  // rejected on its own terms, not on a coincidental head mismatch.
+  assert.ok(!result.reasons.includes('stale-review-head'));
+});
+
+// ---------------------------------------------------------------------------
+// Risk-class gate (SPEC §4.2 #3)
+// ---------------------------------------------------------------------------
+
+test('not eligible: high risk class is not in the default `low` allowlist', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'high' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+  assert.equal(result.trace.riskClass.allowed, false);
+});
+
+test('eligible: medium risk class passes when the operator extends `risk_classes`', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'medium' },
+    cfg: {
+      eligibility: {
+        riskClasses: ['low', 'medium'],
+        fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
+        reviewerFamilyPolicy: 'audit_existing_gate_contract',
+        ciGreenClassifier: 'existingAdversarialMergeClassifier',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+});
+
+test('eligible: high-risk PR + current-head adversarial-merge-requested label override', () => {
+  // SPEC §4.2 #3 — risk-class is satisfied by the current-head AMA-05 label.
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'critical' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    mergeAgentRequested: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_merge_requested',
+      observedAt: '2026-06-10T20:00:00Z',
+    },
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.riskClass.mergeRequestedOverride, true);
+});
+
+test('not eligible: `unknown` risk class is never in the default allowlist', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'unknown' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+// ---------------------------------------------------------------------------
+// CI-green gate (SPEC §4.2 #5)
+// ---------------------------------------------------------------------------
+
+test('not eligible: a failing external check fails CI gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: {
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+        { __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' },
+      ],
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('ci-not-green'));
+  assert.equal(result.trace.ciGreen.green, false);
+});
+
+test('not eligible: a pending external check fails CI gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: {
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+        { __typename: 'CheckRun', name: 'test', status: 'IN_PROGRESS' },
+      ],
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('ci-not-green'));
+});
+
+test('eligible: only the adversarial-review self-gate is present → CI counts as green (no external checks)', () => {
+  // SPEC §4.2 #5 — the classifier excludes the adversarial-review pipeline's
+  // own status context to avoid circular gating. With only that context in
+  // the rollup, the classifier returns SUCCESS and AMA proceeds.
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: {
+      statusCheckRollup: [
+        // Adversarial-review's own gate, in the failing state — still must
+        // be excluded from the AMA classifier per SPEC §4.2 #5.
+        { __typename: 'StatusContext', context: GATE_CONTEXT, state: 'FAILURE' },
+      ],
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+});
+
+// ---------------------------------------------------------------------------
+// Branch-protection gate (SPEC §4.2 #9 + AC#8)
+// ---------------------------------------------------------------------------
+
+test('not eligible: branch protection does NOT require the configured gate context', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { branchProtection: { requiredContexts: ['unrelated/ci'] } },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('branch-protection-missing-gate'));
+  assert.equal(result.trace.branchProtection.ok, false);
+});
+
+test('not eligible: branch protection has no required contexts at all', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { branchProtection: { requiredContexts: [] } },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('branch-protection-missing-gate'));
+});
+
+// ---------------------------------------------------------------------------
+// Hard-stop label gate (SPEC §4.2 #6)
+// ---------------------------------------------------------------------------
+
+test('not eligible: `adversarial-merge-blocked` label always fails closed', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['adversarial-merge-blocked'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('label-adversarial-merge-blocked'));
+});
+
+test('not eligible: `do-not-merge` label fails closed', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['do-not-merge'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('label-do-not-merge'));
+});
+
+test('not eligible: `merge-agent-stuck` label fails closed WITHOUT scoped recovery evidence', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['merge-agent-stuck'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
+});
+
+test('eligible: `merge-agent-stuck` label cleared by current-head non-author recovery evidence', () => {
+  // SPEC §4.2 #6 — the merge-agent-stuck carve-out for documented recovery.
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['merge-agent-stuck'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    recoveryEvidence: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_recovery',
+      observedAt: '2026-06-10T20:30:00Z',
+    },
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.deepEqual(result.trace.blockLabels, []);
+});
+
+// ---------------------------------------------------------------------------
+// Mergeability gate (SPEC §4.2 #7)
+// ---------------------------------------------------------------------------
+
+test('not eligible: closed PR fails the mergeability gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { isOpen: false },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('pr-not-open'));
+});
+
+test('not eligible: draft PR fails the mergeability gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { isDraft: true },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('pr-is-draft'));
+});
+
+test('not eligible: GitHub mergeableState=CONFLICTING fails the mergeability gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { mergeableState: 'CONFLICTING' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('pr-not-mergeable'));
+});
+
+// ---------------------------------------------------------------------------
+// Remediation-pending gate
+// ---------------------------------------------------------------------------
+
+test('not eligible: remediation-pending=true fails closed even with Approved verdict', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { remediationPending: true },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('remediation-pending'));
+  // Verdict gate also fails because a settled-success requires not-pending.
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+// ---------------------------------------------------------------------------
+// Cross-cutting: multiple gates failing simultaneously
+// ---------------------------------------------------------------------------
+
+test('reasons accumulate when multiple gates fail at once', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', riskClass: 'critical' },
+    prMetadata: {
+      labels: ['adversarial-merge-blocked'],
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' },
+      ],
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  // All four gates must surface in reasons; operators read this to triage.
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+  assert.ok(result.reasons.includes('ci-not-green'));
+  assert.ok(result.reasons.includes('label-adversarial-merge-blocked'));
+});
+
+// ---------------------------------------------------------------------------
+// Override evidence: non-applied / non-attributable
+// ---------------------------------------------------------------------------
+
+test('operator-approved evidence with applied=false is ignored', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: false,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_x',
+        observedAt: '2026-06-10T20:00:00Z',
+        reason: 'stale-or-non-attributable',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('adversarial-merge-requested evidence with applied=false is ignored', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'critical' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    mergeAgentRequested: {
+      applied: false,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_x',
+      observedAt: '2026-06-10T20:00:00Z',
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+// ---------------------------------------------------------------------------
+// __testables__ — internal helpers exposed for finer-grained probing.
+// ---------------------------------------------------------------------------
+
+test('__testables__ hard-stop label set matches SPEC §4.2 #6', () => {
+  // Lock the exact set so adding a new hard-stop later is a deliberate
+  // code change with a test update.
+  assert.deepEqual(
+    [...__testables__.HARD_STOP_LABELS],
+    [
+      'merge-agent-skip',
+      'do-not-merge',
+      'no-merge-hold',
+      'merge-agent-stuck',
+      'adversarial-merge-blocked',
+    ],
+  );
+});
+
+test('__testables__ settled-success verdict set matches SPEC §4.2 #1', () => {
+  assert.deepEqual(
+    [...__testables__.SETTLED_SUCCESS_VERDICTS].sort(),
+    ['approved', 'comment-only'].sort(),
+  );
+});

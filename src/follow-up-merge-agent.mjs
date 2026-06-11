@@ -17,6 +17,7 @@ import { promisify } from 'node:util';
 
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { normalizeRequiredContexts } from './branch-protection.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -4882,7 +4883,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       '--repo',
       repo,
       '--json',
-      'mergeable,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
+      'mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
     ],
     { maxBuffer: 5 * 1024 * 1024 }
   );
@@ -4899,6 +4900,24 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
       : mergeAgentRequestEvent ?? null,
   ]);
+  let branchProtection = { requiredContexts: [] };
+  if (parsed.baseRefName) {
+    try {
+      const { stdout: protectionStdout } = await execFileImpl(
+        'gh',
+        [
+          'api',
+          `repos/${repo}/branches/${encodeURIComponent(parsed.baseRefName)}/protection`,
+        ],
+        { maxBuffer: 5 * 1024 * 1024 }
+      );
+      branchProtection = {
+        requiredContexts: normalizeRequiredContexts(JSON.parse(String(protectionStdout || '{}'))),
+      };
+    } catch {
+      branchProtection = { requiredContexts: [] };
+    }
+  }
   return {
     repo,
     prNumber,
@@ -4906,7 +4925,10 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     baseBranch: parsed.baseRefName,
     headSha: parsed.headRefOid || null,
     mergeable: parsed.mergeable || 'UNKNOWN',
+    mergeStateStatus: parsed.mergeStateStatus || null,
     checksConclusion: summarizeChecksConclusion(parsed.statusCheckRollup),
+    statusCheckRollup: Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup : [],
+    branchProtection,
     labels,
     operatorNotes: extractOperatorNotes(parsed.body),
     prState: parsed.mergedAt ? 'merged' : String(parsed.state || 'unknown').trim().toLowerCase(),

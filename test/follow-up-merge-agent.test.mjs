@@ -5226,6 +5226,15 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
           }),
         };
       }
+      if (args[0] === 'api' && String(args[1]).includes('/branches/')) {
+        return {
+          stdout: JSON.stringify({
+            required_status_checks: {
+              contexts: ['agent-os/adversarial-gate'],
+            },
+          }),
+        };
+      }
       eventFetchesStarted += 1;
       return new Promise((resolve) => {
         eventResolvers.push(resolve);
@@ -5277,8 +5286,52 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
 
   const candidate = await candidatePromise;
   assert.equal(candidate.checksConclusion, 'SUCCESS');
+  assert.equal(candidate.mergeStateStatus, null);
+  assert.deepEqual(candidate.statusCheckRollup, []);
+  assert.deepEqual(candidate.branchProtection.requiredContexts, ['agent-os/adversarial-gate']);
   assert.equal(candidate.operatorApprovalEvent.label, 'operator-approved');
   assert.equal(candidate.mergeAgentRequestEvent.label, 'merge-agent-requested');
+});
+
+test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dispatch', async () => {
+  const calls = [];
+  const candidate = await fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
+    execFileImpl: async (_cmd, args) => {
+      calls.push(args);
+      if (args[0] === 'pr') {
+        return {
+          stdout: JSON.stringify({
+            mergeable: 'MERGEABLE',
+            mergeStateStatus: 'CLEAN',
+            headRefName: 'feature/pr-401',
+            baseRefName: 'main',
+            headRefOid: 'abc123',
+            body: '',
+            labels: [],
+            statusCheckRollup: [
+              { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+            ],
+            state: 'OPEN',
+            updatedAt: '2026-05-07T12:00:00.000Z',
+            author: { login: 'builder-bot' },
+          }),
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          required_status_checks: {
+            contexts: ['agent-os/adversarial-gate'],
+            checks: [{ context: 'ci/test' }],
+          },
+        }),
+      };
+    },
+  });
+
+  assert.equal(candidate.mergeStateStatus, 'CLEAN');
+  assert.equal(candidate.statusCheckRollup[0].name, 'lint');
+  assert.deepEqual(candidate.branchProtection.requiredContexts, ['agent-os/adversarial-gate', 'ci/test']);
+  assert.ok(calls.some((args) => args[0] === 'api' && String(args[1]).includes('/branches/main/protection')));
 });
 
 test('dispatchMergeAgentForPR does not mutate the caller job fields while recording trigger', async () => {

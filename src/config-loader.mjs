@@ -59,6 +59,35 @@ function normalizeEnvName(value) {
   return normalized || null;
 }
 
+const DEPRECATED_ENV_VARS = {
+  AMA_ENABLED: {
+    key: 'roles.adversarial.merge_authority.enabled',
+    replacement: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+  },
+};
+
+function checkDeprecatedEnvVars(env) {
+  for (const [envName, info] of Object.entries(DEPRECATED_ENV_VARS)) {
+    if (!(envName in env)) continue;
+    if (isFalseyDeprecatedEnvValue(env[envName])) continue;
+    throw new AgentOSConfigError(
+      `${info.key}: deprecated env var ${envName} is no longer supported; use ${info.replacement} instead`,
+      {
+        key: info.key,
+        expected: `${info.replacement} or config.local.yaml`,
+        got: env[envName],
+        source: `env:${envName}`,
+        envName,
+      },
+    );
+  }
+}
+
+function isFalseyDeprecatedEnvValue(value) {
+  const lower = String(value ?? '').trim().toLowerCase();
+  return lower === '' || lower === 'false' || lower === '0';
+}
+
 // -------- Schema declaration -----------------------------------------------
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
@@ -988,7 +1017,7 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
-    aliases: [['AMA_ENABLED', identity]],
+    aliases: [],
   },
   ...buildRoleFallbackEnvAliases(),
   'roles.quota_probe.ok_tick_seconds': {
@@ -1825,6 +1854,7 @@ export function loadConfig({
   cliOverrides = null,
 } = {}) {
   const envView = env || process.env;
+  checkDeprecatedEnvVars(envView);
   const schema = schemaV1();
 
   const defaults = buildDefaultsDict(schema);

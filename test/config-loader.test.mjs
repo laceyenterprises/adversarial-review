@@ -2118,20 +2118,6 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       'resolveGateStatusContext',
     );
 
-    const legacyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: 'true' } });
-    assert.equal(legacyEnvCfg.get('roles.adversarial.merge_authority.enabled'), true);
-    assert.equal(
-      legacyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
-      'env:AMA_ENABLED',
-    );
-
-    const legacyEmptyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: '' } });
-    assert.equal(legacyEmptyEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
-    assert.equal(
-      legacyEmptyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
-      'env:AMA_ENABLED',
-    );
-
     const canonicalFalseEnvCfg = loadConfig({
       topPath: top,
       env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: '0' },
@@ -2167,6 +2153,47 @@ test('AMA merge_authority risk_classes reject unsupported values in Node loader'
         return true;
       },
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA_ENABLED retired env var fails loud only for enabling values in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            enabled: true
+    `);
+    for (const value of ['true', '1']) {
+      assert.throws(
+        () => loadConfig({ topPath: top, env: { AMA_ENABLED: value } }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, 'roles.adversarial.merge_authority.enabled');
+          assert.equal(err.envName, 'AMA_ENABLED');
+          assert.equal(err.source, 'env:AMA_ENABLED');
+          assert.equal(err.got, value);
+          assert.match(
+            err.message,
+            /AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED/,
+          );
+          return true;
+        },
+      );
+    }
+    for (const value of ['false', '0', '']) {
+      const cfg = loadConfig({ topPath: top, env: { AMA_ENABLED: value } });
+      assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), true);
+      assert.notEqual(
+        cfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+        'env:AMA_ENABLED',
+      );
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

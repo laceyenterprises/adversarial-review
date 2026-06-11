@@ -14,6 +14,7 @@ import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
 const execFileAsync = promisify(execFile);
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
+const ADVERSARIAL_MERGE_REQUESTED_LABEL = 'adversarial-merge-requested';
 const FORCE_REREVIEW_LABEL = 'force-rereview';
 const HALTED_LOOP_LABEL = 'halted-loop';
 const RAISED_ROUND_CAP_LABEL = 'raised-round-cap';
@@ -162,6 +163,7 @@ function createGitHubPRLabelControlsAdapter({
 } = {}) {
   const labelNames = {
     operatorApproved: labels.operatorApproved || OPERATOR_APPROVED_LABEL,
+    adversarialMergeRequested: labels.adversarialMergeRequested || ADVERSARIAL_MERGE_REQUESTED_LABEL,
     forceRereview: labels.forceRereview || FORCE_REREVIEW_LABEL,
     haltedLoop: labels.haltedLoop || HALTED_LOOP_LABEL,
     raisedRoundCap: labels.raisedRoundCap || RAISED_ROUND_CAP_LABEL,
@@ -193,6 +195,10 @@ function createGitHubPRLabelControlsAdapter({
 
   const observeOperatorApproved = (subjectRef, currentRevisionRef) => (
     observeLabelControl(subjectRef, currentRevisionRef, labelNames.operatorApproved)
+  );
+
+  const observeAmaMergeRequested = (subjectRef, currentRevisionRef) => (
+    observeLabelControl(subjectRef, currentRevisionRef, labelNames.adversarialMergeRequested)
   );
 
   const observeForceRereview = (subjectRef, currentRevisionRef) => (
@@ -257,6 +263,7 @@ function createGitHubPRLabelControlsAdapter({
     observeOverrides,
     observeLabelControl,
     observeOperatorApproved,
+    observeAmaMergeRequested,
     observeForceRereview,
     observeHaltedLoop,
     observeRaisedRoundCap,
@@ -265,6 +272,7 @@ function createGitHubPRLabelControlsAdapter({
 }
 
 export {
+  ADVERSARIAL_MERGE_REQUESTED_LABEL,
   FORCE_REREVIEW_LABEL,
   HALTED_LOOP_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL,

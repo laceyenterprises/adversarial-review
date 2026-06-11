@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -237,6 +237,41 @@ test('eligible AMA dispatch writes watcher-owned in_progress audit state before 
   assert.equal(audit.authorizingEvidence.blockingFindingCount, 0);
   assert.equal(audit.closerDispatch.dispatchId, 'disp_test_0001');
   assert.equal(audit.closerDispatch.launchRequestId, 'lrq_test_0001');
+});
+
+test('AMA dispatch reissues when a crash left only a bare in_progress lease with no dispatch identifiers', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-audit-recover-'));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { hqRoot: root },
+  });
+  const exec = buildExecMock();
+  const first = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, hqRoot: root },
+    execFileImpl: exec.impl,
+    readTemplateImpl: () => 'stubbed',
+  });
+  const stranded = JSON.parse(readFileSync(first.auditPath, 'utf8'));
+  stranded.closerDispatch = null;
+  writeFileSync(first.auditPath, JSON.stringify(stranded, null, 2) + '\n', 'utf8');
+
+  const second = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, hqRoot: root },
+    execFileImpl: exec.impl,
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  assert.equal(second.dispatched, true);
+  assert.equal(second.existingDispatch, undefined);
+  assert.equal(exec.calls.length, 2);
+  const repairedAudit = JSON.parse(readFileSync(first.auditPath, 'utf8'));
+  assert.equal(repairedAudit.closerDispatch.dispatchId, 'disp_test_0001');
+  assert.equal(repairedAudit.closerDispatch.launchRequestId, 'lrq_test_0001');
 });
 
 // ---------------------------------------------------------------------------

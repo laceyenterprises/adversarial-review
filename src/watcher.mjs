@@ -22,6 +22,7 @@ import {
 import { loadRoleConfig, resetRoleConfigCache } from './role-config.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
+  ADVERSARIAL_MERGE_REQUESTED_LABEL,
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_APPROVED_LABEL,
@@ -3208,7 +3209,7 @@ async function maybeDispatchAmaClosureFor({
   remediationPending = null,
   labelNames,
   operatorApprovalEvent,
-  mergeAgentRequestEvent,
+  adversarialMergeRequestEvent,
   reviewerLogin = '',
   repoPath,
   prNumber,
@@ -3282,13 +3283,13 @@ async function maybeDispatchAmaClosureFor({
     cfg,
     options: {
       env: process.env,
-      mergeAgentRequested: mergeAgentRequestEvent
+      adversarialMergeRequested: adversarialMergeRequestEvent
         ? {
             applied: true,
-            observedRevisionRef: mergeAgentRequestEvent.headSha || mergeAgentRequestEvent.head_sha || null,
-            actor: mergeAgentRequestEvent.actor || null,
-            eventId: mergeAgentRequestEvent.id || mergeAgentRequestEvent.nodeId || null,
-            observedAt: mergeAgentRequestEvent.createdAt || mergeAgentRequestEvent.created_at || null,
+            observedRevisionRef: adversarialMergeRequestEvent.headSha || adversarialMergeRequestEvent.head_sha || null,
+            actor: adversarialMergeRequestEvent.actor || null,
+            eventId: adversarialMergeRequestEvent.id || adversarialMergeRequestEvent.nodeId || null,
+            observedAt: adversarialMergeRequestEvent.createdAt || adversarialMergeRequestEvent.created_at || null,
           }
         : null,
     },
@@ -3318,7 +3319,7 @@ async function handlePostedReviewRow({
 
   try {
     let operatorApprovalEvent;
-    let mergeAgentRequestEvent;
+    let adversarialMergeRequestEvent;
     if (operatorSurface) {
       const controlSubjectRef = subjectRef || {
         domainId: 'code-pr',
@@ -3326,21 +3327,24 @@ async function handlePostedReviewRow({
         revisionRef: currentRevisionRef || null,
       };
       const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
-      const [operatorApproval, mergeAgentRequest] = await Promise.all([
+      const [operatorApproval, adversarialMergeRequest] = await Promise.all([
         labelNames.includes(OPERATOR_APPROVED_LABEL)
           ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
           : null,
-        labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
-          ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
+        labelNames.includes(ADVERSARIAL_MERGE_REQUESTED_LABEL)
+          ? operatorSurface.observeAmaMergeRequested(controlSubjectRef, revisionRef)
           : null,
       ]);
       operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
-      mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
+      adversarialMergeRequestEvent = legacyLabelEventFromControlResult(
+        adversarialMergeRequest,
+        ADVERSARIAL_MERGE_REQUESTED_LABEL,
+      );
     }
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
       execFileImpl,
       operatorApprovalEvent,
-      mergeAgentRequestEvent,
+      adversarialMergeRequestEvent,
     });
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
 
@@ -3377,7 +3381,8 @@ async function handlePostedReviewRow({
     if (amaClosureResult?.dispatched) {
       logger.log(
         `[watcher] AMA closer dispatched for ${repoPath}#${prNumber}: ` +
-        `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
+        `lrq=${amaClosureResult.launchRequestId || 'unknown'} ` +
+        `dispatchId=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
       );
       return;
     }

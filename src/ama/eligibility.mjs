@@ -22,6 +22,7 @@ import { summarizeChecksConclusion } from '../checks-summary.mjs';
 import { resolveGateStatusContext } from '../adversarial-gate-context.mjs';
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
+const ADVERSARIAL_MERGE_REQUESTED_LABEL = 'adversarial-merge-requested';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
 
 /**
@@ -137,8 +138,8 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
 
 /**
  * @typedef {Object} EvaluateOptions
- * @property {Object=}        env                   Override `process.env` for the gate-context resolver.
- * @property {OperatorApprovalEvidence=} mergeAgentRequested Optional current-head merge-requested evidence. Same shape as operator-approved.
+ * @property {Object=}        env                        Override `process.env` for the gate-context resolver.
+ * @property {OperatorApprovalEvidence=} adversarialMergeRequested Optional current-head adversarial-merge-requested evidence. Same shape as operator-approved.
  * @property {MergeAgentRecoveryEvidence=} recoveryEvidence  Optional current-head recovery evidence for the `merge-agent-stuck` carve-out.
  * @property {Object=} fastMergeState                        Optional FML authorization/veto snapshot. AMA fails closed when the PR is in a fast-merge override state it does not import.
  */
@@ -167,6 +168,7 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
   const evidence = reviewState?.operatorApprovedEvidence;
   if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
   if (!hasCurrentLabel(prMetadata, OPERATOR_APPROVED_LABEL)) return false;
+  if (isSelfApprovalActor(evidence.actor, reviewState, prMetadata)) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
@@ -175,7 +177,7 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
 }
 
 /**
- * Detect a current-head `merge-agent-requested` operator label
+ * Detect a current-head `adversarial-merge-requested` operator label
  * (per SPEC §4.2 #3). Same evidence shape as
  * operator-approved — current-head + attributable.
  *
@@ -185,7 +187,8 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
  */
 function hasMergeRequestedOverride(prMetadata, evidence) {
   if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
-  if (!hasCurrentLabel(prMetadata, MERGE_AGENT_REQUESTED_LABEL)) return false;
+  if (!hasCurrentLabel(prMetadata, ADVERSARIAL_MERGE_REQUESTED_LABEL)) return false;
+  if (isSelfApprovalActor(evidence.actor, null, prMetadata)) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
@@ -195,6 +198,13 @@ function hasMergeRequestedOverride(prMetadata, evidence) {
 
 function normalizeLogin(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function isSelfApprovalActor(actor, reviewState, prMetadata) {
+  const normalizedActor = normalizeLogin(actor);
+  if (!normalizedActor) return false;
+  const prAuthor = normalizeLogin(reviewState?.prAuthor || prMetadata?.author);
+  return prAuthor !== '' && normalizedActor === prAuthor;
 }
 
 function normalizeLabelName(label) {
@@ -416,7 +426,7 @@ function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
 export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = {}) {
   const reasons = [];
   const env = options?.env || process.env;
-  const mergeRequestedEvidence = options?.mergeAgentRequested || null;
+  const mergeRequestedEvidence = options?.adversarialMergeRequested || null;
   const recoveryEvidence = options?.recoveryEvidence || null;
   const fastMergeState = options?.fastMergeState || null;
 

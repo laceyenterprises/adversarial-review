@@ -14,6 +14,7 @@ const subjectRef = {
 
 const controls = [
   ['operator-approved', 'observeOperatorApproved'],
+  ['adversarial-merge-requested', 'observeAmaMergeRequested'],
   ['force-rereview', 'observeForceRereview'],
   ['halted-loop', 'observeHaltedLoop'],
   ['raised-round-cap', 'observeRaisedRoundCap'],

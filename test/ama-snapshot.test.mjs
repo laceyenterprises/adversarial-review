@@ -57,7 +57,7 @@ test('buildAmaReviewSnapshotFromCloserInputs reconstructs blocker and override s
       },
       {
         event: 'labeled',
-        label: { name: 'merge-agent-requested' },
+        label: { name: 'adversarial-merge-requested' },
         commit_id: 'abc123',
         actor: { login: 'operator' },
         id: 102,
@@ -72,7 +72,33 @@ test('buildAmaReviewSnapshotFromCloserInputs reconstructs blocker and override s
   assert.equal(reviewState.blockingFindingState, 'known');
   assert.equal(reviewState.remediationPending, false);
   assert.equal(reviewState.operatorApprovedEvidence.eventId, 101);
-  assert.equal(options.mergeAgentRequested.eventId, 102);
+  assert.equal(options.adversarialMergeRequested.eventId, 102);
+});
+
+test('buildAmaReviewSnapshotFromCloserInputs fails closed when reviews exist only for an older head', () => {
+  const { reviewState } = buildAmaReviewSnapshotFromCloserInputs({
+    reviewsJson: {
+      reviews: [
+        {
+          state: 'APPROVED',
+          body: '## Blocking Issues\n\n- None.\n',
+          submittedAt: '2026-06-11T20:00:00Z',
+          commit: { oid: 'old-head' },
+          author: { login: 'claude-reviewer-lacey' },
+        },
+      ],
+    },
+    prJson: {
+      author: { login: 'lacey' },
+    },
+    timelineJson: [],
+    reviewedSha: 'new-head',
+    riskClass: 'low',
+  });
+  assert.equal(reviewState.verdict, '');
+  assert.equal(reviewState.headSha, 'new-head');
+  assert.equal(reviewState.remediationPending, true);
+  assert.equal(reviewState.blockingFindingState, 'unknown');
 });
 
 test('buildAmaPrMetadata normalizes live PR inputs into the eligibility shape', () => {

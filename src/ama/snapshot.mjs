@@ -89,7 +89,7 @@ function buildAmaPrMetadata({
 
 function pickLatestReviewForHead(reviews = [], reviewedSha) {
   const reviewsForHead = reviews.filter((review) => review?.commit?.oid === reviewedSha);
-  return (reviewsForHead.length > 0 ? reviewsForHead : reviews)
+  return reviewsForHead
     .slice()
     .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')))[0]
     || null;
@@ -113,6 +113,24 @@ function buildAmaReviewSnapshotFromCloserInputs({
   const reviews = Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : [];
   const timeline = Array.isArray(timelineJson) ? timelineJson : [];
   const latest = pickLatestReviewForHead(reviews, reviewedSha);
+  if (!latest) {
+    return {
+      reviewState: {
+        verdict: '',
+        headSha: reviewedSha,
+        riskClass,
+        remediationPending: true,
+        operatorApprovedEvidence: normalizeScopedLabelEvidence(latestLabeledFor(timeline, 'operator-approved')),
+        blockingFindingCount: 0,
+        blockingFindingState: 'unknown',
+        prAuthor: prJson?.author?.login || null,
+        reviewerFamily: null,
+      },
+      options: {
+        adversarialMergeRequested: normalizeScopedLabelEvidence(latestLabeledFor(timeline, 'adversarial-merge-requested')),
+      },
+    };
+  }
   const ghState = String(latest?.state || '').toUpperCase();
   const verdictMap = {
     APPROVED: 'approved',
@@ -137,7 +155,7 @@ function buildAmaReviewSnapshotFromCloserInputs({
     reviewerFamily: latest?.author?.login || null,
   };
   const options = {
-    mergeAgentRequested: normalizeScopedLabelEvidence(latestLabeledFor(timeline, 'merge-agent-requested')),
+    adversarialMergeRequested: normalizeScopedLabelEvidence(latestLabeledFor(timeline, 'adversarial-merge-requested')),
   };
   return { reviewState, options };
 }

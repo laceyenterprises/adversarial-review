@@ -44,6 +44,11 @@ const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
 const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 
+function hasLaunchedCloser(existingRecord) {
+  const dispatch = existingRecord?.closerDispatch;
+  return Boolean(dispatch?.launchRequestId || dispatch?.dispatchId);
+}
+
 /**
  * @typedef {Object} DispatchResult
  * @property {boolean}  dispatched
@@ -229,7 +234,7 @@ export async function maybeDispatchAmaCloser({
   const workerClass = String(cfg.workerClass || 'codex');
   const now = dispatchContext.dispatchedAt || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const existingRecord = readAmaAuditRecord(auditPath);
-  if (existingRecord?.status === 'in_progress') {
+  if (existingRecord?.status === 'in_progress' && hasLaunchedCloser(existingRecord)) {
     return {
       dispatched: true,
       workerClass,

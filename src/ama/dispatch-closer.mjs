@@ -26,11 +26,13 @@
 
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { amaAuditFilePath, amaAuditTraceRef, composeAmaTrailers, writeAmaAuditEntry } from './audit.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -118,6 +120,29 @@ function errorDiagnosticLines(err) {
     .filter(Boolean);
 }
 
+function buildBootstrapEligibilityReasons({ reviewState, prMetadata, verdict, dispatchContext }) {
+  const reasons = [];
+  if (verdict?.eligible) reasons.push('latest_review_settled_success');
+  if (dispatchContext?.reviewedBy) reasons.push('reviewer_family_recorded');
+  if (reviewState?.riskClass) reasons.push(`risk_class_${reviewState.riskClass}_permitted`);
+  if (reviewState?.headSha && prMetadata?.headSha && reviewState.headSha === prMetadata.headSha) {
+    reasons.push('head_sha_matches_review');
+  }
+  if (verdict?.trace?.ciGreen?.green) reasons.push('ci_all_green');
+  if (Array.isArray(verdict?.trace?.blockLabels) && verdict.trace.blockLabels.length === 0) {
+    reasons.push('no_blocking_labels');
+  }
+  if (verdict?.trace?.branchProtection?.ok) reasons.push('configured_gate_context_required');
+  return reasons;
+}
+
+function summarizeEligibilityReason(reasons) {
+  const summary = Array.isArray(reasons)
+    ? reasons.map(reason => String(reason || '').trim()).filter(Boolean).join(', ')
+    : '';
+  return summary || 'eligibility predicate satisfied';
+}
+
 function isExecTimeout(err) {
   return err?.code === 'ETIMEDOUT'
     || err?.killed === true
@@ -153,6 +178,34 @@ function resolveHqOwner(hqRoot) {
   const config = readJsonFile(join(hqRoot, '.hq', 'config.json'));
   const ownerUser = String(config?.ownerUser || '').trim();
   return ownerUser || null;
+}
+
+function currentUserName() {
+  try {
+    return String(userInfo().username || '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function assertAmaAuditOwner({ hqRoot, ownerUser, currentUser = currentUserName() } = {}) {
+  const expected = String(ownerUser || '').trim();
+  if (!expected) {
+    throw new Error(
+      `AMA audit bootstrap refused: HQ ownerUser is unavailable for ${hqRoot || 'unknown HQ root'}`,
+    );
+  }
+  const actual = String(currentUser || '').trim();
+  if (!actual) {
+    throw new Error('AMA audit bootstrap refused: current runtime user is unavailable');
+  }
+  if (actual !== expected) {
+    throw new Error(
+      `AMA audit bootstrap refused: current user '${actual}' does not match ` +
+      `HQ ownerUser '${expected}' for ${hqRoot}`,
+    );
+  }
+  return expected;
 }
 
 function hasAuthoritativeOwnerVisibility(asOwner) {
@@ -282,10 +335,12 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.riskClass
  * @param {string} args.mergeMethod     — 'squash' | 'merge'
  * @param {string} args.requiredGateContext
- * @param {string} args.auditPath       — absolute path inside HQ_ROOT
+ * @param {string} args.auditPath       — absolute path inside HQ_ROOT, used only inside the closer
+ * @param {string} args.hqRoot          — HQ root path (closer passes to `ama-audit append --hq-root`)
  * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
  * @param {string} args.dispatchedAt    — ISO 8601 UTC
+ * @param {string} args.amaTrailers     — provenance trailer block passed to `gh pr merge`
  * @param {string} args.templateBody    — raw template content
  * @returns {string}
  */
@@ -298,9 +353,11 @@ export function composeCloserPrompt({
   mergeMethod,
   requiredGateContext,
   auditPath,
+  hqRoot,
   hqOwnerUser,
   reviewedBy,
   dispatchedAt,
+  amaTrailers,
   templateBody,
 }) {
   return substituteTemplate(templateBody, {
@@ -312,9 +369,11 @@ export function composeCloserPrompt({
     MERGE_METHOD: mergeMethod,
     REQUIRED_GATE_CONTEXT: requiredGateContext,
     AUDIT_PATH: auditPath,
+    HQ_ROOT: hqRoot,
     HQ_OWNER: hqOwnerUser,
     REVIEWED_BY: reviewedBy,
     DISPATCHED_AT: dispatchedAt,
+    AMA_TRAILERS: amaTrailers,
   });
 }
 
@@ -386,17 +445,26 @@ export async function maybeDispatchAmaCloser({
   const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
+  const workerClass = String(cfg.workerClass || 'codex');
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
-  const ownerUser = resolveHqOwner(hqRoot);
-  const auditPath = join(
-    hqRoot,
-    'dispatch',
-    'audit',
-    'adversarial-merge-authority',
-    `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}.json`,
-  );
+  const ownerUser = dispatchContext.hqOwnerUser || resolveHqOwner(hqRoot);
+  const auditPath = amaAuditFilePath(hqRoot, repo, prNumber, reviewedSha);
+  const auditRef = amaAuditTraceRef(repo, prNumber, reviewedSha);
+  const bootstrapEligibilityReasons = buildBootstrapEligibilityReasons({
+    reviewState,
+    prMetadata,
+    verdict,
+    dispatchContext,
+  });
+  const amaTrailers = composeAmaTrailers({
+    workerClass,
+    reviewerFamily: dispatchContext.reviewedBy,
+    riskClass: dispatchContext.riskClass,
+    eligibilityReason: summarizeEligibilityReason(bootstrapEligibilityReasons),
+    auditRef,
+  });
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,
     repo,
@@ -406,14 +474,15 @@ export async function maybeDispatchAmaCloser({
     mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,
+    hqRoot,
     hqOwnerUser: ownerUser || 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,
+    amaTrailers,
     templateBody,
   });
 
   const dispatchIdentity = { repo, prNumber, headSha: reviewedSha };
-  const workerClass = String(cfg.workerClass || 'codex');
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
@@ -465,6 +534,43 @@ export async function maybeDispatchAmaCloser({
   } else if (existingRecord && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND) {
     return { dispatched: false, reason: 'dispatch-retry-exhausted' };
   }
+
+  assertAmaAuditOwner({
+    hqRoot,
+    ownerUser,
+    currentUser: dispatchContext.currentUser,
+  });
+  writeAmaAuditEntry({
+    hqRoot,
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+    now: dispatchContext.dispatchedAt,
+    attempt: {
+      outcome: 'in_progress',
+      reviewedBy: dispatchContext.reviewedBy || null,
+      requiredGateContext: dispatchContext.requiredGateContext || null,
+      eligibilityTrace: verdict.trace,
+      operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
+      mergeRequestedEvidence: options?.mergeAgentRequested || null,
+    },
+    metadata: {
+      reviewedBy: dispatchContext.reviewedBy || null,
+      reviewSha: reviewedSha,
+      riskClass: dispatchContext.riskClass || null,
+      requiredGateContexts: dispatchContext.requiredGateContext
+        ? [dispatchContext.requiredGateContext]
+        : [],
+      eligibilityReasons: bootstrapEligibilityReasons,
+      mergeMethod,
+      reconciliation: {
+        needsRepair: false,
+        lastVerifiedAt: dispatchContext.dispatchedAt || null,
+      },
+      operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
+      mergeRequestedEvidence: options?.mergeAgentRequested || null,
+    },
+  });
 
   // Persist the prompt under watcher-owned repo state and pass that path
   // to `hq dispatch --prompt`. This avoids cross-user writes into HQ_ROOT.

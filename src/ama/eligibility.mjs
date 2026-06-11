@@ -162,13 +162,11 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  */
 function hasOperatorApprovedOverride(reviewState, prMetadata) {
   const evidence = reviewState?.operatorApprovedEvidence;
-  if (!evidence || evidence.applied !== true) return false;
-  if (!evidence.actor) return false;
+  if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
   ) return false;
-  if (isSameActorAsPrAuthor(evidence.actor, reviewState, prMetadata)) return false;
   return true;
 }
 
@@ -182,8 +180,7 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
  * @returns {boolean}
  */
 function hasMergeRequestedOverride(prMetadata, evidence) {
-  if (!evidence || evidence.applied !== true) return false;
-  if (!evidence.actor) return false;
+  if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
@@ -195,14 +192,27 @@ function normalizeLogin(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-function isSameActorAsPrAuthor(actor, reviewState, prMetadata) {
+function hasValidOverrideActor(actor) {
   const normalizedActor = normalizeLogin(actor);
-  if (!normalizedActor) return false;
-  const authors = [
-    normalizeLogin(prMetadata?.author),
-    normalizeLogin(reviewState?.prAuthor),
-  ].filter(Boolean);
-  return authors.includes(normalizedActor);
+  return normalizedActor !== '' && normalizedActor !== 'unknown';
+}
+
+function hasOverrideProvenance(evidence) {
+  if (!evidence) return false;
+  const eventId = evidence.eventId || evidence.eventNodeId || evidence.labelEventId || evidence.labelEventNodeId;
+  const observedAt = evidence.observedAt || evidence.createdAt;
+  return Boolean(eventId && observedAt);
+}
+
+function hasValidScopedOverrideEvidence(evidence, prMetadata) {
+  if (!evidence || evidence.applied !== true) return false;
+  if (!hasValidOverrideActor(evidence.actor)) return false;
+  if (!hasOverrideProvenance(evidence)) return false;
+  if (
+    String(evidence.observedRevisionRef || evidence.headSha || '') !==
+    String(prMetadata?.headSha || '')
+  ) return false;
+  return true;
 }
 
 /**
@@ -218,15 +228,8 @@ function isSameActorAsPrAuthor(actor, reviewState, prMetadata) {
  * @returns {boolean}
  */
 function hasStuckRecoveryEvidence(evidence, reviewState, prMetadata) {
-  if (!evidence || evidence.applied !== true) return false;
-  if (!evidence.actor) return false;
-  if (
-    String(evidence.observedRevisionRef || '') !==
-    String(prMetadata?.headSha || '')
-  ) return false;
-  if (evidence.kind === 'operator-approved') {
-    return !isSameActorAsPrAuthor(evidence.actor, reviewState, prMetadata);
-  }
+  if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
+  if (evidence.kind === 'operator-approved') return true;
   if (evidence.kind !== 'merge-agent-recovery-in-flight') {
     return false;
   }
@@ -535,6 +538,7 @@ export const __testables__ = {
   SETTLED_SUCCESS_VERDICTS,
   hasOperatorApprovedOverride,
   hasMergeRequestedOverride,
+  hasValidScopedOverrideEvidence,
   presentHardStopLabels,
   classifyCiGreen,
   classifyBlockingFindings,

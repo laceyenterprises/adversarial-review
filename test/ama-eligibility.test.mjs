@@ -113,7 +113,7 @@ test('eligible: Request-changes with current-head operator-approved override', (
   assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
-test('not eligible: same-login operator-approved override is rejected for PR-author self-approval', () => {
+test('eligible: same-login operator-approved override is allowed at single-operator scale', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -127,9 +127,8 @@ test('not eligible: same-login operator-approved override is rejected for PR-aut
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, false);
-  assert.equal(result.trace.verdict.operatorOverride, false);
-  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
 test('not eligible: stale operator-approved evidence (head changed since label) is ignored', () => {
@@ -393,7 +392,7 @@ test('eligible: `merge-agent-stuck` label cleared by current-head non-author rec
   assert.deepEqual(result.trace.blockLabels, []);
 });
 
-test('not eligible: `merge-agent-stuck` recovery rejects PR-author operator-approved evidence', () => {
+test('eligible: `merge-agent-stuck` recovery allows same-login operator-approved evidence', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['merge-agent-stuck'] },
   });
@@ -408,8 +407,8 @@ test('not eligible: `merge-agent-stuck` recovery rejects PR-author operator-appr
       observedAt: '2026-06-10T20:30:00Z',
     },
   });
-  assert.equal(result.eligible, false);
-  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.deepEqual(result.trace.blockLabels, []);
 });
 
 // ---------------------------------------------------------------------------
@@ -595,6 +594,60 @@ test('operator-approved evidence with applied=false is ignored', () => {
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
 });
 
+test('operator-approved evidence with actor=`unknown` fails closed', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'unknown',
+        eventId: 'LE_unknown_actor',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+});
+
+test('operator-approved evidence missing event id fails closed', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: null,
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+});
+
+test('operator-approved evidence missing observedAt fails closed', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_missing_time',
+        observedAt: null,
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+});
+
 test('adversarial-merge-requested evidence with applied=false is ignored', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { riskClass: 'critical' },
@@ -610,6 +663,35 @@ test('adversarial-merge-requested evidence with applied=false is ignored', () =>
     },
   });
   assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+test('adversarial-merge-requested evidence missing provenance fails closed', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      riskClass: 'critical',
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    mergeAgentRequested: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'unknown',
+      eventId: null,
+      observedAt: null,
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.riskClass.mergeRequestedOverride, false);
   assert.ok(result.reasons.includes('risk-class-not-permitted'));
 });
 

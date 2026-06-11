@@ -16,6 +16,11 @@ import {
   appendAmaAuditAttempt,
   readAmaAuditEntry,
 } from '../src/ama/audit.mjs';
+import {
+  acquireAmaCloserLease,
+  readAmaCloserLease,
+  updateAmaCloserLease,
+} from '../src/ama/closer-lease.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -508,17 +513,14 @@ test('existing AMA closer dispatch suppresses a duplicate launch for the same he
     readTemplateImpl: () => 'stubbed',
   });
   assert.equal(second.dispatched, false);
-  assert.equal(second.reason, 'lease-held');
-  // The existing lease is surfaced for audit-visibility on the watcher
-  // side; second.existingLease.lrqId carries the AMA-07 record's
-  // launch request id so the watcher can probe hq status itself when
-  // it wants to (the lease intentionally does not auto-probe — that's
-  // the AMA-03 dispatch record's job).
-  assert.equal(second.existingLease?.lrqId, 'lrq_123');
-  assert.equal(second.existingLease?.status, 'dispatched');
-  // No hq dispatch + no status probe — the lease blocks before either.
+  assert.equal(second.reason, 'existing-dispatch-running');
+  assert.equal(second.skipMergeAgent, true);
+  // Once a dispatch record exists, the duplicate-dispatch guard is
+  // surfaced through that durable record: the watcher gets the active
+  // launch request id back and suppresses merge-agent fallback.
+  assert.equal(second.launchRequestId, 'lrq_123');
   const hqStatusProbes = calls.filter((args) => args[0] === 'dispatch' && args[1] === 'status');
-  assert.equal(hqStatusProbes.length, 0);
+  assert.equal(hqStatusProbes.length, 1);
 });
 
 test('AMA-07 lease blocks regardless of how hq dispatch status would have responded', async (t) => {
@@ -570,10 +572,10 @@ test('AMA-07 lease blocks regardless of how hq dispatch status would have respon
     readTemplateImpl: () => 'stubbed',
   });
   assert.equal(second.dispatched, false);
-  assert.equal(second.reason, 'lease-held');
-  // The status probe noise path is now unreachable — the lease wins.
+  assert.equal(second.reason, 'dispatch-status-unknown');
+  assert.equal(second.skipMergeAgent, true);
   const hqStatusProbes = calls.filter((args) => args[0] === 'dispatch' && args[1] === 'status');
-  assert.equal(hqStatusProbes.length, 0);
+  assert.ok(hqStatusProbes.length >= 1);
 });
 
 test('ambiguous dispatch failure with launch request id suppresses merge-agent fallback', async (t) => {
@@ -599,6 +601,109 @@ test('ambiguous dispatch failure with launch request id suppresses merge-agent f
   assert.equal(result.skipMergeAgent, true);
   assert.equal(result.reason, 'dispatch-response-ambiguous');
   assert.equal(result.launchRequestId, 'lrq_999');
+});
+
+test('stale pending lease from pre-dispatch failure is repaired on the next tick', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-stale-pending-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  acquireAmaCloserLease({
+    rootDir,
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+    watcherPid: 999,
+    now: dispatchContext.dispatchedAt,
+  });
+
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"dispatch-retry","launchRequestId":"lrq_retry"}',
+      stderr: '',
+    }),
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(result.dispatched, true);
+  const repairedLease = readAmaCloserLease(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  });
+  assert.equal(repairedLease.status, 'dispatched');
+  assert.equal(repairedLease.lrqId, 'lrq_retry');
+});
+
+test('terminal AMA audit releases a stale lease so the same head can be retried', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-terminal-repair-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+
+  acquireAmaCloserLease({
+    rootDir,
+    ...identity,
+    watcherPid: 1001,
+    now: dispatchContext.dispatchedAt,
+  });
+  const bootstrap = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"dispatch-bootstrap","launchRequestId":"lrq_bootstrap"}',
+      stderr: '',
+    }),
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(bootstrap.dispatched, true);
+  updateAmaCloserLease({
+    rootDir,
+    ...identity,
+    status: 'terminal',
+    terminalOutcome: 'deferred',
+    now: '2026-06-11T20:10:00Z',
+  });
+  appendAmaAuditAttempt({
+    hqRoot: dispatchContext.hqRoot,
+    ...identity,
+    attempt: { outcome: 'deferred', preMergeReasons: ['ci-not-green'] },
+    now: '2026-06-11T20:10:00Z',
+  });
+
+  const retry = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: {
+      ...dispatchContext,
+      dispatchedAt: '2026-06-11T20:11:00Z',
+    },
+    execFileImpl: async (_cmd, args) => (
+      args[0] === 'dispatch' && args[1] === 'status'
+        ? { stdout: '{"status":"superseded"}', stderr: '' }
+        : { stdout: '{"dispatchId":"dispatch-redo","launchRequestId":"lrq_redo"}', stderr: '' }
+    ),
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(retry.dispatched, true);
+  const repairedLease = readAmaCloserLease(rootDir, identity);
+  assert.equal(repairedLease.status, 'dispatched');
+  assert.equal(repairedLease.lrqId, 'lrq_redo');
 });
 
 /*

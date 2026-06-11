@@ -32,10 +32,18 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { amaAuditFilePath, amaAuditTraceRef, composeAmaTrailers, writeAmaAuditEntry } from './audit.mjs';
+import {
+  amaAuditFilePath,
+  amaAuditTraceRef,
+  composeAmaTrailers,
+  readAmaAuditEntry,
+  writeAmaAuditEntry,
+} from './audit.mjs';
 import {
   AMA_CLOSER_LEASE_STATUS,
   acquireAmaCloserLease,
+  deleteAmaCloserLease,
+  readAmaCloserLease,
   updateAmaCloserLease,
 } from './closer-lease.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
@@ -55,6 +63,12 @@ const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const AMA_CLOSER_RETRYABLE_STATUSES = new Set(['failed', 'cancelled', 'canceled', 'superseded', 'not-found']);
+const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
+  'succeeded',
+  'failed-without-merge',
+  'deferred',
+  'superseded',
+]);
 
 /**
  * @typedef {Object} DispatchResult
@@ -307,6 +321,13 @@ function normalizeDispatchIdentifiers(payload) {
   };
 }
 
+function readAmaAuditTerminalOutcome(hqRoot, { repo, prNumber, headSha } = {}) {
+  const status = String(readAmaAuditEntry(hqRoot, repo, prNumber, headSha)?.status || '')
+    .trim()
+    .toLowerCase();
+  return AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES.has(status) ? status : null;
+}
+
 /**
  * Substitute `<<PLACEHOLDER>>` markers in the template body.
  *
@@ -453,34 +474,7 @@ export async function maybeDispatchAmaCloser({
   const workerClass = String(cfg.workerClass || 'codex');
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
 
-  // AMA-07 — durable closer lease keyed by (repo, prNumber, headSha).
-  //
-  // Acquired BEFORE the AMA-03 dispatch record so two concurrent
-  // watcher ticks on the same eligible head cannot both spawn a
-  // closer. The lease is atomic per SPEC §4.9: `writeFileAtomic(..., {
-  // overwrite: false })` uses `linkSync` under the hood, which throws
-  // EEXIST on a race — exactly one acquirer wins.
-  //
-  // On `acquired: false`, return immediately with reason `lease-held`.
-  // The watcher's caller falls through to the merge-agent path on
-  // its next tick if the lease holder terminates without closure.
-  //
-  // Head-change naturally invalidates an older lease — a new head
-  // SHA gets a fresh file; the old lease persists for audit.
   const leaseIdentity = { repo, prNumber, headSha: reviewedSha };
-  const leaseResult = acquireAmaCloserLease({
-    rootDir,
-    ...leaseIdentity,
-    watcherPid: typeof process !== 'undefined' ? process.pid : null,
-    now: dispatchContext.dispatchedAt,
-  });
-  if (!leaseResult.acquired) {
-    return {
-      dispatched: false,
-      reason: 'lease-held',
-      existingLease: leaseResult.existingLease,
-    };
-  }
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
   const ownerUser = dispatchContext.hqOwnerUser || resolveHqOwner(hqRoot);
@@ -520,6 +514,8 @@ export async function maybeDispatchAmaCloser({
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
+  const auditTerminalOutcome = readAmaAuditTerminalOutcome(hqRoot, dispatchIdentity);
+  let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
@@ -529,7 +525,40 @@ export async function maybeDispatchAmaCloser({
       env: process.env,
     });
     const status = statusProbe?.status || null;
+    existingDispatchStatus = status;
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
+      if (auditTerminalOutcome === 'succeeded') {
+        return {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: 'ama-already-succeeded',
+          workerClass: existingRecord.workerClass || workerClass,
+          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+          launchRequestId: existingRecord.launchRequestId || null,
+          promptPath: existingRecord.promptPath || null,
+        };
+      }
+      if (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded') {
+        existingDispatchStatus = null;
+      } else {
+        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: statusProbe?.error || null,
+        }));
+        return {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: `existing-dispatch-${status}`,
+          workerClass: existingRecord.workerClass || workerClass,
+          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+          launchRequestId: existingRecord.launchRequestId || null,
+          promptPath: existingRecord.promptPath || null,
+        };
+      }
+    }
+    if (status === 'unknown') {
       updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
         ...(current || existingRecord),
         lastObservedStatus: status,
@@ -539,22 +568,6 @@ export async function maybeDispatchAmaCloser({
       return {
         dispatched: false,
         skipMergeAgent: true,
-        reason: `existing-dispatch-${status}`,
-        workerClass: existingRecord.workerClass || workerClass,
-        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-        launchRequestId: existingRecord.launchRequestId || null,
-        promptPath: existingRecord.promptPath || null,
-      };
-    }
-    if (status === 'unknown') {
-      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
-        ...(current || existingRecord),
-        lastObservedStatus: status,
-        lastObservedAt: dispatchContext.dispatchedAt,
-        lastError: statusProbe?.error || 'dispatch-status-unknown',
-      }));
-      return {
-        dispatched: false,
         reason: 'dispatch-status-unknown',
         workerClass: existingRecord.workerClass || workerClass,
         dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
@@ -639,6 +652,48 @@ export async function maybeDispatchAmaCloser({
     lastObservedAt: existingRecord?.lastObservedAt || null,
     lastError: null,
   });
+
+  // AMA-07 — acquire the duplicate-dispatch lease immediately before
+  // the hq launch, after every watcher-local preflight that can fail
+  // without creating a live closer. This keeps transient local write
+  // failures from leaving a permanent `pending` lease behind.
+  let leaseResult = acquireAmaCloserLease({
+    rootDir,
+    ...leaseIdentity,
+    watcherPid: typeof process !== 'undefined' ? process.pid : null,
+    now: dispatchContext.dispatchedAt,
+  });
+  if (!leaseResult.acquired) {
+    const existingLease = leaseResult.existingLease || readAmaCloserLease(rootDir, leaseIdentity);
+    if (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded') {
+      deleteAmaCloserLease(rootDir, leaseIdentity);
+      leaseResult = acquireAmaCloserLease({
+        rootDir,
+        ...leaseIdentity,
+        watcherPid: typeof process !== 'undefined' ? process.pid : null,
+        now: dispatchContext.dispatchedAt,
+      });
+    } else if (
+      AMA_CLOSER_RETRYABLE_STATUSES.has(existingDispatchStatus || '')
+      || (existingLease?.status === AMA_CLOSER_LEASE_STATUS.PENDING && !existingRecord?.launchRequestId)
+    ) {
+      deleteAmaCloserLease(rootDir, leaseIdentity);
+      leaseResult = acquireAmaCloserLease({
+        rootDir,
+        ...leaseIdentity,
+        watcherPid: typeof process !== 'undefined' ? process.pid : null,
+        now: dispatchContext.dispatchedAt,
+      });
+    }
+  }
+  if (!leaseResult.acquired) {
+    return {
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'lease-held',
+      existingLease: leaseResult.existingLease,
+    };
+  }
 
   // `hq dispatch` args mirror the existing merge-agent dispatch (see
   // src/follow-up-merge-agent.mjs around line 3866). Differences:

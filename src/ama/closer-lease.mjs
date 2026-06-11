@@ -13,10 +13,11 @@
  *   3. On `acquired: false` → the existing lease is duplicate-dispatch
  *      protection; skip this tick.
  *
- * The closer worker's terminal audit-write (AMA-04) updates the lease
- * to `terminal` with the resolved `terminalOutcome`. Head-change
- * naturally invalidates an older lease — a new head SHA gets a fresh
- * lease file; the old one persists for audit.
+ * The closer worker's terminal audit-write (AMA-04) or watcher-side
+ * repair updates the lease to `terminal` with the resolved
+ * `terminalOutcome`. Head-change naturally invalidates an older lease
+ * — a new head SHA gets a fresh lease file; the old one persists for
+ * audit until watcher-side repair clears it for a same-head retry.
  *
  * State machine:
  *
@@ -30,7 +31,7 @@
  * @module ama/closer-lease
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
@@ -118,6 +119,21 @@ function readLeaseFile(filePath) {
  */
 export function readAmaCloserLease(rootDir, identity) {
   return readLeaseFile(amaCloserLeaseFilePath(rootDir, identity));
+}
+
+/**
+ * Delete the durable lease file for a `(repo, prNumber, headSha)` tuple.
+ * Used only by watcher-side repair once another durable record proves
+ * the lease no longer represents live ownership.
+ *
+ * @param {string} rootDir
+ * @param {object} identity
+ * @returns {string} deleted lease path
+ */
+export function deleteAmaCloserLease(rootDir, identity) {
+  const leasePath = amaCloserLeaseFilePath(rootDir, identity);
+  rmSync(leasePath, { force: true });
+  return leasePath;
 }
 
 /**

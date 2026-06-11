@@ -141,6 +141,17 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {OperatorApprovalEvidence=} mergeAgentRequested Optional current-head merge-requested evidence. Same shape as operator-approved.
  * @property {MergeAgentRecoveryEvidence=} recoveryEvidence  Optional current-head recovery evidence for the `merge-agent-stuck` carve-out.
  * @property {Object=} fastMergeState                        Optional FML authorization/veto snapshot. AMA fails closed when the PR is in a fast-merge override state it does not import.
+ * @property {AdversarialMergeBlockedEvidence=} adversarialMergeBlocked Optional current-head evidence for the AMA-05
+ * `adversarial-merge-blocked` label. When supplied:
+ *   - `applied=true && observedRevisionRef === current head` → block (label respected).
+ *   - `applied=false || stale revisionRef` → ignored (the label may be on the PR but its timeline
+ *     event scope is not current-head).
+ * When NOT supplied, the predicate falls back to label-presence
+ * (`prMetadata.labels.includes('adversarial-merge-blocked')`) → blocks. Fail-closed default for
+ * watchers that have not yet wired the timeline-event fetch.
+ * Unlike `operator-approved` / `adversarial-merge-requested`, AMA-05 §C explicitly permits PR-author
+ * self-application of `adversarial-merge-blocked` (blocking your own PR is fine) so no author check
+ * is applied to this evidence.
  */
 
 /**
@@ -268,7 +279,7 @@ function hasStuckRecoveryEvidence(evidence, reviewState, prMetadata) {
  * @param {OperatorApprovalEvidence?} recoveryEvidence
  * @returns {string[]}
  */
-function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence) {
+function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence, adversarialMergeBlockedEvidence) {
   const labels = currentLabelSet(prMetadata);
   const hits = [];
   for (const stop of HARD_STOP_LABELS) {
@@ -276,6 +287,24 @@ function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence) {
     if (stop === 'merge-agent-stuck' && hasStuckRecoveryEvidence(recoveryEvidence, reviewState, prMetadata)) {
       // Documented scoped recovery path per SPEC §4.2 #6.
       continue;
+    }
+    if (stop === 'adversarial-merge-blocked' && adversarialMergeBlockedEvidence !== undefined) {
+      // AMA-05 §B.1 — head-scoped evidence wins over bare label presence.
+      // Caller supplied evidence: only block when the latest timeline event
+      // for the label was scoped to the current head. Stale events (head
+      // advanced past the labeled commit) are ignored regardless of whether
+      // the label is still attached to the PR.
+      //
+      // Author self-application is intentionally NOT checked here: SPEC
+      // §4.5 + AMA-05 prompt §C carve out that the author may block their
+      // own PR (blocking is fine; requesting closure is not).
+      const evidence = adversarialMergeBlockedEvidence;
+      const headScoped = evidence
+        && evidence.applied === true
+        && String(evidence.observedRevisionRef || '') === String(prMetadata?.headSha || '');
+      if (!headScoped) {
+        continue;
+      }
     }
     hits.push(stop);
   }
@@ -419,6 +448,14 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const mergeRequestedEvidence = options?.mergeAgentRequested || null;
   const recoveryEvidence = options?.recoveryEvidence || null;
   const fastMergeState = options?.fastMergeState || null;
+  // AMA-05 head-scoped evidence for `adversarial-merge-blocked`.
+  // `undefined` (not supplied) → fall back to label-presence (fail-closed).
+  // `null` or an object → treated as supplied evidence; the hard-stop
+  // gate consults the head-scope rules in `presentHardStopLabels`.
+  const adversarialMergeBlockedEvidence =
+    options && Object.prototype.hasOwnProperty.call(options, 'adversarialMergeBlocked')
+      ? (options.adversarialMergeBlocked || null)
+      : undefined;
 
   const amaEnabled = cfg?.enabled === true;
   if (!amaEnabled) {
@@ -505,8 +542,13 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   }
 
   // SPEC §4.2 #6 — hard-stop labels (with the merge-agent-stuck recovery
-  // carve-out).
-  const blockingLabels = presentHardStopLabels(reviewState, prMetadata, recoveryEvidence);
+  // carve-out and AMA-05 head-scoped `adversarial-merge-blocked` evidence).
+  const blockingLabels = presentHardStopLabels(
+    reviewState,
+    prMetadata,
+    recoveryEvidence,
+    adversarialMergeBlockedEvidence,
+  );
   for (const label of blockingLabels) {
     reasons.push(`label-${label}`);
   }

@@ -552,7 +552,7 @@ export async function maybeDispatchAmaCloser({
       requiredGateContext: dispatchContext.requiredGateContext || null,
       eligibilityTrace: verdict.trace,
       operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
-      mergeRequestedEvidence: options?.mergeAgentRequested || null,
+      adversarialMergeRequestedEvidence: options?.adversarialMergeRequested || null,
     },
     metadata: {
       reviewedBy: dispatchContext.reviewedBy || null,
@@ -568,7 +568,7 @@ export async function maybeDispatchAmaCloser({
         lastVerifiedAt: dispatchContext.dispatchedAt || null,
       },
       operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
-      mergeRequestedEvidence: options?.mergeAgentRequested || null,
+      adversarialMergeRequestedEvidence: options?.adversarialMergeRequested || null,
     },
   });
 

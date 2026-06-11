@@ -20,6 +20,10 @@
 
 import { summarizeChecksConclusion } from '../checks-summary.mjs';
 import { resolveGateStatusContext } from '../adversarial-gate-context.mjs';
+import {
+  ADVERSARIAL_MERGE_BLOCKED_LABEL,
+  ADVERSARIAL_MERGE_REQUESTED_LABEL,
+} from './labels.mjs';
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
@@ -40,7 +44,7 @@ const HARD_STOP_LABELS = Object.freeze([
   'do-not-merge',
   'no-merge-hold',
   'merge-agent-stuck',
-  'adversarial-merge-blocked',
+  ADVERSARIAL_MERGE_BLOCKED_LABEL,
 ]);
 
 /**
@@ -138,7 +142,7 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
 /**
  * @typedef {Object} EvaluateOptions
  * @property {Object=}        env                   Override `process.env` for the gate-context resolver.
- * @property {OperatorApprovalEvidence=} mergeAgentRequested Optional current-head merge-requested evidence. Same shape as operator-approved.
+ * @property {OperatorApprovalEvidence=} adversarialMergeRequested Optional current-head adversarial-merge-requested evidence. Same shape as operator-approved.
  * @property {MergeAgentRecoveryEvidence=} recoveryEvidence  Optional current-head recovery evidence for the `merge-agent-stuck` carve-out.
  * @property {Object=} fastMergeState                        Optional FML authorization/veto snapshot. AMA fails closed when the PR is in a fast-merge override state it does not import.
  * @property {AdversarialMergeBlockedEvidence=} adversarialMergeBlocked Optional current-head evidence for the AMA-05
@@ -186,7 +190,7 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
 }
 
 /**
- * Detect a current-head `merge-agent-requested` operator label
+ * Detect a current-head `adversarial-merge-requested` operator label
  * (per SPEC §4.2 #3). Same evidence shape as
  * operator-approved — current-head + attributable.
  *
@@ -194,9 +198,12 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
  * @param {OperatorApprovalEvidence?} evidence
  * @returns {boolean}
  */
-function hasMergeRequestedOverride(prMetadata, evidence) {
+function hasAdversarialMergeRequestedOverride(prMetadata, evidence) {
   if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
-  if (!hasCurrentLabel(prMetadata, MERGE_AGENT_REQUESTED_LABEL)) return false;
+  if (!hasCurrentLabel(prMetadata, ADVERSARIAL_MERGE_REQUESTED_LABEL)) return false;
+  const actor = normalizeLogin(evidence.actor);
+  const author = normalizeLogin(prMetadata?.author || prMetadata?.prAuthor);
+  if (author && actor === author) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
@@ -445,7 +452,7 @@ function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
 export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = {}) {
   const reasons = [];
   const env = options?.env || process.env;
-  const mergeRequestedEvidence = options?.mergeAgentRequested || null;
+  const adversarialMergeRequestedEvidence = options?.adversarialMergeRequested || null;
   const recoveryEvidence = options?.recoveryEvidence || null;
   const fastMergeState = options?.fastMergeState || null;
   // AMA-05 head-scoped evidence for `adversarial-merge-blocked`.
@@ -512,17 +519,18 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('blocking-findings-present');
   }
 
-  // SPEC §4.2 #3 — risk-class allowlist OR merge-agent-requested
+  // SPEC §4.2 #3 — risk-class allowlist OR adversarial-merge-requested
   // override on the current head.
   const riskClass = String(reviewState?.riskClass || '').toLowerCase();
   const allowedRiskClasses = new Set(
     (cfg?.eligibility?.riskClasses || []).map((r) => String(r || '').toLowerCase()),
   );
   const riskAllowed = riskClass !== '' && allowedRiskClasses.has(riskClass);
-  const mergeRequestedOverride = hasMergeRequestedOverride(prMetadata, mergeRequestedEvidence);
+  const adversarialMergeRequestedOverride =
+    hasAdversarialMergeRequestedOverride(prMetadata, adversarialMergeRequestedEvidence);
   const riskClassRequiresTwoKey = ['high', 'critical', 'unknown', ''].includes(riskClass);
   const riskPermitted = riskClassRequiresTwoKey
-    ? mergeRequestedOverride && operatorOverride
+    ? adversarialMergeRequestedOverride && operatorOverride
     : riskAllowed;
   if (!riskPermitted) {
     reasons.push('risk-class-not-permitted');
@@ -574,7 +582,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       allowed: riskAllowed,
       requiresTwoKey: riskClassRequiresTwoKey,
       permitted: riskPermitted,
-      mergeRequestedOverride,
+      adversarialMergeRequestedOverride,
+      mergeRequestedOverride: adversarialMergeRequestedOverride,
     },
     ciGreen: ci,
     branchProtection: {
@@ -608,7 +617,8 @@ export const __testables__ = {
   HARD_STOP_LABELS,
   SETTLED_SUCCESS_VERDICTS,
   hasOperatorApprovedOverride,
-  hasMergeRequestedOverride,
+  hasAdversarialMergeRequestedOverride,
+  hasMergeRequestedOverride: hasAdversarialMergeRequestedOverride,
   hasValidScopedOverrideEvidence,
   hasCurrentLabel,
   presentHardStopLabels,

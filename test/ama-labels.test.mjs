@@ -221,12 +221,12 @@ test('adversarial-merge-requested (non-author) bypasses risk-class gate but not 
       },
     },
     prMetadata: {
-      labels: ['operator-approved', 'adversarial-merge-requested', 'merge-agent-requested'],
+      labels: ['operator-approved', 'adversarial-merge-requested'],
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    mergeAgentRequested: {
+    adversarialMergeRequested: {
       applied: true,
       observedRevisionRef: prMetadata.headSha,
       actor: 'paul-the-operator',
@@ -235,7 +235,7 @@ test('adversarial-merge-requested (non-author) bypasses risk-class gate but not 
     },
   });
   // Risk-class permitted via the two-key turn (operator-approved +
-  // merge-agent-requested both current-head). Other structural gates
+  // adversarial-merge-requested both current-head). Other structural gates
   // pass via the eligible fixture.
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
@@ -244,15 +244,25 @@ test('adversarial-merge-requested cannot bypass branch-protection or CI', () => 
   // Even with both operator labels current-head, AMA refuses when CI is
   // red or branch protection isn't requiring the configured gate.
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    reviewState: { riskClass: 'high' },
+    reviewState: {
+      riskClass: 'high',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345abc12345abc12345abc12345abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_op_approve',
+        observedAt: '2026-06-11T22:00:00Z',
+      },
+    },
     prMetadata: {
+      labels: ['operator-approved', 'adversarial-merge-requested'],
       // CI red.
       statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' }],
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    mergeAgentRequested: {
+    adversarialMergeRequested: {
       applied: true,
       observedRevisionRef: prMetadata.headSha,
       actor: 'paul-the-operator',
@@ -270,11 +280,21 @@ test('adversarial-merge-requested cannot bypass branch-protection or CI', () => 
 
 test('adversarial-merge-requested from PR author → rejected; eligibility unchanged', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    reviewState: { riskClass: 'high' },
+    reviewState: {
+      riskClass: 'high',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345abc12345abc12345abc12345abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_op_approve',
+        observedAt: '2026-06-11T22:00:00Z',
+      },
+    },
+    prMetadata: { labels: ['operator-approved', 'adversarial-merge-requested'] },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    mergeAgentRequested: {
+    adversarialMergeRequested: {
       applied: true,
       observedRevisionRef: prMetadata.headSha,
       actor: prMetadata.author,                  // author == labeler ⇒ self-label
@@ -292,11 +312,21 @@ test('adversarial-merge-requested from PR author → rejected; eligibility uncha
 
 test('adversarial-merge-requested with stale head evidence → ignored', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    reviewState: { riskClass: 'high' },
+    reviewState: {
+      riskClass: 'high',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345abc12345abc12345abc12345abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_op_approve',
+        observedAt: '2026-06-11T22:00:00Z',
+      },
+    },
+    prMetadata: { labels: ['operator-approved', 'adversarial-merge-requested'] },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    mergeAgentRequested: {
+    adversarialMergeRequested: {
       applied: true,
       observedRevisionRef: 'OLD-head-1111111',
       actor: 'paul-the-operator',
@@ -326,12 +356,12 @@ test('operator-approved + adversarial-merge-requested can both be active simulta
       },
     },
     prMetadata: {
-      labels: ['operator-approved', 'merge-agent-requested', 'adversarial-merge-requested'],
+      labels: ['operator-approved', 'adversarial-merge-requested'],
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    mergeAgentRequested: {
+    adversarialMergeRequested: {
       applied: true,
       observedRevisionRef: prMetadata.headSha,
       actor: 'paul-the-operator',
@@ -363,11 +393,11 @@ test('adversarial-merge-blocked overrides operator-approved AND adversarial-merg
         observedAt: '2026-06-11T22:00:00Z',
       },
     },
-    prMetadata: { labels: ['adversarial-merge-blocked'] },
+    prMetadata: { labels: ['operator-approved', 'adversarial-merge-requested', 'adversarial-merge-blocked'] },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    mergeAgentRequested: {
+    adversarialMergeRequested: {
       applied: true,
       observedRevisionRef: prMetadata.headSha,
       actor: 'paul-the-operator',

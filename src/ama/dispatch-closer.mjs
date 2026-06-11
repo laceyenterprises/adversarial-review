@@ -283,6 +283,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.mergeMethod     — 'squash' | 'merge'
  * @param {string} args.requiredGateContext
  * @param {string} args.auditPath       — absolute path inside HQ_ROOT
+ * @param {string} args.hqRoot          — HQ root path (closer passes to `ama-audit append --hq-root`)
  * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
  * @param {string} args.dispatchedAt    — ISO 8601 UTC
@@ -298,6 +299,7 @@ export function composeCloserPrompt({
   mergeMethod,
   requiredGateContext,
   auditPath,
+  hqRoot,
   hqOwnerUser,
   reviewedBy,
   dispatchedAt,
@@ -312,6 +314,7 @@ export function composeCloserPrompt({
     MERGE_METHOD: mergeMethod,
     REQUIRED_GATE_CONTEXT: requiredGateContext,
     AUDIT_PATH: auditPath,
+    HQ_ROOT: hqRoot,
     HQ_OWNER: hqOwnerUser,
     REVIEWED_BY: reviewedBy,
     DISPATCHED_AT: dispatchedAt,
@@ -406,6 +409,7 @@ export async function maybeDispatchAmaCloser({
     mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,
+    hqRoot,
     hqOwnerUser: ownerUser || 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,

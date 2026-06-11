@@ -63,30 +63,30 @@ The CLI emits a JSON object: `{ eligible: bool, reasons: string[], trace: {...} 
 ### If `eligible === false`
 
 This is a **defer**, NOT a failure. The watcher will reconsider on its
-next tick. Write the deferred audit JSON:
+next tick. Append a `deferred` attempt to the watcher-owned audit
+record via the AMA-04 audit shim — the writer handles atomic
+tmp+rename, mode 0640, and SPEC §4.4 state-machine derivation:
 
 ```bash
 if [ "$(id -un)" != "<<HQ_OWNER>>" ]; then
   echo "ama-closer owner mismatch: expected <<HQ_OWNER>>, got $(id -un)" >&2
   exit 1
 fi
-mkdir -p "$(dirname "<<AUDIT_PATH>>")"
-cat > <<AUDIT_PATH>> <<EOF
-{
-  "prNumber": <<PR_NUMBER>>,
-  "headSha": "<<REVIEWED_SHA>>",
-  "status": "deferred",
-  "attempts": [{
-    "attemptId": "$(date -u +%Y-%m-%dT%H:%M:%SZ)-ama-closer",
-    "startedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "preMergeEligible": false,
-    "preMergeReasons": $(jq '.reasons' /tmp/ama-verdict.json)
-  }],
-  "attemptedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "mergeMethod": "<<MERGE_METHOD>>",
-  "reconciliation": { "needsRepair": false, "lastVerifiedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
-}
-EOF
+
+# Capture the fresh predicate's reasons in the attempt entry.
+ATTEMPT_JSON=$(mktemp)
+jq -n --argjson reasons "$(jq '.reasons' /tmp/ama-verdict.json)" \
+  '{ preMergeEligible: false, preMergeReasons: $reasons }' > "$ATTEMPT_JSON"
+
+node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  --hq-root <<HQ_ROOT>> \
+  --repo <<REPO>> \
+  --pr <<PR_NUMBER>> \
+  --head <<REVIEWED_SHA>> \
+  --outcome deferred \
+  --attempt-json "$ATTEMPT_JSON" \
+  --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+rm -f "$ATTEMPT_JSON"
 exit 0
 ```
 
@@ -125,7 +125,7 @@ POST_HEAD=$(jq -r '.headRefOid' /tmp/ama-post-merge.json)
 
 Decision matrix:
 
-| Post-read state | Audit `status` |
+| Post-read state | Outcome |
 |---|---|
 | `PR_STATE == MERGED && POST_HEAD == REVIEWED_SHA` | `succeeded` |
 | `PR_STATE == MERGED && POST_HEAD != REVIEWED_SHA` | `superseded` (someone else landed a different head) |
@@ -133,26 +133,71 @@ Decision matrix:
 | `PR_STATE == OPEN && POST_HEAD == REVIEWED_SHA && MERGE_EXIT != 0` | `failed-without-merge` |
 | `PR_STATE == OPEN && POST_HEAD == REVIEWED_SHA && MERGE_EXIT == 0` | `in_progress` + `reconciliation.needsRepair = true` (the next watcher tick reconciles) |
 
-Write the terminal audit JSON to `<<AUDIT_PATH>>`. Required fields per
-SPEC §4.4:
+Compute the outcome, then append the attempt via the AMA-04 audit
+shim. The writer derives the surface `status` per SPEC §4.4 (incl.
+sticky-succeeded) and refuses to demote a terminal `succeeded` —
+treat a refusal exit code (`65`) as a signal the watcher already
+finalized a different head and exit 0:
+
+```bash
+if [ "$PR_STATE" = "MERGED" ] && [ "$POST_HEAD" = "<<REVIEWED_SHA>>" ]; then
+  OUTCOME=succeeded
+elif [ "$PR_STATE" = "MERGED" ] || [ "$POST_HEAD" != "<<REVIEWED_SHA>>" ]; then
+  OUTCOME=superseded
+elif [ "$MERGE_EXIT" != "0" ]; then
+  OUTCOME=failed-without-merge
+else
+  OUTCOME=in_progress
+fi
+
+ATTEMPT_JSON=$(mktemp)
+jq -n \
+  --arg outcome "$OUTCOME" \
+  --arg mergeCommit "${MERGE_COMMIT:-}" \
+  --arg mergedAt "${MERGED_AT:-}" \
+  --argjson cliExit ${MERGE_EXIT:-0} \
+  '{
+    cliExitCode: $cliExit,
+    mergeCommitSha: $mergeCommit,
+    mergedAt: $mergedAt,
+    needsRepair: ($outcome == "in_progress")
+  }' > "$ATTEMPT_JSON"
+
+node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  --hq-root <<HQ_ROOT>> \
+  --repo <<REPO>> \
+  --pr <<PR_NUMBER>> \
+  --head <<REVIEWED_SHA>> \
+  --outcome "$OUTCOME" \
+  --attempt-json "$ATTEMPT_JSON" \
+  --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+APPEND_EXIT=$?
+rm -f "$ATTEMPT_JSON"
+if [ $APPEND_EXIT -eq 65 ]; then
+  echo "audit append refused (probably sticky-succeeded; treating as no-op)" >&2
+  exit 0
+fi
+exit $APPEND_EXIT
+```
+
+The audit doc shape the writer produces (managed by AMA-04; do NOT
+hand-roll the fields here):
 
 ```json
 {
+  "schemaVersion": 1,
+  "repo": "<<REPO>>",
   "prNumber": <<PR_NUMBER>>,
   "headSha": "<<REVIEWED_SHA>>",
-  "status": "<succeeded|deferred|superseded|failed-without-merge|in_progress>",
-  "attempts": [...],
-  "attemptedAt": "<ISO>",
-  "mergedAt": "<ISO or null>",
-  "mergedBy": "ama-closer",
-  "reviewedBy": "<<REVIEWED_BY>>",
-  "reviewSha": "<<REVIEWED_SHA>>",
-  "riskClass": "<<RISK_CLASS>>",
-  "requiredGateContexts": ["<<REQUIRED_GATE_CONTEXT>>"],
-  "eligibilityReasons": [...],
-  "preMergeCheckLatencyMs": <N>,
-  "mergeMethod": "<<MERGE_METHOD>>",
-  "reconciliation": { "needsRepair": <bool>, "lastVerifiedAt": "<ISO>" }
+  "createdAt": "<ISO>",
+  "updatedAt": "<ISO>",
+  "status": "<in_progress|deferred|superseded|succeeded|failed-without-merge>",
+  "attempts": [{
+    "attemptNumber": 1,
+    "startedAt": "<ISO>",
+    "outcome": "<...>",
+    /* + any per-attempt fields from --attempt-json */
+  }]
 }
 ```
 

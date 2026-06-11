@@ -263,6 +263,7 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
     mergeMethod: cfg.mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,
+    hqRoot: dispatchContext.hqRoot,
     hqOwnerUser: 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,

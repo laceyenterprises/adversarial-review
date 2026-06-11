@@ -19,7 +19,8 @@
  *
  * Exit codes:
  *   0   write succeeded; absolute file path on stdout
- *   65  data error — refused write (e.g. sticky-succeeded regression)
+ *   65  explicit refused write (sticky-succeeded demotion guard)
+ *   70  write/data/runtime failure
  *   1   usage error
  */
 
@@ -27,6 +28,7 @@ import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import {
+  AmaAuditRefusedWriteError,
   appendAmaAuditAttempt,
   composeAmaTrailers,
   writeAmaAuditEntry,
@@ -131,8 +133,12 @@ function runInitOrAppend(subcommand, argv) {
     process.stdout.write(`${filePath}\n`);
     return 0;
   } catch (err) {
-    process.stderr.write(`error: ${err.message}\n`);
-    return 65;
+    if (err instanceof AmaAuditRefusedWriteError || err?.code === 'AMA_AUDIT_REFUSED_WRITE') {
+      process.stderr.write(`ama-audit-refused: sticky-succeeded: ${err.message}\n`);
+      return 65;
+    }
+    process.stderr.write(`ama-audit-error: ${err.message}\n`);
+    return 70;
   }
 }
 

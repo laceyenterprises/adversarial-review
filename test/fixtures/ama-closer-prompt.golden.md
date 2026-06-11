@@ -135,9 +135,10 @@ Decision matrix:
 
 Compute the outcome, then append the attempt via the AMA-04 audit
 shim. The writer derives the surface `status` per SPEC §4.4 (incl.
-sticky-succeeded) and refuses to demote a terminal `succeeded` —
-treat a refusal exit code (`65`) as a signal the watcher already
-finalized a different head and exit 0:
+sticky-succeeded) and refuses to demote a terminal `succeeded`. Exit
+code `65` is reserved for that explicit sticky-succeeded refusal; any
+other writer/data/filesystem failure exits non-zero and must not be
+treated as success:
 
 ```bash
 if [ "$PR_STATE" = "MERGED" ] && [ "$POST_HEAD" = "abc12345abc12345abc12345abc12345abc12345" ]; then
@@ -174,7 +175,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
 APPEND_EXIT=$?
 rm -f "$ATTEMPT_JSON"
 if [ $APPEND_EXIT -eq 65 ]; then
-  echo "audit append refused (probably sticky-succeeded; treating as no-op)" >&2
+  echo "audit append refused by sticky-succeeded guard; treating as no-op" >&2
   exit 0
 fi
 exit $APPEND_EXIT
@@ -192,6 +193,16 @@ hand-roll the fields here):
   "createdAt": "<ISO>",
   "updatedAt": "<ISO>",
   "status": "<in_progress|deferred|superseded|succeeded|failed-without-merge>",
+  "reviewedBy": "<reviewer login>",
+  "reviewSha": "abc12345abc12345abc12345abc12345abc12345",
+  "riskClass": "low",
+  "requiredGateContexts": ["agent-os/adversarial-gate"],
+  "eligibilityReasons": ["<watcher eligibility reason>", "<...>"],
+  "mergeMethod": "squash",
+  "reconciliation": {
+    "needsRepair": false,
+    "lastVerifiedAt": "<ISO>"
+  },
   "attempts": [{
     "attemptNumber": 1,
     "startedAt": "<ISO>",

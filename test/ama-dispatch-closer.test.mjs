@@ -10,6 +10,11 @@ import {
   maybeDispatchAmaCloser,
   substituteTemplate,
 } from '../src/ama/dispatch-closer.mjs';
+import {
+  amaAuditFilePath,
+  appendAmaAuditAttempt,
+  readAmaAuditEntry,
+} from '../src/ama/audit.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -213,6 +218,62 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes(`PR ${dispatchContext.prUrl}`));
   assert.ok(write.captured.body.includes(reviewState.headSha));
   assert.ok(write.captured.body.includes('--squash'));
+});
+
+test('eligible dispatch bootstraps the watcher-owned audit record before the first closer append', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-bootstrap-'));
+  const hqRoot = mkdtempSync(join(tmpdir(), 'ama-hq-bootstrap-'));
+  t.after(() => {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  });
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir, hqRoot },
+  });
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"dispatch-bootstrap","launchRequestId":"lrq_bootstrap"}',
+      stderr: '',
+    }),
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(result.dispatched, true);
+
+  const auditPath = amaAuditFilePath(
+    hqRoot,
+    dispatchContext.repo,
+    prMetadata.prNumber,
+    dispatchContext.reviewedSha,
+  );
+  const bootstrapped = readAmaAuditEntry(
+    hqRoot,
+    dispatchContext.repo,
+    prMetadata.prNumber,
+    dispatchContext.reviewedSha,
+  );
+  assert.equal(bootstrapped.status, 'in_progress');
+  assert.equal(bootstrapped.reviewedBy, 'claude-reviewer-lacey');
+  assert.deepEqual(bootstrapped.requiredGateContexts, ['agent-os/adversarial-gate']);
+  assert.equal(bootstrapped.attempts.length, 1);
+  assert.equal(bootstrapped.attempts[0].outcome, 'in_progress');
+  assert.equal(bootstrapped.attempts[0].requiredGateContext, 'agent-os/adversarial-gate');
+
+  const { doc } = appendAmaAuditAttempt({
+    hqRoot,
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+    attempt: { outcome: 'deferred', preMergeReasons: ['ci-not-green'] },
+    now: '2026-06-11T20:01:00Z',
+  });
+  assert.equal(doc.status, 'deferred');
+  assert.equal(doc.attempts.length, 2);
+  assert.equal(doc.attempts[1].attemptNumber, 2);
+  assert.equal(auditPath.endsWith('.json'), true);
 });
 
 // ---------------------------------------------------------------------------

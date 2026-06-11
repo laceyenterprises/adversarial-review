@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { amaAuditFilePath, writeAmaAuditEntry } from './audit.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -116,6 +117,22 @@ function errorDiagnosticLines(err) {
     .flatMap((value) => String(value).split('\n'))
     .map(line => line.trim())
     .filter(Boolean);
+}
+
+function buildBootstrapEligibilityReasons({ reviewState, prMetadata, verdict, dispatchContext }) {
+  const reasons = [];
+  if (verdict?.eligible) reasons.push('latest_review_settled_success');
+  if (dispatchContext?.reviewedBy) reasons.push('reviewer_family_recorded');
+  if (reviewState?.riskClass) reasons.push(`risk_class_${reviewState.riskClass}_permitted`);
+  if (reviewState?.headSha && prMetadata?.headSha && reviewState.headSha === prMetadata.headSha) {
+    reasons.push('head_sha_matches_review');
+  }
+  if (verdict?.trace?.ciGreen?.green) reasons.push('ci_all_green');
+  if (Array.isArray(verdict?.trace?.blockLabels) && verdict.trace.blockLabels.length === 0) {
+    reasons.push('no_blocking_labels');
+  }
+  if (verdict?.trace?.branchProtection?.ok) reasons.push('configured_gate_context_required');
+  return reasons;
 }
 
 function isExecTimeout(err) {
@@ -393,13 +410,7 @@ export async function maybeDispatchAmaCloser({
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
   const ownerUser = resolveHqOwner(hqRoot);
-  const auditPath = join(
-    hqRoot,
-    'dispatch',
-    'audit',
-    'adversarial-merge-authority',
-    `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}.json`,
-  );
+  const auditPath = amaAuditFilePath(hqRoot, repo, prNumber, reviewedSha);
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,
     repo,
@@ -469,6 +480,43 @@ export async function maybeDispatchAmaCloser({
   } else if (existingRecord && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND) {
     return { dispatched: false, reason: 'dispatch-retry-exhausted' };
   }
+
+  writeAmaAuditEntry({
+    hqRoot,
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+    now: dispatchContext.dispatchedAt,
+    attempt: {
+      outcome: 'in_progress',
+      reviewedBy: dispatchContext.reviewedBy || null,
+      requiredGateContext: dispatchContext.requiredGateContext || null,
+      eligibilityTrace: verdict.trace,
+      operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
+      mergeRequestedEvidence: options?.mergeAgentRequested || null,
+    },
+    metadata: {
+      reviewedBy: dispatchContext.reviewedBy || null,
+      reviewSha: reviewedSha,
+      riskClass: dispatchContext.riskClass || null,
+      requiredGateContexts: dispatchContext.requiredGateContext
+        ? [dispatchContext.requiredGateContext]
+        : [],
+      eligibilityReasons: buildBootstrapEligibilityReasons({
+        reviewState,
+        prMetadata,
+        verdict,
+        dispatchContext,
+      }),
+      mergeMethod,
+      reconciliation: {
+        needsRepair: false,
+        lastVerifiedAt: dispatchContext.dispatchedAt || null,
+      },
+      operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
+      mergeRequestedEvidence: options?.mergeAgentRequested || null,
+    },
+  });
 
   // Persist the prompt under watcher-owned repo state and pass that path
   // to `hq dispatch --prompt`. This avoids cross-user writes into HQ_ROOT.

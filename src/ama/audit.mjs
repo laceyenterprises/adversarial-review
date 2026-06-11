@@ -46,12 +46,15 @@
  * @module ama/audit
  */
 
-import { join } from 'node:path';
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { readFileSync, statSync } from 'node:fs';
 
 const AUDIT_FILE_MODE = 0o640;
+const AUDIT_LOCK_RETRY_MS = 10;
+const AUDIT_LOCK_TIMEOUT_MS = 5_000;
+const AUDIT_LOCK_STALE_MS = 30_000;
 
 /** Outcomes a single attempt can record. */
 const VALID_ATTEMPT_OUTCOMES = new Set([
@@ -75,6 +78,113 @@ const VALID_AUDIT_STATUSES = new Set([
   'succeeded',
   'failed-without-merge',
 ]);
+
+export class AmaAuditRefusedWriteError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AmaAuditRefusedWriteError';
+    this.code = 'AMA_AUDIT_REFUSED_WRITE';
+  }
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function auditLockPath(filePath) {
+  return `${filePath}.lock`;
+}
+
+function readLockTimestamp(lockPath) {
+  try {
+    const raw = readFileSync(lockPath, 'utf8').trim();
+    const parsed = JSON.parse(raw);
+    const acquiredAt = Date.parse(parsed?.acquiredAt || '');
+    return Number.isFinite(acquiredAt) ? acquiredAt : null;
+  } catch {
+    return null;
+  }
+}
+
+function acquireAuditLock(filePath) {
+  const lockPath = auditLockPath(filePath);
+  const startedAt = Date.now();
+  const payload = `${JSON.stringify({
+    pid: process.pid,
+    acquiredAt: new Date().toISOString(),
+  })}\n`;
+  mkdirSync(dirname(lockPath), { recursive: true });
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, 'wx', AUDIT_FILE_MODE);
+      try {
+        writeFileSync(fd, payload, 'utf8');
+      } finally {
+        closeSync(fd);
+      }
+      return lockPath;
+    } catch (err) {
+      if (err?.code !== 'EEXIST') {
+        throw err;
+      }
+      const acquiredAtMs = readLockTimestamp(lockPath);
+      if (
+        acquiredAtMs !== null &&
+        (Date.now() - acquiredAtMs) >= AUDIT_LOCK_STALE_MS
+      ) {
+        rmSync(lockPath, { force: true });
+        continue;
+      }
+      if ((Date.now() - startedAt) >= AUDIT_LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for AMA audit lock: ${lockPath}`);
+      }
+      sleepMs(AUDIT_LOCK_RETRY_MS);
+    }
+  }
+}
+
+function withAuditLock(filePath, callback) {
+  const lockPath = acquireAuditLock(filePath);
+  try {
+    return callback();
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+}
+
+function normalizedAttempts(existing) {
+  return Array.isArray(existing?.attempts) ? existing.attempts : [];
+}
+
+function buildAttempt(attemptNumber, timestamp, attempt) {
+  return { attemptNumber, startedAt: timestamp, ...attempt };
+}
+
+export function readAmaAuditEntry(hqRoot, repo, prNumber, headSha) {
+  return readExisting(amaAuditFilePath(hqRoot, repo, prNumber, headSha));
+}
+
+function buildInitialAuditDoc({
+  repo,
+  prNumber,
+  headSha,
+  timestamp,
+  attempt,
+  metadata = {},
+}) {
+  const attempts = [buildAttempt(1, timestamp, attempt)];
+  return {
+    schemaVersion: 1,
+    repo,
+    prNumber: Number(prNumber),
+    headSha,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    status: deriveStatus(attempts),
+    attempts,
+    ...metadata,
+  };
+}
 
 /**
  * Resolve the on-disk audit path for a `(repo, prNumber, headSha)`
@@ -176,12 +286,16 @@ function readExisting(filePath) {
  * initial attempt entry (typically `outcome: "in_progress"` with
  * eligibility evidence).
  *
+ * Idempotent bootstrap: if the file already exists, the existing
+ * document is returned unchanged instead of being overwritten.
+ *
  * @param {object} args
  * @param {string} args.hqRoot
  * @param {string} args.repo
  * @param {number} args.prNumber
  * @param {string} args.headSha
  * @param {object} args.attempt   Attempt entry per SPEC §4.4 (outcome required).
+ * @param {object=} args.metadata Additional watcher-owned top-level fields.
  * @param {string=} args.now      ISO timestamp for `createdAt` / `updatedAt`. Caller-provided so the writer stays deterministic for tests.
  * @returns {{ filePath: string, doc: object }}
  */
@@ -191,26 +305,30 @@ export function writeAmaAuditEntry({
   prNumber,
   headSha,
   attempt,
+  metadata,
   now,
 }) {
   validateAttempt(attempt);
   const filePath = amaAuditFilePath(hqRoot, repo, prNumber, headSha);
-  const timestamp = now || new Date().toISOString();
-  const attempts = [{ attemptNumber: 1, startedAt: timestamp, ...attempt }];
-  const doc = {
-    schemaVersion: 1,
-    repo,
-    prNumber: Number(prNumber),
-    headSha,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    status: deriveStatus(attempts),
-    attempts,
-  };
-  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, {
-    mode: AUDIT_FILE_MODE,
+  return withAuditLock(filePath, () => {
+    const existing = readExisting(filePath);
+    if (existing) {
+      return { filePath, doc: existing };
+    }
+    const timestamp = now || new Date().toISOString();
+    const doc = buildInitialAuditDoc({
+      repo,
+      prNumber,
+      headSha,
+      timestamp,
+      attempt,
+      metadata,
+    });
+    writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, {
+      mode: AUDIT_FILE_MODE,
+    });
+    return { filePath, doc };
   });
-  return { filePath, doc };
 }
 
 /**
@@ -247,45 +365,46 @@ export function appendAmaAuditAttempt({
 }) {
   validateAttempt(attempt);
   const filePath = amaAuditFilePath(hqRoot, repo, prNumber, headSha);
-  const existing = readExisting(filePath);
-  if (!existing) {
-    throw new Error(
-      `appendAmaAuditAttempt: no existing record at ${filePath} — ` +
-      `call writeAmaAuditEntry first`,
-    );
-  }
+  return withAuditLock(filePath, () => {
+    const existing = readExisting(filePath);
+    if (!existing) {
+      throw new Error(
+        `appendAmaAuditAttempt: no existing record at ${filePath} — ` +
+        `call writeAmaAuditEntry first`,
+      );
+    }
 
-  const currentStatus = String(existing.status || '').toLowerCase();
-  const nextOutcome = String(attempt.outcome || '').toLowerCase();
+    const currentStatus = String(existing.status || '').toLowerCase();
+    const nextOutcome = String(attempt.outcome || '').toLowerCase();
 
-  // Sticky-succeeded refusal. SPEC §4.4 rule #5: terminal succeeded
-  // can't regress to failed-without-merge based on CLI exit codes,
-  // and a normal pre-merge defer never becomes failed-without-merge.
-  if (currentStatus === 'succeeded' && nextOutcome !== 'succeeded') {
-    throw new Error(
-      `appendAmaAuditAttempt: refusing to demote terminal 'succeeded' ` +
-      `to '${nextOutcome}' for ${repo} pr#${prNumber} head=${headSha}. ` +
-      `If a post-merge GitHub repair changed the observed state, write a ` +
-      `new record at the new (pr, headSha) keyed for the new head.`,
-    );
-  }
+    // Sticky-succeeded refusal. SPEC §4.4 rule #5: terminal succeeded
+    // can't regress to failed-without-merge based on CLI exit codes,
+    // and a normal pre-merge defer never becomes failed-without-merge.
+    if (currentStatus === 'succeeded' && nextOutcome !== 'succeeded') {
+      throw new AmaAuditRefusedWriteError(
+        `appendAmaAuditAttempt: refusing to demote terminal 'succeeded' ` +
+        `to '${nextOutcome}' for ${repo} pr#${prNumber} head=${headSha}. ` +
+        `If a post-merge GitHub repair changed the observed state, write a ` +
+        `new record at the new (pr, headSha) keyed for the new head.`,
+      );
+    }
 
-  const timestamp = now || new Date().toISOString();
-  const attemptNumber = (existing.attempts?.length || 0) + 1;
-  const attempts = [
-    ...(Array.isArray(existing.attempts) ? existing.attempts : []),
-    { attemptNumber, startedAt: timestamp, ...attempt },
-  ];
-  const doc = {
-    ...existing,
-    updatedAt: timestamp,
-    status: deriveStatus(attempts),
-    attempts,
-  };
-  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, {
-    mode: AUDIT_FILE_MODE,
+    const timestamp = now || new Date().toISOString();
+    const attempts = [
+      ...normalizedAttempts(existing),
+      buildAttempt(normalizedAttempts(existing).length + 1, timestamp, attempt),
+    ];
+    const doc = {
+      ...existing,
+      updatedAt: timestamp,
+      status: deriveStatus(attempts),
+      attempts,
+    };
+    writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, {
+      mode: AUDIT_FILE_MODE,
+    });
+    return { filePath, doc };
   });
-  return { filePath, doc };
 }
 
 /**

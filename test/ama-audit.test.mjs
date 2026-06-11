@@ -3,12 +3,16 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { execPath } from 'node:process';
 
 import {
+  AmaAuditRefusedWriteError,
   amaAuditFilePath,
   appendAmaAuditAttempt,
   composeAmaTrailers,
   readAuditFileMode,
+  readAmaAuditEntry,
   writeAmaAuditEntry,
 } from '../src/ama/audit.mjs';
 
@@ -21,6 +25,67 @@ const DEFAULT_TUPLE = Object.freeze({
   prNumber: 1234,
   headSha: 'abc12345abc12345abc12345abc12345abc12345',
 });
+
+function runAmaAuditCli(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(execPath, ['bin/ama-audit.mjs', ...args], {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+function runConcurrentAppend({ hqRoot, marker, delayMs = 0 }) {
+  const script = `
+    import { appendAmaAuditAttempt } from ${JSON.stringify(new URL('../src/ama/audit.mjs', import.meta.url).pathname)};
+    const { HQ_ROOT, MARKER, DELAY_MS } = process.env;
+    if (Number(DELAY_MS) > 0) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(DELAY_MS));
+    }
+    appendAmaAuditAttempt({
+      hqRoot: HQ_ROOT,
+      repo: ${JSON.stringify(DEFAULT_TUPLE.repo)},
+      prNumber: ${DEFAULT_TUPLE.prNumber},
+      headSha: ${JSON.stringify(DEFAULT_TUPLE.headSha)},
+      attempt: { outcome: 'deferred', marker: MARKER },
+      now: MARKER === 'A' ? '2026-06-11T20:01:00Z' : '2026-06-11T20:01:01Z',
+    });
+  `;
+  return new Promise((resolve, reject) => {
+    const child = spawn(execPath, ['--input-type=module', '-e', script], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HQ_ROOT: hqRoot,
+        MARKER: marker,
+        DELAY_MS: String(delayMs),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`concurrent append ${marker} failed: ${stderr}`));
+        return;
+      }
+      resolve();
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Test 1 — writeAmaAuditEntry creates the record with status=in_progress and
@@ -154,7 +219,7 @@ test('appendAmaAuditAttempt refuses to demote terminal succeeded', () => {
         attempt: { outcome: 'failed-without-merge' },
         now: '2026-06-11T20:05:00Z',
       }),
-      /refusing to demote terminal 'succeeded'/,
+      (err) => err instanceof AmaAuditRefusedWriteError && /refusing to demote terminal 'succeeded'/.test(err.message),
     );
     // Defer-after-succeeded is also refused — same contract.
     assert.throws(
@@ -164,12 +229,38 @@ test('appendAmaAuditAttempt refuses to demote terminal succeeded', () => {
         attempt: { outcome: 'deferred' },
         now: '2026-06-11T20:05:00Z',
       }),
-      /refusing to demote terminal 'succeeded'/,
+      (err) => err instanceof AmaAuditRefusedWriteError && /refusing to demote terminal 'succeeded'/.test(err.message),
     );
     // The on-disk record stayed succeeded — the write was atomic.
     const onDisk = JSON.parse(readFileSync(amaAuditFilePath(hqRoot, DEFAULT_TUPLE.repo, DEFAULT_TUPLE.prNumber, DEFAULT_TUPLE.headSha), 'utf8'));
     assert.equal(onDisk.status, 'succeeded');
     assert.equal(onDisk.attempts.length, 1);
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('writeAmaAuditEntry is idempotent and preserves an existing record', () => {
+  const hqRoot = freshHqRoot();
+  try {
+    const first = writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'in_progress', bootstrap: true },
+      metadata: { reviewedBy: 'claude-reviewer-lacey' },
+      now: '2026-06-11T20:00:00Z',
+    });
+    const second = writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'in_progress', bootstrap: false },
+      metadata: { reviewedBy: 'different-reviewer' },
+      now: '2026-06-11T20:05:00Z',
+    });
+    assert.deepEqual(second.doc, first.doc);
+    assert.equal(second.doc.reviewedBy, 'claude-reviewer-lacey');
+    assert.equal(second.doc.attempts.length, 1);
+    assert.equal(second.doc.attempts[0].bootstrap, true);
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }
@@ -286,6 +377,77 @@ test('appendAmaAuditAttempt throws when no prior record exists', () => {
       }),
       /no existing record at .* — call writeAmaAuditEntry first/,
     );
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('appendAmaAuditAttempt serializes concurrent appends so both attempts survive', async () => {
+  const hqRoot = freshHqRoot();
+  try {
+    writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'in_progress' },
+      now: '2026-06-11T20:00:00Z',
+    });
+    await Promise.all([
+      runConcurrentAppend({ hqRoot, marker: 'A', delayMs: 0 }),
+      runConcurrentAppend({ hqRoot, marker: 'B', delayMs: 0 }),
+    ]);
+    const doc = readAmaAuditEntry(
+      hqRoot,
+      DEFAULT_TUPLE.repo,
+      DEFAULT_TUPLE.prNumber,
+      DEFAULT_TUPLE.headSha,
+    );
+    assert.equal(doc.attempts.length, 3);
+    assert.deepEqual(
+      doc.attempts.map((attempt) => attempt.marker).filter(Boolean).sort(),
+      ['A', 'B'],
+    );
+    assert.deepEqual(
+      doc.attempts.map((attempt) => attempt.attemptNumber),
+      [1, 2, 3],
+    );
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('ama-audit CLI reserves exit code 65 for sticky-succeeded refusal only', async () => {
+  const hqRoot = freshHqRoot();
+  try {
+    writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'succeeded' },
+      now: '2026-06-11T20:00:00Z',
+    });
+    const refused = await runAmaAuditCli([
+      'append',
+      '--hq-root', hqRoot,
+      '--repo', DEFAULT_TUPLE.repo,
+      '--pr', String(DEFAULT_TUPLE.prNumber),
+      '--head', DEFAULT_TUPLE.headSha,
+      '--outcome', 'deferred',
+      '--now', '2026-06-11T20:01:00Z',
+    ]);
+    assert.equal(refused.code, 65);
+    assert.match(refused.stderr, /ama-audit-refused: sticky-succeeded/);
+
+    const failed = await runAmaAuditCli([
+      'append',
+      '--hq-root', hqRoot,
+      '--repo', DEFAULT_TUPLE.repo,
+      '--pr', String(DEFAULT_TUPLE.prNumber),
+      '--head', 'missing-head',
+      '--outcome', 'deferred',
+      '--now', '2026-06-11T20:01:00Z',
+    ]);
+    assert.equal(failed.code, 70);
+    assert.match(failed.stderr, /ama-audit-error:/);
+    assert.doesNotMatch(failed.stderr, /ama-audit-refused:/);
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }

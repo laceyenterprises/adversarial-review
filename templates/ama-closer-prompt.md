@@ -86,25 +86,77 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
   --outcome deferred \
   --attempt-json "$ATTEMPT_JSON" \
   --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+APPEND_EXIT=$?
 rm -f "$ATTEMPT_JSON"
-exit 0
+if [ $APPEND_EXIT -eq 66 ]; then
+  echo "audit append refused (sticky succeeded already recorded; treating as no-op)" >&2
+  exit 0
+fi
+exit $APPEND_EXIT
 ```
 
 Exit 0 — deferral is a legitimate terminal-for-this-head outcome.
 
 ### If `eligible === true`
 
-Issue the merge with `--match-head-commit` against the reviewed SHA.
-GitHub will refuse if the head has advanced; treat that refusal as a
-normal defer, not a failure.
+Record the merge attempt durably before invoking GitHub, then generate
+the required provenance trailers and issue the merge with
+`--match-head-commit` against the reviewed SHA. GitHub will refuse if
+the head has advanced; treat that refusal as a normal defer, not a
+failure.
 
 ```bash
+ATTEMPT_ID="$(date -u +%Y%m%dT%H%M%SZ)-ama-closer"
+ATTEMPT_JSON=$(mktemp)
+jq -n \
+  --arg attemptId "$ATTEMPT_ID" \
+  --argjson reasons "$(jq '.reasons' /tmp/ama-verdict.json)" \
+  '{
+    attemptId: $attemptId,
+    preMergeEligible: true,
+    preMergeReasons: $reasons
+  }' > "$ATTEMPT_JSON"
+node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  --hq-root <<HQ_ROOT>> \
+  --repo <<REPO>> \
+  --pr <<PR_NUMBER>> \
+  --head <<REVIEWED_SHA>> \
+  --outcome in_progress \
+  --attempt-json "$ATTEMPT_JSON" \
+  --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+PREMERGE_APPEND_EXIT=$?
+rm -f "$ATTEMPT_JSON"
+if [ $PREMERGE_APPEND_EXIT -eq 66 ]; then
+  echo "audit append refused (sticky succeeded already recorded; treating as no-op)" >&2
+  exit 0
+fi
+if [ $PREMERGE_APPEND_EXIT -ne 0 ]; then
+  exit $PREMERGE_APPEND_EXIT
+fi
+
+ELIGIBILITY_REASON=$(jq -r '.reasons | if length > 0 then join(", ") else "eligible on fresh AMA recheck" end' /tmp/ama-verdict.json)
+TRAILERS_FILE=$(mktemp)
+node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs trailers \
+  --worker-class <<WORKER_CLASS>> \
+  --reviewer <<REVIEWED_BY>> \
+  --risk-class <<RISK_CLASS>> \
+  --reason "$ELIGIBILITY_REASON" \
+  --audit-path "<<AUDIT_PATH>>" \
+  > "$TRAILERS_FILE"
+TRAILERS_EXIT=$?
+if [ $TRAILERS_EXIT -ne 0 ]; then
+  rm -f "$TRAILERS_FILE"
+  exit $TRAILERS_EXIT
+fi
+
 gh pr merge <<PR_URL>> \
   --<<MERGE_METHOD>> \
   --match-head-commit <<REVIEWED_SHA>> \
+  --body-file "$TRAILERS_FILE" \
   > /tmp/ama-merge.stdout \
   2> /tmp/ama-merge.stderr
 MERGE_EXIT=$?
+rm -f "$TRAILERS_FILE"
 ```
 
 ## Step 3 — Re-read GitHub state (CLI exit code is NON-AUTHORITATIVE)
@@ -152,11 +204,13 @@ fi
 
 ATTEMPT_JSON=$(mktemp)
 jq -n \
+  --arg attemptId "$ATTEMPT_ID" \
   --arg outcome "$OUTCOME" \
   --arg mergeCommit "${MERGE_COMMIT:-}" \
   --arg mergedAt "${MERGED_AT:-}" \
   --argjson cliExit ${MERGE_EXIT:-0} \
   '{
+    attemptId: $attemptId,
     cliExitCode: $cliExit,
     mergeCommitSha: $mergeCommit,
     mergedAt: $mergedAt,
@@ -173,8 +227,8 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
   --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 APPEND_EXIT=$?
 rm -f "$ATTEMPT_JSON"
-if [ $APPEND_EXIT -eq 65 ]; then
-  echo "audit append refused (probably sticky-succeeded; treating as no-op)" >&2
+if [ $APPEND_EXIT -eq 66 ]; then
+  echo "audit append refused (sticky succeeded already recorded; treating as no-op)" >&2
   exit 0
 fi
 exit $APPEND_EXIT
@@ -205,6 +259,7 @@ hand-roll the fields here):
 
 - Don't `gh pr merge` without `--match-head-commit <<REVIEWED_SHA>>`. Head advance = defer, not merge.
 - Don't terminalize as `succeeded` or `failed-without-merge` on CLI exit code alone. Always re-read GitHub state.
+- Don't invoke `gh pr merge` before the `in_progress` attempt has been durably appended for this head.
 - Don't retry `gh pr merge` inside this prompt. The next watcher tick re-evaluates from `in_progress` + `needsRepair=true`.
 - Don't write the audit JSON anywhere other than `<<AUDIT_PATH>>`, and only do it when `id -un` matches `<<HQ_OWNER>>`. The watcher reads it back from there.
 - Don't commit anything to the worker's checkout. There is no checkout state to preserve — this is a close-only worker.

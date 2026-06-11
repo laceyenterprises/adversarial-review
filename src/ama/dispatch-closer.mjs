@@ -280,6 +280,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {number} args.prNumber
  * @param {string} args.reviewedSha
  * @param {string} args.riskClass
+ * @param {string} args.workerClass
  * @param {string} args.mergeMethod     — 'squash' | 'merge'
  * @param {string} args.requiredGateContext
  * @param {string} args.auditPath       — absolute path inside HQ_ROOT
@@ -296,6 +297,7 @@ export function composeCloserPrompt({
   prNumber,
   reviewedSha,
   riskClass,
+  workerClass,
   mergeMethod,
   requiredGateContext,
   auditPath,
@@ -311,6 +313,7 @@ export function composeCloserPrompt({
     PR_NUMBER: prNumber,
     REVIEWED_SHA: reviewedSha,
     RISK_CLASS: riskClass,
+    WORKER_CLASS: workerClass,
     MERGE_METHOD: mergeMethod,
     REQUIRED_GATE_CONTEXT: requiredGateContext,
     AUDIT_PATH: auditPath,
@@ -406,6 +409,7 @@ export async function maybeDispatchAmaCloser({
     prNumber,
     reviewedSha,
     riskClass: dispatchContext.riskClass,
+    workerClass: String(cfg.workerClass || 'codex'),
     mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,

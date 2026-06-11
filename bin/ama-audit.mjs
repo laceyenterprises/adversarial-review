@@ -19,7 +19,8 @@
  *
  * Exit codes:
  *   0   write succeeded; absolute file path on stdout
- *   65  data error — refused write (e.g. sticky-succeeded regression)
+ *   65  write/data error
+ *   66  sticky-succeeded refusal (benign no-op for closer recovery paths)
  *   1   usage error
  */
 
@@ -59,6 +60,14 @@ Trailers args:
   --reason          short human summary
   --audit-path      absolute path to the audit JSON (for Eligibility-Trace)
 `;
+
+const EXIT_USAGE_ERROR = 1;
+const EXIT_WRITE_ERROR = 65;
+const EXIT_STICKY_SUCCEEDED = 66;
+
+function isStickySucceededRefusal(err) {
+  return /refusing to demote terminal 'succeeded'/i.test(String(err?.message || ''));
+}
 
 function loadAttemptJson(path) {
   if (!path) return {};
@@ -132,7 +141,9 @@ function runInitOrAppend(subcommand, argv) {
     return 0;
   } catch (err) {
     process.stderr.write(`error: ${err.message}\n`);
-    return 65;
+    return isStickySucceededRefusal(err)
+      ? EXIT_STICKY_SUCCEEDED
+      : EXIT_WRITE_ERROR;
   }
 }
 
@@ -166,7 +177,7 @@ function runTrailers(argv) {
     return 0;
   } catch (err) {
     process.stderr.write(`error: ${err.message}\n`);
-    return 65;
+    return EXIT_WRITE_ERROR;
   }
 }
 
@@ -184,7 +195,7 @@ function main(argv = process.argv.slice(2)) {
       return runTrailers(argv.slice(1));
     default:
       process.stderr.write(`error: unknown subcommand '${sub}'\n${USAGE}`);
-      return 1;
+      return EXIT_USAGE_ERROR;
   }
 }
 

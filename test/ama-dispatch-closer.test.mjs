@@ -213,6 +213,22 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes(`PR ${dispatchContext.prUrl}`));
   assert.ok(write.captured.body.includes(reviewState.headSha));
   assert.ok(write.captured.body.includes('--squash'));
+  assert.ok(
+    write.captured.body.includes('ama-audit.mjs trailers'),
+    'prompt must generate provenance trailers before gh pr merge',
+  );
+  assert.ok(
+    write.captured.body.includes('--body-file "$TRAILERS_FILE"'),
+    'prompt must pass trailers into gh pr merge',
+  );
+  assert.ok(
+    write.captured.body.includes('--outcome in_progress'),
+    'prompt must durably append a pre-merge attempt before gh pr merge',
+  );
+  assert.ok(
+    write.captured.body.includes('if [ $APPEND_EXIT -eq 66 ]; then'),
+    'prompt must suppress only explicit sticky-succeeded refusals',
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -260,6 +276,7 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
     prNumber: prMetadata.prNumber,
     reviewedSha: dispatchContext.reviewedSha,
     riskClass: dispatchContext.riskClass,
+    workerClass: cfg.workerClass,
     mergeMethod: cfg.mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,
@@ -471,9 +488,12 @@ test('ambiguous dispatch failure with launch request id suppresses merge-agent f
   //     prNumber: 1234,
   //     reviewedSha: 'abc12345abc12345abc12345abc12345abc12345',
   //     riskClass: 'low',
+  //     workerClass: 'codex',
   //     mergeMethod: 'squash',
   //     requiredGateContext: 'agent-os/adversarial-gate',
   //     auditPath: '/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json',
+  //     hqRoot: '/tmp/ama-test-hqroot',
+  //     hqOwnerUser: 'unknown',
   //     reviewedBy: 'claude-reviewer-lacey',
   //     dispatchedAt: '2026-06-11T20:00:00Z',
   //     templateBody: tpl,

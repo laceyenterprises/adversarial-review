@@ -25,7 +25,9 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 import {
   AmaAuditRefusedWriteError,
@@ -33,6 +35,19 @@ import {
   composeAmaTrailers,
   writeAmaAuditEntry,
 } from '../src/ama/audit.mjs';
+import {
+  AMA_CLOSER_LEASE_STATUS,
+  readAmaCloserLease,
+  updateAmaCloserLease,
+} from '../src/ama/closer-lease.mjs';
+
+const SUBMODULE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const TERMINAL_AUDIT_OUTCOMES = new Set([
+  'succeeded',
+  'failed-without-merge',
+  'deferred',
+  'superseded',
+]);
 
 const USAGE = `\
 Usage:
@@ -103,6 +118,27 @@ function parseTrailersArgs(argv) {
   return { values, positionals };
 }
 
+function terminalizeLeaseFromAudit(args) {
+  if (!TERMINAL_AUDIT_OUTCOMES.has(String(args.attempt?.outcome || ''))) {
+    return;
+  }
+  const identity = {
+    repo: args.repo,
+    prNumber: args.prNumber,
+    headSha: args.headSha,
+  };
+  const existingLease = readAmaCloserLease(SUBMODULE_ROOT, identity);
+  if (!existingLease) return;
+  if (existingLease.status === AMA_CLOSER_LEASE_STATUS.TERMINAL) return;
+  updateAmaCloserLease({
+    rootDir: SUBMODULE_ROOT,
+    ...identity,
+    status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
+    terminalOutcome: args.attempt.outcome,
+    now: args.now,
+  });
+}
+
 function runInitOrAppend(subcommand, argv) {
   const { values } = parseWriteArgs(argv);
   if (values.help) {
@@ -130,6 +166,9 @@ function runInitOrAppend(subcommand, argv) {
       subcommand === 'init'
         ? writeAmaAuditEntry(args)
         : appendAmaAuditAttempt(args);
+    if (subcommand === 'append') {
+      terminalizeLeaseFromAudit(args);
+    }
     process.stdout.write(`${filePath}\n`);
     return 0;
   } catch (err) {

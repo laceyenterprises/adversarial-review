@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -15,6 +17,7 @@ import {
   amaAuditTraceRef,
   appendAmaAuditAttempt,
   readAmaAuditEntry,
+  writeAmaAuditEntry,
 } from '../src/ama/audit.mjs';
 import {
   acquireAmaCloserLease,
@@ -27,6 +30,7 @@ const REPO_ROOT = resolve(__dirname, '..');
 const TEMPLATE_PATH = join(REPO_ROOT, 'templates', 'ama-closer-prompt.md');
 const GOLDEN_PROMPT_PATH = join(__dirname, 'fixtures', 'ama-closer-prompt.golden.md');
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
+const execFile = promisify(execFileCb);
 
 /**
  * Default eligible (reviewState, prMetadata, cfg, dispatchContext)
@@ -444,6 +448,12 @@ test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'dispatch-failed');
   assert.ok(result.error.includes('simulated dispatch failure'));
+  const lease = readAmaCloserLease(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  });
+  assert.equal(lease, null, 'non-ambiguous dispatch failure must release the pending lease');
 });
 
 test('dispatch parses machine-readable JSON stdout and records the launch request id', async (t) => {
@@ -704,6 +714,65 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
   const repairedLease = readAmaCloserLease(rootDir, identity);
   assert.equal(repairedLease.status, 'dispatched');
   assert.equal(repairedLease.lrqId, 'lrq_redo');
+});
+
+test('ama-audit append terminalizes the durable lease on the production CLI path', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-audit-cli-terminal-'));
+  const hqRoot = mkdtempSync(join(tmpdir(), 'ama-hq-cli-terminal-'));
+  t.after(() => {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  });
+
+  const identity = {
+    repo: 'acme/myrepo',
+    prNumber: 1234,
+    headSha: 'abc12345abc12345abc12345abc12345abc12345',
+  };
+  const leaseRoot = REPO_ROOT;
+  acquireAmaCloserLease({
+    rootDir: leaseRoot,
+    ...identity,
+    watcherPid: 4242,
+    now: '2026-06-11T22:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir: leaseRoot,
+    ...identity,
+    status: 'dispatched',
+    lrqId: 'lrq_cli_terminal',
+    now: '2026-06-11T22:00:30Z',
+  });
+  writeAmaAuditEntry({
+    hqRoot,
+    ...identity,
+    attempt: { outcome: 'in_progress' },
+    now: '2026-06-11T22:00:00Z',
+  });
+
+  try {
+    const { stdout } = await execFile(process.execPath, [
+      join(REPO_ROOT, 'bin', 'ama-audit.mjs'),
+      'append',
+      '--hq-root', hqRoot,
+      '--repo', identity.repo,
+      '--pr', String(identity.prNumber),
+      '--head', identity.headSha,
+      '--outcome', 'deferred',
+      '--now', '2026-06-11T22:01:00Z',
+    ], {
+      cwd: REPO_ROOT,
+    });
+    assert.match(stdout, /\.json\s*$/);
+    const lease = readAmaCloserLease(leaseRoot, identity);
+    assert.equal(lease.status, 'terminal');
+    assert.equal(lease.terminalOutcome, 'deferred');
+  } finally {
+    rmSync(
+      join(leaseRoot, 'data', 'ama-closer-leases', 'acme__myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json'),
+      { force: true },
+    );
+  }
 });
 
 /*

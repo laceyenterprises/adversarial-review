@@ -762,6 +762,9 @@ export async function maybeDispatchAmaCloser({
         lastObservedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
         lastError: String(err?.stderr || err?.message || err),
       }));
+      if (!ambiguousLaunch) {
+        deleteAmaCloserLease(rootDir, leaseIdentity);
+      }
       return {
         dispatched: false,
         skipMergeAgent: ambiguousLaunch || (

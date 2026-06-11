@@ -2074,7 +2074,7 @@ test('AgentOSConfigError normalizes derived envName tokens', () => {
   );
 });
 
-test('AMA merge_authority spec YAML and env aliases load through strict Node schema', () => {
+test('AMA merge_authority strict Node schema ignores legacy alias and honors canonical env', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -2119,17 +2119,17 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     );
 
     const legacyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: 'true' } });
-    assert.equal(legacyEnvCfg.get('roles.adversarial.merge_authority.enabled'), true);
+    assert.equal(legacyEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(
       legacyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
-      'env:AMA_ENABLED',
+      'top',
     );
 
     const legacyEmptyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: '' } });
     assert.equal(legacyEmptyEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(
       legacyEmptyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
-      'env:AMA_ENABLED',
+      'top',
     );
 
     const canonicalFalseEnvCfg = loadConfig({

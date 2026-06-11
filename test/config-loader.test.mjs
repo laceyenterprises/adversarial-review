@@ -2172,6 +2172,80 @@ test('AMA merge_authority risk_classes reject unsupported values in Node loader'
   }
 });
 
+// AMA-02 — the JS-camelCase accessor that AMA-02 consumers
+// (`src/ama/eligibility.mjs`, AMA-03 watcher dispatch path, AMA-03 closer
+// worker prompt) use to read the resolved merge-authority subtree without
+// re-typing dotted keys.
+test('AMA getMergeAuthorityConfig returns the camelCased subtree with defaults intact', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({ topPath: top, env: {} });
+    const ma = cfg.getMergeAuthorityConfig();
+    assert.equal(ma.enabled, false);
+    assert.equal(ma.workerClass, 'codex');
+    assert.equal(ma.mergeMethod, 'squash');
+    assert.deepEqual(ma.eligibility.riskClasses, ['low']);
+    assert.deepEqual(
+      ma.eligibility.fastMergeLabels,
+      ['fast-merge:test-fixtures', 'fast-merge:docs'],
+    );
+    assert.equal(ma.eligibility.reviewerFamilyPolicy, 'audit_existing_gate_contract');
+    assert.equal(ma.eligibility.ciGreenClassifier, 'existingAdversarialMergeClassifier');
+    assert.equal(ma.branchProtection.requiredGateContextSource, 'resolveGateStatusContext');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA getMergeAuthorityConfig surfaces operator overrides from top-level YAML', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            enabled: true
+            worker_class: claude-code
+            merge_method: merge
+            eligibility:
+              risk_classes: ["low", "medium"]
+              fast_merge_labels: ["fast-merge:docs"]
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    const ma = cfg.getMergeAuthorityConfig();
+    assert.equal(ma.enabled, true);
+    assert.equal(ma.workerClass, 'claude-code');
+    assert.equal(ma.mergeMethod, 'merge');
+    assert.deepEqual(ma.eligibility.riskClasses, ['low', 'medium']);
+    assert.deepEqual(ma.eligibility.fastMergeLabels, ['fast-merge:docs']);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA getMergeAuthorityConfig reflects the canonical env override', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: 'true' },
+    });
+    const ma = cfg.getMergeAuthorityConfig();
+    assert.equal(ma.enabled, true);
+    // Defaults for everything else remain untouched.
+    assert.equal(ma.workerClass, 'codex');
+    assert.equal(ma.mergeMethod, 'squash');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('quota_probe ok_tick_seconds enforces HRR-02a range bounds', () => {
   const tmp = freshTmp();
   try {

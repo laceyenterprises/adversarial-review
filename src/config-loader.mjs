@@ -1814,6 +1814,59 @@ export class AgentOSConfig {
   envAliasTable() {
     return ENV_ALIASES;
   }
+
+  /**
+   * Resolved `roles.adversarial.merge_authority` subtree with camelCase
+   * keys for direct JS consumption.
+   *
+   * AMA-02 — the eligibility predicate
+   * (`tools/adversarial-review/src/ama/eligibility.mjs`) takes this shape
+   * as its `cfg` argument. Returning a plain object (not a getter
+   * proxy) keeps the predicate easy to test — fixtures can build a
+   * matching literal and pass it directly without mocking the loader.
+   *
+   * The Python loader and the underlying YAML schema keep snake_case;
+   * the conversion is only applied at this surface for JS ergonomic
+   * reasons. Adding new merge-authority fields requires extending both
+   * the schema above AND this getter together.
+   */
+  getMergeAuthorityConfig() {
+    return {
+      enabled: this.get('roles.adversarial.merge_authority.enabled', false),
+      workerClass: this.get(
+        'roles.adversarial.merge_authority.worker_class',
+        'codex',
+      ),
+      mergeMethod: this.get(
+        'roles.adversarial.merge_authority.merge_method',
+        'squash',
+      ),
+      eligibility: {
+        riskClasses: this.get(
+          'roles.adversarial.merge_authority.eligibility.risk_classes',
+          ['low'],
+        ),
+        fastMergeLabels: this.get(
+          'roles.adversarial.merge_authority.eligibility.fast_merge_labels',
+          ['fast-merge:test-fixtures', 'fast-merge:docs'],
+        ),
+        reviewerFamilyPolicy: this.get(
+          'roles.adversarial.merge_authority.eligibility.reviewer_family_policy',
+          'audit_existing_gate_contract',
+        ),
+        ciGreenClassifier: this.get(
+          'roles.adversarial.merge_authority.eligibility.ci_green_classifier',
+          'existingAdversarialMergeClassifier',
+        ),
+      },
+      branchProtection: {
+        requiredGateContextSource: this.get(
+          'roles.adversarial.merge_authority.branch_protection.required_gate_context_source',
+          'resolveGateStatusContext',
+        ),
+      },
+    };
+  }
 }
 
 // -------- Public loader API ------------------------------------------------

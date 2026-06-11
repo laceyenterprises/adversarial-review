@@ -59,6 +59,29 @@ function normalizeEnvName(value) {
   return normalized || null;
 }
 
+const DEPRECATED_ENV_VARS = {
+  AMA_ENABLED: {
+    key: 'roles.adversarial.merge_authority.enabled',
+    replacement: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+  },
+};
+
+function checkDeprecatedEnvVars(env) {
+  for (const [envName, info] of Object.entries(DEPRECATED_ENV_VARS)) {
+    if (!(envName in env)) continue;
+    throw new AgentOSConfigError(
+      `${info.key}: deprecated env var ${envName} is no longer supported; use ${info.replacement} instead`,
+      {
+        key: info.key,
+        expected: `${info.replacement} or config.local.yaml`,
+        got: env[envName],
+        source: `env:${envName}`,
+        envName,
+      },
+    );
+  }
+}
+
 // -------- Schema declaration -----------------------------------------------
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
@@ -1825,6 +1848,7 @@ export function loadConfig({
   cliOverrides = null,
 } = {}) {
   const envView = env || process.env;
+  checkDeprecatedEnvVars(envView);
   const schema = schemaV1();
 
   const defaults = buildDefaultsDict(schema);

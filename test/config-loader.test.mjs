@@ -2168,6 +2168,30 @@ test('AMA merge_authority risk_classes reject unsupported values in Node loader'
   }
 });
 
+test('AMA_ENABLED retired env var fails loud with canonical replacement in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    assert.throws(
+      () => loadConfig({ topPath: top, env: { AMA_ENABLED: 'true' } }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'roles.adversarial.merge_authority.enabled');
+        assert.equal(err.envName, 'AMA_ENABLED');
+        assert.equal(err.source, 'env:AMA_ENABLED');
+        assert.equal(err.got, 'true');
+        assert.match(
+          err.message,
+          /AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED/,
+        );
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('quota_probe ok_tick_seconds enforces HRR-02a range bounds', () => {
   const tmp = freshTmp();
   try {

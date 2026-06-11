@@ -986,9 +986,18 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_ROLES_HERMES_PROVIDER',
     aliases: [],
   },
+  // Round-4 of agent-os PR #1627's adversarial review flagged the
+  // original `AMA_ENABLED` short alias as a security regression: `AMA`
+  // is a plausible variable name in unrelated tooling, CI templates,
+  // and shell profiles, and env overrides beat `config.local.yaml`, so
+  // a stray export anywhere in the operator's environment would silently
+  // enable autonomous PR closure on a host the operator thought was
+  // dark-launched. The Python loader (agent-os #1632) dropped the alias;
+  // this mirrors that change. Operators flip the master switch via the
+  // canonical env name only.
   'roles.adversarial.merge_authority.enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
-    aliases: [['AMA_ENABLED', identity]],
+    aliases: [],
   },
   ...buildRoleFallbackEnvAliases(),
   'roles.quota_probe.ok_tick_seconds': {
@@ -1690,12 +1699,24 @@ function checkEnvOverlap(key, canonicalEnv, aliases, env) {
 function coerceEnvValue(key, value, schemaLeaf, source = null) {
   const expected = schemaLeaf.__type;
   if (expected === TYPE_BOOL) {
+    // Round-4 of agent-os PR #1627's adversarial review flagged the
+    // earlier `'' -> false` coercion as a quiet contract drift: that
+    // change was made to keep `AMA_ENABLED` parity with the Python
+    // loader's blank-string handling, but it widened the rule to every
+    // boolean env override — silently disabling fail-loud on existing
+    // operational flags like
+    // `feature_flags.merge_agent_final_pass_on_request_changes`,
+    // `feature_flags.resume_context_envelope`, and
+    // `sentinel.detectors.litellm_routing_tier_outage.enabled` when a
+    // launchd template or secret-injection layer blanked the env var.
+    // With `AMA_ENABLED` itself removed (above), nothing in this loader
+    // depends on `'' -> false`, so fail-loud is restored — the same
+    // contract `projects/cfg/LOADER-CONTRACT.md` documents.
     const lower = value.trim().toLowerCase();
-    if (lower === '') return false;
     if (lower === 'true' || lower === '1') return true;
     if (lower === 'false' || lower === '0') return false;
     throw new AgentOSConfigError(
-      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false', '1'/'0', or empty string for false)`,
+      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false' or '1'/'0')`,
       { key, expected: 'bool', got: value, source },
     );
   }

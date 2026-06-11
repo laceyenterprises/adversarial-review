@@ -9,6 +9,11 @@ eligibility predicate from
 live state, then either land the merge OR write a deferred audit JSON
 and exit.
 
+The watcher already created or refreshed the watcher-owned `in_progress`
+audit record for this exact `(repo, prNumber, headSha)` before launching
+you. Every audit write in this prompt appends to that record; do not try
+to create a second file.
+
 The predicate is the gate. Trust nothing else.
 
 ## Snapshot the watcher used (for audit context)
@@ -188,7 +193,7 @@ Decision matrix:
 Compute the outcome, then append the attempt via the AMA-04 audit
 shim. The writer derives the surface `status` per SPEC §4.4 (incl.
 sticky-succeeded) and refuses to demote a terminal `succeeded` —
-treat a refusal exit code (`65`) as a signal the watcher already
+treat a refusal exit code (`66`) as a signal the watcher already
 finalized a different head and exit 0:
 
 ```bash
@@ -246,6 +251,16 @@ hand-roll the fields here):
   "createdAt": "<ISO>",
   "updatedAt": "<ISO>",
   "status": "<in_progress|deferred|superseded|succeeded|failed-without-merge>",
+  "reviewedBy": "<<REVIEWED_BY>>",
+  "reviewSha": "<<REVIEWED_SHA>>",
+  "requiredGateContexts": ["<<REQUIRED_GATE_CONTEXT>>"],
+  "riskClass": "<<RISK_CLASS>>",
+  "riskClassSource": "watcher-review-state",
+  "eligibilityReasons": ["<watcher authorization reasons>"],
+  "reconciliation": {
+    "needsRepair": false,
+    "lastVerifiedAt": "<ISO>"
+  },
   "attempts": [{
     "attemptNumber": 1,
     "startedAt": "<ISO>",

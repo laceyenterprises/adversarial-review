@@ -34,6 +34,15 @@ test('writeAmaAuditEntry creates file at the §4.4 path with status=in_progress'
       hqRoot,
       ...DEFAULT_TUPLE,
       attempt: { outcome: 'in_progress', reviewerFamily: 'claude-reviewer-lacey' },
+      metadata: {
+        reviewedBy: 'claude-reviewer-lacey',
+        reviewSha: DEFAULT_TUPLE.headSha,
+        requiredGateContexts: ['agent-os/adversarial-gate'],
+        riskClass: 'low',
+        riskClassSource: 'watcher-review-state',
+        eligibilityReasons: ['ci-green', 'risk-class-permitted'],
+        reconciliation: { needsRepair: false },
+      },
       now: '2026-06-11T20:00:00Z',
     });
     // Path matches the documented convention exactly.
@@ -50,6 +59,13 @@ test('writeAmaAuditEntry creates file at the §4.4 path with status=in_progress'
     assert.equal(doc.repo, 'acme/myrepo');
     assert.equal(doc.prNumber, 1234);
     assert.equal(doc.schemaVersion, 1);
+    assert.equal(doc.reviewedBy, 'claude-reviewer-lacey');
+    assert.equal(doc.reviewSha, DEFAULT_TUPLE.headSha);
+    assert.deepEqual(doc.requiredGateContexts, ['agent-os/adversarial-gate']);
+    assert.equal(doc.riskClass, 'low');
+    assert.equal(doc.riskClassSource, 'watcher-review-state');
+    assert.deepEqual(doc.eligibilityReasons, ['ci-green', 'risk-class-permitted']);
+    assert.equal(doc.reconciliation.needsRepair, false);
     // Round-trip via the on-disk file (atomic write succeeded).
     const onDisk = JSON.parse(readFileSync(filePath, 'utf8'));
     assert.deepEqual(onDisk, doc);
@@ -133,6 +149,55 @@ test('appendAmaAuditAttempt succeeded after deferred sets status=succeeded; hist
     assert.equal(doc.attempts[2].mergeCommitSha, '0123abc');
     // Earlier defer remains visible in the audit trail.
     assert.equal(doc.attempts[1].outcome, 'deferred');
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('appendAmaAuditAttempt preserves watcher-owned provenance and updates reconciliation state', () => {
+  const hqRoot = freshHqRoot();
+  try {
+    writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'in_progress' },
+      metadata: {
+        reviewedBy: 'claude-reviewer-lacey',
+        reviewSha: DEFAULT_TUPLE.headSha,
+        requiredGateContexts: ['agent-os/adversarial-gate'],
+        riskClass: 'low',
+        riskClassSource: 'watcher-review-state',
+        eligibilityReasons: ['ci-green'],
+        operatorApprovalEvidence: {
+          applied: true,
+          observedRevisionRef: DEFAULT_TUPLE.headSha,
+          actor: 'paul',
+          eventId: 'LE_1',
+          observedAt: '2026-06-11T19:59:00Z',
+        },
+        reconciliation: { needsRepair: false },
+      },
+      now: '2026-06-11T20:00:00Z',
+    });
+    const { doc } = appendAmaAuditAttempt({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: {
+        outcome: 'in_progress',
+        attemptId: 'ama-attempt-2',
+        needsRepair: true,
+      },
+      now: '2026-06-11T20:05:00Z',
+    });
+    assert.equal(doc.reviewedBy, 'claude-reviewer-lacey');
+    assert.equal(doc.reviewSha, DEFAULT_TUPLE.headSha);
+    assert.deepEqual(doc.requiredGateContexts, ['agent-os/adversarial-gate']);
+    assert.equal(doc.riskClass, 'low');
+    assert.equal(doc.riskClassSource, 'watcher-review-state');
+    assert.deepEqual(doc.eligibilityReasons, ['ci-green']);
+    assert.equal(doc.operatorApprovalEvidence.actor, 'paul');
+    assert.equal(doc.reconciliation.needsRepair, true);
+    assert.equal(doc.reconciliation.lastVerifiedAt, '2026-06-11T20:05:00Z');
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }

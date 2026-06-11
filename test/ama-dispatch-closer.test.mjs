@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { amaAuditFilePath, appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import {
   composeCloserPrompt,
   maybeDispatchAmaCloser,
@@ -22,6 +23,12 @@ const GOLDEN_PROMPT_PATH = join(__dirname, 'fixtures', 'ama-closer-prompt.golden
  */
 function eligibleFixture(overrides = {}) {
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
+  const overrideDispatchContext = overrides.dispatchContext || {};
+  const defaultRootDir = overrideDispatchContext.rootDir || '/tmp/ama-test-root';
+  const defaultHqRoot = overrideDispatchContext.hqRoot
+    || (overrideDispatchContext.rootDir
+      ? join(overrideDispatchContext.rootDir, 'hqroot')
+      : '/tmp/ama-test-hqroot');
   const reviewState = {
     verdict: 'approved',
     headSha,
@@ -78,11 +85,11 @@ function eligibleFixture(overrides = {}) {
     parentSession: 'session:test:watcher',
     hqProject: 'adversarial-merge-authority',
     hqPath: '/bin/true-stub-hq',
-    hqRoot: '/tmp/ama-test-hqroot',
-    rootDir: '/tmp/ama-test-root',
+    hqRoot: defaultHqRoot,
+    rootDir: defaultRootDir,
     templatePath: TEMPLATE_PATH,
     dispatchedAt: '2026-06-11T20:00:00Z',
-    ...overrides.dispatchContext,
+    ...overrideDispatchContext,
   };
   return { reviewState, prMetadata, cfg, dispatchContext };
 }
@@ -229,6 +236,34 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
     write.captured.body.includes('if [ $APPEND_EXIT -eq 66 ]; then'),
     'prompt must suppress only explicit sticky-succeeded refusals',
   );
+  const auditPath = amaAuditFilePath(
+    dispatchContext.hqRoot,
+    dispatchContext.repo,
+    prMetadata.prNumber,
+    dispatchContext.reviewedSha,
+  );
+  const auditDoc = JSON.parse(readFileSync(auditPath, 'utf8'));
+  assert.equal(auditDoc.status, 'in_progress');
+  assert.equal(auditDoc.reviewedBy, dispatchContext.reviewedBy);
+  assert.equal(auditDoc.reviewSha, dispatchContext.reviewedSha);
+  assert.deepEqual(auditDoc.requiredGateContexts, [dispatchContext.requiredGateContext]);
+  assert.equal(auditDoc.riskClass, dispatchContext.riskClass);
+  assert.equal(auditDoc.riskClassSource, 'watcher-review-state');
+  assert.equal(auditDoc.reconciliation.needsRepair, false);
+  const appended = appendAmaAuditAttempt({
+    hqRoot: dispatchContext.hqRoot,
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+    attempt: {
+      outcome: 'in_progress',
+      attemptId: 'first-closer-attempt',
+      preMergeEligible: true,
+    },
+    now: '2026-06-11T20:00:30Z',
+  });
+  assert.equal(appended.doc.attempts.length, 2);
+  assert.equal(appended.doc.attempts[1].attemptId, 'first-closer-attempt');
 });
 
 // ---------------------------------------------------------------------------

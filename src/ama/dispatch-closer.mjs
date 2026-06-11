@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { writeAmaAuditEntry } from './audit.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -487,6 +488,43 @@ export async function maybeDispatchAmaCloser({
     writeFileSync(promptPath, prompt, { encoding: 'utf8' });
   }
 
+  writeAmaAuditEntry({
+    hqRoot,
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+    attempt: { outcome: 'in_progress' },
+    metadata: {
+      reviewedBy: dispatchContext.reviewedBy,
+      reviewSha: reviewedSha,
+      reviewerEvidence: {
+        reviewerLogin: dispatchContext.reviewedBy || null,
+        reviewSha: reviewedSha,
+      },
+      operatorApprovalEvidence: reviewState?.operatorApprovedEvidence || null,
+      mergeAgentRequestedEvidence: options?.mergeAgentRequested || null,
+      requiredGateContexts: dispatchContext.requiredGateContext
+        ? [dispatchContext.requiredGateContext]
+        : [],
+      riskClass: dispatchContext.riskClass,
+      riskClassSource: 'watcher-review-state',
+      eligibilityReasons: verdict.reasons.length
+        ? verdict.reasons
+        : [
+            'latest-review-settled-success',
+            'head-sha-matches-review',
+            'risk-class-permitted',
+            'ci-green',
+            'branch-protection-gate-present',
+          ],
+      mergeMethod,
+      reconciliation: {
+        needsRepair: false,
+      },
+    },
+    now: dispatchContext.dispatchedAt,
+  });
+
   const priorRetryCount = Number(existingRecord?.retryCount || 0);
   writeAmaCloserDispatchRecord(rootDir, dispatchIdentity, {
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
@@ -619,6 +657,6 @@ export async function maybeDispatchAmaCloser({
     dispatchId: parsed.dispatchId || parsed.launchRequestId || null,
     launchRequestId: parsed.launchRequestId || null,
     promptPath,
-    eligibilityReasons: verdict.trace,
+    eligibilityReasons: verdict.reasons,
   };
 }

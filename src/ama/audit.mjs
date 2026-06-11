@@ -170,6 +170,105 @@ function readExisting(filePath) {
   }
 }
 
+function cloneRecord(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? JSON.parse(JSON.stringify(value))
+    : null;
+}
+
+function normalizeStringArray(values) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean);
+}
+
+function buildReconciliation(existing, metadata, timestamp) {
+  const base =
+    cloneRecord(existing?.reconciliation)
+    || cloneRecord(metadata?.reconciliation)
+    || {};
+  const needsRepair = typeof metadata?.reconciliation?.needsRepair === 'boolean'
+    ? metadata.reconciliation.needsRepair
+    : (typeof base.needsRepair === 'boolean' ? base.needsRepair : false);
+  return {
+    ...base,
+    needsRepair,
+    lastVerifiedAt: timestamp,
+  };
+}
+
+function buildAuditDoc({
+  existing,
+  repo,
+  prNumber,
+  headSha,
+  attempts,
+  timestamp,
+  metadata = {},
+}) {
+  const reviewedBy = String(
+    metadata.reviewedBy ?? existing?.reviewedBy ?? '',
+  ).trim();
+  const reviewSha = String(
+    metadata.reviewSha ?? metadata.reviewedSha ?? existing?.reviewSha ?? headSha,
+  ).trim();
+  const riskClass = String(
+    metadata.riskClass ?? existing?.riskClass ?? '',
+  ).trim();
+  const riskClassSource = String(
+    metadata.riskClassSource ?? existing?.riskClassSource ?? 'watcher-review-state',
+  ).trim();
+  const mergeMethod = String(
+    metadata.mergeMethod ?? existing?.mergeMethod ?? '',
+  ).trim();
+  const requiredGateContexts = normalizeStringArray(
+    metadata.requiredGateContexts ?? existing?.requiredGateContexts,
+  );
+  const eligibilityReasons = normalizeStringArray(
+    metadata.eligibilityReasons ?? existing?.eligibilityReasons,
+  );
+  const reviewerEvidence =
+    cloneRecord(metadata.reviewerEvidence)
+    || cloneRecord(existing?.reviewerEvidence)
+    || (reviewedBy
+      ? {
+          reviewerLogin: reviewedBy,
+          reviewSha,
+        }
+      : null);
+  const operatorApprovalEvidence =
+    cloneRecord(metadata.operatorApprovalEvidence)
+    || cloneRecord(existing?.operatorApprovalEvidence)
+    || null;
+  const mergeAgentRequestedEvidence =
+    cloneRecord(metadata.mergeAgentRequestedEvidence)
+    || cloneRecord(existing?.mergeAgentRequestedEvidence)
+    || null;
+
+  return {
+    schemaVersion: 1,
+    repo,
+    prNumber: Number(prNumber),
+    headSha,
+    createdAt: existing?.createdAt || timestamp,
+    updatedAt: timestamp,
+    status: deriveStatus(attempts),
+    attempts,
+    reviewedBy: reviewedBy || null,
+    reviewSha: reviewSha || null,
+    reviewerEvidence,
+    operatorApprovalEvidence,
+    mergeAgentRequestedEvidence,
+    requiredGateContexts,
+    riskClass: riskClass || null,
+    riskClassSource: riskClassSource || null,
+    eligibilityReasons,
+    mergeMethod: mergeMethod || null,
+    reconciliation: buildReconciliation(existing, metadata, timestamp),
+  };
+}
+
 /**
  * Build the initial `in_progress` audit document the watcher writes
  * before dispatching a closer. The `attempt` argument is the watcher's
@@ -182,6 +281,7 @@ function readExisting(filePath) {
  * @param {number} args.prNumber
  * @param {string} args.headSha
  * @param {object} args.attempt   Attempt entry per SPEC §4.4 (outcome required).
+ * @param {object=} args.metadata Watcher-owned top-level snapshot fields preserved across appends.
  * @param {string=} args.now      ISO timestamp for `createdAt` / `updatedAt`. Caller-provided so the writer stays deterministic for tests.
  * @returns {{ filePath: string, doc: object }}
  */
@@ -191,22 +291,25 @@ export function writeAmaAuditEntry({
   prNumber,
   headSha,
   attempt,
+  metadata,
   now,
 }) {
   validateAttempt(attempt);
   const filePath = amaAuditFilePath(hqRoot, repo, prNumber, headSha);
+  const existing = readExisting(filePath);
   const timestamp = now || new Date().toISOString();
-  const attempts = [{ attemptNumber: 1, startedAt: timestamp, ...attempt }];
-  const doc = {
-    schemaVersion: 1,
+  const attempts = existing?.attempts?.length
+    ? existing.attempts
+    : [{ attemptNumber: 1, startedAt: timestamp, ...attempt }];
+  const doc = buildAuditDoc({
+    existing,
     repo,
-    prNumber: Number(prNumber),
+    prNumber,
     headSha,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    status: deriveStatus(attempts),
     attempts,
-  };
+    timestamp,
+    metadata,
+  });
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, {
     mode: AUDIT_FILE_MODE,
   });
@@ -276,12 +379,21 @@ export function appendAmaAuditAttempt({
     ...(Array.isArray(existing.attempts) ? existing.attempts : []),
     { attemptNumber, startedAt: timestamp, ...attempt },
   ];
-  const doc = {
-    ...existing,
-    updatedAt: timestamp,
-    status: deriveStatus(attempts),
+  const doc = buildAuditDoc({
+    existing,
+    repo,
+    prNumber,
+    headSha,
     attempts,
-  };
+    timestamp,
+    metadata: {
+      reconciliation: {
+        needsRepair: typeof attempt.needsRepair === 'boolean'
+          ? attempt.needsRepair
+          : existing?.reconciliation?.needsRepair,
+      },
+    },
+  });
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, {
     mode: AUDIT_FILE_MODE,
   });

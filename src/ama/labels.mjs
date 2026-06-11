@@ -32,6 +32,84 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_GH_RETRY_ATTEMPTS = 3;
+const DEFAULT_GH_RETRY_DELAY_MS = 50;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorText(err) {
+  return String(
+    [
+      err?.stderr,
+      err?.stdout,
+      err?.message,
+      err?.code,
+      err?.signal,
+    ].filter(Boolean).join('\n'),
+  );
+}
+
+function isTransientGhError(err) {
+  const text = errorText(err).toLowerCase();
+  return [
+    'timeout',
+    'timed out',
+    'temporarily unavailable',
+    'temporary failure',
+    'econnreset',
+    'econnrefused',
+    'etimedout',
+    'eai_again',
+    'enotfound',
+    'tls handshake',
+    'http 429',
+    'http 500',
+    'http 502',
+    'http 503',
+    'http 504',
+    'bad gateway',
+    'service unavailable',
+    'gateway timeout',
+    'rate limit',
+  ].some((needle) => text.includes(needle));
+}
+
+function isDuplicateLabelError(err) {
+  const text = errorText(err).toLowerCase();
+  return (
+    text.includes('already_exists') ||
+    text.includes('already exists') ||
+    text.includes('name already exists') ||
+    text.includes('label already exists') ||
+    (text.includes('http 422') && text.includes('name'))
+  );
+}
+
+async function withGhRetry(operation, {
+  retryAttempts = DEFAULT_GH_RETRY_ATTEMPTS,
+  retryDelayMs = DEFAULT_GH_RETRY_DELAY_MS,
+  sleepImpl = sleep,
+} = {}) {
+  const attempts = Math.max(1, Number(retryAttempts) || 1);
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= attempts || !isTransientGhError(err)) {
+        throw err;
+      }
+      const delay = Math.max(0, Number(retryDelayMs) || 0) * (2 ** (attempt - 1));
+      if (delay > 0) {
+        await sleepImpl(delay);
+      }
+    }
+  }
+  throw lastErr;
+}
 
 /**
  * Public constants — exported so consumers (eligibility module, the
@@ -76,26 +154,38 @@ const LABEL_SPECS = Object.freeze([
  * @param {Object=} opts
  * @param {Function=} opts.execFileImpl
  * @param {Object=}  opts.env
+ * @param {number=}  opts.retryAttempts
+ * @param {number=}  opts.retryDelayMs
+ * @param {Function=} opts.sleepImpl
  * @returns {Promise<Map<string, {name: string, color: string, description: string}>>}
  */
-async function fetchRepoLabels(repo, { execFileImpl = execFileAsync, env = process.env } = {}) {
-  const { stdout } = await execFileImpl(
-    'gh',
-    [
-      'api',
-      `repos/${repo}/labels`,
-      '--paginate',
-      '--jq',
-      '.[] | {name: .name, color: .color, description: .description}',
-    ],
-    {
-      env: {
-        PATH: env.PATH ?? '/usr/bin:/bin',
-        HOME: env.HOME ?? '',
-        GH_TOKEN: env.GH_TOKEN ?? env.GITHUB_TOKEN ?? '',
+async function fetchRepoLabels(repo, {
+  execFileImpl = execFileAsync,
+  env = process.env,
+  retryAttempts = DEFAULT_GH_RETRY_ATTEMPTS,
+  retryDelayMs = DEFAULT_GH_RETRY_DELAY_MS,
+  sleepImpl = sleep,
+} = {}) {
+  const { stdout } = await withGhRetry(
+    () => execFileImpl(
+      'gh',
+      [
+        'api',
+        `repos/${repo}/labels`,
+        '--paginate',
+        '--jq',
+        '.[] | {name: .name, color: .color, description: .description}',
+      ],
+      {
+        env: {
+          PATH: env.PATH ?? '/usr/bin:/bin',
+          HOME: env.HOME ?? '',
+          GH_TOKEN: env.GH_TOKEN ?? env.GITHUB_TOKEN ?? '',
+        },
+        maxBuffer: 5 * 1024 * 1024,
       },
-      maxBuffer: 5 * 1024 * 1024,
-    },
+    ),
+    { retryAttempts, retryDelayMs, sleepImpl },
   );
   const out = new Map();
   for (const line of String(stdout || '').split('\n')) {
@@ -121,25 +211,34 @@ async function fetchRepoLabels(repo, { execFileImpl = execFileAsync, env = proce
 /**
  * Create a single label via `gh api`. Returns the parsed label JSON.
  */
-async function createLabel(repo, spec, { execFileImpl = execFileAsync, env = process.env } = {}) {
-  await execFileImpl(
-    'gh',
-    [
-      'api',
-      `repos/${repo}/labels`,
-      '-X', 'POST',
-      '-f', `name=${spec.name}`,
-      '-f', `color=${spec.color}`,
-      '-f', `description=${spec.description}`,
-    ],
-    {
-      env: {
-        PATH: env.PATH ?? '/usr/bin:/bin',
-        HOME: env.HOME ?? '',
-        GH_TOKEN: env.GH_TOKEN ?? env.GITHUB_TOKEN ?? '',
+async function createLabel(repo, spec, {
+  execFileImpl = execFileAsync,
+  env = process.env,
+  retryAttempts = DEFAULT_GH_RETRY_ATTEMPTS,
+  retryDelayMs = DEFAULT_GH_RETRY_DELAY_MS,
+  sleepImpl = sleep,
+} = {}) {
+  await withGhRetry(
+    () => execFileImpl(
+      'gh',
+      [
+        'api',
+        `repos/${repo}/labels`,
+        '-X', 'POST',
+        '-f', `name=${spec.name}`,
+        '-f', `color=${spec.color}`,
+        '-f', `description=${spec.description}`,
+      ],
+      {
+        env: {
+          PATH: env.PATH ?? '/usr/bin:/bin',
+          HOME: env.HOME ?? '',
+          GH_TOKEN: env.GH_TOKEN ?? env.GITHUB_TOKEN ?? '',
+        },
+        maxBuffer: 1 * 1024 * 1024,
       },
-      maxBuffer: 1 * 1024 * 1024,
-    },
+    ),
+    { retryAttempts, retryDelayMs, sleepImpl },
   );
 }
 
@@ -167,11 +266,15 @@ export async function ensureAmaLabelsOnRepo(repo, {
   fetchRepoLabelsImpl = fetchRepoLabels,
   createLabelImpl = createLabel,
   env = process.env,
+  retryAttempts = DEFAULT_GH_RETRY_ATTEMPTS,
+  retryDelayMs = DEFAULT_GH_RETRY_DELAY_MS,
+  sleepImpl = sleep,
 } = {}) {
   if (!repo || typeof repo !== 'string' || !repo.includes('/')) {
     throw new Error(`ensureAmaLabelsOnRepo: invalid repo '${repo}' (need '<owner>/<name>')`);
   }
-  const existing = await fetchRepoLabelsImpl(repo, { execFileImpl, env });
+  const retryOpts = { retryAttempts, retryDelayMs, sleepImpl };
+  const existing = await fetchRepoLabelsImpl(repo, { execFileImpl, env, ...retryOpts });
   const ensured = [];
   const created = [];
   const preserved = [];
@@ -182,9 +285,22 @@ export async function ensureAmaLabelsOnRepo(repo, {
       preserved.push(present.name);
       continue;
     }
-    await createLabelImpl(repo, spec, { execFileImpl, env });
-    ensured.push(spec.name);
-    created.push(spec.name);
+    try {
+      await createLabelImpl(repo, spec, { execFileImpl, env, ...retryOpts });
+      ensured.push(spec.name);
+      created.push(spec.name);
+    } catch (err) {
+      if (!isDuplicateLabelError(err)) {
+        throw err;
+      }
+      const refreshed = await fetchRepoLabelsImpl(repo, { execFileImpl, env, ...retryOpts });
+      const reconciled = refreshed.get(spec.name.toLowerCase());
+      if (!reconciled) {
+        throw err;
+      }
+      ensured.push(reconciled.name);
+      preserved.push(reconciled.name);
+    }
   }
   return { repo, ensured, created, preserved };
 }
@@ -218,3 +334,11 @@ export async function ensureAmaLabelsOnRepos(repos, opts = {}) {
 export function listAmaLabelSpecs() {
   return LABEL_SPECS.map((spec) => ({ ...spec }));
 }
+
+export const __testables__ = {
+  fetchRepoLabels,
+  createLabel,
+  isDuplicateLabelError,
+  isTransientGhError,
+  withGhRetry,
+};

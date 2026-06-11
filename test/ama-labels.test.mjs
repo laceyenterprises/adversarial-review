@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   ADVERSARIAL_MERGE_BLOCKED_LABEL,
   ADVERSARIAL_MERGE_REQUESTED_LABEL,
+  __testables__,
   ensureAmaLabelsOnRepo,
   ensureAmaLabelsOnRepos,
   listAmaLabelSpecs,
@@ -64,6 +65,12 @@ function eligibleFixture(overrides = {}) {
   return { reviewState, prMetadata, cfg };
 }
 
+function ghError(message) {
+  const err = new Error(message);
+  err.stderr = message;
+  return err;
+}
+
 // ---------------------------------------------------------------------------
 // Test 1 — label initializer creates both labels on first tick; second is
 //          idempotent.
@@ -108,6 +115,81 @@ test('ensureAmaLabelsOnRepo preserves operator customizations on existing labels
   });
   // Only the missing label is created; the customized one is left as-is.
   assert.deepEqual(created, [ADVERSARIAL_MERGE_REQUESTED_LABEL]);
+});
+
+test('fetchRepoLabels retries transient gh api failures', async () => {
+  let calls = 0;
+  const labels = await __testables__.fetchRepoLabels('acme/myrepo', {
+    retryDelayMs: 0,
+    sleepImpl: async () => {},
+    execFileImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw ghError('TLS handshake timeout');
+      }
+      return {
+        stdout:
+          '{"name":"adversarial-merge-requested","color":"fbca04","description":"request"}\n',
+      };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(labels.get(ADVERSARIAL_MERGE_REQUESTED_LABEL).color, 'fbca04');
+});
+
+test('createLabel retries transient gh api failures', async () => {
+  let calls = 0;
+  await __testables__.createLabel('acme/myrepo', {
+    name: ADVERSARIAL_MERGE_BLOCKED_LABEL,
+    color: 'b60205',
+    description: 'Block AMA closure.',
+  }, {
+    retryDelayMs: 0,
+    sleepImpl: async () => {},
+    execFileImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw ghError('HTTP 503 Service Unavailable');
+      }
+      return { stdout: '{}' };
+    },
+  });
+  assert.equal(calls, 2);
+});
+
+test('ensureAmaLabelsOnRepo reconciles duplicate-create races as success', async () => {
+  const state = new Map();
+  let fetchCalls = 0;
+  let duplicateOnce = true;
+  const result = await ensureAmaLabelsOnRepo('acme/myrepo', {
+    fetchRepoLabelsImpl: async () => {
+      fetchCalls += 1;
+      return new Map(state);
+    },
+    createLabelImpl: async (repo, spec) => {
+      if (spec.name === ADVERSARIAL_MERGE_BLOCKED_LABEL && duplicateOnce) {
+        duplicateOnce = false;
+        state.set(spec.name.toLowerCase(), {
+          name: spec.name,
+          color: spec.color,
+          description: spec.description,
+        });
+        throw ghError('HTTP 422 Validation Failed: already_exists name');
+      }
+      state.set(spec.name.toLowerCase(), {
+        name: spec.name,
+        color: spec.color,
+        description: spec.description,
+      });
+    },
+  });
+  assert.equal(fetchCalls, 2);
+  assert.deepEqual(result.created, [ADVERSARIAL_MERGE_REQUESTED_LABEL]);
+  assert.deepEqual(result.preserved, [ADVERSARIAL_MERGE_BLOCKED_LABEL]);
+  assert.deepEqual(
+    result.ensured.sort(),
+    [ADVERSARIAL_MERGE_BLOCKED_LABEL, ADVERSARIAL_MERGE_REQUESTED_LABEL].sort(),
+  );
 });
 
 test('ensureAmaLabelsOnRepos aggregates errors per-repo without aborting', async () => {
@@ -196,6 +278,18 @@ test('adversarial-merge-blocked label without evidence supplied → fail-closed 
     prMetadata: { labels: ['adversarial-merge-blocked'] },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('label-adversarial-merge-blocked'));
+});
+
+test('adversarial-merge-blocked label with null evidence → fail-closed (label-presence blocks)', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['adversarial-merge-blocked'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    adversarialMergeBlocked: null,
+  });
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes('label-adversarial-merge-blocked'));
 });

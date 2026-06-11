@@ -146,11 +146,11 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {MergeAgentRecoveryEvidence=} recoveryEvidence  Optional current-head recovery evidence for the `merge-agent-stuck` carve-out.
  * @property {Object=} fastMergeState                        Optional FML authorization/veto snapshot. AMA fails closed when the PR is in a fast-merge override state it does not import.
  * @property {AdversarialMergeBlockedEvidence=} adversarialMergeBlocked Optional current-head evidence for the AMA-05
- * `adversarial-merge-blocked` label. When supplied:
+ * `adversarial-merge-blocked` label. When a non-null evidence object is supplied:
  *   - `applied=true && observedRevisionRef === current head` → block (label respected).
  *   - `applied=false || stale revisionRef` → ignored (the label may be on the PR but its timeline
  *     event scope is not current-head).
- * When NOT supplied, the predicate falls back to label-presence
+ * When omitted or null, the predicate falls back to label-presence
  * (`prMetadata.labels.includes('adversarial-merge-blocked')`) → blocks. Fail-closed default for
  * watchers that have not yet wired the timeline-event fetch.
  * Unlike `operator-approved` / `adversarial-merge-requested`, AMA-05 §C explicitly permits PR-author
@@ -456,12 +456,14 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const recoveryEvidence = options?.recoveryEvidence || null;
   const fastMergeState = options?.fastMergeState || null;
   // AMA-05 head-scoped evidence for `adversarial-merge-blocked`.
-  // `undefined` (not supplied) → fall back to label-presence (fail-closed).
-  // `null` or an object → treated as supplied evidence; the hard-stop
-  // gate consults the head-scope rules in `presentHardStopLabels`.
+  // Missing or null evidence falls back to label-presence (fail-closed).
+  // Only a non-null evidence object can prove the label is stale/unapplied
+  // and let the hard-stop gate ignore it.
   const adversarialMergeBlockedEvidence =
-    options && Object.prototype.hasOwnProperty.call(options, 'adversarialMergeBlocked')
-      ? (options.adversarialMergeBlocked || null)
+    options &&
+    Object.prototype.hasOwnProperty.call(options, 'adversarialMergeBlocked') &&
+    options.adversarialMergeBlocked !== null
+      ? options.adversarialMergeBlocked
       : undefined;
 
   const amaEnabled = cfg?.enabled === true;

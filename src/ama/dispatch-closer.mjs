@@ -26,12 +26,13 @@
 
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { amaAuditFilePath, composeAmaTrailers, writeAmaAuditEntry } from './audit.mjs';
+import { amaAuditFilePath, amaAuditTraceRef, composeAmaTrailers, writeAmaAuditEntry } from './audit.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -179,6 +180,34 @@ function resolveHqOwner(hqRoot) {
   return ownerUser || null;
 }
 
+function currentUserName() {
+  try {
+    return String(userInfo().username || '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function assertAmaAuditOwner({ hqRoot, ownerUser, currentUser = currentUserName() } = {}) {
+  const expected = String(ownerUser || '').trim();
+  if (!expected) {
+    throw new Error(
+      `AMA audit bootstrap refused: HQ ownerUser is unavailable for ${hqRoot || 'unknown HQ root'}`,
+    );
+  }
+  const actual = String(currentUser || '').trim();
+  if (!actual) {
+    throw new Error('AMA audit bootstrap refused: current runtime user is unavailable');
+  }
+  if (actual !== expected) {
+    throw new Error(
+      `AMA audit bootstrap refused: current user '${actual}' does not match ` +
+      `HQ ownerUser '${expected}' for ${hqRoot}`,
+    );
+  }
+  return expected;
+}
+
 function hasAuthoritativeOwnerVisibility(asOwner) {
   return Boolean(String(asOwner || '').trim());
 }
@@ -306,7 +335,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.riskClass
  * @param {string} args.mergeMethod     — 'squash' | 'merge'
  * @param {string} args.requiredGateContext
- * @param {string} args.auditPath       — absolute path inside HQ_ROOT
+ * @param {string} args.auditPath       — absolute path inside HQ_ROOT, used only inside the closer
  * @param {string} args.hqRoot          — HQ root path (closer passes to `ama-audit append --hq-root`)
  * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
@@ -420,8 +449,9 @@ export async function maybeDispatchAmaCloser({
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
-  const ownerUser = resolveHqOwner(hqRoot);
+  const ownerUser = dispatchContext.hqOwnerUser || resolveHqOwner(hqRoot);
   const auditPath = amaAuditFilePath(hqRoot, repo, prNumber, reviewedSha);
+  const auditRef = amaAuditTraceRef(repo, prNumber, reviewedSha);
   const bootstrapEligibilityReasons = buildBootstrapEligibilityReasons({
     reviewState,
     prMetadata,
@@ -433,7 +463,7 @@ export async function maybeDispatchAmaCloser({
     reviewerFamily: dispatchContext.reviewedBy,
     riskClass: dispatchContext.riskClass,
     eligibilityReason: summarizeEligibilityReason(bootstrapEligibilityReasons),
-    auditPath,
+    auditRef,
   });
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,
@@ -505,6 +535,11 @@ export async function maybeDispatchAmaCloser({
     return { dispatched: false, reason: 'dispatch-retry-exhausted' };
   }
 
+  assertAmaAuditOwner({
+    hqRoot,
+    ownerUser,
+    currentUser: dispatchContext.currentUser,
+  });
   writeAmaAuditEntry({
     hqRoot,
     repo,

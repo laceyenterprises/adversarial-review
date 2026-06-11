@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -9,6 +9,7 @@ import { execPath } from 'node:process';
 import {
   AmaAuditRefusedWriteError,
   amaAuditFilePath,
+  amaAuditTraceRef,
   appendAmaAuditAttempt,
   composeAmaTrailers,
   readAuditFileMode,
@@ -277,13 +278,13 @@ test('appendAmaAuditAttempt refuses to demote terminal succeeded', () => {
   }
 });
 
-test('writeAmaAuditEntry is idempotent and preserves an existing record', () => {
+test('writeAmaAuditEntry refreshes an existing record with a fresh in_progress attempt', () => {
   const hqRoot = freshHqRoot();
   try {
-    const first = writeAmaAuditEntry({
+    writeAmaAuditEntry({
       hqRoot,
       ...DEFAULT_TUPLE,
-      attempt: { outcome: 'in_progress', bootstrap: true },
+      attempt: { outcome: 'deferred', bootstrap: true },
       metadata: { reviewedBy: 'claude-reviewer-lacey' },
       now: '2026-06-11T20:00:00Z',
     });
@@ -291,13 +292,82 @@ test('writeAmaAuditEntry is idempotent and preserves an existing record', () => 
       hqRoot,
       ...DEFAULT_TUPLE,
       attempt: { outcome: 'in_progress', bootstrap: false },
-      metadata: { reviewedBy: 'different-reviewer' },
+      metadata: { reviewedBy: 'different-reviewer', riskClass: 'low' },
       now: '2026-06-11T20:05:00Z',
     });
-    assert.deepEqual(second.doc, first.doc);
-    assert.equal(second.doc.reviewedBy, 'claude-reviewer-lacey');
-    assert.equal(second.doc.attempts.length, 1);
+    assert.equal(second.doc.status, 'in_progress');
+    assert.equal(second.doc.reviewedBy, 'different-reviewer');
+    assert.equal(second.doc.riskClass, 'low');
+    assert.equal(second.doc.attempts.length, 2);
+    assert.equal(second.doc.attempts[0].outcome, 'deferred');
     assert.equal(second.doc.attempts[0].bootstrap, true);
+    assert.equal(second.doc.attempts[1].outcome, 'in_progress');
+    assert.equal(second.doc.attempts[1].attemptNumber, 2);
+    assert.equal(second.doc.attempts[1].startedAt, '2026-06-11T20:05:00Z');
+    assert.equal(second.doc.attempts[1].bootstrap, false);
+    assert.equal(second.doc.createdAt, '2026-06-11T20:00:00Z');
+    assert.equal(second.doc.updatedAt, '2026-06-11T20:05:00Z');
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('audit writer-owned canonical fields cannot be overridden by caller payloads', () => {
+  const hqRoot = freshHqRoot();
+  try {
+    const { doc } = writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: {
+        outcome: 'in_progress',
+        attemptNumber: 99,
+        startedAt: '1999-01-01T00:00:00Z',
+      },
+      metadata: {
+        schemaVersion: 999,
+        repo: 'evil/repo',
+        prNumber: 1,
+        headSha: 'evil',
+        createdAt: '1999-01-01T00:00:00Z',
+        updatedAt: '1999-01-01T00:00:00Z',
+        status: 'succeeded',
+        attempts: [{ outcome: 'succeeded' }],
+        reviewedBy: 'claude-reviewer-lacey',
+      },
+      now: '2026-06-11T20:00:00Z',
+    });
+    assert.equal(doc.schemaVersion, 1);
+    assert.equal(doc.repo, DEFAULT_TUPLE.repo);
+    assert.equal(doc.prNumber, DEFAULT_TUPLE.prNumber);
+    assert.equal(doc.headSha, DEFAULT_TUPLE.headSha);
+    assert.equal(doc.createdAt, '2026-06-11T20:00:00Z');
+    assert.equal(doc.updatedAt, '2026-06-11T20:00:00Z');
+    assert.equal(doc.status, 'in_progress');
+    assert.equal(doc.reviewedBy, 'claude-reviewer-lacey');
+    assert.equal(doc.attempts.length, 1);
+    assert.equal(doc.attempts[0].attemptNumber, 1);
+    assert.equal(doc.attempts[0].startedAt, '2026-06-11T20:00:00Z');
+
+    const refreshed = writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: {
+        outcome: 'deferred',
+        attemptNumber: 100,
+        startedAt: '1999-01-01T00:00:00Z',
+      },
+      metadata: {
+        schemaVersion: 999,
+        status: 'succeeded',
+        attempts: [],
+      },
+      now: '2026-06-11T20:05:00Z',
+    }).doc;
+    assert.equal(refreshed.schemaVersion, 1);
+    assert.equal(refreshed.status, 'deferred');
+    assert.equal(refreshed.attempts.length, 2);
+    assert.equal(refreshed.attempts[1].attemptNumber, 2);
+    assert.equal(refreshed.attempts[1].startedAt, '2026-06-11T20:05:00Z');
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }
@@ -308,12 +378,13 @@ test('writeAmaAuditEntry is idempotent and preserves an existing record', () => 
 // ---------------------------------------------------------------------------
 
 test('composeAmaTrailers produces the SPEC §4.4 trailer block', () => {
+  const auditRef = amaAuditTraceRef('acme/myrepo', 1234, 'abc12345');
   const block = composeAmaTrailers({
     workerClass: 'codex',
     reviewerFamily: 'claude-reviewer-lacey',
     riskClass: 'low',
     eligibilityReason: 'clean review, reviewer family recorded, low risk',
-    auditPath: '/Users/airlock/agent-os-hq/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345.json',
+    auditRef,
   });
   // Snapshot — the trailer block is the contract (SPEC §4.4) and the
   // closing commit's `git interpret-trailers` parser reads exactly
@@ -326,19 +397,19 @@ test('composeAmaTrailers produces the SPEC §4.4 trailer block', () => {
       'Reviewed-By: claude-reviewer-lacey',
       'Risk-Class: low',
       'Eligibility-Reason: clean review, reviewer family recorded, low risk',
-      'Eligibility-Trace: /Users/airlock/agent-os-hq/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345.json',
+      'Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345',
     ].join('\n'),
   );
 });
 
 test('composeAmaTrailers refuses CR/LF injection in any field', () => {
-  for (const field of ['workerClass', 'reviewerFamily', 'riskClass', 'eligibilityReason', 'auditPath']) {
+  for (const field of ['workerClass', 'reviewerFamily', 'riskClass', 'eligibilityReason', 'auditRef']) {
     const base = {
       workerClass: 'codex',
       reviewerFamily: 'claude-reviewer-lacey',
       riskClass: 'low',
       eligibilityReason: 'clean',
-      auditPath: '/tmp/x.json',
+      auditRef: 'ama-audit:acme/myrepo:pr-1234:head-abc',
     };
     base[field] = `${base[field]}\nMalicious-Trailer: pwned`;
     assert.throws(
@@ -347,6 +418,19 @@ test('composeAmaTrailers refuses CR/LF injection in any field', () => {
       `composeAmaTrailers must refuse CR/LF injection in ${field}`,
     );
   }
+});
+
+test('composeAmaTrailers refuses filesystem paths as Eligibility-Trace refs', () => {
+  assert.throws(
+    () => composeAmaTrailers({
+      workerClass: 'codex',
+      reviewerFamily: 'claude-reviewer-lacey',
+      riskClass: 'low',
+      eligibilityReason: 'clean',
+      auditRef: '/Users/airlock/agent-os-hq/dispatch/audit/x.json',
+    }),
+    /logical trace reference/,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -452,6 +536,34 @@ test('appendAmaAuditAttempt serializes concurrent appends so both attempts survi
   }
 });
 
+test('appendAmaAuditAttempt reaps stale malformed lockfiles by mtime', () => {
+  const hqRoot = freshHqRoot();
+  try {
+    const { filePath } = writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'in_progress' },
+      now: '2026-06-11T20:00:00Z',
+    });
+    const lockPath = `${filePath}.lock`;
+    writeFileSync(lockPath, '', { mode: 0o640 });
+    const stale = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, stale, stale);
+    const { doc } = appendAmaAuditAttempt({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'deferred', marker: 'after-malformed-lock' },
+      now: '2026-06-11T20:02:00Z',
+    });
+    assert.equal(doc.status, 'deferred');
+    assert.equal(doc.attempts.length, 2);
+    assert.equal(doc.attempts[1].marker, 'after-malformed-lock');
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('ama-audit CLI reserves exit code 65 for sticky-succeeded refusal only', async () => {
   const hqRoot = freshHqRoot();
   try {
@@ -488,4 +600,28 @@ test('ama-audit CLI reserves exit code 65 for sticky-succeeded refusal only', as
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }
+});
+
+test('ama-audit trailers exits 70 for trailer composition errors', async () => {
+  const rendered = await runAmaAuditCli([
+    'trailers',
+    '--worker-class', 'codex',
+    '--reviewer', 'claude-reviewer-lacey',
+    '--risk-class', 'low',
+    '--reason', 'clean',
+    '--audit-ref', 'ama-audit:acme/myrepo:pr-1234:head-abc12345',
+  ]);
+  assert.equal(rendered.code, 0);
+  assert.match(rendered.stdout, /Eligibility-Trace: ama-audit:acme\/myrepo:pr-1234:head-abc12345/);
+
+  const failed = await runAmaAuditCli([
+    'trailers',
+    '--worker-class', 'codex',
+    '--reviewer', 'claude-reviewer-lacey',
+    '--risk-class', 'low',
+    '--reason', 'clean',
+    '--audit-ref', '/Users/airlock/agent-os-hq/dispatch/audit/x.json',
+  ]);
+  assert.equal(failed.code, 70);
+  assert.match(failed.stderr, /logical trace reference/);
 });

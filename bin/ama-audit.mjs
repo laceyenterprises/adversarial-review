@@ -10,7 +10,7 @@
  *   ama-audit append --hq-root <path> --repo <r> --pr <n> --head <sha> \
  *                    --outcome <enum> [--attempt-json <path>] [--now <iso>]
  *   ama-audit trailers --worker-class <c> --reviewer <r> --risk-class <rc> \
- *                      --reason <text> --audit-path <p>
+ *                      --reason <text> --audit-ref <ref>
  *
  * `--attempt-json <path>` is optional context the writer merges into
  * the attempt entry (e.g. `mergeCliExitCode`, `postCliGithubState`,
@@ -41,7 +41,7 @@ Usage:
   ama-audit append --hq-root <path> --repo <owner/name> --pr <n> --head <sha>
                    --outcome <enum> [--attempt-json <path>] [--now <iso>]
   ama-audit trailers --worker-class <c> --reviewer <r> --risk-class <rc>
-                     --reason <text> --audit-path <p>
+                     --reason <text> --audit-ref <ref>
 
 Common args:
   --hq-root      \$HQ_ROOT (audit file is written under
@@ -59,7 +59,7 @@ Trailers args:
   --reviewer        reviewer bot login (e.g. claude-reviewer-lacey)
   --risk-class      resolved risk class
   --reason          short human summary
-  --audit-path      absolute path to the audit JSON (for Eligibility-Trace)
+  --audit-ref       logical audit ref for Eligibility-Trace
 `;
 
 function loadAttemptJson(path) {
@@ -95,7 +95,7 @@ function parseTrailersArgs(argv) {
       reviewer: { type: 'string' },
       'risk-class': { type: 'string' },
       reason: { type: 'string' },
-      'audit-path': { type: 'string' },
+      'audit-ref': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     strict: true,
@@ -153,7 +153,7 @@ function runTrailers(argv) {
     'reviewer',
     'risk-class',
     'reason',
-    'audit-path',
+    'audit-ref',
   ]) {
     if (!values[required]) {
       process.stderr.write(`error: --${required} is required\n${USAGE}`);
@@ -166,13 +166,13 @@ function runTrailers(argv) {
       reviewerFamily: values.reviewer,
       riskClass: values['risk-class'],
       eligibilityReason: values.reason,
-      auditPath: values['audit-path'],
+      auditRef: values['audit-ref'],
     });
     process.stdout.write(`${block}\n`);
     return 0;
   } catch (err) {
     process.stderr.write(`error: ${err.message}\n`);
-    return 65;
+    return 70;
   }
 }
 

@@ -127,7 +127,7 @@ Closed-By: codex-closer (adversarial-pipe-mode)
 Reviewed-By: claude-reviewer-lacey
 Risk-Class: low
 Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required
-Eligibility-Trace: /tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json
+Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345
 EOF
 
 gh pr merge https://github.com/acme/myrepo/pull/1234 \

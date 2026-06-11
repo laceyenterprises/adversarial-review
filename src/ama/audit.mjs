@@ -106,6 +106,17 @@ function readLockTimestamp(lockPath) {
   }
 }
 
+function readLockStaleSince(lockPath) {
+  const acquiredAtMs = readLockTimestamp(lockPath);
+  if (acquiredAtMs !== null) return acquiredAtMs;
+  try {
+    return statSync(lockPath).mtimeMs;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return Date.now();
+    throw err;
+  }
+}
+
 function acquireAuditLock(filePath) {
   const lockPath = auditLockPath(filePath);
   const startedAt = Date.now();
@@ -127,11 +138,8 @@ function acquireAuditLock(filePath) {
       if (err?.code !== 'EEXIST') {
         throw err;
       }
-      const acquiredAtMs = readLockTimestamp(lockPath);
-      if (
-        acquiredAtMs !== null &&
-        (Date.now() - acquiredAtMs) >= AUDIT_LOCK_STALE_MS
-      ) {
+      const staleSinceMs = readLockStaleSince(lockPath);
+      if ((Date.now() - staleSinceMs) >= AUDIT_LOCK_STALE_MS) {
         rmSync(lockPath, { force: true });
         continue;
       }
@@ -157,7 +165,7 @@ function normalizedAttempts(existing) {
 }
 
 function buildAttempt(attemptNumber, timestamp, attempt) {
-  return { attemptNumber, startedAt: timestamp, ...attempt };
+  return { ...attempt, attemptNumber, startedAt: timestamp };
 }
 
 function deriveReconciliation(existing, attempt, timestamp) {
@@ -185,6 +193,7 @@ function buildInitialAuditDoc({
 }) {
   const attempts = [buildAttempt(1, timestamp, attempt)];
   return {
+    ...metadata,
     schemaVersion: 1,
     repo,
     prNumber: Number(prNumber),
@@ -193,7 +202,6 @@ function buildInitialAuditDoc({
     updatedAt: timestamp,
     status: deriveStatus(attempts),
     attempts,
-    ...metadata,
   };
 }
 
@@ -223,6 +231,25 @@ export function amaAuditFilePath(hqRoot, repo, prNumber, headSha) {
     'adversarial-merge-authority',
     `${safeRepo}-pr-${Number(prNumber)}-${String(headSha)}.json`,
   );
+}
+
+/**
+ * Resolve the public/logical audit trace reference used in PR merge
+ * trailers. This deliberately does not expose the watcher-local
+ * `HQ_ROOT` path.
+ *
+ * @param {string} repo       `<owner>/<name>` form.
+ * @param {number} prNumber   PR number.
+ * @param {string} headSha    Authorized head SHA.
+ * @returns {string}          Opaque audit trace reference.
+ */
+export function amaAuditTraceRef(repo, prNumber, headSha) {
+  if (!repo) throw new Error('amaAuditTraceRef: repo is required');
+  if (!Number.isFinite(Number(prNumber))) {
+    throw new Error('amaAuditTraceRef: prNumber must be numeric');
+  }
+  if (!headSha) throw new Error('amaAuditTraceRef: headSha is required');
+  return `ama-audit:${String(repo)}:pr-${Number(prNumber)}:head-${String(headSha)}`;
 }
 
 /**
@@ -297,8 +324,9 @@ function readExisting(filePath) {
  * initial attempt entry (typically `outcome: "in_progress"` with
  * eligibility evidence).
  *
- * Idempotent bootstrap: if the file already exists, the existing
- * document is returned unchanged instead of being overwritten.
+ * Refresh bootstrap: if the file already exists, append a fresh
+ * watcher-owned attempt so the surface status reflects the new
+ * dispatch instead of retaining a stale deferred/superseded state.
  *
  * @param {object} args
  * @param {string} args.hqRoot
@@ -324,7 +352,37 @@ export function writeAmaAuditEntry({
   return withAuditLock(filePath, () => {
     const existing = readExisting(filePath);
     if (existing) {
-      return { filePath, doc: existing };
+      const timestamp = now || new Date().toISOString();
+      const nextOutcome = String(attempt.outcome || '').toLowerCase();
+      const currentStatus = String(existing.status || '').toLowerCase();
+      if (currentStatus === 'succeeded' && nextOutcome !== 'succeeded') {
+        throw new AmaAuditRefusedWriteError(
+          `writeAmaAuditEntry: refusing to append '${nextOutcome}' to ` +
+          `terminal 'succeeded' record for ${repo} pr#${prNumber} ` +
+          `head=${headSha}`,
+        );
+      }
+      const priorAttempts = normalizedAttempts(existing);
+      const attempts = [
+        ...priorAttempts,
+        buildAttempt(priorAttempts.length + 1, timestamp, attempt),
+      ];
+      const doc = {
+        ...existing,
+        ...metadata,
+        schemaVersion: 1,
+        repo,
+        prNumber: Number(prNumber),
+        headSha,
+        createdAt: existing.createdAt || timestamp,
+        updatedAt: timestamp,
+        status: deriveStatus(attempts),
+        attempts,
+      };
+      writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, {
+        mode: AUDIT_FILE_MODE,
+      });
+      return { filePath, doc };
     }
     const timestamp = now || new Date().toISOString();
     const doc = buildInitialAuditDoc({
@@ -430,7 +488,7 @@ export function appendAmaAuditAttempt({
  *   Reviewed-By: <reviewerFamily>
  *   Risk-Class: <riskClass>
  *   Eligibility-Reason: <eligibilityReason>
- *   Eligibility-Trace: <auditPath>
+ *   Eligibility-Trace: <auditRef>
  *
  * Each value is stripped of CR/LF before assembly — defense against a
  * malformed reviewer login or operator-supplied eligibility reason
@@ -443,7 +501,7 @@ export function appendAmaAuditAttempt({
  * @param {string} args.reviewerFamily    reviewer bot login (e.g. "claude-reviewer-lacey")
  * @param {string} args.riskClass         resolved risk class
  * @param {string} args.eligibilityReason short human summary, one line
- * @param {string} args.auditPath         absolute path to the audit JSON
+ * @param {string} args.auditRef          logical audit trace reference
  * @returns {string} trailer block; lines joined by `\n`, no trailing newline.
  */
 export function composeAmaTrailers({
@@ -451,7 +509,7 @@ export function composeAmaTrailers({
   reviewerFamily,
   riskClass,
   eligibilityReason,
-  auditPath,
+  auditRef,
 }) {
   const sanitize = (value, label) => {
     const str = String(value ?? '');
@@ -463,12 +521,22 @@ export function composeAmaTrailers({
     }
     return str.trim();
   };
+  const sanitizedAuditRef = sanitize(auditRef, 'auditRef');
+  if (!sanitizedAuditRef) {
+    throw new Error('composeAmaTrailers: auditRef is required');
+  }
+  if (/^(?:\/|[A-Za-z]:[\\/]|file:)/i.test(sanitizedAuditRef)) {
+    throw new Error(
+      'composeAmaTrailers: auditRef must be a logical trace reference, ' +
+      'not a filesystem path',
+    );
+  }
   const lines = [
     `Closed-By: ${sanitize(workerClass, 'workerClass')}-closer (adversarial-pipe-mode)`,
     `Reviewed-By: ${sanitize(reviewerFamily, 'reviewerFamily')}`,
     `Risk-Class: ${sanitize(riskClass, 'riskClass')}`,
     `Eligibility-Reason: ${sanitize(eligibilityReason, 'eligibilityReason')}`,
-    `Eligibility-Trace: ${sanitize(auditPath, 'auditPath')}`,
+    `Eligibility-Trace: ${sanitizedAuditRef}`,
   ];
   return lines.join('\n');
 }

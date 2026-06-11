@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,6 +12,7 @@ import {
 } from '../src/ama/dispatch-closer.mjs';
 import {
   amaAuditFilePath,
+  amaAuditTraceRef,
   appendAmaAuditAttempt,
   readAmaAuditEntry,
 } from '../src/ama/audit.mjs';
@@ -20,6 +21,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const TEMPLATE_PATH = join(REPO_ROOT, 'templates', 'ama-closer-prompt.md');
 const GOLDEN_PROMPT_PATH = join(__dirname, 'fixtures', 'ama-closer-prompt.golden.md');
+const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 
 /**
  * Default eligible (reviewState, prMetadata, cfg, dispatchContext)
@@ -27,6 +29,9 @@ const GOLDEN_PROMPT_PATH = join(__dirname, 'fixtures', 'ama-closer-prompt.golden
  */
 function eligibleFixture(overrides = {}) {
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
+  const dispatchContextOverrides = overrides.dispatchContext || {};
+  const rootDir = dispatchContextOverrides.rootDir || '/tmp/ama-test-root';
+  const hqRoot = dispatchContextOverrides.hqRoot || join(rootDir, 'hq-root');
   const reviewState = {
     verdict: 'approved',
     headSha,
@@ -83,11 +88,13 @@ function eligibleFixture(overrides = {}) {
     parentSession: 'session:test:watcher',
     hqProject: 'adversarial-merge-authority',
     hqPath: '/bin/true-stub-hq',
-    hqRoot: '/tmp/ama-test-hqroot',
-    rootDir: '/tmp/ama-test-root',
+    hqRoot,
+    hqOwnerUser: CURRENT_USER,
+    currentUser: CURRENT_USER,
+    rootDir,
     templatePath: TEMPLATE_PATH,
     dispatchedAt: '2026-06-11T20:00:00Z',
-    ...overrides.dispatchContext,
+    ...dispatchContextOverrides,
   };
   return { reviewState, prMetadata, cfg, dispatchContext };
 }
@@ -222,7 +229,7 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes('Closed-By: codex-closer (adversarial-pipe-mode)'));
   assert.ok(write.captured.body.includes('Reviewed-By: claude-reviewer-lacey'));
   assert.ok(write.captured.body.includes('Risk-Class: low'));
-  assert.ok(write.captured.body.includes('Eligibility-Trace: /tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json'));
+  assert.ok(write.captured.body.includes('Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345'));
   assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
 });
 
@@ -310,17 +317,54 @@ test('cfg.workerClass=claude-code routes the closer to claude-code', async (t) =
   assert.equal(args[args.indexOf('--worker-class') + 1], 'claude-code');
 });
 
+test('eligible dispatch refuses watcher audit writes when runtime user is not the HQ owner', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-owner-mismatch-'));
+  const hqRoot = mkdtempSync(join(tmpdir(), 'ama-hq-owner-mismatch-'));
+  t.after(() => {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  });
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: {
+      rootDir,
+      hqRoot,
+      hqOwnerUser: `${CURRENT_USER}-different`,
+      currentUser: CURRENT_USER,
+    },
+  });
+  await assert.rejects(
+    () => maybeDispatchAmaCloser({
+      reviewState,
+      prMetadata,
+      cfg,
+      dispatchContext,
+      execFileImpl: async () => ({
+        stdout: '{"dispatchId":"dispatch-bootstrap","launchRequestId":"lrq_bootstrap"}',
+        stderr: '',
+      }),
+      readTemplateImpl: () => 'stubbed',
+    }),
+    /does not match HQ ownerUser/,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Test 5 — Prompt body snapshot vs the golden file.
 // ---------------------------------------------------------------------------
 
 test('composed prompt body matches the checked-in golden snapshot', () => {
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture();
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: {
+      rootDir: '/tmp/ama-test-root',
+      hqRoot: '/tmp/ama-test-hqroot',
+    },
+  });
   // Use the same substitution values the dispatch site composes.
   const templateBody = readFileSync(TEMPLATE_PATH, 'utf8');
   const auditPath =
     `${dispatchContext.hqRoot}/dispatch/audit/adversarial-merge-authority/` +
     `${dispatchContext.repo.replace('/', '-')}-pr-${prMetadata.prNumber}-${dispatchContext.reviewedSha}.json`;
+  const auditRef = amaAuditTraceRef(dispatchContext.repo, prMetadata.prNumber, dispatchContext.reviewedSha);
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,
     repo: dispatchContext.repo,
@@ -339,7 +383,7 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
       'Reviewed-By: claude-reviewer-lacey',
       'Risk-Class: low',
       'Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required',
-      `Eligibility-Trace: ${auditPath}`,
+      `Eligibility-Trace: ${auditRef}`,
     ].join('\n'),
     templateBody,
   });
@@ -548,6 +592,7 @@ test('ambiguous dispatch failure with launch request id suppresses merge-agent f
   //     mergeMethod: 'squash',
   //     requiredGateContext: 'agent-os/adversarial-gate',
   //     auditPath: '/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json',
+  //     hqOwnerUser: 'unknown',
   //     reviewedBy: 'claude-reviewer-lacey',
   //     dispatchedAt: '2026-06-11T20:00:00Z',
   //     amaTrailers: [
@@ -555,7 +600,7 @@ test('ambiguous dispatch failure with launch request id suppresses merge-agent f
   //       'Reviewed-By: claude-reviewer-lacey',
   //       'Risk-Class: low',
   //       'Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required',
-  //       'Eligibility-Trace: /tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json',
+  //       'Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345',
   //     ].join('\\n'),
   //     templateBody: tpl,
   //   });

@@ -3260,6 +3260,7 @@ async function maybeDispatchAmaClosureFor({
 
   const [owner, name] = repoPath.split('/');
   const dispatchContext = {
+    rootDir,
     repo: repoPath,
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
     reviewedSha: reviewState.headSha,
@@ -3371,6 +3372,15 @@ async function handlePostedReviewRow({
       logger.log(
         `[watcher] AMA closer dispatched for ${repoPath}#${prNumber}: ` +
         `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
+      );
+      return;
+    }
+    if (amaClosureResult?.skipMergeAgent) {
+      logger.log(
+        `[watcher] AMA closer retained ownership for ${repoPath}#${prNumber}: ` +
+        `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
+        `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
+        `workerClass=${amaClosureResult.workerClass || 'unknown'}`
       );
       return;
     }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -78,6 +79,7 @@ function eligibleFixture(overrides = {}) {
     hqProject: 'adversarial-merge-authority',
     hqPath: '/bin/true-stub-hq',
     hqRoot: '/tmp/ama-test-hqroot',
+    rootDir: '/tmp/ama-test-root',
     templatePath: TEMPLATE_PATH,
     dispatchedAt: '2026-06-11T20:00:00Z',
     ...overrides.dispatchContext,
@@ -174,8 +176,12 @@ test('cfg.enabled=true + ineligible returns reasons and never spawns hq dispatch
 // Test 3 — cfg.enabled=true + eligible dispatches with workerClass=codex.
 // ---------------------------------------------------------------------------
 
-test('cfg.enabled=true + eligible dispatches with workerClass=codex by default', async () => {
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture();
+test('cfg.enabled=true + eligible dispatches with workerClass=codex by default', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-codex-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
   const exec = buildExecMock();
   const write = buildWriteMock();
   const result = await maybeDispatchAmaCloser({
@@ -203,6 +209,7 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.equal(args[args.indexOf('--project') + 1], 'adversarial-merge-authority');
   // Prompt body was written; capture inspected for substitutions.
   assert.ok(write.captured.body, 'prompt body must be written');
+  assert.equal(write.captured.dir, `${rootDir}/data/follow-up-jobs/ama-closer-prompts`);
   assert.ok(write.captured.body.includes(`PR ${dispatchContext.prUrl}`));
   assert.ok(write.captured.body.includes(reviewState.headSha));
   assert.ok(write.captured.body.includes('--squash'));
@@ -212,9 +219,12 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
 // Test 4 — cfg.workerClass=claude-code surfaces in the hq dispatch args.
 // ---------------------------------------------------------------------------
 
-test('cfg.workerClass=claude-code routes the closer to claude-code', async () => {
+test('cfg.workerClass=claude-code routes the closer to claude-code', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-claude-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
     cfg: { workerClass: 'claude-code' },
+    dispatchContext: { rootDir },
   });
   const exec = buildExecMock();
   const write = buildWriteMock();
@@ -289,8 +299,12 @@ test('substituteTemplate leaves unknown placeholders alone', () => {
 // rather than throwing — so the watcher can fall through to merge-agent.
 // ---------------------------------------------------------------------------
 
-test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller falls through)', async () => {
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture();
+test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller falls through)', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-failure-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
   const exec = buildExecMock({ throwOn: () => true });
   const write = buildWriteMock();
   const result = await maybeDispatchAmaCloser({
@@ -305,6 +319,99 @@ test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'dispatch-failed');
   assert.ok(result.error.includes('simulated dispatch failure'));
+});
+
+test('dispatch parses machine-readable JSON stdout and records the launch request id', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-json-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"dispatch-321","launchRequestId":"lrq_321"}',
+      stderr: '',
+    }),
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(result.dispatchId, 'dispatch-321');
+  assert.equal(result.launchRequestId, 'lrq_321');
+});
+
+test('existing AMA closer dispatch suppresses a duplicate launch for the same head', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-existing-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const calls = [];
+  const execImpl = async (_cmd, args) => {
+    calls.push(args);
+    if (args[0] === 'dispatch' && args[1] === 'status') {
+      return { stdout: '{"status":"running"}', stderr: '' };
+    }
+    return { stdout: '{"dispatchId":"dispatch-123","launchRequestId":"lrq_123"}', stderr: '' };
+  };
+
+  const first = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: execImpl,
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(first.dispatched, true);
+  assert.equal(first.launchRequestId, 'lrq_123');
+
+  const second = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: {
+      ...dispatchContext,
+      dispatchedAt: '2026-06-11T20:01:00Z',
+    },
+    execFileImpl: execImpl,
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(second.dispatched, false);
+  assert.equal(second.skipMergeAgent, true);
+  assert.equal(second.reason, 'existing-dispatch-running');
+  assert.equal(second.launchRequestId, 'lrq_123');
+  assert.equal(calls.length, 2, 'second call should probe status but not re-dispatch');
+});
+
+test('ambiguous dispatch failure with launch request id suppresses merge-agent fallback', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ambiguous-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const err = new Error('dispatch transport failed');
+  err.stderr = 'simulated dispatch failure';
+  err.stdout = '{"dispatchId":"dispatch-999","launchRequestId":"lrq_999"}';
+
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => { throw err; },
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'dispatch-response-ambiguous');
+  assert.equal(result.launchRequestId, 'lrq_999');
 });
 
 /*

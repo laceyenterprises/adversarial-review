@@ -120,10 +120,10 @@ function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, risk
     // already gated on this; if the head changed since dispatch, the
     // head-match gate will fail and the closer defers.
     remediationPending: false,
-    operatorApprovedEvidence: opApprovedEvent
+    operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,
-          observedRevisionRef: opApprovedEvent?.commit_id || reviewedSha,
+          observedRevisionRef: opApprovedEvent.commit_id,
           actor: opApprovedEvent?.actor?.login || null,
           eventId: String(opApprovedEvent?.node_id || opApprovedEvent?.id || ''),
           observedAt: opApprovedEvent?.created_at || null,

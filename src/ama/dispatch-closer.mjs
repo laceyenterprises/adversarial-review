@@ -30,6 +30,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { writeFileAtomic } from '../atomic-write.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -40,6 +41,12 @@ const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
+const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
+const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
+const AMA_CLOSER_REDISPATCH_BOUND = 2;
+const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
+const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
+const AMA_CLOSER_RETRYABLE_STATUSES = new Set(['failed', 'cancelled', 'canceled', 'superseded', 'not-found']);
 
 /**
  * @typedef {Object} DispatchResult
@@ -48,8 +55,181 @@ const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
  * @property {string[]=} reasons     — populated when `reason=not-eligible`.
  * @property {string=}  workerClass  — populated when `dispatched=true`.
  * @property {string=}  dispatchId   — populated when `dispatched=true`.
+ * @property {string=}  launchRequestId — populated when `dispatched=true`.
  * @property {string=}  promptPath   — populated when `dispatched=true`.
+ * @property {boolean=} skipMergeAgent — populated when AMA owns the
+ * merge path for this tick even though no fresh launch occurred.
  */
+
+function amaCloserDispatchDir(rootDir) {
+  return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
+}
+
+function amaCloserPromptDir(rootDir) {
+  return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
+}
+
+function sanitizeDispatchPathSegment(value) {
+  return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
+function amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha } = {}) {
+  const safeRepo = sanitizeDispatchPathSegment(String(repo ?? '').replace(/\//g, '__'));
+  const safeSha = sanitizeDispatchPathSegment(String(headSha || 'no-sha'));
+  return join(
+    amaCloserDispatchDir(rootDir),
+    `${safeRepo}-pr-${Number(prNumber)}-${safeSha}.json`
+  );
+}
+
+function readJsonFile(filePath) {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readAmaCloserDispatchRecord(rootDir, identity) {
+  return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
+}
+
+function writeAmaCloserDispatchRecord(rootDir, identity, doc) {
+  mkdirSync(amaCloserDispatchDir(rootDir), { recursive: true });
+  const filePath = amaCloserDispatchFilePath(rootDir, identity);
+  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
+  return filePath;
+}
+
+function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
+  const existing = readAmaCloserDispatchRecord(rootDir, identity);
+  const next = mutate(existing ? { ...existing } : null);
+  if (!next) return existing;
+  writeAmaCloserDispatchRecord(rootDir, identity, next);
+  return next;
+}
+
+function errorDiagnosticLines(err) {
+  return [err?.message, err?.stderr, err?.stdout]
+    .filter(Boolean)
+    .flatMap((value) => String(value).split('\n'))
+    .map(line => line.trim())
+    .filter(Boolean);
+}
+
+function isExecTimeout(err) {
+  return err?.code === 'ETIMEDOUT'
+    || err?.killed === true
+    || String(err?.message || '').toLowerCase().includes('timed out');
+}
+
+function isTransientHqDispatchError(err) {
+  if (isExecTimeout(err)) return true;
+  const detail = [
+    err?.code,
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ]
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eagain|epipe)\b/.test(detail)
+    || detail.includes('database is locked')
+    || detail.includes('sqlite_busy')
+    || detail.includes('resource temporarily unavailable')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable');
+}
+
+function sleep(ms) {
+  if (!ms) return Promise.resolve();
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function resolveHqOwner(hqRoot) {
+  if (!hqRoot) return null;
+  const config = readJsonFile(join(hqRoot, '.hq', 'config.json'));
+  const ownerUser = String(config?.ownerUser || '').trim();
+  return ownerUser || null;
+}
+
+function hasAuthoritativeOwnerVisibility(asOwner) {
+  return Boolean(String(asOwner || '').trim());
+}
+
+function isNotFoundDispatchStatusError(err) {
+  if (!err) return false;
+  const code = err.code ?? err.status ?? null;
+  return (code === 1 || code === '1') && /no dispatch with id/i.test(String(err.stderr || ''));
+}
+
+async function probeAmaCloserDispatchStatus({
+  hqPath,
+  launchRequestId,
+  asOwner = null,
+  execFileImpl = execFileAsync,
+  env = {},
+} = {}) {
+  if (!hqPath || !launchRequestId) return null;
+  const args = asOwner
+    ? ['dispatch', 'status', launchRequestId, '--as-owner', asOwner]
+    : ['dispatch', 'status', launchRequestId];
+  try {
+    const { stdout } = await execFileImpl(hqPath, args, {
+      env: { ...env },
+      maxBuffer: 1024 * 1024,
+      timeout: 5_000,
+    });
+    const parsed = JSON.parse(String(stdout || '{}'));
+    const status = typeof parsed?.status === 'string'
+      ? parsed.status.trim().toLowerCase()
+      : null;
+    return status ? { status } : null;
+  } catch (err) {
+    if (hasAuthoritativeOwnerVisibility(asOwner) && isNotFoundDispatchStatusError(err)) {
+      return { status: 'not-found' };
+    }
+    return null;
+  }
+}
+
+function parseAmaCloserDispatchOutput(stdout) {
+  const text = String(stdout ?? '').trim();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {}
+
+  const lines = text.split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const candidate = lines.slice(index).join('\n').trim();
+    if (!candidate.startsWith('{')) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {}
+  }
+
+  let dispatchId = null;
+  let launchRequestId = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const dispatchMatch = /^dispatchId=([A-Za-z0-9_-]+)/.exec(trimmed);
+    if (dispatchMatch) dispatchId = dispatchMatch[1];
+    const lrqMatch = /^(?:launchRequestId|lrq)=([A-Za-z0-9_-]+)/.exec(trimmed);
+    if (lrqMatch) launchRequestId = lrqMatch[1];
+  }
+  return (dispatchId || launchRequestId) ? { dispatchId, launchRequestId } : null;
+}
+
+function normalizeDispatchIdentifiers(payload) {
+  if (!payload || typeof payload !== 'object') return { dispatchId: null, launchRequestId: null };
+  return {
+    dispatchId: String(payload.dispatchId || '').trim() || null,
+    launchRequestId: String(payload.launchRequestId || payload.lrq || payload.dispatchId || '').trim() || null,
+  };
+}
 
 /**
  * Substitute `<<PLACEHOLDER>>` markers in the template body.
@@ -185,7 +365,9 @@ export async function maybeDispatchAmaCloser({
   const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
+  const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
+  const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
   const auditPath = join(
     hqRoot,
     'dispatch',
@@ -207,10 +389,46 @@ export async function maybeDispatchAmaCloser({
     templateBody,
   });
 
-  // Persist the prompt under `<hqRoot>/dispatch/ama-closer-prompts/`
-  // so `hq dispatch --prompt <path>` can read it. The directory mirrors
-  // the existing `merge-agent-prompts/` convention.
-  const promptDir = join(hqRoot, 'dispatch', 'ama-closer-prompts');
+  const dispatchIdentity = { repo, prNumber, headSha: reviewedSha };
+  const workerClass = String(cfg.workerClass || 'codex');
+  const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
+  const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
+  const ownerUser = resolveHqOwner(hqRoot);
+  const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
+  if (existingRecord?.launchRequestId) {
+    const statusProbe = await probeAmaCloserDispatchStatus({
+      hqPath,
+      launchRequestId: existingRecord.launchRequestId,
+      asOwner: ownerUser,
+      execFileImpl,
+      env: process.env,
+    });
+    const status = statusProbe?.status || null;
+    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || status === null) {
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: status,
+        lastObservedAt: dispatchContext.dispatchedAt,
+      }));
+      return {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: status ? `existing-dispatch-${status}` : 'existing-dispatch-status-unknown',
+        workerClass: existingRecord.workerClass || workerClass,
+        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+        launchRequestId: existingRecord.launchRequestId || null,
+        promptPath: existingRecord.promptPath || null,
+      };
+    }
+    if (!AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
+      return { dispatched: false, reason: `dispatch-status-${status || 'unknown'}` };
+    }
+  } else if (existingRecord && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND) {
+    return { dispatched: false, reason: 'dispatch-retry-exhausted' };
+  }
+
+  // Persist the prompt under watcher-owned repo state and pass that path
+  // to `hq dispatch --prompt`. This avoids cross-user writes into HQ_ROOT.
   const promptPath = join(
     promptDir,
     `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}.md`,
@@ -222,9 +440,26 @@ export async function maybeDispatchAmaCloser({
     writeFileSync(promptPath, prompt, { encoding: 'utf8' });
   }
 
-  const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
-  const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
-  const workerClass = String(cfg.workerClass || 'codex');
+  const priorRetryCount = Number(existingRecord?.retryCount || 0);
+  writeAmaCloserDispatchRecord(rootDir, dispatchIdentity, {
+    schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+    workerClass,
+    promptPath,
+    promptDir,
+    hqRoot,
+    lastAttemptedAt: dispatchContext.dispatchedAt,
+    dispatchedAt: null,
+    dispatchId: existingRecord?.dispatchId || null,
+    launchRequestId: existingRecord?.launchRequestId || null,
+    retryCount: priorRetryCount + 1,
+    state: 'dispatching',
+    lastObservedStatus: existingRecord?.lastObservedStatus || null,
+    lastObservedAt: existingRecord?.lastObservedAt || null,
+    lastError: null,
+  });
 
   // `hq dispatch` args mirror the existing merge-agent dispatch (see
   // src/follow-up-merge-agent.mjs around line 3866). Differences:
@@ -253,49 +488,90 @@ export async function maybeDispatchAmaCloser({
     '--root', hqRoot,
   ];
 
-  let dispatchId = null;
-  try {
-    const { stdout } = await execFileImpl(hqPath, args, {
-      env: process.env,
-      maxBuffer: 5 * 1024 * 1024,
-    });
-    dispatchId = parseDispatchId(stdout);
-  } catch (err) {
-    // Surface the error to the caller. The watcher's existing catch
-    // block treats this as a fall-through to the merge-agent path so
-    // the PR isn't stranded by an AMA dispatch failure.
-    return {
-      dispatched: false,
-      reason: 'dispatch-failed',
-      error: String(err?.stderr || err?.message || err),
-    };
+  let execResult;
+  let transientRetryIndex = 0;
+  for (;;) {
+    try {
+      execResult = await execFileImpl(hqPath, args, {
+        env: process.env,
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: 90_000,
+        killSignal: 'SIGTERM',
+      });
+      break;
+    } catch (err) {
+      if (isTransientHqDispatchError(err) && transientRetryIndex < AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length) {
+        const delayMs = Number(AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS[transientRetryIndex]) || 0;
+        transientRetryIndex += 1;
+        await sleep(delayMs);
+        continue;
+      }
+      const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
+      const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        ...(current || {}),
+        schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
+        repo,
+        prNumber,
+        headSha: reviewedSha,
+        workerClass,
+        promptPath,
+        promptDir,
+        hqRoot,
+        lastAttemptedAt: dispatchContext.dispatchedAt,
+        dispatchedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
+        dispatchId: parsedFailure.dispatchId,
+        launchRequestId: parsedFailure.launchRequestId,
+        retryCount: Number(current?.retryCount || priorRetryCount + 1),
+        state: ambiguousLaunch ? 'dispatched' : 'dispatch-failed',
+        lastObservedStatus: ambiguousLaunch ? 'unknown' : null,
+        lastObservedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
+        lastError: String(err?.stderr || err?.message || err),
+      }));
+      return {
+        dispatched: false,
+        skipMergeAgent: ambiguousLaunch || (
+          isTransientHqDispatchError(err)
+          && Number((existingRecord?.retryCount || 0) + 1) < AMA_CLOSER_REDISPATCH_BOUND
+        ),
+        reason: ambiguousLaunch ? 'dispatch-response-ambiguous' : 'dispatch-failed',
+        error: String(err?.stderr || err?.message || err),
+        workerClass,
+        dispatchId: parsedFailure.dispatchId || null,
+        launchRequestId: parsedFailure.launchRequestId || null,
+        promptPath,
+      };
+    }
   }
+
+  const parsed = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || ''));
+  updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+    ...(current || {}),
+    schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+    workerClass,
+    promptPath,
+    promptDir,
+    hqRoot,
+    lastAttemptedAt: dispatchContext.dispatchedAt,
+    dispatchedAt: dispatchContext.dispatchedAt,
+    dispatchId: parsed.dispatchId,
+    launchRequestId: parsed.launchRequestId,
+    retryCount: Number(current?.retryCount || priorRetryCount + 1),
+    state: 'dispatched',
+    lastObservedStatus: 'starting',
+    lastObservedAt: dispatchContext.dispatchedAt,
+    lastError: null,
+  }));
 
   return {
     dispatched: true,
     workerClass,
-    dispatchId,
+    dispatchId: parsed.dispatchId || parsed.launchRequestId || null,
+    launchRequestId: parsed.launchRequestId || null,
     promptPath,
     eligibilityReasons: verdict.trace,
   };
 }
-
-/**
- * Parse the dispatchId from `hq dispatch` stdout. Format the helper
- * emits is `dispatchId=<id>\n` (single line, key=value). Robust to
- * other lines around it. Returns null on parse failure — the caller
- * treats null as "dispatch succeeded but we lost the id"; the watcher
- * will re-issue via duplicate-dispatch protection on the next tick.
- *
- * @param {string} stdout
- * @returns {string|null}
- */
-function parseDispatchId(stdout) {
-  const lines = String(stdout || '').split('\n');
-  for (const line of lines) {
-    const match = /^dispatchId=([A-Za-z0-9_\-]+)/.exec(line.trim());
-    if (match) return match[1];
-  }
-  return null;
-}
-

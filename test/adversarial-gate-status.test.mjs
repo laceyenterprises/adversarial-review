@@ -17,7 +17,7 @@ import {
   claimNextFollowUpJob,
   createFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
-import { handlePostedReviewRow } from '../src/watcher.mjs';
+import { handlePostedReviewRow, maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 
 function makeReviewRow(overrides = {}) {
   return {
@@ -740,4 +740,59 @@ test('projectAdversarialGateStatus posts the env-override context when ADV_GATE_
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot into AMA eligibility', async () => {
+  let observed = null;
+  const result = await maybeDispatchAmaClosureFor({
+    reviewStateRow: makeReviewRow({
+      last_verdict: 'Comment only',
+      risk_class: 'low',
+      remediation_pending: 0,
+      reviewer_login: 'claude-reviewer-lacey',
+    }),
+    dispatchJob: {
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+    },
+    candidate: {
+      headSha: 'abc123',
+      riskClass: 'low',
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+      branchProtection: { requiredContexts: ['agent-os/adversarial-gate', 'ci/test'] },
+      isDraft: false,
+    },
+    labelNames: [],
+    operatorApprovalEvent: null,
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 265,
+    currentRevisionRef: 'abc123',
+    logger: { warn() {} },
+    loadConfigImpl: () => ({
+      getMergeAuthorityConfig() {
+        return { enabled: true };
+      },
+    }),
+    maybeDispatchAmaCloserImpl: async (payload) => {
+      observed = payload;
+      return { dispatched: false, reason: 'fixture' };
+    },
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(observed.reviewState.blockingFindingCount, 0);
+  assert.equal(observed.reviewState.blockingFindingState, 'known');
+  assert.equal(observed.prMetadata.mergeableState, 'CLEAN');
+  assert.deepEqual(observed.prMetadata.statusCheckRollup, [
+    { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+  ]);
+  assert.deepEqual(observed.prMetadata.branchProtection.requiredContexts, [
+    'agent-os/adversarial-gate',
+    'ci/test',
+  ]);
 });

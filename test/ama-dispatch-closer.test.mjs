@@ -263,6 +263,7 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
     mergeMethod: cfg.mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,
+    hqOwnerUser: 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,
     templateBody,
@@ -387,6 +388,49 @@ test('existing AMA closer dispatch suppresses a duplicate launch for the same he
   assert.equal(second.reason, 'existing-dispatch-running');
   assert.equal(second.launchRequestId, 'lrq_123');
   assert.equal(calls.length, 2, 'second call should probe status but not re-dispatch');
+});
+
+test('existing AMA closer dispatch falls back instead of wedging on non-JSON status output', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-status-noise-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const calls = [];
+  const execImpl = async (_cmd, args) => {
+    calls.push(args);
+    if (args[0] === 'dispatch' && args[1] === 'status') {
+      return { stdout: 'warning: daemon bounced\nnot-json\n', stderr: '' };
+    }
+    return { stdout: '{"dispatchId":"dispatch-123","launchRequestId":"lrq_123"}', stderr: '' };
+  };
+
+  const first = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: execImpl,
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(first.dispatched, true);
+
+  const second = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: {
+      ...dispatchContext,
+      dispatchedAt: '2026-06-11T20:01:00Z',
+    },
+    execFileImpl: execImpl,
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(second.dispatched, false);
+  assert.equal(second.skipMergeAgent, undefined);
+  assert.equal(second.reason, 'dispatch-status-unknown');
+  assert.equal(calls.filter((args) => args[0] === 'dispatch' && args[1] === 'status').length, 4);
 });
 
 test('ambiguous dispatch failure with launch request id suppresses merge-agent fallback', async (t) => {

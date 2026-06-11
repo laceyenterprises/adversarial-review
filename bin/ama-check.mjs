@@ -130,7 +130,7 @@ function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, risk
         }
       : null,
     prAuthor: prJson?.author?.login || null,
-    reviewerFamily: latest?.author?.login || null,
+    reviewerFamily: null,
   };
   return reviewState;
 }

@@ -20,6 +20,7 @@ The predicate is the gate. Trust nothing else.
 - **Risk class:** `low`
 - **Merge method:** `squash` (NEVER rebase; SPEC §4.4 requires one canonical landed commit for provenance)
 - **Required gate context:** `agent-os/adversarial-gate`
+- **HQ owner user:** `unknown`
 - **Audit JSON destination:** `/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json`
 
 ## Step 1 — Re-run the eligibility predicate against fresh inputs
@@ -45,7 +46,7 @@ Then invoke the eligibility CLI shim. It loads the AMA config, normalizes
 the inputs, and returns the SPEC §4.2 verdict:
 
 ```bash
-node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check \
+node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --pr /tmp/ama-pr.json \
   --reviews /tmp/ama-reviews.json \
   --protection /tmp/ama-protection.json \
@@ -65,6 +66,11 @@ This is a **defer**, NOT a failure. The watcher will reconsider on its
 next tick. Write the deferred audit JSON:
 
 ```bash
+if [ "$(id -un)" != "unknown" ]; then
+  echo "ama-closer owner mismatch: expected unknown, got $(id -un)" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json")"
 cat > /tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json <<EOF
 {
   "prNumber": 1234,
@@ -155,7 +161,7 @@ SPEC §4.4:
 - Don't `gh pr merge` without `--match-head-commit abc12345abc12345abc12345abc12345abc12345`. Head advance = defer, not merge.
 - Don't terminalize as `succeeded` or `failed-without-merge` on CLI exit code alone. Always re-read GitHub state.
 - Don't retry `gh pr merge` inside this prompt. The next watcher tick re-evaluates from `in_progress` + `needsRepair=true`.
-- Don't write the audit JSON anywhere other than `/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json`. The watcher reads it back from there.
+- Don't write the audit JSON anywhere other than `/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json`, and only do it when `id -un` matches `unknown`. The watcher reads it back from there.
 - Don't commit anything to the worker's checkout. There is no checkout state to preserve — this is a close-only worker.
 
 <!-- hq:closeout:pr -->

@@ -1,7 +1,6 @@
-import {
-  DEFAULT_ADVERSARIAL_GATE_CONTEXT,
-  resolveGateStatusContext,
-} from './adversarial-gate-context.mjs';
+import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+
+const DEFAULT_ADVERSARIAL_GATE_CONTEXT = 'agent-os/adversarial-gate';
 
 const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const PENDING_CHECK_STATES = new Set([

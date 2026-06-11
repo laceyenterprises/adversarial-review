@@ -43,6 +43,7 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
+const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
@@ -164,6 +165,14 @@ function isNotFoundDispatchStatusError(err) {
   return (code === 1 || code === '1') && /no dispatch with id/i.test(String(err.stderr || ''));
 }
 
+function parseAmaCloserDispatchStatusOutput(stdout) {
+  const parsed = parseAmaCloserDispatchOutput(stdout);
+  const status = typeof parsed?.status === 'string'
+    ? parsed.status.trim().toLowerCase()
+    : null;
+  return status ? { status } : null;
+}
+
 async function probeAmaCloserDispatchStatus({
   hqPath,
   launchRequestId,
@@ -175,23 +184,32 @@ async function probeAmaCloserDispatchStatus({
   const args = asOwner
     ? ['dispatch', 'status', launchRequestId, '--as-owner', asOwner]
     : ['dispatch', 'status', launchRequestId];
-  try {
-    const { stdout } = await execFileImpl(hqPath, args, {
-      env: { ...env },
-      maxBuffer: 1024 * 1024,
-      timeout: 5_000,
-    });
-    const parsed = JSON.parse(String(stdout || '{}'));
-    const status = typeof parsed?.status === 'string'
-      ? parsed.status.trim().toLowerCase()
-      : null;
-    return status ? { status } : null;
-  } catch (err) {
-    if (hasAuthoritativeOwnerVisibility(asOwner) && isNotFoundDispatchStatusError(err)) {
-      return { status: 'not-found' };
+  for (let attempt = 0; attempt <= AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      const { stdout } = await execFileImpl(hqPath, args, {
+        env: { ...env },
+        maxBuffer: 1024 * 1024,
+        timeout: 5_000,
+      });
+      const parsed = parseAmaCloserDispatchStatusOutput(stdout);
+      if (parsed) return parsed;
+      if (attempt < AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS.length) {
+        await sleep(AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      return { status: 'unknown', degraded: true };
+    } catch (err) {
+      if (hasAuthoritativeOwnerVisibility(asOwner) && isNotFoundDispatchStatusError(err)) {
+        return { status: 'not-found' };
+      }
+      if (isTransientHqDispatchError(err) && attempt < AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS.length) {
+        await sleep(AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      return { status: 'unknown', degraded: true, error: err?.message || String(err) };
     }
-    return null;
   }
+  return { status: 'unknown', degraded: true };
 }
 
 function parseAmaCloserDispatchOutput(stdout) {
@@ -265,6 +283,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.mergeMethod     — 'squash' | 'merge'
  * @param {string} args.requiredGateContext
  * @param {string} args.auditPath       — absolute path inside HQ_ROOT
+ * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
  * @param {string} args.dispatchedAt    — ISO 8601 UTC
  * @param {string} args.templateBody    — raw template content
@@ -279,6 +298,7 @@ export function composeCloserPrompt({
   mergeMethod,
   requiredGateContext,
   auditPath,
+  hqOwnerUser,
   reviewedBy,
   dispatchedAt,
   templateBody,
@@ -292,6 +312,7 @@ export function composeCloserPrompt({
     MERGE_METHOD: mergeMethod,
     REQUIRED_GATE_CONTEXT: requiredGateContext,
     AUDIT_PATH: auditPath,
+    HQ_OWNER: hqOwnerUser,
     REVIEWED_BY: reviewedBy,
     DISPATCHED_AT: dispatchedAt,
   });
@@ -368,6 +389,7 @@ export async function maybeDispatchAmaCloser({
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
+  const ownerUser = resolveHqOwner(hqRoot);
   const auditPath = join(
     hqRoot,
     'dispatch',
@@ -384,6 +406,7 @@ export async function maybeDispatchAmaCloser({
     mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,
+    hqOwnerUser: ownerUser || 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,
     templateBody,
@@ -393,7 +416,6 @@ export async function maybeDispatchAmaCloser({
   const workerClass = String(cfg.workerClass || 'codex');
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
-  const ownerUser = resolveHqOwner(hqRoot);
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
   if (existingRecord?.launchRequestId) {
     const statusProbe = await probeAmaCloserDispatchStatus({
@@ -404,16 +426,33 @@ export async function maybeDispatchAmaCloser({
       env: process.env,
     });
     const status = statusProbe?.status || null;
-    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || status === null) {
+    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
       updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
         ...(current || existingRecord),
         lastObservedStatus: status,
         lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: statusProbe?.error || null,
       }));
       return {
         dispatched: false,
         skipMergeAgent: true,
-        reason: status ? `existing-dispatch-${status}` : 'existing-dispatch-status-unknown',
+        reason: `existing-dispatch-${status}`,
+        workerClass: existingRecord.workerClass || workerClass,
+        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+        launchRequestId: existingRecord.launchRequestId || null,
+        promptPath: existingRecord.promptPath || null,
+      };
+    }
+    if (status === 'unknown') {
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: status,
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: statusProbe?.error || 'dispatch-status-unknown',
+      }));
+      return {
+        dispatched: false,
+        reason: 'dispatch-status-unknown',
         workerClass: existingRecord.workerClass || workerClass,
         dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
         launchRequestId: existingRecord.launchRequestId || null,

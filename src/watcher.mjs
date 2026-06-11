@@ -3205,7 +3205,9 @@ async function retryPendingMergeCloseouts({
  * AMA-06A/06N wire in the full snapshot in the cutover ticket.
  */
 async function maybeDispatchAmaClosureFor({
+  rootDir = ROOT,
   reviewStateRow,
+  dispatchJob,
   candidate,
   labelNames,
   operatorApprovalEvent,
@@ -3235,6 +3237,8 @@ async function maybeDispatchAmaClosureFor({
     headSha: candidate?.headSha || currentRevisionRef || null,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || 'unknown').toLowerCase(),
     remediationPending: Boolean(reviewStateRow?.remediation_pending),
+    blockingFindingCount: Number(dispatchJob?.blockingFindingCount ?? 0),
+    blockingFindingState: String(dispatchJob?.blockingFindingState || 'unknown').trim().toLowerCase(),
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,
@@ -3251,7 +3255,7 @@ async function maybeDispatchAmaClosureFor({
     headSha: reviewState.headSha,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
-    mergeableState: String(candidate?.mergeable || '').toUpperCase(),
+    mergeableState: String(candidate?.mergeStateStatus || candidate?.mergeable || '').toUpperCase(),
     labels: Array.isArray(labelNames) ? labelNames : [],
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
@@ -3358,7 +3362,9 @@ async function handlePostedReviewRow({
     // path verbatim — no behavior change for hosts that haven't
     // opted in.
     const amaClosureResult = await maybeDispatchAmaClosureFor({
+      rootDir,
       reviewStateRow: existing,
+      dispatchJob,
       candidate,
       labelNames,
       operatorApprovalEvent,
@@ -4954,6 +4960,7 @@ export {
   fetchLivePRLabels,
   getStalePostedReviewAutoRereviewSuppression,
   handlePostedReviewRow,
+  maybeDispatchAmaClosureFor,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,
   pollOnce,

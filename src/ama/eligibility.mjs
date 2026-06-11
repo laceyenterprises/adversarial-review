@@ -18,8 +18,11 @@
  * @module ama/eligibility
  */
 
-import { summarizeChecksConclusion } from '../follow-up-merge-agent.mjs';
+import { summarizeChecksConclusion } from '../checks-summary.mjs';
 import { resolveGateStatusContext } from '../adversarial-gate-context.mjs';
+
+const OPERATOR_APPROVED_LABEL = 'operator-approved';
+const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
 
 /**
  * Hard-stop labels imported from the existing adversarial-review / merge-agent
@@ -71,7 +74,7 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  *
  * Tagged recovery-evidence union for the `merge-agent-stuck` carve-out.
  *
- * @property {'operator-approved'|'merge-agent-recovery-in-flight'} kind
+ * @property {'merge-agent-requested'} kind
  * @property {boolean} applied
  * @property {string} observedRevisionRef
  * @property {string} actor
@@ -107,7 +110,7 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {boolean}  isOpen                         False for closed / merged PRs.
  * @property {boolean}  isDraft                        Draft PRs are not eligible.
  * @property {string}   mergeableState                 GitHub's mergeable-state — 'MERGEABLE' is required.
- * @property {string[]} labels                         All current labels on the PR.
+ * @property {Array<string|{name:string}>} labels      All current labels on the PR.
  * @property {Array}    statusCheckRollup              Raw rollup that feeds `summarizeChecksConclusion()`.
  * @property {Object}   branchProtection
  * @property {string[]} branchProtection.requiredContexts Required-context list from the GitHub branch-protection API.
@@ -163,6 +166,7 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
 function hasOperatorApprovedOverride(reviewState, prMetadata) {
   const evidence = reviewState?.operatorApprovedEvidence;
   if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
+  if (!hasCurrentLabel(prMetadata, OPERATOR_APPROVED_LABEL)) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
@@ -171,8 +175,8 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
 }
 
 /**
- * Detect a current-head `adversarial-merge-requested` operator label
- * (per SPEC §4.2 #3, AMA-05 ships the label). Same evidence shape as
+ * Detect a current-head `merge-agent-requested` operator label
+ * (per SPEC §4.2 #3). Same evidence shape as
  * operator-approved — current-head + attributable.
  *
  * @param {PrMetadata} prMetadata
@@ -181,6 +185,7 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
  */
 function hasMergeRequestedOverride(prMetadata, evidence) {
   if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
+  if (!hasCurrentLabel(prMetadata, MERGE_AGENT_REQUESTED_LABEL)) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
@@ -190,6 +195,24 @@ function hasMergeRequestedOverride(prMetadata, evidence) {
 
 function normalizeLogin(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function normalizeLabelName(label) {
+  if (typeof label === 'string') return label.trim().toLowerCase();
+  if (typeof label?.name === 'string') return label.name.trim().toLowerCase();
+  return '';
+}
+
+function currentLabelSet(prMetadata) {
+  return new Set(
+    (Array.isArray(prMetadata?.labels) ? prMetadata.labels : [])
+      .map((label) => normalizeLabelName(label))
+      .filter(Boolean),
+  );
+}
+
+function hasCurrentLabel(prMetadata, labelName) {
+  return currentLabelSet(prMetadata).has(String(labelName || '').toLowerCase());
 }
 
 function hasValidOverrideActor(actor) {
@@ -217,9 +240,11 @@ function hasValidScopedOverrideEvidence(evidence, prMetadata) {
 
 /**
  * Detect the `merge-agent-stuck` carve-out per SPEC §4.2 #6 — the only
- * way the predicate can clear that label is when the caller supplies
- * current-head recovery evidence (e.g. current-head `operator-approved`
- * recovery OR a documented `merge-agent-recovery-in-flight` repair pass).
+ * way the predicate can clear that label is when the caller supplies a
+ * current-head `merge-agent-requested` recovery event and the label is still
+ * present on the PR. `operator-approved` is not a stuck recovery signal, and
+ * `merge-agent-recovery-in-flight` is a transient handoff marker validated by
+ * its caller, not merge authorization.
  *
  * The other four hard-stop labels are absolute and have no recovery path.
  *
@@ -229,11 +254,8 @@ function hasValidScopedOverrideEvidence(evidence, prMetadata) {
  */
 function hasStuckRecoveryEvidence(evidence, reviewState, prMetadata) {
   if (!hasValidScopedOverrideEvidence(evidence, prMetadata)) return false;
-  if (evidence.kind === 'operator-approved') return true;
-  if (evidence.kind !== 'merge-agent-recovery-in-flight') {
-    return false;
-  }
-  return true;
+  if (evidence.kind !== MERGE_AGENT_REQUESTED_LABEL) return false;
+  return hasCurrentLabel(prMetadata, MERGE_AGENT_REQUESTED_LABEL);
 }
 
 /**
@@ -247,9 +269,7 @@ function hasStuckRecoveryEvidence(evidence, reviewState, prMetadata) {
  * @returns {string[]}
  */
 function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence) {
-  const labels = new Set(
-    (prMetadata?.labels || []).map((l) => String(l || '').toLowerCase()),
-  );
+  const labels = currentLabelSet(prMetadata);
   const hits = [];
   for (const stop of HARD_STOP_LABELS) {
     if (!labels.has(stop)) continue;
@@ -355,9 +375,7 @@ function branchProtectionRequiresGate(prMetadata, requiredContext) {
 }
 
 function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
-  const labels = new Set(
-    (prMetadata?.labels || []).map((label) => normalizeLogin(label)),
-  );
+  const labels = currentLabelSet(prMetadata);
   const configuredLabels = new Set(
     (cfg?.eligibility?.fastMergeLabels || []).map((label) => normalizeLogin(label)),
   );
@@ -402,6 +420,11 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const recoveryEvidence = options?.recoveryEvidence || null;
   const fastMergeState = options?.fastMergeState || null;
 
+  const amaEnabled = cfg?.enabled === true;
+  if (!amaEnabled) {
+    reasons.push('ama-disabled');
+  }
+
   // SPEC §4.2 #7 — open + not draft + mergeable.
   // Check first so the more interesting gates aren't masked by a closed
   // PR's stale labels.
@@ -425,21 +448,25 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   if (!headMatchOk) reasons.push('stale-review-head');
 
   const blockingFindings = classifyBlockingFindings(reviewState);
+  const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
+  const remediationPending = reviewState?.remediationPending === true;
 
   // SPEC §4.2 #1 — settled-success verdict OR operator-approved override.
   const verdictNormalized = String(reviewState?.verdict || '').toLowerCase();
   const settledSuccess =
     SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
-    reviewState?.remediationPending !== true &&
+    remediationPending === false &&
     blockingFindings.known &&
     blockingFindings.count === 0;
   if (!settledSuccess && !operatorOverride) {
     reasons.push('verdict-not-settled-success');
   }
 
-  // SPEC §4.2 #1 — current-head non-author `operator-approved` preserves the
+  // SPEC §4.2 #1 — current-head `operator-approved` preserves the
   // review/remediation escape hatch for stale or malformed remediation state.
-  if (reviewState?.remediationPending === true && !operatorOverride) {
+  if (!operatorOverride && !remediationStateKnown) {
+    reasons.push('remediation-state-unknown');
+  } else if (!operatorOverride && remediationPending) {
     reasons.push('remediation-pending');
   }
   if (!operatorOverride && !blockingFindings.known) {
@@ -448,7 +475,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('blocking-findings-present');
   }
 
-  // SPEC §4.2 #3 — risk-class allowlist OR adversarial-merge-requested
+  // SPEC §4.2 #3 — risk-class allowlist OR merge-agent-requested
   // override on the current head.
   const riskClass = String(reviewState?.riskClass || '').toLowerCase();
   const allowedRiskClasses = new Set(
@@ -496,7 +523,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       normalized: verdictNormalized,
       settledSuccess,
       operatorOverride,
-      remediationPending: reviewState?.remediationPending === true,
+      remediationPending,
+      remediationStateKnown,
       blockingFindings,
     },
     riskClass: {
@@ -519,7 +547,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       current: currentHead,
       ok: headMatchOk,
     },
-    remediation: { pending: reviewState?.remediationPending === true },
+    remediation: { pending: remediationPending, known: remediationStateKnown },
+    config: { enabled: amaEnabled },
   };
 
   return {
@@ -539,6 +568,7 @@ export const __testables__ = {
   hasOperatorApprovedOverride,
   hasMergeRequestedOverride,
   hasValidScopedOverrideEvidence,
+  hasCurrentLabel,
   presentHardStopLabels,
   classifyCiGreen,
   classifyBlockingFindings,

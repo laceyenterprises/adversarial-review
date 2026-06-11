@@ -97,6 +97,7 @@ test('not eligible: Request-changes verdict without operator-approved override',
 
 test('eligible: Request-changes with current-head operator-approved override', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
     reviewState: {
       verdict: 'request-changes',
       operatorApprovedEvidence: {
@@ -115,6 +116,7 @@ test('eligible: Request-changes with current-head operator-approved override', (
 
 test('eligible: same-login operator-approved override is allowed at single-operator scale', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
     reviewState: {
       verdict: 'request-changes',
       operatorApprovedEvidence: {
@@ -160,6 +162,26 @@ test('not eligible: stale operator-approved evidence (head changed since label) 
   assert.ok(!result.reasons.includes('stale-review-head'));
 });
 
+test('not eligible: operator-approved evidence is ignored after the label is removed', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: [] },
+    reviewState: {
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_revoked_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
 // ---------------------------------------------------------------------------
 // Risk-class gate (SPEC §4.2 #3)
 // ---------------------------------------------------------------------------
@@ -190,8 +212,9 @@ test('eligible: medium risk class passes when the operator extends `risk_classes
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
-test('not eligible: critical risk class still needs operator-approved when only adversarial-merge-requested is present', () => {
+test('not eligible: critical risk class still needs operator-approved when only merge-agent-requested is present', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['merge-agent-requested'] },
     reviewState: { riskClass: 'critical' },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
@@ -210,8 +233,9 @@ test('not eligible: critical risk class still needs operator-approved when only 
   assert.ok(result.reasons.includes('risk-class-not-permitted'));
 });
 
-test('eligible: critical risk class requires current-head adversarial-merge-requested plus operator-approved', () => {
+test('eligible: critical risk class requires current-head merge-agent-requested plus operator-approved', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved', 'merge-agent-requested'] },
     reviewState: {
       riskClass: 'critical',
       verdict: 'request-changes',
@@ -237,6 +261,36 @@ test('eligible: critical risk class requires current-head adversarial-merge-requ
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.equal(result.trace.riskClass.permitted, true);
   assert.equal(result.trace.riskClass.requiresTwoKey, true);
+});
+
+test('not eligible: merge-agent-requested evidence is ignored after the label is removed', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      riskClass: 'critical',
+      verdict: 'request-changes',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    mergeAgentRequested: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_revoked_merge_requested',
+      observedAt: '2026-06-10T20:01:00Z',
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.riskClass.mergeRequestedOverride, false);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
 });
 
 test('not eligible: `unknown` risk class is never in the default allowlist', () => {
@@ -356,12 +410,29 @@ test('not eligible: `adversarial-merge-blocked` label always fails closed', () =
 
 test('not eligible: `do-not-merge` label fails closed', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    prMetadata: { labels: ['do-not-merge'] },
+    prMetadata: { labels: [{ name: 'do-not-merge' }] },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes('label-do-not-merge'));
 });
+
+for (const label of [
+  'merge-agent-skip',
+  'do-not-merge',
+  'no-merge-hold',
+  'merge-agent-stuck',
+  'adversarial-merge-blocked',
+]) {
+  test(`not eligible: GitHub-style ${label} label object fails closed`, () => {
+    const { reviewState, prMetadata, cfg } = eligibleFixture({
+      prMetadata: { labels: [{ name: label }] },
+    });
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+    assert.equal(result.eligible, false);
+    assert.ok(result.reasons.includes(`label-${label}`));
+  });
+}
 
 test('not eligible: `merge-agent-stuck` label fails closed WITHOUT scoped recovery evidence', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
@@ -372,15 +443,15 @@ test('not eligible: `merge-agent-stuck` label fails closed WITHOUT scoped recove
   assert.ok(result.reasons.includes('label-merge-agent-stuck'));
 });
 
-test('eligible: `merge-agent-stuck` label cleared by current-head non-author recovery evidence', () => {
+test('eligible: `merge-agent-stuck` label cleared by current-head merge-agent-requested recovery evidence', () => {
   // SPEC §4.2 #6 — the merge-agent-stuck carve-out for documented recovery.
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    prMetadata: { labels: ['merge-agent-stuck'] },
+    prMetadata: { labels: ['merge-agent-stuck', 'merge-agent-requested'] },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     recoveryEvidence: {
-      kind: 'operator-approved',
+      kind: 'merge-agent-requested',
       applied: true,
       observedRevisionRef: 'abc12345',
       actor: 'paul-the-operator',
@@ -392,14 +463,14 @@ test('eligible: `merge-agent-stuck` label cleared by current-head non-author rec
   assert.deepEqual(result.trace.blockLabels, []);
 });
 
-test('eligible: `merge-agent-stuck` recovery allows same-login operator-approved evidence', () => {
+test('eligible: `merge-agent-stuck` recovery allows same-login merge-agent-requested evidence', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    prMetadata: { labels: ['merge-agent-stuck'] },
+    prMetadata: { labels: ['merge-agent-stuck', 'merge-agent-requested'] },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     recoveryEvidence: {
-      kind: 'operator-approved',
+      kind: 'merge-agent-requested',
       applied: true,
       observedRevisionRef: 'abc12345',
       actor: 'codex-worker-bot',
@@ -409,6 +480,44 @@ test('eligible: `merge-agent-stuck` recovery allows same-login operator-approved
   });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.deepEqual(result.trace.blockLabels, []);
+});
+
+test('not eligible: `merge-agent-stuck` is not cleared by plain operator-approved recovery evidence', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['merge-agent-stuck', 'operator-approved'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    recoveryEvidence: {
+      kind: 'operator-approved',
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_wrong_recovery',
+      observedAt: '2026-06-10T20:30:00Z',
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
+});
+
+test('not eligible: `merge-agent-stuck` is not cleared by stale recovery-in-flight evidence', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['merge-agent-stuck', 'merge-agent-recovery-in-flight'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    recoveryEvidence: {
+      kind: 'merge-agent-recovery-in-flight',
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_stale_recovery',
+      observedAt: '2026-06-10T20:30:00Z',
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
 });
 
 // ---------------------------------------------------------------------------
@@ -459,6 +568,7 @@ test('not eligible: remediation-pending=true fails closed without operator-appro
 
 test('eligible: operator-approved clears remediation-pending when structural gates still pass', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
     reviewState: {
       remediationPending: true,
       verdict: 'request-changes',
@@ -474,6 +584,36 @@ test('eligible: operator-approved clears remediation-pending when structural gat
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.ok(!result.reasons.includes('remediation-pending'));
+});
+
+test('not eligible: missing remediationPending fails closed without operator-approved override', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { remediationPending: undefined },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('remediation-state-unknown'));
+  assert.equal(result.trace.remediation.known, false);
+});
+
+test('not eligible: malformed remediationPending fails closed without operator-approved override', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { remediationPending: 'false' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('remediation-state-unknown'));
+  assert.equal(result.trace.remediation.known, false);
+});
+
+test('not eligible: disabled AMA config fails closed even with a green snapshot', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    cfg: { enabled: false },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('ama-disabled'));
+  assert.equal(result.trace.config.enabled, false);
 });
 
 test('not eligible: active fast-merge override state fails closed until AMA imports the FML contract', () => {
@@ -577,6 +717,7 @@ test('reasons accumulate when multiple gates fail at once', () => {
 
 test('operator-approved evidence with applied=false is ignored', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
     reviewState: {
       verdict: 'request-changes',
       operatorApprovedEvidence: {
@@ -596,6 +737,7 @@ test('operator-approved evidence with applied=false is ignored', () => {
 
 test('operator-approved evidence with actor=`unknown` fails closed', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
     reviewState: {
       verdict: 'request-changes',
       operatorApprovedEvidence: {
@@ -614,6 +756,7 @@ test('operator-approved evidence with actor=`unknown` fails closed', () => {
 
 test('operator-approved evidence missing event id fails closed', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
     reviewState: {
       verdict: 'request-changes',
       operatorApprovedEvidence: {
@@ -632,6 +775,7 @@ test('operator-approved evidence missing event id fails closed', () => {
 
 test('operator-approved evidence missing observedAt fails closed', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
     reviewState: {
       verdict: 'request-changes',
       operatorApprovedEvidence: {
@@ -648,8 +792,9 @@ test('operator-approved evidence missing observedAt fails closed', () => {
   assert.equal(result.trace.verdict.operatorOverride, false);
 });
 
-test('adversarial-merge-requested evidence with applied=false is ignored', () => {
+test('merge-agent-requested evidence with applied=false is ignored', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['merge-agent-requested'] },
     reviewState: { riskClass: 'critical' },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
@@ -666,8 +811,9 @@ test('adversarial-merge-requested evidence with applied=false is ignored', () =>
   assert.ok(result.reasons.includes('risk-class-not-permitted'));
 });
 
-test('adversarial-merge-requested evidence missing provenance fails closed', () => {
+test('merge-agent-requested evidence missing provenance fails closed', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved', 'merge-agent-requested'] },
     reviewState: {
       riskClass: 'critical',
       verdict: 'request-changes',

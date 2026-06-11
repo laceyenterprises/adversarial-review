@@ -134,9 +134,9 @@ function allowedForLegacyMessage(canonicalKey, allowedRaw) {
 // The role-pin env vars (both canonical and legacy aliases) treat empty
 // / whitespace-only values as "unset". This preserves the back-compat
 // behavior of the pre-CFG-02 resolvers — operators have long relied on
-// `ENV=` and `unset ENV` being equivalent for these knobs. Bool/int env
-// keys still fail loud on empty-string per CFG-01's contract; this only
-// affects the string-typed role pins.
+// `ENV=` and `unset ENV` being equivalent for these knobs. This only
+// affects the string-typed role pins; the main config loader keeps its
+// own bool/int coercion rules.
 const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'AGENT_OS_ROLES_REVIEWER',
   'ADVERSARIAL_REVIEW_DEFAULT_REVIEWER',

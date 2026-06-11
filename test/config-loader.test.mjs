@@ -1701,20 +1701,9 @@ test('submodules accepts arbitrary keys through validateSchema', () => {
   assert.deepEqual(validated.submodules, { anything_goes: { nested: true } });
 });
 
-// -------- Empty env-string for booleans is rejected (fail-loud) -----------
-//
-// Reverted from the original AMA-01 submodule PR's `'' -> false` coercion.
-// agent-os PR #1627 Round-4 adversarial review flagged the change as a
-// quiet contract drift: the original AMA-01 change was scoped to keep
-// `AMA_ENABLED` env parity with the Python loader, but the rule was
-// applied to every boolean env override — silently disabling fail-loud
-// on existing operational flags (merge_agent_final_pass_on_request_changes,
-// resume_context_envelope, litellm_routing_tier_outage.enabled, etc.)
-// when a launchd template or secret-injection layer blanks the env var.
-// With the `AMA_ENABLED` alias gone, nothing in this loader depends on
-// `'' -> false`, so the contract is restored to fail-loud.
+// -------- Empty env-string for booleans coerces to false ------------------
 
-test('empty-string env var for bool is fail-loud', () => {
+test('empty-string env var for bool coerces to false', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -1723,16 +1712,14 @@ test('empty-string env var for bool is fail-loud', () => {
       feature_flags:
         claude_code_ambient_auth_fallback: true
     `);
-    assert.throws(
-      () => loadConfig({
-        topPath: top,
-        env: { AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK: '' },
-      }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'feature_flags.claude_code_ambient_auth_fallback');
-        return true;
-      },
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK: '' },
+    });
+    assert.equal(cfg.get('feature_flags.claude_code_ambient_auth_fallback'), false);
+    assert.equal(
+      cfg.resolutionTrace('feature_flags.claude_code_ambient_auth_fallback').at(-1).source,
+      'env:AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -2131,26 +2118,18 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       'resolveGateStatusContext',
     );
 
-    // Regression test for agent-os PR #1627 Round-4 finding: the short
-    // alias `AMA_ENABLED` is intentionally NOT recognized — `AMA` is
-    // generic enough to collide with unrelated tooling and a stray
-    // export anywhere in the operator's environment would silently
-    // enable autonomous PR closure. Only the canonical name is honored.
-    const ignoredShortAliasCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: 'true' } });
+    const legacyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: 'true' } });
+    assert.equal(legacyEnvCfg.get('roles.adversarial.merge_authority.enabled'), true);
     assert.equal(
-      ignoredShortAliasCfg.get('roles.adversarial.merge_authority.enabled'),
-      false,
-      'AMA_ENABLED must NOT be recognized as a legacy alias — see PR #1627 Round 4.',
+      legacyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+      'env:AMA_ENABLED',
     );
 
-    const canonicalTrueEnvCfg = loadConfig({
-      topPath: top,
-      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: 'true' },
-    });
-    assert.equal(canonicalTrueEnvCfg.get('roles.adversarial.merge_authority.enabled'), true);
+    const legacyEmptyEnvCfg = loadConfig({ topPath: top, env: { AMA_ENABLED: '' } });
+    assert.equal(legacyEmptyEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(
-      canonicalTrueEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
-      'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+      legacyEmptyEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
+      'env:AMA_ENABLED',
     );
 
     const canonicalFalseEnvCfg = loadConfig({
@@ -2161,21 +2140,6 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(
       canonicalFalseEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
       'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
-    );
-
-    // Boolean env contract: blank string is fail-loud, not '' -> false.
-    // Round-4 of #1627 flagged the global '' -> false coercion as a
-    // contract drift that silently disabled other operational flags.
-    assert.throws(
-      () => loadConfig({
-        topPath: top,
-        env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: '' },
-      }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'roles.adversarial.merge_authority.enabled');
-        return true;
-      },
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

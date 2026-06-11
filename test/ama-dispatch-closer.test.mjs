@@ -218,6 +218,12 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes(`PR ${dispatchContext.prUrl}`));
   assert.ok(write.captured.body.includes(reviewState.headSha));
   assert.ok(write.captured.body.includes('--squash'));
+  assert.ok(write.captured.body.includes('--body-file "$TRAILERS_FILE"'));
+  assert.ok(write.captured.body.includes('Closed-By: codex-closer (adversarial-pipe-mode)'));
+  assert.ok(write.captured.body.includes('Reviewed-By: claude-reviewer-lacey'));
+  assert.ok(write.captured.body.includes('Risk-Class: low'));
+  assert.ok(write.captured.body.includes('Eligibility-Trace: /tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json'));
+  assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
 });
 
 test('eligible dispatch bootstraps the watcher-owned audit record before the first closer append', async (t) => {
@@ -328,6 +334,13 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
     hqOwnerUser: 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,
+    amaTrailers: [
+      'Closed-By: codex-closer (adversarial-pipe-mode)',
+      'Reviewed-By: claude-reviewer-lacey',
+      'Risk-Class: low',
+      'Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required',
+      `Eligibility-Trace: ${auditPath}`,
+    ].join('\n'),
     templateBody,
   });
   const golden = readFileSync(GOLDEN_PROMPT_PATH, 'utf8');
@@ -537,6 +550,13 @@ test('ambiguous dispatch failure with launch request id suppresses merge-agent f
   //     auditPath: '/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json',
   //     reviewedBy: 'claude-reviewer-lacey',
   //     dispatchedAt: '2026-06-11T20:00:00Z',
+  //     amaTrailers: [
+  //       'Closed-By: codex-closer (adversarial-pipe-mode)',
+  //       'Reviewed-By: claude-reviewer-lacey',
+  //       'Risk-Class: low',
+  //       'Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required',
+  //       'Eligibility-Trace: /tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json',
+  //     ].join('\\n'),
   //     templateBody: tpl,
   //   });
   //   writeFileSync('test/fixtures/ama-closer-prompt.golden.md', prompt);

@@ -142,9 +142,46 @@ test('appendAmaAuditAttempt deferred outcome derives status=deferred', () => {
     assert.equal(doc.attempts[1].attemptNumber, 2);
     assert.equal(doc.attempts[1].outcome, 'deferred');
     assert.deepEqual(doc.attempts[1].preMergeReasons, ['risk-class-not-permitted']);
+    assert.deepEqual(doc.reconciliation, {
+      needsRepair: false,
+      lastVerifiedAt: '2026-06-11T20:01:00Z',
+    });
     // Prior attempt remains immutable.
     assert.equal(doc.attempts[0].outcome, 'in_progress');
     assert.equal(doc.attempts[0].attemptNumber, 1);
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('appendAmaAuditAttempt projects repair-needed reconciliation from appended attempt', () => {
+  const hqRoot = freshHqRoot();
+  try {
+    writeAmaAuditEntry({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'in_progress' },
+      metadata: {
+        reconciliation: {
+          needsRepair: false,
+          lastVerifiedAt: '2026-06-11T20:00:00Z',
+        },
+      },
+      now: '2026-06-11T20:00:00Z',
+    });
+    const { doc } = appendAmaAuditAttempt({
+      hqRoot,
+      ...DEFAULT_TUPLE,
+      attempt: { outcome: 'in_progress', needsRepair: true, cliExitCode: 0 },
+      now: '2026-06-11T20:02:00Z',
+    });
+    assert.equal(doc.status, 'in_progress');
+    assert.deepEqual(doc.reconciliation, {
+      needsRepair: true,
+      lastVerifiedAt: '2026-06-11T20:02:00Z',
+    });
+    assert.equal(doc.attempts.length, 2);
+    assert.equal(doc.attempts[1].needsRepair, true);
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }

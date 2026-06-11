@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { amaAuditFilePath, writeAmaAuditEntry } from './audit.mjs';
+import { amaAuditFilePath, composeAmaTrailers, writeAmaAuditEntry } from './audit.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -133,6 +133,13 @@ function buildBootstrapEligibilityReasons({ reviewState, prMetadata, verdict, di
   }
   if (verdict?.trace?.branchProtection?.ok) reasons.push('configured_gate_context_required');
   return reasons;
+}
+
+function summarizeEligibilityReason(reasons) {
+  const summary = Array.isArray(reasons)
+    ? reasons.map(reason => String(reason || '').trim()).filter(Boolean).join(', ')
+    : '';
+  return summary || 'eligibility predicate satisfied';
 }
 
 function isExecTimeout(err) {
@@ -304,6 +311,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
  * @param {string} args.dispatchedAt    — ISO 8601 UTC
+ * @param {string} args.amaTrailers     — provenance trailer block passed to `gh pr merge`
  * @param {string} args.templateBody    — raw template content
  * @returns {string}
  */
@@ -320,6 +328,7 @@ export function composeCloserPrompt({
   hqOwnerUser,
   reviewedBy,
   dispatchedAt,
+  amaTrailers,
   templateBody,
 }) {
   return substituteTemplate(templateBody, {
@@ -335,6 +344,7 @@ export function composeCloserPrompt({
     HQ_OWNER: hqOwnerUser,
     REVIEWED_BY: reviewedBy,
     DISPATCHED_AT: dispatchedAt,
+    AMA_TRAILERS: amaTrailers,
   });
 }
 
@@ -406,11 +416,25 @@ export async function maybeDispatchAmaCloser({
   const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
+  const workerClass = String(cfg.workerClass || 'codex');
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
   const ownerUser = resolveHqOwner(hqRoot);
   const auditPath = amaAuditFilePath(hqRoot, repo, prNumber, reviewedSha);
+  const bootstrapEligibilityReasons = buildBootstrapEligibilityReasons({
+    reviewState,
+    prMetadata,
+    verdict,
+    dispatchContext,
+  });
+  const amaTrailers = composeAmaTrailers({
+    workerClass,
+    reviewerFamily: dispatchContext.reviewedBy,
+    riskClass: dispatchContext.riskClass,
+    eligibilityReason: summarizeEligibilityReason(bootstrapEligibilityReasons),
+    auditPath,
+  });
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,
     repo,
@@ -424,11 +448,11 @@ export async function maybeDispatchAmaCloser({
     hqOwnerUser: ownerUser || 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,
+    amaTrailers,
     templateBody,
   });
 
   const dispatchIdentity = { repo, prNumber, headSha: reviewedSha };
-  const workerClass = String(cfg.workerClass || 'codex');
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
@@ -502,12 +526,7 @@ export async function maybeDispatchAmaCloser({
       requiredGateContexts: dispatchContext.requiredGateContext
         ? [dispatchContext.requiredGateContext]
         : [],
-      eligibilityReasons: buildBootstrapEligibilityReasons({
-        reviewState,
-        prMetadata,
-        verdict,
-        dispatchContext,
-      }),
+      eligibilityReasons: bootstrapEligibilityReasons,
       mergeMethod,
       reconciliation: {
         needsRepair: false,

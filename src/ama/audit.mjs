@@ -160,6 +160,17 @@ function buildAttempt(attemptNumber, timestamp, attempt) {
   return { attemptNumber, startedAt: timestamp, ...attempt };
 }
 
+function deriveReconciliation(existing, attempt, timestamp) {
+  const prior = existing?.reconciliation && typeof existing.reconciliation === 'object'
+    ? existing.reconciliation
+    : {};
+  return {
+    ...prior,
+    needsRepair: Boolean(attempt?.needsRepair),
+    lastVerifiedAt: timestamp,
+  };
+}
+
 export function readAmaAuditEntry(hqRoot, repo, prNumber, headSha) {
   return readExisting(amaAuditFilePath(hqRoot, repo, prNumber, headSha));
 }
@@ -398,6 +409,7 @@ export function appendAmaAuditAttempt({
       ...existing,
       updatedAt: timestamp,
       status: deriveStatus(attempts),
+      reconciliation: deriveReconciliation(existing, attempt, timestamp),
       attempts,
     };
     writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, {

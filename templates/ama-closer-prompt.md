@@ -94,17 +94,46 @@ Exit 0 — deferral is a legitimate terminal-for-this-head outcome.
 
 ### If `eligible === true`
 
-Issue the merge with `--match-head-commit` against the reviewed SHA.
-GitHub will refuse if the head has advanced; treat that refusal as a
-normal defer, not a failure.
+Record the closer attempt BEFORE `gh pr merge`, then issue the merge
+with `--match-head-commit` against the reviewed SHA. GitHub will
+refuse if the head has advanced; treat that refusal as a normal defer,
+not a failure.
 
 ```bash
+PRE_MERGE_ATTEMPT_JSON=$(mktemp)
+jq -n '{ preMergeEligible: true, attemptPhase: "before-gh-pr-merge" }' > "$PRE_MERGE_ATTEMPT_JSON"
+
+node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  --hq-root <<HQ_ROOT>> \
+  --repo <<REPO>> \
+  --pr <<PR_NUMBER>> \
+  --head <<REVIEWED_SHA>> \
+  --outcome in_progress \
+  --attempt-json "$PRE_MERGE_ATTEMPT_JSON" \
+  --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+PRE_APPEND_EXIT=$?
+rm -f "$PRE_MERGE_ATTEMPT_JSON"
+if [ $PRE_APPEND_EXIT -eq 65 ]; then
+  echo "audit append refused by sticky-succeeded guard before merge; treating as no-op" >&2
+  exit 0
+fi
+if [ $PRE_APPEND_EXIT -ne 0 ]; then
+  exit $PRE_APPEND_EXIT
+fi
+
+TRAILERS_FILE=$(mktemp)
+cat <<'EOF' > "$TRAILERS_FILE"
+<<AMA_TRAILERS>>
+EOF
+
 gh pr merge <<PR_URL>> \
   --<<MERGE_METHOD>> \
   --match-head-commit <<REVIEWED_SHA>> \
+  --body-file "$TRAILERS_FILE" \
   > /tmp/ama-merge.stdout \
   2> /tmp/ama-merge.stderr
 MERGE_EXIT=$?
+rm -f "$TRAILERS_FILE"
 ```
 
 ## Step 3 — Re-read GitHub state (CLI exit code is NON-AUTHORITATIVE)
@@ -133,12 +162,16 @@ Decision matrix:
 | `PR_STATE == OPEN && POST_HEAD == REVIEWED_SHA && MERGE_EXIT != 0` | `failed-without-merge` |
 | `PR_STATE == OPEN && POST_HEAD == REVIEWED_SHA && MERGE_EXIT == 0` | `in_progress` + `reconciliation.needsRepair = true` (the next watcher tick reconciles) |
 
-Compute the outcome, then append the attempt via the AMA-04 audit
-shim. The writer derives the surface `status` per SPEC §4.4 (incl.
-sticky-succeeded) and refuses to demote a terminal `succeeded`. Exit
-code `65` is reserved for that explicit sticky-succeeded refusal; any
-other writer/data/filesystem failure exits non-zero and must not be
-treated as success:
+Compute the outcome, then append the post-merge reconciliation attempt
+via the AMA-04 audit shim. The pre-merge append above records that this
+closer invocation reached the merge step; this second write records the
+observed terminal or repair-needed state. The writer derives the
+surface `status` per SPEC §4.4 (incl. sticky-succeeded), projects the
+top-level `reconciliation` fields from the appended attempt, and
+refuses to demote a terminal `succeeded`. Exit code `65` is reserved
+for that explicit sticky-succeeded refusal; any other
+writer/data/filesystem failure exits non-zero and must not be treated
+as success:
 
 ```bash
 if [ "$PR_STATE" = "MERGED" ] && [ "$POST_HEAD" = "<<REVIEWED_SHA>>" ]; then

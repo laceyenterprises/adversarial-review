@@ -113,7 +113,7 @@ test('eligible: Request-changes with current-head operator-approved override', (
   assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
-test('not eligible: same-login operator-approved override is rejected for PR-author self-approval', () => {
+test('eligible: shared-author operator-approved override remains valid in the current operator topology', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -127,9 +127,8 @@ test('not eligible: same-login operator-approved override is rejected for PR-aut
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, false);
-  assert.equal(result.trace.verdict.operatorOverride, false);
-  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
 test('not eligible: stale operator-approved evidence (head changed since label) is ignored', () => {
@@ -373,7 +372,7 @@ test('not eligible: `merge-agent-stuck` label fails closed WITHOUT scoped recove
   assert.ok(result.reasons.includes('label-merge-agent-stuck'));
 });
 
-test('eligible: `merge-agent-stuck` label cleared by current-head non-author recovery evidence', () => {
+test('eligible: `merge-agent-stuck` label cleared by current-head operator-approved recovery evidence', () => {
   // SPEC §4.2 #6 — the merge-agent-stuck carve-out for documented recovery.
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['merge-agent-stuck'] },
@@ -393,7 +392,7 @@ test('eligible: `merge-agent-stuck` label cleared by current-head non-author rec
   assert.deepEqual(result.trace.blockLabels, []);
 });
 
-test('not eligible: `merge-agent-stuck` recovery rejects PR-author operator-approved evidence', () => {
+test('eligible: `merge-agent-stuck` recovery remains valid when PR author and operator share a login', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['merge-agent-stuck'] },
   });
@@ -408,8 +407,8 @@ test('not eligible: `merge-agent-stuck` recovery rejects PR-author operator-appr
       observedAt: '2026-06-10T20:30:00Z',
     },
   });
-  assert.equal(result.eligible, false);
-  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.deepEqual(result.trace.blockLabels, []);
 });
 
 // ---------------------------------------------------------------------------
@@ -477,10 +476,22 @@ test('eligible: operator-approved clears remediation-pending when structural gat
   assert.ok(!result.reasons.includes('remediation-pending'));
 });
 
-test('not eligible: active fast-merge override state fails closed until AMA imports the FML contract', () => {
+test('eligible: bare fast-merge labels are audit-only when no authoritative FML state is active', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['fast-merge:docs'] },
   });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    fastMergeState: {},
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(!result.reasons.includes('fast-merge-state-unsupported'));
+  assert.equal(result.trace.fastMerge.configuredLabelPresent, true);
+  assert.equal(result.trace.fastMerge.active, false);
+});
+
+test('not eligible: active fast-merge override state fails closed until AMA imports the FML contract', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture();
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     fastMergeState: {

@@ -92,7 +92,7 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {OperatorApprovalEvidence?} operatorApprovedEvidence Latest current-head, attributable operator-approved label evidence.
  * @property {number=}                   blockingFindingCount     Structured blocking-finding count from the latest current-head review.
  * @property {string=}                   blockingFindingState     `'known'` when the count is trustworthy; `'unknown'` or missing fail closed.
- * @property {string=}                   prAuthor                 PR author login — audit-only in the current single-operator contract.
+ * @property {string=}                   prAuthor                 PR author login — audit-only in the current shared-operator contract.
  * @property {string=}                   reviewerFamily           'codex' | 'claude' — audit-only field.
  */
 
@@ -111,7 +111,7 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {Array}    statusCheckRollup              Raw rollup that feeds `summarizeChecksConclusion()`.
  * @property {Object}   branchProtection
  * @property {string[]} branchProtection.requiredContexts Required-context list from the GitHub branch-protection API.
- * @property {string=}  author                         PR author login (used as a fallback for self-approval rejection).
+ * @property {string=}  author                         PR author login — audit-only in the current shared-operator contract.
  */
 
 /**
@@ -154,7 +154,9 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
 /**
  * Detect a current-head, attributable operator-approved override. SPEC
  * §4.2 #1: when this is present, the verdict gate passes regardless of
- * the review outcome itself.
+ * the review outcome itself. In the current shared-operator topology the
+ * PR author login is not a distinct-human approval signal, so actor/author
+ * equality is audit-only here.
  *
  * @param {ReviewState} reviewState
  * @param {PrMetadata}  prMetadata
@@ -168,7 +170,6 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
   ) return false;
-  if (isSameActorAsPrAuthor(evidence.actor, reviewState, prMetadata)) return false;
   return true;
 }
 
@@ -195,16 +196,6 @@ function normalizeLogin(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-function isSameActorAsPrAuthor(actor, reviewState, prMetadata) {
-  const normalizedActor = normalizeLogin(actor);
-  if (!normalizedActor) return false;
-  const authors = [
-    normalizeLogin(prMetadata?.author),
-    normalizeLogin(reviewState?.prAuthor),
-  ].filter(Boolean);
-  return authors.includes(normalizedActor);
-}
-
 /**
  * Detect the `merge-agent-stuck` carve-out per SPEC §4.2 #6 — the only
  * way the predicate can clear that label is when the caller supplies
@@ -217,16 +208,14 @@ function isSameActorAsPrAuthor(actor, reviewState, prMetadata) {
  * @param {PrMetadata}                prMetadata
  * @returns {boolean}
  */
-function hasStuckRecoveryEvidence(evidence, reviewState, prMetadata) {
+function hasStuckRecoveryEvidence(evidence, prMetadata) {
   if (!evidence || evidence.applied !== true) return false;
   if (!evidence.actor) return false;
   if (
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
   ) return false;
-  if (evidence.kind === 'operator-approved') {
-    return !isSameActorAsPrAuthor(evidence.actor, reviewState, prMetadata);
-  }
+  if (evidence.kind === 'operator-approved') return true;
   if (evidence.kind !== 'merge-agent-recovery-in-flight') {
     return false;
   }
@@ -250,7 +239,7 @@ function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence) {
   const hits = [];
   for (const stop of HARD_STOP_LABELS) {
     if (!labels.has(stop)) continue;
-    if (stop === 'merge-agent-stuck' && hasStuckRecoveryEvidence(recoveryEvidence, reviewState, prMetadata)) {
+    if (stop === 'merge-agent-stuck' && hasStuckRecoveryEvidence(recoveryEvidence, prMetadata)) {
       // Documented scoped recovery path per SPEC §4.2 #6.
       continue;
     }
@@ -366,9 +355,9 @@ function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
     (authorizedHeadSha !== '' && authorizedHeadSha === String(prMetadata?.headSha || ''));
   const active =
     fastMergeState?.active === true ||
-    configuredLabelPresent ||
     vetoPresent ||
-    currentHeadAuthorized;
+    currentHeadAuthorized ||
+    authorizedHeadSha !== '';
   return {
     active,
     configuredLabelPresent,
@@ -434,7 +423,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('verdict-not-settled-success');
   }
 
-  // SPEC §4.2 #1 — current-head non-author `operator-approved` preserves the
+  // SPEC §4.2 #1 — current-head `operator-approved` preserves the
   // review/remediation escape hatch for stale or malformed remediation state.
   if (reviewState?.remediationPending === true && !operatorOverride) {
     reasons.push('remediation-pending');

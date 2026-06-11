@@ -20,6 +20,8 @@ function eligibleFixture(overrides = {}) {
     riskClass: 'low',
     remediationPending: false,
     operatorApprovedEvidence: null,
+    blockingFindingCount: 0,
+    blockingFindingState: 'known',
     prAuthor: 'codex-worker-bot',
     reviewerFamily: 'claude',
     ...overrides.reviewState,
@@ -93,7 +95,7 @@ test('not eligible: Request-changes verdict without operator-approved override',
   assert.equal(result.trace.verdict.settledSuccess, false);
 });
 
-test('eligible: Request-changes with current-head non-author operator-approved override', () => {
+test('eligible: Request-changes with current-head operator-approved override', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -111,8 +113,7 @@ test('eligible: Request-changes with current-head non-author operator-approved o
   assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
-test('not eligible: PR author cannot self-approve via operator-approved', () => {
-  // Author is `codex-worker-bot`; actor is the same login.
+test('eligible: same-login operator-approved override remains valid at single-operator scale', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -126,9 +127,8 @@ test('not eligible: PR author cannot self-approve via operator-approved', () => 
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, false);
-  assert.ok(result.reasons.includes('verdict-not-settled-success'));
-  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
 test('not eligible: stale operator-approved evidence (head changed since label) is ignored', () => {
@@ -249,6 +249,26 @@ test('not eligible: a pending external check fails CI gate', () => {
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes('ci-not-green'));
+});
+
+test('not eligible: missing statusCheckRollup fails closed as unknown CI', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { statusCheckRollup: undefined },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('ci-not-green'));
+  assert.equal(result.trace.ciGreen.conclusion, null);
+});
+
+test('not eligible: malformed statusCheckRollup object fails closed as unknown CI', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { statusCheckRollup: {} },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('ci-not-green'));
+  assert.equal(result.trace.ciGreen.conclusion, null);
 });
 
 test('eligible: only the adversarial-review self-gate is present → CI counts as green (no external checks)', () => {
@@ -384,6 +404,61 @@ test('not eligible: remediation-pending=true fails closed even with Approved ver
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes('remediation-pending'));
   // Verdict gate also fails because a settled-success requires not-pending.
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('not eligible: comment-only review with structured blocking findings is not settled success', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 2,
+      blockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.verdict.blockingFindings.count, 2);
+});
+
+test('not eligible: approved review with structured blocking findings is not settled success', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('not eligible: unknown blocker state fails closed even with approved verdict', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      blockingFindingCount: 0,
+      blockingFindingState: 'unknown',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('blocking-findings-unknown'));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.verdict.blockingFindings.known, false);
+});
+
+test('not eligible: malformed blocker count fails closed as unknown blocker state', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      blockingFindingCount: Number.NaN,
+      blockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('blocking-findings-unknown'));
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
 });
 

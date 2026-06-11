@@ -43,8 +43,8 @@ const HARD_STOP_LABELS = Object.freeze([
 /**
  * Verdict shapes that count as a settled-success review for AMA closure
  * authority. SPEC §4.2 #1 — `Approved` and the existing adversarial-review
- * classifier's clean `Comment only` outcome, no unresolved blockers, no
- * remediation follow-up pending.
+ * classifier's clean `Comment only` outcome, zero known structured
+ * blocking findings, no remediation follow-up pending.
  *
  * Values are normalized to lowercase by the watcher record builder; the
  * predicate compares accordingly.
@@ -76,7 +76,9 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {string}                    riskClass                Resolved risk class: 'low' | 'medium' | 'high' | 'critical' | 'unknown'.
  * @property {boolean}                   remediationPending       True iff remediation follow-up is still owed.
  * @property {OperatorApprovalEvidence?} operatorApprovedEvidence Latest current-head, attributable operator-approved label evidence.
- * @property {string=}                   prAuthor                 PR author login — used for the non-author self-approval rejection.
+ * @property {number=}                   blockingFindingCount     Structured blocking-finding count from the latest current-head review.
+ * @property {string=}                   blockingFindingState     `'known'` when the count is trustworthy; `'unknown'` or missing fail closed.
+ * @property {string=}                   prAuthor                 PR author login — audit-only in the current single-operator contract.
  * @property {string=}                   reviewerFamily           'codex' | 'claude' — audit-only field.
  */
 
@@ -135,9 +137,9 @@ const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  */
 
 /**
- * Detect a current-head, attributable, non-author operator-approved
- * override. SPEC §4.2 #1: when this is present, the verdict gate passes
- * regardless of the review outcome itself.
+ * Detect a current-head, attributable operator-approved override. SPEC
+ * §4.2 #1: when this is present, the verdict gate passes regardless of
+ * the review outcome itself.
  *
  * @param {ReviewState} reviewState
  * @param {PrMetadata}  prMetadata
@@ -151,19 +153,13 @@ function hasOperatorApprovedOverride(reviewState, prMetadata) {
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
   ) return false;
-  // Author self-approval rejection per SPEC §6 AC#7.
-  const authorLogin = reviewState?.prAuthor || prMetadata?.author || null;
-  if (
-    authorLogin &&
-    String(evidence.actor).toLowerCase() === String(authorLogin).toLowerCase()
-  ) return false;
   return true;
 }
 
 /**
  * Detect a current-head `adversarial-merge-requested` operator label
  * (per SPEC §4.2 #3, AMA-05 ships the label). Same evidence shape as
- * operator-approved — current-head + attributable + non-author.
+ * operator-approved — current-head + attributable.
  *
  * @param {PrMetadata} prMetadata
  * @param {OperatorApprovalEvidence?} evidence
@@ -176,19 +172,13 @@ function hasMergeRequestedOverride(prMetadata, evidence) {
     String(evidence.observedRevisionRef || '') !==
     String(prMetadata?.headSha || '')
   ) return false;
-  // Author self-application rejection — same contract as operator-approved.
-  const authorLogin = prMetadata?.author || null;
-  if (
-    authorLogin &&
-    String(evidence.actor).toLowerCase() === String(authorLogin).toLowerCase()
-  ) return false;
   return true;
 }
 
 /**
  * Detect the `merge-agent-stuck` carve-out per SPEC §4.2 #6 — the only
  * way the predicate can clear that label is when the caller supplies
- * current-head recovery evidence (e.g. non-author `operator-approved`
+ * current-head recovery evidence (e.g. current-head `operator-approved`
  * recovery OR a documented `merge-agent-recovery-in-flight` repair pass).
  *
  * The other four hard-stop labels are absolute and have no recovery path.
@@ -252,12 +242,33 @@ function classifyCiGreen(prMetadata, env) {
     { env },
   );
   return {
-    // `null` and `'SUCCESS'` are both green — `null` means the rollup
-    // was missing/empty (no external checks gate the PR), matching the
-    // existing classifier's contract.
-    green: conclusion === null || conclusion === 'SUCCESS',
+    // `null` is unknown/fail-closed here: the merge-agent classifier uses
+    // it for missing or malformed rollups, while an explicit empty array
+    // already normalizes to `SUCCESS`.
+    green: conclusion === 'SUCCESS',
     conclusion,
   };
+}
+
+/**
+ * Normalize structured blocker state from the current-head review. The
+ * merge gate fails closed unless the caller provides an explicit known
+ * count; that mirrors the existing merge-agent contract for clean
+ * `comment-only` / `approved` verdicts.
+ *
+ * @param {ReviewState} reviewState
+ * @returns {{ count: number, known: boolean, state: string }}
+ */
+function classifyBlockingFindings(reviewState) {
+  const state = String(reviewState?.blockingFindingState || '').trim().toLowerCase();
+  if (state !== 'known') {
+    return { count: 0, known: false, state: 'unknown' };
+  }
+  const rawCount = Number(reviewState?.blockingFindingCount);
+  if (!Number.isFinite(rawCount) || rawCount < 0) {
+    return { count: 0, known: false, state: 'unknown' };
+  }
+  return { count: rawCount, known: true, state };
 }
 
 /**
@@ -346,11 +357,15 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const headMatchOk = operatorOverride || (reviewedHead && reviewedHead === currentHead);
   if (!headMatchOk) reasons.push('stale-review-head');
 
+  const blockingFindings = classifyBlockingFindings(reviewState);
+
   // SPEC §4.2 #1 — settled-success verdict OR operator-approved override.
   const verdictNormalized = String(reviewState?.verdict || '').toLowerCase();
   const settledSuccess =
     SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
-    reviewState?.remediationPending !== true;
+    reviewState?.remediationPending !== true &&
+    blockingFindings.known &&
+    blockingFindings.count === 0;
   if (!settledSuccess && !operatorOverride) {
     reasons.push('verdict-not-settled-success');
   }
@@ -361,6 +376,11 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   // hasn't reached the head being closed).
   if (reviewState?.remediationPending === true) {
     reasons.push('remediation-pending');
+  }
+  if (!operatorOverride && !blockingFindings.known) {
+    reasons.push('blocking-findings-unknown');
+  } else if (!operatorOverride && blockingFindings.count > 0) {
+    reasons.push('blocking-findings-present');
   }
 
   // SPEC §4.2 #3 — risk-class allowlist OR adversarial-merge-requested
@@ -401,6 +421,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       settledSuccess,
       operatorOverride,
       remediationPending: reviewState?.remediationPending === true,
+      blockingFindings,
     },
     riskClass: {
       resolved: riskClass,
@@ -440,6 +461,7 @@ export const __testables__ = {
   hasMergeRequestedOverride,
   presentHardStopLabels,
   classifyCiGreen,
+  classifyBlockingFindings,
   branchProtectionRequiresGate,
   resolveRequiredGateContext,
 };

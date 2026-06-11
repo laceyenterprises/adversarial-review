@@ -15,10 +15,7 @@ import { userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
-import {
-  DEFAULT_ADVERSARIAL_GATE_CONTEXT,
-  resolveGateStatusContext,
-} from './adversarial-gate-context.mjs';
+import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
@@ -190,9 +187,6 @@ function resolveHqDispatchTimeoutMs(env = process.env, options = {}) {
   const parsed = Number(cfgValue);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_DISPATCH_TIMEOUT_MS;
 }
-
-const SUCCESSFUL_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
-const PENDING_CHECK_STATES = new Set(['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED', 'WAITING', 'REQUESTED']);
 
 // Final-pass-on-request-changes is the opt-in escape valve for the
 // convergence-loop deadlock observed on 2026-05-14: when the reviewer
@@ -1038,84 +1032,6 @@ function extractOperatorNotes(prBody) {
     text.slice(0, 2_000),
     'END UNTRUSTED PR BODY NOTES',
   ].join('\n');
-}
-
-// Identify a status-rollup item that belongs to the adversarial-review
-// pipeline's OWN gate (the commit status the watcher posts via
-// adversarial-gate-status.mjs, context `agent-os/adversarial-gate` by default,
-// overridable through ADV_GATE_STATUS_CONTEXT).
-function adversarialOwnCheckContexts(env = process.env) {
-  const contexts = new Set([DEFAULT_ADVERSARIAL_GATE_CONTEXT.toLowerCase()]);
-  try {
-    contexts.add(String(resolveGateStatusContext(env)).trim().toLowerCase());
-  } catch {
-    // A malformed ADV_GATE_STATUS_CONTEXT must not break the merge gate; the
-    // default constant is already in the set.
-  }
-  return contexts;
-}
-
-function isAdversarialOwnStatusContext(item, excludeContexts) {
-  // The watcher currently publishes its own gate as a legacy commit status,
-  // surfaced by GitHub GraphQL as `StatusContext.context`. CheckRun names are
-  // external CI surface area and must keep gating even if they exactly match
-  // the configured context or share an `agent-os/adversarial*` prefix. If the
-  // publisher migrates to CheckRun, this predicate and the branch-protection
-  // contract must change together.
-  if (item?.__typename && item.__typename !== 'StatusContext') {
-    return false;
-  }
-  const ctx = String(item?.context || '').trim().toLowerCase();
-  if (!ctx) return false;
-  return excludeContexts.has(ctx);
-}
-
-// The merge-agent must NOT gate on the adversarial-review pipeline's OWN
-// convergence check. It already receives the review verdict directly via
-// `job.lastVerdict`, and the merge-agent is the component that converges the
-// PR — waiting on the review's own gate-status is circular, and treating a
-// `Request changes` gate-status as a hard CI failure double-counts the verdict
-// (the verdict gates are handled separately, with the ultra-major/merge-by-
-// default contract). Real external CI still gates. (Operator directive
-// 2026-05-25.)
-function summarizeChecksConclusion(statusCheckRollup, { env = process.env } = {}) {
-  if (!Array.isArray(statusCheckRollup)) {
-    return null;
-  }
-  const excludeContexts = adversarialOwnCheckContexts(env);
-  const relevant = statusCheckRollup.filter(
-    (item) => !isAdversarialOwnStatusContext(item, excludeContexts)
-  );
-  if (relevant.length === 0) {
-    // No checks at all, or only the review pipeline's own gate → nothing
-    // external to wait on.
-    return 'SUCCESS';
-  }
-
-  let sawPending = false;
-  for (const item of relevant) {
-    const rawState = String(
-      item?.conclusion
-      || item?.status
-      || item?.state
-      || item?.statusCheckRollup?.state
-      || ''
-    ).trim().toUpperCase();
-    if (!rawState) {
-      sawPending = true;
-      continue;
-    }
-    if (PENDING_CHECK_STATES.has(rawState)) {
-      sawPending = true;
-      continue;
-    }
-    if (SUCCESSFUL_CHECK_STATES.has(rawState)) {
-      continue;
-    }
-    return rawState;
-  }
-
-  return sawPending ? 'PENDING' : 'SUCCESS';
 }
 
 function mergeAgentDispatchDir(rootDir) {

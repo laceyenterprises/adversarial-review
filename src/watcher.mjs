@@ -110,6 +110,7 @@ import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // runs unchanged. AMA-06A/06N flip the broader coexistence semantics
 // once the closer has soaked.
 import { maybeDispatchAmaCloser } from './ama/dispatch-closer.mjs';
+import { buildAmaPrMetadata, buildAmaReviewStateFromDispatchJob } from './ama/snapshot.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
@@ -3186,7 +3187,8 @@ async function retryPendingMergeCloseouts({
 
 /**
  * Resolve the AMA cfg subtree, build (reviewState, prMetadata)
- * snapshots from the watcher's existing row + candidate data, and
+ * snapshots from the merge-agent dispatch job plus live rollup /
+ * branch-protection data, and
  * call `maybeDispatchAmaCloser`. Returns the dispatch result; the
  * caller checks `.dispatched` and skips merge-agent on `true`.
  *
@@ -3196,26 +3198,26 @@ async function retryPendingMergeCloseouts({
  * `loadConfigCached().getMergeAuthorityConfig()`, which is cached
  * across ticks.
  *
- * Snapshot mapping is best-effort against the watcher's existing
- * shapes. Fields the watcher doesn't already have (e.g. branch
- * protection's resolved required contexts) are left empty, and the
- * eligibility predicate fails-closed on them — meaning AMA dispatch
- * won't fire in the watcher path until the operator wires those
- * fetches in. That's intentional: AMA-03 lands the dispatch *path*;
- * AMA-06A/06N wire in the full snapshot in the cutover ticket.
+ * AMA shares the canonical eligibility predicate with the closer. The
+ * watcher must therefore supply the same load-bearing inputs the
+ * closer re-checks: blocker state from the merge-agent dispatch job,
+ * current-head CI rollup, and live branch-protection contexts.
  */
 async function maybeDispatchAmaClosureFor({
-  reviewStateRow,
-  candidate,
+  dispatchJob,
+  remediationPending = null,
   labelNames,
   operatorApprovalEvent,
   mergeAgentRequestEvent,
+  reviewerLogin = '',
   repoPath,
   prNumber,
   currentRevisionRef,
   logger,
   loadConfigImpl = loadConfigCached,
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
+  fetchPullRequestRollupImpl = fetchPullRequestRollup,
+  branchProtectionChecker = adversarialGateBranchProtectionChecker,
 }) {
   let cfg;
   try {
@@ -3230,33 +3232,37 @@ async function maybeDispatchAmaClosureFor({
     return { dispatched: false, reason: 'ama-disabled' };
   }
 
-  const reviewState = {
-    verdict: String(reviewStateRow?.last_verdict || '').toLowerCase(),
-    headSha: candidate?.headSha || currentRevisionRef || null,
-    riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || 'unknown').toLowerCase(),
-    remediationPending: Boolean(reviewStateRow?.remediation_pending),
-    operatorApprovedEvidence: operatorApprovalEvent
-      ? {
-          applied: true,
-          observedRevisionRef: operatorApprovalEvent.headSha || operatorApprovalEvent.head_sha || null,
-          actor: operatorApprovalEvent.actor || null,
-          eventId: operatorApprovalEvent.id || operatorApprovalEvent.nodeId || null,
-          observedAt: operatorApprovalEvent.createdAt || operatorApprovalEvent.created_at || null,
-        }
-      : null,
-    prAuthor: candidate?.prAuthor || null,
-  };
-  const prMetadata = {
+  const reviewState = buildAmaReviewStateFromDispatchJob({
+    dispatchJob,
+    currentRevisionRef,
+    operatorApprovalEvent,
+    remediationPending,
+  });
+  let rollup;
+  try {
+    rollup = await fetchPullRequestRollupImpl(repoPath, prNumber, {
+      execFileImpl: execFileAsync,
+      recordApiCallImpl: recordApiCall,
+    });
+  } catch (err) {
+    logger?.warn?.(`[watcher] AMA rollup fetch failed for ${repoPath}#${prNumber}: ${err?.message || err}`);
+    return { dispatched: false, reason: 'rollup-fetch-failed' };
+  }
+  const protection = await branchProtectionChecker({
+    repoPath,
+    baseBranch: rollup?.baseRefName || dispatchJob?.baseBranch || 'main',
+  });
+  const prMetadata = buildAmaPrMetadata({
     prNumber,
-    headSha: reviewState.headSha,
-    isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
-    isDraft: Boolean(candidate?.isDraft),
-    mergeableState: String(candidate?.mergeable || '').toUpperCase(),
-    labels: Array.isArray(labelNames) ? labelNames : [],
-    statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
-    branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
-    author: candidate?.prAuthor || null,
-  };
+    headSha: rollup?.headRefOid || reviewState.headSha,
+    prState: rollup?.mergedAt ? 'merged' : (rollup?.state || dispatchJob?.prState || 'open'),
+    isDraft: Boolean(rollup?.isDraft),
+    mergeableState: String(rollup?.mergeStateStatus || rollup?.mergeable || dispatchJob?.mergeable || '').toUpperCase(),
+    labels: Array.isArray(labelNames) && labelNames.length > 0 ? labelNames : (rollup?.labels || []),
+    statusCheckRollup: Array.isArray(rollup?.checks) ? rollup.checks : [],
+    requiredContexts: protection?.requiredContexts || [],
+    author: rollup?.author?.login || dispatchJob?.prAuthor || null,
+  });
 
   const [owner, name] = repoPath.split('/');
   const dispatchContext = {
@@ -3265,7 +3271,7 @@ async function maybeDispatchAmaClosureFor({
     reviewedSha: reviewState.headSha,
     riskClass: reviewState.riskClass,
     requiredGateContext: resolveGateStatusContext(),
-    reviewedBy: reviewStateRow?.reviewer_login || '',
+    reviewedBy: reviewerLogin || '',
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
   };
@@ -3357,11 +3363,12 @@ async function handlePostedReviewRow({
     // path verbatim — no behavior change for hosts that haven't
     // opted in.
     const amaClosureResult = await maybeDispatchAmaClosureFor({
-      reviewStateRow: existing,
-      candidate,
+      dispatchJob,
+      remediationPending: Boolean(existing?.remediation_pending),
       labelNames,
       operatorApprovalEvent,
       mergeAgentRequestEvent,
+      reviewerLogin: existing?.reviewer_login || '',
       repoPath,
       prNumber,
       currentRevisionRef,

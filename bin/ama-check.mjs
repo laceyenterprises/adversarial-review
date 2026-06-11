@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
+import { buildAmaPrMetadata, buildAmaReviewSnapshotFromCloserInputs } from '../src/ama/snapshot.mjs';
 import { loadConfigCached } from '../src/config-loader.mjs';
 
 const USAGE = `\
@@ -65,76 +66,6 @@ function loadJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-/**
- * Normalize a `gh pr view --json reviews` payload + the
- * `--reviewed-sha` flag into the `reviewState` shape the eligibility
- * predicate consumes. Picks the latest review submitted at or after
- * the reviewed SHA was set.
- *
- * Reviewer-family resolution is best-effort: the predicate records
- * cross-model attribution per SPEC §4.2 #2 but does NOT gate on it
- * (audit-only). If the reviewer login isn't easily classifiable, the
- * `reviewerFamily` field stays null — the predicate's structural
- * gates still fire.
- */
-function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, riskClass }) {
-  const reviews = Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : [];
-  // Take the most recent review on the reviewed head; fall back to the
-  // most recent review overall.
-  const reviewsForHead = reviews.filter((r) => r?.commit?.oid === reviewedSha);
-  const latest = (reviewsForHead.length > 0 ? reviewsForHead : reviews)
-    .slice()
-    .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')))[0]
-    || null;
-  // Map GitHub review states to the predicate's normalized verdict
-  // strings. APPROVED -> 'approved'; COMMENTED -> 'comment-only';
-  // CHANGES_REQUESTED -> 'request-changes'.
-  const ghState = String(latest?.state || '').toUpperCase();
-  const verdictMap = {
-    APPROVED: 'approved',
-    COMMENTED: 'comment-only',
-    CHANGES_REQUESTED: 'request-changes',
-  };
-  const verdict = verdictMap[ghState] || String(latest?.state || '').toLowerCase();
-
-  // Walk the timeline for the latest current-head `operator-approved`
-  // labeled event. The eligibility predicate applies the head-scope +
-  // attribution + non-author rules itself; this layer only normalizes
-  // the shape.
-  const timeline = Array.isArray(timelineJson) ? timelineJson : [];
-  const latestLabeledFor = (label) => {
-    const events = timeline
-      .filter((e) => e?.event === 'labeled' && String(e?.label?.name || '').toLowerCase() === label)
-      .slice()
-      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
-    return events[0] || null;
-  };
-  const opApprovedEvent = latestLabeledFor('operator-approved');
-
-  const reviewState = {
-    verdict,
-    headSha: reviewedSha,
-    riskClass,
-    // Remediation-pending is operator-side state the closer can't fully
-    // observe; default false here. The watcher's eligibility check
-    // already gated on this; if the head changed since dispatch, the
-    // head-match gate will fail and the closer defers.
-    remediationPending: false,
-    operatorApprovedEvidence: opApprovedEvent
-      ? {
-          applied: true,
-          observedRevisionRef: opApprovedEvent?.commit_id || reviewedSha,
-          actor: opApprovedEvent?.actor?.login || null,
-          eventId: String(opApprovedEvent?.node_id || opApprovedEvent?.id || ''),
-          observedAt: opApprovedEvent?.created_at || null,
-        }
-      : null,
-    prAuthor: prJson?.author?.login || null,
-    reviewerFamily: latest?.author?.login || null,
-  };
-  return reviewState;
-}
-
 function buildPrMetadata({ prJson, protectionJson }) {
   // Branch-protection contexts come from
   // `required_status_checks.contexts` or, on newer GitHub responses,
@@ -144,19 +75,19 @@ function buildPrMetadata({ prJson, protectionJson }) {
     .concat(Array.isArray(checks?.contexts) ? checks.contexts : [])
     .concat(Array.isArray(checks?.checks) ? checks.checks.map((c) => c?.context).filter(Boolean) : []);
 
-  return {
+  return buildAmaPrMetadata({
     prNumber: Number(prJson?.number),
     headSha: String(prJson?.headRefOid || ''),
-    isOpen: String(prJson?.state || '').toUpperCase() === 'OPEN',
+    prState: String(prJson?.state || ''),
     isDraft: prJson?.isDraft === true,
     mergeableState: String(prJson?.mergeStateStatus || prJson?.mergeable || '').toUpperCase(),
     labels: Array.isArray(prJson?.labels)
-      ? prJson.labels.map((l) => String(l?.name || l)).filter(Boolean)
+      ? prJson.labels.map((label) => String(label?.name || label)).filter(Boolean)
       : [],
     statusCheckRollup: Array.isArray(prJson?.statusCheckRollup) ? prJson.statusCheckRollup : [],
-    branchProtection: { requiredContexts },
+    requiredContexts,
     author: prJson?.author?.login || null,
-  };
+  });
 }
 
 function main(argv = process.argv.slice(2)) {
@@ -182,7 +113,7 @@ function main(argv = process.argv.slice(2)) {
     return 1;
   }
   const cfg = loadConfigCached().getMergeAuthorityConfig();
-  const reviewState = buildReviewState({
+  const { reviewState, options } = buildAmaReviewSnapshotFromCloserInputs({
     reviewsJson,
     prJson,
     timelineJson,
@@ -190,7 +121,9 @@ function main(argv = process.argv.slice(2)) {
     riskClass: args['risk-class'],
   });
   const prMetadata = buildPrMetadata({ prJson, protectionJson });
-  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg);
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    ...options,
+  });
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return 0;
 }

@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
 
 import {
   composeCloserPrompt,
@@ -77,7 +78,7 @@ function eligibleFixture(overrides = {}) {
     parentSession: 'session:test:watcher',
     hqProject: 'adversarial-merge-authority',
     hqPath: '/bin/true-stub-hq',
-    hqRoot: '/tmp/ama-test-hqroot',
+    hqRoot: mkdtempSync(join(tmpdir(), 'ama-test-hqroot-')),
     templatePath: TEMPLATE_PATH,
     dispatchedAt: '2026-06-11T20:00:00Z',
     ...overrides.dispatchContext,
@@ -90,13 +91,19 @@ function eligibleFixture(overrides = {}) {
  * scripted dispatch id. Mirrors the contract `maybeDispatchAmaCloser`
  * expects (`{ stdout, stderr }` return shape).
  */
-function buildExecMock({ stdout = 'dispatchId=lrq_test_0001\n', throwOn = null } = {}) {
+function buildExecMock({
+  stdout = JSON.stringify({ dispatchId: 'disp_test_0001', lrq: 'lrq_test_0001' }),
+  throwOn = null,
+  errorFactory = null,
+} = {}) {
   const calls = [];
+  let callCount = 0;
   const impl = async (cmd, args, _opts) => {
     calls.push({ cmd, args });
-    if (throwOn && throwOn(cmd, args)) {
-      const err = new Error('exec failed');
-      err.stderr = 'simulated dispatch failure';
+    callCount += 1;
+    if (throwOn && throwOn(cmd, args, callCount)) {
+      const err = errorFactory ? errorFactory(callCount) : new Error('exec failed');
+      err.stderr ||= 'simulated dispatch failure';
       throw err;
     }
     return { stdout, stderr: '' };
@@ -189,7 +196,8 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   });
   assert.equal(result.dispatched, true);
   assert.equal(result.workerClass, 'codex');
-  assert.equal(result.dispatchId, 'lrq_test_0001');
+  assert.equal(result.dispatchId, 'disp_test_0001');
+  assert.equal(result.launchRequestId, 'lrq_test_0001');
   assert.equal(exec.calls.length, 1);
   const args = exec.calls[0].args;
   assert.ok(args.includes('--worker-class'));
@@ -206,6 +214,29 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes(`PR ${dispatchContext.prUrl}`));
   assert.ok(write.captured.body.includes(reviewState.headSha));
   assert.ok(write.captured.body.includes('--squash'));
+});
+
+test('eligible AMA dispatch writes watcher-owned in_progress audit state before handoff', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-audit-'));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { hqRoot: root },
+  });
+  const exec = buildExecMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, hqRoot: root },
+    execFileImpl: exec.impl,
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(result.dispatched, true);
+  const audit = JSON.parse(readFileSync(result.auditPath, 'utf8'));
+  assert.equal(audit.status, 'in_progress');
+  assert.equal(audit.reviewSha, reviewState.headSha);
+  assert.equal(audit.authorizingEvidence.blockingFindingCount, 0);
+  assert.equal(audit.closerDispatch.dispatchId, 'disp_test_0001');
+  assert.equal(audit.closerDispatch.launchRequestId, 'lrq_test_0001');
 });
 
 // ---------------------------------------------------------------------------
@@ -238,7 +269,9 @@ test('cfg.workerClass=claude-code routes the closer to claude-code', async () =>
 // ---------------------------------------------------------------------------
 
 test('composed prompt body matches the checked-in golden snapshot', () => {
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture();
+  const { prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { hqRoot: '/tmp/ama-test-hqroot' },
+  });
   // Use the same substitution values the dispatch site composes.
   const templateBody = readFileSync(TEMPLATE_PATH, 'utf8');
   const auditPath =
@@ -305,6 +338,45 @@ test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'dispatch-failed');
   assert.ok(result.error.includes('simulated dispatch failure'));
+});
+
+test('AMA dispatch retries transient HQ failures before succeeding', async () => {
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture();
+  const exec = buildExecMock({
+    throwOn: (_cmd, _args, callCount) => callCount < 3,
+    errorFactory: () => {
+      const err = new Error('timed out');
+      err.code = 'ETIMEDOUT';
+      return err;
+    },
+  });
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: buildWriteMock().impl,
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(exec.calls.length, 3);
+});
+
+test('AMA dispatch accepts legacy key=value stdout as a fallback', async () => {
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture();
+  const exec = buildExecMock({ stdout: 'dispatchId=legacy_ama_001\n' });
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: buildWriteMock().impl,
+    readTemplateImpl: () => 'stubbed',
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(result.dispatchId, 'legacy_ama_001');
 });
 
 /*

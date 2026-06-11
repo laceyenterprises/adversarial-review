@@ -30,6 +30,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { amaAuditPath, buildAmaInProgressRecord, readAmaAuditRecord, writeAmaAuditRecord } from './audit.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -40,6 +41,8 @@ const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
+const HQ_DISPATCH_TIMEOUT_MS = 90_000;
+const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 
 /**
  * @typedef {Object} DispatchResult
@@ -186,13 +189,12 @@ export async function maybeDispatchAmaCloser({
   const reviewedSha = dispatchContext.reviewedSha;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
-  const auditPath = join(
+  const auditPath = amaAuditPath({
     hqRoot,
-    'dispatch',
-    'audit',
-    'adversarial-merge-authority',
-    `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}.json`,
-  );
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+  });
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,
     repo,
@@ -225,6 +227,32 @@ export async function maybeDispatchAmaCloser({
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const workerClass = String(cfg.workerClass || 'codex');
+  const now = dispatchContext.dispatchedAt || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const existingRecord = readAmaAuditRecord(auditPath);
+  if (existingRecord?.status === 'in_progress') {
+    return {
+      dispatched: true,
+      workerClass,
+      dispatchId: existingRecord?.closerDispatch?.dispatchId || null,
+      launchRequestId: existingRecord?.closerDispatch?.launchRequestId || null,
+      promptPath,
+      auditPath,
+      existingDispatch: true,
+      eligibilityReasons: verdict.trace,
+    };
+  }
+
+  const auditRecord = buildAmaInProgressRecord({
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+    reviewState,
+    prMetadata,
+    dispatchContext,
+    eligibilityReasons: verdict.reasons,
+    now,
+  });
+  writeAmaAuditRecord(auditPath, auditRecord);
 
   // `hq dispatch` args mirror the existing merge-agent dispatch (see
   // src/follow-up-merge-agent.mjs around line 3866). Differences:
@@ -253,17 +281,23 @@ export async function maybeDispatchAmaCloser({
     '--root', hqRoot,
   ];
 
-  let dispatchId = null;
+  let parsed;
   try {
-    const { stdout } = await execFileImpl(hqPath, args, {
-      env: process.env,
-      maxBuffer: 5 * 1024 * 1024,
-    });
-    dispatchId = parseDispatchId(stdout);
+    parsed = await dispatchAmaWithRetry({ execFileImpl, hqPath, args });
   } catch (err) {
     // Surface the error to the caller. The watcher's existing catch
     // block treats this as a fall-through to the merge-agent path so
     // the PR isn't stranded by an AMA dispatch failure.
+    writeAmaAuditRecord(auditPath, {
+      ...auditRecord,
+      status: 'deferred',
+      deferredReason: 'dispatch-failed',
+      dispatchFailure: String(err?.message || err),
+      reconciliation: {
+        ...auditRecord.reconciliation,
+        lastVerifiedAt: now,
+      },
+    });
     return {
       dispatched: false,
       reason: 'dispatch-failed',
@@ -271,11 +305,25 @@ export async function maybeDispatchAmaCloser({
     };
   }
 
+  const nextAuditRecord = {
+    ...auditRecord,
+    closerDispatch: {
+      workerClass,
+      dispatchId: parsed?.dispatchId || null,
+      launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
+      dispatchedAt: now,
+      promptPath,
+    },
+  };
+  writeAmaAuditRecord(auditPath, nextAuditRecord);
+
   return {
     dispatched: true,
     workerClass,
-    dispatchId,
+    dispatchId: parsed?.dispatchId || null,
+    launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
     promptPath,
+    auditPath,
     eligibilityReasons: verdict.trace,
   };
 }
@@ -290,12 +338,90 @@ export async function maybeDispatchAmaCloser({
  * @param {string} stdout
  * @returns {string|null}
  */
-function parseDispatchId(stdout) {
-  const lines = String(stdout || '').split('\n');
+function parseDispatchOutput(stdout) {
+  const text = String(stdout ?? '').trim();
+  if (!text) {
+    throw new Error('hq dispatch returned empty stdout');
+  }
+  try {
+    return JSON.parse(text);
+  } catch {}
+  const lines = text.split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const candidate = lines.slice(index).join('\n').trim();
+    if (!candidate.startsWith('{')) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {}
+  }
   for (const line of lines) {
     const match = /^dispatchId=([A-Za-z0-9_\-]+)/.exec(line.trim());
-    if (match) return match[1];
+    if (match) return { dispatchId: match[1] };
   }
-  return null;
+  throw new Error('hq dispatch did not return machine-readable JSON');
 }
 
+function formatExecFailure(command, err) {
+  const stderrText = String(err?.stderr ?? '').trim();
+  const stdoutText = String(err?.stdout ?? '').trim();
+  const augmented = new Error(
+    `${command} failed (exit code ${err?.code ?? 'unknown'}): ${err?.message || 'no message'}`
+    + (stderrText ? `\n  stderr:\n${stderrText.split('\n').map((line) => `    ${line}`).join('\n')}` : '')
+    + (stdoutText ? `\n  stdout:\n${stdoutText.split('\n').map((line) => `    ${line}`).join('\n')}` : '')
+  );
+  augmented.code = err?.code;
+  augmented.stderr = err?.stderr;
+  augmented.stdout = err?.stdout;
+  augmented.cause = err;
+  return augmented;
+}
+
+function isExecTimeout(err) {
+  return err?.code === 'ETIMEDOUT'
+    || err?.killed === true
+    || String(err?.message || '').toLowerCase().includes('timed out');
+}
+
+function isTransientHqDispatchError(err) {
+  if (isExecTimeout(err)) return true;
+  const detail = [
+    err?.code,
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].filter(Boolean).join('\n').toLowerCase();
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eagain|epipe)\b/.test(detail)
+    || detail.includes('database is locked')
+    || detail.includes('sqlite_busy')
+    || detail.includes('resource temporarily unavailable')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable');
+}
+
+function sleep(ms) {
+  if (!ms) return Promise.resolve();
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+async function dispatchAmaWithRetry({ execFileImpl, hqPath, args }) {
+  let transientRetryIndex = 0;
+  for (;;) {
+    try {
+      const { stdout } = await execFileImpl(hqPath, args, {
+        env: process.env,
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: HQ_DISPATCH_TIMEOUT_MS,
+        killSignal: 'SIGTERM',
+      });
+      return parseDispatchOutput(stdout);
+    } catch (err) {
+      if (isTransientHqDispatchError(err) && transientRetryIndex < HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length) {
+        const delayMs = Number(HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS[transientRetryIndex]) || 0;
+        transientRetryIndex += 1;
+        await sleep(delayMs);
+        continue;
+      }
+      throw formatExecFailure('hq dispatch', err);
+    }
+  }
+}

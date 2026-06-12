@@ -1,0 +1,194 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  COEXISTENCE_ACTION,
+  MERGE_AGENT_OPERATOR_FALLBACK_ENV,
+  MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE,
+  decideMergeAgentCoexistence,
+  isMergeAgentRequestedScoped,
+  mergeAgentDispatchEnvForAction,
+} from '../src/ama/coexistence.mjs';
+
+// ---------------------------------------------------------------------------
+// AMA-06N env-var contract pin — AMA-06A on the agent-os side accepts
+// ONLY the exact lowercase string "true". Drift here breaks the bypass.
+// ---------------------------------------------------------------------------
+
+test('env-var name + value match the AMA-06A admit-gate contract byte-for-byte', () => {
+  assert.equal(MERGE_AGENT_OPERATOR_FALLBACK_ENV, 'AMA_OPERATOR_MERGE_AGENT_OVERRIDE');
+  assert.equal(MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE, 'true');
+});
+
+// ---------------------------------------------------------------------------
+// isMergeAgentRequestedScoped — head-scope + attribution + non-author.
+// ---------------------------------------------------------------------------
+
+test('isMergeAgentRequestedScoped: absent event → false', () => {
+  assert.equal(isMergeAgentRequestedScoped(null, { headSha: 'abc', author: 'alice' }), false);
+  assert.equal(isMergeAgentRequestedScoped(undefined, { headSha: 'abc', author: 'alice' }), false);
+});
+
+test('isMergeAgentRequestedScoped: current-head + non-author actor → true', () => {
+  const event = { headSha: 'abc', actor: 'bob' };
+  assert.equal(
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', author: 'alice' }),
+    true,
+  );
+});
+
+test('isMergeAgentRequestedScoped: stale head → false', () => {
+  const event = { headSha: 'OLD-head', actor: 'bob' };
+  assert.equal(
+    isMergeAgentRequestedScoped(event, { headSha: 'NEW-head', author: 'alice' }),
+    false,
+  );
+});
+
+test('isMergeAgentRequestedScoped: missing actor → false', () => {
+  const event = { headSha: 'abc', actor: '' };
+  assert.equal(
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', author: 'alice' }),
+    false,
+  );
+});
+
+test('isMergeAgentRequestedScoped: author self-application → false', () => {
+  const event = { headSha: 'abc', actor: 'alice' };
+  assert.equal(
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', author: 'alice' }),
+    false,
+  );
+});
+
+test('isMergeAgentRequestedScoped: tolerates alternate field names', () => {
+  // legacy `head_sha` + `actor.login` aren't part of the contract, but the
+  // operator-controls adapter emits `headSha` while raw GitHub events use
+  // `commit_id`; this defends against the underscore variant.
+  const event = { head_sha: 'abc', actor: 'bob' };
+  assert.equal(
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', author: 'alice' }),
+    true,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// SPEC §4.8 decision matrix — the 7 cases the prompt requires.
+// ---------------------------------------------------------------------------
+
+test('case 1: cfg.enabled=false, no operator label → merge-agent-default (current behavior)', () => {
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: false,
+    amaClosureDispatched: false,
+    mergeAgentRequestedScoped: false,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.MERGE_AGENT_DEFAULT);
+  assert.equal(mergeAgentDispatchEnvForAction(r.action), null);
+});
+
+test('case 2: cfg.enabled=false, operator label present → merge-agent-default (label is no-op when AMA off)', () => {
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: false,
+    amaClosureDispatched: false,
+    mergeAgentRequestedScoped: true,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.MERGE_AGENT_DEFAULT);
+  assert.equal(mergeAgentDispatchEnvForAction(r.action), null);
+});
+
+test('case 3: cfg.enabled=true + AMA eligible + no operator label → AMA closer', () => {
+  // The AMA closer fires upstream; this surface is `amaClosureDispatched=true`.
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: true,
+    amaClosureDispatched: true,
+    mergeAgentRequestedScoped: false,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.AMA_CLOSER);
+  assert.equal(mergeAgentDispatchEnvForAction(r.action), null);
+});
+
+test('case 4: cfg.enabled=true + AMA NOT eligible + no operator label → await-operator-action', () => {
+  // SPEC §4.8 — watcher must NOT silently fall through to merge-agent
+  // when AMA is enabled but not eligible.
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: true,
+    amaClosureDispatched: false,
+    mergeAgentRequestedScoped: false,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION);
+  assert.equal(mergeAgentDispatchEnvForAction(r.action), null);
+});
+
+test('case 5: cfg.enabled=true + operator label on current head → operator-fallback + override env', () => {
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: true,
+    amaClosureDispatched: false,
+    mergeAgentRequestedScoped: true,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK);
+  const env = mergeAgentDispatchEnvForAction(r.action);
+  assert.deepEqual(env, { [MERGE_AGENT_OPERATOR_FALLBACK_ENV]: MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE });
+});
+
+test('case 6: cfg.enabled=true + stale-head operator label → await-operator-action', () => {
+  // The caller (the watcher) computes `mergeAgentRequestedScoped` via
+  // `isMergeAgentRequestedScoped` which already rejects stale heads.
+  // Confirmed by the head-scope unit tests above; here we verify the
+  // downstream cell of the decision matrix.
+  const staleScoped = isMergeAgentRequestedScoped(
+    { headSha: 'OLD', actor: 'bob' },
+    { headSha: 'NEW', author: 'alice' },
+  );
+  assert.equal(staleScoped, false);
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: true,
+    amaClosureDispatched: false,
+    mergeAgentRequestedScoped: staleScoped,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION);
+});
+
+test('case 7: cfg.enabled=true + author self-applied operator label → await-operator-action', () => {
+  const selfScoped = isMergeAgentRequestedScoped(
+    { headSha: 'abc', actor: 'alice' },
+    { headSha: 'abc', author: 'alice' },
+  );
+  assert.equal(selfScoped, false);
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: true,
+    amaClosureDispatched: false,
+    mergeAgentRequestedScoped: selfScoped,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION);
+});
+
+// ---------------------------------------------------------------------------
+// AMA-CLOSER-PENDING precedence — when the lease is held or the AMA
+// dispatch is in-flight, the watcher must NOT also dispatch merge-agent.
+// ---------------------------------------------------------------------------
+
+test('amaClosurePending=true takes precedence over operator-fallback (no double dispatch)', () => {
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: true,
+    amaClosureDispatched: false,
+    amaClosurePending: true,
+    mergeAgentRequestedScoped: true,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.AMA_CLOSER_PENDING);
+  assert.equal(mergeAgentDispatchEnvForAction(r.action), null);
+});
+
+// ---------------------------------------------------------------------------
+// Defensive: dispatch-env helper only emits for the operator-fallback.
+// ---------------------------------------------------------------------------
+
+test('mergeAgentDispatchEnvForAction returns null for every non-fallback action', () => {
+  for (const action of [
+    COEXISTENCE_ACTION.MERGE_AGENT_DEFAULT,
+    COEXISTENCE_ACTION.AMA_CLOSER,
+    COEXISTENCE_ACTION.AMA_CLOSER_PENDING,
+    COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION,
+  ]) {
+    assert.equal(mergeAgentDispatchEnvForAction(action), null, `expected null for action=${action}`);
+  }
+});

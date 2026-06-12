@@ -27,9 +27,21 @@ dispatcher debugging), see
 ## 1. Prerequisites
 
 - **AMA-01..AMA-07 + AMA-06A + AMA-06N merged** and main-catchup floated
-  to the deploy checkout. Verify the runtime code is live by
-  checking that the deploy checkout's
-  `tools/adversarial-review/src/ama/dispatch-closer.mjs` exists.
+  to the deploy checkout. Verify the deploy is new enough to contain the full
+  AMA closure cutover by checking ancestry in both repos:
+
+  ```bash
+  git -C /Users/airlock/agent-os merge-base --is-ancestor \
+    e696c58af8fb031ba68a889aff487722dd802b7e HEAD
+  git -C /Users/airlock/agent-os/tools/adversarial-review merge-base --is-ancestor \
+    0deeb0204a1f8cb594a288b2727ed07ccf2aa696 HEAD
+  ```
+
+  The first command proves the deploy checkout includes the agent-os-side
+  AMA-08N submodule bump on top of AMA-01..AMA-07 + AMA-06A. The second proves
+  the live adversarial-review checkout includes the AMA-06N-side coexistence
+  logic, not just an older tree that already happened to have
+  `src/ama/dispatch-closer.mjs`.
 
 - **`agent-os-config` CFG schema includes
   `roles.adversarial.merge_authority`** (AMA-01). Verify with the
@@ -247,6 +259,7 @@ reasons:
 | `label-adversarial-merge-blocked` | Current-head `adversarial-merge-blocked` is applied (with head-scoped evidence). |
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |
+| `fast-merge-state-unsupported` | The PR is already in a fast-merge override state. AMA refuses closure until that contract is explicitly imported or the override is cleared. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 | `remediation-state-unknown` | The current-head review record did not carry a trustworthy remediation-pending boolean. AMA fails closed unless current-head `operator-approved` is present. |
 | `blocking-findings-present` | The latest current-head review still reports one or more structured blocking findings. Current-head `operator-approved` is the only override for this gate. |

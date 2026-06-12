@@ -51,9 +51,12 @@ dispatcher debugging), see
   branch instead:
 
   ```bash
-  # Substitute <base-branch> with the PR's target branch
-  # (gh pr view <pr#> --json baseRefName --jq .baseRefName).
-  gh api repos/<owner>/<repo>/branches/<base-branch>/protection \
+  # Query the PR's target branch and URL-encode it before interpolating it into
+  # the REST path. Slash-containing names like release/2026-06 or
+  # cutover/tmp-1 must be encoded or GitHub parses them as multiple segments.
+  base=$(gh pr view <pr#> --json baseRefName --jq .baseRefName)
+  base_enc=$(printf '%s' "$base" | jq -sRr @uri)
+  gh api "repos/<owner>/<repo>/branches/$base_enc/protection" \
     | jq '.required_status_checks.contexts, .required_status_checks.checks[]?.context'
   ```
 

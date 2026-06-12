@@ -3,6 +3,13 @@
 _Status: Living contract_
 _Related: `SPEC.md`, `docs/follow-up-runbook.md`_
 
+For the AMA closer lane documented in [`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md),
+the operator-facing contract is that closure dispatch uses the configured
+`roles.adversarial.merge_authority.worker_class`, not a hardcoded `codex`
+worker. Validation examples and cutover checks must therefore substitute the
+configured worker class and verify the dispatched `workerClass` against that
+config value.
+
 ## Kernel Contract Surface
 
 `src/kernel/contracts.d.ts` defines the target kernel contract surface for

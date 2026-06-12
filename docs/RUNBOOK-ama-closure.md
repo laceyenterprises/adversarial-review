@@ -77,9 +77,19 @@ dispatcher debugging), see
 
    ```bash
    hq dispatch drain --timeout 30m
-   launchctl kickstart -k gui/<uid>/ai.laceyenterprises.cwp-dispatch-daemon.<account>
+   DISPATCH_LABEL=gui/<uid>/ai.laceyenterprises.cwp-dispatch-daemon.<account>
+   for delay in 0 2 5; do
+     [ "$delay" -eq 0 ] || sleep "$delay"
+     launchctl kickstart -k "$DISPATCH_LABEL" && break
+   done
+   launchctl print "$DISPATCH_LABEL" | grep -E 'label =|state = running'
    hq dispatch resume --epoch <epoch-from-drain>
    ```
+
+   Do not resume the queue until the `launchctl print` check shows the
+   expected label and `state = running`. If every `kickstart` attempt
+   fails or the daemon never returns to `running`, stop here and fix the
+   launchd state before resuming traffic.
 
 3. Bounce the adversarial-watcher using the label from the installed plist,
    not a hardcoded legacy owner. This repo still ships the legacy
@@ -93,16 +103,19 @@ dispatcher debugging), see
    # If that file is absent, inspect ~/Library/LaunchAgents for the deployed
    # watcher plist and point WATCHER_PLIST at the installed variant instead.
    WATCHER_LABEL=$(/usr/libexec/PlistBuddy -c 'Print :Label' "$WATCHER_PLIST")
-   launchctl kickstart -k "gui/<uid>/$WATCHER_LABEL"
+   WATCHER_TARGET="gui/<uid>/$WATCHER_LABEL"
+   for delay in 0 2 5; do
+     [ "$delay" -eq 0 ] || sleep "$delay"
+     launchctl kickstart -k "$WATCHER_TARGET" && break
+   done
+   launchctl print "$WATCHER_TARGET" | grep -E 'label =|state = running'
    ```
 
    The watcher reads `cfg.roles.adversarial.merge_authority.enabled` on
-   every tick via the cached config loader — no in-process state.
-   Validate the bounce immediately so a stale label is caught on the spot:
-
-   ```bash
-   launchctl print "gui/<uid>/$WATCHER_LABEL" | grep -E 'label =|state ='
-   ```
+   every tick via the cached config loader — no in-process state. Do not
+   proceed until the `launchctl print` check shows the expected label and
+   `state = running`; otherwise the old process may still be serving the
+   stale config you were trying to replace.
 
 ---
 
@@ -126,14 +139,45 @@ prefix). Expected sequence:
 
    ```bash
    git -C /Users/airlock/agent-os log --format=%B -1 <mergeSha> \
-     | grep -E '^(Closed-By|Reviewed-By|Risk-Class|Eligibility-Reason|Eligibility-Trace):'
+     | awk -F: '
+         /^(Closed-By|Reviewed-By|Risk-Class|Eligibility-Reason|Eligibility-Trace):/ {
+           counts[$1]++
+         }
+         END {
+           required["Closed-By"]=1
+           required["Reviewed-By"]=1
+           required["Risk-Class"]=1
+           required["Eligibility-Reason"]=1
+           required["Eligibility-Trace"]=1
+           for (key in required) {
+             if (counts[key] != 1) {
+               printf "%s count=%d\n", key, counts[key]
+               bad=1
+             }
+           }
+           exit bad
+         }
+       '
    ```
 
-   Expected output: each of the five trailer lines exactly once.
+   Expected output: nothing. Any printed `count=` line means a required
+   trailer is missing or duplicated.
 
 6. Audit JSON record at
    `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/<repo>-pr-<n>-<headSha>.json`
-   has `status: "succeeded"` and `attempts[0].outcome: "succeeded"`.
+   has terminal `status: "succeeded"`, and the latest attempt shows a
+   successful merge outcome even if earlier attempts deferred or retried:
+
+   ```bash
+   jq '
+     .status == "succeeded"
+     and ((.attempts // []) | length > 0)
+     and ((.attempts[-1].outcome // "") == "succeeded")
+   ' \
+     "$HQ_ROOT/dispatch/audit/adversarial-merge-authority/<repo>-pr-<n>-<headSha>.json"
+   ```
+
+   Expected output: `true`.
 
 If any step fails, drop into §6 (diagnostic playbook).
 
@@ -153,6 +197,10 @@ The cutover is fully reversible per SPEC §6 AC#9.
    ```
 
 2. Bounce the dispatch daemon + watcher (same commands as §2 steps 2-3).
+
+   Apply the same bounded `kickstart` retry and `launchctl print ... state = running`
+   verification before `hq dispatch resume`. A rollback is not complete
+   until both services are confirmed healthy on the new config.
 
 3. The next settled-success closure routes back to the merge-agent
    path (SPEC §4.8).
@@ -178,7 +226,7 @@ already accepts same-login evidence.
 | `operator-approved` | Bypasses the verdict gate. A `Request changes` review with current-head `operator-approved` becomes eligible. The structural hard gates (CI, branch protection, no remediation pending, no hard-stop labels, mergeability) still apply. On single-operator hosts, same-login current-head evidence is accepted when the event is attributable and fresh. | **Accepted** at single-operator scale when the evidence is current-head, attributable, and fresh. |
 | `adversarial-merge-requested` | AMA-05. Bypasses the **risk-class gate only**. A `medium` or `high`-risk PR becomes eligible if all structural gates pass. Does not bypass verdict, CI, branch protection, or hard-stop labels. | **Rejected.** |
 | `adversarial-merge-blocked` | AMA-05. Blocks AMA closure unconditionally regardless of other eligibility. | **Accepted** (author may block their own PR). |
-| `merge-agent-requested` | Existing. On AMA-enabled hosts, dispatches merge-agent as the operator-fallback lane WITH the AMA-06A admit-gate bypass (`AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`). It also serves as the documented `merge-agent-stuck` recovery signal when the current-head evidence is attributable and the label is still present. | **Accepted** for the `merge-agent-stuck` recovery carve-out when the current-head evidence is attributable and fresh, including same-login evidence on single-operator hosts; otherwise rejected as ordinary author self-application. |
+| `merge-agent-requested` | Existing. On AMA-enabled hosts, dispatches merge-agent as the current-head operator-fallback lane WITH the AMA-06A admit-gate bypass (`AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`). It also serves as the documented `merge-agent-stuck` recovery signal when the current-head evidence is attributable and the label is still present. The live contract is single-operator: the scoped current-head label is the authority, not a distinct non-author actor check. | **Accepted** when the evidence is current-head, attributable, and fresh, including same-login evidence on single-operator hosts. |
 
 For the four other hard-stop labels (`merge-agent-skip`, `do-not-merge`,
 `no-merge-hold`, `merge-agent-stuck`), see SPEC §4.2 #6. They block AMA
@@ -262,9 +310,11 @@ eligibility reasons and waits. The operator has two options:
 
 1. **Make AMA-eligible** — apply `operator-approved` /
    `adversarial-merge-requested` per §5 to override the failing gates.
-2. **Operator-fallback lane** — apply `merge-agent-requested` (must be
-   non-author). The watcher's next tick dispatches merge-agent with
-   `AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`, and AMA-06A's admit gate
-   lets it through.
+2. **Operator-fallback lane** — apply a fresh current-head
+   `merge-agent-requested`. On single-operator hosts this may be the
+   same login as the PR author; the scoped label event is the control
+   signal the live gate enforces. The watcher's next tick dispatches
+   merge-agent with `AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`, and
+   AMA-06A's admit gate lets it through.
 
 The full SPEC reference: §4.8 coexistence table + §6 AC#9 rollback.

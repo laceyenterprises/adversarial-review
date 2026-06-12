@@ -3533,10 +3533,21 @@ async function handlePostedReviewRow({
     }
 
     const { coexistence, dispatchEnv } = coexistenceDecision;
+    // AMA-06N: when the operator-fallback lane is selected, override
+    // the dispatch trigger to 'merge-agent-requested' so the critical-
+    // lane priority + consumed-label cleanup at
+    // follow-up-merge-agent.mjs:3768-3783 + :3060-3069 fire correctly.
+    // An env overlay alone leaves the trigger on the normal lane,
+    // recreating the memory-pressure outage class this label exists
+    // to bypass.
+    const operatorFallbackTriggerOverride =
+      coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
+        ? 'merge-agent-requested'
+        : null;
     if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
       logger.log(
         `[watcher] merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
-        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true (AMA-06N → AMA-06A admit-gate bypass)`
+        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true + trigger=merge-agent-requested (AMA-06N → AMA-06A admit-gate bypass)`
       );
     } else if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK) {
       logger.log(
@@ -3549,6 +3560,7 @@ async function handlePostedReviewRow({
       rootDir,
       ...dispatchJob,
       ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
+      ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
     });
     // Enrich the decision log line when the dispatch is stuck pre-spawn
     // (recorded, daemon refusing admission). Surfaces what
@@ -3735,10 +3747,17 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       return { handled: true, dispatchJob, amaClosureResult };
     }
     const { coexistence, dispatchEnv } = coexistenceDecision;
+    // AMA-06N: timeout-exhaustion path also honors triggerOverride on
+    // the operator-fallback lane, same rationale as the green-path
+    // dispatch above — env overlay alone is insufficient.
+    const operatorFallbackTriggerOverride =
+      coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
+        ? 'merge-agent-requested'
+        : null;
     if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
       logger.log(
         `[watcher] reviewer-timeout exhaustion using merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
-        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true (AMA-06N → AMA-06A admit-gate bypass)`
+        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true + trigger=merge-agent-requested (AMA-06N → AMA-06A admit-gate bypass)`
       );
     } else if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK) {
       logger.log(
@@ -3751,6 +3770,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       rootDir,
       ...dispatchJob,
       ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
+      ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
     });
     logger.log(
       `[watcher] reviewer-timeout exhaustion handoff for ${repoPath}#${prNumber}: ${dispatched.decision}`

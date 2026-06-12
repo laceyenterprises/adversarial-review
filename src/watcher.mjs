@@ -3323,6 +3323,67 @@ async function maybeDispatchAmaClosureFor({
   return result;
 }
 
+async function resolveMergeAgentCoexistenceForWatcher({
+  rootDir = ROOT,
+  reviewStateRow,
+  dispatchJob,
+  candidate,
+  labelNames,
+  operatorApprovalEvent,
+  mergeAgentRequestEvent,
+  adversarialMergeRequestedEvent,
+  repoPath,
+  prNumber,
+  currentRevisionRef,
+  logger,
+  maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
+}) {
+  const amaClosureResult = await maybeDispatchAmaClosureForImpl({
+    rootDir,
+    reviewStateRow,
+    dispatchJob,
+    candidate,
+    labelNames,
+    operatorApprovalEvent,
+    adversarialMergeRequestedEvent,
+    repoPath,
+    prNumber,
+    currentRevisionRef,
+    logger,
+  });
+  if (amaClosureResult?.dispatched) {
+    return { outcome: 'ama-dispatched', amaClosureResult };
+  }
+  if (amaClosureResult?.skipMergeAgent) {
+    return { outcome: 'ama-pending', amaClosureResult };
+  }
+
+  const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
+  const mergeAgentRequestedScoped = isMergeAgentRequestedScoped(
+    mergeAgentRequestEvent,
+    {
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
+      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+    },
+  );
+  const coexistence = decideMergeAgentCoexistence({
+    amaEnabled,
+    amaClosureDispatched: Boolean(amaClosureResult?.dispatched),
+    amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent),
+    mergeAgentRequestedScoped,
+  });
+
+  if (coexistence.action === COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION) {
+    return { outcome: 'await-operator', amaClosureResult, coexistence };
+  }
+  return {
+    outcome: 'dispatch-merge-agent',
+    amaClosureResult,
+    coexistence,
+    dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action),
+  };
+}
+
 // ── Poll loop (new PRs) ──────────────────────────────────────────────────────
 
 async function handlePostedReviewRow({
@@ -3402,27 +3463,30 @@ async function handlePostedReviewRow({
     // failed), we fall through to the existing merge-agent dispatch
     // path verbatim — no behavior change for hosts that haven't
     // opted in.
-    const amaClosureResult = await maybeDispatchAmaClosureFor({
+    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcher({
       rootDir,
       reviewStateRow: existing,
       dispatchJob,
       candidate,
       labelNames,
       operatorApprovalEvent,
+      mergeAgentRequestEvent,
       adversarialMergeRequestedEvent,
       repoPath,
       prNumber,
       currentRevisionRef,
       logger,
     });
-    if (amaClosureResult?.dispatched) {
+    if (coexistenceDecision.outcome === 'ama-dispatched') {
+      const { amaClosureResult } = coexistenceDecision;
       logger.log(
         `[watcher] AMA closer dispatched for ${repoPath}#${prNumber}: ` +
         `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
       );
       return;
     }
-    if (amaClosureResult?.skipMergeAgent) {
+    if (coexistenceDecision.outcome === 'ama-pending') {
+      const { amaClosureResult } = coexistenceDecision;
       logger.log(
         `[watcher] AMA closer retained ownership for ${repoPath}#${prNumber}: ` +
         `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
@@ -3447,19 +3511,8 @@ async function handlePostedReviewRow({
     // When AMA is disabled, the action is `merge-agent-default` and
     // the existing dispatch runs unchanged (no override env, no
     // logging change).
-    const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
-    const mergeAgentRequestedScoped = isMergeAgentRequestedScoped(
-      mergeAgentRequestEvent,
-      { headSha: currentRevisionRef, author: candidate?.prAuthor || candidate?.author || null },
-    );
-    const coexistence = decideMergeAgentCoexistence({
-      amaEnabled,
-      amaClosureDispatched: Boolean(amaClosureResult?.dispatched),
-      amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent),
-      mergeAgentRequestedScoped,
-    });
-
-    if (coexistence.action === COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION) {
+    if (coexistenceDecision.outcome === 'await-operator') {
+      const { amaClosureResult } = coexistenceDecision;
       const reasonsHint = Array.isArray(amaClosureResult?.reasons)
         ? amaClosureResult.reasons.slice(0, 8).join(',')
         : amaClosureResult?.reason || 'unknown';
@@ -3472,8 +3525,8 @@ async function handlePostedReviewRow({
       return;
     }
 
-    const dispatchEnv = mergeAgentDispatchEnvForAction(coexistence.action);
-    if (coexistence.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
+    const { coexistence, dispatchEnv } = coexistenceDecision;
+    if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
       logger.log(
         `[watcher] merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
         `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true (AMA-06N → AMA-06A admit-gate bypass)`
@@ -3583,6 +3636,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
   try {
     let operatorApprovalEvent;
     let mergeAgentRequestEvent;
+    let adversarialMergeRequestedEvent;
     if (operatorSurface) {
       const controlSubjectRef = subjectRef || {
         domainId: 'code-pr',
@@ -3590,16 +3644,28 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         revisionRef: currentRevisionRef || null,
       };
       const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
-      const [operatorApproval, mergeAgentRequest] = await Promise.all([
+      const [operatorApproval, mergeAgentRequest, adversarialMergeRequest] = await Promise.all([
         labelNames.includes(OPERATOR_APPROVED_LABEL)
           ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
           : null,
         labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
           ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
           : null,
+        labelNames.includes(ADVERSARIAL_MERGE_REQUESTED_LABEL) &&
+          typeof operatorSurface.observeLabelControl === 'function'
+          ? operatorSurface.observeLabelControl(
+              controlSubjectRef,
+              revisionRef,
+              ADVERSARIAL_MERGE_REQUESTED_LABEL,
+            )
+          : null,
       ]);
       operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
       mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
+      adversarialMergeRequestedEvent = legacyLabelEventFromControlResult(
+        adversarialMergeRequest,
+        ADVERSARIAL_MERGE_REQUESTED_LABEL,
+      );
     }
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
       execFileImpl,
@@ -3610,9 +3676,62 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
     if (!shouldUseReviewerTimeoutExhaustedMergeGate(dispatchJob)) {
       return { handled: false, dispatchJob };
     }
+    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcher({
+      rootDir,
+      reviewStateRow: existing,
+      dispatchJob,
+      candidate,
+      labelNames,
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
+      adversarialMergeRequestedEvent,
+      repoPath,
+      prNumber,
+      currentRevisionRef,
+      logger,
+    });
+    if (coexistenceDecision.outcome === 'ama-dispatched') {
+      const { amaClosureResult } = coexistenceDecision;
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion handed off to AMA closer for ${repoPath}#${prNumber}: ` +
+        `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass || 'unknown'}`
+      );
+      return { handled: true, dispatchJob, amaClosureResult };
+    }
+    if (coexistenceDecision.outcome === 'ama-pending') {
+      const { amaClosureResult } = coexistenceDecision;
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion awaiting AMA closer for ${repoPath}#${prNumber}: ` +
+        `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
+        `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
+        `workerClass=${amaClosureResult.workerClass || 'unknown'}`
+      );
+      return { handled: true, dispatchJob, amaClosureResult };
+    }
+    if (coexistenceDecision.outcome === 'await-operator') {
+      const { amaClosureResult } = coexistenceDecision;
+      const reasonsHint = Array.isArray(amaClosureResult?.reasons)
+        ? amaClosureResult.reasons.slice(0, 8).join(',')
+        : amaClosureResult?.reason || 'unknown';
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion parked for ${repoPath}#${prNumber}: ` +
+        `AMA enabled but not eligible (reasons: ${reasonsHint}); awaiting operator action ` +
+        `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
+        `OR 'merge-agent-requested' for the operator-fallback lane)`
+      );
+      return { handled: true, dispatchJob, amaClosureResult };
+    }
+    const { coexistence, dispatchEnv } = coexistenceDecision;
+    if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion using merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
+        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true (AMA-06N → AMA-06A admit-gate bypass)`
+      );
+    }
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
+      ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
     });
     logger.log(
       `[watcher] reviewer-timeout exhaustion handoff for ${repoPath}#${prNumber}: ${dispatched.decision}`
@@ -5049,7 +5168,9 @@ export {
   fetchLivePRLabels,
   getStalePostedReviewAutoRereviewSuppression,
   handlePostedReviewRow,
+  maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
+  resolveMergeAgentCoexistenceForWatcher,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,
   pollOnce,

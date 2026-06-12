@@ -21,7 +21,7 @@ test('env-var name + value match the AMA-06A admit-gate contract byte-for-byte',
 });
 
 // ---------------------------------------------------------------------------
-// isMergeAgentRequestedScoped — head-scope + attribution + non-author.
+// isMergeAgentRequestedScoped — head-scope + attribution + freshness.
 // ---------------------------------------------------------------------------
 
 test('isMergeAgentRequestedScoped: absent event → false', () => {
@@ -29,45 +29,83 @@ test('isMergeAgentRequestedScoped: absent event → false', () => {
   assert.equal(isMergeAgentRequestedScoped(undefined, { headSha: 'abc', author: 'alice' }), false);
 });
 
-test('isMergeAgentRequestedScoped: current-head + non-author actor → true', () => {
-  const event = { headSha: 'abc', actor: 'bob' };
+test('isMergeAgentRequestedScoped: current-head + fresh attributable event → true', () => {
+  const event = {
+    id: 'evt-1',
+    headSha: 'abc',
+    actor: 'bob',
+    createdAt: '2026-05-07T12:05:00.000Z',
+  };
   assert.equal(
-    isMergeAgentRequestedScoped(event, { headSha: 'abc', author: 'alice' }),
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', prUpdatedAt: '2026-05-07T12:05:00.000Z' }),
     true,
   );
 });
 
 test('isMergeAgentRequestedScoped: stale head → false', () => {
-  const event = { headSha: 'OLD-head', actor: 'bob' };
+  const event = {
+    id: 'evt-1',
+    headSha: 'OLD-head',
+    actor: 'bob',
+    createdAt: '2026-05-07T12:05:00.000Z',
+  };
   assert.equal(
-    isMergeAgentRequestedScoped(event, { headSha: 'NEW-head', author: 'alice' }),
+    isMergeAgentRequestedScoped(event, { headSha: 'NEW-head', prUpdatedAt: '2026-05-07T12:05:00.000Z' }),
     false,
   );
 });
 
 test('isMergeAgentRequestedScoped: missing actor → false', () => {
-  const event = { headSha: 'abc', actor: '' };
+  const event = { id: 'evt-1', headSha: 'abc', actor: '', createdAt: '2026-05-07T12:05:00.000Z' };
   assert.equal(
-    isMergeAgentRequestedScoped(event, { headSha: 'abc', author: 'alice' }),
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', prUpdatedAt: '2026-05-07T12:05:00.000Z' }),
     false,
   );
 });
 
-test('isMergeAgentRequestedScoped: author self-application → false', () => {
-  const event = { headSha: 'abc', actor: 'alice' };
+test('isMergeAgentRequestedScoped: missing event id → false', () => {
+  const event = { headSha: 'abc', actor: 'alice', createdAt: '2026-05-07T12:05:00.000Z' };
   assert.equal(
-    isMergeAgentRequestedScoped(event, { headSha: 'abc', author: 'alice' }),
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', prUpdatedAt: '2026-05-07T12:05:00.000Z' }),
     false,
+  );
+});
+
+test('isMergeAgentRequestedScoped: stale versus latest PR update → false', () => {
+  const event = {
+    id: 'evt-1',
+    headSha: 'abc',
+    actor: 'alice',
+    createdAt: '2026-05-07T12:04:59.000Z',
+  };
+  assert.equal(
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', prUpdatedAt: '2026-05-07T12:05:00.000Z' }),
+    false,
+  );
+});
+
+test('isMergeAgentRequestedScoped: same-login application stays valid when fresh and attributable', () => {
+  const event = {
+    id: 'evt-1',
+    headSha: 'abc',
+    actor: 'alice',
+    createdAt: '2026-05-07T12:05:00.000Z',
+  };
+  assert.equal(
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', prUpdatedAt: '2026-05-07T12:05:00.000Z' }),
+    true,
   );
 });
 
 test('isMergeAgentRequestedScoped: tolerates alternate field names', () => {
-  // legacy `head_sha` + `actor.login` aren't part of the contract, but the
-  // operator-controls adapter emits `headSha` while raw GitHub events use
-  // `commit_id`; this defends against the underscore variant.
-  const event = { head_sha: 'abc', actor: 'bob' };
+  const event = {
+    labelEventId: 'evt-1',
+    head_sha: 'abc',
+    actor: 'bob',
+    createdAt: '2026-05-07T12:05:00.000Z',
+  };
   assert.equal(
-    isMergeAgentRequestedScoped(event, { headSha: 'abc', author: 'alice' }),
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', prUpdatedAt: '2026-05-07T12:05:00.000Z' }),
     true,
   );
 });
@@ -148,18 +186,23 @@ test('case 6: cfg.enabled=true + stale-head operator label → await-operator-ac
   assert.equal(r.action, COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION);
 });
 
-test('case 7: cfg.enabled=true + author self-applied operator label → await-operator-action', () => {
+test('case 7: cfg.enabled=true + same-login current-head operator label → operator-fallback', () => {
   const selfScoped = isMergeAgentRequestedScoped(
-    { headSha: 'abc', actor: 'alice' },
-    { headSha: 'abc', author: 'alice' },
+    {
+      id: 'evt-1',
+      headSha: 'abc',
+      actor: 'alice',
+      createdAt: '2026-05-07T12:05:00.000Z',
+    },
+    { headSha: 'abc', prUpdatedAt: '2026-05-07T12:05:00.000Z' },
   );
-  assert.equal(selfScoped, false);
+  assert.equal(selfScoped, true);
   const r = decideMergeAgentCoexistence({
     amaEnabled: true,
     amaClosureDispatched: false,
     mergeAgentRequestedScoped: selfScoped,
   });
-  assert.equal(r.action, COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION);
+  assert.equal(r.action, COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK);
 });
 
 // ---------------------------------------------------------------------------

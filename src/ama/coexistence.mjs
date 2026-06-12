@@ -22,7 +22,7 @@
  *
  * Decision table per SPEC §4.8:
  *
- *   cfg.enabled   merge-agent-requested label (current-head, non-author)
+ *   cfg.enabled   merge-agent-requested label (current-head, fresh)
  *   ────────────  ────────────────────────────────────────────────────
  *   false         (any)                          → merge-agent (default)
  *   true          absent                         → AMA closer (default)
@@ -73,15 +73,16 @@ export const COEXISTENCE_ACTION = Object.freeze({
 });
 
 /**
- * Detect a current-head, attributable, non-author
+ * Detect a current-head, attributable, fresh
  * `merge-agent-requested` operator label event. Returns false when
- * the event is missing, stale (different head), non-attributable
- * (no actor), or applied by the PR author themselves.
+ * the event is missing, stale (different head), non-attributable,
+ * missing audit fields, or older than the latest PR update on that
+ * same head.
  *
  * @param {Object|null} event           Legacy label-event shape (operator-controls adapter).
  * @param {Object} prMetadata
  * @param {string} prMetadata.headSha   The PR's current head SHA.
- * @param {string=} prMetadata.author   PR author login (for self-application rejection).
+ * @param {string=} prMetadata.prUpdatedAt Latest known PR update timestamp for the current head.
  * @returns {boolean}
  */
 export function isMergeAgentRequestedScoped(event, prMetadata) {
@@ -93,10 +94,19 @@ export function isMergeAgentRequestedScoped(event, prMetadata) {
   if (eventHead !== String(prMetadata?.headSha || '')) return false;
   const actor = String(event.actor || '').trim();
   if (!actor) return false;
-  // Self-application rejection — mirrors operator-approved attribution.
-  const author = String(prMetadata?.author || '').trim();
-  if (author && actor.toLowerCase() === author.toLowerCase()) return false;
+  if (!event.createdAt) return false;
+  if (!event.id && !event.nodeId && !event.labelEventId && !event.labelEventNodeId) return false;
+  const prUpdatedAt = event.prUpdatedAt || prMetadata?.prUpdatedAt || null;
+  if (prUpdatedAt && !isoAtOrAfter(event.createdAt, prUpdatedAt)) return false;
   return true;
+}
+
+function isoAtOrAfter(candidate, floor) {
+  if (!candidate || !floor) return false;
+  const candidateEpoch = Date.parse(candidate);
+  const floorEpoch = Date.parse(floor);
+  if (Number.isNaN(candidateEpoch) || Number.isNaN(floorEpoch)) return false;
+  return candidateEpoch >= floorEpoch;
 }
 
 /**

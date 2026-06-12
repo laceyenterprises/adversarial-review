@@ -1,3 +1,5 @@
+import { isScopedMergeAgentRequest } from '../follow-up-merge-agent.mjs';
+
 /**
  * AMA-06N — watcher-side coexistence decision for the merge-agent
  * dispatch.
@@ -59,6 +61,11 @@ export const MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE = 'true';
  *                                     non-author merge-agent-requested
  *                                     label is present. Dispatch merge-
  *                                     agent WITH the override env.
+ *   merge-agent-recovery-fallback     AMA dispatch/status failure on an
+ *                                     otherwise eligible handoff. Dispatch
+ *                                     merge-agent WITH the override env so
+ *                                     the watcher recovers instead of
+ *                                     parking indefinitely.
  *   await-operator-action             cfg.enabled=true AND AMA NOT eligible
  *                                     AND NO merge-agent-requested. Watcher
  *                                     logs an info line and does NOT
@@ -69,6 +76,7 @@ export const COEXISTENCE_ACTION = Object.freeze({
   AMA_CLOSER: 'ama-closer',
   AMA_CLOSER_PENDING: 'ama-closer-pending',
   MERGE_AGENT_OPERATOR_FALLBACK: 'merge-agent-operator-fallback',
+  MERGE_AGENT_RECOVERY_FALLBACK: 'merge-agent-recovery-fallback',
   AWAIT_OPERATOR_ACTION: 'await-operator-action',
 });
 
@@ -86,27 +94,18 @@ export const COEXISTENCE_ACTION = Object.freeze({
  * @returns {boolean}
  */
 export function isMergeAgentRequestedScoped(event, prMetadata) {
-  if (!event) return false;
-  const eventHead = String(
-    event.headSha || event.head_sha || event.observedRevisionRef || '',
-  );
-  if (!eventHead) return false;
-  if (eventHead !== String(prMetadata?.headSha || '')) return false;
-  const actor = String(event.actor || '').trim();
-  if (!actor) return false;
-  if (!event.createdAt) return false;
-  if (!event.id && !event.nodeId && !event.labelEventId && !event.labelEventNodeId) return false;
-  const prUpdatedAt = event.prUpdatedAt || prMetadata?.prUpdatedAt || null;
-  if (prUpdatedAt && !isoAtOrAfter(event.createdAt, prUpdatedAt)) return false;
-  return true;
-}
-
-function isoAtOrAfter(candidate, floor) {
-  if (!candidate || !floor) return false;
-  const candidateEpoch = Date.parse(candidate);
-  const floorEpoch = Date.parse(floor);
-  if (Number.isNaN(candidateEpoch) || Number.isNaN(floorEpoch)) return false;
-  return candidateEpoch >= floorEpoch;
+  return isScopedMergeAgentRequest({
+    headSha: prMetadata?.headSha || null,
+    prUpdatedAt: prMetadata?.prUpdatedAt || null,
+    mergeAgentRequest: {
+      actor: event?.actor || null,
+      createdAt: event?.createdAt || null,
+      headSha: event?.headSha || event?.head_sha || event?.observedRevisionRef || null,
+      prUpdatedAt: event?.prUpdatedAt || prMetadata?.prUpdatedAt || null,
+      labelEventId: event?.id || event?.labelEventId || null,
+      labelEventNodeId: event?.nodeId || event?.labelEventNodeId || null,
+    },
+  });
 }
 
 /**
@@ -122,13 +121,17 @@ function isoAtOrAfter(candidate, floor) {
  *   3. cfg.enabled=false → MERGE-AGENT-DEFAULT (current behavior).
  *   4. cfg.enabled=true + current-head non-author `merge-agent-requested`
  *      → MERGE-AGENT-OPERATOR-FALLBACK (with override env).
- *   5. cfg.enabled=true + AMA NOT eligible + no operator fallback
+ *   5. cfg.enabled=true + AMA launch/status failure + no operator fallback
+ *      → MERGE-AGENT-RECOVERY-FALLBACK.
+ *   6. cfg.enabled=true + AMA NOT eligible + no operator fallback
  *      → AWAIT-OPERATOR-ACTION.
  *
  * @param {Object} args
  * @param {boolean} args.amaEnabled
  * @param {boolean} args.amaClosureDispatched
  * @param {boolean=} args.amaClosurePending
+ * @param {boolean=} args.amaClosureEligibilityMiss
+ * @param {boolean=} args.amaClosureRecoverableFailure
  * @param {boolean} args.mergeAgentRequestedScoped
  * @returns {{ action: string }}
  */
@@ -136,6 +139,8 @@ export function decideMergeAgentCoexistence({
   amaEnabled,
   amaClosureDispatched,
   amaClosurePending = false,
+  amaClosureEligibilityMiss = false,
+  amaClosureRecoverableFailure = false,
   mergeAgentRequestedScoped,
 }) {
   if (amaClosureDispatched) {
@@ -150,6 +155,9 @@ export function decideMergeAgentCoexistence({
   if (mergeAgentRequestedScoped) {
     return { action: COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK };
   }
+  if (amaClosureRecoverableFailure && !amaClosureEligibilityMiss) {
+    return { action: COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK };
+  }
   return { action: COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION };
 }
 
@@ -163,7 +171,10 @@ export function decideMergeAgentCoexistence({
  * @returns {Object<string,string>|null}
  */
 export function mergeAgentDispatchEnvForAction(action) {
-  if (action !== COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
+  if (
+    action !== COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
+    && action !== COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK
+  ) {
     return null;
   }
   return {

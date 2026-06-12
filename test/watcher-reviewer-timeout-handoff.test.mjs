@@ -126,7 +126,7 @@ export async function load(url, context, nextLoad) {
     'fixture:adversarial-gate-status': "export function deleteGateRecordsForPR() {} export async function projectAdversarialGateStatus() { return { decision: { state: 'success', reason: 'reviewer-timeout' } }; }",
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
     'fixture:follow-up-jobs': "export function resolveRoundBudgetForJob() { return { roundBudget: 2, riskClass: 'medium' }; } export function summarizePRRemediationLedger() { return { completedRoundsForPR: 1, latestRiskClass: 'medium', latestMaxRounds: 2 }; } export function isActiveFollowUpJobStatus(status) { return ['pending','inProgress','in-progress','in_progress'].includes(status); }",
-    'fixture:follow-up-merge-agent': "globalThis.__timeoutHandoffDispatches = []; export const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched'; export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return { repo: 'laceyenterprises/adversarial-review', prNumber: 164, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', lastVerdict: 'Request changes', latestFollowUpJobStatus: 'completed', latestFollowUpReReviewRequested: true, reviewFailureClass: 'reviewer-timeout', reviewFailureExhausted: true, mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [] }; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export async function dispatchMergeAgentForPR(payload) { globalThis.__timeoutHandoffDispatches.push(payload); return { decision: 'dispatch', trigger: 'reviewer-timeout-exhausted' }; } export function fetchMergeAgentCandidate(repo, prNumber) { return { repo, prNumber, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [], operatorNotes: null, prState: 'open', merged: false }; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export function resolveFastMergePerPollCap() { return 5; } export function scanStuckMergeAgentDispatches() { return []; } export function shouldUseReviewerTimeoutExhaustedMergeGate(job) { return job.reviewFailureClass === 'reviewer-timeout' && job.reviewFailureExhausted === true && job.latestFollowUpJobStatus === 'completed' && job.latestFollowUpReReviewRequested === true; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {}",
+    'fixture:follow-up-merge-agent': "globalThis.__timeoutHandoffDispatches = []; export const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched'; export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return { repo: 'laceyenterprises/adversarial-review', prNumber: 164, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', lastVerdict: 'Request changes', latestFollowUpJobStatus: 'completed', latestFollowUpReReviewRequested: true, reviewFailureClass: 'reviewer-timeout', reviewFailureExhausted: true, mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [] }; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export async function dispatchMergeAgentForPR(payload) { globalThis.__timeoutHandoffDispatches.push(payload); return { decision: 'dispatch', trigger: 'reviewer-timeout-exhausted' }; } export function fetchMergeAgentCandidate(repo, prNumber) { return { repo, prNumber, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [], operatorNotes: null, prState: 'open', merged: false, prUpdatedAt: '2026-05-27T04:00:01.000Z' }; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export function isScopedMergeAgentRequest(job) { const request = job?.mergeAgentRequest; if (!request) return false; if (!request.actor || String(request.actor).trim().toLowerCase() === 'unknown') return false; if (!request.labelEventId && !request.labelEventNodeId) return false; if (!request.createdAt) return false; if (String(request.headSha || '') !== String(job?.headSha || '')) return false; const prUpdatedAt = request.prUpdatedAt || job?.prUpdatedAt || null; if (prUpdatedAt && Date.parse(request.createdAt) < Date.parse(prUpdatedAt)) return false; return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export function resolveFastMergePerPollCap() { return 5; } export function scanStuckMergeAgentDispatches() { return []; } export function shouldUseReviewerTimeoutExhaustedMergeGate(job) { return job.reviewFailureClass === 'reviewer-timeout' && job.reviewFailureExhausted === true && job.latestFollowUpJobStatus === 'completed' && job.latestFollowUpReReviewRequested === true; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {}",
     'fixture:follow-up-retrigger-label': "export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation'; export async function retryPendingRetriggerAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerRemediationFromLabel() { return { outcome: 'noop' }; }",
     'fixture:follow-up-retrigger-review-label': "export const RETRIGGER_REVIEW_LABEL = 'retrigger-review'; export async function retryPendingRetriggerReviewAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerReviewFromLabel() { return { outcome: 'noop' }; }",
     'fixture:operator-retrigger-helpers': "export function findLatestFollowUpJob() { return null; }",
@@ -138,7 +138,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'timeout-head-164', labels: [] }; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
-    'fixture:ama-dispatch-closer': "export async function maybeDispatchAmaCloser() { return { dispatched: false, reason: process.env.FIXTURE_AMA_REASON || 'not-eligible' }; }",
+    'fixture:ama-dispatch-closer': "export async function maybeDispatchAmaCloser() { const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; return { dispatched: false, reason, ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
     'fixture:config-loader': "export class AgentOSConfigError extends Error {} function buildConfig() { return { get() { return undefined; }, getMergeAuthorityConfig() { return { enabled: process.env.FIXTURE_AMA_ENABLED === '1' }; } }; } export function loadConfig() { return buildConfig(); } export function loadConfigCached() { return buildConfig(); } export function resetConfigCache() {}",
   };
 
@@ -284,7 +284,7 @@ test('watcher pollOnce parks reviewer-timeout exhaustion when AMA is enabled wit
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
           FIXTURE_AMA_ENABLED: '1',
-          FIXTURE_AMA_REASON: 'risk-class-blocked',
+          FIXTURE_AMA_REASON: 'not-eligible',
         },
       }
     );
@@ -300,6 +300,48 @@ test('watcher pollOnce parks reviewer-timeout exhaustion when AMA is enabled wit
     assert.equal(summary.reviewStatus, 'pending-upstream');
     assert.equal(summary.reviewerSpawns.length, 0);
     assert.equal(summary.dispatches.length, 0);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce recovers reviewer-timeout exhaustion when AMA dispatch fails', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-timeout-handoff-ama-recover-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_TOKEN: 'fixture-token',
+          FIXTURE_AMA_ENABLED: '1',
+          FIXTURE_AMA_REASON: 'dispatch-failed',
+        },
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.reviewStatus, 'pending-upstream');
+    assert.equal(summary.reviewerSpawns.length, 0);
+    assert.equal(summary.dispatches.length, 1);
+    assert.equal(summary.dispatches[0].env.AMA_OPERATOR_MERGE_AGENT_OVERRIDE, 'true');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -325,7 +367,7 @@ test('watcher pollOnce uses the AMA operator-fallback env on reviewer-timeout ex
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
           FIXTURE_AMA_ENABLED: '1',
-          FIXTURE_AMA_REASON: 'risk-class-blocked',
+          FIXTURE_AMA_REASON: 'not-eligible',
           FIXTURE_MERGE_AGENT_REQUESTED: '1',
           FIXTURE_MERGE_AGENT_ACTOR: 'codex-worker',
           FIXTURE_MERGE_AGENT_CREATED_AT: '2026-05-27T04:00:01.000Z',

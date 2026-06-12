@@ -3359,6 +3359,11 @@ async function resolveMergeAgentCoexistenceForWatcher({
   }
 
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
+  const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
+  const amaClosureRecoverableFailure = amaEnabled
+    && !amaClosureResult?.dispatched
+    && !amaClosureResult?.skipMergeAgent
+    && !amaClosureEligibilityMiss;
   const mergeAgentRequestedScoped = isMergeAgentRequestedScoped(
     mergeAgentRequestEvent,
     {
@@ -3370,6 +3375,8 @@ async function resolveMergeAgentCoexistenceForWatcher({
     amaEnabled,
     amaClosureDispatched: Boolean(amaClosureResult?.dispatched),
     amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent),
+    amaClosureEligibilityMiss,
+    amaClosureRecoverableFailure,
     mergeAgentRequestedScoped,
   });
 
@@ -3530,6 +3537,12 @@ async function handlePostedReviewRow({
       logger.log(
         `[watcher] merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
         `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true (AMA-06N → AMA-06A admit-gate bypass)`
+      );
+    } else if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK) {
+      logger.log(
+        `[watcher] AMA closer recovery fallback for ${repoPath}#${prNumber}: ` +
+        `${coexistenceDecision?.amaClosureResult?.reason || 'ama-dispatch-failure'}; ` +
+        `dispatching merge-agent with AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`
       );
     }
     const dispatched = await dispatchMergeAgentForPRImpl({
@@ -3726,6 +3739,12 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       logger.log(
         `[watcher] reviewer-timeout exhaustion using merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
         `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true (AMA-06N → AMA-06A admit-gate bypass)`
+      );
+    } else if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK) {
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion recovering via merge-agent for ${repoPath}#${prNumber}: ` +
+        `${coexistenceDecision?.amaClosureResult?.reason || 'ama-dispatch-failure'}; ` +
+        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`
       );
     }
     const dispatched = await dispatchMergeAgentForPRImpl({

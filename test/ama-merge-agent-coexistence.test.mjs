@@ -63,6 +63,14 @@ test('isMergeAgentRequestedScoped: missing actor → false', () => {
   );
 });
 
+test('isMergeAgentRequestedScoped: unknown actor → false', () => {
+  const event = { id: 'evt-1', headSha: 'abc', actor: 'unknown', createdAt: '2026-05-07T12:05:00.000Z' };
+  assert.equal(
+    isMergeAgentRequestedScoped(event, { headSha: 'abc', prUpdatedAt: '2026-05-07T12:05:00.000Z' }),
+    false,
+  );
+});
+
 test('isMergeAgentRequestedScoped: missing event id → false', () => {
   const event = { headSha: 'abc', actor: 'alice', createdAt: '2026-05-07T12:05:00.000Z' };
   assert.equal(
@@ -161,9 +169,22 @@ test('case 5: cfg.enabled=true + operator label on current head → operator-fal
   const r = decideMergeAgentCoexistence({
     amaEnabled: true,
     amaClosureDispatched: false,
+    amaClosureEligibilityMiss: true,
     mergeAgentRequestedScoped: true,
   });
   assert.equal(r.action, COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK);
+  const env = mergeAgentDispatchEnvForAction(r.action);
+  assert.deepEqual(env, { [MERGE_AGENT_OPERATOR_FALLBACK_ENV]: MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE });
+});
+
+test('case 5b: cfg.enabled=true + AMA dispatch failure + no operator label → merge-agent-recovery-fallback', () => {
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: true,
+    amaClosureDispatched: false,
+    amaClosureRecoverableFailure: true,
+    mergeAgentRequestedScoped: false,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK);
   const env = mergeAgentDispatchEnvForAction(r.action);
   assert.deepEqual(env, { [MERGE_AGENT_OPERATOR_FALLBACK_ENV]: MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE });
 });
@@ -181,6 +202,7 @@ test('case 6: cfg.enabled=true + stale-head operator label → await-operator-ac
   const r = decideMergeAgentCoexistence({
     amaEnabled: true,
     amaClosureDispatched: false,
+    amaClosureEligibilityMiss: true,
     mergeAgentRequestedScoped: staleScoped,
   });
   assert.equal(r.action, COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION);
@@ -200,6 +222,7 @@ test('case 7: cfg.enabled=true + same-login current-head operator label → oper
   const r = decideMergeAgentCoexistence({
     amaEnabled: true,
     amaClosureDispatched: false,
+    amaClosureEligibilityMiss: true,
     mergeAgentRequestedScoped: selfScoped,
   });
   assert.equal(r.action, COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK);

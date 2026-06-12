@@ -114,6 +114,7 @@ import { maybeDispatchAmaCloser } from './ama/dispatch-closer.mjs';
 import {
   COEXISTENCE_ACTION,
   decideMergeAgentCoexistence,
+  isAmaInfraFailureResult,
   isMergeAgentRequestedScoped,
   mergeAgentDispatchEnvForAction,
 } from './ama/coexistence.mjs';
@@ -3338,6 +3339,7 @@ async function handlePostedReviewRow({
   fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
   dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
+  maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
   operatorSurface = null,
   logger = console,
 } = {}) {
@@ -3402,7 +3404,7 @@ async function handlePostedReviewRow({
     // failed), we fall through to the existing merge-agent dispatch
     // path verbatim — no behavior change for hosts that haven't
     // opted in.
-    const amaClosureResult = await maybeDispatchAmaClosureFor({
+    const amaClosureResult = await maybeDispatchAmaClosureForImpl({
       rootDir,
       reviewStateRow: existing,
       dispatchJob,
@@ -3456,8 +3458,20 @@ async function handlePostedReviewRow({
       amaEnabled,
       amaClosureDispatched: Boolean(amaClosureResult?.dispatched),
       amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent),
+      amaClosureInfraFailure: isAmaInfraFailureResult(amaClosureResult),
       mergeAgentRequestedScoped,
     });
+
+    if (coexistence.action === COEXISTENCE_ACTION.AMA_INFRA_FAILURE) {
+      const failureReason = amaClosureResult?.reason || 'unknown';
+      const failureDetail = amaClosureResult?.error ? ` detail=${amaClosureResult.error}` : '';
+      logger.error(
+        `[watcher] AMA closer infrastructure failure for ${repoPath}#${prNumber}: ` +
+        `${failureReason}.${failureDetail} ` +
+        `Awaiting AMA repair or explicit 'merge-agent-requested' operator fallback.`
+      );
+      return;
+    }
 
     if (coexistence.action === COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION) {
       const reasonsHint = Array.isArray(amaClosureResult?.reasons)

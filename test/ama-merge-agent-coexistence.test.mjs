@@ -6,6 +6,7 @@ import {
   MERGE_AGENT_OPERATOR_FALLBACK_ENV,
   MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE,
   decideMergeAgentCoexistence,
+  isAmaInfraFailureResult,
   isMergeAgentRequestedScoped,
   mergeAgentDispatchEnvForAction,
 } from '../src/ama/coexistence.mjs';
@@ -178,6 +179,30 @@ test('amaClosurePending=true takes precedence over operator-fallback (no double 
   assert.equal(mergeAgentDispatchEnvForAction(r.action), null);
 });
 
+test('operator-fallback still wins when AMA infra failure coincides with an explicit override label', () => {
+  const r = decideMergeAgentCoexistence({
+    amaEnabled: true,
+    amaClosureDispatched: false,
+    amaClosurePending: false,
+    amaClosureInfraFailure: true,
+    mergeAgentRequestedScoped: true,
+  });
+  assert.equal(r.action, COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK);
+  assert.deepEqual(mergeAgentDispatchEnvForAction(r.action), {
+    [MERGE_AGENT_OPERATOR_FALLBACK_ENV]: MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE,
+  });
+});
+
+test('isAmaInfraFailureResult matches closer launch/status failures only', () => {
+  assert.equal(isAmaInfraFailureResult({ reason: 'dispatch-failed' }), true);
+  assert.equal(isAmaInfraFailureResult({ reason: 'dispatch-retry-exhausted' }), true);
+  assert.equal(isAmaInfraFailureResult({ reason: 'dispatch-status-unknown' }), true);
+  assert.equal(isAmaInfraFailureResult({ reason: 'dispatch-status-failed' }), true);
+  assert.equal(isAmaInfraFailureResult({ reason: 'not-eligible' }), false);
+  assert.equal(isAmaInfraFailureResult({ reason: 'ama-disabled' }), false);
+  assert.equal(isAmaInfraFailureResult({ reason: 'lease-held' }), false);
+});
+
 // ---------------------------------------------------------------------------
 // Defensive: dispatch-env helper only emits for the operator-fallback.
 // ---------------------------------------------------------------------------
@@ -187,6 +212,7 @@ test('mergeAgentDispatchEnvForAction returns null for every non-fallback action'
     COEXISTENCE_ACTION.MERGE_AGENT_DEFAULT,
     COEXISTENCE_ACTION.AMA_CLOSER,
     COEXISTENCE_ACTION.AMA_CLOSER_PENDING,
+    COEXISTENCE_ACTION.AMA_INFRA_FAILURE,
     COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION,
   ]) {
     assert.equal(mergeAgentDispatchEnvForAction(action), null, `expected null for action=${action}`);

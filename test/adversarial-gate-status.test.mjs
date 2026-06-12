@@ -742,6 +742,143 @@ test('projectAdversarialGateStatus posts the env-override context when ADV_GATE_
   }
 });
 
+test('handlePostedReviewRow leaves AMA policy ineligibility in await-operator-action without merge-agent dispatch', async () => {
+  const logs = [];
+  const errors = [];
+  const events = [];
+
+  await handlePostedReviewRow({
+    rootDir: '/tmp/ama-not-eligible',
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 54,
+    existing: makeReviewRow({ reviewer_login: 'claude-reviewer-lacey' }),
+    currentRevisionRef: 'abc123posted',
+    projectGateStatusSafe: async () => {},
+    fetchMergeAgentCandidateImpl: async () => {
+      events.push('merge-fetch');
+      return { repo: 'laceyenterprises/adversarial-review', prNumber: 54, prAuthor: 'alice' };
+    },
+    buildMergeAgentDispatchJobImpl: (_rootDir, candidate) => candidate,
+    dispatchMergeAgentForPRImpl: async () => {
+      events.push('merge-dispatch');
+      return { decision: 'unexpected' };
+    },
+    maybeDispatchAmaClosureForImpl: async () => ({
+      amaEnabled: true,
+      dispatched: false,
+      reason: 'not-eligible',
+      reasons: ['operator-approval-missing'],
+    }),
+    logger: {
+      log(message) { logs.push(message); },
+      error(message) { errors.push(message); },
+    },
+  });
+
+  assert.deepEqual(events, ['merge-fetch']);
+  assert.equal(errors.length, 0);
+  assert.match(logs[0], /AMA enabled but not eligible/);
+  assert.match(logs[0], /merge-agent-requested/);
+});
+
+test('handlePostedReviewRow logs AMA infrastructure failures distinctly and does not mislabel them as eligibility waits', async () => {
+  const logs = [];
+  const errors = [];
+  const events = [];
+
+  await handlePostedReviewRow({
+    rootDir: '/tmp/ama-dispatch-failed',
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 54,
+    existing: makeReviewRow({ reviewer_login: 'claude-reviewer-lacey' }),
+    currentRevisionRef: 'abc123posted',
+    projectGateStatusSafe: async () => {},
+    fetchMergeAgentCandidateImpl: async () => {
+      events.push('merge-fetch');
+      return { repo: 'laceyenterprises/adversarial-review', prNumber: 54, prAuthor: 'alice' };
+    },
+    buildMergeAgentDispatchJobImpl: (_rootDir, candidate) => candidate,
+    dispatchMergeAgentForPRImpl: async () => {
+      events.push('merge-dispatch');
+      return { decision: 'unexpected' };
+    },
+    maybeDispatchAmaClosureForImpl: async () => ({
+      amaEnabled: true,
+      dispatched: false,
+      reason: 'dispatch-failed',
+      error: 'hq dispatch timed out',
+    }),
+    logger: {
+      log(message) { logs.push(message); },
+      error(message) { errors.push(message); },
+    },
+  });
+
+  assert.deepEqual(events, ['merge-fetch']);
+  assert.equal(logs.length, 0);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /AMA closer infrastructure failure/);
+  assert.match(errors[0], /dispatch-failed/);
+  assert.match(errors[0], /merge-agent-requested/);
+});
+
+test('handlePostedReviewRow dispatches the operator-fallback merge-agent lane under AMA when current-head override is present', async () => {
+  const logs = [];
+  const errors = [];
+  const events = [];
+
+  await handlePostedReviewRow({
+    rootDir: '/tmp/ama-operator-fallback',
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 54,
+    existing: makeReviewRow({ reviewer_login: 'claude-reviewer-lacey' }),
+    currentRevisionRef: 'abc123posted',
+    labelNames: ['merge-agent-requested'],
+    subjectRef: {
+      domainId: 'code-pr',
+      subjectExternalId: 'laceyenterprises/adversarial-review#54',
+      revisionRef: 'abc123posted',
+    },
+    projectGateStatusSafe: async () => {},
+    fetchMergeAgentCandidateImpl: async () => {
+      events.push('merge-fetch');
+      return { repo: 'laceyenterprises/adversarial-review', prNumber: 54, prAuthor: 'alice' };
+    },
+    buildMergeAgentDispatchJobImpl: (_rootDir, candidate) => candidate,
+    dispatchMergeAgentForPRImpl: async (payload) => {
+      events.push('merge-dispatch');
+      assert.equal(payload.env.AMA_OPERATOR_MERGE_AGENT_OVERRIDE, 'true');
+      return { decision: 'dispatch-test' };
+    },
+    maybeDispatchAmaClosureForImpl: async () => ({
+      amaEnabled: true,
+      dispatched: false,
+      reason: 'dispatch-retry-exhausted',
+    }),
+    operatorSurface: {
+      async observeOperatorApproved() { return null; },
+      async observeMergeAgentOverride() {
+        return {
+          applied: true,
+          actor: 'VirtualPaul',
+          observedRevisionRef: 'abc123posted',
+          observedAt: '2026-05-07T18:05:00.000Z',
+          eventId: 'evt-merge-agent-requested',
+        };
+      },
+    },
+    logger: {
+      log(message) { logs.push(message); },
+      error(message) { errors.push(message); },
+    },
+  });
+
+  assert.deepEqual(events, ['merge-fetch', 'merge-dispatch']);
+  assert.equal(errors.length, 0);
+  assert.ok(logs.some(line => /operator-fallback lane/.test(line)));
+  assert.ok(logs.some(line => /merge-agent decision/.test(line)));
+});
+
 test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot into AMA eligibility', async () => {
   let observed = null;
   const result = await maybeDispatchAmaClosureFor({

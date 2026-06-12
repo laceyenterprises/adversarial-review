@@ -6,7 +6,7 @@
  * `worker_class=merge-agent` dispatches when
  * `cfg.roles.adversarial.merge_authority.enabled === true` AND the
  * dispatch env does NOT carry the operator-fallback flag. This module
- * is the adversarial-review half: the watcher chooses one of four
+ * is the adversarial-review half: the watcher chooses one of five
  * actions per settled-success event, and on the operator-fallback
  * lane it sets the env flag the AMA-06A gate looks for.
  *
@@ -55,6 +55,9 @@ export const MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE = 'true';
  *   ama-closer-pending                AMA dispatch is in-flight (lease held
  *                                     or pending status probe); watcher
  *                                     should NOT also dispatch merge-agent.
+ *   ama-infra-failure                 AMA closer launch/status failed in a
+ *                                     way the operator must treat as
+ *                                     infrastructure, not eligibility.
  *   merge-agent-operator-fallback     cfg.enabled=true AND a current-head
  *                                     non-author merge-agent-requested
  *                                     label is present. Dispatch merge-
@@ -68,9 +71,23 @@ export const COEXISTENCE_ACTION = Object.freeze({
   MERGE_AGENT_DEFAULT: 'merge-agent-default',
   AMA_CLOSER: 'ama-closer',
   AMA_CLOSER_PENDING: 'ama-closer-pending',
+  AMA_INFRA_FAILURE: 'ama-infra-failure',
   MERGE_AGENT_OPERATOR_FALLBACK: 'merge-agent-operator-fallback',
   AWAIT_OPERATOR_ACTION: 'await-operator-action',
 });
+
+const AMA_INFRA_FAILURE_REASONS = new Set([
+  'dispatch-failed',
+  'dispatch-retry-exhausted',
+  'dispatch-status-unknown',
+]);
+
+export function isAmaInfraFailureResult(result) {
+  const reason = String(result?.reason || '').trim().toLowerCase();
+  if (!reason) return false;
+  if (AMA_INFRA_FAILURE_REASONS.has(reason)) return true;
+  return reason.startsWith('dispatch-status-');
+}
 
 /**
  * Detect a current-head, attributable, non-author
@@ -112,13 +129,15 @@ export function isMergeAgentRequestedScoped(event, prMetadata) {
  *   3. cfg.enabled=false → MERGE-AGENT-DEFAULT (current behavior).
  *   4. cfg.enabled=true + current-head non-author `merge-agent-requested`
  *      → MERGE-AGENT-OPERATOR-FALLBACK (with override env).
- *   5. cfg.enabled=true + AMA NOT eligible + no operator fallback
+ *   5. AMA infra failure with no operator fallback → AMA-INFRA-FAILURE.
+ *   6. cfg.enabled=true + AMA NOT eligible + no operator fallback
  *      → AWAIT-OPERATOR-ACTION.
  *
  * @param {Object} args
  * @param {boolean} args.amaEnabled
  * @param {boolean} args.amaClosureDispatched
  * @param {boolean=} args.amaClosurePending
+ * @param {boolean=} args.amaClosureInfraFailure
  * @param {boolean} args.mergeAgentRequestedScoped
  * @returns {{ action: string }}
  */
@@ -126,6 +145,7 @@ export function decideMergeAgentCoexistence({
   amaEnabled,
   amaClosureDispatched,
   amaClosurePending = false,
+  amaClosureInfraFailure = false,
   mergeAgentRequestedScoped,
 }) {
   if (amaClosureDispatched) {
@@ -139,6 +159,9 @@ export function decideMergeAgentCoexistence({
   }
   if (mergeAgentRequestedScoped) {
     return { action: COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK };
+  }
+  if (amaClosureInfraFailure) {
+    return { action: COEXISTENCE_ACTION.AMA_INFRA_FAILURE };
   }
   return { action: COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION };
 }

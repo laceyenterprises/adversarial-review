@@ -111,6 +111,12 @@ import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // runs unchanged. AMA-06A/06N flip the broader coexistence semantics
 // once the closer has soaked.
 import { maybeDispatchAmaCloser } from './ama/dispatch-closer.mjs';
+import {
+  COEXISTENCE_ACTION,
+  decideMergeAgentCoexistence,
+  isMergeAgentRequestedScoped,
+  mergeAgentDispatchEnvForAction,
+} from './ama/coexistence.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
@@ -3227,10 +3233,14 @@ async function maybeDispatchAmaClosureFor({
     // CFG load failure isn't an AMA problem; let the existing
     // merge-agent path handle the tick.
     logger?.warn?.(`[watcher] AMA cfg load failed: ${err?.message || err}`);
-    return { dispatched: false, reason: 'cfg-load-failed' };
+    return { dispatched: false, reason: 'cfg-load-failed', amaEnabled: false };
   }
   if (!cfg?.enabled) {
-    return { dispatched: false, reason: 'ama-disabled' };
+    // AMA-06N — surface `amaEnabled` so the watcher's coexistence
+    // decision (the call site of this helper) can branch on it. With
+    // AMA off, the default `merge-agent-default` action falls through
+    // to the existing merge-agent dispatch without any override env.
+    return { dispatched: false, reason: 'ama-disabled', amaEnabled: false };
   }
 
   const reviewState = {
@@ -3276,7 +3286,7 @@ async function maybeDispatchAmaClosureFor({
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
   };
 
-  return maybeDispatchAmaCloserImpl({
+  const result = await maybeDispatchAmaCloserImpl({
     reviewState,
     prMetadata,
     cfg,
@@ -3303,6 +3313,82 @@ async function maybeDispatchAmaClosureFor({
     },
     dispatchContext,
   });
+  // AMA-06N — expose `amaEnabled` so the watcher's coexistence
+  // decision (downstream of this helper) can branch on it. The
+  // upstream code paths (`cfg-load-failed`, `ama-disabled`) already
+  // include the flag; this wraps the maybeDispatchAmaCloser return.
+  if (result && typeof result === 'object' && result.amaEnabled === undefined) {
+    return { ...result, amaEnabled: true };
+  }
+  return result;
+}
+
+async function resolveMergeAgentCoexistenceForWatcher({
+  rootDir = ROOT,
+  reviewStateRow,
+  dispatchJob,
+  candidate,
+  labelNames,
+  operatorApprovalEvent,
+  mergeAgentRequestEvent,
+  adversarialMergeRequestedEvent,
+  repoPath,
+  prNumber,
+  currentRevisionRef,
+  logger,
+  maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
+}) {
+  const amaClosureResult = await maybeDispatchAmaClosureForImpl({
+    rootDir,
+    reviewStateRow,
+    dispatchJob,
+    candidate,
+    labelNames,
+    operatorApprovalEvent,
+    adversarialMergeRequestedEvent,
+    repoPath,
+    prNumber,
+    currentRevisionRef,
+    logger,
+  });
+  if (amaClosureResult?.dispatched) {
+    return { outcome: 'ama-dispatched', amaClosureResult };
+  }
+  if (amaClosureResult?.skipMergeAgent) {
+    return { outcome: 'ama-pending', amaClosureResult };
+  }
+
+  const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
+  const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
+  const amaClosureRecoverableFailure = amaEnabled
+    && !amaClosureResult?.dispatched
+    && !amaClosureResult?.skipMergeAgent
+    && !amaClosureEligibilityMiss;
+  const mergeAgentRequestedScoped = isMergeAgentRequestedScoped(
+    mergeAgentRequestEvent,
+    {
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
+      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+    },
+  );
+  const coexistence = decideMergeAgentCoexistence({
+    amaEnabled,
+    amaClosureDispatched: Boolean(amaClosureResult?.dispatched),
+    amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent),
+    amaClosureEligibilityMiss,
+    amaClosureRecoverableFailure,
+    mergeAgentRequestedScoped,
+  });
+
+  if (coexistence.action === COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION) {
+    return { outcome: 'await-operator', amaClosureResult, coexistence };
+  }
+  return {
+    outcome: 'dispatch-merge-agent',
+    amaClosureResult,
+    coexistence,
+    dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action),
+  };
 }
 
 // ── Poll loop (new PRs) ──────────────────────────────────────────────────────
@@ -3384,27 +3470,30 @@ async function handlePostedReviewRow({
     // failed), we fall through to the existing merge-agent dispatch
     // path verbatim — no behavior change for hosts that haven't
     // opted in.
-    const amaClosureResult = await maybeDispatchAmaClosureFor({
+    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcher({
       rootDir,
       reviewStateRow: existing,
       dispatchJob,
       candidate,
       labelNames,
       operatorApprovalEvent,
+      mergeAgentRequestEvent,
       adversarialMergeRequestedEvent,
       repoPath,
       prNumber,
       currentRevisionRef,
       logger,
     });
-    if (amaClosureResult?.dispatched) {
+    if (coexistenceDecision.outcome === 'ama-dispatched') {
+      const { amaClosureResult } = coexistenceDecision;
       logger.log(
         `[watcher] AMA closer dispatched for ${repoPath}#${prNumber}: ` +
         `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
       );
       return;
     }
-    if (amaClosureResult?.skipMergeAgent) {
+    if (coexistenceDecision.outcome === 'ama-pending') {
+      const { amaClosureResult } = coexistenceDecision;
       logger.log(
         `[watcher] AMA closer retained ownership for ${repoPath}#${prNumber}: ` +
         `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
@@ -3414,9 +3503,64 @@ async function handlePostedReviewRow({
       return;
     }
 
+    // AMA-06N — coexistence decision per SPEC §4.8. When AMA is
+    // enabled and the AMA closer didn't fire (not eligible, dispatch
+    // failed, etc.), the watcher must NOT auto-fall-through to merge-
+    // agent. The operator either fixes eligibility (apply
+    // operator-approved / adversarial-merge-requested) OR explicitly
+    // applies `merge-agent-requested` on the current head to invoke
+    // the operator-fallback lane.
+    //
+    // Operator-fallback dispatches merge-agent WITH the
+    // `AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true` env so the AMA-06A
+    // admit gate (agent-os side) lets it through.
+    //
+    // When AMA is disabled, the action is `merge-agent-default` and
+    // the existing dispatch runs unchanged (no override env, no
+    // logging change).
+    if (coexistenceDecision.outcome === 'await-operator') {
+      const { amaClosureResult } = coexistenceDecision;
+      const reasonsHint = Array.isArray(amaClosureResult?.reasons)
+        ? amaClosureResult.reasons.slice(0, 8).join(',')
+        : amaClosureResult?.reason || 'unknown';
+      logger.log(
+        `[watcher] AMA enabled but not eligible for ${repoPath}#${prNumber} ` +
+        `(reasons: ${reasonsHint}); awaiting operator action ` +
+        `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
+        `OR 'merge-agent-requested' for the operator-fallback lane)`
+      );
+      return;
+    }
+
+    const { coexistence, dispatchEnv } = coexistenceDecision;
+    // AMA-06N: when the operator-fallback lane is selected, override
+    // the dispatch trigger to 'merge-agent-requested' so the critical-
+    // lane priority + consumed-label cleanup at
+    // follow-up-merge-agent.mjs:3768-3783 + :3060-3069 fire correctly.
+    // An env overlay alone leaves the trigger on the normal lane,
+    // recreating the memory-pressure outage class this label exists
+    // to bypass.
+    const operatorFallbackTriggerOverride =
+      coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
+        ? 'merge-agent-requested'
+        : null;
+    if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
+      logger.log(
+        `[watcher] merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
+        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true + trigger=merge-agent-requested (AMA-06N → AMA-06A admit-gate bypass)`
+      );
+    } else if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK) {
+      logger.log(
+        `[watcher] AMA closer recovery fallback for ${repoPath}#${prNumber}: ` +
+        `${coexistenceDecision?.amaClosureResult?.reason || 'ama-dispatch-failure'}; ` +
+        `dispatching merge-agent with AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`
+      );
+    }
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
+      ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
+      ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
     });
     // Enrich the decision log line when the dispatch is stuck pre-spawn
     // (recorded, daemon refusing admission). Surfaces what
@@ -3517,6 +3661,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
   try {
     let operatorApprovalEvent;
     let mergeAgentRequestEvent;
+    let adversarialMergeRequestedEvent;
     if (operatorSurface) {
       const controlSubjectRef = subjectRef || {
         domainId: 'code-pr',
@@ -3524,16 +3669,28 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         revisionRef: currentRevisionRef || null,
       };
       const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
-      const [operatorApproval, mergeAgentRequest] = await Promise.all([
+      const [operatorApproval, mergeAgentRequest, adversarialMergeRequest] = await Promise.all([
         labelNames.includes(OPERATOR_APPROVED_LABEL)
           ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
           : null,
         labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
           ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
           : null,
+        labelNames.includes(ADVERSARIAL_MERGE_REQUESTED_LABEL) &&
+          typeof operatorSurface.observeLabelControl === 'function'
+          ? operatorSurface.observeLabelControl(
+              controlSubjectRef,
+              revisionRef,
+              ADVERSARIAL_MERGE_REQUESTED_LABEL,
+            )
+          : null,
       ]);
       operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
       mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
+      adversarialMergeRequestedEvent = legacyLabelEventFromControlResult(
+        adversarialMergeRequest,
+        ADVERSARIAL_MERGE_REQUESTED_LABEL,
+      );
     }
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
       execFileImpl,
@@ -3544,9 +3701,76 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
     if (!shouldUseReviewerTimeoutExhaustedMergeGate(dispatchJob)) {
       return { handled: false, dispatchJob };
     }
+    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcher({
+      rootDir,
+      reviewStateRow: existing,
+      dispatchJob,
+      candidate,
+      labelNames,
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
+      adversarialMergeRequestedEvent,
+      repoPath,
+      prNumber,
+      currentRevisionRef,
+      logger,
+    });
+    if (coexistenceDecision.outcome === 'ama-dispatched') {
+      const { amaClosureResult } = coexistenceDecision;
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion handed off to AMA closer for ${repoPath}#${prNumber}: ` +
+        `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass || 'unknown'}`
+      );
+      return { handled: true, dispatchJob, amaClosureResult };
+    }
+    if (coexistenceDecision.outcome === 'ama-pending') {
+      const { amaClosureResult } = coexistenceDecision;
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion awaiting AMA closer for ${repoPath}#${prNumber}: ` +
+        `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
+        `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
+        `workerClass=${amaClosureResult.workerClass || 'unknown'}`
+      );
+      return { handled: true, dispatchJob, amaClosureResult };
+    }
+    if (coexistenceDecision.outcome === 'await-operator') {
+      const { amaClosureResult } = coexistenceDecision;
+      const reasonsHint = Array.isArray(amaClosureResult?.reasons)
+        ? amaClosureResult.reasons.slice(0, 8).join(',')
+        : amaClosureResult?.reason || 'unknown';
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion parked for ${repoPath}#${prNumber}: ` +
+        `AMA enabled but not eligible (reasons: ${reasonsHint}); awaiting operator action ` +
+        `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
+        `OR 'merge-agent-requested' for the operator-fallback lane)`
+      );
+      return { handled: true, dispatchJob, amaClosureResult };
+    }
+    const { coexistence, dispatchEnv } = coexistenceDecision;
+    // AMA-06N: timeout-exhaustion path also honors triggerOverride on
+    // the operator-fallback lane, same rationale as the green-path
+    // dispatch above — env overlay alone is insufficient.
+    const operatorFallbackTriggerOverride =
+      coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
+        ? 'merge-agent-requested'
+        : null;
+    if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion using merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
+        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true + trigger=merge-agent-requested (AMA-06N → AMA-06A admit-gate bypass)`
+      );
+    } else if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK) {
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion recovering via merge-agent for ${repoPath}#${prNumber}: ` +
+        `${coexistenceDecision?.amaClosureResult?.reason || 'ama-dispatch-failure'}; ` +
+        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`
+      );
+    }
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
+      ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
+      ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
     });
     logger.log(
       `[watcher] reviewer-timeout exhaustion handoff for ${repoPath}#${prNumber}: ${dispatched.decision}`
@@ -4983,7 +5207,9 @@ export {
   fetchLivePRLabels,
   getStalePostedReviewAutoRereviewSuppression,
   handlePostedReviewRow,
+  maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
+  resolveMergeAgentCoexistenceForWatcher,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,
   pollOnce,

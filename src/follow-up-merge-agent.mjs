@@ -3315,6 +3315,16 @@ async function dispatchMergeAgentForPR({
   dispatchRetryDelaysMs = HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS,
   logger = console,
   env = process.env,
+  // AMA-06N: when the AMA-coexistence decision selects
+  // MERGE_AGENT_OPERATOR_FALLBACK, the watcher passes
+  // triggerOverride='merge-agent-requested' so the dispatch records
+  // the canonical operator-escape-hatch trigger instead of the
+  // green/timeout default. This is load-bearing: critical-lane
+  // assignment, label removal, and skip-already-dispatched semantics
+  // all key off trigger === 'merge-agent-requested' (see
+  // pickMergeAgentDispatchDetail + dispatch-priority assignment at
+  // lines 3768-3783 and label removal at 3060-3069).
+  triggerOverride = null,
 } = {}) {
   const runtimeEnv = { ...process.env, ...env };
   const job = {
@@ -3510,7 +3520,16 @@ async function dispatchMergeAgentForPR({
     finalPassOnRequestChangesEnabled: isFinalPassOnRequestChangesEnabled({ env: runtimeEnv }),
     blockingFinalPassAttempted,
   });
-  const { decision, trigger } = dispatchDecision;
+  const { decision } = dispatchDecision;
+  // AMA-06N: triggerOverride from the watcher's coexistence path
+  // forces the canonical operator-escape-hatch trigger when the
+  // coexistence action is MERGE_AGENT_OPERATOR_FALLBACK. Override only
+  // applies when the picker would actually dispatch (otherwise we'd
+  // mis-record skips); upstream pickMergeAgentDispatchDetail still
+  // gets to refuse if the job isn't dispatch-eligible at all.
+  const trigger = (decision === 'dispatch' && triggerOverride)
+    ? triggerOverride
+    : dispatchDecision.trigger;
   if (decision !== 'dispatch') {
     if (decision === 'skip-already-dispatched' && latestRecordedDispatch?.trigger) {
       const labelRemoval = await removeConsumedTriggerLabel({

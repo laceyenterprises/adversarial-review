@@ -17,7 +17,11 @@ import {
   claimNextFollowUpJob,
   createFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
-import { handlePostedReviewRow, maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
+import {
+  handlePostedReviewRow,
+  maybeDispatchAmaClosureFor,
+  resolveMergeAgentCoexistenceForWatcher,
+} from '../src/watcher.mjs';
 
 function makeReviewRow(overrides = {}) {
   return {
@@ -806,5 +810,38 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
     actor: 'VirtualPaul',
     eventId: 'LE_adversarial_merge_requested',
     observedAt: '2026-06-11T23:20:00.000Z',
+  });
+});
+
+test('resolveMergeAgentCoexistenceForWatcher recovers AMA dispatch failures via merge-agent on the normal posted-review path', async () => {
+  const decision = await resolveMergeAgentCoexistenceForWatcher({
+    reviewStateRow: makeReviewRow(),
+    dispatchJob: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 53,
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    candidate: {
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    labelNames: [],
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 53,
+    currentRevisionRef: 'abc123',
+    logger: { log() {}, warn() {}, error() {} },
+    maybeDispatchAmaClosureForImpl: async () => ({
+      amaEnabled: true,
+      dispatched: false,
+      reason: 'dispatch-failed',
+    }),
+  });
+
+  assert.equal(decision.outcome, 'dispatch-merge-agent');
+  assert.equal(decision.amaClosureResult.reason, 'dispatch-failed');
+  assert.deepEqual(decision.dispatchEnv, {
+    AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true',
   });
 });

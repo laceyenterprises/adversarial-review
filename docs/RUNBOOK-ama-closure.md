@@ -81,14 +81,28 @@ dispatcher debugging), see
    hq dispatch resume --epoch <epoch-from-drain>
    ```
 
-3. Bounce the adversarial-watcher (placey-owned LaunchAgent):
+3. Bounce the adversarial-watcher using the label from the installed plist,
+   not a hardcoded legacy owner. This repo still ships the legacy
+   `launchd/ai.laceyenterprises.adversarial-watcher.placey.plist`, but the
+   current host may be running the airlock-owned variant
+   (`ai.laceyenterprises.adversarial-watcher.airlock`) to avoid HQ
+   owner-mismatch failures on AMA / merge-agent dispatches.
 
    ```bash
-   launchctl kickstart -k gui/<uid>/ai.laceyenterprises.adversarial-watcher
+   WATCHER_PLIST=~/Library/LaunchAgents/ai.laceyenterprises.adversarial-watcher.airlock.plist
+   # If that file is absent, inspect ~/Library/LaunchAgents for the deployed
+   # watcher plist and point WATCHER_PLIST at the installed variant instead.
+   WATCHER_LABEL=$(/usr/libexec/PlistBuddy -c 'Print :Label' "$WATCHER_PLIST")
+   launchctl kickstart -k "gui/<uid>/$WATCHER_LABEL"
    ```
 
    The watcher reads `cfg.roles.adversarial.merge_authority.enabled` on
    every tick via the cached config loader — no in-process state.
+   Validate the bounce immediately so a stale label is caught on the spot:
+
+   ```bash
+   launchctl print "gui/<uid>/$WATCHER_LABEL" | grep -E 'label =|state ='
+   ```
 
 ---
 
@@ -154,20 +168,24 @@ The cutover is fully reversible per SPEC §6 AC#9.
 ## 5. Operator label reference
 
 All labels are **head-scoped + attributable**. Stale (older-head)
-label events are ignored. The author-as-labeler check rejects
-self-application except where noted.
+label events are ignored. Single-operator hosts intentionally allow the
+same login to supply current-head evidence for the scoped recovery paths
+called out below; do not wait for a second human when the live contract
+already accepts same-login evidence.
 
 | Label | Effect | Author self-application |
 |---|---|---|
-| `operator-approved` | Bypasses the verdict gate. A `Request changes` review with current-head `operator-approved` becomes eligible. The structural hard gates (CI, branch protection, no remediation pending, no hard-stop labels, mergeability) still apply. | **Rejected.** |
+| `operator-approved` | Bypasses the verdict gate. A `Request changes` review with current-head `operator-approved` becomes eligible. The structural hard gates (CI, branch protection, no remediation pending, no hard-stop labels, mergeability) still apply. On single-operator hosts, same-login current-head evidence is accepted when the event is attributable and fresh. | **Accepted** at single-operator scale when the evidence is current-head, attributable, and fresh. |
 | `adversarial-merge-requested` | AMA-05. Bypasses the **risk-class gate only**. A `medium` or `high`-risk PR becomes eligible if all structural gates pass. Does not bypass verdict, CI, branch protection, or hard-stop labels. | **Rejected.** |
 | `adversarial-merge-blocked` | AMA-05. Blocks AMA closure unconditionally regardless of other eligibility. | **Accepted** (author may block their own PR). |
-| `merge-agent-requested` | Existing. On AMA-enabled hosts, dispatches merge-agent as the operator-fallback lane WITH the AMA-06A admit-gate bypass (`AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`). | **Rejected.** |
+| `merge-agent-requested` | Existing. On AMA-enabled hosts, dispatches merge-agent as the operator-fallback lane WITH the AMA-06A admit-gate bypass (`AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`). It also serves as the documented `merge-agent-stuck` recovery signal when the current-head evidence is attributable and the label is still present. | **Accepted** for the `merge-agent-stuck` recovery carve-out when the current-head evidence is attributable and fresh, including same-login evidence on single-operator hosts; otherwise rejected as ordinary author self-application. |
 
 For the four other hard-stop labels (`merge-agent-skip`, `do-not-merge`,
 `no-merge-hold`, `merge-agent-stuck`), see SPEC §4.2 #6. They block AMA
-closure regardless of evidence; `merge-agent-stuck` has a documented
-scoped-recovery carve-out per §4.2.
+closure regardless of evidence except for the documented
+`merge-agent-stuck` carve-out above, which requires current-head
+`merge-agent-requested` evidence and does not accept `operator-approved`
+as a substitute recovery signal.
 
 ---
 

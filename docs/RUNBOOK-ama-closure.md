@@ -45,10 +45,15 @@ dispatcher debugging), see
 - **Branch protection on the target branch already requires the
   configured adversarial-gate context(s)**. AMA-02's eligibility
   predicate refuses closure if this gate isn't required at branch
-  protection (SPEC §6 AC#8). Verify:
+  protection (SPEC §6 AC#8). Verify against the PR's actual target
+  branch, NOT universally `main` — repos that merge to a release branch
+  or temporary cutover branch must check the protection object on that
+  branch instead:
 
   ```bash
-  gh api repos/<owner>/<repo>/branches/main/protection \
+  # Substitute <base-branch> with the PR's target branch
+  # (gh pr view <pr#> --json baseRefName --jq .baseRefName).
+  gh api repos/<owner>/<repo>/branches/<base-branch>/protection \
     | jq '.required_status_checks.contexts, .required_status_checks.checks[]?.context'
   ```
 
@@ -122,23 +127,32 @@ dispatcher debugging), see
 ## 3. Validating cutover
 
 Cut a low-risk test PR (any work that would normally trip the
-adversarial-review path, e.g. a docs-only change with `[codex]` title
-prefix). Expected sequence:
+adversarial-review path, e.g. a docs-only change with a worker-class
+title prefix matching the configured class — `[codex]` or
+`[claude-code]`). Expected sequence (substitute `<configured-worker-class>`
+with the value of `roles.adversarial.merge_authority.worker_class` from
+your CFG; the reviewer/closer identities follow whatever class you
+configured, NOT a hardcoded `codex`):
 
-1. Codex worker opens PR with `[codex]` prefix.
-2. Adversarial-watcher posts `claude-reviewer-lacey` review (settled-
+1. Worker opens PR with `[<configured-worker-class>]` prefix.
+2. Adversarial-watcher posts the cross-class reviewer review
+   (`claude-reviewer-lacey` for `[codex]` builders,
+   `codex-reviewer-lacey` for `[claude-code]` builders — settled-
    success: `Approved` or clean `Comment only`).
-3. **AMA closer (codex) dispatches within 1 watcher tick** instead of
+3. **AMA closer dispatches within 1 watcher tick** instead of
    merge-agent. Verify via `hq dispatch status <lrq>` — `workerClass`
-   is `codex`, `task-kind` is `merge`, `completion-shape` is
-   `decision-only`, `project` is `adversarial-merge-authority`.
+   matches `<configured-worker-class>`, `task-kind` is `merge`,
+   `completion-shape` is `decision-only`, `project` is
+   `adversarial-merge-authority`.
 4. The closer's prompt logs the gh CLI invocation:
    `gh pr merge <prUrl> --match-head-commit <sha> --<merge_method>`.
-5. PR closes; the commit on `main` carries the §4.4 trailers verifiable
-   via:
+5. PR closes; the commit on the target branch carries the §4.4 trailers
+   verifiable via the deploy checkout (substitute
+   `$AGENT_OS_DEPLOY_CHECKOUT` if your host is non-default; the
+   `/Users/airlock/agent-os` literal is just the on-host default):
 
    ```bash
-   git -C /Users/airlock/agent-os log --format=%B -1 <mergeSha> \
+   git -C "${AGENT_OS_DEPLOY_CHECKOUT:-/Users/airlock/agent-os}" log --format=%B -1 <mergeSha> \
      | awk -F: '
          /^(Closed-By|Reviewed-By|Risk-Class|Eligibility-Reason|Eligibility-Trace):/ {
            counts[$1]++

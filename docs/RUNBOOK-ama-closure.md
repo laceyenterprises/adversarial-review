@@ -77,14 +77,38 @@ dispatcher debugging), see
 
    ```bash
    hq dispatch drain --timeout 30m
-   launchctl kickstart -k gui/<uid>/ai.laceyenterprises.cwp-dispatch-daemon.<account>
+   for attempt in 1 2 3 4 5; do
+     if launchctl kickstart -k gui/<uid>/ai.laceyenterprises.cwp-dispatch-daemon.<account>; then
+       break
+     fi
+     if [ "$attempt" -eq 5 ]; then
+       echo "dispatch-daemon kickstart failed after 5 attempts" >&2
+       exit 1
+     fi
+     echo "transient launchctl kickstart failure; retrying (${attempt}/5)" >&2
+     sleep $((attempt * 2))
+   done
    hq dispatch resume --epoch <epoch-from-drain>
    ```
+
+   Treat transient `launchctl` failures (for example launchd still settling
+   after a prior bounce) as retryable. Stop after the bounded retry budget and
+   inspect `launchctl print` / service logs before trying again.
 
 3. Bounce the adversarial-watcher (placey-owned LaunchAgent):
 
    ```bash
-   launchctl kickstart -k gui/<uid>/ai.laceyenterprises.adversarial-watcher
+   for attempt in 1 2 3 4 5; do
+     if launchctl kickstart -k gui/<uid>/ai.laceyenterprises.adversarial-watcher; then
+       break
+     fi
+     if [ "$attempt" -eq 5 ]; then
+       echo "adversarial-watcher kickstart failed after 5 attempts" >&2
+       exit 1
+     fi
+     echo "transient launchctl kickstart failure; retrying (${attempt}/5)" >&2
+     sleep $((attempt * 2))
+   done
    ```
 
    The watcher reads `cfg.roles.adversarial.merge_authority.enabled` on
@@ -159,8 +183,8 @@ self-application except where noted.
 
 | Label | Effect | Author self-application |
 |---|---|---|
-| `operator-approved` | Bypasses the verdict gate. A `Request changes` review with current-head `operator-approved` becomes eligible. The structural hard gates (CI, branch protection, no remediation pending, no hard-stop labels, mergeability) still apply. | **Rejected.** |
-| `adversarial-merge-requested` | AMA-05. Bypasses the **risk-class gate only**. A `medium` or `high`-risk PR becomes eligible if all structural gates pass. Does not bypass verdict, CI, branch protection, or hard-stop labels. | **Rejected.** |
+| `operator-approved` | Bypasses the verdict/remediation/blocking-findings gates for the current head. A `Request changes` review with current-head `operator-approved` can still be AMA-eligible even when remediation is pending, remediation state is unknown, or blocking findings are present/unknown. It does **not** bypass mergeability, CI, branch protection, fast-merge import refusal, or hard-stop labels. | **Rejected.** |
+| `adversarial-merge-requested` | AMA-05. Bypasses **only AMA's risk-class gate** for the current head. For `high`, `critical`, and `unknown` risk it must be present simultaneously with current-head `operator-approved` (two-key turn). For `medium`, the label does not bypass the allowlist at all; the risk class must already be configured in `cfg.roles.adversarial.merge_authority.eligibility.risk_classes`. It does not bypass verdict, CI, branch protection, remediation/blocking-finding gates, fast-merge import refusal, or hard-stop labels. | **Rejected.** |
 | `adversarial-merge-blocked` | AMA-05. Blocks AMA closure unconditionally regardless of other eligibility. | **Accepted** (author may block their own PR). |
 | `merge-agent-requested` | Existing. On AMA-enabled hosts, dispatches merge-agent as the operator-fallback lane WITH the AMA-06A admit-gate bypass (`AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`). | **Rejected.** |
 
@@ -224,6 +248,9 @@ reasons:
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
+| `remediation-state-unknown` | The current-head review record did not carry a trustworthy remediation-pending boolean. AMA fails closed unless current-head `operator-approved` is present. |
+| `blocking-findings-present` | The latest current-head review still reports one or more structured blocking findings. Current-head `operator-approved` is the only override for this gate. |
+| `blocking-findings-unknown` | The review record did not carry a trustworthy structured blocking-finding count. AMA fails closed unless current-head `operator-approved` is present. |
 
 ### `lease-held` skip
 
@@ -243,7 +270,14 @@ merge-agent on an ineligible PR (SPEC §4.8). The watcher logs the
 eligibility reasons and waits. The operator has two options:
 
 1. **Make AMA-eligible** — apply `operator-approved` /
-   `adversarial-merge-requested` per §5 to override the failing gates.
+   `adversarial-merge-requested` per §5 only when those labels match the
+   specific failing gate:
+   - `operator-approved` bypasses verdict/remediation/blocking-finding gates
+     for the current head, but not mergeability, CI, branch protection,
+     fast-merge import refusal, or hard-stop labels.
+   - `adversarial-merge-requested` participates only in AMA's risk-class gate
+     and, for `high` / `critical` / `unknown`, still requires simultaneous
+     current-head `operator-approved`.
 2. **Operator-fallback lane** — apply `merge-agent-requested` (must be
    non-author). The watcher's next tick dispatches merge-agent with
    `AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`, and AMA-06A's admit gate

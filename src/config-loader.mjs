@@ -137,6 +137,8 @@ const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
 const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
 const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
 const PATTERN_SQL_IDENTIFIER_DESCRIPTION = 'SQL identifier /^[A-Za-z_][A-Za-z0-9_]{0,62}$/';
+const PATTERN_LOCAL_USERNAME = '^[A-Za-z_][A-Za-z0-9_-]{0,63}$';
+const PATTERN_LOCAL_USERNAME_DESCRIPTION = 'local username /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/';
 
 const TYPE_STRING = 'string';
 const TYPE_BOOL = 'bool';
@@ -200,6 +202,23 @@ function schemaV1() {
           // env aliases on the Python side. Forks override per-host.
           runtime_home: { __type: TYPE_STRING, __default: null, __nullable: true },
           admin_home: { __type: TYPE_STRING, __default: null, __nullable: true },
+          // OSR-03 account-name extension. The Node loader does not consume
+          // these values directly, but strict CFG parity means top-level
+          // config.yaml must parse in every language sibling.
+          runtime_user: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+            __pattern: PATTERN_LOCAL_USERNAME,
+            __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
+          },
+          admin_user: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+            __pattern: PATTERN_LOCAL_USERNAME,
+            __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
+          },
         },
       },
       openclaw: {

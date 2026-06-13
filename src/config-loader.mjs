@@ -1526,7 +1526,7 @@ function validateDictPresentKeysOnly(
         const near = nearestValidKey(rawKey, Object.keys(allowed));
         const full = keyPath ? `${keyPath}.${rawKey}` : rawKey;
         const hint = near ? ` did you mean ${keyPath ? keyPath + '.' : ''}${JSON.stringify(near)}?` : '';
-        if (tolerateUnknown) {
+        if (tolerateUnknown && keyPath) {
           // Operator-local override (config.local.yaml / module *.local.yaml):
           // a NESTED unknown key under a root this reader owns is dropped, not
           // raised. This is the Node mirror of agent-os#1743: the local

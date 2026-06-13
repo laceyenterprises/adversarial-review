@@ -547,6 +547,37 @@ test('config.local.yaml tolerates a NESTED unknown key under an owned root (no w
   }
 });
 
+test('config.local.yaml rejects arbitrary unknown top-level keys as typos', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      version: 1
+      retentoin:
+        policies:
+          standard_backup:
+            daily: 3
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /retentoin/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('checked-in config.yaml STILL rejects a nested unknown key (strict preserved)', () => {
   // The tolerance is scoped to *.local.yaml only — the version-controlled
   // config.yaml keeps catching genuine typos at review/CI time.
@@ -604,6 +635,41 @@ test('module *.local.yaml tolerates a nested unknown key; module config.yaml sta
     assert.equal(
       cfg.get('retention.policies.standard_backup.bogus_key_not_in_schema'),
       null,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('module *.local.yaml rejects arbitrary unknown top-level keys as typos', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const mod = join(tmp, 'mod.yaml');
+    const modLocal = join(tmp, 'mod.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(mod, `
+      roles:
+        reviewer: codex
+    `);
+    writeFile(modLocal, `
+      retentoin:
+        policies:
+          standard_backup:
+            daily: 3
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, modulePaths: [mod], env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /retentoin/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -1801,7 +1867,10 @@ test('validateSchema rejects MHX title tags in shared CFG enums', () => {
 
 test('validateSchema rejects allowlisted foreign top-level keys unless local-layer tolerance is explicit', () => {
   assert.throws(
-    () => validateSchema({ version: 1, worker_pool: { anything: true } }),
+    () => validateSchema(
+      { version: 1, worker_pool: { anything: true } },
+      { source: '/tmp/config.local.yaml' },
+    ),
     (err) => {
       assert.ok(err instanceof AgentOSConfigError);
       assert.match(err.message, /worker_pool/);
@@ -1849,7 +1918,10 @@ test('validateSchema can explicitly tolerate allowlisted foreign top-level keys 
 
 test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {
   assert.throws(
-    () => validateSchema({ version: 1, not_a_section: { anything: true } }),
+    () => validateSchema(
+      { version: 1, not_a_section: { anything: true } },
+      { source: '/tmp/config.local.yaml' },
+    ),
     (err) => {
       assert.ok(err instanceof AgentOSConfigError);
       assert.match(err.message, /not_a_section/);
@@ -1860,7 +1932,7 @@ test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {
 });
 
 test('validateSchema stays strict on unknown keys INSIDE a known section', () => {
-  // Tolerance is top-level only — typos within a section this reader consumes
+  // Without a *.local.yaml source, typos within a section this reader consumes
   // still fail loud.
   assert.throws(
     () => validateSchema({ version: 1, remediation: { max_concur_jobs: 10 } }),

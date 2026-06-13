@@ -663,6 +663,22 @@ function schemaV1() {
                         __default: 'resolveGateStatusContext',
                         __enum: ['resolveGateStatusContext'],
                       },
+                      // SPEC §4.2 #9 is satisfied by a required branch-protection
+                      // status check. Some repos run on a GitHub plan that does
+                      // not offer branch protection at all (the protection API
+                      // 403s with "Upgrade to GitHub Pro"), so the gate context
+                      // can never be present and AMA can never close. Operators
+                      // on such repos set this false to drop ONLY the
+                      // branch-protection requirement; every other §4.2 hard gate
+                      // (settled-success verdict, head-match via
+                      // --match-head-commit, mergeable, no blocking findings,
+                      // risk-class, hard-stop labels, CI-green) still applies.
+                      // Default true preserves the existing fail-closed contract
+                      // everywhere it is not explicitly opted out.
+                      required: {
+                        __type: TYPE_BOOL,
+                        __default: true,
+                      },
                     },
                   },
                 },
@@ -1950,6 +1966,10 @@ export class AgentOSConfig {
         requiredGateContextSource: this.get(
           'roles.adversarial.merge_authority.branch_protection.required_gate_context_source',
           'resolveGateStatusContext',
+        ),
+        required: this.get(
+          'roles.adversarial.merge_authority.branch_protection.required',
+          true,
         ),
       },
     };

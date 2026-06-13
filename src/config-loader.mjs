@@ -94,6 +94,15 @@ function isLocalYamlSource(source) {
   return name.endsWith('.local.yaml') || name.endsWith('.local.yml');
 }
 
+// Silent by default. We deliberately do NOT console.warn unknown-key drops:
+// agent-os#1738 showed a config-loader warning leaking onto stderr can corrupt
+// positional config captures downstream. Opt in with ADVERSARIAL_CONFIG_DEBUG.
+function configDebugLog(message) {
+  if (process.env.ADVERSARIAL_CONFIG_DEBUG) {
+    process.stderr.write(`[adversarial-config] ${message}\n`);
+  }
+}
+
 // -------- Schema declaration -----------------------------------------------
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
@@ -1486,7 +1495,14 @@ function buildLineMap(text, allowedTopKeys) {
   return out;
 }
 
-function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
+function validateDictPresentKeysOnly(
+  doc,
+  schema,
+  keyPath,
+  source,
+  lineMap,
+  tolerateUnknown = false,
+) {
   if (doc === null || doc === undefined) return {};
   if (typeof doc !== 'object' || Array.isArray(doc)) {
     throw new AgentOSConfigError(
@@ -1510,6 +1526,21 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
         const near = nearestValidKey(rawKey, Object.keys(allowed));
         const full = keyPath ? `${keyPath}.${rawKey}` : rawKey;
         const hint = near ? ` did you mean ${keyPath ? keyPath + '.' : ''}${JSON.stringify(near)}?` : '';
+        if (tolerateUnknown) {
+          // Operator-local override (config.local.yaml / module *.local.yaml):
+          // a NESTED unknown key under a root this reader owns is dropped, not
+          // raised. This is the Node mirror of agent-os#1743: the local
+          // override is live-edited and read by multiple daemons (python/shell
+          // CFG loader + this Node adversarial loader) that may each be at a
+          // different deployed schema version during a rollout, so a premature
+          // key must be a no-op here instead of a watcher crash-loop. Debug-only
+          // (never stderr by default — see agent-os#1738 warning-leak lesson).
+          configDebugLog(
+            `dropping unknown key ${JSON.stringify(full)} from local override` +
+              `${source ? ` (${source})` : ''} — not in this reader's schema`,
+          );
+          continue;
+        }
         throw new AgentOSConfigError(
           `${full}: unknown key (strict schema)${hint}`,
           {
@@ -1529,7 +1560,8 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
     if (!(childKey in allowed)) {
       // Non-strict dict (e.g. `submodules`) is an extension point:
       // pass arbitrary subtrees through verbatim instead of silently
-      // dropping them. Strict dicts would have thrown above.
+      // dropping them. Strict dicts would have thrown above (or, under
+      // tolerateUnknown, been dropped above).
       if (!strict) out[childKey] = raw;
       continue;
     }
@@ -1537,7 +1569,14 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
     const full = keyPath ? `${keyPath}.${childKey}` : childKey;
     const childSource = annotateLine(source, lineMap, childKey);
     if (childSchema.__type === TYPE_DICT) {
-      out[childKey] = validateDictPresentKeysOnly(raw, childSchema, full, childSource, null);
+      out[childKey] = validateDictPresentKeysOnly(
+        raw,
+        childSchema,
+        full,
+        childSource,
+        null,
+        tolerateUnknown,
+      );
     } else {
       out[childKey] = checkLeaf(raw, childSchema, full, childSource);
     }
@@ -1599,7 +1638,11 @@ export function validateSchema(
       filtered[topKey] = doc[topKey];
     }
   }
-  return validateDictPresentKeysOnly(filtered, schema, '', source, lineMap);
+  // Layer-4 local siblings tolerate NESTED unknown keys too (drop, not crash) —
+  // the strict checked-in config.yaml (Layer 3, not a *.local.yaml source) keeps
+  // raising so genuine typos in version-controlled config are still caught.
+  const tolerateUnknown = isLocalYamlSource(source);
+  return validateDictPresentKeysOnly(filtered, schema, '', source, lineMap, tolerateUnknown);
 }
 
 // -------- Module file validation -------------------------------------------
@@ -1735,7 +1778,17 @@ function validateModuleDoc(doc, source, rawText) {
     if (k !== 'version') moduleSchema.__keys[k] = v;
   }
   const lineMap = rawText ? buildLineMap(rawText, Object.keys(moduleSchema.__keys)) : null;
-  const validated = validateDictPresentKeysOnly(canonicalBody, moduleSchema, '', source, lineMap);
+  // Module *.local.yaml siblings tolerate nested unknown keys (drop, not crash);
+  // checked-in module config.yaml stays strict. Mirror of agent-os#1743.
+  const tolerateUnknown = isLocalYamlSource(source);
+  const validated = validateDictPresentKeysOnly(
+    canonicalBody,
+    moduleSchema,
+    '',
+    source,
+    lineMap,
+    tolerateUnknown,
+  );
   return { validated, aliases };
 }
 

@@ -512,6 +512,104 @@ test('versioned config.local.yaml tolerates allowlisted foreign worker_pool sect
   }
 });
 
+test('config.local.yaml tolerates a NESTED unknown key under an owned root (no watcher crash)', () => {
+  // Mirror of agent-os#1743: a nested unknown key under a root THIS reader owns
+  // (here retention.policies.standard_backup, a strict nested dict) must be
+  // dropped, not raised, when it appears in the live-edited local override.
+  // The watcher crash-loop class (enabling a feature via a schema key the
+  // running daemon's schema lags on) must become a no-op, not an outage.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 3
+            bogus_key_not_in_schema: 1
+    `);
+    // Must NOT throw — the unknown nested key is dropped.
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('retention.policies.standard_backup.daily'), 3);
+    assert.equal(
+      cfg.get('retention.policies.standard_backup.bogus_key_not_in_schema'),
+      null,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('checked-in config.yaml STILL rejects a nested unknown key (strict preserved)', () => {
+  // The tolerance is scoped to *.local.yaml only — the version-controlled
+  // config.yaml keeps catching genuine typos at review/CI time.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 3
+            bogus_key_not_in_schema: 1
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /bogus_key_not_in_schema/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('module *.local.yaml tolerates a nested unknown key; module config.yaml stays strict', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const mod = join(tmp, 'mod.yaml');
+    const modLocal = join(tmp, 'mod.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(mod, `
+      roles:
+        reviewer: codex
+    `);
+    writeFile(modLocal, `
+      roles:
+        reviewer: claude-code
+      retention:
+        policies:
+          standard_backup:
+            bogus_key_not_in_schema: 1
+    `);
+    // module-local nested unknown is dropped, not raised.
+    const cfg = loadConfig({ topPath: top, modulePaths: [mod], env: {} });
+    assert.equal(cfg.get('roles.reviewer'), 'claude-code');
+    assert.equal(
+      cfg.get('retention.policies.standard_backup.bogus_key_not_in_schema'),
+      null,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('retention full block accepts schema-default values', () => {
   const tmp = freshTmp();
   try {

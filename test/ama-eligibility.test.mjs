@@ -437,6 +437,46 @@ test('not eligible: branch protection has no required contexts at all', () => {
   assert.ok(result.reasons.includes('branch-protection-missing-gate'));
 });
 
+test('eligible: branch_protection.required=false drops ONLY the gate requirement (plan without branch protection)', () => {
+  // Simulates a repo whose GitHub plan offers no branch protection: the
+  // gate context can never be present, so the operator opts out via
+  // roles.adversarial.merge_authority.branch_protection.required=false.
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { branchProtection: { requiredContexts: [] } },
+    cfg: {
+      branchProtection: {
+        requiredGateContextSource: 'resolveGateStatusContext',
+        required: false,
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(!result.reasons.includes('branch-protection-missing-gate'));
+  assert.equal(result.trace.branchProtection.required, false);
+  assert.equal(result.trace.branchProtection.ok, true);
+});
+
+test('not eligible: branch_protection.required=false still enforces every OTHER §4.2 gate', () => {
+  // Opting out of branch protection must NOT weaken any other hard gate.
+  // Here a blocking finding is present, so the PR stays ineligible even
+  // though the branch-protection gate is waived.
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { blockingFindingCount: 1, blockingFindingState: 'known' },
+    prMetadata: { branchProtection: { requiredContexts: [] } },
+    cfg: {
+      branchProtection: {
+        requiredGateContextSource: 'resolveGateStatusContext',
+        required: false,
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(!result.reasons.includes('branch-protection-missing-gate'));
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+});
+
 // ---------------------------------------------------------------------------
 // Hard-stop label gate (SPEC §4.2 #6)
 // ---------------------------------------------------------------------------

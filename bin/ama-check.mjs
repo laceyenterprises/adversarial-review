@@ -65,6 +65,28 @@ function loadJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
+function isBranchProtectionUnavailableSentinel(value) {
+  return value?.branchProtectionUnavailable === true && value?.reason === 'github_plan';
+}
+
+function loadProtectionJson(path, cfg) {
+  const parsed = loadJson(path);
+  if (cfg?.branchProtection?.required === false) {
+    if (isBranchProtectionUnavailableSentinel(parsed)) {
+      return {};
+    }
+    throw new Error(
+      'branch protection waiver requires branchProtectionUnavailable sentinel with reason github_plan',
+    );
+  }
+  if (isBranchProtectionUnavailableSentinel(parsed)) {
+    throw new Error(
+      'branch protection is required but protection input reported GitHub plan unavailability',
+    );
+  }
+  return parsed;
+}
+
 /**
  * Normalize a `gh pr view --json reviews` payload + the
  * `--reviewed-sha` flag into the `reviewState` shape the eligibility
@@ -171,17 +193,17 @@ function main(argv = process.argv.slice(2)) {
       return 1;
     }
   }
+  const cfg = loadConfigCached().getMergeAuthorityConfig();
   let prJson, reviewsJson, protectionJson, timelineJson;
   try {
     prJson = loadJson(args.pr);
     reviewsJson = loadJson(args.reviews);
-    protectionJson = loadJson(args.protection);
+    protectionJson = loadProtectionJson(args.protection, cfg);
     timelineJson = loadJson(args.timeline);
   } catch (err) {
     process.stderr.write(`error: failed to load input JSON: ${err.message}\n`);
     return 1;
   }
-  const cfg = loadConfigCached().getMergeAuthorityConfig();
   const reviewState = buildReviewState({
     reviewsJson,
     prJson,

@@ -225,6 +225,9 @@ load_local_linear_api_key() {
         gsub(/^[[:space:]]+|[[:space:]]+$/, "")
         if (($0 ~ /^".*"$/) || ($0 ~ /^'\''.*'\''$/)) {
           $0 = substr($0, 2, length($0) - 2)
+        } else {
+          sub(/[[:space:]]+#.*$/, "")
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "")
         }
         print
         exit
@@ -258,41 +261,42 @@ fi
 # instead of silently regressing to the shared-identity cascade. To
 # roll back: `unset CLAUDE_REVIEWER_AUTH_VIA_BROKER` /
 # `unset CODEX_REVIEWER_AUTH_VIA_BROKER` and bounce the watcher.
+broker_fail_closed_exit() {
+  local flag_name="$1"
+  echo "[adversarial-watcher] ERROR: ${flag_name}=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the OAuth broker or unset ${flag_name} and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 1
+}
+
+# Save the watcher's primary OP_SERVICE_ACCOUNT_TOKEN (resolved above via
+# resolve-op-token-cli.mjs) and keep the legacy reviewer-PAT fallback helper in
+# top-level scope so partial broker rollback works for any reviewer role.
+_WATCHER_PRIMARY_OP_SA_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
+_try_resolve_reviewer_pat() {
+  local target_env="$1"
+  local op_ref="$2"
+  if resolve_and_export_required_op_secret "$target_env" "$op_ref"; then
+    return 0
+  fi
+  if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then
+    echo "[adversarial-watcher] retrying ${target_env} read under canonical SA env file (watcher SA may lack Cliovault access)" >&2
+    local _fallback_token
+    # shellcheck disable=SC1091
+    _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"
+    if [[ -n "$_fallback_token" ]]; then
+      OP_SERVICE_ACCOUNT_TOKEN="$_fallback_token" \
+        resolve_and_export_required_op_secret "$target_env" "$op_ref" && return 0
+    fi
+  fi
+  return 1
+}
+
 if reviewer_broker_mode_enabled "claude-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
-    echo "[adversarial-watcher] ERROR: CLAUDE_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
-    exit 1
+    broker_fail_closed_exit "CLAUDE_REVIEWER_AUTH_VIA_BROKER"
   fi
 else
-  # Save the watcher's primary OP_SERVICE_ACCOUNT_TOKEN (resolved
-  # above via resolve-op-token-cli.mjs) and try the reviewer-PAT read
-  # under it first. If that fails (token lacks Cliovault read access
-  # — the operator's new per-bot PATs landed in Cliovault but the
-  # watcher SA may have narrower scope), retry with the canonical
-  # agent-os SA env file at .secrets/local/op-service-account.env,
-  # which is granted full vault access for the merge-agent flow. The
-  # retry is bounded to the reviewer-PAT lines only; OP_SERVICE_ACCOUNT_TOKEN
-  # is restored to its primary value before the watcher proceeds, so
-  # other op reads downstream keep the audit-attributed SA.
-  _WATCHER_PRIMARY_OP_SA_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
-  _try_resolve_reviewer_pat() {
-    local target_env="$1"
-    local op_ref="$2"
-    if resolve_and_export_required_op_secret "$target_env" "$op_ref"; then
-      return 0
-    fi
-    if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then
-      echo "[adversarial-watcher] retrying ${target_env} read under canonical SA env file (watcher SA may lack Cliovault access)" >&2
-      local _fallback_token
-      # shellcheck disable=SC1091
-      _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"
-      if [[ -n "$_fallback_token" ]]; then
-        OP_SERVICE_ACCOUNT_TOKEN="$_fallback_token" \
-          resolve_and_export_required_op_secret "$target_env" "$op_ref" && return 0
-      fi
-    fi
-    return 1
-  }
   if ! _try_resolve_reviewer_pat GH_CLAUDE_REVIEWER_TOKEN 'op://Cliovault/claude-reviewer-pat/credential'; then
     echo "[adversarial-watcher] ERROR: failed to resolve GH_CLAUDE_REVIEWER_TOKEN from Cliovault under both watcher SA and canonical SA. Grant Cliovault read to the watcher SA, OR move claude-reviewer-pat into a vault the watcher can read." >&2
     exit 1
@@ -303,8 +307,7 @@ else
 fi
 if reviewer_broker_mode_enabled "codex-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
-    echo "[adversarial-watcher] ERROR: CODEX_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
-    exit 1
+    broker_fail_closed_exit "CODEX_REVIEWER_AUTH_VIA_BROKER"
   fi
 else
   if ! _try_resolve_reviewer_pat GH_CODEX_REVIEWER_TOKEN 'op://Cliovault/codex-reviewer-pat/credential'; then
@@ -316,8 +319,7 @@ else
 fi
 if reviewer_broker_mode_enabled "gemini-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer; then
-    echo "[adversarial-watcher] ERROR: GEMINI_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
-    exit 1
+    broker_fail_closed_exit "GEMINI_REVIEWER_AUTH_VIA_BROKER"
   fi
 else
   if ! _try_resolve_reviewer_pat GH_GEMINI_REVIEWER_TOKEN 'op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/credential'; then
@@ -378,7 +380,16 @@ load_local_alert_to() {
     "$REPO_ROOT/.secrets/local/adversarial-watcher-alert-to" \
     "$REPO_ROOT/agents/clio/credentials/local/adversarial-watcher-alert-to"; do
     [[ -r "$alert_to_file" ]] || continue
-    alert_to_value="$(<"$alert_to_file")"
+    alert_to_value="$(awk '
+      {
+        value = $0
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        if (value != "") {
+          print value
+          exit
+        }
+      }
+    ' "$alert_to_file")"
     if [[ -n "${alert_to_value//[[:space:]]/}" ]]; then
       export ALERT_TO="$alert_to_value"
       return 0

@@ -496,6 +496,215 @@ test('auditWorkspaceForContamination refuses to guess a missing base branch', as
   assert.match(audit.error, /baseBranch is required/);
 });
 
+test('prepareWorkspaceForJob retries transient same-repo git fetch failures before checkout', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  let fetchAttempts = 0;
+
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob({ repo: 'laceyenterprises/clio', prNumber: 7 }),
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        return { stdout: '', stderr: '' };
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      if (
+        command === 'git'
+        && args[2] === 'fetch'
+        && args[3] === 'origin'
+        && args[4] === '+refs/heads/clio-feature:refs/remotes/origin/clio-feature'
+      ) {
+        fetchAttempts += 1;
+        if (fetchAttempts === 1) {
+          const err = new Error('git fetch failed');
+          err.stderr = 'fatal: unable to access https://github.com/laceyenterprises/clio.git/: TLS handshake timeout';
+          throw err;
+        }
+        return { stdout: '', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(fetchAttempts, 2);
+  assert.ok(result.workspaceDir.endsWith(path.join('workspaces', makeJob().jobId)));
+  assert.ok(
+    calls.some((call) => call[0] === 'git'
+      && call[3] === 'checkout'
+      && call.includes('clio-feature')
+      && call.includes('origin/clio-feature')),
+    'checkout should run after the retried fetch succeeds'
+  );
+});
+
+test('same-repo fetch refspec creates and refreshes origin head refs', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'adversarial-review-refspec-'));
+  const originDir = path.join(tmp, 'origin.git');
+  const seedDir = path.join(tmp, 'seed');
+  const workspaceDir = path.join(tmp, 'workspace');
+
+  execFileSync('git', ['init', '--bare', '--quiet', originDir], { stdio: 'ignore' });
+  execFileSync('git', ['init', '--quiet', '-b', 'main', seedDir], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'config', 'user.name', 'Test User'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'config', 'user.email', 'test@example.com'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'remote', 'add', 'origin', originDir], { stdio: 'ignore' });
+
+  writeFileSync(path.join(seedDir, 'README.md'), 'base\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'README.md'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'base'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', '-u', 'origin', 'main'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'checkout', '-b', 'feature'], { stdio: 'ignore' });
+  writeFileSync(path.join(seedDir, 'feature.txt'), 'one\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'feature.txt'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'feature one'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', '-u', 'origin', 'feature'], { stdio: 'ignore' });
+
+  execFileSync('git', ['clone', '--quiet', '--single-branch', '--branch', 'main', originDir, workspaceDir], {
+    stdio: 'ignore',
+  });
+  assert.throws(
+    () => execFileSync('git', ['-C', workspaceDir, 'rev-parse', 'refs/remotes/origin/feature'], { stdio: 'pipe' }),
+    /unknown revision|ambiguous argument|Needed a single revision/
+  );
+
+  const refspec = '+refs/heads/feature:refs/remotes/origin/feature';
+  execFileSync('git', ['-C', workspaceDir, 'fetch', 'origin', refspec], { stdio: 'ignore' });
+  const firstFetched = execFileSync('git', ['-C', workspaceDir, 'rev-parse', 'refs/remotes/origin/feature'], {
+    encoding: 'utf8',
+  }).trim();
+
+  writeFileSync(path.join(seedDir, 'feature.txt'), 'two\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'feature.txt'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'feature two'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', 'origin', 'feature'], { stdio: 'ignore' });
+
+  execFileSync('git', ['-C', workspaceDir, 'fetch', 'origin', refspec], { stdio: 'ignore' });
+  const secondFetched = execFileSync('git', ['-C', workspaceDir, 'rev-parse', 'refs/remotes/origin/feature'], {
+    encoding: 'utf8',
+  }).trim();
+
+  assert.notEqual(secondFetched, firstFetched);
+  assert.equal(
+    secondFetched,
+    execFileSync('git', ['-C', seedDir, 'rev-parse', 'feature'], { encoding: 'utf8' }).trim()
+  );
+});
+
+test('prepareWorkspaceForJob retries transient REST metadata lookup failures', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  let apiAttempts = 0;
+
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {},
+    execFileImpl: async (command, args) => {
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        apiAttempts += 1;
+        if (apiAttempts === 1) {
+          const err = new Error('gh api failed');
+          err.stderr = 'Get "https://api.github.com": connection reset by peer';
+          throw err;
+        }
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(apiAttempts, 2);
+});
+
+test('prepareWorkspaceForJob retries transient git clone failures', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  let cloneAttempts = 0;
+
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {},
+    execFileImpl: async (command, args) => {
+      if (command === 'git' && args[0] === 'clone') {
+        cloneAttempts += 1;
+        if (cloneAttempts === 1) {
+          const err = new Error('git clone failed');
+          err.stderr = 'fatal: unable to access https://github.com/laceyenterprises/clio.git/: HTTP 503';
+          throw err;
+        }
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(cloneAttempts, 2);
+});
+
+test('prepareWorkspaceForJob retries transient fork checkout failures', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  let checkoutAttempts = 0;
+
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {},
+    execFileImpl: async (command, args) => {
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'patch-1', repo: { full_name: 'contributor-fork/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'checkout') {
+        checkoutAttempts += 1;
+        if (checkoutAttempts === 1) {
+          const err = new Error('gh pr checkout failed');
+          err.stderr = 'HTTP 502: GitHub connection timed out';
+          throw err;
+        }
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(checkoutAttempts, 2);
+});
+
 test('assertValidRepoSlug rejects malformed repo names', () => {
   assert.equal(assertValidRepoSlug('laceyenterprises/clio'), 'laceyenterprises/clio');
   assert.throws(() => assertValidRepoSlug('../clio'));
@@ -635,8 +844,17 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
     env: {},
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -645,14 +863,189 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   assert.equal(existsSync(path.join(result.workspaceDir, '.git')), true);
   assert.deepEqual(result.workspaceState, { action: 'reused', reason: 'missing' });
   assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
-    ['gh', 'repo', 'clone', 'laceyenterprises/clio', result.workspaceDir],
+    ['git', 'clone', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
     ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
     ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
-    ['gh', 'pr', 'checkout', '7'],
+    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
+    ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature'],
+    ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
   ]);
-  // pr checkout still runs with cwd set to the workspace; the git -C config
-  // calls embed the workspace dir as an arg instead, so cwd is unset there.
-  assert.equal(calls[3].options.cwd, result.workspaceDir);
+  // The whole workspace-prep path is GraphQL-free now: git clone over the
+  // smart-HTTP protocol, the PR head ref resolved via the REST pulls endpoint,
+  // then git fetch + checkout -B against origin. No `gh repo clone` / `gh pr
+  // checkout` GraphQL calls remain on the same-repo hot path.
+  const sameRepoCheckout = calls.find(
+    (c) => c.command === 'git' && c.args.includes('checkout'),
+  );
+  assert.ok(sameRepoCheckout, 'expected a git checkout call');
+});
+
+test('prepareWorkspaceForJob authenticates git clone/fetch via the inline gh credential helper (no global git config assumed)', async () => {
+  // Round-3 review fix: the GraphQL-free clone path must not rely on a global
+  // `gh auth setup-git` having been run. The network-touching git calls (clone,
+  // fetch) carry the gh credential helper inline through git's GIT_CONFIG_* env
+  // so they authenticate from the daemon's exported token on a fresh host, and
+  // the caller env (incl. GITHUB_TOKEN, which the helper subprocess reads) is
+  // preserved.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: { GITHUB_TOKEN: 'gho_test_token', PATH: '/usr/bin:/bin' },
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  for (const sub of ['clone', 'fetch']) {
+    const call = calls.find((c) => c.command === 'git' && c.args.includes(sub));
+    assert.ok(call, `expected a git ${sub} call`);
+    const env = call.options?.env || {};
+    assert.equal(env.GIT_CONFIG_COUNT, '2', `${sub}: GIT_CONFIG_COUNT`);
+    assert.equal(env.GIT_CONFIG_KEY_0, 'credential.helper', `${sub}: resets any global helper`);
+    assert.equal(env.GIT_CONFIG_VALUE_0, '', `${sub}: reset value is empty`);
+    assert.equal(env.GIT_CONFIG_KEY_1, 'credential.helper', `${sub}: sets the gh helper`);
+    assert.equal(env.GIT_CONFIG_VALUE_1, '!gh auth git-credential', `${sub}: gh credential helper`);
+    assert.equal(env.GITHUB_TOKEN, 'gho_test_token', `${sub}: caller token preserved for the helper`);
+  }
+  // The purely-local checkout needs no network auth; argv stays clean.
+  const checkout = calls.find((c) => c.command === 'git' && c.args.includes('checkout'));
+  assert.ok(checkout, 'expected a git checkout call');
+  assert.equal(checkout.args[0], '-C', 'checkout argv is unchanged (no credential prefix)');
+});
+
+test('prepareWorkspaceForJob rejects a malformed PR number before building a REST path', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  await assert.rejects(
+    prepareWorkspaceForJob({
+      rootDir,
+      job: { ...makeJob(), prNumber: '7; rm -rf /' },
+      env: {},
+      execFileImpl: async (command, args) => {
+        if (command === 'git' && args[0] === 'clone') {
+          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        }
+        return { stdout: '', stderr: '' };
+      },
+    }),
+    /Invalid GitHub PR number/,
+  );
+});
+
+test('prepareWorkspaceForJob normalizes a numeric-string PR number into the REST path', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: { ...makeJob(), prNumber: '7' },
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  const apiCall = calls.find((c) => c.command === 'gh' && c.args[0] === 'api');
+  assert.ok(apiCall, 'expected a gh api call');
+  // Normalized to an integer — no String() coercion artifacts in the path.
+  assert.equal(apiCall.args[1], 'repos/laceyenterprises/clio/pulls/7');
+});
+
+test('prepareWorkspaceForJob issues no GraphQL-backed gh commands (rate-limit wedge guard)', async () => {
+  // Regression guard for the 2026-06-13 wedge: `gh repo clone`, `gh pr view`,
+  // and `gh pr checkout` all hit GitHub GraphQL, whose per-token budget is
+  // exhausted first under a heavy push — failing every remediation spawn with
+  // "API rate limit already exceeded". Workspace prep must use only git
+  // protocol (clone/fetch/checkout via the gh credential helper) plus the REST
+  // pulls endpoint, never a GraphQL-backed gh subcommand.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  const ghCalls = calls.filter((c) => c.command === 'gh');
+  // The only permitted gh call is the REST pulls lookup.
+  for (const c of ghCalls) {
+    assert.equal(c.args[0], 'api', `unexpected gh subcommand: gh ${c.args.join(' ')}`);
+    assert.match(c.args[1], /\/pulls\//);
+  }
+  assert.ok(!calls.some((c) => c.command === 'gh' && c.args[0] === 'repo'));
+  assert.ok(!calls.some((c) => c.command === 'gh' && c.args[0] === 'pr'));
+});
+
+test('prepareWorkspaceForJob falls back to gh pr checkout for fork PRs', async () => {
+  // Fork PRs put the head branch on the fork remote, not origin, so git fetch
+  // origin <headRef> cannot reach it. Those fall back to `gh pr checkout`,
+  // which wires up the fork remote. Forks are off this fleet's hot path, so
+  // the rare GraphQL call there is acceptable.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'patch-1', repo: { full_name: 'contributor-fork/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  // Fork → no same-repo git fetch/checkout; gh pr checkout handles the remote.
+  assert.ok(calls.some((c) => c.command === 'gh' && c.args[0] === 'pr' && c.args[1] === 'checkout'));
+  assert.ok(!calls.some((c) => c.command === 'git' && c.args.includes('checkout')));
 });
 
 test('prepareWorkspaceForJob hydrates production workspaces under HQ_ROOT', async () => {
@@ -674,8 +1067,17 @@ test('prepareWorkspaceForJob hydrates production workspaces under HQ_ROOT', asyn
     },
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -686,7 +1088,13 @@ test('prepareWorkspaceForJob hydrates production workspaces under HQ_ROOT', asyn
     path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', job.jobId),
   );
   assert.ok(!result.workspaceDir.startsWith(rootDir));
-  assert.equal(calls[3].options.cwd, result.workspaceDir);
+  // The PR head ref is resolved via the REST pulls endpoint and checked out
+  // with git -C against the hydrated workspace dir (no GraphQL gh pr checkout).
+  const checkout = calls.find(
+    (c) => c.command === 'git' && c.args.includes('checkout'),
+  );
+  assert.ok(checkout, 'expected a git checkout call');
+  assert.equal(checkout.args[1], result.workspaceDir);
 });
 
 test('prepareWorkspaceForJob surfaces HQ_ROOT and runtime user on workspace-root permission errors', async () => {
@@ -771,8 +1179,17 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
       if (command === 'git' && args[0] === 'status') {
         return { stdout: '', stderr: '' };
       }
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -782,10 +1199,12 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
   assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
     ['git', 'config', '--get', 'remote.origin.url'],
     ['git', 'status', '--short'],
-    ['gh', 'repo', 'clone', 'laceyenterprises/clio', result.workspaceDir],
+    ['git', 'clone', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
     ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
     ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
-    ['gh', 'pr', 'checkout', '7'],
+    ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
+    ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature'],
+    ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
   ]);
 });
 
@@ -821,8 +1240,17 @@ test('prepareWorkspaceForJob uses the claude-code identity when workerClass="cla
     env: {},
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args });
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -974,8 +1402,17 @@ test('prepareWorkspaceForJob installs the worker-provenance hook in the workspac
     job: makeJob(),
     env: {},
     execFileImpl: async (command, args, options = {}) => {
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -997,8 +1434,17 @@ test('prepareWorkspaceForJob does not pre-create remediation-reply.json in the w
     job: makeJob(),
     env: {},
     execFileImpl: async (command, args) => {
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -2111,8 +2557,17 @@ function drainerTestOptions(rootDir, spawnCalls, overrides = {}) {
     promptTemplate: 'You are a remediation worker.',
     resolvePRLifecycleImpl: async () => null,
     execFileImpl: async (command, args) => {
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -2154,11 +2609,17 @@ test('consumeNextFollowUpJob hydrates legacy jobs without baseBranch before spaw
   const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob(
     drainerTestOptions(rootDir, spawnCalls, {
       execFileImpl: async (command, args) => {
-        if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-          return { stdout: JSON.stringify({ baseRefName: 'release/2026.05' }), stderr: '' };
+        if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+          return {
+            stdout: JSON.stringify({
+              base: { ref: 'release/2026.05' },
+              head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+            }),
+            stderr: '',
+          };
         }
-        if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-          mkdirSync(path.join(args[3], '.git'), { recursive: true });
+        if (command === 'git' && args[0] === 'clone') {
+          mkdirSync(path.join(args[2], '.git'), { recursive: true });
         }
         return { stdout: '', stderr: '' };
       },
@@ -2636,8 +3097,17 @@ test('consumeNextFollowUpJob honors persisted maxRounds=2 on a medium-risk legac
     rootDir,
     now: () => '2026-04-21T10:30:00.000Z',
     execFileImpl: async (command, args) => {
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -2702,8 +3172,17 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 3 wi
     rootDir,
     now: () => '2026-04-21T10:31:00.000Z',
     execFileImpl: async (command, args, options = {}) => {
-      if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-        mkdirSync(path.join(args[3], '.git'), { recursive: true });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
       }
       return { stdout: '', stderr: '' };
     },
@@ -3140,10 +3619,19 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
         // template string instead.
         promptTemplate: 'You are a remediation worker.',
         execFileImpl: async (command, args) => {
-          if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+          if (command === 'git' && args[0] === 'clone') {
             // Simulate the clone: drop a `.git` dir at the workspace.
-            mkdirSync(path.join(args[3], '.git'), { recursive: true });
+            mkdirSync(path.join(args[2], '.git'), { recursive: true });
             return { stdout: '', stderr: '' };
+          }
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
           }
           if (command === 'gh' && args[0] === 'pr' && args[1] === 'checkout') {
             return { stdout: '', stderr: '' };
@@ -3232,8 +3720,14 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
         now: () => '2026-04-21T10:00:00.000Z',
         execFileImpl: async (command, args) => {
           commands.push([command, ...args]);
-          if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-            return { stdout: JSON.stringify({ baseRefName: 'main', headRefName: 'codex/fix-pr-71' }), stderr: '' };
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'codex/fix-pr-71', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
           }
           if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
             return {
@@ -3703,11 +4197,17 @@ test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ disp
       now: () => '2026-04-21T10:00:00.000Z',
       execFileImpl: async (command, args) => {
         commands.push([command, ...args]);
-        if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-          return { stdout: JSON.stringify({ baseRefName: 'main' }), stderr: '' };
+        if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+          return {
+            stdout: JSON.stringify({
+              base: { ref: 'main' },
+              head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+            }),
+            stderr: '',
+          };
         }
-        if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-          mkdirSync(path.join(args[3], '.git'), { recursive: true });
+        if (command === 'git' && args[0] === 'clone') {
+          mkdirSync(path.join(args[2], '.git'), { recursive: true });
           return { stdout: '', stderr: '' };
         }
         return { stdout: '', stderr: '' };
@@ -3835,8 +4335,14 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-04-21T10:00:00.000Z',
         execFileImpl: async (command, args) => {
-          if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-            return { stdout: JSON.stringify({ baseRefName: 'main', headRefName: 'codex/fix-pr-75' }), stderr: '' };
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'codex/fix-pr-75', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
           }
           if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
             return {
@@ -4489,8 +4995,17 @@ test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral wh
         promptTemplate: 'Remediation prompt template.',
         resolvePRLifecycleImpl: async () => null,
         execFileImpl: async (command, args) => {
-          if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-            mkdirSync(path.join(args[3], '.git'), { recursive: true });
+          if (command === 'git' && args[0] === 'clone') {
+            mkdirSync(path.join(args[2], '.git'), { recursive: true });
+          }
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
           }
           return { stdout: '', stderr: '' };
         },

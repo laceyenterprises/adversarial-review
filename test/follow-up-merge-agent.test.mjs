@@ -696,9 +696,13 @@ test('isFinalPassOnRequestChangesEnabled defaults ON for unset/empty, off for ex
       }),
       false,
     );
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /maybe/);
-    assert.match(warnings[0], /falling back to OFF/);
+    // Exclude the config-loader's own foreign-key advisory (emitted on config
+    // load for a worker_pool/remediation section in a shared config.local.yaml)
+    // so this assertion stays about the merge-agent warning under test.
+    const relevant = warnings.filter((w) => !/\[adversarial-config\]/.test(w));
+    assert.equal(relevant.length, 1);
+    assert.match(relevant[0], /maybe/);
+    assert.match(relevant[0], /falling back to OFF/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -4278,8 +4282,12 @@ test('isFinalPassOnRequestChangesEnabled falls back to default ON when config lo
       }),
       true,
     );
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /failed to load feature_flags\.merge_agent_final_pass_on_request_changes/);
+    // Exclude the config-loader's own foreign-key advisory (emitted on config
+    // load for a worker_pool/remediation section in a shared config.local.yaml)
+    // so this assertion stays about the feature-flag warning under test.
+    const relevant = warnings.filter((w) => !/\[adversarial-config\]/.test(w));
+    assert.equal(relevant.length, 1);
+    assert.match(relevant[0], /failed to load feature_flags\.merge_agent_final_pass_on_request_changes/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -4801,6 +4809,10 @@ test('dispatchMergeAgentForPR logs consumed-label removal failures', async () =>
     assert.equal(recorded.labelRemoval.label, 'merge-agent-requested');
     assert.equal(recorded.labelRemoval.removed, false);
     assert.equal(recorded.labelRemoval.lastError, 'rate limited');
+    // Scan all warnings rather than asserting on warnings[0]: config-load can
+    // emit its own console.warn first (e.g. the foreign-key advisory for a
+    // worker_pool/remediation section in a shared config.local.yaml), which is
+    // unrelated to the label-removal warning under test.
     assert.ok(
       warnings.some((warning) => /failed to remove consumed label 'merge-agent-requested'/.test(String(warning))),
       `expected consumed-label warning, got: ${warnings.join('\n')}`

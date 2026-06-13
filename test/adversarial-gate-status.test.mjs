@@ -22,6 +22,25 @@ import {
   maybeDispatchAmaClosureFor,
   resolveMergeAgentCoexistenceForWatcher,
 } from '../src/watcher.mjs';
+import { resetConfigCache } from '../src/config-loader.mjs';
+
+// Pin AMA enabled/disabled for a test body regardless of the host's live
+// config.local.yaml (which may set roles.adversarial.merge_authority.enabled).
+// The env alias overrides config; resetConfigCache forces the cached loader to
+// re-read. Restores the prior value + cache on exit.
+async function withMergeAuthorityEnabled(enabled, fn) {
+  const KEY = 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED';
+  const prev = process.env[KEY];
+  process.env[KEY] = enabled ? 'true' : 'false';
+  resetConfigCache();
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env[KEY];
+    else process.env[KEY] = prev;
+    resetConfigCache();
+  }
+}
 
 function makeReviewRow(overrides = {}) {
   return {
@@ -777,7 +796,10 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
       return { stdout: '{}', stderr: '' };
     };
 
-    await handlePostedReviewRow({
+    // This test exercises the merge-agent dispatch path, which only runs when
+    // AMA is disabled. Pin it off so the host's live config.local.yaml (which
+    // may enable AMA) cannot pre-empt merge-agent and drop 'merge-dispatch'.
+    await withMergeAuthorityEnabled(false, () => handlePostedReviewRow({
       rootDir,
       repoPath: repo,
       prNumber,
@@ -814,7 +836,7 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
         log() {},
         error() {},
       },
-    });
+    }));
 
     assert.deepEqual(events, ['status-post', 'merge-fetch', 'merge-dispatch']);
     assert.equal(ghCalls.length, 1);

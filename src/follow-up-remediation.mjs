@@ -68,6 +68,7 @@ const VALID_REPLY_STORAGE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
 const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
+const WORKSPACE_GIT_RETRY_DELAYS_MS = [250, 750];
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -85,23 +86,52 @@ function normalizePrHeadRef(branch) {
   return trimmed || null;
 }
 
+// Normalize a PR number to a positive integer before it is interpolated into a
+// REST path. A corrupt or malformed durable job must fail fast with a clear
+// error rather than build a wrong/misleading `gh api repos/.../pulls/<x>` path.
+// Mirrors the same-named helper in github-api.mjs / adversarial-gate-status.mjs.
+function normalizePrNumber(prNumber) {
+  const normalized = Number(String(prNumber ?? '').trim());
+  if (!Number.isInteger(normalized) || normalized <= 0) {
+    throw new TypeError(`Invalid GitHub PR number: ${prNumber}`);
+  }
+  return normalized;
+}
+
 async function fetchPRBranchMetadata({
   repo,
   prNumber,
   execFileImpl = execFileAsync,
 } = {}) {
-  const { stdout } = await execFileImpl(
-    'gh',
-    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName,headRefName'],
-    { maxBuffer: 1 * 1024 * 1024 }
-  );
+  // Resolve PR branch metadata via the REST pulls endpoint instead of
+  // `gh pr view --json` (which goes through GraphQL). GraphQL and REST have
+  // SEPARATE rate-limit pools; during a heavy throughput push the shared user
+  // token's GraphQL budget gets exhausted first, and a GraphQL-based lookup
+  // here then fails with "API rate limit already exceeded", wedging every
+  // remediation spawn. REST (`gh api repos/{owner}/{repo}/pulls/{n}`) draws
+  // from the core pool, which has far more headroom. base.ref / head.ref are
+  // first-class fields on the REST PR object.
+  const [owner, repoName] = String(repo).split('/');
+  if (!owner || !repoName) {
+    throw new Error(`Invalid repo slug: ${repo}`);
+  }
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  const { stdout } = await runWorkspaceNetworkCommandWithTransientRetry({
+    execFileImpl,
+    command: 'gh',
+    args: ['api', `repos/${owner}/${repoName}/pulls/${normalizedPrNumber}`],
+    options: { maxBuffer: 2 * 1024 * 1024 },
+  });
   const parsed = JSON.parse(String(stdout || '{}'));
-  const baseBranch = normalizeBaseBranch(parsed.baseRefName);
+  const baseBranch = normalizeBaseBranch(parsed?.base?.ref);
   if (!baseBranch) {
     throw new Error(`Could not resolve baseRefName for ${repo}#${prNumber}`);
   }
-  const branch = normalizePrHeadRef(parsed.headRefName);
-  return { baseBranch, branch };
+  const branch = normalizePrHeadRef(parsed?.head?.ref);
+  // head.repo.full_name lets callers tell same-repo PRs (push-back works
+  // against origin) from fork PRs (head branch is not on origin).
+  const headRepo = parsed?.head?.repo?.full_name || null;
+  return { baseBranch, branch, headRepo };
 }
 
 async function fetchPRBaseBranch({
@@ -613,6 +643,78 @@ async function resolveHqWorkerWorkspace({
 function isHqCancelRetryable(err) {
   const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
   return /(?:^|[\s:])(EIO)(?:$|[\s:])|timed out|timeout/i.test(detail);
+}
+
+function isTransientWorkspaceNetworkError(err) {
+  const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
+  return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable)/i.test(detail);
+}
+
+// Authenticate git's smart-HTTP calls (clone/fetch) through gh's credential
+// helper, scoped INLINE rather than relying on a global `gh auth setup-git`
+// having been run on the host. The daemon only guarantees an exported
+// GITHUB_TOKEN (from `gh auth token`); a fresh host can satisfy that yet have no
+// global git credential helper installed, so a plain `git clone
+// https://github.com/...` of a private repo would fail authentication even
+// though `gh` itself is authenticated.
+//
+// We inject the config through git's GIT_CONFIG_COUNT/KEY/VALUE env mechanism
+// (equivalent to `-c credential.helper=...`) instead of argv, so the git
+// invocation's positional arguments are unchanged. Entry 0 resets
+// credential.helper to empty first, so a broken or absent global helper can't
+// be chained ahead of ours; entry 1 sets `!gh auth git-credential`, which reads
+// gh's auth state (honoring GITHUB_TOKEN) and so works from the daemon's
+// exported token with no host-global git config. Merged onto the caller's env,
+// so GITHUB_TOKEN reaches the credential-helper subprocess.
+const GH_GIT_CREDENTIAL_ENV = Object.freeze({
+  GIT_CONFIG_COUNT: '2',
+  GIT_CONFIG_KEY_0: 'credential.helper',
+  GIT_CONFIG_VALUE_0: '',
+  GIT_CONFIG_KEY_1: 'credential.helper',
+  GIT_CONFIG_VALUE_1: '!gh auth git-credential',
+});
+
+function withGhGitCredentialEnv(baseEnv) {
+  return { ...(baseEnv || {}), ...GH_GIT_CREDENTIAL_ENV };
+}
+
+async function runWorkspaceNetworkCommandWithTransientRetry({
+  execFileImpl,
+  command,
+  args,
+  options,
+  retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
+}) {
+  const delays = [0, ...retryDelaysMs];
+  let lastError = null;
+  for (let attempt = 0; attempt < delays.length; attempt += 1) {
+    if (delays[attempt] > 0) {
+      await sleep(delays[attempt]);
+    }
+    try {
+      return await execFileImpl(command, args, options);
+    } catch (err) {
+      lastError = err;
+      if (!isTransientWorkspaceNetworkError(err) || attempt === delays.length - 1) {
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function runWorkspaceGitWithTransientRetry(args, {
+  execFileImpl,
+  options,
+  retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
+}) {
+  return runWorkspaceNetworkCommandWithTransientRetry({
+    execFileImpl,
+    command: 'git',
+    args,
+    options,
+    retryDelaysMs,
+  });
 }
 
 async function cancelHqDispatch({
@@ -2130,9 +2232,26 @@ async function prepareWorkspaceForJob({
   }
 
   if (!existsSync(join(workspaceDir, '.git'))) {
-    await execFileImpl('gh', ['repo', 'clone', repo, workspaceDir], {
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    // Clone with plain `git` over HTTPS rather than `gh repo clone`. `gh repo
+    // clone` resolves the repo through GraphQL, which shares a token's
+    // GraphQL rate-limit pool that gets exhausted first under a heavy push —
+    // wedging every remediation spawn with "API rate limit already exceeded".
+    // `git clone` uses the git smart-HTTP protocol (a separate, far larger
+    // limit). Authentication goes through `gh auth git-credential`, scoped
+    // inline via GH_GIT_CREDENTIAL_ENV, so it works from the daemon's exported
+    // GITHUB_TOKEN even on a host where `gh auth setup-git` was never run; no
+    // token is passed on argv or written into .git/config. Verified to succeed
+    // even when the token's GraphQL budget is fully exhausted.
+    await runWorkspaceGitWithTransientRetry(
+      ['clone', `https://github.com/${repo}.git`, workspaceDir],
+      {
+        execFileImpl,
+        options: {
+          maxBuffer: 10 * 1024 * 1024,
+          env: withGhGitCredentialEnv(env),
+        },
+      }
+    );
   }
 
   // Set local git identity *before* the PR checkout so the very first
@@ -2163,10 +2282,52 @@ async function prepareWorkspaceForJob({
   // the version checked into this branch.
   installWorkerProvenanceHook(workspaceDir);
 
-  await execFileImpl('gh', ['pr', 'checkout', String(job.prNumber)], {
-    cwd: workspaceDir,
-    maxBuffer: 10 * 1024 * 1024,
+  // Check out the PR head branch without `gh pr checkout` (which goes through
+  // GraphQL and so fails under the same rate-limit exhaustion as the clone).
+  // For a same-repo PR the head branch lives on origin, so a plain
+  // `git fetch` + `checkout -B` reproduces what `gh pr checkout` sets up —
+  // including the local branch name the remediation worker later
+  // force-with-lease pushes back to (HEAD:refs/heads/<branch>). Fork PRs (head
+  // branch not on origin) fall back to `gh pr checkout`, which handles the
+  // fork remote wiring; forks are not part of this fleet's hot path, so the
+  // rare GraphQL call there is acceptable.
+  const { branch: headRef, headRepo } = await fetchPRBranchMetadata({
+    repo,
+    prNumber: job.prNumber,
+    execFileImpl,
   });
+  const isSameRepo = !headRepo || headRepo === repo;
+  if (isSameRepo && headRef) {
+    await runWorkspaceGitWithTransientRetry(
+      ['-C', workspaceDir, 'fetch', 'origin', `+refs/heads/${headRef}:refs/remotes/origin/${headRef}`],
+      {
+        execFileImpl,
+        options: {
+          maxBuffer: 10 * 1024 * 1024,
+          env: withGhGitCredentialEnv(env),
+        },
+      }
+    );
+    await runWorkspaceGitWithTransientRetry(
+      ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
+      {
+        execFileImpl,
+        options: {
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      }
+    );
+  } else {
+    await runWorkspaceNetworkCommandWithTransientRetry({
+      execFileImpl,
+      command: 'gh',
+      args: ['pr', 'checkout', String(job.prNumber)],
+      options: {
+        cwd: workspaceDir,
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    });
+  }
 
   return {
     workspaceDir,

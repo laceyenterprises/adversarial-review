@@ -27,8 +27,8 @@ function seedReviewing(db, overrides = {}) {
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
         review_attempts, last_attempted_at, reviewer_session_uuid,
         reviewer_pgid, reviewer_started_at, reviewer_head_sha, reviewer_timeout_ms,
-        reviewer_lease_expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        reviewer_lease_expires_at, infra_auto_recover_attempts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     overrides.repo || REPO,
     overrides.prNumber || PR,
@@ -49,7 +49,8 @@ function seedReviewing(db, overrides = {}) {
       : null,
     Object.prototype.hasOwnProperty.call(overrides, 'reviewerLeaseExpiresAt')
       ? overrides.reviewerLeaseExpiresAt
-      : null
+      : null,
+    overrides.infraAutoRecoverAttempts ?? 0
   );
 }
 
@@ -124,6 +125,28 @@ test('selective stale probing recovers only overdue reviewing rows during steady
   const freshRow = readRow(db, REPO, 71);
   assert.equal(staleRow.review_status, 'posted');
   assert.equal(freshRow.review_status, 'reviewing');
+  assert.match(log.lines.join('\n'), /reviewer_reattach_recovered/);
+});
+
+test('reattach posted review resets infra auto-recovery attempts', async () => {
+  const db = setupDb();
+  seedReviewing(db, { infraAutoRecoverAttempts: 3 });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
+    ]),
+    now: new Date(FAILURE_AT),
+    log,
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'posted');
+  assert.equal(row.infra_auto_recover_attempts, 0);
   assert.match(log.lines.join('\n'), /reviewer_reattach_recovered/);
 });
 

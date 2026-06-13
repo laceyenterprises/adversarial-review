@@ -143,7 +143,7 @@ function claimWithWatcherCas(db, prNumber) {
             last_attempted_at = '2026-05-24T13:00:00.000Z'
       WHERE repo = ?
         AND pr_number = ?
-        AND review_status IN ('pending', 'failed', 'pending-upstream')`
+        AND review_status IN ('pending', 'pending-upstream')`
   ).run(REPO, prNumber);
 }
 

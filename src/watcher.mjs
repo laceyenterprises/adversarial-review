@@ -2024,7 +2024,8 @@ const stmtMarkMalformed = db.prepare(
 // reviewer handle below lets reconcileReviewerSessions reattach to a
 // still-live reviewer or recover a posted GitHub review before falling
 // back to sticky operator action for legacy/anomalous rows.
-// Compare-and-swap claim: only flip `pending` / `failed` rows to
+// Compare-and-swap claim: only flip `pending` rows and expired
+// `pending-upstream` backoff rows to
 // `'reviewing'`. The unconditional UPDATE the previous version of this
 // statement performed was safe under the in-process pollOnce
 // serialization in this module, but did NOT close the cross-process
@@ -2038,13 +2039,15 @@ const stmtMarkMalformed = db.prepare(
 //
 // Match conditions:
 //   - `review_status = 'pending'` — happy-path claim.
-//   - `review_status = 'failed'` — automatic-retry path; the pre-CAS
-//     code treated `failed` as eligible for retry on the next poll,
-//     and we preserve that contract here.
 //   - `review_status = 'pending-upstream'` — upstream-cascade backoff
 //     path. pollOnce gates this state on file-backed nextRetryAfter,
 //     and once that window expires the row may be reclaimed for
 //     another attempt without burning review_attempts.
+// Infrastructure-class `failed` rows use the dedicated
+// stmtMarkInfraAutoRecoveryAttemptStarted claim above, which rechecks the
+// stored failure class and recovery cap atomically. Non-infrastructure
+// `failed` rows must remain failed for operator inspection; the generic claim
+// must never erase their failure evidence.
 //
 // Terminal statuses (`posted`, `malformed`) and the durable in-flight
 // states (`reviewing`, `failed-orphan`) are NOT reclaimable by this
@@ -2077,7 +2080,7 @@ const stmtMarkAttemptStarted = db.prepare(
          END
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status IN ('pending', 'failed', 'pending-upstream')`
+     AND review_status IN ('pending', 'pending-upstream')`
 );
 const stmtMarkReviewerPgid = db.prepare(
   `UPDATE reviewed_prs
@@ -4356,8 +4359,8 @@ async function pollOnce(
       // at 2026-05-16T22:37Z that cited "stale review(s) on prior
       // commits": 4 of 9 sampled PRs had `posted` rows with
       // `reviewer_head_sha` != current PR head. The CAS in
-      // `stmtMarkAttemptStarted` reclaims only
-      // `pending | failed | pending-upstream`, never `posted` — so
+      // `stmtMarkAttemptStarted` reclaims only `pending` and
+      // `pending-upstream`, never `posted` or generic `failed` — so
       // those rows stay stale until manual `retrigger-review`.
       //
       // This auto-refresh calls `requestReviewRereview`, whose own CAS
@@ -4735,6 +4738,13 @@ async function pollOnce(
       const infraRecoveryClass = current?.review_status === 'failed'
         ? infraRecoverableFailureClass(current)
         : null;
+      if (current?.review_status === 'failed' && !infraRecoveryClass) {
+        console.log(
+          `[watcher] Skipping failed review ${repoPath}#${prNumber}: ` +
+            `failure is not infrastructure-recoverable; leaving evidence intact`
+        );
+        continue;
+      }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
       if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
         console.log(

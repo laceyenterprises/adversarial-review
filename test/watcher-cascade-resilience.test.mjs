@@ -724,7 +724,7 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
               END
         WHERE repo = ?
           AND pr_number = ?
-          AND review_status IN ('pending', 'failed', 'pending-upstream')`
+          AND review_status IN ('pending', 'pending-upstream')`
     ).run(
       '2026-05-04T07:30:00.000Z',
       'session-cascade',

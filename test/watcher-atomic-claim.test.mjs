@@ -34,7 +34,7 @@ const CLAIM_SQL = `UPDATE reviewed_prs
          END
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status IN ('pending', 'failed', 'pending-upstream')`;
+     AND review_status IN ('pending', 'pending-upstream')`;
 const RELEASE_TO_PENDING_SQL =
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'";
 const MARK_POSTED_SQL =
@@ -168,19 +168,16 @@ test('atomic claim succeeds for a pending row and flips status to reviewing', ()
   assert.equal(row.failure_message, null);
 });
 
-test('atomic claim succeeds for a failed row (preserves auto-retry contract)', () => {
-  // Pre-CAS, the watcher loop treated 'failed' rows as eligible for
-  // automatic retry on the next poll. The CAS preserves that contract:
-  // 'failed' rows match and are reclaimed.
+test('atomic claim refuses generic failed rows so failure evidence stays terminal', () => {
   const db = setupDb();
-  seedReviewRow(db, { reviewStatus: 'failed', failureMessage: 'transient OAuth failure' });
+  seedReviewRow(db, { reviewStatus: 'failed', failureMessage: '[forbidden-fallback] API key fallback blocked' });
 
   const claim = runClaim(db, '2026-05-02T18:10:00.000Z');
 
-  assert.equal(claim.changes, 1, 'failed rows must remain auto-retryable');
+  assert.equal(claim.changes, 0, 'generic claim must not retry failed rows');
   const row = readRow(db);
-  assert.equal(row.review_status, 'reviewing');
-  assert.equal(row.failure_message, null, 'previous failure_message is cleared on re-claim');
+  assert.equal(row.review_status, 'failed');
+  assert.equal(row.failure_message, '[forbidden-fallback] API key fallback blocked');
 });
 
 test('infra auto-recovery claim atomically promotes and increments the failed row', () => {

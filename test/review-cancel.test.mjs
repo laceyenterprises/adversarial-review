@@ -308,11 +308,11 @@ test('cancelActiveReview still refuses statuses outside the allowed set', async 
 });
 
 test('cancelActiveReview re-fetches and surfaces hint when failed row promotes mid-cancel', async () => {
-  // Simulate the watcher's stmtMarkAttemptStarted promoting a `failed`
-  // row to `reviewing` between the CLI's snapshot read and the identity
-  // check. The CLI's identity check refuses to signal the stale pgid
-  // (start-time mismatch); we expect cancelActiveReview to re-fetch the
-  // row and surface the new pgid via result.hint + receipt.postSignalState.
+  // Simulate the watcher's dedicated infra-recovery claim promoting a
+  // `failed` row to `reviewing` between the CLI's snapshot read and the
+  // identity check. The CLI's identity check refuses to signal the stale pgid
+  // (start-time mismatch); we expect cancelActiveReview to re-fetch the row
+  // and surface the new pgid via result.hint + receipt.postSignalState.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewingRow(rootDir, {
     prNumber: 151,

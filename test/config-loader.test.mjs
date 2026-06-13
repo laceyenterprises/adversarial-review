@@ -2285,6 +2285,10 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       cfg.get('roles.adversarial.merge_authority.branch_protection.required_gate_context_source'),
       'resolveGateStatusContext',
     );
+    assert.equal(
+      cfg.get('roles.adversarial.merge_authority.branch_protection.required'),
+      true,
+    );
 
     const canonicalFalseEnvCfg = loadConfig({
       topPath: top,
@@ -2348,6 +2352,7 @@ test('AMA getMergeAuthorityConfig returns the camelCased subtree with defaults i
     assert.equal(ma.eligibility.reviewerFamilyPolicy, 'audit_existing_gate_contract');
     assert.equal(ma.eligibility.ciGreenClassifier, 'existingAdversarialMergeClassifier');
     assert.equal(ma.branchProtection.requiredGateContextSource, 'resolveGateStatusContext');
+    assert.equal(ma.branchProtection.required, true);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2368,6 +2373,8 @@ test('AMA getMergeAuthorityConfig surfaces operator overrides from top-level YAM
             eligibility:
               risk_classes: ["low", "medium"]
               fast_merge_labels: ["fast-merge:docs"]
+            branch_protection:
+              required: false
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     const ma = cfg.getMergeAuthorityConfig();
@@ -2376,6 +2383,7 @@ test('AMA getMergeAuthorityConfig surfaces operator overrides from top-level YAM
     assert.equal(ma.mergeMethod, 'merge');
     assert.deepEqual(ma.eligibility.riskClasses, ['low', 'medium']);
     assert.deepEqual(ma.eligibility.fastMergeLabels, ['fast-merge:docs']);
+    assert.equal(ma.branchProtection.required, false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

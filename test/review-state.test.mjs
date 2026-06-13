@@ -510,6 +510,15 @@ test("requestReviewRereview refuses to reset a row in 'reviewing' state (in-flig
 test('requestReviewRereview preserves attempt history and records rereview metadata separately from failures', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   insertReviewRow(rootDir);
+  const seededDb = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(seededDb);
+    seededDb.prepare(
+      'UPDATE reviewed_prs SET infra_auto_recover_attempts = 3 WHERE repo = ? AND pr_number = ?'
+    ).run('laceyenterprises/adversarial-review', 10);
+  } finally {
+    seededDb.close();
+  }
 
   const result = requestReviewRereview({
     rootDir,
@@ -525,6 +534,7 @@ test('requestReviewRereview preserves attempt history and records rereview metad
   assert.equal(result.reviewRow.review_attempts, 1);
   assert.equal(result.reviewRow.last_attempted_at, '2026-04-24T12:05:00.000Z');
   assert.equal(result.reviewRow.failure_message, null);
+  assert.equal(result.reviewRow.infra_auto_recover_attempts, 0);
   assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
   assert.equal(result.reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
 });

@@ -69,3 +69,38 @@ diff --git a/modules/worker-pool/lib/hq-common.sh b/modules/worker-pool/lib/hq-c
     },
   ]);
 });
+
+test('watcher retry contract changes require the adversarial-review SPEC touch', () => {
+  const findings = evaluateSpecTouch(`
+diff --git a/src/watcher.mjs b/src/watcher.mjs
+@@
+-const INFRA_AUTO_RECOVER_CAP = 3;
++const INFRA_AUTO_RECOVER_CAP = 5;
+`);
+
+  assert.deepEqual(findings, [
+    {
+      ruleId: 'adversarial-review-watcher-retry-contract',
+      path: 'src/watcher.mjs',
+      label: 'watcher reviewer retry/recovery contract changes',
+      specPaths: ['docs/SPEC-adversarial-review-auto-remediation.md'],
+      covered: false,
+    },
+  ]);
+});
+
+test('adversarial-review SPEC touch covers watcher retry contract changes', () => {
+  const findings = evaluateSpecTouch(`
+diff --git a/src/watcher.mjs b/src/watcher.mjs
+@@
+-const INFRA_AUTO_RECOVER_CAP = 3;
++const INFRA_AUTO_RECOVER_CAP = 5;
+diff --git a/docs/SPEC-adversarial-review-auto-remediation.md b/docs/SPEC-adversarial-review-auto-remediation.md
+@@
++The watcher recovery cap is five attempts.
+`);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].ruleId, 'adversarial-review-watcher-retry-contract');
+  assert.equal(findings[0].covered, true);
+});

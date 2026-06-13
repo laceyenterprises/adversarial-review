@@ -827,6 +827,7 @@ function requestReviewRereview({
              posted_at = NULL,
              failed_at = NULL,
              failure_message = NULL,
+             infra_auto_recover_attempts = 0,
              rereview_requested_at = ?,
              rereview_reason = ?
        WHERE repo = ?

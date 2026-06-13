@@ -35,8 +35,38 @@ gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,sta
 # Latest adversarial review record for the current head
 gh pr view https://github.com/acme/myrepo/pull/1234 --json reviews > /tmp/ama-reviews.json
 
-# Branch protection for the target branch
-gh api "repos/acme/myrepo/branches/$(jq -r '.baseRefName' /tmp/ama-pr.json)/protection" > /tmp/ama-protection.json
+# Branch protection for the target branch. GitHub returns a known 403
+# upgrade/forbidden response on plans without branch protection; represent
+# only that case with a structured sentinel so ama-check can apply
+# branch_protection.required=false. Retry recognized transient gh/GitHub
+# failures briefly; any non-transient or exhausted failure is a hard stop.
+base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
+protection_err=$(mktemp)
+protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)'
+protection_transient_re='timed? out|timeout|TLS handshake timeout|connection (reset|refused|aborted)|temporary failure|network is unreachable|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error'
+protection_attempt=1
+protection_max_attempts=3
+while true; do
+  : > "$protection_err"
+  if gh api "repos/acme/myrepo/branches/$base_enc/protection" > /tmp/ama-protection.json 2> "$protection_err"; then
+    break
+  fi
+  if grep -Eiq "$protection_plan_unavailable_re" "$protection_err"; then
+    jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > /tmp/ama-protection.json
+    break
+  fi
+  if [ "$protection_attempt" -lt "$protection_max_attempts" ] && grep -Eiq "$protection_transient_re" "$protection_err"; then
+    echo "branch protection fetch transient failure (attempt $protection_attempt/$protection_max_attempts); retrying" >&2
+    cat "$protection_err" >&2
+    sleep "$protection_attempt"
+    protection_attempt=$((protection_attempt + 1))
+    continue
+  fi
+  cat "$protection_err" >&2
+  rm -f "$protection_err"
+  exit 1
+done
+rm -f "$protection_err"
 
 # Operator-approved + adversarial-merge-requested label events on the current head
 gh api "repos/acme/myrepo/issues/1234/timeline" --paginate > /tmp/ama-timeline.json

@@ -151,7 +151,12 @@ function buildBootstrapEligibilityReasons({ reviewState, prMetadata, verdict, di
   if (Array.isArray(verdict?.trace?.blockLabels) && verdict.trace.blockLabels.length === 0) {
     reasons.push('no_blocking_labels');
   }
-  if (verdict?.trace?.branchProtection?.ok) reasons.push('configured_gate_context_required');
+  const branchProtection = verdict?.trace?.branchProtection;
+  if (branchProtection?.ok && branchProtection?.required === true) {
+    reasons.push('configured_gate_context_required');
+  } else if (branchProtection?.ok && branchProtection?.required === false) {
+    reasons.push('branch_protection_requirement_waived');
+  }
   return reasons;
 }
 

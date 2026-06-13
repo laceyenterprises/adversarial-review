@@ -544,9 +544,20 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('ci-not-green');
   }
 
-  // SPEC §4.2 #9 — branch protection requires the configured gate.
-  const requiredContext = resolveRequiredGateContext(cfg, env);
-  const protectionOk = branchProtectionRequiresGate(prMetadata, requiredContext);
+  // SPEC §4.2 #9 — branch protection requires the configured gate, UNLESS the
+  // operator has explicitly opted out on a repo whose GitHub plan offers no
+  // branch protection at all (cfg.branchProtection.required === false). The
+  // opt-out drops ONLY this gate; every other §4.2 hard gate above/below still
+  // applies, and AMA still pins --match-head-commit <reviewedSha> at merge time
+  // so a moved head cannot be closed. Default (required !== false) preserves the
+  // existing fail-closed contract.
+  const branchProtectionRequired = cfg?.branchProtection?.required !== false;
+  const requiredContext = branchProtectionRequired
+    ? resolveRequiredGateContext(cfg, env)
+    : null;
+  const protectionOk =
+    !branchProtectionRequired ||
+    branchProtectionRequiresGate(prMetadata, requiredContext);
   if (!protectionOk) {
     reasons.push('branch-protection-missing-gate');
   }
@@ -589,6 +600,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     },
     ciGreen: ci,
     branchProtection: {
+      required: branchProtectionRequired,
       requiredContext,
       ok: protectionOk,
     },

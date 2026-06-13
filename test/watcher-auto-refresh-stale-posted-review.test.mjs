@@ -3,7 +3,7 @@
  * Before this fix, a `posted` review row in reviewed_prs sat forever
  * even when the PR had been updated. The watcher's main reclaim CAS
  * (`stmtMarkAttemptStarted`) only matches rows in
- * `pending | failed | pending-upstream`, never `posted`. D3 (downstream
+ * `pending | pending-upstream`, never `posted` or generic `failed`. D3 (downstream
  * gate) saw the posted review on an older head SHA, reported "stale
  * review", and D4 stayed pending forever. The only recovery was
  * operator-applied `retrigger-review` label.

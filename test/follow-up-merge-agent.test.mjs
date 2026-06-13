@@ -4814,8 +4814,8 @@ test('dispatchMergeAgentForPR logs consumed-label removal failures', async () =>
     // worker_pool/remediation section in a shared config.local.yaml), which is
     // unrelated to the label-removal warning under test.
     assert.ok(
-      warnings.some((w) => /failed to remove consumed label 'merge-agent-requested'/.test(w)),
-      'expected a consumed-label removal warning',
+      warnings.some((warning) => /failed to remove consumed label 'merge-agent-requested'/.test(String(warning))),
+      `expected consumed-label warning, got: ${warnings.join('\n')}`
     );
   } finally {
     console.warn = originalWarn;

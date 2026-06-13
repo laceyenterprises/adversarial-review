@@ -54,7 +54,7 @@ import {
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
-import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import {
   createReviewerRuntimeAdapterForDomain,
   recoverReviewerRunRecords,
@@ -1964,6 +1964,20 @@ const stmtGetFastMergeSkippedPRs = db.prepare(
 const stmtGetPendingFastMergeAudits = db.prepare(
   "SELECT * FROM reviewed_prs WHERE fast_merge_audit_status = 'pending' AND fast_merge_audit_payload_json IS NOT NULL ORDER BY reviewed_at ASC, id ASC LIMIT ?"
 );
+// Bounded auto-recovery of infrastructure-class reviewer failures (2026-06-13
+// codex-fleet-spawn incident): once the routing tier is healthy, re-queue
+// reviews that FAILED on infra (cascade / reviewer-timeout / launchctl-bootstrap
+// / oauth-broken spawn) so a fleet-wide reviewer outage self-heals instead of
+// needing a manual retrigger-review. Bounded by infra_auto_recover_attempts so a
+// persistent failure stays terminal and keeps alerting.
+const INFRA_AUTO_RECOVER_CAP = 3;
+const INFRA_AUTO_RECOVER_PER_TICK = 25;
+const stmtGetInfraFailedReviews = db.prepare(
+  "SELECT repo, pr_number, failure_message, infra_auto_recover_attempts FROM reviewed_prs WHERE review_status = 'failed' AND pr_state = 'open' AND infra_auto_recover_attempts < ? ORDER BY last_attempted_at ASC, id ASC LIMIT ?"
+);
+const stmtRequeueInfraFailedReview = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'pending', failed_at = NULL, failure_message = NULL, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = infra_auto_recover_attempts + 1, rereview_requested_at = ?, rereview_reason = ? WHERE repo = ? AND pr_number = ? AND review_status = 'failed'"
+);
 const stmtMarkFastMergeAuditPending = db.prepare(
   "UPDATE reviewed_prs SET fast_merge_audit_status = 'pending', fast_merge_audit_payload_json = ?, fast_merge_audit_error = NULL WHERE repo = ? AND pr_number = ?"
 );
@@ -3839,6 +3853,52 @@ function retryPendingFastMergeAudits({ logger = console } = {}) {
   }
 }
 
+// Re-queue reviews that FAILED on an infrastructure-class cause back to
+// 'pending', but ONLY once the routing tier is confirmed healthy — so we don't
+// thrash retries while the infra is still down. Bounded by
+// infra_auto_recover_attempts (<= INFRA_AUTO_RECOVER_CAP): a transient or
+// misclassified outage recovers within the cap; a genuinely persistent failure
+// (e.g. real expired OAuth creds) exhausts the cap and stays terminal 'failed',
+// preserving its operator alert. The review budget (review_attempts) is NOT
+// reset — only the failed→pending transition + the infra counter.
+async function recoverInfraFailedReviews({ logger = console } = {}) {
+  let readiness;
+  try {
+    readiness = await probeRoutingTierReadiness();
+  } catch (err) {
+    logger.error?.(`[watcher] infra-failed-review auto-recovery skipped; readiness probe threw: ${err?.message || err}`);
+    return { skipped: 'readiness-probe-error', recovered: 0 };
+  }
+  if (!readiness?.ready) {
+    return { skipped: 'routing-tier-not-ready', recovered: 0 };
+  }
+  let rows;
+  try {
+    rows = stmtGetInfraFailedReviews.all(INFRA_AUTO_RECOVER_CAP, INFRA_AUTO_RECOVER_PER_TICK);
+  } catch (err) {
+    logger.error?.(`[watcher] infra-failed-review auto-recovery query failed: ${err?.message || err}`);
+    return { skipped: 'query-error', recovered: 0 };
+  }
+  let recovered = 0;
+  const now = new Date().toISOString();
+  for (const row of rows) {
+    const failureClass = infraRecoverableFailureClass(row);
+    if (!failureClass) continue; // non-infra failure (real review verdict / security) — leave terminal
+    const nextAttempt = Number(row.infra_auto_recover_attempts || 0) + 1;
+    const reason = `auto-recovery: routing tier healthy; re-queue ${failureClass} failure (infra attempt ${nextAttempt}/${INFRA_AUTO_RECOVER_CAP})`;
+    try {
+      const res = stmtRequeueInfraFailedReview.run(now, reason, row.repo, row.pr_number);
+      if (res.changes > 0) {
+        recovered += 1;
+        logger.log(`[watcher] auto-recovered infra-failed review ${row.repo}#${row.pr_number} (class=${failureClass}, infra attempt ${nextAttempt}/${INFRA_AUTO_RECOVER_CAP}); re-queued to pending`);
+      }
+    } catch (err) {
+      logger.error?.(`[watcher] infra-failed-review auto-recovery failed for ${row.repo}#${row.pr_number}: ${err?.message || err}`);
+    }
+  }
+  return { recovered };
+}
+
 async function recoverFastMergeVetoes(octokit, { logger = console } = {}) {
   const skippedRows = stmtGetFastMergeSkippedPRs.all(FAST_MERGE_RECOVERY_PER_TICK);
   for (const row of skippedRows) {
@@ -4040,6 +4100,7 @@ async function pollOnce(
   await retryPendingMergeCloseouts({ octokit });
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);
+  await recoverInfraFailedReviews();
   await runFastMergeClosePathIsolated();
 
   try {

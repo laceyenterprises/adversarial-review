@@ -496,6 +496,53 @@ test('auditWorkspaceForContamination refuses to guess a missing base branch', as
   assert.match(audit.error, /baseBranch is required/);
 });
 
+test('prepareWorkspaceForJob retries transient same-repo git fetch failures before checkout', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  let fetchAttempts = 0;
+
+  const result = await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob({ repo: 'laceyenterprises/clio', prNumber: 7 }),
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        return { stdout: '', stderr: '' };
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      if (command === 'git' && args[2] === 'fetch' && args[3] === 'origin' && args[4] === 'clio-feature') {
+        fetchAttempts += 1;
+        if (fetchAttempts === 1) {
+          const err = new Error('git fetch failed');
+          err.stderr = 'fatal: unable to access https://github.com/laceyenterprises/clio.git/: TLS handshake timeout';
+          throw err;
+        }
+        return { stdout: '', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(fetchAttempts, 2);
+  assert.ok(result.workspaceDir.endsWith(path.join('workspaces', makeJob().jobId)));
+  assert.ok(
+    calls.some((call) => call[0] === 'git'
+      && call[3] === 'checkout'
+      && call.includes('clio-feature')
+      && call.includes('origin/clio-feature')),
+    'checkout should run after the retried fetch succeeds'
+  );
+});
+
 test('assertValidRepoSlug rejects malformed repo names', () => {
   assert.equal(assertValidRepoSlug('laceyenterprises/clio'), 'laceyenterprises/clio');
   assert.throws(() => assertValidRepoSlug('../clio'));

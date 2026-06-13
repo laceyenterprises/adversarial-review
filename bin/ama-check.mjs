@@ -65,6 +65,17 @@ function loadJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
+function loadProtectionJson(path, cfg) {
+  try {
+    return loadJson(path);
+  } catch {
+    if (cfg?.branchProtection?.required === false) {
+      return {};
+    }
+    throw err;
+  }
+}
+
 /**
  * Normalize a `gh pr view --json reviews` payload + the
  * `--reviewed-sha` flag into the `reviewState` shape the eligibility
@@ -171,17 +182,17 @@ function main(argv = process.argv.slice(2)) {
       return 1;
     }
   }
+  const cfg = loadConfigCached().getMergeAuthorityConfig();
   let prJson, reviewsJson, protectionJson, timelineJson;
   try {
     prJson = loadJson(args.pr);
     reviewsJson = loadJson(args.reviews);
-    protectionJson = loadJson(args.protection);
+    protectionJson = loadProtectionJson(args.protection, cfg);
     timelineJson = loadJson(args.timeline);
   } catch (err) {
     process.stderr.write(`error: failed to load input JSON: ${err.message}\n`);
     return 1;
   }
-  const cfg = loadConfigCached().getMergeAuthorityConfig();
   const reviewState = buildReviewState({
     reviewsJson,
     prJson,

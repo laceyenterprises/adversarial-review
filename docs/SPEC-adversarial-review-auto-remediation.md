@@ -10,6 +10,27 @@ worker. Validation examples and cutover checks must therefore substitute the
 configured worker class and verify the dispatched `workerClass` against that
 config value.
 
+AMA's §4.2 branch-protection gate is enabled by default:
+`roles.adversarial.merge_authority.branch_protection.required` defaults to
+`true`, and the target branch must require the resolved adversarial-gate
+context (`resolveGateStatusContext()`, default `agent-os/adversarial-gate`).
+Operators may set `branch_protection.required: false` only for repositories on
+GitHub plans where branch protection is unavailable and the protection API
+returns the upgrade/forbidden response. That opt-out waives only the
+branch-protection-required-context predicate; review verdict, blocking-finding
+state, risk class, CI, hard-stop labels, mergeability, remediation state, and
+the closer's `--match-head-commit <reviewedSha>` guard still apply.
+
+Closer rechecks represent a forbidden, missing, or unreadable protection
+response as an empty protection snapshot only when
+`branch_protection.required=false`; with the default requirement enabled, an
+empty snapshot fails the branch-protection gate closed with
+`branch-protection-missing-gate`. Audit/provenance strings must distinguish the
+two successful cases: `configured_gate_context_required` means branch
+protection actually required the configured gate, while
+`branch_protection_requirement_waived` means the explicit no-branch-protection
+plan opt-out satisfied §4.2 #9.
+
 ## Kernel Contract Surface
 
 `src/kernel/contracts.d.ts` defines the target kernel contract surface for

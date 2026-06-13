@@ -43,12 +43,14 @@ dispatcher debugging), see
   which is the safe pre-cutover state.
 
 - **Branch protection on the target branch already requires the
-  configured adversarial-gate context(s)**. AMA-02's eligibility
+  configured adversarial-gate context(s), unless the operator explicitly
+  configured `branch_protection.required: false` for a repository whose
+  GitHub plan has no branch-protection API access.** AMA-02's eligibility
   predicate refuses closure if this gate isn't required at branch
-  protection (SPEC §6 AC#8). Verify against the PR's actual target
-  branch, NOT universally `main` — repos that merge to a release branch
-  or temporary cutover branch must check the protection object on that
-  branch instead:
+  protection (SPEC §6 AC#8) and the opt-out is not set. Verify against
+  the PR's actual target branch, NOT universally `main` — repos that
+  merge to a release branch or temporary cutover branch must check the
+  protection object on that branch instead:
 
   ```bash
   # Query the PR's target branch and URL-encode it before interpolating it into
@@ -62,7 +64,16 @@ dispatcher debugging), see
 
   The expected output names the value returned by
   `resolveGateStatusContext()` (default `agent-os/adversarial-gate`; or
-  the `ADV_GATE_STATUS_CONTEXT` env override if set).
+  the `ADV_GATE_STATUS_CONTEXT` env override if set). If this endpoint
+  returns GitHub's upgrade/forbidden response because the plan does not
+  support branch protection, set
+  `roles.adversarial.merge_authority.branch_protection.required: false`
+  only after confirming every other AMA structural gate remains acceptable
+  for that repository. The closer then treats the forbidden protection
+  response as an empty snapshot and records
+  `branch_protection_requirement_waived` instead of
+  `configured_gate_context_required`; with the default `required: true`,
+  the same empty snapshot fails closed as `branch-protection-missing-gate`.
 
 ---
 
@@ -303,6 +314,7 @@ reasons:
 | `risk-class-not-permitted` | PR's risk class is outside `cfg.eligibility.risk_classes` (and no current-head `adversarial-merge-requested`). |
 | `ci-not-green` | At least one external CI check is FAILURE / pending. |
 | `branch-protection-missing-gate` | Target branch protection doesn't require the configured adversarial-gate context. Re-check §1 prerequisite. |
+| `branch_protection_requirement_waived` | Audit/provenance reason for the explicit `branch_protection.required=false` opt-out on a no-branch-protection GitHub plan. This is not a refusal reason. |
 | `label-adversarial-merge-blocked` | Current-head `adversarial-merge-blocked` is applied (with head-scoped evidence). |
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |

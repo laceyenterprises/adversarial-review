@@ -238,6 +238,46 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
 });
 
+test('cfg.enabled=true + branch protection opt-out records waived eligibility reason', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-waived-protection-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    prMetadata: { branchProtection: { requiredContexts: [] } },
+    cfg: {
+      branchProtection: {
+        requiredGateContextSource: 'resolveGateStatusContext',
+        required: false,
+      },
+    },
+    dispatchContext: { rootDir },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+  });
+  assert.equal(result.dispatched, true);
+  assert.ok(write.captured.body.includes('branch_protection_requirement_waived'));
+  assert.ok(!write.captured.body.includes('configured_gate_context_required'));
+
+  const audit = readAmaAuditEntry(
+    dispatchContext.hqRoot,
+    dispatchContext.repo,
+    prMetadata.prNumber,
+    dispatchContext.reviewedSha,
+  );
+  assert.deepEqual(
+    audit.eligibilityReasons.filter(reason => reason.includes('branch')),
+    ['branch_protection_requirement_waived'],
+  );
+});
+
 test('eligible dispatch bootstraps the watcher-owned audit record before the first closer append', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-bootstrap-'));
   const hqRoot = mkdtempSync(join(tmpdir(), 'ama-hq-bootstrap-'));

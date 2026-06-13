@@ -35,8 +35,14 @@ gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStat
 # Latest adversarial review record for the current head
 gh pr view <<PR_URL>> --json reviews > /tmp/ama-reviews.json
 
-# Branch protection for the target branch
-gh api "repos/<<REPO>>/branches/$(jq -r '.baseRefName' /tmp/ama-pr.json)/protection" > /tmp/ama-protection.json
+# Branch protection for the target branch. GitHub returns 403 on plans
+# without branch protection; represent that as an empty snapshot so
+# ama-check can apply branch_protection.required=false while still
+# failing closed when the requirement is enabled.
+base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
+if ! gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ama-protection.json; then
+  printf '{}\n' > /tmp/ama-protection.json
+fi
 
 # Operator-approved + adversarial-merge-requested label events on the current head
 gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ama-timeline.json

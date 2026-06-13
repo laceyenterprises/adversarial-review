@@ -136,42 +136,48 @@ if [[ -r "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER" ]]; then
   source "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER"
 fi
 
+broker_fail_closed_exit() {
+  local flag_name="$1"
+  echo "[follow-up-tick] ERROR: ${flag_name}=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2
+  echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix the OAuth broker or unset ${flag_name} and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 1
+}
+
+# SA-token-fallback: keep the legacy reviewer-PAT helper in top-level scope so
+# partial broker rollback works for any reviewer role, not only claude-first.
+_tick_op_read_reviewer_pat() {
+  local op_ref="$1"
+  local result
+  result=$(/opt/homebrew/bin/op read "$op_ref" 2>/dev/null || true)
+  if [[ -n "$result" ]]; then
+    printf '%s' "$result"
+    return 0
+  fi
+  if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then
+    local _fallback_token
+    # shellcheck disable=SC1091
+    _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"
+    if [[ -n "$_fallback_token" ]]; then
+      result=$(OP_SERVICE_ACCOUNT_TOKEN="$_fallback_token" /opt/homebrew/bin/op read "$op_ref" 2>/dev/null || true)
+      printf '%s' "$result"
+    fi
+  fi
+}
+
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
    reviewer_broker_mode_enabled "claude-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
-    echo "[follow-up-tick] ERROR: CLAUDE_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2
-    exit 1
+    broker_fail_closed_exit "CLAUDE_REVIEWER_AUTH_VIA_BROKER"
   fi
 else
-  # SA-token-fallback: try the daemon's current OP context first,
-  # then retry under the canonical agent-os SA env file if Cliovault
-  # is unreachable from the current SA.
-  _tick_op_read_reviewer_pat() {
-    local op_ref="$1"
-    local result
-    result=$(/opt/homebrew/bin/op read "$op_ref" 2>/dev/null || true)
-    if [[ -n "$result" ]]; then
-      printf '%s' "$result"
-      return 0
-    fi
-    if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then
-      local _fallback_token
-      # shellcheck disable=SC1091
-      _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"
-      if [[ -n "$_fallback_token" ]]; then
-        result=$(OP_SERVICE_ACCOUNT_TOKEN="$_fallback_token" /opt/homebrew/bin/op read "$op_ref" 2>/dev/null || true)
-        printf '%s' "$result"
-      fi
-    fi
-  }
   GH_CLAUDE_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/claude-reviewer-pat/credential')
   export GH_CLAUDE_REVIEWER_TOKEN
 fi
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
    reviewer_broker_mode_enabled "codex-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
-    echo "[follow-up-tick] ERROR: CODEX_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2
-    exit 1
+    broker_fail_closed_exit "CODEX_REVIEWER_AUTH_VIA_BROKER"
   fi
 else
   GH_CODEX_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/codex-reviewer-pat/credential')
@@ -180,8 +186,7 @@ fi
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
    reviewer_broker_mode_enabled "gemini-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer; then
-    echo "[follow-up-tick] ERROR: GEMINI_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2
-    exit 1
+    broker_fail_closed_exit "GEMINI_REVIEWER_AUTH_VIA_BROKER"
   fi
 else
   GH_GEMINI_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/credential')

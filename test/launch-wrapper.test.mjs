@@ -48,6 +48,8 @@ function writeExecutable(filePath, body) {
 
 async function runMaintainerWatcherLauncher(scriptName, {
   alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
+  brokerMode = 'healthy',
+  localAlertTo = null,
   localLinearEnv = null,
   opCliPath = null,
   opMode = 'ok',
@@ -66,22 +68,34 @@ async function runMaintainerWatcherLauncher(scriptName, {
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(join(fakeRepo, 'src', 'secret-source'), { recursive: true });
   mkdirSync(fakeTmp, { recursive: true });
-  writeFileSync(join(fakeRepo, 'src', 'watcher.mjs'), 'process.exit(0);\n', 'utf8');
+  writeFileSync(
+    join(fakeRepo, 'src', 'watcher.mjs'),
+    'console.log(JSON.stringify({linearApiKey: process.env.LINEAR_API_KEY || "", alertTo: process.env.ALERT_TO || ""}));\n'
+      + 'process.exit(0);\n',
+    'utf8',
+  );
   if (localLinearEnv !== null) {
     const localSecretsDir = join(root, 'agent-os', '.secrets', 'local');
     mkdirSync(localSecretsDir, { recursive: true });
     writeFileSync(join(localSecretsDir, 'linear.env'), localLinearEnv, 'utf8');
   }
+  if (localAlertTo !== null) {
+    const localSecretsDir = join(root, 'agent-os', '.secrets', 'local');
+    mkdirSync(localSecretsDir, { recursive: true });
+    writeFileSync(join(localSecretsDir, 'adversarial-watcher-alert-to'), localAlertTo, 'utf8');
+  }
 
   const fakeNode = join(fakeBin, 'node');
   const fakeGh = join(fakeBin, 'gh');
-  writeExecutable(
-    fakeNode,
-    '#!/bin/bash\n'
-      + 'if [[ "$1" == "-e" ]]; then exit 0; fi\n'
-      + 'if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then printf "op-token"; exit 0; fi\n'
-      + 'exit 0\n',
-  );
+	  writeExecutable(
+	    fakeNode,
+	    '#!/bin/bash\n'
+	      + 'if [[ "$1" == "-e" ]]; then exit 0; fi\n'
+	      + 'if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then printf "op-token"; exit 0; fi\n'
+	      + 'if [[ "$1" == *"watcher.mjs" ]]; then printf "{\\"linearApiKey\\":\\"%s\\",\\"alertTo\\":\\"%s\\"}\\n" "${LINEAR_API_KEY:-}" "${ALERT_TO:-}"; exit 0; fi\n'
+	      + 'if [[ "$1" == *"adversarial-follow-up-daemon.mjs" ]]; then exit 0; fi\n'
+	      + 'exit 0\n',
+	  );
   writeExecutable(
     fakeGh,
     '#!/bin/bash\n'
@@ -164,23 +178,27 @@ async function runMaintainerWatcherLauncher(scriptName, {
         + '}\n',
     );
   }
-  mkdirSync(dirname(fakeReviewerBrokerHelper), { recursive: true });
-  writeExecutable(
-    fakeReviewerBrokerHelper,
-    '#!/bin/zsh\n'
-      + 'reviewer_broker_mode_enabled() {\n'
-      + '  local role_upper flag_name flag_value\n'
-      + '  role_upper="$(printf "%s" "$1" | tr "[:lower:]-" "[:upper:]_")"\n'
-      + '  flag_name="${role_upper}_AUTH_VIA_BROKER"\n'
+	  const reviewerBrokerHelperBody = '#!/bin/zsh\n'
+	      + 'reviewer_broker_mode_enabled() {\n'
+	      + '  local role_upper flag_name flag_value\n'
+	      + '  role_upper="$(printf "%s" "$1" | tr "[:lower:]-" "[:upper:]_")"\n'
+	      + '  flag_name="${role_upper}_AUTH_VIA_BROKER"\n'
       + '  eval "flag_value=\\"\\${${flag_name}:-}\\""\n'
-      + '  [[ "$flag_value" == "true" ]]\n'
-      + '}\n'
-      + 'resolve_reviewer_token_via_broker() {\n'
-      + '  export "$1=broker-token"\n'
-      + '  echo "[reviewer-broker] resolved $1 via OAuth broker" >&2\n'
-      + '  return 0\n'
-      + '}\n',
-  );
+	      + '  [[ "$flag_value" == "true" ]]\n'
+	      + '}\n'
+	      + 'resolve_reviewer_token_via_broker() {\n'
+	      + '  if [[ "${TEST_REVIEWER_BROKER_MODE:-healthy}" == "fail" ]]; then\n'
+	      + '    echo "[reviewer-broker] simulated broker failure for $2" >&2\n'
+	      + '    return 1\n'
+	      + '  fi\n'
+	      + '  export "$1=broker-token"\n'
+	      + '  echo "[reviewer-broker] resolved $1 via OAuth broker" >&2\n'
+	      + '  return 0\n'
+	      + '}\n';
+	  mkdirSync(dirname(fakeReviewerBrokerHelper), { recursive: true });
+	  writeExecutable(fakeReviewerBrokerHelper, reviewerBrokerHelperBody);
+	  mkdirSync(join(root, 'lib'), { recursive: true });
+	  writeExecutable(join(root, 'lib', 'reviewer-broker.sh'), reviewerBrokerHelperBody);
 
   const script = readScript(scriptName)
     .replace('set -euo pipefail', `set -euo pipefail\nexport PATH="${fakeBin}:/usr/bin:/bin"`)
@@ -203,6 +221,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
     TEST_OP_READ_LOG: opReadLog,
     TEST_OP_MODE: opMode,
     TEST_REQUIRED_OP_MODE: requiredOpMode,
+    TEST_REVIEWER_BROKER_MODE: brokerMode,
     ...extraEnv,
   };
   try {
@@ -366,6 +385,52 @@ test('maintainer watcher launcher ignores whitespace local LINEAR_API_KEY and fa
   });
   assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
   assert.match(result.opReadLog, /op:\/\/mem423y7ewrymvxv4ibh34zdk4\/zcblkukakjcadmws2vnjeqlswa\/credential/);
+});
+
+test('maintainer watcher launcher uses local LINEAR_API_KEY without inline comments or 1Password read', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    localLinearEnv: 'export LINEAR_API_KEY=linear-local-token # rotated by local runtime\n',
+    extraEnv: BROKER_MODE_TEST_ENV,
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.doesNotMatch(
+    result.opReadLog,
+    /op:\/\/mem423y7ewrymvxv4ibh34zdk4\/zcblkukakjcadmws2vnjeqlswa\/credential/,
+  );
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.equal(payload.linearApiKey, 'linear-local-token');
+});
+
+test('maintainer watcher launcher reads first non-empty local ALERT_TO line', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    localAlertTo: '  alert@example.com  \nignored@example.com\n',
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.doesNotMatch(result.opReadLog, /op:\/\/test-vault\/adversarial-watcher-alert-to\/credential/);
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.equal(payload.alertTo, 'alert@example.com');
+});
+
+test('broker-mode launchers sleep before fail-closed exit when broker is unavailable', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-follow-up-tick.sh',
+  ]) {
+    const result = await runMaintainerWatcherLauncher(scriptName, {
+      brokerMode: 'fail',
+      extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+    });
+    assert.equal(result.code, 1, `${scriptName} stderr:\n${result.stderr}`);
+    assert.match(result.stderr, /broker fetch failed/);
+    assert.equal(result.sleepLog.trim(), '3600', `${scriptName} sleep log:\n${result.sleepLog}`);
+  }
 });
 
 test('maintainer watcher launcher warns when configured op CLI is not executable', {

@@ -73,6 +73,126 @@ test('pickAdversarialGateStatus returns success for a settled non-blocking revie
   assert.equal(decision.reason, 'review-settled');
 });
 
+test('pickAdversarialGateStatus holds a settled verdict pending when the live head moved past the reviewed head', () => {
+  // Regression: a comment-only/approved verdict was reviewed at head A, then
+  // the PR advanced to head B (remediation push / re-review still in flight).
+  // The verdict no longer describes the merge tree, so the gate must not
+  // greenlight head B until the re-review posts on it.
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({ reviewer_head_sha: 'aaaaaaa_reviewed_head' }),
+    latestJob: makeJob(),
+    headSha: 'bbbbbbb_live_head',
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'stale-review-head');
+});
+
+test('pickAdversarialGateStatus holds a settled posted row (no follow-up job) pending on a stale head', () => {
+  // The !latestJob branch must respect the same staleness guard so a
+  // comment-only verdict computed at head A cannot greenlight head B.
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      reviewer_head_sha: 'aaaaaaa_reviewed_head',
+      reviewBody: '## Summary\nClean.\n## Verdict\nComment only',
+    }),
+    latestJob: null,
+    headSha: 'bbbbbbb_live_head',
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'stale-review-head');
+});
+
+for (const failureCase of [
+  {
+    name: 'reviewer timeout',
+    failure_message: '[reviewer-timeout] Command failed after reviewer timeout',
+  },
+  {
+    name: 'launchctl bootstrap',
+    failure_message: '[launchctl-bootstrap] Claude launchctl session bootstrap failed',
+  },
+  {
+    name: 'cascade',
+    failure_message: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
+  },
+  {
+    name: 'unknown failure',
+    failure_message: 'reviewer process exited without completion marker',
+  },
+]) {
+  test(`pickAdversarialGateStatus holds stale failed ${failureCase.name} rows pending`, () => {
+    const decision = pickAdversarialGateStatus({
+      reviewRow: makeReviewRow({
+        review_status: 'failed',
+        reviewer_head_sha: 'aaaaaaa_reviewed_head',
+        failure_message: failureCase.failure_message,
+      }),
+      latestJob: null,
+      headSha: 'bbbbbbb_live_head',
+    });
+
+    assert.equal(decision.state, 'pending');
+    assert.equal(decision.reason, 'stale-review-head');
+  });
+}
+
+test('pickAdversarialGateStatus holds stale failed-orphan rows pending', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed-orphan',
+      reviewer_head_sha: 'aaaaaaa_reviewed_head',
+    }),
+    latestJob: null,
+    headSha: 'bbbbbbb_live_head',
+  });
+
+  assert.equal(decision.state, 'pending');
+  assert.equal(decision.reason, 'stale-review-head');
+});
+
+test('pickAdversarialGateStatus settles when the reviewed head matches the live head', () => {
+  // The guard must not block the normal path: once the re-review posts on the
+  // current head, reviewer_head_sha catches up and the verdict applies.
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({ reviewer_head_sha: 'bbbbbbb_live_head' }),
+    latestJob: makeJob(),
+    headSha: 'bbbbbbb_live_head',
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+});
+
+test('pickAdversarialGateStatus keeps current-head failed rows non-blocking', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      review_status: 'failed',
+      reviewer_head_sha: 'bbbbbbb_live_head',
+      failure_message: '[reviewer-timeout] Command failed after reviewer timeout',
+    }),
+    latestJob: null,
+    headSha: 'bbbbbbb_live_head',
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'reviewer-timeout');
+});
+
+test('pickAdversarialGateStatus falls through the staleness guard on legacy rows without a reviewed head', () => {
+  // Rows predating the reviewer_head_sha column carry no reviewed head; the
+  // guard must not block them (it would block every legacy PR forever).
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob(),
+    headSha: 'bbbbbbb_live_head',
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+});
+
 test('pickAdversarialGateStatus keeps posted rows without a follow-up ledger entry pending', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),
@@ -686,6 +806,10 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
         events.push('merge-dispatch');
         return { decision: 'skip-test' };
       },
+      resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+        outcome: 'dispatch-merge-agent',
+        dispatchEnv: null,
+      }),
       logger: {
         log() {},
         error() {},

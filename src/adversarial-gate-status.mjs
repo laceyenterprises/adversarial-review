@@ -222,6 +222,29 @@ function pickAdversarialGateStatus({
   if (reviewStatus === 'malformed') {
     return decide('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }
+
+  // Stale-review-head guard. Stored review rows can intentionally publish a
+  // green, operator-decides gate even when the reviewer never posted a clean
+  // verdict (for example infra `failed` / `failed-orphan` rows), so the head
+  // comparison must run before any stored-state branch that can return
+  // `success`, not only before settled posted verdict handling. When the PR's
+  // live head advances past the row's reviewer_head_sha, the stored outcome no
+  // longer describes the tree being merged; report pending until the watcher
+  // refreshes/re-reviews the current head.
+  //
+  // Fall through when either side is unknown: a null `headSha` means the caller
+  // didn't supply a live head to compare, and a null `reviewer_head_sha` means a
+  // legacy row predating that column. Operator override (`operator-approved`,
+  // handled above) already pins to the current head, so it is unaffected.
+  const reviewedHead = reviewRow.reviewer_head_sha || null;
+  if (headSha && reviewedHead && String(reviewedHead) !== String(headSha)) {
+    return decide(
+      'pending',
+      'Live head has advanced past the reviewed head; re-review of the current head is pending.',
+      'stale-review-head'
+    );
+  }
+
   if (reviewStatus === 'failed') {
     // Infrastructure failures (reviewer crashed before posting any verdict)
     // intentionally post `success` so the GitHub status check does NOT block

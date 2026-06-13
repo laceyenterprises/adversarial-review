@@ -406,6 +406,62 @@ test('local.yaml overrides top', () => {
   }
 });
 
+test('top-level config.yaml rejects foreign worker_pool section', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        anything: true
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /worker_pool/);
+        assert.match(err.message, /unknown key/);
+        assert.equal(err.source, top);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('versioned config.local.yaml tolerates allowlisted foreign worker_pool section', () => {
+  const tmp = freshTmp();
+  const originalWarn = console.warn;
+  try {
+    const warnings = [];
+    console.warn = (msg) => warnings.push(String(msg));
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      version: 1
+      roots:
+        hq: /from-local
+      worker_pool:
+        anything: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('worker_pool.anything'), null);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /worker_pool/);
+    assert.match(warnings[0], /config\.local\.yaml/);
+  } finally {
+    console.warn = originalWarn;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('retention full block accepts schema-default values', () => {
   const tmp = freshTmp();
   try {
@@ -1595,7 +1651,34 @@ test('validateSchema rejects MHX title tags in shared CFG enums', () => {
   );
 });
 
-test('validateSchema tolerates allowlisted foreign top-level keys (multi-reader config.local.yaml)', () => {
+test('validateSchema rejects allowlisted foreign top-level keys unless local-layer tolerance is explicit', () => {
+  assert.throws(
+    () => validateSchema({ version: 1, worker_pool: { anything: true } }),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /worker_pool/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('validateSchema keeps foreign top-level tolerance scoped to local YAML sources', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, worker_pool: { anything: true } },
+      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /worker_pool/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('validateSchema can explicitly tolerate allowlisted foreign top-level keys for local files', () => {
   // config.local.yaml is shared by several loaders (CFG-01 python loader, this
   // adversarial-review loader, ...). A top-level section owned by a DIFFERENT
   // reader must be explicitly allowlisted before this loader ignores it.
@@ -1603,7 +1686,10 @@ test('validateSchema tolerates allowlisted foreign top-level keys (multi-reader 
   try {
     const warnings = [];
     console.warn = (msg) => warnings.push(String(msg));
-    const out = validateSchema({ version: 1, worker_pool: { anything: true } });
+    const out = validateSchema(
+      { version: 1, worker_pool: { anything: true } },
+      { source: '/tmp/config.local.yaml', tolerateForeignTopLevelSections: true },
+    );
     assert.equal(out.worker_pool, undefined, 'foreign top-level section is dropped, not thrown');
     assert.equal(out.version, 1);
     assert.equal(warnings.length, 1);

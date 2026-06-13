@@ -35,14 +35,22 @@ gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStat
 # Latest adversarial review record for the current head
 gh pr view <<PR_URL>> --json reviews > /tmp/ama-reviews.json
 
-# Branch protection for the target branch. GitHub returns 403 on plans
-# without branch protection; represent that as an empty snapshot so
-# ama-check can apply branch_protection.required=false while still
-# failing closed when the requirement is enabled.
+# Branch protection for the target branch. GitHub returns a known 403
+# upgrade/forbidden response on plans without branch protection; represent
+# only that case with a structured sentinel so ama-check can apply
+# branch_protection.required=false. Any other API failure is a hard stop.
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
-if ! gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ama-protection.json; then
-  printf '{}\n' > /tmp/ama-protection.json
+protection_err=$(mktemp)
+if ! gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ama-protection.json 2> "$protection_err"; then
+  if grep -Eiq 'branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)' "$protection_err"; then
+    jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > /tmp/ama-protection.json
+  else
+    cat "$protection_err" >&2
+    rm -f "$protection_err"
+    exit 1
+  fi
 fi
+rm -f "$protection_err"
 
 # Operator-approved + adversarial-merge-requested label events on the current head
 gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ama-timeline.json

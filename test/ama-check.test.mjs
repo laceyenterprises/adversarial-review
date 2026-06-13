@@ -99,18 +99,74 @@ function runAmaCheck(tmp, { branchProtectionRequired, protectionBody }) {
   );
 }
 
-test('ama-check treats unreadable protection JSON as empty only when branch protection is waived', () => {
+test('ama-check accepts GitHub-plan protection sentinel only when branch protection is waived', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-protection-'));
   try {
     const result = runAmaCheck(tmp, {
       branchProtectionRequired: false,
-      protectionBody: '',
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
     });
     assert.equal(result.status, 0, result.stderr);
     const verdict = JSON.parse(result.stdout);
     assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
     assert.equal(verdict.trace.branchProtection.required, false);
     assert.equal(verdict.trace.branchProtection.ok, true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check rejects ambiguous empty protection input when branch protection is waived', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-empty-protection-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{}\n',
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /branch protection waiver requires branchProtectionUnavailable sentinel/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check rejects non-sentinel protection input when branch protection is waived', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-wrong-protection-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "required_status_checks": { "contexts": ["agent-os/adversarial-gate"] } }\n',
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /branch protection waiver requires branchProtectionUnavailable sentinel/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check rejects malformed protection input when branch protection is waived', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-malformed-protection-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '',
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /failed to load input JSON/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check rejects GitHub-plan protection sentinel when branch protection is required', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-required-sentinel-protection-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /branch protection is required/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

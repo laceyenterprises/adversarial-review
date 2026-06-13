@@ -65,15 +65,18 @@ dispatcher debugging), see
   The expected output names the value returned by
   `resolveGateStatusContext()` (default `agent-os/adversarial-gate`; or
   the `ADV_GATE_STATUS_CONTEXT` env override if set). If this endpoint
-  returns GitHub's upgrade/forbidden response because the plan does not
+  returns GitHub's known upgrade/forbidden response because the plan does not
   support branch protection, set
   `roles.adversarial.merge_authority.branch_protection.required: false`
   only after confirming every other AMA structural gate remains acceptable
-  for that repository. The closer then treats the forbidden protection
-  response as an empty snapshot and records
+  for that repository. The closer then writes the structured
+  `{ "branchProtectionUnavailable": true, "reason": "github_plan" }`
+  sentinel and records
   `branch_protection_requirement_waived` instead of
-  `configured_gate_context_required`; with the default `required: true`,
-  the same empty snapshot fails closed as `branch-protection-missing-gate`.
+  `configured_gate_context_required`; missing, malformed, unreadable, or
+  ambiguous empty protection input remains a hard closer input error. With the
+  default `required: true`, an ordinary empty protection snapshot fails closed
+  as `branch-protection-missing-gate`.
 
 ---
 

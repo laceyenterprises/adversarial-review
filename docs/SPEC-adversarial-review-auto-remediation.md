@@ -16,20 +16,24 @@ AMA's §4.2 branch-protection gate is enabled by default:
 context (`resolveGateStatusContext()`, default `agent-os/adversarial-gate`).
 Operators may set `branch_protection.required: false` only for repositories on
 GitHub plans where branch protection is unavailable and the protection API
-returns the upgrade/forbidden response. That opt-out waives only the
+returns the known upgrade/forbidden response. The closer must capture that
+specific response as `{ "branchProtectionUnavailable": true, "reason":
+"github_plan" }`; other protection-fetch failures are hard stops, not waiver
+inputs. That opt-out waives only the
 branch-protection-required-context predicate; review verdict, blocking-finding
 state, risk class, CI, hard-stop labels, mergeability, remediation state, and
 the closer's `--match-head-commit <reviewedSha>` guard still apply.
 
-Closer rechecks represent a forbidden, missing, or unreadable protection
-response as an empty protection snapshot only when
-`branch_protection.required=false`; with the default requirement enabled, an
-empty snapshot fails the branch-protection gate closed with
-`branch-protection-missing-gate`. Audit/provenance strings must distinguish the
-two successful cases: `configured_gate_context_required` means branch
-protection actually required the configured gate, while
-`branch_protection_requirement_waived` means the explicit no-branch-protection
-plan opt-out satisfied §4.2 #9.
+Closer rechecks accept only the structured GitHub-plan sentinel above as the
+no-branch-protection waiver input when `branch_protection.required=false`.
+Missing, unreadable, malformed, or ambiguous empty protection input is a hard
+input error. With the default requirement enabled, the sentinel is also a hard
+input error, and an ordinary empty protection snapshot fails the
+branch-protection gate closed with `branch-protection-missing-gate`.
+Audit/provenance strings must distinguish the two successful cases:
+`configured_gate_context_required` means branch protection actually required
+the configured gate, while `branch_protection_requirement_waived` means the
+explicit no-branch-protection plan opt-out satisfied §4.2 #9.
 
 ## Kernel Contract Surface
 

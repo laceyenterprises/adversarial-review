@@ -440,6 +440,8 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
     'Re-generate via the snippet in the test file header (search "// regenerate-golden") ' +
     'after reviewing the diff for unintended changes.',
   );
+  assert.match(prompt, /branchProtectionUnavailable: true, reason: "github_plan"/);
+  assert.match(prompt, /cat "\$protection_err" >&2\n    rm -f "\$protection_err"\n    exit 1/);
 });
 
 // ---------------------------------------------------------------------------

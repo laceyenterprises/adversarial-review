@@ -65,15 +65,26 @@ function loadJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
+function isBranchProtectionUnavailableSentinel(value) {
+  return value?.branchProtectionUnavailable === true && value?.reason === 'github_plan';
+}
+
 function loadProtectionJson(path, cfg) {
-  try {
-    return loadJson(path);
-  } catch {
-    if (cfg?.branchProtection?.required === false) {
+  const parsed = loadJson(path);
+  if (cfg?.branchProtection?.required === false) {
+    if (isBranchProtectionUnavailableSentinel(parsed)) {
       return {};
     }
-    throw err;
+    throw new Error(
+      'branch protection waiver requires branchProtectionUnavailable sentinel with reason github_plan',
+    );
   }
+  if (isBranchProtectionUnavailableSentinel(parsed)) {
+    throw new Error(
+      'branch protection is required but protection input reported GitHub plan unavailability',
+    );
+  }
+  return parsed;
 }
 
 /**

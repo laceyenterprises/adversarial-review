@@ -88,6 +88,12 @@ function isFalseyDeprecatedEnvValue(value) {
   return lower === '' || lower === 'false' || lower === '0';
 }
 
+function isLocalYamlSource(source) {
+  if (typeof source !== 'string' || !source) return false;
+  const name = basename(source);
+  return name.endsWith('.local.yaml') || name.endsWith('.local.yml');
+}
+
 // -------- Schema declaration -----------------------------------------------
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
@@ -96,6 +102,12 @@ const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-cod
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
+const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
+  // LOADER-CONTRACT §2 permits each reader to ignore only root sections
+  // explicitly foreign to that reader in top-level config.local.yaml. The
+  // worker-pool CFG reader owns this root; this Node reader does not.
+  'worker_pool',
+]);
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a
 // Python-only key must not land without adding the same key here first.
@@ -1498,7 +1510,10 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
   return out;
 }
 
-export function validateSchema(doc, { source = null, rawText = null } = {}) {
+export function validateSchema(
+  doc,
+  { source = null, rawText = null, tolerateForeignTopLevelSections = false } = {},
+) {
   const schema = schemaV1();
   const lineMap = rawText ? buildLineMap(rawText, Object.keys(schema.__keys)) : null;
   if (doc === null || doc === undefined) {
@@ -1525,7 +1540,31 @@ export function validateSchema(doc, { source = null, rawText = null } = {}) {
       { key: 'version', expected: String(SCHEMA_VERSION), got: doc.version, source },
     );
   }
-  return validateDictPresentKeysOnly(doc, schema, '', source, lineMap);
+  // Tolerant top-level is scoped to Layer-4 multi-reader local siblings.
+  // The public validator and checked-in Layer-3 config.yaml remain strict so
+  // this reader cannot silently diverge from sibling CFG loaders.
+  const knownTop = schema.__keys || {};
+  const filtered = {};
+  for (const topKey of Object.keys(doc)) {
+    if (topKey === 'version' || topKey.startsWith('__') || topKey in knownTop) {
+      filtered[topKey] = doc[topKey];
+    } else if (
+      tolerateForeignTopLevelSections &&
+      isLocalYamlSource(source) &&
+      FOREIGN_TOP_LEVEL_SECTIONS.has(topKey)
+    ) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn(
+          `[adversarial-config] ignoring unknown top-level key ${JSON.stringify(topKey)}` +
+            `${source ? ` from ${source}` : ''} — not in this reader's schema ` +
+            `(owned by another config reader)`,
+        );
+      }
+    } else {
+      filtered[topKey] = doc[topKey];
+    }
+  }
+  return validateDictPresentKeysOnly(filtered, schema, '', source, lineMap);
 }
 
 // -------- Module file validation -------------------------------------------
@@ -1985,7 +2024,11 @@ export function loadConfig({
       !Array.isArray(localDoc) &&
       'version' in localDoc
     ) {
-      validatedLocal = validateSchema(localDoc, { source: local, rawText: localRaw });
+      validatedLocal = validateSchema(localDoc, {
+        source: local,
+        rawText: localRaw,
+        tolerateForeignTopLevelSections: true,
+      });
     } else {
       const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw);
       validatedLocal = validated;

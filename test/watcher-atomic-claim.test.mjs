@@ -37,6 +37,8 @@ const CLAIM_SQL = `UPDATE reviewed_prs
      AND review_status IN ('pending', 'failed', 'pending-upstream')`;
 const RELEASE_TO_PENDING_SQL =
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'";
+const RECORD_INFRA_AUTO_RECOVERY_CLAIM_SQL =
+  "UPDATE reviewed_prs SET infra_auto_recover_attempts = infra_auto_recover_attempts + 1 WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ? AND review_status = 'reviewing'";
 
 function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
   sessionUuid = 'session-999',
@@ -119,6 +121,21 @@ test('atomic claim succeeds for a failed row (preserves auto-retry contract)', (
   const row = readRow(db);
   assert.equal(row.review_status, 'reviewing');
   assert.equal(row.failure_message, null, 'previous failure_message is cleared on re-claim');
+});
+
+test('infra auto-recovery counter increments only after a reviewing claim', () => {
+  const db = setupDb();
+  seedReviewRow(db, { reviewStatus: 'failed', failureMessage: '[oauth-broken] reviewer spawn failed' });
+
+  const beforeClaim = db.prepare(RECORD_INFRA_AUTO_RECOVERY_CLAIM_SQL).run(REPO, PR, 'session-999');
+  assert.equal(beforeClaim.changes, 0, 'failed evidence must not be consumed before a claim');
+  assert.equal(readRow(db).infra_auto_recover_attempts, 0);
+
+  const claim = runClaim(db, '2026-05-02T18:10:00.000Z');
+  assert.equal(claim.changes, 1);
+  const afterClaim = db.prepare(RECORD_INFRA_AUTO_RECOVERY_CLAIM_SQL).run(REPO, PR, 'session-999');
+  assert.equal(afterClaim.changes, 1);
+  assert.equal(readRow(db).infra_auto_recover_attempts, 1);
 });
 
 test('atomic claim succeeds for a pending-upstream row once backoff has expired', () => {

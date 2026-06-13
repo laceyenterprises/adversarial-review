@@ -1,9 +1,10 @@
 // infra-recoverable-failure-class.test.mjs — proves infraRecoverableFailureClass
 // recognizes the infrastructure-class reviewer failures the watcher may
-// boundedly auto-recover, INCLUDING the oauth-broken spawn failure that grounded
-// the codex reviewer fleet on 2026-06-13 (a missing hq-gh.sh source mislabeled
-// as oauth-broken). Security-class failures (forbidden-fallback) and real review
-// verdicts must NOT be recoverable.
+// boundedly auto-recover after the normal dispatch path claims the row,
+// INCLUDING the oauth-broken spawn failure that grounded the codex reviewer
+// fleet on 2026-06-13 (a missing hq-gh.sh source mislabeled as oauth-broken).
+// Security-class failures (forbidden-fallback) and real review verdicts must
+// NOT be recoverable.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {

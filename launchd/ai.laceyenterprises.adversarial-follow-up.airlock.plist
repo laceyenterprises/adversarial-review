@@ -69,6 +69,32 @@
         <string>adversarial</string>
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
         <string>codex</string>
+        <!--
+          Match the watcher LaunchAgent: follow-up comment posting uses the
+          same reviewer identities and should mint reviewer GitHub tokens
+          through the local OAuth broker instead of per-role 1Password PAT
+          reads.
+        -->
+        <key>CLAUDE_REVIEWER_AUTH_VIA_BROKER</key>
+        <string>true</string>
+        <key>CODEX_REVIEWER_AUTH_VIA_BROKER</key>
+        <string>true</string>
+        <key>GEMINI_REVIEWER_AUTH_VIA_BROKER</key>
+        <string>true</string>
+        <key>OAUTH_BROKER_SHARED_SECRET_FILE</key>
+        <string>/Users/airlock/agent-os/.secrets/local/oauth-broker-shared-secret</string>
+        <key>OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID</key>
+        <string>3994110</string>
+        <key>OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID</key>
+        <string>138772505</string>
+        <key>OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID</key>
+        <string>3994060</string>
+        <key>OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID</key>
+        <string>138771486</string>
+        <key>OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID</key>
+        <string>3994139</string>
+        <key>OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_INSTALLATION_ID</key>
+        <string>138773049</string>
     </dict>
 
     <key>RunAtLoad</key>

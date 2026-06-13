@@ -170,6 +170,11 @@ test('follow-up-tick script sources the broker helper + gates op-read on the fla
     /reviewer_broker_mode_enabled "codex-reviewer"/,
     'follow-up-tick must consult the codex-reviewer broker flag',
   );
+  assert.match(
+    script,
+    /reviewer_broker_mode_enabled "gemini-reviewer"/,
+    'follow-up-tick must consult the gemini-reviewer broker flag',
+  );
   // The op-read fallback must remain present (default-off broker mode
   // preserves existing behavior) but inside the `else` branch.
   assert.match(
@@ -181,5 +186,10 @@ test('follow-up-tick script sources the broker helper + gates op-read on the fla
     script,
     /_tick_op_read_reviewer_pat 'op:\/\/Cliovault\/codex-reviewer-pat\/credential'/,
     'follow-up-tick must preserve the codex-reviewer op-read fallback',
+  );
+  assert.match(
+    script,
+    /_tick_op_read_reviewer_pat 'op:\/\/Cliovault\/GEMINI_REVIEWER_GH_TOKEN\/credential'/,
+    'follow-up-tick must preserve the gemini-reviewer op-read fallback',
   );
 });

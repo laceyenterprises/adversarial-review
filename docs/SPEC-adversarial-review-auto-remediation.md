@@ -74,6 +74,31 @@ Invalid non-empty override values are configuration errors. The runtime must
 not silently fall back from an invalid value because that can route work to an
 expensive, unavailable, or intentionally locked-out agent.
 
+## Launcher Secret Resolution
+
+The airlock watcher and follow-up LaunchAgents set
+`CLAUDE_REVIEWER_AUTH_VIA_BROKER=true`, `CODEX_REVIEWER_AUTH_VIA_BROKER=true`,
+and `GEMINI_REVIEWER_AUTH_VIA_BROKER=true`, plus
+`OAUTH_BROKER_SHARED_SECRET_FILE`, so reviewer GitHub tokens are minted through
+the local OAuth broker before any legacy per-role 1Password PAT path is used.
+Broker mode fails closed: when the flag is true and the broker cannot mint the
+token, the launcher must not silently fall back to `op read`.
+
+The airlock watcher may satisfy runtime-only alerting secrets from local files
+before using 1Password:
+
+- `LINEAR_API_KEY` is read from `$REPO_ROOT/.secrets/local/linear.env` or the
+  legacy `$REPO_ROOT/agents/clio/credentials/local/linear.env` only as a single
+  parsed key assignment. The launcher must not source this file into its global
+  shell environment, and a blank or whitespace-only value must fall through to
+  the canonical 1Password resolver.
+- `ALERT_TO` is read from `$REPO_ROOT/.secrets/local/adversarial-watcher-alert-to`
+  or the legacy
+  `$REPO_ROOT/agents/clio/credentials/local/adversarial-watcher-alert-to` only
+  when the file contains a non-whitespace value. Otherwise the existing
+  `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` resolution and allow-missing contract
+  remain authoritative.
+
 ## GitHub Diff Cache Contract
 
 Reviewer diff caching is keyed by `(repo, prNumber, headSha)`, where `repo`

@@ -1595,14 +1595,34 @@ test('validateSchema rejects MHX title tags in shared CFG enums', () => {
   );
 });
 
-test('validateSchema tolerates unknown top-level keys (multi-reader config.local.yaml)', () => {
+test('validateSchema tolerates allowlisted foreign top-level keys (multi-reader config.local.yaml)', () => {
   // config.local.yaml is shared by several loaders (CFG-01 python loader, this
   // adversarial-review loader, ...). A top-level section owned by a DIFFERENT
-  // reader (e.g. `worker_pool`) must be ignored here, not fail loud — otherwise
-  // adding a key for one reader crashes every other reader on the same file.
-  const out = validateSchema({ version: 1, not_a_section: { anything: true } });
-  assert.equal(out.not_a_section, undefined, 'unknown top-level section is dropped, not thrown');
-  assert.equal(out.version, 1);
+  // reader must be explicitly allowlisted before this loader ignores it.
+  const originalWarn = console.warn;
+  try {
+    const warnings = [];
+    console.warn = (msg) => warnings.push(String(msg));
+    const out = validateSchema({ version: 1, worker_pool: { anything: true } });
+    assert.equal(out.worker_pool, undefined, 'foreign top-level section is dropped, not thrown');
+    assert.equal(out.version, 1);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /worker_pool/);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {
+  assert.throws(
+    () => validateSchema({ version: 1, not_a_section: { anything: true } }),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /not_a_section/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
 });
 
 test('validateSchema stays strict on unknown keys INSIDE a known section', () => {

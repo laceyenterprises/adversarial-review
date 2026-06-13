@@ -96,6 +96,11 @@ const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-cod
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
+const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
+  // Owned by the worker-pool CFG reader. Keep this explicit so typo-shaped
+  // top-level keys still fail loud through the shared strict-schema contract.
+  'worker_pool',
+]);
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a
 // Python-only key must not land without adding the same key here first.
@@ -1525,25 +1530,24 @@ export function validateSchema(doc, { source = null, rawText = null } = {}) {
       { key: 'version', expected: String(SCHEMA_VERSION), got: doc.version, source },
     );
   }
-  // Tolerant top-level (multi-reader config.local.yaml): the deployment's
-  // config.local.yaml is read by several loaders (the CFG-01 python loader,
-  // this adversarial-review loader, ...). A top-level section owned by a
-  // *different* reader (e.g. `worker_pool`, known only to the CFG-01 loader)
-  // must be IGNORED here rather than fail loud — otherwise adding a key for
-  // one reader crashes every other reader that shares the file. Nested keys
-  // inside KNOWN sections stay strict, so typos in config this reader actually
-  // consumes still fail loudly.
+  // Tolerant top-level (multi-reader config.local.yaml): only explicitly
+  // allowlisted sections owned by a different CFG reader are ignored here.
+  // Everything else remains strict so typo-shaped top-level keys fail loud.
   const knownTop = schema.__keys || {};
   const filtered = {};
   for (const topKey of Object.keys(doc)) {
     if (topKey === 'version' || topKey.startsWith('__') || topKey in knownTop) {
       filtered[topKey] = doc[topKey];
-    } else if (typeof console !== 'undefined' && console.warn) {
-      console.warn(
-        `[adversarial-config] ignoring unknown top-level key ${JSON.stringify(topKey)}` +
-          `${source ? ` from ${source}` : ''} — not in this reader's schema ` +
-          `(owned by another config reader)`,
-      );
+    } else if (FOREIGN_TOP_LEVEL_SECTIONS.has(topKey)) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn(
+          `[adversarial-config] ignoring unknown top-level key ${JSON.stringify(topKey)}` +
+            `${source ? ` from ${source}` : ''} — not in this reader's schema ` +
+            `(owned by another config reader)`,
+        );
+      }
+    } else {
+      filtered[topKey] = doc[topKey];
     }
   }
   return validateDictPresentKeysOnly(filtered, schema, '', source, lineMap);

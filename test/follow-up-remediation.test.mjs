@@ -880,6 +880,101 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   assert.ok(sameRepoCheckout, 'expected a git checkout call');
 });
 
+test('prepareWorkspaceForJob authenticates git clone/fetch via the inline gh credential helper (no global git config assumed)', async () => {
+  // Round-3 review fix: the GraphQL-free clone path must not rely on a global
+  // `gh auth setup-git` having been run. The network-touching git calls (clone,
+  // fetch) carry the gh credential helper inline through git's GIT_CONFIG_* env
+  // so they authenticate from the daemon's exported token on a fresh host, and
+  // the caller env (incl. GITHUB_TOKEN, which the helper subprocess reads) is
+  // preserved.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: { GITHUB_TOKEN: 'gho_test_token', PATH: '/usr/bin:/bin' },
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  for (const sub of ['clone', 'fetch']) {
+    const call = calls.find((c) => c.command === 'git' && c.args.includes(sub));
+    assert.ok(call, `expected a git ${sub} call`);
+    const env = call.options?.env || {};
+    assert.equal(env.GIT_CONFIG_COUNT, '2', `${sub}: GIT_CONFIG_COUNT`);
+    assert.equal(env.GIT_CONFIG_KEY_0, 'credential.helper', `${sub}: resets any global helper`);
+    assert.equal(env.GIT_CONFIG_VALUE_0, '', `${sub}: reset value is empty`);
+    assert.equal(env.GIT_CONFIG_KEY_1, 'credential.helper', `${sub}: sets the gh helper`);
+    assert.equal(env.GIT_CONFIG_VALUE_1, '!gh auth git-credential', `${sub}: gh credential helper`);
+    assert.equal(env.GITHUB_TOKEN, 'gho_test_token', `${sub}: caller token preserved for the helper`);
+  }
+  // The purely-local checkout needs no network auth; argv stays clean.
+  const checkout = calls.find((c) => c.command === 'git' && c.args.includes('checkout'));
+  assert.ok(checkout, 'expected a git checkout call');
+  assert.equal(checkout.args[0], '-C', 'checkout argv is unchanged (no credential prefix)');
+});
+
+test('prepareWorkspaceForJob rejects a malformed PR number before building a REST path', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  await assert.rejects(
+    prepareWorkspaceForJob({
+      rootDir,
+      job: { ...makeJob(), prNumber: '7; rm -rf /' },
+      env: {},
+      execFileImpl: async (command, args) => {
+        if (command === 'git' && args[0] === 'clone') {
+          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        }
+        return { stdout: '', stderr: '' };
+      },
+    }),
+    /Invalid GitHub PR number/,
+  );
+});
+
+test('prepareWorkspaceForJob normalizes a numeric-string PR number into the REST path', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: { ...makeJob(), prNumber: '7' },
+    env: {},
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  const apiCall = calls.find((c) => c.command === 'gh' && c.args[0] === 'api');
+  assert.ok(apiCall, 'expected a gh api call');
+  // Normalized to an integer — no String() coercion artifacts in the path.
+  assert.equal(apiCall.args[1], 'repos/laceyenterprises/clio/pulls/7');
+});
+
 test('prepareWorkspaceForJob issues no GraphQL-backed gh commands (rate-limit wedge guard)', async () => {
   // Regression guard for the 2026-06-13 wedge: `gh repo clone`, `gh pr view`,
   // and `gh pr checkout` all hit GitHub GraphQL, whose per-token budget is

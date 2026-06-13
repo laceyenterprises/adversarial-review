@@ -86,6 +86,18 @@ function normalizePrHeadRef(branch) {
   return trimmed || null;
 }
 
+// Normalize a PR number to a positive integer before it is interpolated into a
+// REST path. A corrupt or malformed durable job must fail fast with a clear
+// error rather than build a wrong/misleading `gh api repos/.../pulls/<x>` path.
+// Mirrors the same-named helper in github-api.mjs / adversarial-gate-status.mjs.
+function normalizePrNumber(prNumber) {
+  const normalized = Number(String(prNumber ?? '').trim());
+  if (!Number.isInteger(normalized) || normalized <= 0) {
+    throw new TypeError(`Invalid GitHub PR number: ${prNumber}`);
+  }
+  return normalized;
+}
+
 async function fetchPRBranchMetadata({
   repo,
   prNumber,
@@ -103,10 +115,11 @@ async function fetchPRBranchMetadata({
   if (!owner || !repoName) {
     throw new Error(`Invalid repo slug: ${repo}`);
   }
+  const normalizedPrNumber = normalizePrNumber(prNumber);
   const { stdout } = await runWorkspaceNetworkCommandWithTransientRetry({
     execFileImpl,
     command: 'gh',
-    args: ['api', `repos/${owner}/${repoName}/pulls/${String(prNumber)}`],
+    args: ['api', `repos/${owner}/${repoName}/pulls/${normalizedPrNumber}`],
     options: { maxBuffer: 2 * 1024 * 1024 },
   });
   const parsed = JSON.parse(String(stdout || '{}'));
@@ -635,6 +648,34 @@ function isHqCancelRetryable(err) {
 function isTransientWorkspaceNetworkError(err) {
   const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
   return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable)/i.test(detail);
+}
+
+// Authenticate git's smart-HTTP calls (clone/fetch) through gh's credential
+// helper, scoped INLINE rather than relying on a global `gh auth setup-git`
+// having been run on the host. The daemon only guarantees an exported
+// GITHUB_TOKEN (from `gh auth token`); a fresh host can satisfy that yet have no
+// global git credential helper installed, so a plain `git clone
+// https://github.com/...` of a private repo would fail authentication even
+// though `gh` itself is authenticated.
+//
+// We inject the config through git's GIT_CONFIG_COUNT/KEY/VALUE env mechanism
+// (equivalent to `-c credential.helper=...`) instead of argv, so the git
+// invocation's positional arguments are unchanged. Entry 0 resets
+// credential.helper to empty first, so a broken or absent global helper can't
+// be chained ahead of ours; entry 1 sets `!gh auth git-credential`, which reads
+// gh's auth state (honoring GITHUB_TOKEN) and so works from the daemon's
+// exported token with no host-global git config. Merged onto the caller's env,
+// so GITHUB_TOKEN reaches the credential-helper subprocess.
+const GH_GIT_CREDENTIAL_ENV = Object.freeze({
+  GIT_CONFIG_COUNT: '2',
+  GIT_CONFIG_KEY_0: 'credential.helper',
+  GIT_CONFIG_VALUE_0: '',
+  GIT_CONFIG_KEY_1: 'credential.helper',
+  GIT_CONFIG_VALUE_1: '!gh auth git-credential',
+});
+
+function withGhGitCredentialEnv(baseEnv) {
+  return { ...(baseEnv || {}), ...GH_GIT_CREDENTIAL_ENV };
 }
 
 async function runWorkspaceNetworkCommandWithTransientRetry({
@@ -2196,16 +2237,18 @@ async function prepareWorkspaceForJob({
     // GraphQL rate-limit pool that gets exhausted first under a heavy push —
     // wedging every remediation spawn with "API rate limit already exceeded".
     // `git clone` uses the git smart-HTTP protocol (a separate, far larger
-    // limit) and authenticates through the `gh auth git-credential` helper
-    // that `gh auth setup-git` installs, so no token is passed on argv or
-    // written into .git/config. Verified to succeed even when the token's
-    // GraphQL budget is fully exhausted.
+    // limit). Authentication goes through `gh auth git-credential`, scoped
+    // inline via GH_GIT_CREDENTIAL_ENV, so it works from the daemon's exported
+    // GITHUB_TOKEN even on a host where `gh auth setup-git` was never run; no
+    // token is passed on argv or written into .git/config. Verified to succeed
+    // even when the token's GraphQL budget is fully exhausted.
     await runWorkspaceGitWithTransientRetry(
       ['clone', `https://github.com/${repo}.git`, workspaceDir],
       {
         execFileImpl,
         options: {
           maxBuffer: 10 * 1024 * 1024,
+          env: withGhGitCredentialEnv(env),
         },
       }
     );
@@ -2261,6 +2304,7 @@ async function prepareWorkspaceForJob({
         execFileImpl,
         options: {
           maxBuffer: 10 * 1024 * 1024,
+          env: withGhGitCredentialEnv(env),
         },
       }
     );

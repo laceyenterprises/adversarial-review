@@ -103,8 +103,9 @@ const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
-  // Owned by the worker-pool CFG reader. Keep this explicit so typo-shaped
-  // top-level keys still fail loud through the shared strict-schema contract.
+  // LOADER-CONTRACT §2 permits each reader to ignore only root sections
+  // explicitly foreign to that reader in top-level config.local.yaml. The
+  // worker-pool CFG reader owns this root; this Node reader does not.
   'worker_pool',
 ]);
 // Keep this per-role fallback surface in lockstep with the Python

@@ -178,8 +178,17 @@ test('consumeNextFollowUpJob exports the canonical reply env, pre-creates the HQ
       promptTemplate: 'Reply path: ${REPLY_PATH}',
       now: () => '2026-05-04T09:30:00.000Z',
       execFileImpl: async (command, args) => {
-        if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
-          mkdirSync(path.join(args[3], '.git'), { recursive: true });
+        if (command === 'git' && args[0] === 'clone') {
+          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        }
+        if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+          return {
+            stdout: JSON.stringify({
+              base: { ref: 'main' },
+              head: { ref: 'remediation-head', repo: { full_name: 'laceyenterprises/agent-os' } },
+            }),
+            stderr: '',
+          };
         }
         return { stdout: '', stderr: '' };
       },

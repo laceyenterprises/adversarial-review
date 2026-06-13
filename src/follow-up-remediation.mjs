@@ -90,18 +90,33 @@ async function fetchPRBranchMetadata({
   prNumber,
   execFileImpl = execFileAsync,
 } = {}) {
+  // Resolve PR branch metadata via the REST pulls endpoint instead of
+  // `gh pr view --json` (which goes through GraphQL). GraphQL and REST have
+  // SEPARATE rate-limit pools; during a heavy throughput push the shared user
+  // token's GraphQL budget gets exhausted first, and a GraphQL-based lookup
+  // here then fails with "API rate limit already exceeded", wedging every
+  // remediation spawn. REST (`gh api repos/{owner}/{repo}/pulls/{n}`) draws
+  // from the core pool, which has far more headroom. base.ref / head.ref are
+  // first-class fields on the REST PR object.
+  const [owner, repoName] = String(repo).split('/');
+  if (!owner || !repoName) {
+    throw new Error(`Invalid repo slug: ${repo}`);
+  }
   const { stdout } = await execFileImpl(
     'gh',
-    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'baseRefName,headRefName'],
-    { maxBuffer: 1 * 1024 * 1024 }
+    ['api', `repos/${owner}/${repoName}/pulls/${String(prNumber)}`],
+    { maxBuffer: 2 * 1024 * 1024 }
   );
   const parsed = JSON.parse(String(stdout || '{}'));
-  const baseBranch = normalizeBaseBranch(parsed.baseRefName);
+  const baseBranch = normalizeBaseBranch(parsed?.base?.ref);
   if (!baseBranch) {
     throw new Error(`Could not resolve baseRefName for ${repo}#${prNumber}`);
   }
-  const branch = normalizePrHeadRef(parsed.headRefName);
-  return { baseBranch, branch };
+  const branch = normalizePrHeadRef(parsed?.head?.ref);
+  // head.repo.full_name lets callers tell same-repo PRs (push-back works
+  // against origin) from fork PRs (head branch is not on origin).
+  const headRepo = parsed?.head?.repo?.full_name || null;
+  return { baseBranch, branch, headRepo };
 }
 
 async function fetchPRBaseBranch({
@@ -2130,7 +2145,16 @@ async function prepareWorkspaceForJob({
   }
 
   if (!existsSync(join(workspaceDir, '.git'))) {
-    await execFileImpl('gh', ['repo', 'clone', repo, workspaceDir], {
+    // Clone with plain `git` over HTTPS rather than `gh repo clone`. `gh repo
+    // clone` resolves the repo through GraphQL, which shares a token's
+    // GraphQL rate-limit pool that gets exhausted first under a heavy push —
+    // wedging every remediation spawn with "API rate limit already exceeded".
+    // `git clone` uses the git smart-HTTP protocol (a separate, far larger
+    // limit) and authenticates through the `gh auth git-credential` helper
+    // that `gh auth setup-git` installs, so no token is passed on argv or
+    // written into .git/config. Verified to succeed even when the token's
+    // GraphQL budget is fully exhausted.
+    await execFileImpl('git', ['clone', `https://github.com/${repo}.git`, workspaceDir], {
       maxBuffer: 10 * 1024 * 1024,
     });
   }
@@ -2163,10 +2187,36 @@ async function prepareWorkspaceForJob({
   // the version checked into this branch.
   installWorkerProvenanceHook(workspaceDir);
 
-  await execFileImpl('gh', ['pr', 'checkout', String(job.prNumber)], {
-    cwd: workspaceDir,
-    maxBuffer: 10 * 1024 * 1024,
+  // Check out the PR head branch without `gh pr checkout` (which goes through
+  // GraphQL and so fails under the same rate-limit exhaustion as the clone).
+  // For a same-repo PR the head branch lives on origin, so a plain
+  // `git fetch` + `checkout -B` reproduces what `gh pr checkout` sets up —
+  // including the local branch name the remediation worker later
+  // force-with-lease pushes back to (HEAD:refs/heads/<branch>). Fork PRs (head
+  // branch not on origin) fall back to `gh pr checkout`, which handles the
+  // fork remote wiring; forks are not part of this fleet's hot path, so the
+  // rare GraphQL call there is acceptable.
+  const { branch: headRef, headRepo } = await fetchPRBranchMetadata({
+    repo,
+    prNumber: job.prNumber,
+    execFileImpl,
   });
+  const isSameRepo = !headRepo || headRepo === repo;
+  if (isSameRepo && headRef) {
+    await execFileImpl('git', ['-C', workspaceDir, 'fetch', 'origin', headRef], {
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    await execFileImpl(
+      'git',
+      ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
+      { maxBuffer: 10 * 1024 * 1024 }
+    );
+  } else {
+    await execFileImpl('gh', ['pr', 'checkout', String(job.prNumber)], {
+      cwd: workspaceDir,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  }
 
   return {
     workspaceDir,

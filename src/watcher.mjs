@@ -147,6 +147,7 @@ import {
 } from './conditional-request.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
+import { refreshReviewerBrokerTokens } from './reviewer-broker-refresh.mjs';
 import { fetchPullRequestHeadAndState, fetchPullRequestRollup } from './github-api.mjs';
 import {
   appendFenceAuditEvent,
@@ -4044,6 +4045,14 @@ async function pollOnce(
   // see the same cached config); operator env rotations between ticks
   // propagate after this reset, not at next file-mtime change.
   resetRoleConfigCache();
+  // Keep the reviewer-bot GitHub App installation tokens fresh. The watcher is
+  // a single long-lived process that resolved these once at startup; App
+  // installation tokens expire ~1h, so without a periodic refresh the GitHub
+  // review-POST starts failing with HTTP 401 about an hour after each restart
+  // (the 2026-06-13 pipeline-wide outage). This is TTL-gated + fail-safe: it
+  // only re-fetches a token older than the TTL and never clears a still-valid
+  // token if the broker is briefly unreachable. Never throws.
+  await refreshReviewerBrokerTokens({ log: console });
   const healthTick = healthProbe?.beginTick?.();
   try {
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });

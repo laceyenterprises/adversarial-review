@@ -337,6 +337,56 @@ test('roots.hq from top-level resolves with trace', () => {
   }
 });
 
+test('roots runtime/admin users load through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        runtime_user: _runtime-agent
+        admin_user: fork-admin
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.runtime_user'), '_runtime-agent');
+    assert.equal(cfg.get('roots.admin_user'), 'fork-admin');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('roots runtime/admin users reject invalid local username shapes', () => {
+  const tmp = freshTmp();
+  try {
+    const cases = [
+      ['runtime_user', "''"],
+      ['runtime_user', "'   '"],
+      ['runtime_user', 'bad/name'],
+      ['admin_user', '-leading-dash'],
+      ['admin_user', 'bad$user'],
+    ];
+    for (const [key, value] of cases) {
+      const top = join(tmp, `bad-${key}-${value.replaceAll(/[^A-Za-z0-9_-]/g, '_')}.yaml`);
+      writeFile(top, `
+        version: 1
+        roots:
+          ${key}: ${value}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, `roots.${key}`);
+          assert.match(err.message, /local username/);
+          return true;
+        },
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top overrides module on canonical key', () => {
   const tmp = freshTmp();
   try {

@@ -1595,12 +1595,24 @@ test('validateSchema rejects MHX title tags in shared CFG enums', () => {
   );
 });
 
-test('validateSchema strict at top-level', () => {
+test('validateSchema tolerates unknown top-level keys (multi-reader config.local.yaml)', () => {
+  // config.local.yaml is shared by several loaders (CFG-01 python loader, this
+  // adversarial-review loader, ...). A top-level section owned by a DIFFERENT
+  // reader (e.g. `worker_pool`) must be ignored here, not fail loud — otherwise
+  // adding a key for one reader crashes every other reader on the same file.
+  const out = validateSchema({ version: 1, not_a_section: { anything: true } });
+  assert.equal(out.not_a_section, undefined, 'unknown top-level section is dropped, not thrown');
+  assert.equal(out.version, 1);
+});
+
+test('validateSchema stays strict on unknown keys INSIDE a known section', () => {
+  // Tolerance is top-level only — typos within a section this reader consumes
+  // still fail loud.
   assert.throws(
-    () => validateSchema({ version: 1, not_a_section: {} }),
+    () => validateSchema({ version: 1, remediation: { max_concur_jobs: 10 } }),
     (err) => {
       assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /not_a_section/);
+      assert.match(err.message, /max_concur_jobs/);
       return true;
     },
   );

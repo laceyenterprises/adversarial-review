@@ -1525,7 +1525,28 @@ export function validateSchema(doc, { source = null, rawText = null } = {}) {
       { key: 'version', expected: String(SCHEMA_VERSION), got: doc.version, source },
     );
   }
-  return validateDictPresentKeysOnly(doc, schema, '', source, lineMap);
+  // Tolerant top-level (multi-reader config.local.yaml): the deployment's
+  // config.local.yaml is read by several loaders (the CFG-01 python loader,
+  // this adversarial-review loader, ...). A top-level section owned by a
+  // *different* reader (e.g. `worker_pool`, known only to the CFG-01 loader)
+  // must be IGNORED here rather than fail loud — otherwise adding a key for
+  // one reader crashes every other reader that shares the file. Nested keys
+  // inside KNOWN sections stay strict, so typos in config this reader actually
+  // consumes still fail loudly.
+  const knownTop = schema.__keys || {};
+  const filtered = {};
+  for (const topKey of Object.keys(doc)) {
+    if (topKey === 'version' || topKey.startsWith('__') || topKey in knownTop) {
+      filtered[topKey] = doc[topKey];
+    } else if (typeof console !== 'undefined' && console.warn) {
+      console.warn(
+        `[adversarial-config] ignoring unknown top-level key ${JSON.stringify(topKey)}` +
+          `${source ? ` from ${source}` : ''} — not in this reader's schema ` +
+          `(owned by another config reader)`,
+      );
+    }
+  }
+  return validateDictPresentKeysOnly(filtered, schema, '', source, lineMap);
 }
 
 // -------- Module file validation -------------------------------------------

@@ -4801,7 +4801,10 @@ test('dispatchMergeAgentForPR logs consumed-label removal failures', async () =>
     assert.equal(recorded.labelRemoval.label, 'merge-agent-requested');
     assert.equal(recorded.labelRemoval.removed, false);
     assert.equal(recorded.labelRemoval.lastError, 'rate limited');
-    assert.match(warnings[0], /failed to remove consumed label 'merge-agent-requested'/);
+    assert.ok(
+      warnings.some((warning) => /failed to remove consumed label 'merge-agent-requested'/.test(String(warning))),
+      `expected consumed-label warning, got: ${warnings.join('\n')}`
+    );
   } finally {
     console.warn = originalWarn;
   }

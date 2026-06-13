@@ -3406,6 +3406,7 @@ async function handlePostedReviewRow({
   fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
   dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
+  resolveMergeAgentCoexistenceForWatcherImpl = resolveMergeAgentCoexistenceForWatcher,
   operatorSurface = null,
   logger = console,
 } = {}) {
@@ -3470,7 +3471,7 @@ async function handlePostedReviewRow({
     // failed), we fall through to the existing merge-agent dispatch
     // path verbatim — no behavior change for hosts that haven't
     // opted in.
-    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcher({
+    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcherImpl({
       rootDir,
       reviewStateRow: existing,
       dispatchJob,

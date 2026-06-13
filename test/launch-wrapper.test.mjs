@@ -63,11 +63,15 @@ async function runMaintainerWatcherLauncher(scriptName, {
   const fakeSharedHelper = join(fakeRepo, 'scripts', 'lib', 'op-resolve-with-rate-limit-backoff.sh');
   const fakeReviewerBrokerHelper = join(fakeRepo, 'scripts', 'lib', 'reviewer-broker.sh');
   const fakeTmp = join(root, 'tmp');
+  const fakeHome = join(root, 'home');
+  const fakeZdotdir = join(root, 'zdotdir');
   const sleepLog = join(fakeTmp, 'sleep.log');
   const opReadLog = join(fakeTmp, 'op-read.log');
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(join(fakeRepo, 'src', 'secret-source'), { recursive: true });
   mkdirSync(fakeTmp, { recursive: true });
+  mkdirSync(fakeHome, { recursive: true });
+  mkdirSync(fakeZdotdir, { recursive: true });
   writeFileSync(
     join(fakeRepo, 'src', 'watcher.mjs'),
     'console.log(JSON.stringify({linearApiKey: process.env.LINEAR_API_KEY || "", alertTo: process.env.ALERT_TO || ""}));\n'
@@ -213,12 +217,17 @@ async function runMaintainerWatcherLauncher(scriptName, {
   writeExecutable(wrapperPath, script);
 
   const env = {
-    ...process.env,
     PATH: `${fakeBin}:/usr/bin:/bin`,
+    HOME: fakeHome,
+    USER: 'launch-wrapper-test',
+    LOGNAME: 'launch-wrapper-test',
+    SHELL: ZSH_PATH,
+    ZDOTDIR: fakeZdotdir,
     TMPDIR: fakeTmp,
     ADVERSARIAL_REVIEW_ALERT_TO_OP_REF: alertToOpRef,
     ADVERSARIAL_REVIEW_OP_CLI: opCliPath ?? fakeOp,
     TEST_OP_READ_LOG: opReadLog,
+    AGENT_OS_CONFIG_PATH: '/dev/null',
     TEST_OP_MODE: opMode,
     TEST_REQUIRED_OP_MODE: requiredOpMode,
     TEST_REVIEWER_BROKER_MODE: brokerMode,

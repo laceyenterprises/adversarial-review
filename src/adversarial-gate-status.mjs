@@ -222,6 +222,29 @@ function pickAdversarialGateStatus({
   if (reviewStatus === 'malformed') {
     return decide('failure', 'Adversarial review ledger is malformed.', 'review-malformed');
   }
+
+  // Stale-review-head guard. Stored review rows can intentionally publish a
+  // green, operator-decides gate even when the reviewer never posted a clean
+  // verdict (for example infra `failed` / `failed-orphan` rows), so the head
+  // comparison must run before any stored-state branch that can return
+  // `success`, not only before settled posted verdict handling. When the PR's
+  // live head advances past the row's reviewer_head_sha, the stored outcome no
+  // longer describes the tree being merged; report pending until the watcher
+  // refreshes/re-reviews the current head.
+  //
+  // Fall through when either side is unknown: a null `headSha` means the caller
+  // didn't supply a live head to compare, and a null `reviewer_head_sha` means a
+  // legacy row predating that column. Operator override (`operator-approved`,
+  // handled above) already pins to the current head, so it is unaffected.
+  const reviewedHead = reviewRow.reviewer_head_sha || null;
+  if (headSha && reviewedHead && String(reviewedHead) !== String(headSha)) {
+    return decide(
+      'pending',
+      'Live head has advanced past the reviewed head; re-review of the current head is pending.',
+      'stale-review-head'
+    );
+  }
+
   if (reviewStatus === 'failed') {
     // Infrastructure failures (reviewer crashed before posting any verdict)
     // intentionally post `success` so the GitHub status check does NOT block
@@ -251,37 +274,6 @@ function pickAdversarialGateStatus({
       'failure',
       `Unexpected adversarial review state: ${reviewStatus || 'missing'}.`,
       'review-state-unknown'
-    );
-  }
-
-  // Stale-review-head guard. A `posted` row carries `reviewer_head_sha`, the
-  // head the verdict was actually computed against (set by the reviewer-claim
-  // CAS in watcher.mjs and preserved by the posted transition). When the PR's
-  // live head advances past it — a remediation push, an operator force-push,
-  // or any new commit — the posted verdict no longer describes the tree being
-  // merged. The watcher's auto-refresh eventually flips the row back to
-  // `pending` and re-reviews the new head, but only on its next poll tick;
-  // until then the row is still `posted` with a stale verdict. Without this
-  // guard, every settled-success branch below ('review-settled',
-  // 'remediation-stopped', 'remediation-failed') would publish a green
-  // GitHub status against the LIVE head during that TOCTOU window, which is
-  // exactly what let three PRs merge prematurely: a comment-only verdict
-  // greenlit after a remediation push that was never re-reviewed, and PRs
-  // merged while their re-review was still in flight. Reporting `pending`
-  // here closes the window; the gate clears to `success` once the re-review
-  // posts and `reviewer_head_sha` catches up to the live head.
-  //
-  // Fall through (preserve prior behavior) when either side is unknown:
-  // a null `headSha` means the caller didn't supply a live head to compare,
-  // and a null `reviewer_head_sha` means a legacy row predating that column.
-  // Operator override (`operator-approved`, handled above) already pins to
-  // the current head, so it is unaffected.
-  const reviewedHead = reviewRow.reviewer_head_sha || null;
-  if (headSha && reviewedHead && String(reviewedHead) !== String(headSha)) {
-    return decide(
-      'pending',
-      'Live head has advanced past the reviewed head; re-review of the current head is pending.',
-      'stale-review-head'
     );
   }
 

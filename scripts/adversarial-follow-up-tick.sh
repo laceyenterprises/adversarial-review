@@ -92,11 +92,11 @@ OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="follow-up-tick" /opt/homebrew/b
   }
 export OP_SERVICE_ACCOUNT_TOKEN
 
-# Operator gh token for repo clone / pr checkout / pr metadata. The
-# remediation worker uses this to clone the PR's repo, switch to its
-# branch, and push its remediation commits back. Note: this is the
-# operator's identity, distinct from the reviewer-bot PATs the comment
-# poster uses (see below).
+# Operator gh token for workspace prep and push-back. The daemon uses
+# `gh api` for REST PR metadata, git smart-HTTP for clone/fetch of
+# same-repo branches, and `gh pr checkout` only for fork fallback. Note:
+# this is the operator's identity, distinct from the reviewer-bot PATs
+# the comment poster uses (see below).
 export GITHUB_TOKEN=$(/opt/homebrew/bin/gh auth token 2>/dev/null)
 # Failure here MUST sleep before exit. Same fail-once shape as the
 # 1Password sleep guards added in #139; the gh path was missed in

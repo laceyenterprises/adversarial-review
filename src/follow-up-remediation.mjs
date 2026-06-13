@@ -103,11 +103,12 @@ async function fetchPRBranchMetadata({
   if (!owner || !repoName) {
     throw new Error(`Invalid repo slug: ${repo}`);
   }
-  const { stdout } = await execFileImpl(
-    'gh',
-    ['api', `repos/${owner}/${repoName}/pulls/${String(prNumber)}`],
-    { maxBuffer: 2 * 1024 * 1024 }
-  );
+  const { stdout } = await runWorkspaceNetworkCommandWithTransientRetry({
+    execFileImpl,
+    command: 'gh',
+    args: ['api', `repos/${owner}/${repoName}/pulls/${String(prNumber)}`],
+    options: { maxBuffer: 2 * 1024 * 1024 },
+  });
   const parsed = JSON.parse(String(stdout || '{}'));
   const baseBranch = normalizeBaseBranch(parsed?.base?.ref);
   if (!baseBranch) {
@@ -631,13 +632,14 @@ function isHqCancelRetryable(err) {
   return /(?:^|[\s:])(EIO)(?:$|[\s:])|timed out|timeout/i.test(detail);
 }
 
-function isTransientWorkspaceGitError(err) {
+function isTransientWorkspaceNetworkError(err) {
   const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
   return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable)/i.test(detail);
 }
 
-async function runWorkspaceGitWithTransientRetry({
+async function runWorkspaceNetworkCommandWithTransientRetry({
   execFileImpl,
+  command,
   args,
   options,
   retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
@@ -649,15 +651,29 @@ async function runWorkspaceGitWithTransientRetry({
       await sleep(delays[attempt]);
     }
     try {
-      return await execFileImpl('git', args, options);
+      return await execFileImpl(command, args, options);
     } catch (err) {
       lastError = err;
-      if (!isTransientWorkspaceGitError(err) || attempt === delays.length - 1) {
+      if (!isTransientWorkspaceNetworkError(err) || attempt === delays.length - 1) {
         throw err;
       }
     }
   }
   throw lastError;
+}
+
+async function runWorkspaceGitWithTransientRetry(args, {
+  execFileImpl,
+  options,
+  retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
+}) {
+  return runWorkspaceNetworkCommandWithTransientRetry({
+    execFileImpl,
+    command: 'git',
+    args,
+    options,
+    retryDelaysMs,
+  });
 }
 
 async function cancelHqDispatch({
@@ -2184,9 +2200,15 @@ async function prepareWorkspaceForJob({
     // that `gh auth setup-git` installs, so no token is passed on argv or
     // written into .git/config. Verified to succeed even when the token's
     // GraphQL budget is fully exhausted.
-    await execFileImpl('git', ['clone', `https://github.com/${repo}.git`, workspaceDir], {
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    await runWorkspaceGitWithTransientRetry(
+      ['clone', `https://github.com/${repo}.git`, workspaceDir],
+      {
+        execFileImpl,
+        options: {
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      }
+    );
   }
 
   // Set local git identity *before* the PR checkout so the very first
@@ -2233,24 +2255,33 @@ async function prepareWorkspaceForJob({
   });
   const isSameRepo = !headRepo || headRepo === repo;
   if (isSameRepo && headRef) {
-    await runWorkspaceGitWithTransientRetry({
-      execFileImpl,
-      args: ['-C', workspaceDir, 'fetch', 'origin', headRef],
-      options: {
-        maxBuffer: 10 * 1024 * 1024,
-      },
-    });
-    await runWorkspaceGitWithTransientRetry({
-      execFileImpl,
-      args: ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
-      options: {
-        maxBuffer: 10 * 1024 * 1024,
-      },
-    });
+    await runWorkspaceGitWithTransientRetry(
+      ['-C', workspaceDir, 'fetch', 'origin', `+refs/heads/${headRef}:refs/remotes/origin/${headRef}`],
+      {
+        execFileImpl,
+        options: {
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      }
+    );
+    await runWorkspaceGitWithTransientRetry(
+      ['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`],
+      {
+        execFileImpl,
+        options: {
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      }
+    );
   } else {
-    await execFileImpl('gh', ['pr', 'checkout', String(job.prNumber)], {
-      cwd: workspaceDir,
-      maxBuffer: 10 * 1024 * 1024,
+    await runWorkspaceNetworkCommandWithTransientRetry({
+      execFileImpl,
+      command: 'gh',
+      args: ['pr', 'checkout', String(job.prNumber)],
+      options: {
+        cwd: workspaceDir,
+        maxBuffer: 10 * 1024 * 1024,
+      },
     });
   }
 

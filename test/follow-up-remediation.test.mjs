@@ -519,7 +519,12 @@ test('prepareWorkspaceForJob retries transient same-repo git fetch failures befo
           stderr: '',
         };
       }
-      if (command === 'git' && args[2] === 'fetch' && args[3] === 'origin' && args[4] === 'clio-feature') {
+      if (
+        command === 'git'
+        && args[2] === 'fetch'
+        && args[3] === 'origin'
+        && args[4] === '+refs/heads/clio-feature:refs/remotes/origin/clio-feature'
+      ) {
         fetchAttempts += 1;
         if (fetchAttempts === 1) {
           const err = new Error('git fetch failed');
@@ -541,6 +546,163 @@ test('prepareWorkspaceForJob retries transient same-repo git fetch failures befo
       && call.includes('origin/clio-feature')),
     'checkout should run after the retried fetch succeeds'
   );
+});
+
+test('same-repo fetch refspec creates and refreshes origin head refs', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'adversarial-review-refspec-'));
+  const originDir = path.join(tmp, 'origin.git');
+  const seedDir = path.join(tmp, 'seed');
+  const workspaceDir = path.join(tmp, 'workspace');
+
+  execFileSync('git', ['init', '--bare', '--quiet', originDir], { stdio: 'ignore' });
+  execFileSync('git', ['init', '--quiet', '-b', 'main', seedDir], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'config', 'user.name', 'Test User'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'config', 'user.email', 'test@example.com'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'remote', 'add', 'origin', originDir], { stdio: 'ignore' });
+
+  writeFileSync(path.join(seedDir, 'README.md'), 'base\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'README.md'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'base'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', '-u', 'origin', 'main'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'checkout', '-b', 'feature'], { stdio: 'ignore' });
+  writeFileSync(path.join(seedDir, 'feature.txt'), 'one\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'feature.txt'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'feature one'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', '-u', 'origin', 'feature'], { stdio: 'ignore' });
+
+  execFileSync('git', ['clone', '--quiet', '--single-branch', '--branch', 'main', originDir, workspaceDir], {
+    stdio: 'ignore',
+  });
+  assert.throws(
+    () => execFileSync('git', ['-C', workspaceDir, 'rev-parse', 'refs/remotes/origin/feature'], { stdio: 'pipe' }),
+    /unknown revision|ambiguous argument|Needed a single revision/
+  );
+
+  const refspec = '+refs/heads/feature:refs/remotes/origin/feature';
+  execFileSync('git', ['-C', workspaceDir, 'fetch', 'origin', refspec], { stdio: 'ignore' });
+  const firstFetched = execFileSync('git', ['-C', workspaceDir, 'rev-parse', 'refs/remotes/origin/feature'], {
+    encoding: 'utf8',
+  }).trim();
+
+  writeFileSync(path.join(seedDir, 'feature.txt'), 'two\n', 'utf8');
+  execFileSync('git', ['-C', seedDir, 'add', 'feature.txt'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'commit', '-m', 'feature two'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', seedDir, 'push', 'origin', 'feature'], { stdio: 'ignore' });
+
+  execFileSync('git', ['-C', workspaceDir, 'fetch', 'origin', refspec], { stdio: 'ignore' });
+  const secondFetched = execFileSync('git', ['-C', workspaceDir, 'rev-parse', 'refs/remotes/origin/feature'], {
+    encoding: 'utf8',
+  }).trim();
+
+  assert.notEqual(secondFetched, firstFetched);
+  assert.equal(
+    secondFetched,
+    execFileSync('git', ['-C', seedDir, 'rev-parse', 'feature'], { encoding: 'utf8' }).trim()
+  );
+});
+
+test('prepareWorkspaceForJob retries transient REST metadata lookup failures', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  let apiAttempts = 0;
+
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {},
+    execFileImpl: async (command, args) => {
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        apiAttempts += 1;
+        if (apiAttempts === 1) {
+          const err = new Error('gh api failed');
+          err.stderr = 'Get "https://api.github.com": connection reset by peer';
+          throw err;
+        }
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(apiAttempts, 2);
+});
+
+test('prepareWorkspaceForJob retries transient git clone failures', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  let cloneAttempts = 0;
+
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {},
+    execFileImpl: async (command, args) => {
+      if (command === 'git' && args[0] === 'clone') {
+        cloneAttempts += 1;
+        if (cloneAttempts === 1) {
+          const err = new Error('git clone failed');
+          err.stderr = 'fatal: unable to access https://github.com/laceyenterprises/clio.git/: HTTP 503';
+          throw err;
+        }
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(cloneAttempts, 2);
+});
+
+test('prepareWorkspaceForJob retries transient fork checkout failures', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  let checkoutAttempts = 0;
+
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {},
+    execFileImpl: async (command, args) => {
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'patch-1', repo: { full_name: 'contributor-fork/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'checkout') {
+        checkoutAttempts += 1;
+        if (checkoutAttempts === 1) {
+          const err = new Error('gh pr checkout failed');
+          err.stderr = 'HTTP 502: GitHub connection timed out';
+          throw err;
+        }
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(checkoutAttempts, 2);
 });
 
 test('assertValidRepoSlug rejects malformed repo names', () => {
@@ -705,7 +867,7 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
     ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
     ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
     ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
-    ['git', '-C', result.workspaceDir, 'fetch', 'origin', 'clio-feature'],
+    ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature'],
     ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
   ]);
   // The whole workspace-prep path is GraphQL-free now: git clone over the
@@ -946,7 +1108,7 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
     ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
     ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
     ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
-    ['git', '-C', result.workspaceDir, 'fetch', 'origin', 'clio-feature'],
+    ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature'],
     ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
   ]);
 });

@@ -367,7 +367,9 @@ What this does:
 - increments `remediationPlan.currentRound`
 - appends a round entry to `remediationPlan.rounds[]`
 - prepares a workspace under `HQ_ROOT/adversarial-review/follow-up-workspaces/<jobId>/` when `HQ_ROOT` is set
-- checks out the existing PR branch there with `gh pr checkout`
+- resolves PR metadata with `gh api repos/<owner>/<repo>/pulls/<n>`
+- clones and refreshes same-repo PR branches with git smart-HTTP, fetching the head branch into `refs/remotes/origin/<headRef>` before `checkout -B`
+- uses `gh pr checkout` only for fork PR fallback, where the head branch is not on `origin`
 - writes worker artifacts under `<workspace>/.adversarial-follow-up/`
 - spawns a detached Codex remediation worker
 

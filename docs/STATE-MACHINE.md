@@ -116,12 +116,15 @@ new PR
   evidence is cleared because a replacement review pass is now durably
   `reviewing`.
 - Infrastructure-class `failed` rows (`cascade`, `reviewer-timeout`,
-  `launchctl-bootstrap`, and reviewer-spawn `oauth-broken`) use the same claim
-  path. The watcher increments `infra_auto_recover_attempts` only after that
-  successful claim; once the counter reaches the cap, the row stays `failed`
-  for operator inspection. `forbidden-fallback`, `failed-orphan`, `malformed`,
-  inactive repos, closed/merged PRs, undiscovered PRs, active watcher drain, and
-  active follow-up jobs are not auto-recovered by this path.
+  `launchctl-bootstrap`, and reviewer-spawn `oauth-broken`) use a dedicated
+  claim path that atomically promotes the row to `reviewing` and increments
+  `infra_auto_recover_attempts` only if the row is still the same failed
+  infrastructure class. Once the counter reaches the cap, the row stays
+  `failed` for operator inspection. The counter resets after a successful
+  posted review or an intentional re-review re-arm. `forbidden-fallback`,
+  `failed-orphan`, `malformed`, inactive repos, closed/merged PRs, undiscovered
+  PRs, active watcher drain, and active follow-up jobs are not auto-recovered by
+  this path.
 - **Cancellation surface (`src/review-cancel.mjs`).** The canonical CLI for cancelling an in-flight reviewer is `node src/review-cancel.mjs --repo <slug> --pr <n> [--signal SIGTERM] [--allow-status <comma-list>] [reason]`. By default the CLI accepts only rows in `review_status='reviewing'` (the durable claim that a reviewer subprocess is in flight). Supported values for `--allow-status` are `reviewing`, `posted`, `failed`. The flag explicitly excludes `pending` (no subprocess to signal), `failed-orphan` (sticky operator-only recovery; use `npm run retrigger-review` instead), and `malformed` (terminal by design). The canonical surface MUST cover the extended cases so operators do not fall back to `sudo kill -KILL <pgid>` or hand-editing the row to fool the guard.
   - **`--allow-status posted`** covers the **post-merge race** observed 2026-05-30: a prior attempt's row had already transitioned to `posted` while the watcher had re-spawned a retry whose subprocess outlived the PR's own merge.
   - **`--allow-status failed`** covers the **draining-subprocess** shape: the subprocess errored (timeout, cleanup-phase exception) and flipped the row to `failed`, but the OS process is still alive — for example holding a file handle, an open Linear API session, or its own SIGTERM teardown timer. Distinct from `failed-orphan`: a `failed` row is a recent, watcher-recoverable failure where the watcher's `stmtMarkAttemptStarted` can re-promote `failed → reviewing` on the next poll, while `failed-orphan` is sticky and requires `npm run retrigger-review`. Because of that auto-retry promote, `failed → reviewing` can race the operator's cancel: the CLI's PID-identity guard (`verifyPgidIdentity` start-time match) is what makes the kill safe under the race, and the CLI re-fetches the row on `identity-unconfirmed` to surface the new state so the operator can target the live reviewer instead.

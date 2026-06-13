@@ -1970,8 +1970,37 @@ const stmtGetPendingFastMergeAudits = db.prepare(
 // The counter below bounds those claim-path recoveries so a persistent infra
 // failure eventually remains terminal instead of retrying forever.
 const INFRA_AUTO_RECOVER_CAP = 3;
-const stmtRecordInfraAutoRecoveryClaim = db.prepare(
-  "UPDATE reviewed_prs SET infra_auto_recover_attempts = infra_auto_recover_attempts + 1 WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ? AND review_status = 'reviewing'"
+const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL,
+         infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+   WHERE repo = ?
+     AND pr_number = ?
+     AND review_status = 'failed'
+     AND infra_auto_recover_attempts < ?
+     AND (
+       (? = 'cascade' AND (
+         lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
+       )) OR
+       (? = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
+       (? = 'launchctl-bootstrap' AND (
+         lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
+       )) OR
+       (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%')
+     )`
 );
 const stmtMarkFastMergeAuditPending = db.prepare(
   "UPDATE reviewed_prs SET fast_merge_audit_status = 'pending', fast_merge_audit_payload_json = ?, fast_merge_audit_error = NULL WHERE repo = ? AND pr_number = ?"
@@ -2075,7 +2104,7 @@ const stmtReleaseReviewerClaim = db.prepare(
       AND review_status = 'reviewing'`
 );
 const stmtMarkPosted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
@@ -4793,15 +4822,30 @@ async function pollOnce(
             const reviewerHeadSha = subject?.headSha || null;
             const reviewerTimeoutMs = resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
-            const claim = stmtMarkAttemptStarted.run(
-              attemptAt,
-              reviewerSessionUuid,
-              reviewerHeadSha,
-              reviewerTimeoutMs,
-              reviewerLeaseExpiresAt,
-              repoPath,
-              prNumber
-            );
+            const claim = infraRecoveryClass
+              ? stmtMarkInfraAutoRecoveryAttemptStarted.run(
+                attemptAt,
+                reviewerSessionUuid,
+                reviewerHeadSha,
+                reviewerTimeoutMs,
+                reviewerLeaseExpiresAt,
+                repoPath,
+                prNumber,
+                INFRA_AUTO_RECOVER_CAP,
+                infraRecoveryClass,
+                infraRecoveryClass,
+                infraRecoveryClass,
+                infraRecoveryClass
+              )
+              : stmtMarkAttemptStarted.run(
+                attemptAt,
+                reviewerSessionUuid,
+                reviewerHeadSha,
+                reviewerTimeoutMs,
+                reviewerLeaseExpiresAt,
+                repoPath,
+                prNumber
+              );
             if (claim.changes === 0) {
               // Lost the cross-process compare-and-swap. Either another
               // watcher just claimed this row, or the row's status moved to
@@ -4814,17 +4858,10 @@ async function pollOnce(
               return;
             }
             if (infraRecoveryClass) {
-              const recordClaim = stmtRecordInfraAutoRecoveryClaim.run(
-                repoPath,
-                prNumber,
-                reviewerSessionUuid
+              console.log(
+                `[watcher] Claimed infra-failed review ${repoPath}#${prNumber} ` +
+                  `(class=${infraRecoveryClass}, infra attempt ${infraRecoveryAttempts + 1}/${INFRA_AUTO_RECOVER_CAP})`
               );
-              if (recordClaim.changes > 0) {
-                console.log(
-                  `[watcher] Claimed infra-failed review ${repoPath}#${prNumber} ` +
-                    `(class=${infraRecoveryClass}, infra attempt ${infraRecoveryAttempts + 1}/${INFRA_AUTO_RECOVER_CAP})`
-                );
-              }
             }
             if (afterClaim) {
               try {

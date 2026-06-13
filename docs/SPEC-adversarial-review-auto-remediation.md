@@ -275,6 +275,41 @@ scoped to explicit local-routing context such as `127.0.0.1:4000`,
 non-local API connectivity failures remain `unknown` unless another more
 specific classifier matches.
 
+## Infrastructure Failed-Row Auto-Recovery
+
+The watcher may boundedly recover `review_status='failed'` rows only through
+the normal reviewer dispatch path. The row must still be an open, rediscovered
+PR, the watcher must not be draining, active follow-up/backoff/handoff gates
+must allow dispatch, memory admission must pass, and the routing-tier readiness
+gate above must report healthy before an infrastructure failed row is claimed.
+
+Eligible infrastructure classes are routing-tier `cascade`,
+`reviewer-timeout`, `launchctl-bootstrap`, and reviewer-spawn
+`oauth-broken`. `forbidden-fallback`, `failed-orphan`, `malformed`, inactive
+repos, closed or merged PRs, undiscovered PRs, drain-skipped rows, and rows
+blocked by active follow-up jobs are not recovered by this path. `oauth-broken`
+is included only for spawn failures recorded in the watcher row, because those
+failures can represent local OAuth/runtime launch breakage before any reviewer
+verdict exists.
+
+The recovery budget is lifecycle-scoped to the current failed-row incident, not
+PR-row lifetime state. The watcher atomically promotes an eligible failed row to
+`reviewing` and increments `infra_auto_recover_attempts` in the same SQL
+transition, conditional on the row still being `failed` and still matching the
+same infrastructure class observed before claim. If another watcher, operator
+action, stale-head refresh, or remediation reconciliation has already moved the
+row to another status or changed the failure class, the claim loses and the
+counter is not consumed. Once the counter reaches the cap (`3`), the watcher
+leaves the row `failed` with its evidence intact for operator inspection.
+
+Failure evidence is cleared only at the successful recovery claim, when the
+replacement reviewer pass is durably `reviewing`. A successful posted review
+resets `infra_auto_recover_attempts` to `0`, and intentional re-review re-arms
+such as remediation reconciliation or stale-head refresh also reset the counter
+when they move the row back to `pending`. This gives later, unrelated
+infrastructure incidents a fresh bounded budget while still capping persistent
+failure loops.
+
 ## GitHub API Rollup
 
 `src/github-api.mjs` is the watcher/reviewer rollup helper for GitHub PR

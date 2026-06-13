@@ -50,6 +50,15 @@ const SPEC_TOUCH_RULES = [
     specPathText: '`projects/worker-pool/SPEC.md`',
     kind: 'hq-cli-surface',
   },
+  {
+    id: 'adversarial-review-watcher-retry-contract',
+    label: 'watcher reviewer retry/recovery contract changes',
+    pathPattern: /^src\/watcher\.mjs$/,
+    specPaths: ['docs/SPEC-adversarial-review-auto-remediation.md'],
+    promptPathText: '`src/watcher.mjs` reviewer retry/recovery state-machine changes',
+    specPathText: '`docs/SPEC-adversarial-review-auto-remediation.md`',
+    kind: 'watcher-retry-contract',
+  },
 ];
 
 function parseChangedFiles(diffText) {
@@ -93,6 +102,15 @@ function isHqCliSurfaceChange(lines) {
   });
 }
 
+function isWatcherRetryContractChange(lines) {
+  return lines.some((line) => {
+    if ((!line.startsWith('+') && !line.startsWith('-')) || line.startsWith('+++') || line.startsWith('---')) {
+      return false;
+    }
+    return /infra_auto_recover_attempts|INFRA_AUTO_RECOVER_CAP|stmtMark(?:InfraAutoRecovery)?AttemptStarted|review_status\s*=\s*'failed'|pending-upstream|failed-orphan|reviewer-timeout|launchctl-bootstrap|oauth-broken/.test(line);
+  });
+}
+
 function touchedSpecPaths(files) {
   return new Set(files.map((file) => file.path).filter((path) => /(^|\/)SPEC.*\.md$/.test(path)));
 }
@@ -110,7 +128,9 @@ function evaluateSpecTouch(diffText) {
         ? file.lines.some((line) => (line.startsWith('+') || line.startsWith('-')) && !line.startsWith('+++') && !line.startsWith('---'))
         : rule.kind === 'python-signature'
           ? isPublicPythonSignatureChange(file.lines)
-          : isHqCliSurfaceChange(file.lines);
+          : rule.kind === 'hq-cli-surface'
+            ? isHqCliSurfaceChange(file.lines)
+            : isWatcherRetryContractChange(file.lines);
 
       if (!contractChanged) continue;
 
@@ -143,6 +163,7 @@ function buildSpecTouchPromptSection() {
     '  - public Python function or method signature changes in the mapped Python ownership paths above (parameter lists or return types only; ignore private `_helpers` and cosmetic docstring edits)',
     '  - new or altered SQL migrations in `platform/session-ledger/src/session_ledger/migrations/*.sql`',
     '  - new or altered `hq` CLI subcommands or flags in `modules/worker-pool/bin/hq` or `modules/worker-pool/lib/hq-*.sh`',
+    '  - watcher reviewer retry/recovery state-machine changes such as failed-row recovery eligibility, retry caps, evidence clearing, readiness-gate interaction, or reviewer claim status transitions',
     '- Assume new or changed behavior in a PR was operator-driven unless the PR context clearly says otherwise. Do not recommend rolling code back merely to match stale spec text; recommend updating the mapped governing SPEC/RUNBOOK to describe the new behavior unless the change introduces a concrete production regression or conflicts with an explicit operator decision.',
     '- Use this blocking-issue message template when the rule triggers:',
     '  - `Contract changed without spec update. The diff modifies {thing} in {path}, but {specPath} was not touched. The default remediation is to update the governing spec to match the new behavior; revert the contract change only if it introduces a real regression (data corruption / data loss / secret leakage / security regression / broken external contract) or conflicts with an explicit operator decision encoded in the doc. Spec-as-source-of-truth is load-bearing; silent drift is the dominant maintenance risk from the 2026-05-04 operator retrospective, and silent reverts are the 2026-05-14 follow-on.`',

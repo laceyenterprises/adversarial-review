@@ -241,12 +241,12 @@ async function cancelActiveReview({
       processKill,
       execFileImpl,
     });
-    // Watcher can promote `failed → reviewing` via stmtMarkAttemptStarted
-    // between the operator's snapshot and our signal attempt. If the
-    // identity check refused (start-time drift, pgid recycled), re-fetch
-    // the row so the receipt + return value carry the post-promote state
-    // and the operator gets actionable feedback instead of just
-    // "identity-unconfirmed".
+    // The watcher can promote infrastructure-class `failed → reviewing` via
+    // its dedicated recovery claim between the operator's snapshot and our
+    // signal attempt. If the identity check refused (start-time drift, pgid
+    // recycled), re-fetch the row so the receipt + return value carry the
+    // post-promote state and the operator gets actionable feedback instead
+    // of just "identity-unconfirmed".
     let postSignalRow = null;
     if (
       signalResult.error === 'identity-unconfirmed'

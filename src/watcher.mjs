@@ -54,7 +54,7 @@ import {
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
-import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import {
   createReviewerRuntimeAdapterForDomain,
   recoverReviewerRunRecords,
@@ -1964,6 +1964,44 @@ const stmtGetFastMergeSkippedPRs = db.prepare(
 const stmtGetPendingFastMergeAudits = db.prepare(
   "SELECT * FROM reviewed_prs WHERE fast_merge_audit_status = 'pending' AND fast_merge_audit_payload_json IS NOT NULL ORDER BY reviewed_at ASC, id ASC LIMIT ?"
 );
+// Bounded auto-recovery of infrastructure-class reviewer failures (2026-06-13
+// codex-fleet-spawn incident): failed rows stay operator-visible until the
+// normal dispatch path rediscovers the PR and wins the atomic reviewing claim.
+// The counter below bounds those claim-path recoveries so a persistent infra
+// failure eventually remains terminal instead of retrying forever.
+const INFRA_AUTO_RECOVER_CAP = 3;
+const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL,
+         infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+   WHERE repo = ?
+     AND pr_number = ?
+     AND review_status = 'failed'
+     AND infra_auto_recover_attempts < ?
+     AND (
+       (? = 'cascade' AND (
+         lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
+       )) OR
+       (? = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
+       (? = 'launchctl-bootstrap' AND (
+         lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
+         lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
+       )) OR
+       (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%')
+     )`
+);
 const stmtMarkFastMergeAuditPending = db.prepare(
   "UPDATE reviewed_prs SET fast_merge_audit_status = 'pending', fast_merge_audit_payload_json = ?, fast_merge_audit_error = NULL WHERE repo = ? AND pr_number = ?"
 );
@@ -1986,7 +2024,8 @@ const stmtMarkMalformed = db.prepare(
 // reviewer handle below lets reconcileReviewerSessions reattach to a
 // still-live reviewer or recover a posted GitHub review before falling
 // back to sticky operator action for legacy/anomalous rows.
-// Compare-and-swap claim: only flip `pending` / `failed` rows to
+// Compare-and-swap claim: only flip `pending` rows and expired
+// `pending-upstream` backoff rows to
 // `'reviewing'`. The unconditional UPDATE the previous version of this
 // statement performed was safe under the in-process pollOnce
 // serialization in this module, but did NOT close the cross-process
@@ -2000,13 +2039,15 @@ const stmtMarkMalformed = db.prepare(
 //
 // Match conditions:
 //   - `review_status = 'pending'` — happy-path claim.
-//   - `review_status = 'failed'` — automatic-retry path; the pre-CAS
-//     code treated `failed` as eligible for retry on the next poll,
-//     and we preserve that contract here.
 //   - `review_status = 'pending-upstream'` — upstream-cascade backoff
 //     path. pollOnce gates this state on file-backed nextRetryAfter,
 //     and once that window expires the row may be reclaimed for
 //     another attempt without burning review_attempts.
+// Infrastructure-class `failed` rows use the dedicated
+// stmtMarkInfraAutoRecoveryAttemptStarted claim above, which rechecks the
+// stored failure class and recovery cap atomically. Non-infrastructure
+// `failed` rows must remain failed for operator inspection; the generic claim
+// must never erase their failure evidence.
 //
 // Terminal statuses (`posted`, `malformed`) and the durable in-flight
 // states (`reviewing`, `failed-orphan`) are NOT reclaimable by this
@@ -2039,7 +2080,7 @@ const stmtMarkAttemptStarted = db.prepare(
          END
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status IN ('pending', 'failed', 'pending-upstream')`
+     AND review_status IN ('pending', 'pending-upstream')`
 );
 const stmtMarkReviewerPgid = db.prepare(
   `UPDATE reviewed_prs
@@ -2066,7 +2107,7 @@ const stmtReleaseReviewerClaim = db.prepare(
       AND review_status = 'reviewing'`
 );
 const stmtMarkPosted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
@@ -4318,8 +4359,8 @@ async function pollOnce(
       // at 2026-05-16T22:37Z that cited "stale review(s) on prior
       // commits": 4 of 9 sampled PRs had `posted` rows with
       // `reviewer_head_sha` != current PR head. The CAS in
-      // `stmtMarkAttemptStarted` reclaims only
-      // `pending | failed | pending-upstream`, never `posted` — so
+      // `stmtMarkAttemptStarted` reclaims only `pending` and
+      // `pending-upstream`, never `posted` or generic `failed` — so
       // those rows stay stale until manual `retrigger-review`.
       //
       // This auto-refresh calls `requestReviewRereview`, whose own CAS
@@ -4694,6 +4735,37 @@ async function pollOnce(
         continue;
       }
 
+      const infraRecoveryClass = current?.review_status === 'failed'
+        ? infraRecoverableFailureClass(current)
+        : null;
+      if (current?.review_status === 'failed' && !infraRecoveryClass) {
+        console.log(
+          `[watcher] Skipping failed review ${repoPath}#${prNumber}: ` +
+            `failure is not infrastructure-recoverable; leaving evidence intact`
+        );
+        continue;
+      }
+      const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
+      if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
+        console.log(
+          `[watcher] Infra auto-recovery cap exhausted for ${repoPath}#${prNumber}: ` +
+            `class=${infraRecoveryClass} attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}; ` +
+            `leaving review_status='failed' for operator inspection`
+        );
+        continue;
+      }
+      if (infraRecoveryClass) {
+        const infraRecoveryReadiness = await getRoutingTierReadinessForTick();
+        if (!infraRecoveryReadiness.ready) {
+          console.log(
+            `[watcher] Skipping infra auto-recovery for ${repoPath}#${prNumber}: ` +
+              `routing tier not ready (${infraRecoveryReadiness.reason}); ` +
+              `leaving review_status='failed' evidence intact`
+          );
+          continue;
+        }
+      }
+
       if (!existing) {
         console.log(
           `[watcher] New PR ${repoPath}#${prNumber}: "${prTitle}" → ${route.reviewerModel}` +
@@ -4760,15 +4832,30 @@ async function pollOnce(
             const reviewerHeadSha = subject?.headSha || null;
             const reviewerTimeoutMs = resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
-            const claim = stmtMarkAttemptStarted.run(
-              attemptAt,
-              reviewerSessionUuid,
-              reviewerHeadSha,
-              reviewerTimeoutMs,
-              reviewerLeaseExpiresAt,
-              repoPath,
-              prNumber
-            );
+            const claim = infraRecoveryClass
+              ? stmtMarkInfraAutoRecoveryAttemptStarted.run(
+                attemptAt,
+                reviewerSessionUuid,
+                reviewerHeadSha,
+                reviewerTimeoutMs,
+                reviewerLeaseExpiresAt,
+                repoPath,
+                prNumber,
+                INFRA_AUTO_RECOVER_CAP,
+                infraRecoveryClass,
+                infraRecoveryClass,
+                infraRecoveryClass,
+                infraRecoveryClass
+              )
+              : stmtMarkAttemptStarted.run(
+                attemptAt,
+                reviewerSessionUuid,
+                reviewerHeadSha,
+                reviewerTimeoutMs,
+                reviewerLeaseExpiresAt,
+                repoPath,
+                prNumber
+              );
             if (claim.changes === 0) {
               // Lost the cross-process compare-and-swap. Either another
               // watcher just claimed this row, or the row's status moved to
@@ -4779,6 +4866,12 @@ async function pollOnce(
                 `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
               );
               return;
+            }
+            if (infraRecoveryClass) {
+              console.log(
+                `[watcher] Claimed infra-failed review ${repoPath}#${prNumber} ` +
+                  `(class=${infraRecoveryClass}, infra attempt ${infraRecoveryAttempts + 1}/${INFRA_AUTO_RECOVER_CAP})`
+              );
             }
             if (afterClaim) {
               try {

@@ -68,7 +68,7 @@ data/reviews.db
 | `pending` | eligible for watcher review / re-review |
 | `reviewing` | reviewer subprocess in flight; durable claim before spawn |
 | `posted` | review posted successfully |
-| `failed` | review attempt failed (auto-retried by next poll) |
+| `failed` | review attempt failed; eligible rows are auto-retried by the normal dispatch path on a later poll |
 | `failed-orphan` | watcher restarted while a `reviewing` row was in flight and safe automatic recovery could not be proven — sticky, requires operator verification + `npm run retrigger-review` |
 | `malformed` | title guardrail failure; terminal by design |
 
@@ -92,6 +92,8 @@ new PR
             │
             ├─ reviewer subprocess fails
             │    └─ failed
+            │         └─ eligible retry: normal dispatch gates + stmtMarkAttemptStarted
+            │              └─ reviewing
             │
             ├─ watcher restart while reviewing
             │    ├─ confirmed dead + no late review after bounded overdue recovery
@@ -106,9 +108,26 @@ new PR
 ### Notes
 
 - `malformed` is intentionally sticky.
+- A `failed` row is not reset by a standalone sweep. Its `failed_at` and
+  `failure_message` remain visible until the watcher rediscovers that PR in an
+  active repo, passes the normal non-drain/subject/follow-up/backoff/admission
+  gates, passes the routing-tier readiness probe, and wins
+  `stmtMarkAttemptStarted`. That atomic claim is the point where failure
+  evidence is cleared because a replacement review pass is now durably
+  `reviewing`.
+- Infrastructure-class `failed` rows (`cascade`, `reviewer-timeout`,
+  `launchctl-bootstrap`, and reviewer-spawn `oauth-broken`) use a dedicated
+  claim path that atomically promotes the row to `reviewing` and increments
+  `infra_auto_recover_attempts` only if the row is still the same failed
+  infrastructure class. Once the counter reaches the cap, the row stays
+  `failed` for operator inspection. The counter resets after a successful
+  posted review or an intentional re-review re-arm. `forbidden-fallback`,
+  `failed-orphan`, `malformed`, inactive repos, closed/merged PRs, undiscovered
+  PRs, active watcher drain, and active follow-up jobs are not auto-recovered by
+  this path.
 - **Cancellation surface (`src/review-cancel.mjs`).** The canonical CLI for cancelling an in-flight reviewer is `node src/review-cancel.mjs --repo <slug> --pr <n> [--signal SIGTERM] [--allow-status <comma-list>] [reason]`. By default the CLI accepts only rows in `review_status='reviewing'` (the durable claim that a reviewer subprocess is in flight). Supported values for `--allow-status` are `reviewing`, `posted`, `failed`. The flag explicitly excludes `pending` (no subprocess to signal), `failed-orphan` (sticky operator-only recovery; use `npm run retrigger-review` instead), and `malformed` (terminal by design). The canonical surface MUST cover the extended cases so operators do not fall back to `sudo kill -KILL <pgid>` or hand-editing the row to fool the guard.
   - **`--allow-status posted`** covers the **post-merge race** observed 2026-05-30: a prior attempt's row had already transitioned to `posted` while the watcher had re-spawned a retry whose subprocess outlived the PR's own merge.
-  - **`--allow-status failed`** covers the **draining-subprocess** shape: the subprocess errored (timeout, cleanup-phase exception) and flipped the row to `failed`, but the OS process is still alive — for example holding a file handle, an open Linear API session, or its own SIGTERM teardown timer. Distinct from `failed-orphan`: a `failed` row is a recent, watcher-recoverable failure where the watcher's `stmtMarkAttemptStarted` can re-promote `failed → reviewing` on the next poll, while `failed-orphan` is sticky and requires `npm run retrigger-review`. Because of that auto-retry promote, `failed → reviewing` can race the operator's cancel: the CLI's PID-identity guard (`verifyPgidIdentity` start-time match) is what makes the kill safe under the race, and the CLI re-fetches the row on `identity-unconfirmed` to surface the new state so the operator can target the live reviewer instead.
+  - **`--allow-status failed`** covers the **draining-subprocess** shape: the subprocess errored (timeout, cleanup-phase exception) and flipped the row to `failed`, but the OS process is still alive — for example holding a file handle, an open Linear API session, or its own SIGTERM teardown timer. Distinct from `failed-orphan`: a `failed` row preserves the reviewer failure evidence for operator inspection unless it matches the bounded infrastructure-recovery classifier (`cascade`, `reviewer-timeout`, `launchctl-bootstrap`, or reviewer-spawn `oauth-broken`). Only that dedicated infra claim may promote `failed → reviewing`; generic failed rows are not re-promoted by `stmtMarkAttemptStarted`. The CLI's PID-identity guard (`verifyPgidIdentity` start-time match) is what makes the kill safe if row state changes during cancellation, and the CLI re-fetches the row on `identity-unconfirmed` to surface the new state so the operator can target the live reviewer instead.
   - **Audit channel.** The cancellation receipt at `data/review-cancellations/<repo>-pr-<n>-<utc>.json` records the source `review.status`, the resolved `result`, and any `postSignalState` snapshot if the row transitioned mid-cancel. This receipt directory — **not** the SQLite row — is the canonical audit trail for cancels: `cancelActiveReview` runs read-only against `reviewed_prs` (`query_only = 1`), so a successful cancel against a `posted` or `failed` row leaves the row state unchanged. To find historical cancels for a PR after the fact: `ls data/review-cancellations/ | grep -F "pr-<n>"`, then read each JSON to see the source status, requestedBy, requestedAt, reason, and signal outcome.
 - `failed-orphan` is intentionally sticky. It covers any restart-era session where the watcher cannot prove a safe handoff back to automation, including missing launch-time timeout metadata on legacy rows, a live PGID that survives the bounded SIGTERM/SIGKILL recovery loop, or a late GitHub review that appears during recovery. Recovery is operator-only:
   1. Inspect the GitHub PR. If a review was already posted by the reviewer bot, leave the row alone (the round is effectively done).

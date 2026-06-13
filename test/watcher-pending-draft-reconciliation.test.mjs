@@ -101,12 +101,15 @@ test('watcher pre-spawn reconciliation clears stale-head drafts before spawn and
 
 test('watcher runs pending-draft reconciliation after claim and freshness re-check', () => {
   const source = readFileSync(WATCHER_SOURCE, 'utf8');
-  const claimIndex = source.indexOf('const claim = stmtMarkAttemptStarted.run(');
+  const claimIndex = source.indexOf(': stmtMarkAttemptStarted.run(');
+  const infraClaimIndex = source.indexOf('? stmtMarkInfraAutoRecoveryAttemptStarted.run(');
   const freshnessIndex = source.indexOf('Freshness re-check (2026-05-18)');
   const reconcileIndex = source.indexOf('const preSpawnReconciliation = await reconcilePendingDraftsBeforeSpawn({');
   const releaseIndex = source.indexOf('stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);');
 
   assert.ok(claimIndex > 0, 'claim site should exist');
+  assert.ok(infraClaimIndex > 0, 'infra-recovery claim site should exist');
+  assert.ok(infraClaimIndex < claimIndex, 'infra-recovery claim should be checked before the generic claim');
   assert.ok(freshnessIndex > claimIndex, 'freshness re-check should happen after claim');
   assert.ok(reconcileIndex > freshnessIndex, 'reconciliation should happen after freshness re-check');
   assert.ok(releaseIndex > reconcileIndex, 'skip-spawn path should release the claim');

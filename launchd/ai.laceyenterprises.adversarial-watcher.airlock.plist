@@ -91,6 +91,32 @@
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
         <string>codex</string>
         <!--
+          Resolve reviewer GitHub credentials through the local OAuth
+          broker instead of per-role 1Password PAT reads. The expected
+          IDs pin the broker response to the reviewer GitHub Apps
+          documented in the model-routing runtime compose file.
+        -->
+        <key>CLAUDE_REVIEWER_AUTH_VIA_BROKER</key>
+        <string>true</string>
+        <key>CODEX_REVIEWER_AUTH_VIA_BROKER</key>
+        <string>true</string>
+        <key>GEMINI_REVIEWER_AUTH_VIA_BROKER</key>
+        <string>true</string>
+        <key>OAUTH_BROKER_SHARED_SECRET_FILE</key>
+        <string>/Users/airlock/agent-os/.secrets/local/oauth-broker-shared-secret</string>
+        <key>OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID</key>
+        <string>3994110</string>
+        <key>OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID</key>
+        <string>138772505</string>
+        <key>OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID</key>
+        <string>3994060</string>
+        <key>OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID</key>
+        <string>138771486</string>
+        <key>OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID</key>
+        <string>3994139</string>
+        <key>OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_INSTALLATION_ID</key>
+        <string>138773049</string>
+        <!--
           Operator kill-switch for the adversarial-gate GitHub status
           check (2026-06-07). When set to `true`, the watcher skips
           the `gh api POST repos/.../statuses/<headSha>` call in

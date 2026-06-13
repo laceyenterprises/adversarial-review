@@ -212,13 +212,45 @@ resolve_and_export_required_op_secret() {
   exit 1
 }
 
-# OPH-01: route through op_resolve_with_rate_limit_backoff so a
-# 1Password rate-limit gets a 15-min sleep before exit (vs. the
-# previous fail-open path that turned into a 30-second respawn storm
-# under launchd KeepAlive+ThrottleInterval=30). Non-rate-limit failures
-# get the same explicit launchd backoff here instead of relying on
-# `set -e` to abort during command substitution.
-resolve_and_export_required_op_secret LINEAR_API_KEY 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential'
+load_local_linear_api_key() {
+  local linear_env_file
+  local linear_value
+  for linear_env_file in \
+    "$REPO_ROOT/.secrets/local/linear.env" \
+    "$REPO_ROOT/agents/clio/credentials/local/linear.env"; do
+    [[ -r "$linear_env_file" ]] || continue
+    linear_value="$(awk '
+      /^[[:space:]]*(export[[:space:]]+)?LINEAR_API_KEY=/ {
+        sub(/^[[:space:]]*(export[[:space:]]+)?LINEAR_API_KEY=/, "")
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+        if (($0 ~ /^".*"$/) || ($0 ~ /^'\''.*'\''$/)) {
+          $0 = substr($0, 2, length($0) - 2)
+        }
+        print
+        exit
+      }
+    ' "$linear_env_file")"
+    if [[ -n "${linear_value//[[:space:]]/}" ]]; then
+      export LINEAR_API_KEY="$linear_value"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -n "${LINEAR_API_KEY:-}" && -z "${LINEAR_API_KEY//[[:space:]]/}" ]]; then
+  unset LINEAR_API_KEY
+fi
+if [[ -z "${LINEAR_API_KEY:-}" ]]; then
+  load_local_linear_api_key || true
+fi
+if [[ -z "${LINEAR_API_KEY:-}" ]]; then
+  # OPH-01: route through op_resolve_with_rate_limit_backoff so a
+  # 1Password rate-limit gets a 15-min sleep before exit (vs. the
+  # previous fail-open path that turned into a 30-second respawn storm
+  # under launchd KeepAlive=true + ThrottleInterval=30).
+  resolve_and_export_required_op_secret LINEAR_API_KEY 'op://mem423y7ewrymvxv4ibh34zdk4/zcblkukakjcadmws2vnjeqlswa/credential'
+fi
 
 # Reviewer tokens: try the OAuth broker path FIRST when the per-role
 # flag is set, fall back to op-read otherwise. Broker mode fails closed
@@ -339,8 +371,27 @@ resolve_alert_to_optional() {
   done
 }
 
+load_local_alert_to() {
+  local alert_to_file
+  local alert_to_value
+  for alert_to_file in \
+    "$REPO_ROOT/.secrets/local/adversarial-watcher-alert-to" \
+    "$REPO_ROOT/agents/clio/credentials/local/adversarial-watcher-alert-to"; do
+    [[ -r "$alert_to_file" ]] || continue
+    alert_to_value="$(<"$alert_to_file")"
+    if [[ -n "${alert_to_value//[[:space:]]/}" ]]; then
+      export ALERT_TO="$alert_to_value"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [[ -n "${ALERT_TO:-}" && -z "${ALERT_TO//[[:space:]]/}" ]]; then
   unset ALERT_TO
+fi
+if [[ -z "${ALERT_TO:-}" ]]; then
+  load_local_alert_to || true
 fi
 if [[ -z "${ALERT_TO:-}" ]]; then
   if alert_to_value="$(resolve_alert_to_optional)"; then

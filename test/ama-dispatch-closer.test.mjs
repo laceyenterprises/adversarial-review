@@ -441,7 +441,9 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
     'after reviewing the diff for unintended changes.',
   );
   assert.match(prompt, /branchProtectionUnavailable: true, reason: "github_plan"/);
-  assert.match(prompt, /cat "\$protection_err" >&2\n    rm -f "\$protection_err"\n    exit 1/);
+  assert.match(prompt, /protection_max_attempts=3/);
+  assert.match(prompt, /grep -Eiq "\$protection_transient_re" "\$protection_err"/);
+  assert.match(prompt, /cat "\$protection_err" >&2\n  rm -f "\$protection_err"\n  exit 1/);
 });
 
 // ---------------------------------------------------------------------------

@@ -1367,6 +1367,40 @@ test('worker-provenance hook appends Worker-Class / Worker-Job-Id / Worker-Run-A
   assert.match(updated, /body paragraph\n\nWorker-Class:/);
 });
 
+test('worker-provenance hook appends Persona in canonical order when WORKER_CLASS and PERSONA are set', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  writeFileSync(msgPath, 'fix: another change\n\nbody paragraph\n', 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        WORKER_CLASS: 'codex',
+        PERSONA: 'cso-reviewer',
+        WORKER_JOB_ID: 'job-1',
+        WORKER_RUN_AT: '2026-05-29T00:00:00Z',
+      },
+      stdio: 'pipe',
+    }
+  );
+  assert.equal(result.status, 0, `hook exited ${result.status}: ${result.stderr?.toString()}`);
+
+  const updated = readFileSync(msgPath, 'utf8');
+  const trailers = updated.trimEnd().split('\n').slice(-4);
+  assert.deepEqual(trailers, [
+    'Worker-Class: codex',
+    'Persona: cso-reviewer',
+    'Worker-Job-Id: job-1',
+    'Worker-Run-At: 2026-05-29T00:00:00Z',
+  ]);
+});
+
 test('worker-provenance hook is idempotent — repeated runs do not duplicate trailers', () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
@@ -1392,6 +1426,61 @@ test('worker-provenance hook is idempotent — repeated runs do not duplicate tr
   // invocations fired against the same message file.
   assert.equal((updated.match(/^Worker-Class: codex-remediation$/gm) || []).length, 1);
   assert.equal((updated.match(/^Worker-Job-Id: job-x$/gm) || []).length, 1);
+});
+
+test('worker-provenance hook is idempotent with Persona — repeated runs do not duplicate trailers', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  writeFileSync(msgPath, 'fix: idempotent run\n', 'utf8');
+
+  const env = {
+    PATH: process.env.PATH,
+    WORKER_CLASS: 'codex',
+    PERSONA: 'cso-reviewer',
+    WORKER_JOB_ID: 'job-x',
+    WORKER_RUN_AT: '2026-05-29T00:00:00Z',
+  };
+  for (let i = 0; i < 2; i++) {
+    spawnSync(path.join(workspaceDir, '.git', 'hooks', 'commit-msg'), [msgPath], {
+      env,
+      stdio: 'ignore',
+    });
+  }
+
+  const updated = readFileSync(msgPath, 'utf8');
+  assert.equal((updated.match(/^Worker-Class: codex$/gm) || []).length, 1);
+  assert.equal((updated.match(/^Persona: cso-reviewer$/gm) || []).length, 1);
+  assert.equal((updated.match(/^Worker-Job-Id: job-x$/gm) || []).length, 1);
+  assert.equal((updated.match(/^Worker-Run-At: 2026-05-29T00:00:00Z$/gm) || []).length, 1);
+});
+
+test('worker-provenance hook refuses PERSONA without WORKER_CLASS', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  const original = 'fix: undefined persona state\n';
+  writeFileSync(msgPath, original, 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        PERSONA: 'cso-reviewer',
+      },
+      stdio: 'pipe',
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr.toString(), /PERSONA requires WORKER_CLASS/);
+  assert.equal(readFileSync(msgPath, 'utf8'), original);
 });
 
 test('prepareWorkspaceForJob installs the worker-provenance hook in the workspace', async () => {
@@ -4686,6 +4775,32 @@ test('worker-provenance hook rejects WORKER_CLASS values containing carriage ret
       env: {
         PATH: process.env.PATH,
         WORKER_CLASS: 'codex-remediation\rCo-authored-by: Forged <f@example.com>',
+      },
+      stdio: 'pipe',
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(msgPath, 'utf8'), original);
+});
+
+test('worker-provenance hook rejects PERSONA values containing newlines', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  const original = 'fix: carriage return guard\n';
+  writeFileSync(msgPath, original, 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        WORKER_CLASS: 'codex',
+        PERSONA: 'cso-reviewer\nWorker-Class: claude-code',
       },
       stdio: 'pipe',
     }

@@ -390,6 +390,7 @@ export function composeCloserPrompt({
   dispatchedAt,
   amaTrailers,
   templateBody,
+  reviewCycleExhausted = false,
 }) {
   return substituteTemplate(templateBody, {
     PR_URL: prUrl,
@@ -405,6 +406,8 @@ export function composeCloserPrompt({
     REVIEWED_BY: reviewedBy,
     DISPATCHED_AT: dispatchedAt,
     AMA_TRAILERS: amaTrailers,
+    // Final-hammer signal forwarded to the closer's ama-check recheck.
+    REVIEW_CYCLE_EXHAUSTED: reviewCycleExhausted === true ? 'true' : 'false',
   });
 }
 
@@ -513,6 +516,10 @@ export async function maybeDispatchAmaCloser({
     dispatchedAt: dispatchContext.dispatchedAt,
     amaTrailers,
     templateBody,
+    // The watcher's eligibility verdict already honored the final-hammer signal;
+    // forward it so the closer's fresh ama-check recheck reaches the same verdict
+    // instead of re-blocking on the (still unconverged) review verdict.
+    reviewCycleExhausted: reviewState?.reviewCycleExhausted === true,
   });
 
   const dispatchIdentity = { repo, prNumber, headSha: reviewedSha };

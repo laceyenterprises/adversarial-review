@@ -189,3 +189,51 @@ test('ama-check fails closed on empty protection snapshot when branch protection
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('ama-check: --review-cycle-exhausted true waives the soft gates (final hammer)', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-final-hammer-'));
+  try {
+    const paths = {
+      pr: join(tmp, 'pr.json'),
+      reviews: join(tmp, 'reviews.json'),
+      protection: join(tmp, 'protection.json'),
+      timeline: join(tmp, 'timeline.json'),
+    };
+    // Request-changes verdict, no operator-approved, branch protection required
+    // but the snapshot has NO required context → normally blocked on
+    // verdict-not-settled-success + branch-protection-missing-gate.
+    writeJson(paths.pr, {
+      number: 1234, headRefOid: HEAD_SHA, state: 'OPEN', isDraft: false,
+      mergeStateStatus: 'MERGEABLE',
+      labels: [],
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' }],
+      author: { login: 'codex-worker-bot' }, baseRefName: 'main',
+    });
+    writeJson(paths.reviews, {
+      reviews: [{ state: 'CHANGES_REQUESTED', submittedAt: '2026-06-13T12:00:00Z', commit: { oid: HEAD_SHA } }],
+    });
+    writeFileSync(paths.protection, '{}'); // no required contexts
+    writeJson(paths.timeline, []);
+    const configPath = writeConfig(tmp, { branchProtectionRequired: true });
+    const run = (exhausted) => spawnSync(process.execPath, [
+      AMA_CHECK,
+      '--pr', paths.pr, '--reviews', paths.reviews, '--protection', paths.protection,
+      '--timeline', paths.timeline, '--reviewed-sha', HEAD_SHA, '--risk-class', 'low',
+      '--review-cycle-exhausted', exhausted,
+    ], { encoding: 'utf8', env: { ...process.env, AGENT_OS_CONFIG_PATH: configPath } });
+
+    // Not exhausted → blocked.
+    const strict = JSON.parse(run('false').stdout);
+    assert.equal(strict.eligible, false);
+    assert.ok(strict.reasons.includes('verdict-not-settled-success'));
+
+    // Exhausted → final hammer waives the soft gates → eligible.
+    const hammer = JSON.parse(run('true').stdout);
+    assert.equal(hammer.eligible, true, JSON.stringify(hammer, null, 2));
+    assert.equal(hammer.trace.finalHammer.active, true);
+    assert.ok(hammer.trace.finalHammer.waived.includes('verdict-not-settled-success'));
+    assert.ok(hammer.trace.finalHammer.waived.includes('branch-protection-missing-gate'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

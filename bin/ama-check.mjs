@@ -54,6 +54,10 @@ function parseInputs(argv) {
       timeline: { type: 'string' },
       'reviewed-sha': { type: 'string' },
       'risk-class': { type: 'string' },
+      // AMA final hammer: the watcher passes 'true' when the PR's remediation
+      // round budget is exhausted (a monotonic property — it only ever grows),
+      // authorizing the soft-gate waiver. Absent/anything-but-'true' = strict.
+      'review-cycle-exhausted': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     strict: true,
@@ -99,7 +103,7 @@ function loadProtectionJson(path, cfg) {
  * `reviewerFamily` field stays null — the predicate's structural
  * gates still fire.
  */
-function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, riskClass }) {
+function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, riskClass, reviewCycleExhausted = false }) {
   const reviews = Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : [];
   // Take the most recent review on the reviewed head; fall back to the
   // most recent review overall.
@@ -142,6 +146,9 @@ function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, risk
     // already gated on this; if the head changed since dispatch, the
     // head-match gate will fail and the closer defers.
     remediationPending: false,
+    // AMA final hammer (monotonic): once the watcher observed the round budget
+    // exhausted it cannot un-exhaust, so the closer honors the dispatched value.
+    reviewCycleExhausted: reviewCycleExhausted === true,
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,
@@ -210,6 +217,7 @@ function main(argv = process.argv.slice(2)) {
     timelineJson,
     reviewedSha: args['reviewed-sha'],
     riskClass: args['risk-class'],
+    reviewCycleExhausted: String(args['review-cycle-exhausted'] || '').trim().toLowerCase() === 'true',
   });
   const prMetadata = buildPrMetadata({ prJson, protectionJson });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg);

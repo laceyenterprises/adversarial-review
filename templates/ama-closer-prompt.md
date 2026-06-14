@@ -83,6 +83,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --timeline /tmp/ama-timeline.json \
   --reviewed-sha <<REVIEWED_SHA>> \
   --risk-class <<RISK_CLASS>> \
+  --review-cycle-exhausted <<REVIEW_CYCLE_EXHAUSTED>> \
   > /tmp/ama-verdict.json
 ```
 

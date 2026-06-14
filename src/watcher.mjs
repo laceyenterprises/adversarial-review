@@ -3284,11 +3284,41 @@ async function maybeDispatchAmaClosureFor({
     return { dispatched: false, reason: 'ama-disabled', amaEnabled: false };
   }
 
+  // AMA "final hammer" signal: the review cycle is EXHAUSTED once the PR has
+  // consumed its full remediation round budget. At that point the adversarial
+  // verdict can loop on `Request changes` forever, so AMA must land the PR
+  // (eligibility.mjs waives the soft convergence gates, keeps the hard ones).
+  // Mirrors evaluateRoundBudgetForReview's budget resolution. Fail-safe: any
+  // error leaves the signal false (AMA keeps its normal strict gates).
+  let reviewCycleExhausted = false;
+  try {
+    const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
+    const rbResolution = resolveRoundBudgetForJob(
+      { riskClass: remLedger.latestRiskClass },
+      { rootDir },
+    );
+    const latestMaxRounds = Number(remLedger.latestMaxRounds);
+    const effectiveRoundBudget =
+      Number.isInteger(latestMaxRounds) && latestMaxRounds > rbResolution.roundBudget
+        ? latestMaxRounds
+        : rbResolution.roundBudget;
+    reviewCycleExhausted =
+      Number.isFinite(effectiveRoundBudget) &&
+      effectiveRoundBudget > 0 &&
+      Number(remLedger.completedRoundsForPR) >= effectiveRoundBudget;
+  } catch (err) {
+    console.warn(
+      `[watcher] AMA final-hammer round-budget probe failed for ${repoPath}#${prNumber}; ` +
+        `treating cycle as NOT exhausted: ${err?.message || err}`,
+    );
+  }
+
   const reviewState = {
     verdict: String(reviewStateRow?.last_verdict || '').toLowerCase(),
     headSha: candidate?.headSha || currentRevisionRef || null,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || 'unknown').toLowerCase(),
     remediationPending: Boolean(reviewStateRow?.remediation_pending),
+    reviewCycleExhausted,
     blockingFindingCount: Number(dispatchJob?.blockingFindingCount ?? 0),
     blockingFindingState: String(dispatchJob?.blockingFindingState || 'unknown').trim().toLowerCase(),
     operatorApprovedEvidence: operatorApprovalEvent

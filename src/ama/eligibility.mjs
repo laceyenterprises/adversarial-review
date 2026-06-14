@@ -581,6 +581,42 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('fast-merge-state-unsupported');
   }
 
+  // AMA "final hammer" (operator directive 2026-06-14): once the review cycle is
+  // EXHAUSTED — the remediation round budget is fully spent and the verdict still
+  // hasn't converged — AMA must be the final authority that LANDS the PR rather
+  // than leaving it blocked forever in a perpetual review loop. At cycle-end we
+  // WAIVE the soft, convergence-dependent gates (verdict, remediation state,
+  // blocking findings, the structural branch-protection gate, and the risk-class
+  // gate for non-two-key classes). We NEVER waive the hard safety gates: the PR
+  // must still be open/non-draft/mergeable, the head must still match the
+  // reviewed head (AMA pins --match-head-commit so a moved head can't be closed),
+  // CI must still be green, hard-stop labels (incl. head-scoped
+  // adversarial-merge-blocked) still block, fast-merge state still blocks, AMA
+  // must be enabled, and high/critical/unknown risk still require the explicit
+  // two-key override. A PR that converges normally merges via the settled-success
+  // path above and never reaches this waiver.
+  const reviewCycleExhausted = reviewState?.reviewCycleExhausted === true;
+  const FINAL_HAMMER_WAIVABLE_REASONS = new Set([
+    'verdict-not-settled-success',
+    'remediation-pending',
+    'remediation-state-unknown',
+    'blocking-findings-present',
+    'blocking-findings-unknown',
+    'branch-protection-missing-gate',
+  ]);
+  const waivedByFinalHammer = [];
+  let effectiveReasons = reasons;
+  if (reviewCycleExhausted) {
+    effectiveReasons = [];
+    for (const reason of reasons) {
+      const waivable =
+        FINAL_HAMMER_WAIVABLE_REASONS.has(reason) ||
+        (reason === 'risk-class-not-permitted' && !riskClassRequiresTwoKey);
+      if (waivable) waivedByFinalHammer.push(reason);
+      else effectiveReasons.push(reason);
+    }
+  }
+
   const trace = {
     verdict: {
       normalized: verdictNormalized,
@@ -589,6 +625,10 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       remediationPending,
       remediationStateKnown,
       blockingFindings,
+    },
+    finalHammer: {
+      active: reviewCycleExhausted,
+      waived: waivedByFinalHammer,
     },
     riskClass: {
       resolved: riskClass,
@@ -617,8 +657,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   };
 
   return {
-    eligible: reasons.length === 0,
-    reasons,
+    eligible: effectiveReasons.length === 0,
+    reasons: effectiveReasons,
     trace,
   };
 }

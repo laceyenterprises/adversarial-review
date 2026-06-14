@@ -35,6 +35,40 @@ Audit/provenance strings must distinguish the two successful cases:
 the configured gate, while `branch_protection_requirement_waived` means the
 explicit no-branch-protection plan opt-out satisfied §4.2 #9.
 
+### §4.2a — AMA final hammer (review-cycle exhaustion)
+
+AMA is the **final merge authority at the end of the review cycle**, by operator
+directive (2026-06-14): a PR must not loop on `Request changes` forever. The
+review-cycle is **exhausted** once the PR has consumed its full remediation
+round budget — `completedRoundsForPR >= roundBudget` (the same budget
+`evaluateRoundBudgetForReview` resolves: the risk-class default, raised by any
+persisted higher `maxRounds`). The watcher computes this signal
+(`reviewState.reviewCycleExhausted`) at AMA dispatch time; any probe error
+fails safe by treating the cycle as NOT exhausted (normal strict gates apply).
+
+When the cycle is exhausted, the eligibility predicate **waives the soft,
+convergence-dependent gates** so AMA can land the PR:
+
+- `verdict-not-settled-success` (the verdict may still be `Request changes`)
+- `remediation-pending` / `remediation-state-unknown`
+- `blocking-findings-present` / `blocking-findings-unknown`
+- `branch-protection-missing-gate` (the structural gate this GitHub plan can't
+  provide — the historical reason AMA closed zero PRs)
+- `risk-class-not-permitted` **only for the non-two-key classes**
+
+Exhaustion **never waives the hard safety gates** — these still block AMA even at
+cycle-end: PR open / non-draft / **mergeable**; **head-match** to the reviewed
+head (AMA still pins `--match-head-commit <reviewedSha>` at merge); **CI green**;
+**hard-stop labels** (including head-scoped `adversarial-merge-blocked`);
+fast-merge state; AMA enabled; and the **two-key override for high / critical /
+unknown risk** (the auth/billing/security/prod cluster keeps its human gate).
+
+A PR that converges normally (settled-success `Comment only` / `Approved` with no
+standing blocking findings) merges via the ordinary path and never reaches this
+waiver — only a PR that burned its entire remediation budget without converging
+is force-landed. The §4.4 audit records `trace.finalHammer.{active,waived}` so
+every waiver is attributable.
+
 ## Kernel Contract Surface
 
 `src/kernel/contracts.d.ts` defines the target kernel contract surface for

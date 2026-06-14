@@ -45,6 +45,7 @@ import {
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
+import { refreshReviewerBrokerTokens } from '../src/reviewer-broker-refresh.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
@@ -361,6 +362,18 @@ async function main() {
   );
 
   while (!stopping) {
+    // Keep the broker-minted reviewer GitHub App tokens fresh BEFORE any step
+    // that touches GitHub. This long-lived daemon resolved GH_*_REVIEWER_TOKEN
+    // once at startup; App installation tokens expire ~1h, so without this the
+    // remediation reply-comment POSTs (and the tokens that spawned remediation
+    // workers inherit) start failing with HTTP 401 about an hour after each
+    // (re)start — the watcher got this fix in pollOnce, the follow-up daemon did
+    // not, so its comments silently stopped posting. TTL-gated + fail-safe (keeps
+    // the existing token on any broker error; never throws). Runs first so the
+    // same-tick `consume` (spawns workers that snapshot env) and `retry-comments`
+    // both see the refreshed token.
+    await runStep('reviewer-token-refresh', () => refreshReviewerBrokerTokens({ log: console }));
+    if (stopping) break;
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
     if (stopping) break;
     await runStep('heartbeat', () => {

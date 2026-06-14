@@ -319,3 +319,27 @@ test('maintenance failed-step retry cooldown can be tuned by env', async (t) => 
     nowMs + 1000,
   );
 });
+
+// Regression guard for the per-tick reviewer-token refresh wiring. The tick
+// loop lives in main() (not exported), so we assert at the source level that
+// the refresh runs as the FIRST tick step — ahead of `consume` (which spawns
+// remediation workers that snapshot process.env) and `retry-comments` (which
+// posts directly). Without it, the daemon's broker App token expires ~1h after
+// (re)start and remediation reply comments silently 401 (2026-06-14 incident).
+test('tick loop refreshes the reviewer broker token before any GitHub step', () => {
+  const src = readFileSync(
+    new URL('../scripts/adversarial-follow-up-daemon.mjs', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    src,
+    /import \{ refreshReviewerBrokerTokens \} from '\.\.\/src\/reviewer-broker-refresh\.mjs'/,
+    'daemon must import refreshReviewerBrokerTokens',
+  );
+  const refreshIdx = src.indexOf("runStep('reviewer-token-refresh'");
+  const consumeIdx = src.indexOf("runStep('consume'");
+  const retryIdx = src.indexOf("runStep('retry-comments'");
+  assert.ok(refreshIdx > 0, 'tick loop must run the reviewer-token-refresh step');
+  assert.ok(consumeIdx > refreshIdx, 'refresh must run before consume (worker spawn)');
+  assert.ok(retryIdx > refreshIdx, 'refresh must run before retry-comments (direct post)');
+});

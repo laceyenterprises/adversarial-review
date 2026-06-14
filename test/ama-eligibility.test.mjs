@@ -948,3 +948,105 @@ test('__testables__ settled-success verdict set matches SPEC §4.2 #1', () => {
     ['approved', 'comment-only'].sort(),
   );
 });
+
+// ---------------------------------------------------------------------------
+// AMA "final hammer" (operator directive 2026-06-14): at review-cycle exhaustion
+// AMA waives the soft convergence gates but keeps the hard safety gates.
+// ---------------------------------------------------------------------------
+
+test('final hammer: exhausted cycle waives a Request-changes verdict + blocking findings', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 3,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.finalHammer.active, true);
+  assert.ok(result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
+  assert.ok(result.trace.finalHammer.waived.includes('blocking-findings-present'));
+});
+
+test('final hammer: waives the structural branch-protection-missing-gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', reviewCycleExhausted: true },
+    // repo GitHub plan offers no branch protection at all
+    prMetadata: { branchProtection: { requiredContexts: [] } },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(result.trace.finalHammer.waived.includes('branch-protection-missing-gate'));
+});
+
+test('final hammer: does NOT fire before the cycle is exhausted', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 2,
+      reviewCycleExhausted: false,
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.finalHammer.active, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('final hammer: NEVER waives a non-mergeable PR (hard gate)', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', reviewCycleExhausted: true },
+    prMetadata: { mergeableState: 'CONFLICTING' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('pr-not-mergeable'));
+});
+
+test('final hammer: NEVER waives a red CI (hard gate)', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', reviewCycleExhausted: true },
+    prMetadata: {
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' },
+      ],
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('ci-not-green'));
+});
+
+test('final hammer: NEVER waives a head-scoped adversarial-merge-blocked hard stop', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', reviewCycleExhausted: true },
+    prMetadata: { labels: ['adversarial-merge-blocked'] },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    adversarialMergeBlockedEvidence: { applied: true, observedRevisionRef: prMetadata.headSha },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.some((r) => r.startsWith('label-')));
+});
+
+test('final hammer: still requires the two-key override for high/critical risk', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', riskClass: 'critical', reviewCycleExhausted: true },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+test('final hammer: waives risk-class for a non-two-key class (medium not in allowlist)', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', riskClass: 'medium', reviewCycleExhausted: true },
+    cfg: { eligibility: { riskClasses: ['low'] } }, // medium NOT permitted normally
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
+});

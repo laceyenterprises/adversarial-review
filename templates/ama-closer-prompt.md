@@ -81,8 +81,11 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --reviews /tmp/ama-reviews.json \
   --protection /tmp/ama-protection.json \
   --timeline /tmp/ama-timeline.json \
+  --repo <<REPO>> \
+  --root-dir <<ROOT_DIR>> \
   --reviewed-sha <<REVIEWED_SHA>> \
   --risk-class <<RISK_CLASS>> \
+  --review-cycle-exhausted <<REVIEW_CYCLE_EXHAUSTED>> \
   > /tmp/ama-verdict.json
 ```
 

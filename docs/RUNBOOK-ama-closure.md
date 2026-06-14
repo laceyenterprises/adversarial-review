@@ -349,8 +349,11 @@ reasons:
 Another watcher tick already dispatched a closer for this `(repo,
 prNumber, headSha)`. **Not an error.** The existing lease file at
 `data/ama-closer-leases/<repo>-pr-<n>-<head>.json` carries the original
-launch request id; check `hq dispatch status <lrqId>` if you want to
-know the closer's live state.
+launch request id after `hq dispatch` returns. While the owning watcher is
+still inside the `hq dispatch` launch window, the lease can remain
+`status: "pending"` with no `lrqId`; this is still live duplicate-dispatch
+protection and must not be hand-deleted. Once `lrqId` is present, check
+`hq dispatch status <lrqId>` if you want to know the closer's live state.
 
 A new head SHA always gets a fresh lease — the file is keyed by
 `headSha` so head-change naturally invalidates the old lease.

@@ -671,6 +671,11 @@ test('stale pending lease from pre-dispatch failure is repaired on the next tick
     prMetadata,
     cfg,
     dispatchContext,
+    processKillImpl: () => {
+      const err = new Error('missing process');
+      err.code = 'ESRCH';
+      throw err;
+    },
     execFileImpl: async () => ({
       stdout: '{"dispatchId":"dispatch-retry","launchRequestId":"lrq_retry"}',
       stderr: '',
@@ -708,17 +713,57 @@ function plantDispatchRecord(rootDir, identity, overrides) {
 test('isInterruptedInFlightAmaCloserDispatch identifies a watcher-killed mid-dispatch record', () => {
   // The exact frozen signature: dispatching, no launch id, no error.
   assert.equal(
-    isInterruptedInFlightAmaCloserDispatch({ state: 'dispatching', launchRequestId: null, dispatchId: null, lastError: null }),
+    isInterruptedInFlightAmaCloserDispatch(
+      { state: 'dispatching', launchRequestId: null, dispatchId: null, lastError: null },
+      {
+        status: 'pending',
+        acquiredAt: '2026-06-14T20:16:32Z',
+        watcherPid: 4542,
+      },
+      {
+        now: '2026-06-14T20:30:00Z',
+        processKillImpl: () => {
+          const err = new Error('missing process');
+          err.code = 'ESRCH';
+          throw err;
+        },
+      },
+    ),
     true,
+  );
+  // The same frozen dispatch record is NOT reclaimable while its pending lease
+  // still belongs to a live watcher inside the hq-dispatch launch window.
+  assert.equal(
+    isInterruptedInFlightAmaCloserDispatch(
+      { state: 'dispatching', launchRequestId: null, dispatchId: null, lastError: null },
+      {
+        status: 'pending',
+        acquiredAt: '2026-06-14T20:16:32Z',
+        watcherPid: 4542,
+      },
+      {
+        now: '2026-06-14T20:17:00Z',
+        processKillImpl: () => {},
+      },
+    ),
+    false,
   );
   // A dispatch that DID launch (lrq recorded) is not an interruption.
   assert.equal(
-    isInterruptedInFlightAmaCloserDispatch({ state: 'dispatching', launchRequestId: 'lrq_x', dispatchId: null, lastError: null }),
+    isInterruptedInFlightAmaCloserDispatch(
+      { state: 'dispatching', launchRequestId: 'lrq_x', dispatchId: null, lastError: null },
+      { status: 'pending', acquiredAt: '2026-06-14T20:16:32Z', watcherPid: 4542 },
+      { now: '2026-06-14T20:30:00Z' },
+    ),
     false,
   );
   // A genuine completed failure (lastError set) is bounded normally.
   assert.equal(
-    isInterruptedInFlightAmaCloserDispatch({ state: 'dispatch-failed', launchRequestId: null, dispatchId: null, lastError: 'boom' }),
+    isInterruptedInFlightAmaCloserDispatch(
+      { state: 'dispatch-failed', launchRequestId: null, dispatchId: null, lastError: 'boom' },
+      { status: 'pending', acquiredAt: '2026-06-14T20:16:32Z', watcherPid: 4542 },
+      { now: '2026-06-14T20:30:00Z' },
+    ),
     false,
   );
   assert.equal(isInterruptedInFlightAmaCloserDispatch({ state: 'dispatched', launchRequestId: 'lrq_y' }), false);
@@ -755,6 +800,11 @@ test('interrupted in-flight dispatch at the redispatch bound is reclaimed, not e
     prMetadata,
     cfg,
     dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-14T20:30:00Z' },
+    processKillImpl: () => {
+      const err = new Error('missing process');
+      err.code = 'ESRCH';
+      throw err;
+    },
     execFileImpl: async () => ({
       stdout: '{"dispatchId":"dispatch-reclaim","launchRequestId":"lrq_reclaim"}',
       stderr: '',
@@ -769,6 +819,58 @@ test('interrupted in-flight dispatch at the redispatch bound is reclaimed, not e
   const lease = readAmaCloserLease(rootDir, identity);
   assert.equal(lease.status, 'dispatched');
   assert.equal(lease.lrqId, 'lrq_reclaim');
+});
+
+test('recent live pending lease is preserved instead of stolen during hq dispatch launch window', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-live-pending-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatching',
+    retryCount: 2,
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: null,
+  });
+  acquireAmaCloserLease({
+    rootDir,
+    ...identity,
+    watcherPid: 4542,
+    now: '2026-06-14T20:16:32Z',
+  });
+
+  let execCalled = false;
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-14T20:17:00Z' },
+    processKillImpl: () => {},
+    execFileImpl: async () => {
+      execCalled = true;
+      return { stdout: '{"dispatchId":"dispatch-stolen","launchRequestId":"lrq_stolen"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'lease-held');
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(execCalled, false, 'must not launch a duplicate AMA closer while the pending lease is live');
+  const lease = readAmaCloserLease(rootDir, identity);
+  assert.equal(lease.status, 'pending');
+  assert.equal(lease.lrqId, null);
+  assert.equal(lease.watcherPid, 4542);
 });
 
 test('genuine repeated dispatch failures at the bound are still exhausted', async (t) => {

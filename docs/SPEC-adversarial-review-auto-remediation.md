@@ -111,6 +111,53 @@ token, the launcher must not silently fall back to `op read`. That fail-closed
 path must also sleep before exit using the same launchd respawn-storm guard as
 the other startup secret failures.
 
+### Runtime reviewer-token refresh (watcher poll loop)
+
+The launcher mints the reviewer tokens **once**, at startup. The watcher,
+however, is a single long-lived process and the broker issues **GitHub App
+installation tokens that expire ~1h after issuance** (and may be served from the
+broker's cache already partway through that life). A token resolved only at
+startup therefore goes `401` mid-run, failing the GitHub review POST and
+stalling the pipeline until the daemon is restarted. To close that gap the
+watcher **re-resolves each broker-enabled reviewer token on every `pollOnce`
+tick** (`src/reviewer-broker-refresh.mjs`), writing the fresh token back into
+`process.env[botTokenEnv]` so subsequently-spawned reviewers inherit it. The
+runtime refresh contract:
+
+- **Scheduling is expiry-driven, not a blind TTL.** The next refresh is keyed
+  off the broker response's `expires_at` minus a 15-minute skew; a fixed
+  fallback TTL applies only when `expires_at` is absent. The first sight of a
+  role always re-fetches (the startup token's expiry is unknown to the watcher).
+- **Reviewer handoff requires enough remaining lifetime.** A token with a
+  parseable `expires_at` is written into the reviewer environment only when its
+  remaining lifetime exceeds the configured reviewer timeout plus the runtime
+  post slack (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). Short-lived cached
+  broker responses are rejected and the prior token, if any, remains in place,
+  because each reviewer subprocess snapshots `process.env` at spawn and cannot
+  benefit from a later watcher refresh.
+- **Operator config rotations bypass the schedule.** The refresh clock records a
+  per-role fingerprint covering broker URL, provider, expected app ID, expected
+  installation ID, shared-secret file path, and the broker-mode flag. Any change
+  to that fingerprint forces an immediate broker call and metadata
+  re-verification even when the prior token's expiry-derived refresh time has
+  not arrived.
+- **Same verification as launcher minting.** The runtime path re-applies the
+  `scripts/lib/reviewer-broker.sh` checks: provider is compared unconditionally,
+  and `metadata.app_id` / `metadata.installation_id` must match the configured
+  expectations when set. A response failing any check is rejected.
+- **Bounded.** The broker fetch *and* body read run under a single abort timer
+  (`REVIEWER_TOKEN_FETCH_TIMEOUT_MS`, default 5s) so a wedged broker can never
+  hang the poll loop.
+- **Runtime is fail-OPEN, deliberately distinct from startup fail-CLOSED.** A
+  refresh failure (broker down, non-200, malformed/unverified response, timeout)
+  is logged and **leaves the existing token in place** — it never clears a
+  still-valid token and never throws into the tick. This is intentional: at
+  startup, no token yet exists so a broker failure must fail closed; at runtime,
+  a still-valid token is in hand, so a transient broker blip must not take the
+  pipeline down. The refresh retries on the next tick.
+- **Honors the per-role `*_AUTH_VIA_BROKER` flag** — a pure no-op when broker
+  mode is off, so non-broker deployments are unaffected.
+
 The airlock watcher may satisfy runtime-only alerting secrets from local files
 before using 1Password:
 

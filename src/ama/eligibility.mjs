@@ -530,7 +530,18 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const riskAllowed = riskClass !== '' && allowedRiskClasses.has(riskClass);
   const adversarialMergeRequestedOverride =
     hasAdversarialMergeRequestedOverride(prMetadata, adversarialMergeRequestedEvidence);
-  const riskClassRequiresTwoKey = ['high', 'critical', 'unknown', ''].includes(riskClass);
+  // By default `high`/`critical` (and always `unknown`/unclassified) require the
+  // two-key override. Operators who make AMA the single authority for EVERY risk
+  // class set `eligibility.high_risk_requires_two_key: false`; then `high`/
+  // `critical` close on risk_classes membership alone, exactly like low/medium.
+  // `unknown`/'' is NEVER waived (the risk could not be established → fail-closed).
+  const highRiskRequiresTwoKey = cfg?.eligibility?.highRiskRequiresTwoKey !== false;
+  const alwaysTwoKeyClass = ['unknown', ''].includes(riskClass);
+  const highOrCriticalClass = ['high', 'critical'].includes(riskClass);
+  const highRiskTwoKeyClass = highRiskRequiresTwoKey && highOrCriticalClass;
+  const riskClassRequiresTwoKey = alwaysTwoKeyClass || highRiskTwoKeyClass;
+  const riskClassFinalHammerWaivable =
+    !riskClassRequiresTwoKey && !(highOrCriticalClass && !riskAllowed);
   const riskPermitted = riskClassRequiresTwoKey
     ? adversarialMergeRequestedOverride && operatorOverride
     : riskAllowed;
@@ -586,15 +597,17 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   // hasn't converged — AMA must be the final authority that LANDS the PR rather
   // than leaving it blocked forever in a perpetual review loop. At cycle-end we
   // WAIVE the soft, convergence-dependent gates (verdict, remediation state,
-  // blocking findings, the structural branch-protection gate, and the risk-class
-  // gate for non-two-key classes). We NEVER waive the hard safety gates: the PR
+  // blocking findings, the structural branch-protection gate, and the low/medium
+  // risk-class allowlist gate). We NEVER waive the hard safety gates: the PR
   // must still be open/non-draft/mergeable, the head must still match the
   // reviewed head (AMA pins --match-head-commit so a moved head can't be closed),
   // CI must still be green, hard-stop labels (incl. head-scoped
   // adversarial-merge-blocked) still block, fast-merge state still blocks, AMA
-  // must be enabled, and high/critical/unknown risk still require the explicit
-  // two-key override. A PR that converges normally merges via the settled-success
-  // path above and never reaches this waiver.
+  // must be enabled, unknown risk still requires the explicit two-key override,
+  // and high/critical risk still requires either the configured single-key
+  // allowlist (`high_risk_requires_two_key=false` plus risk_classes membership)
+  // or the explicit two-key override. A PR that converges normally merges via
+  // the settled-success path above and never reaches this waiver.
   const reviewCycleExhausted = reviewState?.reviewCycleExhausted === true;
   const FINAL_HAMMER_WAIVABLE_REASONS = new Set([
     'verdict-not-settled-success',
@@ -611,7 +624,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     for (const reason of reasons) {
       const waivable =
         FINAL_HAMMER_WAIVABLE_REASONS.has(reason) ||
-        (reason === 'risk-class-not-permitted' && !riskClassRequiresTwoKey);
+        (reason === 'risk-class-not-permitted' && riskClassFinalHammerWaivable);
       if (waivable) waivedByFinalHammer.push(reason);
       else effectiveReasons.push(reason);
     }
@@ -634,6 +647,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       resolved: riskClass,
       allowed: riskAllowed,
       requiresTwoKey: riskClassRequiresTwoKey,
+      highRiskRequiresTwoKey,
+      finalHammerWaivable: riskClassFinalHammerWaivable,
       permitted: riskPermitted,
       adversarialMergeRequestedOverride,
       mergeRequestedOverride: adversarialMergeRequestedOverride,

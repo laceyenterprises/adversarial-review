@@ -2598,17 +2598,70 @@ test('AMA merge_authority risk_classes reject unsupported values in Node loader'
         adversarial:
           merge_authority:
             eligibility:
-              risk_classes: ["critical"]
+              risk_classes: ["extreme"]
     `);
     assert.throws(
       () => loadConfig({ topPath: top, env: {} }),
       (err) => {
         assert.ok(err instanceof AgentOSConfigError);
         assert.equal(err.key, 'roles.adversarial.merge_authority.eligibility.risk_classes[0]');
-        assert.equal(err.got, 'critical');
+        assert.equal(err.got, 'extreme');
         return true;
       },
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA merge_authority accepts all four risk classes + high_risk_requires_two_key in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            eligibility:
+              risk_classes: ["low", "medium", "high", "critical"]
+              high_risk_requires_two_key: false
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(
+      cfg.get('roles.adversarial.merge_authority.eligibility.risk_classes'),
+      ['low', 'medium', 'high', 'critical'],
+    );
+    assert.equal(
+      cfg.get('roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key'),
+      false,
+    );
+    // The camelCase AMA accessor surfaces both.
+    const ma = cfg.getMergeAuthorityConfig();
+    assert.deepEqual(ma.eligibility.riskClasses, ['low', 'medium', 'high', 'critical']);
+    assert.equal(ma.eligibility.highRiskRequiresTwoKey, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA merge_authority high_risk_requires_two_key defaults to true', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            enabled: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(
+      cfg.get('roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key'),
+      true,
+    );
+    assert.equal(cfg.getMergeAuthorityConfig().eligibility.highRiskRequiresTwoKey, true);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

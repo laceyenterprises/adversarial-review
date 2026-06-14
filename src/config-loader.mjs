@@ -109,7 +109,7 @@ const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
-const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium'];
+const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // LOADER-CONTRACT §2 permits each reader to ignore only root sections
@@ -660,6 +660,24 @@ function schemaV1() {
                         __type: TYPE_STRING,
                         __default: 'existingAdversarialMergeClassifier',
                         __enum: ['existingAdversarialMergeClassifier'],
+                      },
+                      // SPEC §4.2 #3 — by default `high`/`critical` risk PRs
+                      // require the explicit two-key override (a non-author
+                      // `adversarial-merge-requested` label AND an operator
+                      // override on the current head) before AMA may close them;
+                      // only `low`/`medium` close on plain risk_classes
+                      // membership. Operators who want AMA to be the single
+                      // authority for EVERY risk class set this false: then
+                      // `high`/`critical` close on risk_classes membership alone,
+                      // exactly like low/medium. `unknown`/unclassified risk is
+                      // NEVER waived by this knob — it always requires two-key,
+                      // because an unknown class means the risk could not be
+                      // established (fail-closed). Default true preserves the
+                      // current two-key behavior for every deployment that does
+                      // not opt in.
+                      high_risk_requires_two_key: {
+                        __type: TYPE_BOOL,
+                        __default: true,
                       },
                     },
                   },
@@ -2046,6 +2064,10 @@ export class AgentOSConfig {
         ciGreenClassifier: this.get(
           'roles.adversarial.merge_authority.eligibility.ci_green_classifier',
           'existingAdversarialMergeClassifier',
+        ),
+        highRiskRequiresTwoKey: this.get(
+          'roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key',
+          true,
         ),
       },
       branchProtection: {

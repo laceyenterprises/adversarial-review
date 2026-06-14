@@ -93,7 +93,17 @@ dispatcher debugging), see
          merge_method: squash    # or merge — never rebase (SPEC §4.4)
          eligibility:
            risk_classes: [low]   # widen later; start conservative
+           high_risk_requires_two_key: true  # default; set false only after allowlisting high/critical intentionally
    ```
+
+   `risk_classes` may include `low`, `medium`, `high`, and `critical`.
+   `unknown` / unclassified risk is never single-key eligible. With the
+   default `high_risk_requires_two_key: true`, high/critical still require the
+   two-key `adversarial-merge-requested` + `operator-approved` turn. When the
+   operator explicitly sets `high_risk_requires_two_key: false`, high/critical
+   become AMA single-key eligible only if the concrete class is also present in
+   `risk_classes`; final-hammer review-cycle exhaustion does not waive a
+   missing high/critical allowlist entry.
 
 2. Bounce the dispatch daemon per the standard procedure:
 
@@ -255,7 +265,7 @@ already accepts same-login evidence.
 | Label | Effect | Author self-application |
 |---|---|---|
 | `operator-approved` | Bypasses the verdict gate. A `Request changes` review with current-head `operator-approved` becomes eligible. The structural hard gates (CI, branch protection, no remediation pending, no hard-stop labels, mergeability) still apply. On single-operator hosts, same-login current-head evidence is accepted when the event is attributable and fresh. | **Accepted** at single-operator scale when the evidence is current-head, attributable, and fresh. |
-| `adversarial-merge-requested` | AMA-05. Bypasses the **risk-class gate only**. A `medium` or `high`-risk PR becomes eligible if all structural gates pass. Does not bypass verdict, CI, branch protection, or hard-stop labels. | **Rejected.** |
+| `adversarial-merge-requested` | AMA-05. Bypasses the **risk-class gate only**. Required for unknown risk, and for high/critical unless `high_risk_requires_two_key=false` plus matching `risk_classes` membership makes that class single-key eligible. Does not bypass verdict, CI, branch protection, or hard-stop labels. | **Rejected.** |
 | `adversarial-merge-blocked` | AMA-05. Blocks AMA closure unconditionally regardless of other eligibility. | **Accepted** (author may block their own PR). |
 | `merge-agent-requested` | Existing. On AMA-enabled hosts, dispatches merge-agent as the current-head operator-fallback lane WITH the AMA-06A admit-gate bypass (`AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`). It also serves as the documented `merge-agent-stuck` recovery signal when the current-head evidence is attributable and the label is still present. The live contract is single-operator: the scoped current-head label is the authority, not a distinct non-author actor check. | **Accepted** when the evidence is current-head, attributable, and fresh, including same-login evidence on single-operator hosts. |
 
@@ -314,7 +324,7 @@ reasons:
 | Reason | Meaning |
 |---|---|
 | `verdict-not-settled-success` | Latest review is `Request changes` (and no current-head `operator-approved`). |
-| `risk-class-not-permitted` | PR's risk class is outside `cfg.eligibility.risk_classes` (and no current-head `adversarial-merge-requested`). |
+| `risk-class-not-permitted` | PR's risk class is outside `cfg.eligibility.risk_classes` (and no current-head `adversarial-merge-requested`), or high/critical/unknown still require the two-key path. |
 | `ci-not-green` | At least one external CI check is FAILURE / pending. |
 | `branch-protection-missing-gate` | Target branch protection doesn't require the configured adversarial-gate context. Re-check §1 prerequisite. |
 | `branch_protection_requirement_waived` | Audit/provenance reason for the explicit `branch_protection.required=false` opt-out on a no-branch-protection GitHub plan. This is not a refusal reason. |

@@ -148,6 +148,33 @@ test('posted rows with stale reviewer_head_sha do not resolve settled-success', 
   assert.equal(res.reviewedHeadSha, 'head-a');
 });
 
+test('older-head follow-up jobs do not block a settled current-head review', () => {
+  let seenQuery = null;
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 12,
+    reviewRow: {
+      review_status: 'posted',
+      review_body: '## Verdict\n\nComment only',
+      reviewer_head_sha: 'head-new',
+    },
+    currentHeadSha: 'head-new',
+    latestJobFinder: (rootDir, query) => {
+      seenQuery = { rootDir, ...query };
+      return !query.revisionRef || query.revisionRef === 'head-old'
+        ? { status: 'pending', revisionRef: 'head-old', reviewBody: '## Verdict\n\nRequest changes' }
+        : null;
+    },
+  });
+  assert.equal(seenQuery.rootDir, '/root');
+  assert.equal(seenQuery.repo, 'acme/agent-os');
+  assert.equal(seenQuery.prNumber, 12);
+  assert.equal(seenQuery.revisionRef, 'head-new');
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.remediationPending, false);
+  assert.equal(res.reviewedHeadSha, 'head-new');
+});
+
 test('completed latest job with blank body does not fall back to stale settled row verdict', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',

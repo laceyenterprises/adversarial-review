@@ -162,7 +162,9 @@ function resolveSettledReviewVerdict(
     return { verdict: '', remediationPending: false, reviewedHeadSha };
   }
 
-  const latestJob = latestJobFinder(rootDir, { repo, prNumber });
+  const latestJobQuery = { repo, prNumber };
+  if (currentHeadSha) latestJobQuery.revisionRef = currentHeadSha;
+  const latestJob = latestJobFinder(rootDir, latestJobQuery);
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
   if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {
     return { verdict: '', remediationPending: true, reviewedHeadSha };

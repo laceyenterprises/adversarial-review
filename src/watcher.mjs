@@ -3943,17 +3943,6 @@ async function handlePostedReviewRow({
         `[watcher] orchestration_mode load failed for merge-agent dispatch; defaulting to native: ${cfgErr?.message || cfgErr}`,
       );
     }
-    let orchestrationMode = 'native';
-    try {
-      const loadedConfig = loadConfigCached();
-      if (typeof loadedConfig.getOrchestrationMode === 'function') {
-        orchestrationMode = loadedConfig.getOrchestrationMode() || 'native';
-      }
-    } catch (cfgErr) {
-      logger?.warn?.(
-        `[watcher] orchestration_mode load failed for reviewer-timeout merge-agent handoff; defaulting to native: ${cfgErr?.message || cfgErr}`,
-      );
-    }
     const { coexistence, dispatchEnv } = coexistenceDecision;
     // AMA-06N: when the operator-fallback lane is selected, override
     // the dispatch trigger to 'merge-agent-requested' so the critical-
@@ -4168,6 +4157,17 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         `OR 'merge-agent-requested' for the operator-fallback lane)`
       );
       return { handled: true, dispatchJob, amaClosureResult };
+    }
+    let orchestrationMode = 'native';
+    try {
+      const loadedConfig = loadConfigCached();
+      if (typeof loadedConfig.getOrchestrationMode === 'function') {
+        orchestrationMode = loadedConfig.getOrchestrationMode() || 'native';
+      }
+    } catch (cfgErr) {
+      logger?.warn?.(
+        `[watcher] orchestration_mode load failed for reviewer-timeout merge-agent handoff; defaulting to native: ${cfgErr?.message || cfgErr}`,
+      );
     }
     const { coexistence, dispatchEnv } = coexistenceDecision;
     // AMA-06N: timeout-exhaustion path also honors triggerOverride on

@@ -139,7 +139,7 @@ export async function load(url, context, nextLoad) {
     'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'timeout-head-164', labels: [] }; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:ama-dispatch-closer': "export async function maybeDispatchAmaCloser() { const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; return { dispatched: false, reason, ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
-    'fixture:config-loader': "export class AgentOSConfigError extends Error {} function buildConfig() { return { get() { return undefined; }, getMergeAuthorityConfig() { return { enabled: process.env.FIXTURE_AMA_ENABLED === '1' }; } }; } export function loadConfig() { return buildConfig(); } export function loadConfigCached() { return buildConfig(); } export function resetConfigCache() {}",
+    'fixture:config-loader': "export class AgentOSConfigError extends Error {} function buildConfig() { return { get() { return undefined; }, getMergeAuthorityConfig() { return { enabled: process.env.FIXTURE_AMA_ENABLED === '1' }; }, getOrchestrationMode() { return process.env.FIXTURE_ORCHESTRATION_MODE || 'native'; } }; } export function loadConfig() { return buildConfig(); } export function loadConfigCached() { return buildConfig(); } export function resetConfigCache() {}",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
@@ -240,6 +240,7 @@ test('watcher pollOnce routes reviewer-timeout exhaustion through merge-agent in
         env: {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
+          FIXTURE_ORCHESTRATION_MODE: 'agentos',
         },
       }
     );
@@ -259,6 +260,7 @@ test('watcher pollOnce routes reviewer-timeout exhaustion through merge-agent in
     assert.equal(summary.dispatches[0].reviewFailureClass, 'reviewer-timeout');
     assert.equal(summary.dispatches[0].reviewFailureExhausted, true);
     assert.equal(summary.dispatches[0].latestFollowUpReReviewRequested, true);
+    assert.equal(summary.dispatches[0].orchestrationMode, 'agentos');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

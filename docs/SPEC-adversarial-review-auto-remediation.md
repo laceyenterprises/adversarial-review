@@ -1120,6 +1120,36 @@ The `final-pass-on-budget-exhausted` trigger is **not** a label — it is select
 
 Repeated reviewer no-output timeouts are infrastructure failures, not substantive review rounds. They must not increment the remediation round counter or make the next reviewer pass "final" by themselves. After two timeout-class failures for the same PR head, the watcher may switch to the alternate reviewer model for the next retry only when an operator explicitly opts in (`ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL=claude|codex`; the default is `off`). Timeout exhaustion is scoped to the head SHA that the timed-out reviewer attempted; a new PR head must not inherit the previous head's timeout budget. If the timeout budget is exhausted after a remediation round completed with `reReview.requested=true`, the watcher must not strand the PR behind a green-ish timeout gate: it routes the head through the same AMA/merge-agent coexistence matrix used by the normal watcher handoff. With AMA disabled, the `reviewer-timeout-exhausted` merge-agent trigger runs unchanged. With AMA enabled, the watcher first tries the AMA closer; true AMA eligibility misses still park at await-operator unless a fresh scoped `merge-agent-requested` event authorizes the operator-fallback lane, but AMA launch/status failures recover by dispatching merge-agent with `AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true` so a transient AMA outage does not become a durable manual park. Because the downstream timeout path still has no fresh review of the post-remediation diff, it parks at `skip-blocking-findings-unknown` unless a scoped `operator-approved` override explicitly accepts the head; standing blockers still park at `skip-blockers-present`. A non-mergeable or checks-blocked PR records a durable skip under `data/follow-up-jobs/merge-agent-skips/` with the timeout trigger so operators see a concrete mergeability/check blocker instead of an ambiguous stalled review.
 
+### Merge-time DAG autowalk
+
+When the watcher observes an open PR transition to merged, it records owed
+`hq dag autowalk-on-merge --repo <repo> --pr <n>` work before it marks the
+SQLite lifecycle mirror merged. This is the AMA/DAG bridge for PRs merged by
+AMA or merge-agent through `gh pr merge`: the legacy `hq adjudicate merge`
+`dag_on_merge` hook did not run, and the broad periodic DAG sweep can miss the
+specific just-merged D5 step long enough to strand the run. The subcommand is
+self-gated by Agent OS (`HQ_AUTO_DAG_WALK`) and is a clean no-op for non-DAG
+PRs, so the watcher records the owed work for every observed merge rather than
+trying to pre-classify DAG membership.
+
+The owed-work record lives at
+`data/follow-up-jobs/dag-autowalk-on-merge/<repo>-pr-<n>.json`. The watcher
+removes it only after the hq command exits successfully. Nonzero exits,
+timeouts, missing `HQ_BIN`, SQLite locks, and other launch/runtime failures keep
+the record on disk with `attempts`, `lastAttemptAt`, `lastError.exitCode`,
+`lastError.signal`, and captured stdout/stderr. Later watcher ticks retry
+eligible records even though the PR row is already marked merged. Each
+`pollOnce` tick runs one global retry pass after lifecycle sync has enqueued any
+newly merged PRs; lifecycle sync itself does not run retries inside the per-PR
+loop. The retry path is paced and bounded per poll so a broken hq installation
+cannot monopolize the watcher:
+`ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_RETRY_MS` defaults to 5 minutes,
+`ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_PER_POLL` defaults to 2, and
+`ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS` defaults to 2 minutes. After
+`ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_MAX_ATTEMPTS` attempts (default 5), the
+record stays in `status: "failed"` with terminal diagnostics for operator
+repair instead of being silently discarded.
+
 ### Dispatch state
 
 Successful dispatches write a record under `data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`. Each record carries the dispatch timestamp, the trigger label (or null for the standard verdict path), the resolved priority selection, whether the host actually supported `--priority`, the resulting `dispatchId` and `launchRequestId` from the hq invocation, and the label-removal attempt result. The same record is also the durable watcher-side handoff ledger: when a terminal-failed dispatch clears `merge-agent-dispatched` without establishing recovery, the watcher stamps `phantomHandoffObservedAt` on the first tick that proves the gap and starts the 60-minute grace from that timestamp, not from the original dispatch creation time. That detection is proactive and keyed to the current PR head, not just the normal merge-agent revisit set, so a label-cleared orphan can still enter the grace/escalation state machine. If the grace expires with no recovery ownership, the watcher first persists pending phantom-handoff comment-delivery state on the dispatch record, then converges the `merge-agent-stuck` label and owed operator comment from that ledger. Later ticks replay whichever side effect is still missing, so a partial failure after the label transition cannot permanently lose the human-facing explanation. Pre-existing dispatches with the same `(repo, prNumber, headSha)` triple normally short-circuit a second dispatch via the `skip-already-dispatched` decision, and the consumed-label removal is retried best-effort each tick until the label is observed gone from the PR.

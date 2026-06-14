@@ -75,7 +75,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
   mkdirSync(fakeZdotdir, { recursive: true });
   writeFileSync(
     join(fakeRepo, 'src', 'watcher.mjs'),
-    'console.log(JSON.stringify({linearApiKey: process.env.LINEAR_API_KEY || "", alertTo: process.env.ALERT_TO || ""}));\n'
+    'console.log(JSON.stringify({linearApiKey: process.env.LINEAR_API_KEY || "", alertTo: process.env.ALERT_TO || "", githubToken: process.env.GITHUB_TOKEN || "", ghToken: process.env.GH_TOKEN || ""}));\n'
       + 'process.exit(0);\n',
     'utf8',
   );
@@ -98,7 +98,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
 	    '#!/bin/bash\n'
 	      + 'if [[ "$1" == "-e" ]]; then exit 0; fi\n'
 	      + 'if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then printf "op-token"; exit 0; fi\n'
-	      + 'if [[ "$1" == *"watcher.mjs" ]]; then printf "{\\"linearApiKey\\":\\"%s\\",\\"alertTo\\":\\"%s\\"}\\n" "${LINEAR_API_KEY:-}" "${ALERT_TO:-}"; exit 0; fi\n'
+	      + 'if [[ "$1" == *"watcher.mjs" ]]; then printf "{\\"linearApiKey\\":\\"%s\\",\\"alertTo\\":\\"%s\\",\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\"}\\n" "${LINEAR_API_KEY:-}" "${ALERT_TO:-}" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}"; exit 0; fi\n'
 	      + 'if [[ "$1" == *"adversarial-follow-up-daemon.mjs" ]]; then exit 0; fi\n'
 	      + 'exit 0\n',
 	  );
@@ -417,6 +417,19 @@ test('maintainer launchers resolve gh when only the signed /usr/local fallback e
     });
     assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
   }
+});
+
+test('placey watcher launcher defaults watcher GitHub auth to the broker token', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start-placey.sh', {
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.equal(payload.githubToken, 'broker-token');
+  assert.equal(payload.ghToken, 'broker-token');
+  assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
 });
 
 test('maintainer watcher launcher ignores whitespace local LINEAR_API_KEY and falls back to 1Password', {

@@ -182,16 +182,16 @@ function createWatcherOctokit({
   octokitFactory = defaultOctokitFactory,
   authProvider = null,
 } = {}) {
-  const octokit = octokitFactory({ auth });
+  const hasDynamicAuth = typeof authProvider === 'function';
+  const octokit = octokitFactory(hasDynamicAuth ? {} : { auth });
   // When an authProvider is supplied, refresh the Authorization header on EVERY
   // request from the live token. The watcher is a long-lived process and its
   // octokit is constructed ONCE at startup; a GitHub App installation token
-  // (broker-backed, ~1h life) snapshotted at construction would expire and 401
-  // mid-run. Reading process.env.GITHUB_TOKEN per request (kept fresh by
-  // refreshWatcherGithubToken) keeps the poll loop on a valid, rate-limit-
-  // isolated App token without recreating the client. Fail-open: if the provider
-  // yields nothing, leave the constructor auth in place.
-  if (typeof authProvider === 'function' && octokit?.hook?.before) {
+  // (broker-backed, ~1h life) snapshotted at construction would expire and can
+  // also be re-applied by Octokit's auth plugin after before-hooks. Dynamic mode
+  // therefore constructs an unauthenticated client and injects the live token in
+  // the request hook.
+  if (hasDynamicAuth && octokit?.hook?.before) {
     octokit.hook.before('request', (options) => {
       let token;
       try {

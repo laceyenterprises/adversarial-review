@@ -51,6 +51,13 @@ fi
 if ! . "$OP_RATE_LIMIT_HELPER"; then
   fail_op_helper_load "OPH-01 helper failed to load from $OP_RATE_LIMIT_HELPER; refusing to start without the shared cooldown primitive."
 fi
+REVIEWER_BROKER_HELPER="$REPO_RENDER_REPO_ROOT/scripts/lib/reviewer-broker.sh"
+if [ ! -r "$REVIEWER_BROKER_HELPER" ]; then
+  fail_op_helper_load "reviewer-broker helper missing at $REVIEWER_BROKER_HELPER; refusing to start without the broker primitive."
+fi
+if ! . "$REVIEWER_BROKER_HELPER"; then
+  fail_op_helper_load "reviewer-broker helper failed to load from $REVIEWER_BROKER_HELPER; refusing to start without the broker primitive."
+fi
 
 # 1. Native module gate.
 NATIVE_CHECK_ERR="$REPO_RENDER_LOG_ROOT/adversarial-watcher-native-check.err"
@@ -158,11 +165,19 @@ resolve_alert_to_optional() {
 }
 
 # 3. GitHub token.
-if [ -z "${GITHUB_TOKEN:-}" ]; then
-  if command -v gh >/dev/null 2>&1; then
-    GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
-    export GITHUB_TOKEN
-  fi
+: "${WATCHER_GH_AUTH_VIA_BROKER:=true}"
+export WATCHER_GH_AUTH_VIA_BROKER
+WATCHER_GH_BROKER_ROLE="${WATCHER_GH_BROKER_ROLE:-merge-agent}"
+export WATCHER_GH_BROKER_ROLE
+if [ "${WATCHER_GH_AUTH_VIA_BROKER}" = "true" ] \
+  && resolve_reviewer_token_via_broker GITHUB_TOKEN "${WATCHER_GH_BROKER_ROLE}"; then
+  export GH_TOKEN="$GITHUB_TOKEN"
+  echo "[adversarial-watcher] GITHUB_TOKEN resolved via OAuth broker (role=${WATCHER_GH_BROKER_ROLE} App installation token; isolated rate-limit budget)" >&2
+elif command -v gh >/dev/null 2>&1; then
+  GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+  export GITHUB_TOKEN
+  export GH_TOKEN="$GITHUB_TOKEN"
+  echo "[adversarial-watcher] GITHUB_TOKEN from gh keychain PAT (broker role ${WATCHER_GH_BROKER_ROLE} disabled/unavailable; shares operator 5000/hr, rate-limit-prone under surge)" >&2
 fi
 if [ -z "${GITHUB_TOKEN:-}" ]; then
   echo "[adversarial-watcher] ERROR: GITHUB_TOKEN not set and gh auth token returned nothing" >&2

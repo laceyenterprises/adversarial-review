@@ -55,6 +55,7 @@ async function runRenderedWatcherWrapper({
   opValue = 'alerts@example.com',
   ghMode = 'ok',
   helperMode = 'healthy',
+  watcherBrokerMode = 'fail',
 } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'portable-installer-wrapper-'));
   const fakeBin = path.join(root, 'bin');
@@ -63,6 +64,7 @@ async function runRenderedWatcherWrapper({
   const fakeLogs = path.join(root, 'logs');
   const fakeTmp = path.join(root, 'tmp');
   const fakeSharedHelper = path.join(fakeRepo, 'scripts', 'lib', 'op-resolve-with-rate-limit-backoff.sh');
+  const fakeReviewerBrokerHelper = path.join(fakeRepo, 'scripts', 'lib', 'reviewer-broker.sh');
   const sleepLog = path.join(fakeTmp, 'sleep.log');
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(path.join(fakeRepo, 'src'), { recursive: true });
@@ -176,6 +178,19 @@ async function runRenderedWatcherWrapper({
         + '}\n',
     );
   }
+  mkdirSync(path.dirname(fakeReviewerBrokerHelper), { recursive: true });
+  writeExecutable(
+    fakeReviewerBrokerHelper,
+    '#!/bin/bash\n'
+      + 'resolve_reviewer_token_via_broker() {\n'
+      + '  if [[ "${TEST_WATCHER_BROKER_MODE:-fail}" != "healthy" ]]; then\n'
+      + '    echo "[reviewer-broker] broker fetch failed" >&2\n'
+      + '    return 1\n'
+      + '  fi\n'
+      + '  export "$1=broker-token"\n'
+      + '  return 0\n'
+      + '}\n',
+  );
 
   const env = {
     ...process.env,
@@ -191,6 +206,7 @@ async function runRenderedWatcherWrapper({
     TEST_OP_MODE: opMode,
     TEST_OP_VALUE: opValue,
     TEST_GH_MODE: ghMode,
+    TEST_WATCHER_BROKER_MODE: watcherBrokerMode,
   };
 
   try {
@@ -341,6 +357,9 @@ test('the four shipped templates render with sample bindings and leave no placeh
       assert.match(rendered, /resolve_op_bin/);
       assert.match(rendered, /op_resolve_with_rate_limit_backoff/);
       assert.match(rendered, /if ! \. "\$OP_RATE_LIMIT_HELPER"; then/);
+      assert.match(rendered, /REVIEWER_BROKER_HELPER="\$REPO_RENDER_REPO_ROOT\/scripts\/lib\/reviewer-broker\.sh"/);
+      assert.match(rendered, /resolve_reviewer_token_via_broker GITHUB_TOKEN "\$\{WATCHER_GH_BROKER_ROLE\}"/);
+      assert.match(rendered, /WATCHER_GH_AUTH_VIA_BROKER:=true/);
       assert.doesNotMatch(rendered, /\(\s*\. "\$OP_RATE_LIMIT_HELPER"\s*\)/);
       assert.match(rendered, /refusing to start without the shared cooldown primitive/);
       assert.match(rendered, /\/usr\/local\/bin\/op/);
@@ -456,6 +475,17 @@ test('rendered watcher wrapper allows blank ALERT_TO values from 1Password with 
   });
   assert.equal(result.code, 0);
   assert.match(result.stderr, /WARN: ALERT_TO is unset by explicit operator override/);
+});
+
+test('rendered watcher wrapper defaults watcher GitHub auth to the broker token', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: 'direct-alert@example.com',
+    ghMode: 'fail',
+    watcherBrokerMode: 'healthy',
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
+  assert.doesNotMatch(result.stderr, /GITHUB_TOKEN not set and gh auth token returned nothing/);
 });
 
 test('rendered watcher wrapper fails closed when the shared helper fails to load', async () => {

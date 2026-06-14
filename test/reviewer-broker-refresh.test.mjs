@@ -3,13 +3,17 @@ import { strict as assert } from 'node:assert';
 
 import {
   refreshReviewerBrokerTokens,
+  refreshWatcherGithubToken,
   resolveReviewerAppToken,
+  resolveWatcherGhBrokerRole,
   _resetReviewerTokenRefreshClockForTest,
   REVIEWER_TOKEN_REFRESH_SKEW_MS,
   REVIEWER_TOKEN_FALLBACK_TTL_MS,
   REVIEWER_TOKEN_POST_SLACK_MS,
   REVIEWER_TOKEN_FAILURE_RETRY_MS,
   BROKER_REVIEWER_ROLES,
+  WATCHER_GH_TOKEN_ENV_VARS,
+  DEFAULT_WATCHER_GH_BROKER_ROLE,
 } from '../src/reviewer-broker-refresh.mjs';
 
 const SECRET_FILE = '/secret/oauth-broker-shared-secret';
@@ -688,4 +692,99 @@ test('an invalid env knob falls back to the built-in default (does not disable t
 test('role table covers the three reviewer families', () => {
   const roles = BROKER_REVIEWER_ROLES.map((r) => r.role).sort();
   assert.deepEqual(roles, ['claude-reviewer', 'codex-reviewer', 'gemini-reviewer']);
+});
+
+// ── Watcher's OWN GitHub token (rate-limit isolation) ────────────────────────
+
+function makeWatcherEnv(overrides = {}) {
+  return {
+    WATCHER_GH_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_URL: 'http://127.0.0.1:4099',
+    OAUTH_BROKER_SHARED_SECRET_FILE: SECRET_FILE,
+    GITHUB_TOKEN: 'ghp_OLD_operator_pat',
+    GH_TOKEN: 'ghp_OLD_operator_pat',
+    ...overrides,
+  };
+}
+
+test('refreshWatcherGithubToken: sets GITHUB_TOKEN + GH_TOKEN from the broker App token (default role)', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeWatcherEnv();
+  let calledUrl = null;
+  const fetchImpl = async (url) => {
+    calledUrl = url;
+    return brokerOk(`github-app-${DEFAULT_WATCHER_GH_BROKER_ROLE}`, 'ghs_APP_token', {
+      expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+    });
+  };
+  const summary = await refreshWatcherGithubToken({
+    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
+  });
+  assert.equal(summary.refreshed, true);
+  assert.equal(summary.role, DEFAULT_WATCHER_GH_BROKER_ROLE);
+  // BOTH env vars flip to the App token (octokit reads GITHUB_TOKEN, gh CLI GH_TOKEN).
+  for (const envVar of WATCHER_GH_TOKEN_ENV_VARS) {
+    assert.equal(env[envVar], 'ghs_APP_token', `${envVar} should be the App token`);
+  }
+  assert.match(calledUrl, new RegExp(`/token\\?provider=github-app-${DEFAULT_WATCHER_GH_BROKER_ROLE}$`));
+});
+
+test('refreshWatcherGithubToken: honors WATCHER_GH_BROKER_ROLE override', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeWatcherEnv({ WATCHER_GH_BROKER_ROLE: 'adversarial-watcher' });
+  assert.equal(resolveWatcherGhBrokerRole(env), 'adversarial-watcher');
+  let calledUrl = null;
+  const fetchImpl = async (url) => {
+    calledUrl = url;
+    return brokerOk('github-app-adversarial-watcher', 'ghs_DEDICATED', {
+      expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+    });
+  };
+  const summary = await refreshWatcherGithubToken({
+    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
+  });
+  assert.equal(summary.refreshed, true);
+  assert.equal(env.GITHUB_TOKEN, 'ghs_DEDICATED');
+  assert.match(calledUrl, /provider=github-app-adversarial-watcher$/);
+});
+
+test('refreshWatcherGithubToken: no-op (skipped) when the flag is not true — keeps the PAT', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeWatcherEnv({ WATCHER_GH_AUTH_VIA_BROKER: '' });
+  let fetched = false;
+  const summary = await refreshWatcherGithubToken({
+    env, now: 1_000_000, fetchImpl: async () => { fetched = true; return brokerOk('x', 'y'); },
+    readFileImpl: readSecret, log: silentLog,
+  });
+  assert.equal(summary.skipped, 'broker-mode-disabled');
+  assert.equal(fetched, false, 'must not touch the broker when disabled');
+  assert.equal(env.GITHUB_TOKEN, 'ghp_OLD_operator_pat', 'PAT left intact');
+});
+
+test('refreshWatcherGithubToken: FAIL-SAFE — broker error keeps the existing token', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeWatcherEnv({ GITHUB_TOKEN: 'ghs_STILL_VALID', GH_TOKEN: 'ghs_STILL_VALID' });
+  const fetchImpl = async () => { throw new Error('broker unreachable'); };
+  const summary = await refreshWatcherGithubToken({
+    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
+  });
+  assert.equal(summary.refreshed, false);
+  assert.ok(summary.failed && /broker unreachable/.test(summary.failed));
+  // The whole point: a broker blip NEVER blanks a working token.
+  assert.equal(env.GITHUB_TOKEN, 'ghs_STILL_VALID');
+  assert.equal(env.GH_TOKEN, 'ghs_STILL_VALID');
+});
+
+test('refreshWatcherGithubToken: rejects a token minted for the WRONG provider (no silent accept)', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeWatcherEnv({ GITHUB_TOKEN: 'ghs_KEEP', GH_TOKEN: 'ghs_KEEP' });
+  // Broker returns 200 but for a different App — must be rejected, token kept.
+  const fetchImpl = async () => brokerOk('github-app-claude-reviewer', 'ghs_WRONG_APP', {
+    expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+  });
+  const summary = await refreshWatcherGithubToken({
+    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
+  });
+  assert.equal(summary.refreshed, false);
+  assert.equal(env.GITHUB_TOKEN, 'ghs_KEEP');
 });

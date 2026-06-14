@@ -180,8 +180,32 @@ async function fetchConditionalRestPage({
 function createWatcherOctokit({
   auth = process.env.GITHUB_TOKEN,
   octokitFactory = defaultOctokitFactory,
+  authProvider = null,
 } = {}) {
-  return octokitFactory({ auth });
+  const octokit = octokitFactory({ auth });
+  // When an authProvider is supplied, refresh the Authorization header on EVERY
+  // request from the live token. The watcher is a long-lived process and its
+  // octokit is constructed ONCE at startup; a GitHub App installation token
+  // (broker-backed, ~1h life) snapshotted at construction would expire and 401
+  // mid-run. Reading process.env.GITHUB_TOKEN per request (kept fresh by
+  // refreshWatcherGithubToken) keeps the poll loop on a valid, rate-limit-
+  // isolated App token without recreating the client. Fail-open: if the provider
+  // yields nothing, leave the constructor auth in place.
+  if (typeof authProvider === 'function' && octokit?.hook?.before) {
+    octokit.hook.before('request', (options) => {
+      let token;
+      try {
+        token = authProvider();
+      } catch {
+        token = null;
+      }
+      if (token) {
+        options.headers = options.headers || {};
+        options.headers.authorization = `token ${token}`;
+      }
+    });
+  }
+  return octokit;
 }
 
 export {

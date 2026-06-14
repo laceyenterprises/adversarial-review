@@ -149,7 +149,7 @@ import {
 } from './conditional-request.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
-import { refreshReviewerBrokerTokens } from './reviewer-broker-refresh.mjs';
+import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
 import { fetchPullRequestHeadAndState, fetchPullRequestRollup } from './github-api.mjs';
 import {
   appendFenceAuditEvent,
@@ -4403,6 +4403,11 @@ async function pollOnce(
   // only re-fetches a token older than the TTL and never clears a still-valid
   // token if the broker is briefly unreachable. Never throws.
   await refreshReviewerBrokerTokens({ log: console });
+  // Same TTL-gated, fail-safe refresh for the watcher's OWN GitHub token
+  // (GITHUB_TOKEN/GH_TOKEN) so the poll-loop octokit + AMA-eligibility `gh` calls
+  // stay on a rate-limit-isolated App token instead of exhausting the operator
+  // PAT's shared 5000/hr budget under PR surge. No-op unless WATCHER_GH_AUTH_VIA_BROKER=true.
+  await refreshWatcherGithubToken({ log: console });
   const healthTick = healthProbe?.beginTick?.();
   try {
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
@@ -5542,7 +5547,13 @@ async function main() {
     throw err;
   }
 
-  const octokit = createWatcherOctokit({ auth: process.env.GITHUB_TOKEN });
+  const octokit = createWatcherOctokit({
+    auth: process.env.GITHUB_TOKEN,
+    // Read the live token per request so the long-lived poll octokit picks up
+    // each broker refresh (App installation tokens expire ~1h) instead of
+    // 401-ing on a stale snapshot. See refreshWatcherGithubToken.
+    authProvider: () => process.env.GITHUB_TOKEN,
+  });
   const intervalMs = config.pollIntervalMs ?? 300_000;
   const configuredDeadlineMs = config.pollDeadlineMs;
 

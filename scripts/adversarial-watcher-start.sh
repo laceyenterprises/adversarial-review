@@ -121,10 +121,31 @@ resolve_gh_bin() {
 # 1Password sleep guards added in #139 (op-read failures); the gh path
 # was missed in that pass and produces an identical respawn-storm shape.
 GH_BIN="$(resolve_gh_bin || true)"
-if [[ -n "$GH_BIN" ]]; then
+# Prefer a broker-backed GitHub App installation token for the watcher's OWN
+# GitHub calls (poll-loop octokit + AMA-eligibility `gh` calls). The App token
+# has its own ~15000/hr budget, isolated from the operator PAT — the prior
+# `gh auth token` path shared clio-airlock's single 5000/hr REST budget, which
+# exhausts under PR surge ("API rate limit already exceeded") and stalls review.
+# Default-ON via the flag; FAIL-SAFE: fall back to the gh keychain PAT if the
+# broker is disabled/unavailable, so the watcher always starts. Per-tick refresh
+# (refreshWatcherGithubToken) keeps both GITHUB_TOKEN and GH_TOKEN fresh.
+: "${WATCHER_GH_AUTH_VIA_BROKER:=true}"
+export WATCHER_GH_AUTH_VIA_BROKER
+WATCHER_GH_BROKER_ROLE="${WATCHER_GH_BROKER_ROLE:-merge-agent}"
+export WATCHER_GH_BROKER_ROLE
+export GITHUB_TOKEN=""
+# Gate ONLY on our own flag (not a per-reviewer-role flag) and call the broker
+# resolver directly; resolve_reviewer_token_via_broker validates the provider +
+# secret itself and returns non-zero on any problem, so the fail-safe `elif`
+# below falls back to the gh keychain PAT.
+if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]] \
+  && resolve_reviewer_token_via_broker GITHUB_TOKEN "${WATCHER_GH_BROKER_ROLE}"; then
+  export GH_TOKEN="$GITHUB_TOKEN"
+  echo "[adversarial-watcher] GITHUB_TOKEN resolved via OAuth broker (role=${WATCHER_GH_BROKER_ROLE} App installation token; isolated rate-limit budget)" >&2
+elif [[ -n "$GH_BIN" ]]; then
   export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
-else
-  export GITHUB_TOKEN=""
+  export GH_TOKEN="$GITHUB_TOKEN"
+  echo "[adversarial-watcher] GITHUB_TOKEN from gh keychain PAT (broker role ${WATCHER_GH_BROKER_ROLE} disabled/unavailable — shares operator 5000/hr, rate-limit-prone under surge)" >&2
 fi
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN from gh keychain via ${GH_BIN:-gh}" >&2

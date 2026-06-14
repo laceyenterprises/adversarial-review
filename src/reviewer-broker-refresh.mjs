@@ -417,3 +417,109 @@ export async function refreshReviewerBrokerTokens({
   }
   return summary;
 }
+
+// ── Watcher's OWN GitHub token ───────────────────────────────────────────────
+//
+// The watcher's poll-loop octokit AND its AMA-eligibility `gh` CLI calls
+// historically authenticated as the operator PAT (`gh auth token` →
+// clio-airlock), a single shared 5000/hr REST budget. Under a PR surge that
+// exhausts, the poll loop logs `API rate limit already exceeded` and PRs sit
+// unreviewed. A GitHub App installation token has its own ~15000/hr budget,
+// isolated from the operator PAT — so route the watcher's token through the same
+// broker the reviewers use, refreshed per-tick. FAIL-SAFE: a broker blip leaves
+// the existing token (PAT or still-valid App token) untouched.
+//
+// Both env vars are set: GITHUB_TOKEN (the poll octokit) and GH_TOKEN (the `gh`
+// CLI, which prefers GH_TOKEN). The role is operator-tunable; default reuses the
+// existing merge-agent App. A dedicated `github-app-adversarial-watcher` App is
+// the cleaner long-term (operator out-of-band: create App + install + broker
+// PEM + provider) — point WATCHER_GH_BROKER_ROLE at it once provisioned.
+export const WATCHER_GH_TOKEN_ENV_VARS = Object.freeze(['GITHUB_TOKEN', 'GH_TOKEN']);
+export const WATCHER_GH_AUTH_FLAG = 'WATCHER_GH_AUTH_VIA_BROKER';
+export const DEFAULT_WATCHER_GH_BROKER_ROLE = 'merge-agent';
+
+export function resolveWatcherGhBrokerRole(env = process.env) {
+  const raw = String(env.WATCHER_GH_BROKER_ROLE || '').trim();
+  return raw || DEFAULT_WATCHER_GH_BROKER_ROLE;
+}
+
+export async function refreshWatcherGithubToken({
+  env = process.env,
+  now = Date.now(),
+  fetchImpl = globalThis.fetch,
+  readFileImpl = readFileSync,
+  log = console,
+  skewMs = REVIEWER_TOKEN_REFRESH_SKEW_MS,
+  fallbackTtlMs = REVIEWER_TOKEN_FALLBACK_TTL_MS,
+  timeoutMs = null,
+  force = false,
+} = {}) {
+  const summary = { refreshed: false, skipped: null, failed: null, role: null };
+  // Default-OFF at the flag layer so enabling is an explicit, auditable switch;
+  // the start script sets the flag true with a PAT fallback, so the live watcher
+  // gets the fix while a disabled/rolled-back deployment keeps the prior behavior.
+  if (String(env[WATCHER_GH_AUTH_FLAG] || '').trim() !== 'true') {
+    summary.skipped = 'broker-mode-disabled';
+    return summary;
+  }
+  const role = resolveWatcherGhBrokerRole(env);
+  summary.role = role;
+  // Distinct clock key namespace so the watcher token's schedule never collides
+  // with a reviewer role that happens to share the same App role string.
+  const clockKey = `__watcher_gh__:${role}`;
+  const configFingerprint = brokerConfigFingerprint(
+    brokerConfigForRole({ role, env, flag: WATCHER_GH_AUTH_FLAG })
+  );
+  const scheduled = refreshClock.get(clockKey);
+  if (
+    !force
+    && scheduled !== undefined
+    && scheduled.configFingerprint === configFingerprint
+    && now < scheduled.nextRefreshAtMs
+  ) {
+    summary.skipped = 'token-still-valid';
+    return summary;
+  }
+  const effectiveTimeoutMs =
+    timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
+  try {
+    const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
+      role,
+      env,
+      fetchImpl,
+      readFileImpl,
+      timeoutMs: effectiveTimeoutMs,
+    });
+    // No subprocess-handoff floor here: unlike reviewer tokens (inherited by a
+    // spawned subprocess that must survive its whole run), the watcher consumes
+    // its own token directly and re-checks every tick, so a short token is fine.
+    for (const envVar of WATCHER_GH_TOKEN_ENV_VARS) {
+      env[envVar] = token;
+    }
+    const byExpiry = expiresAtMs != null ? expiresAtMs - skewMs : null;
+    const next = byExpiry != null ? Math.max(byExpiry, now + 1) : now + fallbackTtlMs;
+    refreshClock.set(clockKey, {
+      nextRefreshAtMs: next,
+      configFingerprint,
+      expiresAtMs: expiresAtMs ?? null,
+    });
+    summary.refreshed = true;
+    log?.log?.(
+      `[reviewer-broker-refresh] watcher GITHUB_TOKEN/GH_TOKEN refreshed via broker (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
+    );
+  } catch (err) {
+    // FAIL-SAFE: keep whatever token env already holds (the PAT, or a still-valid
+    // App token). Short backoff so a wedged broker doesn't hammer every tick.
+    summary.failed = err?.message || String(err);
+    const retryAt = now + resolvePositiveMsEnv(env.REVIEWER_TOKEN_FAILURE_RETRY_MS, REVIEWER_TOKEN_FAILURE_RETRY_MS);
+    refreshClock.set(clockKey, {
+      nextRefreshAtMs: retryAt,
+      configFingerprint,
+      expiresAtMs: scheduled?.expiresAtMs ?? null,
+    });
+    log?.warn?.(
+      `[reviewer-broker-refresh] keeping existing watcher GITHUB_TOKEN; broker fetch for role ${role} failed: ${summary.failed}`
+    );
+  }
+  return summary;
+}

@@ -109,6 +109,7 @@ const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
+const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
@@ -619,6 +620,11 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              orchestration_mode: {
+                __type: TYPE_STRING,
+                __default: 'native',
+                __enum: ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE,
+              },
               merge_authority: {
                 __type: TYPE_DICT,
                 __strict: true,
@@ -1091,6 +1097,10 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+    aliases: [],
+  },
+  'roles.adversarial.orchestration_mode': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE',
     aliases: [],
   },
   ...buildRoleFallbackEnvAliases(),
@@ -2081,6 +2091,10 @@ export class AgentOSConfig {
         ),
       },
     };
+  }
+
+  getOrchestrationMode() {
+    return this.get('roles.adversarial.orchestration_mode');
   }
 }
 

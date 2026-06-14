@@ -227,6 +227,25 @@ remediation-worker subprocess handoff. The runtime refresh contract:
 - **Honors the per-role `*_AUTH_VIA_BROKER` flag** — a pure no-op when broker
   mode is off, so non-broker deployments are unaffected.
 
+### Reviewer Review-Post Auth Retry
+
+`src/reviewer-broker-refresh.mjs` also exposes `resolveReviewerAppToken(identity,
+opts)` for the reviewer post path. The post path may call it only after a
+genuine GitHub authentication failure while submitting `gh pr review --comment`:
+HTTP 401/unauthorized, bad credentials, authentication-required messages, or a
+pre-write self-probe 401 paired with token/credential/OAuth-specific post
+errors. When that happens, the reviewer refreshes the matching GitHub App
+installation token, writes it back to `process.env[botTokenEnv]`, and retries
+the review post at most once.
+
+The retry must not fire for generic transport or server errors such as
+`ECONNRESET`, timeouts, secondary-rate-limit messages, or 502/503/504 responses.
+`gh pr review --comment` submits a non-idempotent review mutation; if the first
+write committed server-side and the client failed while reading the response, a
+transport retry would duplicate the submitted review. Transport resilience
+requires a separate idempotency check that can prove a self-authored submitted
+review already exists at the reviewed head before any no-refresh retry is added.
+
 The airlock watcher may satisfy runtime-only alerting secrets from local files
 before using 1Password:
 

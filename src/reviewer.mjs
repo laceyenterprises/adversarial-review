@@ -1091,18 +1091,21 @@ function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
   const detail = buildGhErrorDetail(err);
   if (
     /\b401\b/.test(detail)
-    || detail.includes('unauthorized')
-    || detail.includes('bad credentials')
-    || detail.includes('authentication failed')
-    || detail.includes('authentication required')
+    || /\bunauthorized\b/.test(detail)
+    || /\bbad credentials?\b/.test(detail)
+    || /\bauthentication (?:failed|required)\b/.test(detail)
+    || /\brequires authentication\b/.test(detail)
+    || /\bnot logged in\b/.test(detail)
+    || /\blogin required\b/.test(detail)
   ) {
     return true;
   }
   return preWriteSaw401 && (
-    detail.includes('oauth')
-    || detail.includes('login')
-    || detail.includes('credential')
-    || detail.includes('auth')
+    /\boauth\b/.test(detail)
+    || /\bcredentials?\b/.test(detail)
+    || /\b(?:access|bearer|installation|github app)\s+token\b/.test(detail)
+    || /\bgh auth\b/.test(detail)
+    || /\bkeychain\b/.test(detail)
   );
 }
 
@@ -1233,8 +1236,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             }
           );
         } catch (err) {
-          const authRetryable = isRetryableGhTransportError(err, {
-            allowAuthRefresh: true,
+          const authRetryable = isReviewerPostAuthFailure(err, {
             preWriteSaw401: preWriteLog.tracker.saw401,
           });
           if (!refreshedAfterAuthFailure && authRetryable) {

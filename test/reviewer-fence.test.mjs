@@ -29,14 +29,14 @@ import {
   waitForActiveReviewerFencesOnSigterm,
 } from '../src/watcher.mjs';
 
-const { postGitHubReview } = reviewerTest;
+const { isReviewerPostAuthFailure, postGitHubReview } = reviewerTest;
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 function makeRootDir(prefix) {
   return mkdtempSync(path.join(tmpdir(), prefix));
 }
 
-function withEnv(overrides, fn) {
+async function withEnv(overrides, fn) {
   const previous = {};
   for (const [key, value] of Object.entries(overrides)) {
     previous[key] = process.env[key];
@@ -44,7 +44,7 @@ function withEnv(overrides, fn) {
     else process.env[key] = value;
   }
   try {
-    return fn();
+    return await fn();
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -127,6 +127,25 @@ test('reviewer-side fence is deleted after failed gh review post without draft h
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('reviewer post auth classifier avoids broad author/auth substring matches', () => {
+  assert.equal(
+    isReviewerPostAuthFailure(new Error('GraphQL: author cannot review this pull request'), {
+      preWriteSaw401: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isReviewerPostAuthFailure(new Error('gh: authentication required')),
+    true,
+  );
+  assert.equal(
+    isReviewerPostAuthFailure(new Error('credential expired during gh auth probe'), {
+      preWriteSaw401: true,
+    }),
+    true,
+  );
 });
 
 test('postGitHubReview refreshes the reviewer App token once after a 401 and retries the post once', async () => {
@@ -279,6 +298,55 @@ test('postGitHubReview does not refresh or retry on non-401 post failures', asyn
           },
         ),
         /body is invalid/,
+      );
+    });
+    assert.equal(ghCalls, 1);
+    assert.equal(brokerCalls, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('postGitHubReview does not refresh or retry on transient review-post transport errors', async () => {
+  const rootDir = makeRootDir('reviewer-post-transient-no-retry-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    let brokerCalls = 0;
+    let ghCalls = 0;
+    await withEnv({
+      GH_CLAUDE_REVIEWER_TOKEN: 'ghs_stale_token',
+      CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
+      ADVERSARIAL_REVIEW_STATE_DIR: stateDir,
+    }, async () => {
+      await assert.rejects(
+        () => postGitHubReview(
+          'laceyenterprises/adversarial-review',
+          177,
+          'body',
+          'GH_CLAUDE_REVIEWER_TOKEN',
+          async () => {
+            ghCalls += 1;
+            const err = new Error('socket hang up after review mutation');
+            err.code = 'ECONNRESET';
+            err.stderr = 'read ECONNRESET';
+            throw err;
+          },
+          {
+            rootDir,
+            reviewerIdentity: 'claude-reviewer-lacey',
+            prepareReviewWrite: async ({ log }) => {
+              log.warn?.('[reviewer-pre-write] self-login probe returned HTTP 401');
+              return { cleared: 0, listed: 0 };
+            },
+            fetchImpl: async () => {
+              brokerCalls += 1;
+              throw new Error('should not be called');
+            },
+            readFileImpl: () => 'broker-shared-secret',
+          },
+        ),
+        /socket hang up/,
       );
     });
     assert.equal(ghCalls, 1);

@@ -71,6 +71,36 @@ const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
 ]);
 
 /**
+ * Detect a dispatch record frozen mid-`hq dispatch` by an external SIGTERM.
+ *
+ * The canonical case is a main-catchup deploy bounce of the watcher landing in
+ * the ~90s window of the closer's `hq dispatch` execFile (the watcher's launchd
+ * `kickstart -k` SIGTERMs the whole process group). The record is written
+ * `state: 'dispatching'` immediately BEFORE the launch and is only advanced to
+ * `dispatched` (on success, with an lrq/dispatchId) or `dispatch-failed` (on a
+ * thrown error, with `lastError`) AFTER the call returns or throws. A kill in
+ * between leaves it at `dispatching` with no launchRequestId, no dispatchId, and
+ * no lastError — distinguishable from a genuine completed attempt.
+ *
+ * An interruption is NOT a completed attempt: it must not consume the redispatch
+ * bound. Otherwise a couple of routine deploy bounces during closer dispatch
+ * wedge the PR forever — the closer never launches and the merge-agent fallback
+ * is refused (observed 2026-06-14: 10 eligible PRs stuck at retryCount=2,
+ * zero autonomous merges for hours). The closer is idempotent under
+ * `gh pr merge --match-head-commit`, so a duplicate launch — if the killed
+ * dispatch did leak an LRQ before dying — is a no-op second merge.
+ */
+export function isInterruptedInFlightAmaCloserDispatch(record) {
+  return Boolean(
+    record
+    && record.state === 'dispatching'
+    && !record.launchRequestId
+    && !record.dispatchId
+    && !record.lastError,
+  );
+}
+
+/**
  * @typedef {Object} DispatchResult
  * @property {boolean}  dispatched
  * @property {string=}  reason       — populated when `dispatched=false`.
@@ -95,7 +125,7 @@ function sanitizeDispatchPathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
 }
 
-function amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha } = {}) {
+export function amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha } = {}) {
   const safeRepo = sanitizeDispatchPathSegment(String(repo ?? '').replace(/\//g, '__'));
   const safeSha = sanitizeDispatchPathSegment(String(headSha || 'no-sha'));
   return join(
@@ -595,7 +625,15 @@ export async function maybeDispatchAmaCloser({
     if (!AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return { dispatched: false, reason: `dispatch-status-${status || 'unknown'}` };
     }
-  } else if (existingRecord && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND) {
+  } else if (
+    existingRecord
+    && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
+    && !isInterruptedInFlightAmaCloserDispatch(existingRecord)
+  ) {
+    // Genuine completed failures are bounded; an interrupted in-flight dispatch
+    // (watcher SIGTERM'd mid-launch, e.g. a deploy bounce) is reclaimed below
+    // — it never completed an attempt, so it must not exhaust the bound. The
+    // stale `pending` lease it left behind is reacquired at the lease step.
     return { dispatched: false, reason: 'dispatch-retry-exhausted' };
   }
 
@@ -649,7 +687,13 @@ export async function maybeDispatchAmaCloser({
     writeFileSync(promptPath, prompt, { encoding: 'utf8' });
   }
 
-  const priorRetryCount = Number(existingRecord?.retryCount || 0);
+  // An interrupted in-flight dispatch already bumped retryCount before it was
+  // killed without completing an attempt. Roll that phantom increment back so
+  // the redispatch bound reflects only genuine completed failures and does not
+  // inflate across repeated deploy-bounce interruptions.
+  const priorRetryCount = isInterruptedInFlightAmaCloserDispatch(existingRecord)
+    ? Math.max(0, Number(existingRecord?.retryCount || 1) - 1)
+    : Number(existingRecord?.retryCount || 0);
   writeAmaCloserDispatchRecord(rootDir, dispatchIdentity, {
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,

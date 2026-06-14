@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  amaCloserDispatchFilePath,
   composeCloserPrompt,
+  isInterruptedInFlightAmaCloserDispatch,
   maybeDispatchAmaCloser,
   substituteTemplate,
 } from '../src/ama/dispatch-closer.mjs';
@@ -683,6 +685,132 @@ test('stale pending lease from pre-dispatch failure is repaired on the next tick
   });
   assert.equal(repairedLease.status, 'dispatched');
   assert.equal(repairedLease.lrqId, 'lrq_retry');
+});
+
+// ---------------------------------------------------------------------------
+// Regression — interrupted in-flight dispatch (watcher SIGTERM'd mid-launch,
+// e.g. a main-catchup deploy bounce) must be reclaimed, not miscounted as
+// exhausted genuine failures. Reproduces the 2026-06-14 wedge: 10 eligible PRs
+// stuck at retryCount=2 with `state:'dispatching', lrqId:null, lastError:null`,
+// zero autonomous merges for hours.
+// ---------------------------------------------------------------------------
+
+function plantDispatchRecord(rootDir, identity, overrides) {
+  const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+  mkdirSync(dirname(recordPath), { recursive: true });
+  writeFileSync(
+    recordPath,
+    `${JSON.stringify({ schemaVersion: 1, ...identity, workerClass: 'codex', ...overrides }, null, 2)}\n`,
+  );
+  return recordPath;
+}
+
+test('isInterruptedInFlightAmaCloserDispatch identifies a watcher-killed mid-dispatch record', () => {
+  // The exact frozen signature: dispatching, no launch id, no error.
+  assert.equal(
+    isInterruptedInFlightAmaCloserDispatch({ state: 'dispatching', launchRequestId: null, dispatchId: null, lastError: null }),
+    true,
+  );
+  // A dispatch that DID launch (lrq recorded) is not an interruption.
+  assert.equal(
+    isInterruptedInFlightAmaCloserDispatch({ state: 'dispatching', launchRequestId: 'lrq_x', dispatchId: null, lastError: null }),
+    false,
+  );
+  // A genuine completed failure (lastError set) is bounded normally.
+  assert.equal(
+    isInterruptedInFlightAmaCloserDispatch({ state: 'dispatch-failed', launchRequestId: null, dispatchId: null, lastError: 'boom' }),
+    false,
+  );
+  assert.equal(isInterruptedInFlightAmaCloserDispatch({ state: 'dispatched', launchRequestId: 'lrq_y' }), false);
+  assert.equal(isInterruptedInFlightAmaCloserDispatch(null), false);
+});
+
+test('interrupted in-flight dispatch at the redispatch bound is reclaimed, not exhausted', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-interrupted-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+
+  // Two deploy-bounce interruptions left retryCount == REDISPATCH_BOUND (2),
+  // frozen mid-launch, plus a stale pending lease from the dead watcher.
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatching',
+    retryCount: 2,
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: null,
+  });
+  acquireAmaCloserLease({ rootDir, ...identity, watcherPid: 4542, now: '2026-06-14T20:16:32Z' });
+
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-14T20:30:00Z' },
+    execFileImpl: async () => ({
+      stdout: '{"dispatchId":"dispatch-reclaim","launchRequestId":"lrq_reclaim"}',
+      stderr: '',
+    }),
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  // The whole point: the bound must NOT fire on an interrupted attempt.
+  assert.equal(result.dispatched, true, 'interrupted dispatch must redispatch, not exhaust');
+  assert.notEqual(result.reason, 'dispatch-retry-exhausted');
+  assert.equal(result.launchRequestId, 'lrq_reclaim');
+  const lease = readAmaCloserLease(rootDir, identity);
+  assert.equal(lease.status, 'dispatched');
+  assert.equal(lease.lrqId, 'lrq_reclaim');
+});
+
+test('genuine repeated dispatch failures at the bound are still exhausted', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-genuine-exhausted-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+
+  // Completed failures (lastError set, state='dispatch-failed') stay bounded —
+  // the exemption is narrowly the interrupted-in-flight signature only.
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatch-failed',
+    retryCount: 2,
+    dispatchedAt: null,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: 'hq dispatch failed (exit code 65)',
+  });
+
+  let execCalled = false;
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-14T20:30:00Z' },
+    execFileImpl: async () => {
+      execCalled = true;
+      return { stdout: '{"dispatchId":"d","launchRequestId":"l"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'dispatch-retry-exhausted');
+  assert.equal(execCalled, false, 'must not redispatch a genuinely-exhausted closer');
 });
 
 test('terminal AMA audit releases a stale lease so the same head can be retried', async (t) => {

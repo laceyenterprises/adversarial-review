@@ -2094,7 +2094,7 @@ export class AgentOSConfig {
   }
 
   getOrchestrationMode() {
-    return this.get('roles.adversarial.orchestration_mode', 'native');
+    return this.get('roles.adversarial.orchestration_mode');
   }
 }
 

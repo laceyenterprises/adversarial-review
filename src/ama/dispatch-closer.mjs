@@ -58,6 +58,12 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
+const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
+const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
+const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
+  AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
+)
+  + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
@@ -69,6 +75,72 @@ const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'deferred',
   'superseded',
 ]);
+
+/**
+ * Detect a dispatch record frozen mid-`hq dispatch` by an external SIGTERM.
+ *
+ * The canonical case is a main-catchup deploy bounce of the watcher landing in
+ * the ~90s window of the closer's `hq dispatch` execFile (the watcher's launchd
+ * `kickstart -k` SIGTERMs the whole process group). The record is written
+ * `state: 'dispatching'` immediately BEFORE the launch and is only advanced to
+ * `dispatched` (on success, with an lrq/dispatchId) or `dispatch-failed` (on a
+ * thrown error, with `lastError`) AFTER the call returns or throws. A kill in
+ * between leaves it at `dispatching` with no launchRequestId, no dispatchId, and
+ * no lastError, plus a `pending` lease that is provably no longer live —
+ * distinguishable from a genuine completed attempt and from a healthy watcher
+ * still blocked inside the launch.
+ *
+ * An interruption is NOT a completed attempt: it must not consume the redispatch
+ * bound. Otherwise a couple of routine deploy bounces during closer dispatch
+ * wedge the PR forever — the closer never launches and the merge-agent fallback
+ * is refused (observed 2026-06-14: 10 eligible PRs stuck at retryCount=2,
+ * zero autonomous merges for hours).
+ */
+export function isInterruptedInFlightAmaCloserDispatch(record, lease = null, options = {}) {
+  return hasInterruptedInFlightAmaCloserDispatchShape(record)
+    && isReclaimablePendingAmaCloserLease(lease, options);
+}
+
+function hasInterruptedInFlightAmaCloserDispatchShape(record) {
+  return Boolean(
+    record
+      && record.state === 'dispatching'
+      && !record.launchRequestId
+      && !record.dispatchId
+      && !record.lastError,
+  );
+}
+
+function parseTimeMs(value) {
+  const ms = Date.parse(String(value || ''));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function isPidAlive(pid, processKillImpl = process.kill) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return null;
+  try {
+    processKillImpl(numericPid, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') return false;
+    if (err?.code === 'EPERM') return true;
+    return true;
+  }
+}
+
+function isReclaimablePendingAmaCloserLease(lease, { now = null, processKillImpl = process.kill } = {}) {
+  if (lease?.status !== AMA_CLOSER_LEASE_STATUS.PENDING) return false;
+
+  const pidAlive = isPidAlive(lease.watcherPid, processKillImpl);
+  if (pidAlive === false) return true;
+
+  const acquiredAtMs = parseTimeMs(lease.acquiredAt);
+  const nowMs = parseTimeMs(now || new Date().toISOString());
+  return acquiredAtMs !== null
+    && nowMs !== null
+    && nowMs - acquiredAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+}
 
 /**
  * @typedef {Object} DispatchResult
@@ -95,7 +167,7 @@ function sanitizeDispatchPathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
 }
 
-function amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha } = {}) {
+export function amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha } = {}) {
   const safeRepo = sanitizeDispatchPathSegment(String(repo ?? '').replace(/\//g, '__'));
   const safeSha = sanitizeDispatchPathSegment(String(headSha || 'no-sha'));
   return join(
@@ -441,6 +513,7 @@ export function composeCloserPrompt({
  * @param {string=} args.dispatchContext.templatePath
  * @param {string=} args.dispatchContext.dispatchedAt  ISO 8601 UTC (caller-provided to keep the function deterministic for tests)
  * @param {Object=} args.execFileImpl    — DI for tests
+ * @param {Object=} args.processKillImpl  — DI for tests
  * @param {Object=} args.readTemplateImpl — DI for tests
  * @param {Object=} args.writeFileImpl   — DI for tests
  * @returns {Promise<DispatchResult>}
@@ -452,6 +525,7 @@ export async function maybeDispatchAmaCloser({
   options,
   dispatchContext,
   execFileImpl = execFileAsync,
+  processKillImpl = process.kill,
   readTemplateImpl = null,
   writeFileImpl = null,
 }) {
@@ -531,7 +605,16 @@ export async function maybeDispatchAmaCloser({
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
+  const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, leaseIdentity);
   const auditTerminalOutcome = readAmaAuditTerminalOutcome(hqRoot, dispatchIdentity);
+  const existingRecordIsReclaimableInterruption = isInterruptedInFlightAmaCloserDispatch(
+    existingRecord,
+    existingLeaseBeforeDispatch,
+    { now: dispatchContext.dispatchedAt, processKillImpl },
+  );
+  const existingRecordHasLivePendingInterruption = hasInterruptedInFlightAmaCloserDispatchShape(existingRecord)
+    && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
+    && !existingRecordIsReclaimableInterruption;
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     const statusProbe = await probeAmaCloserDispatchStatus({
@@ -595,7 +678,22 @@ export async function maybeDispatchAmaCloser({
     if (!AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return { dispatched: false, reason: `dispatch-status-${status || 'unknown'}` };
     }
-  } else if (existingRecord && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND) {
+  } else if (existingRecordHasLivePendingInterruption) {
+    return {
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'lease-held',
+      existingLease: existingLeaseBeforeDispatch,
+    };
+  } else if (
+    existingRecord
+    && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
+    && !existingRecordIsReclaimableInterruption
+  ) {
+    // Genuine completed failures are bounded; an interrupted in-flight dispatch
+    // (watcher SIGTERM'd mid-launch, e.g. a deploy bounce) is reclaimed below
+    // only after the stale `pending` lease it left behind proves the owner died
+    // or outlived the full hq dispatch retry loop.
     return { dispatched: false, reason: 'dispatch-retry-exhausted' };
   }
 
@@ -649,7 +747,13 @@ export async function maybeDispatchAmaCloser({
     writeFileSync(promptPath, prompt, { encoding: 'utf8' });
   }
 
-  const priorRetryCount = Number(existingRecord?.retryCount || 0);
+  // An interrupted in-flight dispatch already bumped retryCount before it was
+  // killed without completing an attempt. Roll that phantom increment back so
+  // the redispatch bound reflects only genuine completed failures and does not
+  // inflate across repeated deploy-bounce interruptions.
+  const priorRetryCount = existingRecordIsReclaimableInterruption
+    ? Math.max(0, Number(existingRecord?.retryCount || 1) - 1)
+    : Number(existingRecord?.retryCount || 0);
   writeAmaCloserDispatchRecord(rootDir, dispatchIdentity, {
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,
@@ -692,7 +796,13 @@ export async function maybeDispatchAmaCloser({
       });
     } else if (
       AMA_CLOSER_RETRYABLE_STATUSES.has(existingDispatchStatus || '')
-      || (existingLease?.status === AMA_CLOSER_LEASE_STATUS.PENDING && !existingRecord?.launchRequestId)
+      || (
+        !existingRecord?.launchRequestId
+        && isReclaimablePendingAmaCloserLease(existingLease, {
+          now: dispatchContext.dispatchedAt,
+          processKillImpl,
+        })
+      )
     ) {
       deleteAmaCloserLease(rootDir, leaseIdentity);
       leaseResult = acquireAmaCloserLease({

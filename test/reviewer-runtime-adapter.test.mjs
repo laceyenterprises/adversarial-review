@@ -128,6 +128,73 @@ test('loads reviewer runtime by name from domain config with cli-direct default'
   }
 });
 
+test('resolveReviewerRuntimeName forces agent-os-hq only in agentos mode', () => {
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'cli-direct' },
+      { orchestrationMode: 'agentos' },
+    ),
+    'agent-os-hq',
+  );
+  assert.equal(
+    resolveReviewerRuntimeName({}, { orchestrationMode: 'native' }),
+    'cli-direct',
+  );
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'acpx' },
+      { orchestrationMode: 'native' },
+    ),
+    'acpx',
+  );
+});
+
+test('createReviewerRuntimeAdapterForDomain applies orchestration override without mutating domain JSON', () => {
+  const rootDir = makeRoot();
+  const domainPath = join(rootDir, 'domains', 'code-pr.json');
+  const domainBody = JSON.stringify({
+    id: 'code-pr',
+    reviewerRuntime: 'cli-direct',
+  }, null, 2);
+  writeFileSync(domainPath, `${domainBody}\n`);
+  try {
+    const agentOsAdapter = createReviewerRuntimeAdapterForDomain({
+      rootDir,
+      domainId: 'code-pr',
+      orchestrationMode: 'agentos',
+      env: { HQ_ROOT: rootDir, USER: process.env.USER || 'test-user' },
+      hqBin: '/bin/hq',
+    });
+    assert.equal(agentOsAdapter.describe().id, 'agent-os-hq');
+
+    const nativeAdapter = createReviewerRuntimeAdapterForDomain({
+      rootDir,
+      domainId: 'code-pr',
+      orchestrationMode: 'native',
+    });
+    assert.equal(nativeAdapter.describe().id, 'cli-direct');
+    assert.equal(readFileSync(domainPath, 'utf8'), `${domainBody}\n`);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('createReviewerRuntimeAdapterForDomain preserves explicit native non-default reviewerRuntime', () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createReviewerRuntimeAdapterForDomain({
+      rootDir,
+      domainId: 'code-pr',
+      domainConfig: { id: 'code-pr', reviewerRuntime: 'acpx' },
+      orchestrationMode: 'native',
+      env: { CODEX_HOME: rootDir },
+    });
+    assert.equal(adapter.describe().id, 'acpx');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq dispatches via hq with artifact completion and stripped fallback env', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');

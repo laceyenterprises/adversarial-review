@@ -205,11 +205,26 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 // Fail fast during watcher bootstrap; a bad gate-context override should not
 // leave reviews running while commit-status publication silently stops later.
 resolveGateStatusContext(process.env);
-const reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
+let reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
   rootDir: ROOT,
   domainId: 'code-pr',
   logger: console,
 });
+
+function refreshReviewerRuntimeAdapter({
+  rootDir = ROOT,
+  logger = console,
+  loadConfigImpl = loadConfigCached,
+} = {}) {
+  const orchestrationMode = loadConfigImpl().getOrchestrationMode();
+  reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
+    rootDir,
+    domainId: 'code-pr',
+    logger,
+    orchestrationMode,
+  });
+  return reviewerRuntimeAdapter;
+}
 
 // ── DB setup ────────────────────────────────────────────────────────────────
 
@@ -4560,6 +4575,7 @@ async function pollOnce(
   // see the same cached config); operator env rotations between ticks
   // propagate after this reset, not at next file-mtime change.
   resetRoleConfigCache();
+  refreshReviewerRuntimeAdapter();
   // Keep the reviewer-bot GitHub App installation tokens fresh. The watcher is
   // a single long-lived process that resolved these once at startup; App
   // installation tokens expire ~1h, so without a periodic refresh the GitHub

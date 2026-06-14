@@ -512,6 +512,37 @@ test('versioned config.local.yaml tolerates allowlisted foreign worker_pool sect
   }
 });
 
+test('unversioned config.local.yaml tolerates allowlisted foreign worker_pool section', () => {
+  const tmp = freshTmp();
+  const originalWarn = console.warn;
+  try {
+    const warnings = [];
+    console.warn = (msg) => warnings.push(String(msg));
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      roots:
+        hq: /from-local
+      worker_pool:
+        anything: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('worker_pool.anything'), null);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /worker_pool/);
+    assert.match(warnings[0], /config\.local\.yaml/);
+  } finally {
+    console.warn = originalWarn;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('config.local.yaml tolerates a NESTED unknown key under an owned root (no watcher crash)', () => {
   // Mirror of agent-os#1743: a nested unknown key under a root THIS reader owns
   // (here retention.policies.standard_backup, a strict nested dict) must be

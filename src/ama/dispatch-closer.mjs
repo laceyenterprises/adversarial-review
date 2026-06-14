@@ -59,7 +59,10 @@ const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
-const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS
+const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
+const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
+  AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
+)
   + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 const AMA_CLOSER_REDISPATCH_BOUND = 2;
@@ -609,6 +612,9 @@ export async function maybeDispatchAmaCloser({
     existingLeaseBeforeDispatch,
     { now: dispatchContext.dispatchedAt, processKillImpl },
   );
+  const existingRecordHasLivePendingInterruption = hasInterruptedInFlightAmaCloserDispatchShape(existingRecord)
+    && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
+    && !existingRecordIsReclaimableInterruption;
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     const statusProbe = await probeAmaCloserDispatchStatus({
@@ -672,26 +678,22 @@ export async function maybeDispatchAmaCloser({
     if (!AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return { dispatched: false, reason: `dispatch-status-${status || 'unknown'}` };
     }
+  } else if (existingRecordHasLivePendingInterruption) {
+    return {
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'lease-held',
+      existingLease: existingLeaseBeforeDispatch,
+    };
   } else if (
     existingRecord
     && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
     && !existingRecordIsReclaimableInterruption
   ) {
-    if (
-      hasInterruptedInFlightAmaCloserDispatchShape(existingRecord)
-      && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
-    ) {
-      return {
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: 'lease-held',
-        existingLease: existingLeaseBeforeDispatch,
-      };
-    }
     // Genuine completed failures are bounded; an interrupted in-flight dispatch
     // (watcher SIGTERM'd mid-launch, e.g. a deploy bounce) is reclaimed below
     // only after the stale `pending` lease it left behind proves the owner died
-    // or outlived the hq launch window.
+    // or outlived the full hq dispatch retry loop.
     return { dispatched: false, reason: 'dispatch-retry-exhausted' };
   }
 

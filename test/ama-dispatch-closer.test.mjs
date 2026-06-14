@@ -748,6 +748,23 @@ test('isInterruptedInFlightAmaCloserDispatch identifies a watcher-killed mid-dis
     ),
     false,
   );
+  // The live owner may still be inside the retry loop after the first 90s
+  // execFile timeout plus both retry sleeps; do not reclaim at the old 96s mark.
+  assert.equal(
+    isInterruptedInFlightAmaCloserDispatch(
+      { state: 'dispatching', launchRequestId: null, dispatchId: null, lastError: null },
+      {
+        status: 'pending',
+        acquiredAt: '2026-06-14T20:16:32Z',
+        watcherPid: 4542,
+      },
+      {
+        now: '2026-06-14T20:18:08Z',
+        processKillImpl: () => {},
+      },
+    ),
+    false,
+  );
   // A dispatch that DID launch (lrq recorded) is not an interruption.
   assert.equal(
     isInterruptedInFlightAmaCloserDispatch(
@@ -821,7 +838,7 @@ test('interrupted in-flight dispatch at the redispatch bound is reclaimed, not e
   assert.equal(lease.lrqId, 'lrq_reclaim');
 });
 
-test('recent live pending lease is preserved instead of stolen during hq dispatch launch window', async (t) => {
+test('live pending lease below redispatch bound does not consume a phantom retry', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-live-pending-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -834,9 +851,9 @@ test('recent live pending lease is preserved instead of stolen during hq dispatc
     headSha: dispatchContext.reviewedSha,
   };
 
-  plantDispatchRecord(rootDir, identity, {
+  const recordPath = plantDispatchRecord(rootDir, identity, {
     state: 'dispatching',
-    retryCount: 2,
+    retryCount: 1,
     dispatchedAt: null,
     dispatchId: null,
     launchRequestId: null,
@@ -867,6 +884,10 @@ test('recent live pending lease is preserved instead of stolen during hq dispatc
   assert.equal(result.reason, 'lease-held');
   assert.equal(result.skipMergeAgent, true);
   assert.equal(execCalled, false, 'must not launch a duplicate AMA closer while the pending lease is live');
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.equal(record.retryCount, 1, 'must not consume retry budget for a launch it did not attempt');
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.lastAttemptedAt || null, null);
   const lease = readAmaCloserLease(rootDir, identity);
   assert.equal(lease.status, 'pending');
   assert.equal(lease.lrqId, null);

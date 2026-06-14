@@ -3338,7 +3338,14 @@ async function maybeDispatchAmaClosureFor({
     reviewRow: reviewStateRow,
     currentHeadSha: candidate?.headSha || currentRevisionRef || null,
   });
-  const reviewAuthorityHead = settledReview.reviewedHeadSha || candidate?.headSha || currentRevisionRef || null;
+  // Proven reviewed head ONLY — do NOT fall back to the current PR head. AMA's
+  // eligibility compares reviewState.headSha (reviewed head) against
+  // prMetadata.headSha (current head); synthesizing the reviewed head from the
+  // current head would always match and silently defeat the stale-review-head
+  // guard, letting AMA close a commit never proven to be the reviewed one. Null
+  // when unprovable -> AMA fails `stale-review-head` unless a current-head
+  // operator override is present.
+  const reviewAuthorityHead = settledReview.reviewedHeadSha || null;
   const reviewState = {
     verdict: settledReview.verdict,
     headSha: reviewAuthorityHead,

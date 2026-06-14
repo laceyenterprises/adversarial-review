@@ -129,6 +129,165 @@ test('reviewer-side fence is deleted after failed gh review post without draft h
   }
 });
 
+test('postGitHubReview refreshes the reviewer App token once after a 401 and retries the post once', async () => {
+  const rootDir = makeRootDir('reviewer-post-refresh-retry-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const prepareTokens = [];
+    const ghTokens = [];
+    let brokerCalls = 0;
+    let ghCalls = 0;
+    await withEnv({
+      GH_CLAUDE_REVIEWER_TOKEN: 'ghs_stale_token',
+      CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
+      ADVERSARIAL_REVIEW_STATE_DIR: stateDir,
+    }, async () => {
+      await postGitHubReview(
+        'laceyenterprises/adversarial-review',
+        177,
+        'body',
+        'GH_CLAUDE_REVIEWER_TOKEN',
+        async (_command, _args, options) => {
+          ghCalls += 1;
+          ghTokens.push(options.env.GH_TOKEN);
+          if (ghCalls === 1) {
+            const err = new Error('gh review failed');
+            err.stderr = 'HTTP 401 Unauthorized';
+            throw err;
+          }
+          return { stdout: '', stderr: '' };
+        },
+        {
+          rootDir,
+          reviewerIdentity: 'claude-reviewer-lacey',
+          prepareReviewWrite: async ({ token, log }) => {
+            prepareTokens.push(token);
+            if (prepareTokens.length === 1) {
+              log.warn?.('[reviewer-pre-write] self-login probe returned HTTP 401');
+            }
+            return { cleared: 0, listed: 0 };
+          },
+          fetchImpl: async (url) => {
+            brokerCalls += 1;
+            assert.match(url, /\/token\?provider=github-app-claude-reviewer$/);
+            return {
+              ok: true,
+              status: 200,
+              async json() {
+                return {
+                  access_token: 'ghs_fresh_token',
+                  provider: 'github-app-claude-reviewer',
+                  metadata: {},
+                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+                };
+              },
+            };
+          },
+          readFileImpl: () => 'broker-shared-secret',
+        },
+      );
+    });
+    assert.equal(brokerCalls, 1);
+    assert.equal(ghCalls, 2);
+    assert.deepEqual(prepareTokens, ['ghs_stale_token', 'ghs_fresh_token']);
+    assert.deepEqual(ghTokens, ['ghs_stale_token', 'ghs_fresh_token']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('postGitHubReview degrades to the existing failure path when the refreshed token cannot be resolved', async () => {
+  const rootDir = makeRootDir('reviewer-post-refresh-fails-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    let ghCalls = 0;
+    let brokerCalls = 0;
+    await withEnv({
+      GH_CLAUDE_REVIEWER_TOKEN: 'ghs_stale_token',
+      CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
+      ADVERSARIAL_REVIEW_STATE_DIR: stateDir,
+    }, async () => {
+      await assert.rejects(
+        () => postGitHubReview(
+          'laceyenterprises/adversarial-review',
+          177,
+          'body',
+          'GH_CLAUDE_REVIEWER_TOKEN',
+          async () => {
+            ghCalls += 1;
+            const err = new Error('gh review failed');
+            err.stderr = 'HTTP 401 Unauthorized';
+            throw err;
+          },
+          {
+            rootDir,
+            reviewerIdentity: 'claude-reviewer-lacey',
+            prepareReviewWrite: async ({ log }) => {
+              log.warn?.('[reviewer-pre-write] self-login probe returned HTTP 401');
+              return { cleared: 0, listed: 0 };
+            },
+            fetchImpl: async () => {
+              brokerCalls += 1;
+              throw new Error('broker down');
+            },
+            readFileImpl: () => 'broker-shared-secret',
+          },
+        ),
+        /gh review failed/,
+      );
+    });
+    assert.equal(ghCalls, 1);
+    assert.equal(brokerCalls, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('postGitHubReview does not refresh or retry on non-401 post failures', async () => {
+  const rootDir = makeRootDir('reviewer-post-no-refresh-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    let brokerCalls = 0;
+    let ghCalls = 0;
+    await withEnv({
+      GH_CLAUDE_REVIEWER_TOKEN: 'ghs_stale_token',
+      CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
+      ADVERSARIAL_REVIEW_STATE_DIR: stateDir,
+    }, async () => {
+      await assert.rejects(
+        () => postGitHubReview(
+          'laceyenterprises/adversarial-review',
+          177,
+          'body',
+          'GH_CLAUDE_REVIEWER_TOKEN',
+          async () => {
+            ghCalls += 1;
+            throw new Error('GraphQL: body is invalid');
+          },
+          {
+            rootDir,
+            reviewerIdentity: 'claude-reviewer-lacey',
+            prepareReviewWrite: async () => ({ cleared: 0, listed: 0 }),
+            fetchImpl: async () => {
+              brokerCalls += 1;
+              throw new Error('should not be called');
+            },
+            readFileImpl: () => 'broker-shared-secret',
+          },
+        ),
+        /body is invalid/,
+      );
+    });
+    assert.equal(ghCalls, 1);
+    assert.equal(brokerCalls, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('openReviewerFence rolls back lock file when audit write fails after flock', () => {
   const rootDir = makeRootDir('reviewer-fence-open-rollback-');
   try {

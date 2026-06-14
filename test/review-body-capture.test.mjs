@@ -163,6 +163,77 @@ test('shared pre-write helper runs before the GitHub review mutation', async () 
   });
 });
 
+test('reviewer capture uses the refreshed token after a 401-triggered post retry', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, { reviewerClass: 'codex' });
+  const reviewBody = '## Verdict\n\nComment only\n\nRetried body';
+  const seen = [];
+
+  await withEnv({
+    GH_CODEX_REVIEWER_TOKEN: 'ghs_stale_token',
+    CODEX_REVIEWER_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
+  }, () => postGitHubReviewWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    passKind: 'first-pass',
+    postedAt: '2026-05-29T12:01:00.000Z',
+    prepareReviewWrite: async ({ log }) => {
+      if (!seen.some((entry) => entry.kind === 'prepare')) {
+        log.warn?.('[reviewer-pre-write] self-login probe returned HTTP 401');
+      }
+      seen.push({ kind: 'prepare', token: process.env.GH_CODEX_REVIEWER_TOKEN });
+      return { cleared: 0, listed: 0 };
+    },
+    fetchImpl: async (url) => {
+      seen.push({ kind: 'broker', url });
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            access_token: 'ghs_fresh_token',
+            provider: 'github-app-codex-reviewer',
+            metadata: {},
+            expires_at: '2026-05-29T13:01:00.000Z',
+          };
+        },
+      };
+    },
+    readFileImpl: () => 'broker-shared-secret',
+    execFileImpl: async (_command, args, options = {}) => {
+      if (args[0] === 'pr' && args[1] === 'review') {
+        seen.push({ kind: 'review-post', token: options.env?.GH_TOKEN });
+        if (seen.filter((entry) => entry.kind === 'review-post').length === 1) {
+          const err = new Error('gh review failed');
+          err.stderr = 'HTTP 401 Unauthorized';
+          throw err;
+        }
+        return { stdout: '', stderr: '' };
+      }
+      seen.push({ kind: 'capture-api', token: options.env?.GH_CODEX_REVIEWER_TOKEN });
+      return {
+        stdout: `${JSON.stringify({ id: 950, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n`,
+        stderr: '',
+      };
+    },
+  }));
+
+  assert.deepEqual(
+    seen.filter((entry) => entry.kind === 'review-post').map((entry) => entry.token),
+    ['ghs_stale_token', 'ghs_fresh_token'],
+  );
+  assert.equal(
+    seen.find((entry) => entry.kind === 'capture-api')?.token,
+    'ghs_fresh_token',
+  );
+});
+
 test('reviewer recapture is idempotent and preserves the first stored body', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, { passKind: 'rereview', reviewerClass: 'codex' });

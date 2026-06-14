@@ -55,14 +55,9 @@ if [[ -x "$CHAINED_HOOK" ]]; then
   "$CHAINED_HOOK" "$@"
 fi
 
-# PERSONA without WORKER_CLASS is undefined: the audit contract records
-# persona alongside a concrete worker class, never by itself.
-if [[ -n "${PERSONA:-}" && -z "${WORKER_CLASS:-}" ]]; then
-  echo "worker-provenance hook: PERSONA requires WORKER_CLASS; refusing to commit" >&2
-  exit 1
-fi
-
-# Operator-mode commit (no worker env): stay out of the way entirely.
+# Operator-mode commit (no worker env): stay out of the way entirely. An
+# ambient PERSONA without WORKER_CLASS is treated as operator mode so a generic
+# shell variable cannot block unrelated commits.
 if [[ -z "${WORKER_CLASS:-}" ]]; then
   exit 0
 fi

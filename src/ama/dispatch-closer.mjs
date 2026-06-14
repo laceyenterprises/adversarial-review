@@ -69,6 +69,7 @@ const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const AMA_CLOSER_RETRYABLE_STATUSES = new Set(['failed', 'cancelled', 'canceled', 'superseded', 'not-found']);
+const MERGE_CLASS_ORCHESTRATION_MODES = new Set(['native', 'agentos']);
 const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'succeeded',
   'failed-without-merge',
@@ -193,6 +194,42 @@ function writeAmaCloserDispatchRecord(rootDir, identity, doc) {
   const filePath = amaCloserDispatchFilePath(rootDir, identity);
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   return filePath;
+}
+
+function logAmaCloserDispatchEvent(logger, event, fields = {}) {
+  const sink = logger && typeof logger.info === 'function'
+    ? logger.info.bind(logger)
+    : console.log.bind(console);
+  sink(JSON.stringify({ event, ...fields }));
+}
+
+function resolveMergeClassDispatchRoute({
+  orchestrationMode = null,
+  logger = console,
+  repo = null,
+  prNumber = null,
+  workerClass = null,
+  completionShape = null,
+} = {}) {
+  const normalized = orchestrationMode == null
+    ? 'native'
+    : String(orchestrationMode).trim().toLowerCase();
+  if (!MERGE_CLASS_ORCHESTRATION_MODES.has(normalized)) {
+    throw new Error(
+      `[ama-closer] unsupported orchestration_mode=${JSON.stringify(orchestrationMode)} `
+      + '(expected native or agentos for merge-class dispatch invariance)',
+    );
+  }
+  const route = 'hq-dispatch';
+  logAmaCloserDispatchEvent(logger, 'ama_closer.orchestration_mode_noop', {
+    orchestrationMode: normalized,
+    route,
+    repo,
+    prNumber: prNumber == null ? null : Number(prNumber),
+    workerClass,
+    completionShape,
+  });
+  return route;
 }
 
 function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
@@ -528,6 +565,7 @@ export async function maybeDispatchAmaCloser({
   processKillImpl = process.kill,
   readTemplateImpl = null,
   writeFileImpl = null,
+  logger = console,
 }) {
   // The master gate. With no operator config, this is `false` per
   // AMA-01 schema defaults and the entire path is a no-op.
@@ -835,6 +873,20 @@ export async function maybeDispatchAmaCloser({
   //   - `--project adversarial-merge-authority` to keep audit + token
   //     accounting separate from the merge-agent stream.
   //   - `--ticket AMA-PR-<n>` so the launch is traceable per-PR.
+  // AOM-04: the orchestration switch is a deliberate no-op for merge-class
+  // dispatch. Native and agentos both stay on `hq dispatch` because no bare
+  // merge orchestration exists to fall back to.
+  const mergeDispatchRoute = resolveMergeClassDispatchRoute({
+    orchestrationMode: dispatchContext?.orchestrationMode ?? null,
+    logger,
+    repo,
+    prNumber,
+    workerClass,
+    completionShape: 'decision-only',
+  });
+  if (mergeDispatchRoute !== 'hq-dispatch') {
+    throw new Error(`[ama-closer] unsupported merge dispatch route: ${mergeDispatchRoute}`);
+  }
   const args = [
     'dispatch',
     '--worker-class', workerClass,

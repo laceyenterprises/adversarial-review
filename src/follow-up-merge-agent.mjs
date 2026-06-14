@@ -63,6 +63,7 @@ const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
 const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
+const MERGE_CLASS_ORCHESTRATION_MODES = new Set(['native', 'agentos']);
 const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WORKER_ID_CLASS_PREFIXES = [
   'claude-code',
@@ -390,6 +391,33 @@ function mergeAgentLifecycleLog(logger, event, fields = {}) {
     ? logger.info.bind(logger)
     : console.log.bind(console);
   sink(JSON.stringify({ event, ...fields }));
+}
+
+function resolveMergeClassDispatchRoute({
+  orchestrationMode = null,
+  logger = console,
+  repo = null,
+  prNumber = null,
+  workerClass = null,
+} = {}) {
+  const normalized = orchestrationMode == null
+    ? 'native'
+    : String(orchestrationMode).trim().toLowerCase();
+  if (!MERGE_CLASS_ORCHESTRATION_MODES.has(normalized)) {
+    throw new Error(
+      `[merge-agent] unsupported orchestration_mode=${JSON.stringify(orchestrationMode)} `
+      + '(expected native or agentos for merge-class dispatch invariance)',
+    );
+  }
+  const route = 'hq-dispatch';
+  mergeAgentLifecycleLog(logger, 'merge_agent.orchestration_mode_noop', {
+    orchestrationMode: normalized,
+    route,
+    repo,
+    prNumber: prNumber == null ? null : Number(prNumber),
+    workerClass,
+  });
+  return route;
 }
 
 function deriveOriginalWorkerIdFromBranch(branch) {
@@ -3325,6 +3353,7 @@ async function dispatchMergeAgentForPR({
   // pickMergeAgentDispatchDetail + dispatch-priority assignment at
   // lines 3768-3783 and label removal at 3060-3069).
   triggerOverride = null,
+  orchestrationMode = null,
 } = {}) {
   const runtimeEnv = { ...process.env, ...env };
   const job = {
@@ -3800,6 +3829,19 @@ async function dispatchMergeAgentForPR({
   // bypass semantics; broadening that escape hatch to every merge-agent launch
   // is not.
   const mergeAgentWorkerClass = resolveMergeAgentWorkerClass(runtimeEnv);
+  // AOM-04: the orchestration switch is a deliberate no-op for merge-class
+  // dispatch. Native and agentos both stay on `hq dispatch` because no bare
+  // merge orchestration exists to fall back to.
+  const mergeDispatchRoute = resolveMergeClassDispatchRoute({
+    orchestrationMode,
+    logger,
+    repo,
+    prNumber,
+    workerClass: mergeAgentWorkerClass,
+  });
+  if (mergeDispatchRoute !== 'hq-dispatch') {
+    throw new Error(`[merge-agent] unsupported merge dispatch route: ${mergeDispatchRoute}`);
+  }
   const hqDispatchHeadArgs = [
     'dispatch',
     '--worker-class', mergeAgentWorkerClass,

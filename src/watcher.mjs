@@ -3554,8 +3554,13 @@ async function maybeDispatchAmaClosureFor({
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
 }) {
   let cfg;
+  let orchestrationMode = 'native';
   try {
-    cfg = loadConfigImpl().getMergeAuthorityConfig();
+    const loadedConfig = loadConfigImpl();
+    cfg = loadedConfig.getMergeAuthorityConfig();
+    if (typeof loadedConfig.getOrchestrationMode === 'function') {
+      orchestrationMode = loadedConfig.getOrchestrationMode() || 'native';
+    }
   } catch (err) {
     // CFG load failure isn't an AMA problem; let the existing
     // merge-agent path handle the tick.
@@ -3676,6 +3681,7 @@ async function maybeDispatchAmaClosureFor({
     reviewedBy: reviewStateRow?.reviewer_login || '',
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    orchestrationMode,
   };
 
   const result = await maybeDispatchAmaCloserImpl({
@@ -3704,6 +3710,7 @@ async function maybeDispatchAmaClosureFor({
         : null,
     },
     dispatchContext,
+    logger,
   });
   // AMA-06N — expose `amaEnabled` so the watcher's coexistence
   // decision (downstream of this helper) can branch on it. The
@@ -3925,6 +3932,28 @@ async function handlePostedReviewRow({
       return;
     }
 
+    let orchestrationMode = 'native';
+    try {
+      const loadedConfig = loadConfigCached();
+      if (typeof loadedConfig.getOrchestrationMode === 'function') {
+        orchestrationMode = loadedConfig.getOrchestrationMode() || 'native';
+      }
+    } catch (cfgErr) {
+      logger?.warn?.(
+        `[watcher] orchestration_mode load failed for merge-agent dispatch; defaulting to native: ${cfgErr?.message || cfgErr}`,
+      );
+    }
+    let orchestrationMode = 'native';
+    try {
+      const loadedConfig = loadConfigCached();
+      if (typeof loadedConfig.getOrchestrationMode === 'function') {
+        orchestrationMode = loadedConfig.getOrchestrationMode() || 'native';
+      }
+    } catch (cfgErr) {
+      logger?.warn?.(
+        `[watcher] orchestration_mode load failed for reviewer-timeout merge-agent handoff; defaulting to native: ${cfgErr?.message || cfgErr}`,
+      );
+    }
     const { coexistence, dispatchEnv } = coexistenceDecision;
     // AMA-06N: when the operator-fallback lane is selected, override
     // the dispatch trigger to 'merge-agent-requested' so the critical-
@@ -3952,6 +3981,7 @@ async function handlePostedReviewRow({
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
+      orchestrationMode,
       ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
       ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
     });
@@ -4162,6 +4192,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
+      orchestrationMode,
       ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
       ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
     });

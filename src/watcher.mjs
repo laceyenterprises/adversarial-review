@@ -3483,6 +3483,26 @@ const PENDING_MERGE_CLOSEOUTS_PER_TICK = 20;
 // chronic-failure tail — exactly the rows it is safe to defer.
 const PENDING_MERGE_CLOSEOUTS_BUDGET_MS = 60_000;
 
+function resolveOrchestrationMode({
+  loadedConfig = null,
+  loadConfigImpl = loadConfigCached,
+  logger = console,
+  context = 'merge-agent dispatch',
+} = {}) {
+  let orchestrationMode = 'native';
+  try {
+    const cfg = loadedConfig || loadConfigImpl();
+    if (typeof cfg?.getOrchestrationMode === 'function') {
+      orchestrationMode = cfg.getOrchestrationMode() || 'native';
+    }
+  } catch (cfgErr) {
+    logger?.warn?.(
+      `[watcher] orchestration_mode load failed for ${context}; defaulting to native: ${cfgErr?.message || cfgErr}`,
+    );
+  }
+  return orchestrationMode;
+}
+
 async function retryPendingMergeCloseouts({
   octokit,
   limit = PENDING_MERGE_CLOSEOUTS_PER_TICK,
@@ -3554,13 +3574,15 @@ async function maybeDispatchAmaClosureFor({
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
 }) {
   let cfg;
-  let orchestrationMode = 'native';
+  let orchestrationMode;
   try {
     const loadedConfig = loadConfigImpl();
     cfg = loadedConfig.getMergeAuthorityConfig();
-    if (typeof loadedConfig.getOrchestrationMode === 'function') {
-      orchestrationMode = loadedConfig.getOrchestrationMode() || 'native';
-    }
+    orchestrationMode = resolveOrchestrationMode({
+      loadedConfig,
+      logger,
+      context: 'AMA closure dispatch',
+    });
   } catch (err) {
     // CFG load failure isn't an AMA problem; let the existing
     // merge-agent path handle the tick.
@@ -3932,17 +3954,10 @@ async function handlePostedReviewRow({
       return;
     }
 
-    let orchestrationMode = 'native';
-    try {
-      const loadedConfig = loadConfigCached();
-      if (typeof loadedConfig.getOrchestrationMode === 'function') {
-        orchestrationMode = loadedConfig.getOrchestrationMode() || 'native';
-      }
-    } catch (cfgErr) {
-      logger?.warn?.(
-        `[watcher] orchestration_mode load failed for merge-agent dispatch; defaulting to native: ${cfgErr?.message || cfgErr}`,
-      );
-    }
+    const orchestrationMode = resolveOrchestrationMode({
+      logger,
+      context: 'merge-agent dispatch',
+    });
     const { coexistence, dispatchEnv } = coexistenceDecision;
     // AMA-06N: when the operator-fallback lane is selected, override
     // the dispatch trigger to 'merge-agent-requested' so the critical-
@@ -4158,17 +4173,10 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       );
       return { handled: true, dispatchJob, amaClosureResult };
     }
-    let orchestrationMode = 'native';
-    try {
-      const loadedConfig = loadConfigCached();
-      if (typeof loadedConfig.getOrchestrationMode === 'function') {
-        orchestrationMode = loadedConfig.getOrchestrationMode() || 'native';
-      }
-    } catch (cfgErr) {
-      logger?.warn?.(
-        `[watcher] orchestration_mode load failed for reviewer-timeout merge-agent handoff; defaulting to native: ${cfgErr?.message || cfgErr}`,
-      );
-    }
+    const orchestrationMode = resolveOrchestrationMode({
+      logger,
+      context: 'reviewer-timeout merge-agent handoff',
+    });
     const { coexistence, dispatchEnv } = coexistenceDecision;
     // AMA-06N: timeout-exhaustion path also honors triggerOverride on
     // the operator-fallback lane, same rationale as the green-path

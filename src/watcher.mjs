@@ -212,9 +212,41 @@ let reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
 });
 let reviewerRuntimeAdapterCache = null;
 let lastKnownReviewerOrchestrationMode = 'native';
+let activeReviewerRuntimeOrchestrationMode = 'native';
+let reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
+let reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
 
 function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = 'code-pr') {
   return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;
+}
+
+function shouldEmitReviewerRuntimeFailureSignal(count) {
+  return count <= 2 || count === 5 || count % 10 === 0;
+}
+
+function recordReviewerRuntimeFailureSignal({ kind, key, message, logger }) {
+  const state = kind === 'config'
+    ? reviewerRuntimeConfigFailureSignal
+    : reviewerRuntimeAdapterFailureSignal;
+  if (state.key === key) {
+    state.count += 1;
+  } else {
+    state.key = key;
+    state.count = 1;
+  }
+  if (shouldEmitReviewerRuntimeFailureSignal(state.count)) {
+    logger?.error?.(
+      `[watcher] ALERT reviewer runtime ${kind} degraded consecutive=${state.count}: ${message}`
+    );
+  }
+}
+
+function clearReviewerRuntimeFailureSignal(kind) {
+  if (kind === 'config') {
+    reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
+  } else {
+    reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
+  }
 }
 
 function refreshReviewerRuntimeAdapter({
@@ -227,11 +259,18 @@ function refreshReviewerRuntimeAdapter({
   let orchestrationMode = lastKnownReviewerOrchestrationMode || 'native';
   try {
     orchestrationMode = loadConfigImpl().getOrchestrationMode();
+    clearReviewerRuntimeFailureSignal('config');
   } catch (err) {
-    logger?.error?.(
-      `[watcher] ERROR config key=roles.adversarial.orchestration_mode: ${err?.message || err}; ` +
-      `keeping reviewer runtime orchestration_mode=${orchestrationMode}`
-    );
+    const errorMessage = String(err?.message || err);
+    recordReviewerRuntimeFailureSignal({
+      kind: 'config',
+      key: errorMessage,
+      logger,
+      message:
+        `config key=roles.adversarial.orchestration_mode failed (${errorMessage}); ` +
+        `keeping reviewer runtime orchestration_mode=${orchestrationMode}; ` +
+        `broker token refresh still runs, but later strict config reads may stall review work`
+    });
   }
 
   let domainMtimeMs = null;
@@ -243,6 +282,7 @@ function refreshReviewerRuntimeAdapter({
       reviewerRuntimeAdapterCache.domainMtimeMs === domainMtimeMs
     ) {
       lastKnownReviewerOrchestrationMode = orchestrationMode;
+      activeReviewerRuntimeOrchestrationMode = orchestrationMode;
       reviewerRuntimeAdapter = reviewerRuntimeAdapterCache.adapter;
       return reviewerRuntimeAdapter;
     }
@@ -259,10 +299,25 @@ function refreshReviewerRuntimeAdapter({
       orchestrationMode,
     };
     lastKnownReviewerOrchestrationMode = orchestrationMode;
+    activeReviewerRuntimeOrchestrationMode = orchestrationMode;
+    clearReviewerRuntimeFailureSignal('adapter');
   } catch (err) {
-    logger?.error?.(
-      `[watcher] ERROR reviewer runtime adapter refresh failed: ${err?.message || err}; keeping existing adapter`
-    );
+    const errorMessage = String(err?.message || err);
+    if (orchestrationMode !== activeReviewerRuntimeOrchestrationMode) {
+      recordReviewerRuntimeFailureSignal({
+        kind: 'adapter',
+        key: `${orchestrationMode}->${activeReviewerRuntimeOrchestrationMode}:${errorMessage}`,
+        logger,
+        message:
+          `requested orchestration_mode=${orchestrationMode} but active adapter remains ` +
+          `${activeReviewerRuntimeOrchestrationMode}; first-pass reviews continue through the ` +
+          `active adapter until refresh succeeds: ${errorMessage}`
+      });
+    } else {
+      logger?.error?.(
+        `[watcher] ERROR reviewer runtime adapter refresh failed: ${errorMessage}; keeping existing adapter`
+      );
+    }
   }
   return reviewerRuntimeAdapter;
 }

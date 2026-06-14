@@ -386,6 +386,7 @@ const logger = { error: (message) => loggerMessages.push(String(message)) };
 
 let mode = 'native';
 let mtime = 1;
+let throwAgentosAdapter = false;
 function loadConfigImpl() {
   if (mode === 'throw') throw new Error('invalid orchestration mode');
   return { getOrchestrationMode: () => mode };
@@ -393,6 +394,9 @@ function loadConfigImpl() {
 
 function createAdapterImpl({ orchestrationMode }) {
   calls.push(orchestrationMode);
+  if (throwAgentosAdapter && orchestrationMode === 'agentos') {
+    throw new Error('agent-os-hq unavailable');
+  }
   return { describe: () => ({ id: orchestrationMode }) };
 }
 
@@ -412,36 +416,51 @@ assert.equal(first, second);
 assert.deepEqual(calls, ['native']);
 
 mode = 'agentos';
+throwAgentosAdapter = true;
 const third = refreshReviewerRuntimeAdapter({
   logger,
   loadConfigImpl,
   createAdapterImpl,
   domainMtimeImpl: () => mtime,
 });
-assert.notEqual(third, second);
+assert.equal(third, second);
 assert.deepEqual(calls, ['native', 'agentos']);
+assert.ok(
+  loggerMessages.some((message) => /requested orchestration_mode=agentos but active adapter remains native/.test(message))
+);
 
-mode = 'throw';
+throwAgentosAdapter = false;
 const fourth = refreshReviewerRuntimeAdapter({
   logger,
   loadConfigImpl,
   createAdapterImpl,
   domainMtimeImpl: () => mtime,
 });
-assert.equal(fourth, third);
-assert.deepEqual(calls, ['native', 'agentos']);
-assert.ok(loggerMessages.some((message) => /invalid orchestration mode/.test(message)));
+assert.notEqual(fourth, third);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos']);
 
-mtime = 2;
-mode = 'agentos';
+mode = 'throw';
 const fifth = refreshReviewerRuntimeAdapter({
   logger,
   loadConfigImpl,
   createAdapterImpl,
   domainMtimeImpl: () => mtime,
 });
-assert.notEqual(fifth, fourth);
+assert.equal(fifth, fourth);
 assert.deepEqual(calls, ['native', 'agentos', 'agentos']);
+assert.ok(loggerMessages.some((message) => /invalid orchestration mode/.test(message)));
+assert.ok(loggerMessages.some((message) => /broker token refresh still runs/.test(message)));
+
+mtime = 2;
+mode = 'agentos';
+const sixth = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.notEqual(sixth, fifth);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos']);
 `;
 }
 

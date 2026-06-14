@@ -116,11 +116,16 @@ CLI subprocess.
 
 The watcher refreshes that runtime adapter before startup recovery and
 again at the beginning of each poll tick. Invalid orchestration-mode
-config is logged loudly, but the tick keeps the last-known-good mode
-(or `native` before any good value has been seen) so GitHub App token
-refresh is not skipped by a config typo in this adapter refresh path.
-The adapter is rebuilt only when the resolved mode or
-`domains/code-pr.json` mtime changes.
+config is logged through a deduped persistent-failure signal, and the
+adapter refresh keeps the last-known-good mode (or `native` before any
+good value has been seen) so GitHub App token refresh is not skipped by
+a config typo in this adapter refresh path. This resilience is scoped:
+later strict config reads in the same tick can still fail and stall
+review work until the bad `orchestration_mode` value is corrected. If
+`agentos` is requested but the `agent-os-hq` adapter cannot be built,
+the watcher emits a persistent mode-mismatch signal while reviews keep
+using the active adapter. The adapter is rebuilt only when the resolved
+mode or `domains/code-pr.json` mtime changes.
 
 ---
 

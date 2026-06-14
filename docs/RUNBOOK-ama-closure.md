@@ -355,6 +355,29 @@ know the closer's live state.
 A new head SHA always gets a fresh lease — the file is keyed by
 `headSha` so head-change naturally invalidates the old lease.
 
+### Merged PR but DAG step did not advance
+
+When AMA or merge-agent merges a PR through `gh pr merge`, the watcher records
+owed `hq dag autowalk-on-merge --repo <repo> --pr <n>` work as part of the
+merge lifecycle sync. The durable record is
+`data/follow-up-jobs/dag-autowalk-on-merge/<repo>-pr-<n>.json`; it is removed
+only after the hq command exits successfully. If a merged PR's DAG run remains
+stuck, check that file first:
+
+```bash
+jq '{status, attempts, lastAttemptAt, lastError}' \
+  data/follow-up-jobs/dag-autowalk-on-merge/<repo>-pr-<n>.json
+```
+
+`status: "pending"` means the watcher will retry after
+`ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_RETRY_MS` (default 5 minutes).
+`status: "failed"` means the bounded automatic attempts
+(`ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_MAX_ATTEMPTS`, default 5) are exhausted;
+repair the recorded root cause (`HQ_BIN`, owner/env, SQLite lock, hq timeout,
+or stderr from the subcommand), then re-run the hq command manually or reset the
+record for another watcher retry. The command remains self-gated by
+`HQ_AUTO_DAG_WALK` and cleanly no-ops for non-DAG PRs.
+
 ### Watcher info: "AMA enabled but not eligible … awaiting operator action"
 
 When AMA is enabled, the watcher does NOT silently fall back to

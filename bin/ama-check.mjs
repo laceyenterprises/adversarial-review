@@ -109,8 +109,11 @@ function loadProtectionJson(path, cfg) {
 function recomputeReviewCycleExhausted({ rootDir, repo, prNumber }) {
   const normalizedRepo = String(repo || '').trim();
   const normalizedPr = Number(prNumber);
-  if (!normalizedRepo || !Number.isFinite(normalizedPr)) {
-    return false;
+  if (!normalizedRepo) {
+    throw new Error('missing --repo for review-cycle exhaustion recomputation');
+  }
+  if (!Number.isFinite(normalizedPr)) {
+    throw new Error('missing PR number for review-cycle exhaustion recomputation');
   }
 
   const ledger = summarizePRRemediationLedger(rootDir, {
@@ -189,8 +192,9 @@ function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, risk
     // already gated on this; if the head changed since dispatch, the
     // head-match gate will fail and the closer defers.
     remediationPending: false,
-    // AMA final hammer (monotonic): once the watcher observed the round budget
-    // exhausted it cannot un-exhaust, so the closer honors the dispatched value.
+    // AMA final hammer: the dispatched value is audit context only. The
+    // merge-time closer recomputes exhaustion from the durable ledger before
+    // passing a true value here.
     reviewCycleExhausted: reviewCycleExhausted === true,
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {

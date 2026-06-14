@@ -338,3 +338,48 @@ test('ama-check recomputes final-hammer exhaustion from raised closer-time ledge
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('ama-check fails closed when final-hammer recomputation lacks repo identity', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-final-hammer-missing-repo-'));
+  try {
+    const rootDir = join(tmp, 'root');
+    writeCompletedLedgerJob(rootDir, { currentRound: 2, maxRounds: 2 });
+    const paths = {
+      pr: join(tmp, 'pr.json'),
+      reviews: join(tmp, 'reviews.json'),
+      protection: join(tmp, 'protection.json'),
+      timeline: join(tmp, 'timeline.json'),
+    };
+    writeJson(paths.pr, {
+      number: 1234, headRefOid: HEAD_SHA, state: 'OPEN', isDraft: false,
+      mergeStateStatus: 'MERGEABLE',
+      labels: [],
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' }],
+      author: { login: 'codex-worker-bot' }, baseRefName: 'main',
+    });
+    writeJson(paths.reviews, {
+      reviews: [{ state: 'CHANGES_REQUESTED', submittedAt: '2026-06-13T12:00:00Z', commit: { oid: HEAD_SHA } }],
+    });
+    writeFileSync(paths.protection, '{}');
+    writeJson(paths.timeline, []);
+    const configPath = writeConfig(tmp, { branchProtectionRequired: true });
+    const result = spawnSync(process.execPath, [
+      AMA_CHECK,
+      '--pr', paths.pr, '--reviews', paths.reviews, '--protection', paths.protection,
+      '--timeline', paths.timeline, '--reviewed-sha', HEAD_SHA, '--risk-class', 'low',
+      '--root-dir', rootDir,
+      '--review-cycle-exhausted', 'true',
+    ], { encoding: 'utf8', env: { ...process.env, AGENT_OS_CONFIG_PATH: configPath } });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /failed to recompute review-cycle exhaustion/);
+    assert.match(result.stderr, /missing --repo/);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false);
+    assert.equal(verdict.trace.finalHammer.active, false);
+    assert.ok(verdict.reasons.includes('verdict-not-settled-success'));
+    assert.ok(verdict.reasons.includes('branch-protection-missing-gate'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

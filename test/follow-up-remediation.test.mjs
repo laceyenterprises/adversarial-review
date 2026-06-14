@@ -1367,6 +1367,33 @@ test('worker-provenance hook appends Worker-Class / Worker-Job-Id / Worker-Run-A
   assert.match(updated, /body paragraph\n\nWorker-Class:/);
 });
 
+test('worker-provenance hook appends Persona trailer when env is set with worker class', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  writeFileSync(msgPath, 'fix: persona change\n\nbody paragraph\n', 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        WORKER_CLASS: 'codex-remediation',
+        PERSONA: 'cso-reviewer',
+      },
+      stdio: 'pipe',
+    }
+  );
+  assert.equal(result.status, 0, `hook exited ${result.status}: ${result.stderr?.toString()}`);
+
+  const updated = readFileSync(msgPath, 'utf8');
+  assert.match(updated, /^Worker-Class: codex-remediation$/m);
+  assert.match(updated, /^Persona: cso-reviewer$/m);
+});
+
 test('worker-provenance hook is idempotent — repeated runs do not duplicate trailers', () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
@@ -4695,6 +4722,58 @@ test('worker-provenance hook rejects WORKER_CLASS values containing carriage ret
   assert.equal(readFileSync(msgPath, 'utf8'), original);
 });
 
+test('worker-provenance hook rejects PERSONA without WORKER_CLASS', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  const original = 'fix: persona requires class\n';
+  writeFileSync(msgPath, original, 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        PERSONA: 'cso-reviewer',
+      },
+      stdio: 'pipe',
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr.toString(), /PERSONA requires WORKER_CLASS/);
+  assert.equal(readFileSync(msgPath, 'utf8'), original);
+});
+
+test('worker-provenance hook rejects PERSONA values containing newlines', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  installWorkerProvenanceHook(workspaceDir);
+
+  const msgPath = path.join(workspaceDir, 'commit-msg.txt');
+  const original = 'fix: persona newline guard\n';
+  writeFileSync(msgPath, original, 'utf8');
+
+  const result = spawnSync(
+    path.join(workspaceDir, '.git', 'hooks', 'commit-msg'),
+    [msgPath],
+    {
+      env: {
+        PATH: process.env.PATH,
+        WORKER_CLASS: 'codex-remediation',
+        PERSONA: 'cso-reviewer\nSigned-off-by: Forged <forged@example.com>',
+      },
+      stdio: 'pipe',
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(msgPath, 'utf8'), original);
+});
+
 // ── integration: real `git commit` honors the installed hook ───────────────
 
 test('integration: real git commit picks up the worker-provenance hook under custom core.hooksPath', () => {
@@ -4726,6 +4805,7 @@ test('integration: real git commit picks up the worker-provenance hook under cus
       env: {
         ...process.env,
         WORKER_CLASS: 'codex-remediation',
+        PERSONA: 'cso-reviewer',
         WORKER_JOB_ID: 'integration-job-123',
         WORKER_RUN_AT: '2026-05-01T20:00:00Z',
       },
@@ -4738,6 +4818,7 @@ test('integration: real git commit picks up the worker-provenance hook under cus
     encoding: 'utf8',
   });
   assert.match(finalMessage, /^Worker-Class: codex-remediation$/m);
+  assert.match(finalMessage, /^Persona: cso-reviewer$/m);
   assert.match(finalMessage, /^Worker-Job-Id: integration-job-123$/m);
   assert.match(finalMessage, /^Worker-Run-At: 2026-05-01T20:00:00Z$/m);
 });

@@ -12,6 +12,8 @@
 #
 #   Worker-Class:    e.g. "codex-remediation", "claude-code-remediation"
 #                    (set by the spawn path; presence enables the hook)
+#   Persona:         persona id acting through the workerClass
+#                    (set when dispatch passed --persona)
 #   Worker-Job-Id:   the follow-up job's jobId — uniquely identifies the
 #                    unit of work being executed
 #   Worker-Run-At:   ISO 8601 timestamp the spawn fired (so the audit
@@ -53,6 +55,13 @@ if [[ -x "$CHAINED_HOOK" ]]; then
   "$CHAINED_HOOK" "$@"
 fi
 
+# PERSONA without WORKER_CLASS is undefined: the audit contract records
+# persona alongside a concrete worker class, never by itself.
+if [[ -n "${PERSONA:-}" && -z "${WORKER_CLASS:-}" ]]; then
+  echo "worker-provenance hook: PERSONA requires WORKER_CLASS; refusing to commit" >&2
+  exit 1
+fi
+
 # Operator-mode commit (no worker env): stay out of the way entirely.
 if [[ -z "${WORKER_CLASS:-}" ]]; then
   exit 0
@@ -71,6 +80,10 @@ require_safe_trailer_value() {
 
 require_safe_trailer_value "WORKER_CLASS" "$WORKER_CLASS"
 TRAILERS=("--trailer" "Worker-Class: $WORKER_CLASS")
+if [[ -n "${PERSONA:-}" ]]; then
+  require_safe_trailer_value "PERSONA" "$PERSONA"
+  TRAILERS+=("--trailer" "Persona: $PERSONA")
+fi
 if [[ -n "${WORKER_JOB_ID:-}" ]]; then
   require_safe_trailer_value "WORKER_JOB_ID" "$WORKER_JOB_ID"
   TRAILERS+=("--trailer" "Worker-Job-Id: $WORKER_JOB_ID")

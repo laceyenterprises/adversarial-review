@@ -160,6 +160,35 @@ test('bounds the broker fetch with an abort signal + timeout', async () => {
   assert.equal(summary.failed.length, 1);
 });
 
+test('timeout covers a stalled BODY read (headers resolve, json() hangs until abort)', async () => {
+  // Regression for the review finding: in Fetch the response promise resolves on
+  // headers while the body may still stream. A broker that returns 200 headers
+  // then stalls the JSON body must still be bounded by the abort timer — the
+  // timer must remain armed through res.json(), and the shared signal must abort
+  // the hanging body read.
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  let bodyAborted = false;
+  const fetchImpl = async (url, opts) => ({
+    ok: true,
+    status: 200,
+    // json() never resolves on its own; it only settles when the abort fires.
+    json: () =>
+      new Promise((_resolve, reject) => {
+        opts.signal.addEventListener('abort', () => {
+          bodyAborted = true;
+          reject(new Error('aborted body read'));
+        });
+      }),
+  });
+  const summary = await refreshReviewerBrokerTokens({
+    env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog, timeoutMs: 10,
+  });
+  assert.equal(bodyAborted, true); // the timer aborted the stalled body read
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token'); // fail-safe
+  assert.equal(summary.failed.length, 1);
+});
+
 test('rejects a token minted for the wrong app_id (metadata mismatch), keeps old token', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv({ OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID: '111' });

@@ -87,46 +87,52 @@ async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl
     throw new Error(`OAUTH_BROKER_SHARED_SECRET_FILE '${secretFile}' is empty`);
   }
 
-  // Bound the network call so a wedged broker can't hang the watcher tick.
+  // Bound the WHOLE network exchange so a wedged broker can't hang the watcher
+  // tick. The timeout/abort must cover both the headers (fetchImpl) AND the body
+  // read (res.json()): in Fetch, the response promise resolves once headers
+  // arrive while the body may still be streaming, so a broker that sends `200`
+  // headers and then stalls the JSON body would otherwise hang inside res.json()
+  // — past clearTimeout — and wedge the long-lived daemon. We keep the abort
+  // timer armed until AFTER the body is fully parsed; the shared AbortSignal
+  // makes the timer abort a stalled body read too.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let res;
   try {
-    res = await fetchImpl(`${brokerUrl}/token?provider=${encodeURIComponent(provider)}`, {
+    const res = await fetchImpl(`${brokerUrl}/token?provider=${encodeURIComponent(provider)}`, {
       headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' },
       signal: controller.signal,
     });
+    if (!res.ok) {
+      throw new Error(`broker returned HTTP ${res.status}`);
+    }
+    const body = await res.json();
+    const accessToken = body?.access_token;
+    if (!accessToken || typeof accessToken !== 'string') {
+      throw new Error('broker response missing access_token');
+    }
+    // Same metadata verification as scripts/lib/reviewer-broker.sh: never accept
+    // a token minted for the wrong App/installation just because the call
+    // returned 200. The bash contract compares provider UNCONDITIONALLY, so a
+    // missing / empty provider is a rejection here too (don't guard on presence).
+    if (String(body?.provider || '') !== provider) {
+      throw new Error(`response.provider='${body?.provider ?? ''}' != expected '${provider}'`);
+    }
+    const actualAppId = body?.metadata?.app_id != null ? String(body.metadata.app_id) : '';
+    const actualInstallationId =
+      body?.metadata?.installation_id != null ? String(body.metadata.installation_id) : '';
+    if (expectedAppId && actualAppId !== expectedAppId) {
+      throw new Error(`response.metadata.app_id='${actualAppId}' != expected '${expectedAppId}'`);
+    }
+    if (expectedInstallationId && actualInstallationId !== expectedInstallationId) {
+      throw new Error(
+        `response.metadata.installation_id='${actualInstallationId}' != expected '${expectedInstallationId}'`
+      );
+    }
+    const expiresAtMs = body?.expires_at ? Date.parse(body.expires_at) : NaN;
+    return { token: accessToken, expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : null };
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) {
-    throw new Error(`broker returned HTTP ${res.status}`);
-  }
-  const body = await res.json();
-  const accessToken = body?.access_token;
-  if (!accessToken || typeof accessToken !== 'string') {
-    throw new Error('broker response missing access_token');
-  }
-  // Same metadata verification as scripts/lib/reviewer-broker.sh: never accept a
-  // token minted for the wrong App/installation just because the call returned
-  // 200. The bash contract compares provider UNCONDITIONALLY, so a missing /
-  // empty provider is a rejection here too (do not guard the check on presence).
-  if (String(body?.provider || '') !== provider) {
-    throw new Error(`response.provider='${body?.provider ?? ''}' != expected '${provider}'`);
-  }
-  const actualAppId = body?.metadata?.app_id != null ? String(body.metadata.app_id) : '';
-  const actualInstallationId =
-    body?.metadata?.installation_id != null ? String(body.metadata.installation_id) : '';
-  if (expectedAppId && actualAppId !== expectedAppId) {
-    throw new Error(`response.metadata.app_id='${actualAppId}' != expected '${expectedAppId}'`);
-  }
-  if (expectedInstallationId && actualInstallationId !== expectedInstallationId) {
-    throw new Error(
-      `response.metadata.installation_id='${actualInstallationId}' != expected '${expectedInstallationId}'`
-    );
-  }
-  const expiresAtMs = body?.expires_at ? Date.parse(body.expires_at) : NaN;
-  return { token: accessToken, expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : null };
 }
 
 // Refresh every broker-enabled reviewer token whose cached value is older than

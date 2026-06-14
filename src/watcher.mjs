@@ -104,6 +104,7 @@ import {
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { normalizeGithubMergeability } from './github-mergeability.mjs';
 // AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
 // (AMA-01 defaults to false). When the operator opts in AND the
 // canonical eligibility predicate from SPEC §4.2 returns
@@ -3649,26 +3650,15 @@ async function maybeDispatchAmaClosureFor({
     prAuthor: candidate?.prAuthor || null,
   };
   // AMA's eligibility gate (SPEC §4.2 #7) compares `mergeableState` against
-  // 'MERGEABLE' — the vocabulary of GitHub's `mergeable` field (MERGEABLE /
-  // CONFLICTING / UNKNOWN), the authoritative merge-CONFLICT signal. The prior
-  // expression preferred `mergeStateStatus`, whose vocabulary is a DIFFERENT
-  // axis (CLEAN / BLOCKED / BEHIND / UNSTABLE / ...), so a perfectly mergeable PR
-  // (mergeStateStatus=CLEAN) resolved to 'CLEAN' !== 'MERGEABLE' and AMA reported
-  // `pr-not-mergeable` for EVERY clean PR — closing nothing even after the
-  // verdict fix (#291). Prefer the `mergeable` field; treat mergeStateStatus=CLEAN
-  // as MERGEABLE too (covers the window where GitHub still reports
-  // mergeable=UNKNOWN). CI state is gated separately via `ci-not-green`.
-  const candidateMergeable = String(candidate?.mergeable || '').toUpperCase();
-  const candidateMergeStateStatus = String(candidate?.mergeStateStatus || '').toUpperCase();
+  // 'MERGEABLE' — the vocabulary of GitHub's `mergeable` field. Use
+  // mergeStateStatus=CLEAN only as the UNKNOWN/empty fallback GitHub exposes
+  // while recomputing mergeability; never let it override CONFLICTING.
   const prMetadata = {
     prNumber,
     headSha: candidate?.headSha || currentRevisionRef || null,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
-    mergeableState:
-      candidateMergeable === 'MERGEABLE' || candidateMergeStateStatus === 'CLEAN'
-        ? 'MERGEABLE'
-        : candidateMergeable || candidateMergeStateStatus,
+    mergeableState: normalizeGithubMergeability(candidate),
     labels: Array.isArray(labelNames) ? labelNames : [],
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },

@@ -964,6 +964,52 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
   });
 });
 
+test('maybeDispatchAmaClosureFor preserves explicit conflicting mergeability over CLEAN status', async () => {
+  let observed = null;
+  const result = await maybeDispatchAmaClosureFor({
+    reviewStateRow: makeReviewRow({
+      last_verdict: 'Comment only',
+      risk_class: 'low',
+      remediation_pending: 0,
+      reviewer_login: 'claude-reviewer-lacey',
+    }),
+    dispatchJob: {
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+    },
+    candidate: {
+      headSha: 'abc123',
+      riskClass: 'low',
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'CONFLICTING',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+      branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
+      isDraft: false,
+    },
+    labelNames: ['adversarial-merge-requested'],
+    operatorApprovalEvent: null,
+    adversarialMergeRequestedEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 265,
+    currentRevisionRef: 'abc123',
+    logger: { warn() {} },
+    loadConfigImpl: () => ({
+      getMergeAuthorityConfig() {
+        return { enabled: true };
+      },
+    }),
+    maybeDispatchAmaCloserImpl: async (payload) => {
+      observed = payload;
+      return { dispatched: false, reason: 'fixture' };
+    },
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(observed.prMetadata.mergeableState, 'CONFLICTING');
+});
+
 test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger when neither candidate nor review row carries it', async () => {
   // Root cause of "AMA closed 0 PRs ever": fetchMergeAgentCandidate never sets
   // candidate.riskClass and reviewed_prs has no risk_class column, so the

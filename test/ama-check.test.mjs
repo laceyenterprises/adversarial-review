@@ -22,7 +22,7 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function writeFixtureFiles(tmp, { protectionBody = '{}' } = {}) {
+function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {} } = {}) {
   const paths = {
     pr: join(tmp, 'pr.json'),
     reviews: join(tmp, 'reviews.json'),
@@ -41,6 +41,7 @@ function writeFixtureFiles(tmp, { protectionBody = '{}' } = {}) {
     ],
     author: { login: 'codex-worker-bot' },
     baseRefName: 'main',
+    ...prPatch,
   });
   writeJson(paths.reviews, {
     reviews: [
@@ -130,8 +131,8 @@ function writeCompletedLedgerJob(rootDir, { currentRound, maxRounds }) {
   });
 }
 
-function runAmaCheck(tmp, { branchProtectionRequired, protectionBody }) {
-  const paths = writeFixtureFiles(tmp, { protectionBody });
+function runAmaCheck(tmp, { branchProtectionRequired, protectionBody, prPatch }) {
+  const paths = writeFixtureFiles(tmp, { protectionBody, prPatch });
   const configPath = writeConfig(tmp, { branchProtectionRequired });
   return spawnSync(
     process.execPath,
@@ -153,6 +154,48 @@ function runAmaCheck(tmp, { branchProtectionRequired, protectionBody }) {
     },
   );
 }
+
+test('ama-check normalizes mergeable=MERGEABLE plus mergeStateStatus=CLEAN as mergeable', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-clean-mergeable-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.mergeability.mergeableState, 'MERGEABLE');
+    assert.ok(!verdict.reasons.includes('pr-not-mergeable'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check does not let mergeStateStatus=CLEAN override mergeable=CONFLICTING', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-conflicting-clean-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'CLEAN',
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false);
+    assert.equal(verdict.trace.mergeability.mergeableState, 'CONFLICTING');
+    assert.ok(verdict.reasons.includes('pr-not-mergeable'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 test('ama-check accepts GitHub-plan protection sentinel only when branch protection is waived', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-protection-'));

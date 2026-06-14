@@ -3292,8 +3292,18 @@ async function maybeDispatchAmaClosureFor({
   // Mirrors evaluateRoundBudgetForReview's budget resolution. Fail-safe: any
   // error leaves the signal false (AMA keeps its normal strict gates).
   let reviewCycleExhausted = false;
+  // Resolve the PR's risk class from the remediation ledger (which defaults to
+  // DEFAULT_RISK_CLASS) so AMA eligibility uses the SAME risk class the
+  // round-budget path below already computes. Without this, the eligibility
+  // riskClass fell back to 'unknown' for EVERY PR — fetchMergeAgentCandidate
+  // does not populate candidate.riskClass and reviewed_prs has no risk_class
+  // column — and 'unknown' is always-two-key, so AMA could never auto-close any
+  // PR (closed 0 ever). Hoisted out of the try so it survives a round-budget
+  // probe failure.
+  let ledgerRiskClass = null;
   try {
     const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
+    ledgerRiskClass = remLedger?.latestRiskClass || null;
     const rbResolution = resolveRoundBudgetForJob(
       { riskClass: remLedger.latestRiskClass },
       { rootDir },
@@ -3317,7 +3327,7 @@ async function maybeDispatchAmaClosureFor({
   const reviewState = {
     verdict: String(reviewStateRow?.last_verdict || '').toLowerCase(),
     headSha: candidate?.headSha || currentRevisionRef || null,
-    riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || 'unknown').toLowerCase(),
+    riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: Boolean(reviewStateRow?.remediation_pending),
     reviewCycleExhausted,
     blockingFindingCount: Number(dispatchJob?.blockingFindingCount ?? 0),

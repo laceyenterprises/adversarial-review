@@ -959,6 +959,62 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
   });
 });
 
+test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger when neither candidate nor review row carries it', async () => {
+  // Root cause of "AMA closed 0 PRs ever": fetchMergeAgentCandidate never sets
+  // candidate.riskClass and reviewed_prs has no risk_class column, so the
+  // eligibility riskClass fell back to 'unknown' (always two-key) for EVERY PR.
+  // It must instead use the remediation ledger's latestRiskClass
+  // (DEFAULT_RISK_CLASS = 'medium' for a PR with no jobs) — the same class the
+  // round-budget path already computes.
+  let observed = null;
+  await maybeDispatchAmaClosureFor({
+    reviewStateRow: makeReviewRow({
+      last_verdict: 'Comment only',
+      // risk_class explicitly NULL — production reviewed_prs has no such column.
+      risk_class: null,
+      remediation_pending: 0,
+      reviewer_login: 'claude-reviewer-lacey',
+    }),
+    dispatchJob: {
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+    },
+    candidate: {
+      headSha: 'abc123',
+      // riskClass intentionally omitted — fetchMergeAgentCandidate never sets it.
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+      branchProtection: { requiredContexts: [] },
+      isDraft: false,
+    },
+    labelNames: [],
+    operatorApprovalEvent: null,
+    adversarialMergeRequestedEvent: null,
+    // Fixture repo/PR with no remediation jobs -> latestRiskClass defaults to
+    // DEFAULT_RISK_CLASS ('medium').
+    repoPath: 'laceyenterprises/nonexistent-ama-riskclass-fixture',
+    prNumber: 999999,
+    currentRevisionRef: 'abc123',
+    logger: { warn() {} },
+    loadConfigImpl: () => ({
+      getMergeAuthorityConfig() {
+        return { enabled: true };
+      },
+    }),
+    maybeDispatchAmaCloserImpl: async (payload) => {
+      observed = payload;
+      return { dispatched: false, reason: 'fixture' };
+    },
+  });
+
+  assert.ok(observed, 'AMA closer payload should be built');
+  assert.equal(observed.reviewState.riskClass, 'medium');
+  assert.notEqual(observed.reviewState.riskClass, 'unknown');
+});
+
 test('resolveMergeAgentCoexistenceForWatcher recovers AMA dispatch failures via merge-agent on the normal posted-review path', async () => {
   const decision = await resolveMergeAgentCoexistenceForWatcher({
     reviewStateRow: makeReviewRow(),

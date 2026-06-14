@@ -1586,7 +1586,12 @@ function validateDictPresentKeysOnly(
 
 export function validateSchema(
   doc,
-  { source = null, rawText = null, tolerateForeignTopLevelSections = false } = {},
+  {
+    source = null,
+    rawText = null,
+    tolerateForeignTopLevelSections = false,
+    tolerateNestedUnknownLocalKeys = false,
+  } = {},
 ) {
   const schema = schemaV1();
   const lineMap = rawText ? buildLineMap(rawText, Object.keys(schema.__keys)) : null;
@@ -1638,11 +1643,14 @@ export function validateSchema(
       filtered[topKey] = doc[topKey];
     }
   }
-  // Layer-4 local siblings tolerate NESTED unknown keys too (drop, not crash) —
-  // the strict checked-in config.yaml (Layer 3, not a *.local.yaml source) keeps
-  // raising so genuine typos in version-controlled config are still caught.
-  const tolerateUnknown = isLocalYamlSource(source);
-  return validateDictPresentKeysOnly(filtered, schema, '', source, lineMap, tolerateUnknown);
+  return validateDictPresentKeysOnly(
+    filtered,
+    schema,
+    '',
+    source,
+    lineMap,
+    tolerateNestedUnknownLocalKeys,
+  );
 }
 
 // -------- Module file validation -------------------------------------------
@@ -1689,7 +1697,12 @@ function getLeaf(source, dottedKey) {
 
 const MISSING = Symbol('missing');
 
-function validateModuleDoc(doc, source, rawText) {
+function validateModuleDoc(
+  doc,
+  source,
+  rawText,
+  { tolerateNestedUnknownLocalKeys = false } = {},
+) {
   if (doc === null || doc === undefined) return { validated: {}, aliases: {} };
   if (typeof doc !== 'object' || Array.isArray(doc)) {
     throw new AgentOSConfigError(
@@ -1778,16 +1791,13 @@ function validateModuleDoc(doc, source, rawText) {
     if (k !== 'version') moduleSchema.__keys[k] = v;
   }
   const lineMap = rawText ? buildLineMap(rawText, Object.keys(moduleSchema.__keys)) : null;
-  // Module *.local.yaml siblings tolerate nested unknown keys (drop, not crash);
-  // checked-in module config.yaml stays strict. Mirror of agent-os#1743.
-  const tolerateUnknown = isLocalYamlSource(source);
   const validated = validateDictPresentKeysOnly(
     canonicalBody,
     moduleSchema,
     '',
     source,
     lineMap,
-    tolerateUnknown,
+    tolerateNestedUnknownLocalKeys,
   );
   return { validated, aliases };
 }
@@ -2120,9 +2130,12 @@ export function loadConfig({
         source: local,
         rawText: localRaw,
         tolerateForeignTopLevelSections: true,
+        tolerateNestedUnknownLocalKeys: true,
       });
     } else {
-      const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw);
+      const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw, {
+        tolerateNestedUnknownLocalKeys: true,
+      });
       validatedLocal = validated;
       for (const [moduleKey, canonicalKey] of Object.entries(aliases)) {
         if (!(moduleKey in moduleAliases)) moduleAliases[moduleKey] = canonicalKey;

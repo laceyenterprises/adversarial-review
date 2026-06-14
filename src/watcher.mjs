@@ -4,7 +4,7 @@
  * Also tracks PR lifecycle (merged/closed) and syncs status to Linear automatically.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
@@ -3045,6 +3045,42 @@ async function runFastMergeClosePathIsolated({
 }
 
 /**
+ * Fire-and-forget `hq dag autowalk-on-merge` for a just-merged PR.
+ *
+ * On AMA-enabled hosts PRs merge via this pipeline (AMA closer / merge-agent)
+ * using `gh pr merge`, not `hq adjudicate merge`, so the legacy D5 dag_on_merge
+ * step-advance is dead and the periodic `hq dag autowalk --all` sweep can window
+ * out a specific failed-but-merged step for many ticks. `hq dag
+ * autowalk-on-merge` resolves the merged PR to its dag-run plan-id and runs a
+ * targeted, run-scoped autowalk that promotes the merged step immediately.
+ *
+ * Spawned DETACHED (the subcommand runs reconcile+walk synchronously and can
+ * take a while) so it never blocks the watcher poll loop, and self-gated by
+ * HQ_AUTO_DAG_WALK + a clean no-op for non-dag PRs — so it's safe to fire on
+ * every merge. Best-effort: any spawn error is logged and swallowed.
+ */
+function fireDagAutowalkOnMerge({ repo, prNumber, spawnImpl = spawn, logger = console } = {}) {
+  try {
+    const hqPath = process.env.HQ_BIN || 'hq';
+    const child = spawnImpl(
+      hqPath,
+      ['dag', 'autowalk-on-merge', '--repo', String(repo), '--pr', String(prNumber)],
+      { detached: true, stdio: 'ignore' }
+    );
+    if (child && typeof child.unref === 'function') child.unref();
+    if (child && typeof child.on === 'function') {
+      // A failed exec (ENOENT etc.) surfaces as an async 'error' event; swallow it.
+      child.on('error', (err) => {
+        logger.error(`[watcher] dag autowalk-on-merge spawn failed for ${repo}#${prNumber}: ${err?.message || err}`);
+      });
+    }
+    logger.log(`[watcher] dag autowalk-on-merge fired for ${repo}#${prNumber}`);
+  } catch (err) {
+    logger.error(`[watcher] dag autowalk-on-merge spawn threw for ${repo}#${prNumber}: ${err?.message || err}`);
+  }
+}
+
+/**
  * For every PR we previously marked as "open", check if it has since been
  * merged or closed and update Linear accordingly.
  */
@@ -3077,6 +3113,9 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         pr, repo, prNumber, transition: 'merged',
       });
       stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
+      // Advance the merged PR's dag-run (AMA D5 gate). Detached + self-gated;
+      // a clean no-op for non-dag PRs and when HQ_AUTO_DAG_WALK is disarmed.
+      fireDagAutowalkOnMerge({ repo, prNumber });
       // Closeout capture is intentionally NOT awaited inline here. The
       // gh retry budget for a single scrape (~30–45s worst case) would
       // otherwise stall the gates-deletion and Linear triage sync for
@@ -5341,6 +5380,7 @@ if (isMain) {
 export {
   classifyReviewerFailure,
   createWatcherOctokit,
+  fireDagAutowalkOnMerge,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   probeRoutingTierReadiness,
   evaluateRoundBudgetForReview,

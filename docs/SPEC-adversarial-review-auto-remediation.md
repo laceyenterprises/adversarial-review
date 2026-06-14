@@ -1138,9 +1138,12 @@ removes it only after the hq command exits successfully. Nonzero exits,
 timeouts, missing `HQ_BIN`, SQLite locks, and other launch/runtime failures keep
 the record on disk with `attempts`, `lastAttemptAt`, `lastError.exitCode`,
 `lastError.signal`, and captured stdout/stderr. Later watcher ticks retry
-eligible records even though the PR row is already marked merged. The retry path
-is paced and bounded per poll so a broken hq installation cannot monopolize the
-watcher: `ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_RETRY_MS` defaults to 5 minutes,
+eligible records even though the PR row is already marked merged. Each
+`pollOnce` tick runs one global retry pass after lifecycle sync has enqueued any
+newly merged PRs; lifecycle sync itself does not run retries inside the per-PR
+loop. The retry path is paced and bounded per poll so a broken hq installation
+cannot monopolize the watcher:
+`ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_RETRY_MS` defaults to 5 minutes,
 `ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_PER_POLL` defaults to 2, and
 `ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS` defaults to 2 minutes. After
 `ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_MAX_ATTEMPTS` attempts (default 5), the

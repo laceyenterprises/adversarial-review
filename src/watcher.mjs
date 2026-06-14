@@ -3319,7 +3319,6 @@ async function syncPRLifecycle(octokit, operatorSurface) {
         continue;
       }
       stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
-      await retryPendingDagAutowalkOnMerge();
       // Closeout capture is intentionally NOT awaited inline here. The
       // gh retry budget for a single scrape (~30–45s worst case) would
       // otherwise stall the gates-deletion and Linear triage sync for
@@ -4367,10 +4366,10 @@ async function pollOnce(
   });
 
   await retryPendingMergeAgentLifecycleCleanups();
-  await retryPendingDagAutowalkOnMerge();
 
   // Check lifecycle of previously-seen PRs first
   await syncPRLifecycle(octokit, operatorSurface);
+  await retryPendingDagAutowalkOnMerge();
   await retryPendingMergeCloseouts({ octokit });
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);

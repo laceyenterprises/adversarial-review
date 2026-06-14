@@ -160,3 +160,29 @@ test('retryPendingDagAutowalkOnMerge keeps terminal diagnostics after max attemp
   assert.equal(record.lastError.code, 'ENOENT');
   assert.equal(record.lastError.stderr, 'not found\n');
 });
+
+test('pollOnce keeps dag autowalk-on-merge retry as a single poll-level pass', () => {
+  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const lifecycleStart = source.indexOf('async function syncPRLifecycle(');
+  const pollStart = source.indexOf('async function pollOnce(');
+  assert.notEqual(lifecycleStart, -1);
+  assert.notEqual(pollStart, -1);
+
+  const lifecycleSource = source.slice(lifecycleStart, pollStart);
+  assert.equal(
+    lifecycleSource.includes('await retryPendingDagAutowalkOnMerge('),
+    false,
+    'syncPRLifecycle must enqueue owed work without running the global retry worker per merged PR'
+  );
+
+  const pollSource = source.slice(pollStart, source.indexOf('async function main(', pollStart));
+  const syncIndex = pollSource.indexOf('await syncPRLifecycle(octokit, operatorSurface);');
+  const retryIndex = pollSource.indexOf('await retryPendingDagAutowalkOnMerge();');
+  assert.ok(syncIndex >= 0);
+  assert.ok(retryIndex > syncIndex, 'pollOnce should retry once after lifecycle sync sees new merges');
+  assert.equal(
+    pollSource.match(/await retryPendingDagAutowalkOnMerge\(\);/g)?.length,
+    1,
+    'pollOnce should run the dag autowalk-on-merge retry worker once per tick'
+  );
+});

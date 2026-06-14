@@ -46,6 +46,7 @@ function buildLoaderSource({
     [fileUrl('src', 'reviewer-cascade.mjs')]: 'fixture:reviewer-cascade',
     [fileUrl('src', 'reviewer-reattach.mjs')]: 'fixture:reviewer-reattach',
     [fileUrl('src', 'reviewer-timeout.mjs')]: 'fixture:reviewer-timeout',
+    [fileUrl('src', 'reviewer-broker-refresh.mjs')]: 'fixture:reviewer-broker-refresh',
     [fileUrl('src', 'stale-drift.mjs')]: 'fixture:stale-drift',
     [fileUrl('src', 'watcher-fail-loud.mjs')]: 'fixture:watcher-fail-loud',
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
@@ -217,6 +218,7 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-cascade': "export const CASCADE_FAILURE_CAP = 3; export function classifyReviewerFailure() { return 'unknown'; } export function clearCascadeState() {} export function formatTransientFailureBreakdown() { return ''; } export function isReviewerSubprocessTimeout() { return false; } export function readCascadeState() { return null; } export function recordCascadeFailure() { return { consecutiveTransientFailures: 1, transientFailureBreakdown: {}, backoffMinutes: 1 }; } export function shouldBackoffReviewerSpawn() { return { shouldBackoff: false }; }",
     'fixture:reviewer-reattach': "export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
     'fixture:reviewer-timeout': "export function resolveReviewerTimeoutMs() { return 300000; } export function resolveProgressTimeoutMs() { return 300000; }",
+    'fixture:reviewer-broker-refresh': "globalThis.__watcherClaimLoopBrokerRefreshes = 0; export async function refreshReviewerBrokerTokens() { globalThis.__watcherClaimLoopBrokerRefreshes += 1; return { refreshed: 0, failed: 0, skipped: 3 }; }",
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed-title path'); }",
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
@@ -362,12 +364,84 @@ try {
     fetchCalls,
     operatorWrites: globalThis.__watcherClaimLoopOperatorWrites || [],
     reviewerSpawns: globalThis.__watcherClaimLoopReviewerSpawns || [],
+    brokerRefreshes: globalThis.__watcherClaimLoopBrokerRefreshes || 0,
     pollError: pollError ? String(pollError.message || pollError) : null,
   }));
 } catch (err) {
   console.error(err?.stack || err?.message || err);
   process.exit(1);
 }
+`;
+}
+
+function buildRefreshRunnerSource() {
+  const watcherUrl = fileUrl('src', 'watcher.mjs');
+  return `
+import assert from 'node:assert/strict';
+
+const { refreshReviewerRuntimeAdapter } = await import(${JSON.stringify(watcherUrl)});
+const calls = [];
+const loggerMessages = [];
+const logger = { error: (message) => loggerMessages.push(String(message)) };
+
+let mode = 'native';
+let mtime = 1;
+function loadConfigImpl() {
+  if (mode === 'throw') throw new Error('invalid orchestration mode');
+  return { getOrchestrationMode: () => mode };
+}
+
+function createAdapterImpl({ orchestrationMode }) {
+  calls.push(orchestrationMode);
+  return { describe: () => ({ id: orchestrationMode }) };
+}
+
+const first = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+const second = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(first, second);
+assert.deepEqual(calls, ['native']);
+
+mode = 'agentos';
+const third = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.notEqual(third, second);
+assert.deepEqual(calls, ['native', 'agentos']);
+
+mode = 'throw';
+const fourth = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(fourth, third);
+assert.deepEqual(calls, ['native', 'agentos']);
+assert.ok(loggerMessages.some((message) => /invalid orchestration mode/.test(message)));
+
+mtime = 2;
+mode = 'agentos';
+const fifth = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.notEqual(fifth, fourth);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos']);
 `;
 }
 
@@ -417,7 +491,11 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       'missing-PR detail edge should exercise the synthetic pulls.get fixture'
     );
     assert.deepEqual(summary.githubWrites, []);
-    assert.deepEqual(summary.fetchCalls, []);
+    assert.deepEqual(
+      summary.fetchCalls.filter(([url]) => url !== 'https://api.github.com/user'),
+      []
+    );
+    assert.equal(summary.brokerRefreshes, 1);
     assert.equal(summary.operatorWrites.length, 2);
     assert.deepEqual(
       summary.operatorWrites
@@ -437,6 +515,71 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT),
       'reviewer pass rows should retain the tool root so transcript token fallback can match Claude sessions on disk'
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher reviewer runtime refresh memoizes and falls back on config errors', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-refresh-runtime-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-refresh-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRefreshRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce refreshes broker tokens when orchestration_mode config is invalid', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv({
+          AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agent-os',
+        }),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /roles\.adversarial\.orchestration_mode/);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+    assert.equal(summary.brokerRefreshes, 1);
+    assert.match(summary.pollError, /AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE/);
+    assert.equal(summary.reviewerSpawns.length, 0);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -210,19 +210,60 @@ let reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
   domainId: 'code-pr',
   logger: console,
 });
+let reviewerRuntimeAdapterCache = null;
+let lastKnownReviewerOrchestrationMode = 'native';
+
+function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = 'code-pr') {
+  return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;
+}
 
 function refreshReviewerRuntimeAdapter({
   rootDir = ROOT,
   logger = console,
   loadConfigImpl = loadConfigCached,
+  createAdapterImpl = createReviewerRuntimeAdapterForDomain,
+  domainMtimeImpl = reviewerRuntimeDomainMtimeMs,
 } = {}) {
-  const orchestrationMode = loadConfigImpl().getOrchestrationMode();
-  reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
-    rootDir,
-    domainId: 'code-pr',
-    logger,
-    orchestrationMode,
-  });
+  let orchestrationMode = lastKnownReviewerOrchestrationMode || 'native';
+  try {
+    orchestrationMode = loadConfigImpl().getOrchestrationMode();
+  } catch (err) {
+    logger?.error?.(
+      `[watcher] ERROR config key=roles.adversarial.orchestration_mode: ${err?.message || err}; ` +
+      `keeping reviewer runtime orchestration_mode=${orchestrationMode}`
+    );
+  }
+
+  let domainMtimeMs = null;
+  try {
+    domainMtimeMs = domainMtimeImpl(rootDir, 'code-pr');
+    if (
+      reviewerRuntimeAdapterCache?.adapter &&
+      reviewerRuntimeAdapterCache.orchestrationMode === orchestrationMode &&
+      reviewerRuntimeAdapterCache.domainMtimeMs === domainMtimeMs
+    ) {
+      lastKnownReviewerOrchestrationMode = orchestrationMode;
+      reviewerRuntimeAdapter = reviewerRuntimeAdapterCache.adapter;
+      return reviewerRuntimeAdapter;
+    }
+
+    reviewerRuntimeAdapter = createAdapterImpl({
+      rootDir,
+      domainId: 'code-pr',
+      logger,
+      orchestrationMode,
+    });
+    reviewerRuntimeAdapterCache = {
+      adapter: reviewerRuntimeAdapter,
+      domainMtimeMs,
+      orchestrationMode,
+    };
+    lastKnownReviewerOrchestrationMode = orchestrationMode;
+  } catch (err) {
+    logger?.error?.(
+      `[watcher] ERROR reviewer runtime adapter refresh failed: ${err?.message || err}; keeping existing adapter`
+    );
+  }
   return reviewerRuntimeAdapter;
 }
 
@@ -5752,6 +5793,7 @@ async function main() {
   await sweepReviewerFencesOnStartup();
   await processQueuedFenceCleanupJobs();
   await reconcileOrphanedReviewing(octokit);
+  refreshReviewerRuntimeAdapter();
   await recoverReviewerRunRecords({
     rootDir: ROOT,
     adapter: reviewerRuntimeAdapter,
@@ -5857,6 +5899,7 @@ export {
   handlePostedReviewRow,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
+  refreshReviewerRuntimeAdapter,
   resolveMergeAgentCoexistenceForWatcher,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,

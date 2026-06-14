@@ -18,10 +18,19 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { loadConfigCached } from '../src/config-loader.mjs';
+import {
+  resolveRoundBudgetForJob,
+  summarizePRRemediationLedger,
+} from '../src/follow-up-jobs.mjs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
 
 const USAGE = `\
 Usage:
@@ -32,6 +41,10 @@ Usage:
 Inputs:
   --pr            JSON from \`gh pr view --json number,headRefOid,state,isDraft,
                   mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName\`
+  --repo          owner/name slug for the PR; required for final-hammer
+                  exhaustion recomputation
+  --root-dir      adversarial-review checkout root containing data/follow-up-jobs
+                  (default: repository root containing this script)
   --reviews       JSON from \`gh pr view --json reviews\`
   --protection    JSON from \`gh api repos/<owner>/<repo>/branches/<base>/protection\`
   --timeline      JSON from \`gh api repos/<owner>/<repo>/issues/<n>/timeline --paginate\`
@@ -54,9 +67,11 @@ function parseInputs(argv) {
       timeline: { type: 'string' },
       'reviewed-sha': { type: 'string' },
       'risk-class': { type: 'string' },
-      // AMA final hammer: the watcher passes 'true' when the PR's remediation
-      // round budget is exhausted (a monotonic property — it only ever grows),
-      // authorizing the soft-gate waiver. Absent/anything-but-'true' = strict.
+      repo: { type: 'string' },
+      'root-dir': { type: 'string' },
+      // AMA final hammer: the watcher passes the dispatch-time observation for
+      // audit context only. Exhaustion is recomputed from the durable ledger at
+      // closer runtime before any waiver is applied.
       'review-cycle-exhausted': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -89,6 +104,34 @@ function loadProtectionJson(path, cfg) {
     );
   }
   return parsed;
+}
+
+function recomputeReviewCycleExhausted({ rootDir, repo, prNumber }) {
+  const normalizedRepo = String(repo || '').trim();
+  const normalizedPr = Number(prNumber);
+  if (!normalizedRepo || !Number.isFinite(normalizedPr)) {
+    return false;
+  }
+
+  const ledger = summarizePRRemediationLedger(rootDir, {
+    repo: normalizedRepo,
+    prNumber: normalizedPr,
+  });
+  const resolution = resolveRoundBudgetForJob(
+    { riskClass: ledger.latestRiskClass },
+    { rootDir },
+  );
+  const latestMaxRounds = Number(ledger.latestMaxRounds);
+  const effectiveRoundBudget =
+    Number.isInteger(latestMaxRounds) && latestMaxRounds > resolution.roundBudget
+      ? latestMaxRounds
+      : resolution.roundBudget;
+
+  return (
+    Number.isFinite(effectiveRoundBudget)
+    && effectiveRoundBudget > 0
+    && Number(ledger.completedRoundsForPR) >= effectiveRoundBudget
+  );
 }
 
 /**
@@ -211,13 +254,30 @@ function main(argv = process.argv.slice(2)) {
     process.stderr.write(`error: failed to load input JSON: ${err.message}\n`);
     return 1;
   }
+  const dispatchedReviewCycleExhausted =
+    String(args['review-cycle-exhausted'] || '').trim().toLowerCase() === 'true';
+  let reviewCycleExhausted = false;
+  if (dispatchedReviewCycleExhausted) {
+    try {
+      reviewCycleExhausted = recomputeReviewCycleExhausted({
+        rootDir: args['root-dir'] ? resolve(args['root-dir']) : DEFAULT_ROOT_DIR,
+        repo: args.repo,
+        prNumber: prJson?.number,
+      });
+    } catch (err) {
+      process.stderr.write(
+        `warning: failed to recompute review-cycle exhaustion; final-hammer waiver disabled: ${err.message}\n`,
+      );
+      reviewCycleExhausted = false;
+    }
+  }
   const reviewState = buildReviewState({
     reviewsJson,
     prJson,
     timelineJson,
     reviewedSha: args['reviewed-sha'],
     riskClass: args['risk-class'],
-    reviewCycleExhausted: String(args['review-cycle-exhausted'] || '').trim().toLowerCase() === 'true',
+    reviewCycleExhausted,
   });
   const prMetadata = buildPrMetadata({ prJson, protectionJson });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg);

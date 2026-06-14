@@ -368,6 +368,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.requiredGateContext
  * @param {string} args.auditPath       — absolute path inside HQ_ROOT, used only inside the closer
  * @param {string} args.hqRoot          — HQ root path (closer passes to `ama-audit append --hq-root`)
+ * @param {string} args.rootDir         — adversarial-review checkout root for ama-check ledger probes
  * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
  * @param {string} args.dispatchedAt    — ISO 8601 UTC
@@ -385,6 +386,7 @@ export function composeCloserPrompt({
   requiredGateContext,
   auditPath,
   hqRoot,
+  rootDir = SUBMODULE_ROOT,
   hqOwnerUser,
   reviewedBy,
   dispatchedAt,
@@ -402,11 +404,13 @@ export function composeCloserPrompt({
     REQUIRED_GATE_CONTEXT: requiredGateContext,
     AUDIT_PATH: auditPath,
     HQ_ROOT: hqRoot,
+    ROOT_DIR: rootDir,
     HQ_OWNER: hqOwnerUser,
     REVIEWED_BY: reviewedBy,
     DISPATCHED_AT: dispatchedAt,
     AMA_TRAILERS: amaTrailers,
-    // Final-hammer signal forwarded to the closer's ama-check recheck.
+    // Dispatch-time final-hammer observation forwarded only as audit context;
+    // ama-check recomputes the durable ledger state before applying waivers.
     REVIEW_CYCLE_EXHAUSTED: reviewCycleExhausted === true ? 'true' : 'false',
   });
 }
@@ -511,14 +515,15 @@ export async function maybeDispatchAmaCloser({
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,
     hqRoot,
+    rootDir,
     hqOwnerUser: ownerUser || 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,
     amaTrailers,
     templateBody,
-    // The watcher's eligibility verdict already honored the final-hammer signal;
-    // forward it so the closer's fresh ama-check recheck reaches the same verdict
-    // instead of re-blocking on the (still unconverged) review verdict.
+    // Forward the dispatch-time final-hammer observation only as context; the
+    // closer's ama-check invocation recomputes exhaustion from the current
+    // follow-up ledger before it honors any waiver.
     reviewCycleExhausted: reviewState?.reviewCycleExhausted === true,
   });
 

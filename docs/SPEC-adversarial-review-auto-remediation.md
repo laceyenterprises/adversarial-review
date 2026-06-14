@@ -43,8 +43,12 @@ review-cycle is **exhausted** once the PR has consumed its full remediation
 round budget — `completedRoundsForPR >= roundBudget` (the same budget
 `evaluateRoundBudgetForReview` resolves: the risk-class default, raised by any
 persisted higher `maxRounds`). The watcher computes this signal
-(`reviewState.reviewCycleExhausted`) at AMA dispatch time; any probe error
-fails safe by treating the cycle as NOT exhausted (normal strict gates apply).
+(`reviewState.reviewCycleExhausted`) at AMA dispatch time only as an eligibility
+precheck and audit observation. The closer's `ama-check` invocation must
+recompute exhaustion at merge time from the durable follow-up ledger for the
+current repo/PR before applying any waiver, using the same effective budget
+resolution. Any probe error, missing repo identity, or ledger read failure fails
+safe by treating the cycle as NOT exhausted (normal strict gates apply).
 
 When the cycle is exhausted, the eligibility predicate **waives the soft,
 convergence-dependent gates** so AMA can land the PR:

@@ -420,6 +420,7 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
     requiredGateContext: dispatchContext.requiredGateContext,
     auditPath,
     hqRoot: dispatchContext.hqRoot,
+    rootDir: dispatchContext.rootDir,
     hqOwnerUser: 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
     dispatchedAt: dispatchContext.dispatchedAt,

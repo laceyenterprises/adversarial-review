@@ -154,10 +154,9 @@ function resolveSettledReviewVerdict(
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
     return { verdict: '', remediationPending: true };
   }
-  const body =
-    latestJob && typeof latestJob.reviewBody === 'string' && latestJob.reviewBody.trim()
-      ? latestJob.reviewBody
-      : extractReviewBodyFromRow(reviewRow);
+  const body = latestJob
+    ? latestJob.reviewBody
+    : extractReviewBodyFromRow(reviewRow);
   const verdict = String(normalizeReviewVerdict(extractReviewVerdict(body)) || '').toLowerCase();
   return { verdict, remediationPending: false };
 }

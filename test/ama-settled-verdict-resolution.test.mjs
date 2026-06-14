@@ -95,10 +95,32 @@ test('falls back to the review-row body when there is no follow-up job', () => {
   assert.equal(res.remediationPending, false);
 });
 
-test('no job and no row body yields empty verdict (not falsely settled)', () => {
+test('completed latest job with missing body does not fall back to stale settled row verdict', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 7,
+    reviewRow: { review_body: '## Verdict\n\nComment only' },
+    latestJobFinder: finder({ status: 'completed' }),
+  });
+  assert.equal(res.verdict, '');
+  assert.equal(res.remediationPending, false);
+});
+
+test('completed latest job with blank body does not fall back to stale settled row verdict', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 8,
+    reviewRow: { review_body: '## Verdict\n\nComment only' },
+    latestJobFinder: finder({ status: 'completed', reviewBody: '   \n\t' }),
+  });
+  assert.equal(res.verdict, '');
+  assert.equal(res.remediationPending, false);
+});
+
+test('no job and no row body yields empty verdict (not falsely settled)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 9,
     reviewRow: { review_status: 'posted' },
     latestJobFinder: finder(null),
   });

@@ -12,6 +12,7 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { CASCADE_FAILURE_CAP, recordCascadeFailure } from '../src/reviewer-cascade.mjs';
+import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
 import {
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
@@ -2341,7 +2342,7 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
 
 test('dispatchMergeAgentForPR is mode-invariant for merge-class dispatch', async () => {
   const dispatches = [];
-  for (const orchestrationMode of ['native', 'agentos']) {
+  for (const orchestrationMode of ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE) {
     const rootDir = mkdtempSync(path.join(tmpdir(), `adversarial-review-${orchestrationMode}-`));
     const hqCalls = [];
     const { logger, events } = buildStructuredLogger();
@@ -2368,6 +2369,7 @@ test('dispatchMergeAgentForPR is mode-invariant for merge-class dispatch', async
 
   const nativeDispatch = dispatches.find(entry => entry.orchestrationMode === 'native');
   const agentosDispatch = dispatches.find(entry => entry.orchestrationMode === 'agentos');
+  assert.equal(dispatches.length, ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE.length);
   assert.equal(nativeDispatch.result.decision, 'dispatch');
   assert.equal(agentosDispatch.result.decision, 'dispatch');
   assert.equal(nativeDispatch.hqCalls.length, 1, 'native must still launch via hq dispatch');

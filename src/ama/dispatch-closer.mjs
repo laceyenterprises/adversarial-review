@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
   amaAuditFilePath,
   amaAuditTraceRef,
@@ -69,7 +70,7 @@ const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const AMA_CLOSER_RETRYABLE_STATUSES = new Set(['failed', 'cancelled', 'canceled', 'superseded', 'not-found']);
-const MERGE_CLASS_ORCHESTRATION_MODES = new Set(['native', 'agentos']);
+const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE);
 const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'succeeded',
   'failed-without-merge',
@@ -884,9 +885,6 @@ export async function maybeDispatchAmaCloser({
     workerClass,
     completionShape: 'decision-only',
   });
-  if (mergeDispatchRoute !== 'hq-dispatch') {
-    throw new Error(`[ama-closer] unsupported merge dispatch route: ${mergeDispatchRoute}`);
-  }
   const args = [
     'dispatch',
     '--worker-class', workerClass,

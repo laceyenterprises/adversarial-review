@@ -3706,34 +3706,40 @@ async function maybeDispatchAmaClosureFor({
     orchestrationMode,
   };
 
-  const result = await maybeDispatchAmaCloserImpl({
-    reviewState,
-    prMetadata,
-    cfg,
-    options: {
-      env: process.env,
-      adversarialMergeRequested: adversarialMergeRequestedEvent
-        ? {
-            applied: true,
-            observedRevisionRef:
-              adversarialMergeRequestedEvent.headSha ||
-              adversarialMergeRequestedEvent.head_sha ||
-              null,
-            actor: adversarialMergeRequestedEvent.actor || null,
-            eventId:
-              adversarialMergeRequestedEvent.id ||
-              adversarialMergeRequestedEvent.nodeId ||
-              null,
-            observedAt:
-              adversarialMergeRequestedEvent.createdAt ||
-              adversarialMergeRequestedEvent.created_at ||
-              null,
-          }
-        : null,
-    },
-    dispatchContext,
-    logger,
-  });
+  let result;
+  try {
+    result = await maybeDispatchAmaCloserImpl({
+      reviewState,
+      prMetadata,
+      cfg,
+      options: {
+        env: process.env,
+        adversarialMergeRequested: adversarialMergeRequestedEvent
+          ? {
+              applied: true,
+              observedRevisionRef:
+                adversarialMergeRequestedEvent.headSha ||
+                adversarialMergeRequestedEvent.head_sha ||
+                null,
+              actor: adversarialMergeRequestedEvent.actor || null,
+              eventId:
+                adversarialMergeRequestedEvent.id ||
+                adversarialMergeRequestedEvent.nodeId ||
+                null,
+              observedAt:
+                adversarialMergeRequestedEvent.createdAt ||
+                adversarialMergeRequestedEvent.created_at ||
+                null,
+            }
+          : null,
+      },
+      dispatchContext,
+      logger,
+    });
+  } catch (err) {
+    logger?.warn?.(`[watcher] AMA dispatch failed: ${err?.message || err}`);
+    return { dispatched: false, reason: 'ama-dispatch-failed', amaEnabled: Boolean(cfg?.enabled) };
+  }
   // AMA-06N — expose `amaEnabled` so the watcher's coexistence
   // decision (downstream of this helper) can branch on it. The
   // upstream code paths (`cfg-load-failed`, `ama-disabled`) already

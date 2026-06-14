@@ -12,6 +12,7 @@ import {
   maybeDispatchAmaCloser,
   substituteTemplate,
 } from '../src/ama/dispatch-closer.mjs';
+import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
 import {
   amaAuditFilePath,
   amaAuditTraceRef,
@@ -276,7 +277,7 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
 
 test('maybeDispatchAmaCloser is mode-invariant for merge-class dispatch', async (t) => {
   const dispatches = [];
-  for (const orchestrationMode of ['native', 'agentos']) {
+  for (const orchestrationMode of ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE) {
     const rootDir = mkdtempSync(join(tmpdir(), `ama-dispatch-${orchestrationMode}-`));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
@@ -305,6 +306,7 @@ test('maybeDispatchAmaCloser is mode-invariant for merge-class dispatch', async 
 
   const nativeDispatch = dispatches.find(entry => entry.orchestrationMode === 'native');
   const agentosDispatch = dispatches.find(entry => entry.orchestrationMode === 'agentos');
+  assert.equal(dispatches.length, ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE.length);
   assert.equal(nativeDispatch.result.dispatched, true);
   assert.equal(agentosDispatch.result.dispatched, true);
   assert.equal(nativeDispatch.calls.length, 1, 'native must still launch via hq dispatch');

@@ -46,7 +46,7 @@ import {
   MODULE_CONFIG_PATH,
   validateStartupRoleConfig,
 } from './role-config.mjs';
-import { loadConfigCached } from './config-loader.mjs';
+import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
@@ -63,7 +63,7 @@ const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
 const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
-const MERGE_CLASS_ORCHESTRATION_MODES = new Set(['native', 'agentos']);
+const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE);
 const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WORKER_ID_CLASS_PREFIXES = [
   'claude-code',
@@ -3839,9 +3839,6 @@ async function dispatchMergeAgentForPR({
     prNumber,
     workerClass: mergeAgentWorkerClass,
   });
-  if (mergeDispatchRoute !== 'hq-dispatch') {
-    throw new Error(`[merge-agent] unsupported merge dispatch route: ${mergeDispatchRoute}`);
-  }
   const hqDispatchHeadArgs = [
     'dispatch',
     '--worker-class', mergeAgentWorkerClass,

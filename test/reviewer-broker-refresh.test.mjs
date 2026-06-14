@@ -364,6 +364,56 @@ test('refreshes multiple enabled roles independently; one failing does not block
   assert.equal(summary.failed.length, 1);
 });
 
+test('honors process.env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS (documented operator knob)', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  // A custom small timeout must be applied to the broker fetch. We prove it by
+  // observing the abort fires (the fetch never resolves on its own).
+  const env = makeEnv({ REVIEWER_TOKEN_FETCH_TIMEOUT_MS: '25' });
+  let aborted = false;
+  const fetchImpl = (url, opts) =>
+    new Promise((_resolve, reject) => {
+      opts.signal.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')); });
+    });
+  const summary = await refreshReviewerBrokerTokens({
+    env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog, // no explicit timeoutMs → env wins
+  });
+  assert.equal(aborted, true);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token'); // fail-safe
+  assert.equal(summary.failed.length, 1);
+});
+
+test('honors process.env.REVIEWER_TOKEN_POST_SLACK_MS in the min-lifetime calculation', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  // resolveReviewerTimeoutMs default is 20m. With a large post-slack the
+  // required lifetime exceeds a 25-min token, so it must be REJECTED; the
+  // built-in 2-min slack would have accepted it.
+  const env = makeEnv({ REVIEWER_TOKEN_POST_SLACK_MS: String(10 * 60 * 1000) }); // 10m → required 30m
+  const t0 = 4_000_000;
+  const fetchImpl = async () =>
+    brokerOk('github-app-claude-reviewer', 'ghs_25m', {
+      expiresAt: new Date(t0 + 25 * 60 * 1000).toISOString(), // 25m < 30m required
+    });
+  const summary = await refreshReviewerBrokerTokens({
+    env, now: t0, fetchImpl, readFileImpl: readSecret, log: silentLog, // no explicit postSlackMs → env wins
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token'); // rejected: 25m < 30m
+  assert.equal(summary.failed.length, 1);
+  assert.match(summary.failed[0].reason, /expires too soon/);
+});
+
+test('an invalid env knob falls back to the built-in default (does not disable the bound)', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv({ REVIEWER_TOKEN_POST_SLACK_MS: 'not-a-number' });
+  const t0 = 4_000_000;
+  // 25m token: with the DEFAULT 2-min slack, required ~22m, so 25m is accepted.
+  const fetchImpl = async () =>
+    brokerOk('github-app-claude-reviewer', 'ghs_25m', {
+      expiresAt: new Date(t0 + 25 * 60 * 1000).toISOString(),
+    });
+  await refreshReviewerBrokerTokens({ env, now: t0, fetchImpl, readFileImpl: readSecret, log: silentLog });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_25m'); // accepted under the fallback default
+});
+
 test('role table covers the three reviewer families', () => {
   const roles = BROKER_REVIEWER_ROLES.map((r) => r.role).sort();
   assert.deepEqual(roles, ['claude-reviewer', 'codex-reviewer', 'gemini-reviewer']);

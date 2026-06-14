@@ -66,6 +66,18 @@ function roleUpper(role) {
   return String(role).replace(/-/g, '_').toUpperCase();
 }
 
+// Resolve an operator-tunable millisecond knob from env. A present value must
+// parse to a finite, strictly-positive number; anything else (missing, blank,
+// non-numeric, <= 0) falls back to the built-in default so a typo can never
+// disable the bound or hand out a zero-lifetime token.
+function resolvePositiveMsEnv(rawValue, fallbackMs) {
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') {
+    return fallbackMs;
+  }
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs;
+}
+
 // Module-level schedule clock, keyed by envVar → { nextRefreshAtMs,
 // configFingerprint }. nextRefreshAtMs is derived from the broker's expires_at
 // minus skew, or a fallback TTL. The fingerprint forces an immediate re-fetch
@@ -179,10 +191,19 @@ export async function refreshReviewerBrokerTokens({
   log = console,
   skewMs = REVIEWER_TOKEN_REFRESH_SKEW_MS,
   fallbackTtlMs = REVIEWER_TOKEN_FALLBACK_TTL_MS,
-  timeoutMs = REVIEWER_TOKEN_FETCH_TIMEOUT_MS,
+  timeoutMs = null,
+  postSlackMs = null,
   minTokenLifetimeMs = null,
   force = false,
 } = {}) {
+  // Operator-tunable knobs (documented in
+  // docs/SPEC-adversarial-review-auto-remediation.md). Explicit function args
+  // win (tests); otherwise resolve + validate from env so the documented
+  // process.env contract is actually honored, falling back to the constants.
+  const effectiveTimeoutMs =
+    timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
+  const effectivePostSlackMs =
+    postSlackMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_POST_SLACK_MS, REVIEWER_TOKEN_POST_SLACK_MS);
   const summary = { refreshed: [], skipped: [], failed: [] };
   for (const { role, envVar, flag } of BROKER_REVIEWER_ROLES) {
     const configFingerprint = brokerConfigFingerprint(brokerConfigForRole({ role, env, flag }));
@@ -211,9 +232,10 @@ export async function refreshReviewerBrokerTokens({
         env,
         fetchImpl,
         readFileImpl,
-        timeoutMs,
+        timeoutMs: effectiveTimeoutMs,
       });
-      const requiredLifetimeMs = minTokenLifetimeMs ?? resolveReviewerTimeoutMs(env) + REVIEWER_TOKEN_POST_SLACK_MS;
+      const requiredLifetimeMs =
+        minTokenLifetimeMs ?? resolveReviewerTimeoutMs(env) + effectivePostSlackMs;
       if (expiresAtMs != null && expiresAtMs - now <= requiredLifetimeMs) {
         throw new Error(
           `broker token expires too soon for reviewer handoff: remaining=${expiresAtMs - now}ms minimum=${requiredLifetimeMs}ms`

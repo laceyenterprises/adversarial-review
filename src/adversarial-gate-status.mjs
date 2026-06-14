@@ -137,28 +137,44 @@ function extractReviewBodyFromRow(reviewRow) {
  * the row, got `undefined` -> verdict `''` -> never in SETTLED_SUCCESS_VERDICTS
  * -> AMA reported `verdict-not-settled-success` for every PR and closed 0 ever
  * (the same phantom-column class as the `risk_class` fix in the AMA path). This
- * mirrors the gate's ordering: an active or queued-re-review remediation is NOT
- * settled; everything else resolves the verdict from the posted body.
+ * mirrors the gate's ordering: non-posted review rows and active or
+ * queued-re-review remediation are NOT settled, and review-based authority is
+ * only current when reviewer_head_sha matches the live head.
  *
- * @returns {{verdict: string, remediationPending: boolean}}
+ * @returns {{verdict: string, remediationPending: boolean, reviewedHeadSha: string|null}}
  */
 function resolveSettledReviewVerdict(
   rootDir,
-  { repo, prNumber, reviewRow = null, latestJobFinder = findLatestFollowUpJobForPR } = {}
+  {
+    repo,
+    prNumber,
+    reviewRow = null,
+    currentHeadSha = null,
+    latestJobFinder = findLatestFollowUpJobForPR,
+  } = {}
 ) {
+  const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
+  const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
+  if (reviewStatus !== 'posted') {
+    return { verdict: '', remediationPending: false, reviewedHeadSha };
+  }
+  if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
+    return { verdict: '', remediationPending: false, reviewedHeadSha };
+  }
+
   const latestJob = latestJobFinder(rootDir, { repo, prNumber });
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
   if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {
-    return { verdict: '', remediationPending: true };
+    return { verdict: '', remediationPending: true, reviewedHeadSha };
   }
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
-    return { verdict: '', remediationPending: true };
+    return { verdict: '', remediationPending: true, reviewedHeadSha };
   }
   const body = latestJob
     ? latestJob.reviewBody
     : extractReviewBodyFromRow(reviewRow);
   const verdict = String(normalizeReviewVerdict(extractReviewVerdict(body)) || '').toLowerCase();
-  return { verdict, remediationPending: false };
+  return { verdict, remediationPending: false, reviewedHeadSha };
 }
 
 function truncateDescription(description) {

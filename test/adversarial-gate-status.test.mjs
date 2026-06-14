@@ -1047,6 +1047,69 @@ test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger
   assert.equal(eligibility.trace.riskClass.requiresTwoKey, false);
 });
 
+test('maybeDispatchAmaClosureFor carries stale reviewed head into AMA instead of current PR head', async () => {
+  let observed = null;
+  await maybeDispatchAmaClosureFor({
+    reviewStateRow: makeReviewRow({
+      review_body: '## Summary\nClean on the old head.\n## Verdict\nComment only',
+      reviewer_head_sha: 'head-a-reviewed',
+      reviewer_login: 'claude-reviewer-lacey',
+    }),
+    dispatchJob: {
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+    },
+    candidate: {
+      headSha: 'head-b-current',
+      riskClass: 'low',
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [],
+      branchProtection: { requiredContexts: [] },
+      isDraft: false,
+    },
+    labelNames: [],
+    operatorApprovalEvent: null,
+    adversarialMergeRequestedEvent: null,
+    repoPath: 'laceyenterprises/nonexistent-ama-stale-review-head-fixture',
+    prNumber: 999998,
+    currentRevisionRef: 'head-b-current',
+    logger: { warn() {} },
+    loadConfigImpl: () => ({
+      getMergeAuthorityConfig() {
+        return {
+          enabled: true,
+          eligibility: {
+            riskClasses: ['low', 'medium', 'high', 'critical'],
+            highRiskRequiresTwoKey: false,
+          },
+          branchProtection: { required: false },
+        };
+      },
+    }),
+    maybeDispatchAmaCloserImpl: async (payload) => {
+      observed = payload;
+      return { dispatched: false, reason: 'fixture' };
+    },
+  });
+
+  assert.ok(observed, 'AMA closer payload should be built');
+  assert.equal(observed.reviewState.verdict, '');
+  assert.equal(observed.reviewState.headSha, 'head-a-reviewed');
+  assert.equal(observed.prMetadata.headSha, 'head-b-current');
+
+  const eligibility = isEligibleForAmaClosure(
+    observed.reviewState,
+    observed.prMetadata,
+    observed.cfg,
+    observed.options,
+  );
+  assert.ok(eligibility.reasons.includes('stale-review-head'));
+  assert.ok(eligibility.reasons.includes('verdict-not-settled-success'));
+});
+
 test('resolveMergeAgentCoexistenceForWatcher recovers AMA dispatch failures via merge-agent on the normal posted-review path', async () => {
   const decision = await resolveMergeAgentCoexistenceForWatcher({
     reviewStateRow: makeReviewRow(),

@@ -3336,10 +3336,12 @@ async function maybeDispatchAmaClosureFor({
     repo: repoPath,
     prNumber,
     reviewRow: reviewStateRow,
+    currentHeadSha: candidate?.headSha || currentRevisionRef || null,
   });
+  const reviewAuthorityHead = settledReview.reviewedHeadSha || candidate?.headSha || currentRevisionRef || null;
   const reviewState = {
     verdict: settledReview.verdict,
-    headSha: candidate?.headSha || currentRevisionRef || null,
+    headSha: reviewAuthorityHead,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: settledReview.remediationPending,
     reviewCycleExhausted,
@@ -3358,7 +3360,7 @@ async function maybeDispatchAmaClosureFor({
   };
   const prMetadata = {
     prNumber,
-    headSha: reviewState.headSha,
+    headSha: candidate?.headSha || currentRevisionRef || null,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
     mergeableState: String(candidate?.mergeStateStatus || candidate?.mergeable || '').toUpperCase(),

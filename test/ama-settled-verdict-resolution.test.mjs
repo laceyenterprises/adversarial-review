@@ -29,7 +29,7 @@ test('approved verdict resolves to approved', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 1,
-    reviewRow: {},
+    reviewRow: { review_status: 'posted' },
     latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nApproved' }),
   });
   assert.equal(res.verdict, 'approved');
@@ -40,7 +40,7 @@ test('request-changes verdict is NOT settled-success (verdict != comment-only/ap
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 2,
-    reviewRow: {},
+    reviewRow: { review_status: 'posted' },
     latestJobFinder: finder({ status: 'stopped', reviewBody: '## Verdict\n\nRequest changes' }),
   });
   assert.equal(res.verdict, 'request-changes');
@@ -51,7 +51,7 @@ test('an in-progress remediation is remediation-pending, not settled', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 3,
-    reviewRow: {},
+    reviewRow: { review_status: 'posted' },
     latestJobFinder: finder({ status: 'in-progress', reviewBody: '## Verdict\n\nComment only' }),
   });
   assert.equal(res.verdict, '');
@@ -62,7 +62,7 @@ test('a pending remediation is remediation-pending, not settled', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 4,
-    reviewRow: {},
+    reviewRow: { review_status: 'posted' },
     latestJobFinder: finder({ status: 'pending', reviewBody: '## Verdict\n\nApproved' }),
   });
   assert.equal(res.verdict, '');
@@ -73,7 +73,7 @@ test('a completed job with a queued re-review is remediation-pending, not settle
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 5,
-    reviewRow: {},
+    reviewRow: { review_status: 'posted' },
     latestJobFinder: finder({
       status: 'completed',
       reReview: { requested: true },
@@ -88,7 +88,7 @@ test('falls back to the review-row body when there is no follow-up job', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 6,
-    reviewRow: { review_body: '## Verdict\n\nComment only' },
+    reviewRow: { review_status: 'posted', review_body: '## Verdict\n\nComment only' },
     latestJobFinder: finder(null),
   });
   assert.equal(res.verdict, 'comment-only');
@@ -104,6 +104,48 @@ test('completed latest job with missing body does not fall back to stale settled
   });
   assert.equal(res.verdict, '');
   assert.equal(res.remediationPending, false);
+});
+
+for (const reviewStatus of ['pending', 'reviewing', 'pending-upstream']) {
+  test(`${reviewStatus} review rows do not reuse an old clean body as settled`, () => {
+    const res = resolveSettledReviewVerdict('/root', {
+      repo: 'acme/agent-os',
+      prNumber: 10,
+      reviewRow: {
+        review_status: reviewStatus,
+        review_body: '## Verdict\n\nComment only',
+        reviewer_head_sha: 'head-a',
+      },
+      currentHeadSha: 'head-a',
+      latestJobFinder: finder({
+        status: 'completed',
+        reviewBody: '## Verdict\n\nApproved',
+      }),
+    });
+    assert.equal(res.verdict, '');
+    assert.equal(res.remediationPending, false);
+    assert.equal(res.reviewedHeadSha, 'head-a');
+  });
+}
+
+test('posted rows with stale reviewer_head_sha do not resolve settled-success', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 11,
+    reviewRow: {
+      review_status: 'posted',
+      review_body: '## Verdict\n\nComment only',
+      reviewer_head_sha: 'head-a',
+    },
+    currentHeadSha: 'head-b',
+    latestJobFinder: finder({
+      status: 'completed',
+      reviewBody: '## Verdict\n\nComment only',
+    }),
+  });
+  assert.equal(res.verdict, '');
+  assert.equal(res.remediationPending, false);
+  assert.equal(res.reviewedHeadSha, 'head-a');
 });
 
 test('completed latest job with blank body does not fall back to stale settled row verdict', () => {

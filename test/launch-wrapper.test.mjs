@@ -49,6 +49,7 @@ function writeExecutable(filePath, body) {
 async function runMaintainerWatcherLauncher(scriptName, {
   alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
   brokerMode = 'healthy',
+  ghOnPath = true,
   localAlertTo = null,
   localLinearEnv = null,
   opCliPath = null,
@@ -90,7 +91,8 @@ async function runMaintainerWatcherLauncher(scriptName, {
   }
 
   const fakeNode = join(fakeBin, 'node');
-  const fakeGh = join(fakeBin, 'gh');
+  const fakeGh = ghOnPath ? join(fakeBin, 'gh') : join(root, 'usr-local-bin', 'gh');
+  mkdirSync(dirname(fakeGh), { recursive: true });
 	  writeExecutable(
 	    fakeNode,
 	    '#!/bin/bash\n'
@@ -209,6 +211,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
     .replaceAll('/Users/airlock/agent-os', join(root, 'agent-os'))
     .replaceAll('/Users/airlock/agent-os/tools/adversarial-review', fakeRepo)
     .replaceAll('/opt/homebrew/bin/node', fakeNode)
+    .replaceAll('/usr/local/bin/gh', fakeGh)
     .replaceAll('/opt/homebrew/bin/gh', fakeGh)
     .replaceAll('/opt/homebrew/bin/op', fakeOp)
     .replaceAll('/usr/local/bin/op', fakeOp)
@@ -290,6 +293,21 @@ test('launcher scripts do not hardcode operator identity defaults', () => {
     assert.doesNotMatch(script, operatorEmailDomain);
     assert.doesNotMatch(script, /paul\s+lacey/i);
     assert.doesNotMatch(script, standaloneOrgName);
+  }
+});
+
+test('launcher scripts resolve gh dynamically for GitHub token lookup', () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+    'adversarial-follow-up-tick.sh',
+  ]) {
+    const script = readLauncherScript(scriptName);
+    assert.match(script, /resolve_gh_bin\(\)/);
+    assert.match(script, /command -v gh/);
+    assert.match(script, /\/usr\/local\/bin\/gh/);
+    assert.match(script, /\/opt\/homebrew\/bin\/gh/);
+    assert.doesNotMatch(script, /\/opt\/homebrew\/bin\/gh auth token/);
   }
 });
 
@@ -382,6 +400,22 @@ test('maintainer watcher launchers resolve ALERT_TO through configured op ref', 
     });
     assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
     assert.doesNotMatch(result.stderr, /Cliovault/);
+  }
+});
+
+test('maintainer launchers resolve gh when only the signed /usr/local fallback exists', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+    'adversarial-follow-up-tick.sh',
+  ]) {
+    const result = await runMaintainerWatcherLauncher(scriptName, {
+      ghOnPath: false,
+      extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+    });
+    assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
   }
 });
 

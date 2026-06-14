@@ -90,6 +90,29 @@ OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="adversarial-watcher" /opt/homeb
   }
 export OP_SERVICE_ACCOUNT_TOKEN
 
+resolve_gh_bin() {
+  local configured_gh_bin gh_bin
+  configured_gh_bin="${ADVERSARIAL_REVIEW_GH_CLI:-${GH_BIN:-}}"
+  if [[ -n "$configured_gh_bin" ]]; then
+    if [[ -x "$configured_gh_bin" ]]; then
+      printf '%s' "$configured_gh_bin"
+      return 0
+    fi
+    echo "[adversarial-watcher] WARN: configured gh CLI '$configured_gh_bin' is not executable; falling back to PATH/signed-release discovery." >&2
+  fi
+  if gh_bin="$(command -v gh 2>/dev/null)" && [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
+    printf '%s' "$gh_bin"
+    return 0
+  fi
+  for gh_bin in /usr/local/bin/gh /opt/homebrew/bin/gh; do
+    if [[ -x "$gh_bin" ]]; then
+      printf '%s' "$gh_bin"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Resolve GitHub token from gh CLI keychain.
 # Failure here MUST sleep before exit. Without the sleep, launchd's
 # KeepAlive=true + ThrottleInterval=30 turns a missing `gh auth token`
@@ -97,9 +120,14 @@ export OP_SERVICE_ACCOUNT_TOKEN
 # etc.) into a 30-second respawn storm. Same fail-once shape as the
 # 1Password sleep guards added in #139 (op-read failures); the gh path
 # was missed in that pass and produces an identical respawn-storm shape.
-export GITHUB_TOKEN=$(/opt/homebrew/bin/gh auth token 2>/dev/null)
+GH_BIN="$(resolve_gh_bin || true)"
+if [[ -n "$GH_BIN" ]]; then
+  export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
+else
+  export GITHUB_TOKEN=""
+fi
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN from gh keychain" >&2
+  echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN from gh keychain via ${GH_BIN:-gh}" >&2
   echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the gh credential and bootout the agent to recover sooner." >&2
   sleep 3600
   exit 1

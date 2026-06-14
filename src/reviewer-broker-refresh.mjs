@@ -25,6 +25,7 @@
 // keeps working until the broker recovers.
 
 import { readFileSync } from 'node:fs';
+import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
 
@@ -46,6 +47,11 @@ export const REVIEWER_TOKEN_FALLBACK_TTL_MS = 20 * 60 * 1000;
 // poll loop on a wedged broker. On timeout we fail-safe (keep the old token).
 export const REVIEWER_TOKEN_FETCH_TIMEOUT_MS = 5_000;
 
+// A reviewer subprocess snapshots process.env at spawn and may run until the
+// hard reviewer timeout before posting to GitHub. Only hand off tokens that can
+// survive that runtime plus a little post slack.
+export const REVIEWER_TOKEN_POST_SLACK_MS = 2 * 60 * 1000;
+
 // The reviewer roles that can be broker-backed. Mirrors the routes in
 // watcher.mjs + scripts/adversarial-watcher-start.sh. `envVar` is the
 // destination process.env key the reviewer subprocess reads (botTokenEnv);
@@ -60,24 +66,50 @@ function roleUpper(role) {
   return String(role).replace(/-/g, '_').toUpperCase();
 }
 
-// Module-level schedule clock, keyed by envVar → the ms timestamp at/after
-// which the token should be re-fetched (derived from the broker's expires_at
-// minus skew, or a fallback TTL). Exported reset for tests.
-const nextRefreshAtMs = new Map();
+// Module-level schedule clock, keyed by envVar → { nextRefreshAtMs,
+// configFingerprint }. nextRefreshAtMs is derived from the broker's expires_at
+// minus skew, or a fallback TTL. The fingerprint forces an immediate re-fetch
+// when operator-controlled broker routing/identity settings rotate. Exported
+// reset for tests.
+const refreshClock = new Map();
 export function _resetReviewerTokenRefreshClockForTest() {
-  nextRefreshAtMs.clear();
+  refreshClock.clear();
 }
 
-// Resolve one role's token from the broker. Returns { token, expiresAtMs }
-// on success (expiresAtMs is null when the broker omits a parseable
-// expires_at), or throws on any failure (caller keeps the old token on throw).
-async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl, timeoutMs }) {
+function brokerConfigForRole({ role, env, flag }) {
   const upper = roleUpper(role);
   const brokerUrl = (env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
   const provider = env[`OAUTH_BROKER_${upper}_PROVIDER`] || `github-app-${role}`;
   const expectedAppId = env[`OAUTH_BROKER_${upper}_EXPECTED_APP_ID`] || '';
   const expectedInstallationId = env[`OAUTH_BROKER_${upper}_EXPECTED_INSTALLATION_ID`] || '';
   const secretFile = env.OAUTH_BROKER_SHARED_SECRET_FILE || '';
+  return {
+    brokerUrl,
+    provider,
+    expectedAppId,
+    expectedInstallationId,
+    secretFile,
+    flagValue: flag ? String(env[flag] || '').trim() : '',
+  };
+}
+
+function brokerConfigFingerprint(config) {
+  return JSON.stringify([
+    config.brokerUrl,
+    config.provider,
+    config.expectedAppId,
+    config.expectedInstallationId,
+    config.secretFile,
+    config.flagValue,
+  ]);
+}
+
+// Resolve one role's token from the broker. Returns { token, expiresAtMs }
+// on success (expiresAtMs is null when the broker omits a parseable
+// expires_at), or throws on any failure (caller keeps the old token on throw).
+async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl, timeoutMs }) {
+  const config = brokerConfigForRole({ role, env, flag: '' });
+  const { brokerUrl, provider, expectedAppId, expectedInstallationId, secretFile } = config;
 
   if (!secretFile) {
     throw new Error('OAUTH_BROKER_SHARED_SECRET_FILE is empty');
@@ -148,10 +180,12 @@ export async function refreshReviewerBrokerTokens({
   skewMs = REVIEWER_TOKEN_REFRESH_SKEW_MS,
   fallbackTtlMs = REVIEWER_TOKEN_FALLBACK_TTL_MS,
   timeoutMs = REVIEWER_TOKEN_FETCH_TIMEOUT_MS,
+  minTokenLifetimeMs = null,
   force = false,
 } = {}) {
   const summary = { refreshed: [], skipped: [], failed: [] };
   for (const { role, envVar, flag } of BROKER_REVIEWER_ROLES) {
+    const configFingerprint = brokerConfigFingerprint(brokerConfigForRole({ role, env, flag }));
     if (String(env[flag] || '').trim() !== 'true') {
       summary.skipped.push({ role, reason: 'broker-mode-disabled' });
       continue;
@@ -161,8 +195,13 @@ export async function refreshReviewerBrokerTokens({
     // or a fallback TTL when expires_at is absent. The startup token's expiry
     // is unknown to us (no record), so the first sight of a role always
     // re-fetches even though env already holds a value.
-    const scheduled = nextRefreshAtMs.get(envVar);
-    if (!force && scheduled !== undefined && now < scheduled) {
+    const scheduled = refreshClock.get(envVar);
+    if (
+      !force
+      && scheduled !== undefined
+      && scheduled.configFingerprint === configFingerprint
+      && now < scheduled.nextRefreshAtMs
+    ) {
       summary.skipped.push({ role, reason: 'token-still-valid' });
       continue;
     }
@@ -174,6 +213,12 @@ export async function refreshReviewerBrokerTokens({
         readFileImpl,
         timeoutMs,
       });
+      const requiredLifetimeMs = minTokenLifetimeMs ?? resolveReviewerTimeoutMs(env) + REVIEWER_TOKEN_POST_SLACK_MS;
+      if (expiresAtMs != null && expiresAtMs - now <= requiredLifetimeMs) {
+        throw new Error(
+          `broker token expires too soon for reviewer handoff: remaining=${expiresAtMs - now}ms minimum=${requiredLifetimeMs}ms`
+        );
+      }
       env[envVar] = token;
       // Re-check at (expiry - skew) when we know the real expiry; otherwise fall
       // back to a fixed cadence. Clamp to > now so we always make forward
@@ -181,7 +226,7 @@ export async function refreshReviewerBrokerTokens({
       const byExpiry = expiresAtMs != null ? expiresAtMs - skewMs : null;
       const byFallback = now + fallbackTtlMs;
       const next = byExpiry != null ? Math.max(byExpiry, now + 1) : byFallback;
-      nextRefreshAtMs.set(envVar, next);
+      refreshClock.set(envVar, { nextRefreshAtMs: next, configFingerprint });
       summary.refreshed.push({ role, envVar, expiresAtMs: expiresAtMs ?? null });
     } catch (err) {
       // Fail-safe: keep whatever token env already holds. Do NOT clear it, and

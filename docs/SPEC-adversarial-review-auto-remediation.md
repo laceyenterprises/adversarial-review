@@ -128,6 +128,19 @@ runtime refresh contract:
   off the broker response's `expires_at` minus a 15-minute skew; a fixed
   fallback TTL applies only when `expires_at` is absent. The first sight of a
   role always re-fetches (the startup token's expiry is unknown to the watcher).
+- **Reviewer handoff requires enough remaining lifetime.** A token with a
+  parseable `expires_at` is written into the reviewer environment only when its
+  remaining lifetime exceeds the configured reviewer timeout plus the runtime
+  post slack (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). Short-lived cached
+  broker responses are rejected and the prior token, if any, remains in place,
+  because each reviewer subprocess snapshots `process.env` at spawn and cannot
+  benefit from a later watcher refresh.
+- **Operator config rotations bypass the schedule.** The refresh clock records a
+  per-role fingerprint covering broker URL, provider, expected app ID, expected
+  installation ID, shared-secret file path, and the broker-mode flag. Any change
+  to that fingerprint forces an immediate broker call and metadata
+  re-verification even when the prior token's expiry-derived refresh time has
+  not arrived.
 - **Same verification as launcher minting.** The runtime path re-applies the
   `scripts/lib/reviewer-broker.sh` checks: provider is compared unconditionally,
   and `metadata.app_id` / `metadata.installation_id` must match the configured

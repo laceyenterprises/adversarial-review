@@ -6,6 +6,7 @@ import {
   _resetReviewerTokenRefreshClockForTest,
   REVIEWER_TOKEN_REFRESH_SKEW_MS,
   REVIEWER_TOKEN_FALLBACK_TTL_MS,
+  REVIEWER_TOKEN_POST_SLACK_MS,
   BROKER_REVIEWER_ROLES,
 } from '../src/reviewer-broker-refresh.mjs';
 
@@ -63,8 +64,9 @@ test('keys the refresh schedule off the broker expires_at minus skew', async () 
   // First token expires in exactly 1h.
   const fetchImpl = async () => {
     calls += 1;
+    const issuedAt = calls === 1 ? t0 : t0 + HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS + 1;
     return brokerOk('github-app-claude-reviewer', `ghs_token_${calls}`, {
-      expiresAt: new Date(t0 + HOUR_MS).toISOString(),
+      expiresAt: new Date(issuedAt + HOUR_MS).toISOString(),
     });
   };
   await refreshReviewerBrokerTokens({ env, now: t0, fetchImpl, readFileImpl: readSecret, log: silentLog });
@@ -85,27 +87,41 @@ test('keys the refresh schedule off the broker expires_at minus skew', async () 
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_2');
 });
 
-test('a partially-aged cached token (little life left) refreshes on the very next tick', async () => {
+test('rejects a cached token that cannot survive reviewer timeout plus post slack', async () => {
   // Reproduces the real broker behavior: the first response is a cached token
-  // with only a few minutes of life left. Its (expiry - skew) is already in the
-  // past, so the NEXT tick must re-fetch rather than hold it past expiry.
+  // with only a few minutes of life left. A reviewer subprocess snapshots env at
+  // spawn and can run until the reviewer timeout before posting, so this token
+  // must not be handed to a newly spawned reviewer.
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();
-  let calls = 0;
   const t0 = 9_000_000;
-  const fetchImpl = async () => {
-    calls += 1;
-    const life = calls === 1 ? 5 * 60 * 1000 : HOUR_MS; // 5 min, then a full hour
-    return brokerOk('github-app-claude-reviewer', `ghs_token_${calls}`, {
-      expiresAt: new Date(t0 + life).toISOString(),
+  const fetchImpl = async () =>
+    brokerOk('github-app-claude-reviewer', 'ghs_too_close', {
+      expiresAt: new Date(t0 + 5 * 60 * 1000).toISOString(),
     });
-  };
+  const summary = await refreshReviewerBrokerTokens({
+    env,
+    now: t0,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.equal(summary.failed.length, 1);
+  assert.match(summary.failed[0].reason, /expires too soon/);
+});
+
+test('accepts a token that exceeds reviewer timeout plus post slack', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 9_000_000;
+  const minimum = 20 * 60 * 1000 + REVIEWER_TOKEN_POST_SLACK_MS;
+  const fetchImpl = async () =>
+    brokerOk('github-app-claude-reviewer', 'ghs_long_enough', {
+      expiresAt: new Date(t0 + minimum + 1).toISOString(),
+    });
   await refreshReviewerBrokerTokens({ env, now: t0, fetchImpl, readFileImpl: readSecret, log: silentLog });
-  assert.equal(calls, 1);
-  // Next tick a minute later: the 5-min token is already inside the 15-min skew → re-fetch.
-  await refreshReviewerBrokerTokens({ env, now: t0 + 60_000, fetchImpl, readFileImpl: readSecret, log: silentLog });
-  assert.equal(calls, 2);
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_2');
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_long_enough');
 });
 
 test('falls back to a fixed TTL when the broker omits expires_at', async () => {
@@ -139,6 +155,25 @@ test('FAIL-SAFE: broker unreachable (fetch throws) keeps the existing token', as
   const fetchImpl = async () => { throw new Error('ECONNREFUSED'); };
   await refreshReviewerBrokerTokens({ env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog });
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+});
+
+test('FAIL-SAFE: invalid reviewer timeout config keeps the existing token', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: 'not-a-number' });
+  const fetchImpl = async () =>
+    brokerOk('github-app-claude-reviewer', 'ghs_FRESH_token', {
+      expiresAt: new Date(1 + HOUR_MS).toISOString(),
+    });
+  const summary = await refreshReviewerBrokerTokens({
+    env,
+    now: 1,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.equal(summary.failed.length, 1);
+  assert.match(summary.failed[0].reason, /reviewer\.timeout_ms/);
 });
 
 test('bounds the broker fetch with an abort signal + timeout', async () => {
@@ -226,6 +261,38 @@ test('accepts a token whose metadata matches the expected app_id + installation_
     brokerOk('github-app-claude-reviewer', 'ghs_GOOD', { metadata: { app_id: 111, installation_id: 42 } });
   await refreshReviewerBrokerTokens({ env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog });
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_GOOD');
+});
+
+test('broker config rotation bypasses the old valid schedule and re-verifies metadata', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const t0 = 12_000_000;
+  const env = makeEnv({
+    OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID: '42',
+  });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return brokerOk('github-app-claude-reviewer', `ghs_token_${calls}`, {
+      expiresAt: new Date(t0 + HOUR_MS).toISOString(),
+      metadata: { installation_id: '42' },
+    });
+  };
+  await refreshReviewerBrokerTokens({ env, now: t0, fetchImpl, readFileImpl: readSecret, log: silentLog });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_1');
+
+  env.OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID = '99';
+  const summary = await refreshReviewerBrokerTokens({
+    env,
+    now: t0 + 60_000,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_1');
+  assert.equal(summary.failed.length, 1);
+  assert.match(summary.failed[0].reason, /installation_id/);
 });
 
 test('does NOT fetch for a reviewer role whose broker flag is not "true"', async () => {

@@ -67,8 +67,30 @@ export const BROKER_REVIEWER_ROLES = Object.freeze([
   { role: 'gemini-reviewer', envVar: 'GH_GEMINI_REVIEWER_TOKEN', flag: 'GEMINI_REVIEWER_AUTH_VIA_BROKER' },
 ]);
 
+const REVIEWER_ROLE_BY_IDENTITY = Object.freeze({
+  'claude-reviewer': 'claude-reviewer',
+  'claude-reviewer-lacey': 'claude-reviewer',
+  'codex-reviewer': 'codex-reviewer',
+  'codex-reviewer-lacey': 'codex-reviewer',
+  'gemini-reviewer': 'gemini-reviewer',
+  'gemini-reviewer-lacey': 'gemini-reviewer',
+  GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer',
+  GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer',
+  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer',
+});
+
 function roleUpper(role) {
   return String(role).replace(/-/g, '_').toUpperCase();
+}
+
+function resolveReviewerBrokerRole(identity) {
+  const raw = String(identity || '').trim();
+  if (!raw) return null;
+  return REVIEWER_ROLE_BY_IDENTITY[raw] || REVIEWER_ROLE_BY_IDENTITY[raw.toLowerCase()] || null;
+}
+
+function brokerRoleConfig(role) {
+  return BROKER_REVIEWER_ROLES.find((entry) => entry.role === role) || null;
 }
 
 // Resolve an operator-tunable millisecond knob from env. A present value must
@@ -224,6 +246,36 @@ async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function resolveReviewerAppToken(identity, {
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  readFileImpl = readFileSync,
+  timeoutMs = REVIEWER_TOKEN_FETCH_TIMEOUT_MS,
+} = {}) {
+  const role = resolveReviewerBrokerRole(identity);
+  if (!role) {
+    throw new Error(`Unknown reviewer identity '${identity ?? ''}'`);
+  }
+  const roleConfig = brokerRoleConfig(role);
+  if (!roleConfig) {
+    throw new Error(`Reviewer broker role '${role}' is not configured`);
+  }
+  const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
+    role,
+    env,
+    fetchImpl,
+    readFileImpl,
+    timeoutMs,
+  });
+  env[roleConfig.envVar] = token;
+  return {
+    role,
+    envVar: roleConfig.envVar,
+    token,
+    expiresAtMs,
+  };
 }
 
 // Refresh every broker-enabled reviewer token whose cached value is older than

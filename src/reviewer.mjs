@@ -40,6 +40,7 @@ import {
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
 import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
+import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   openReviewerFence,
@@ -55,6 +56,11 @@ import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env
 import { fetchPullRequestReviewContext } from './github-api.mjs';
 
 const execFileAsync = promisify(execFile);
+const REVIEW_POST_RETRY_DELAYS_MS = [0];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function spawnWithInput(command, args, {
   env,
@@ -1064,6 +1070,99 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
 
 // ── GitHub review posting ────────────────────────────────────────────────────
 
+class ReviewerPostAuthRefreshRetryableError extends Error {
+  constructor(message, { cause } = {}) {
+    super(message);
+    this.name = 'ReviewerPostAuthRefreshRetryableError';
+    this.cause = cause;
+  }
+}
+
+function buildGhErrorDetail(err) {
+  return [
+    err?.code,
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].filter(Boolean).join('\n').toLowerCase();
+}
+
+function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
+  const detail = buildGhErrorDetail(err);
+  if (
+    /\b401\b/.test(detail)
+    || /\bunauthorized\b/.test(detail)
+    || /\bbad credentials?\b/.test(detail)
+    || /\bauthentication (?:failed|required)\b/.test(detail)
+    || /\brequires authentication\b/.test(detail)
+    || /\bnot logged in\b/.test(detail)
+    || /\blogin required\b/.test(detail)
+  ) {
+    return true;
+  }
+  return preWriteSaw401 && (
+    /\boauth\b/.test(detail)
+    || /\bcredentials?\b/.test(detail)
+    || /\b(?:access|bearer|installation|github app)\s+token\b/.test(detail)
+    || /\bgh auth\b/.test(detail)
+    || /\bkeychain\b/.test(detail)
+  );
+}
+
+function isRetryableGhTransportError(err, { allowAuthRefresh = false, preWriteSaw401 = false } = {}) {
+  const detail = buildGhErrorDetail(err);
+  if (allowAuthRefresh && isReviewerPostAuthFailure(err, { preWriteSaw401 })) {
+    return true;
+  }
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
+    || detail.includes('timeout')
+    || detail.includes('timed out')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable')
+    || detail.includes('rate limit')
+    || detail.includes('secondary rate limit')
+    || detail.includes('502 bad gateway')
+    || detail.includes('503 service unavailable')
+    || detail.includes('504 gateway timeout');
+}
+
+async function withGhRetry(operation, {
+  retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
+  isRetryable = () => false,
+} = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err) || attempt >= retryDelaysMs.length) {
+        throw err;
+      }
+      await sleep(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastErr;
+}
+
+function createReviewerPreWriteLogProxy(log = console) {
+  const base = log || console;
+  const tracker = { saw401: false };
+  return {
+    tracker,
+    log: {
+      ...base,
+      warn(message, ...args) {
+        const rendered = String(message || '');
+        if (/\[reviewer-pre-write\].*http 401/i.test(rendered)) {
+          tracker.saw401 = true;
+        }
+        return base.warn?.(message, ...args);
+      },
+    },
+  };
+}
+
 // GitHub's GraphQL `addPullRequestReview` mutation refuses to create a second
 // pending review per (user, PR) tuple. If a previous reviewer subprocess was
 // SIGTERM'd between `gh pr review --comment` initiating the review and the
@@ -1085,21 +1184,15 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
 // fail, log and continue — the post may still succeed, and a failure here is
 // strictly less bad than the leak it's trying to prevent.
 async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync, opts = {}) {
-  const token = process.env[botTokenEnv];
+  let token = process.env[botTokenEnv];
   if (!token) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
 
-  // Pre-post cleanup: drop any leaked PENDING drafts the bot owns on this PR
-  // from a previously-killed reviewer subprocess. Best-effort; logged.
   const prepareReviewWrite = opts.prepareReviewWrite || clearPendingReviewsForSelf;
-  await prepareReviewWrite({
-    repo,
-    prNumber,
-    token,
-    fetchImpl: opts.fetchImpl,
-    log: opts.log || console,
-  });
+  const log = opts.log || console;
+  const reviewerIdentity = opts.reviewerIdentity || botTokenEnv;
+  let refreshedAfterAuthFailure = false;
 
   const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, opts.env || process.env);
   let reviewerFence = null;
@@ -1122,13 +1215,60 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   }
   const startedAt = Date.now();
   try {
-    await awaitThrottleIfNeeded();
-    await execFileImpl(
-      'gh',
-      ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],
+    await withGhRetry(
+      async () => {
+        const preWriteLog = createReviewerPreWriteLogProxy(log);
+        await prepareReviewWrite({
+          repo,
+          prNumber,
+          token,
+          fetchImpl: opts.fetchImpl,
+          log: preWriteLog.log,
+        });
+        try {
+          await awaitThrottleIfNeeded();
+          await execFileImpl(
+            'gh',
+            ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],
+            {
+              env: { ...process.env, GH_TOKEN: token },
+              maxBuffer: 5 * 1024 * 1024,
+            }
+          );
+        } catch (err) {
+          const authRetryable = isReviewerPostAuthFailure(err, {
+            preWriteSaw401: preWriteLog.tracker.saw401,
+          });
+          if (!refreshedAfterAuthFailure && authRetryable) {
+            const refreshed = await resolveReviewerAppToken(reviewerIdentity, {
+              env: process.env,
+              fetchImpl: opts.fetchImpl,
+              readFileImpl: opts.readFileImpl,
+              timeoutMs: opts.reviewerTokenFetchTimeoutMs,
+            }).catch((refreshErr) => {
+              log.warn?.(
+                `[reviewer] failed to refresh ${botTokenEnv} after GitHub auth failure: ${refreshErr?.message || refreshErr}`
+              );
+              return null;
+            });
+            if (refreshed?.token) {
+              refreshedAfterAuthFailure = true;
+              token = refreshed.token;
+              log.warn?.(
+                `[reviewer] refreshed ${botTokenEnv} after GitHub auth failure; retrying review post once`
+              );
+              throw new ReviewerPostAuthRefreshRetryableError(
+                `Retry GitHub review post after refreshing ${botTokenEnv}`,
+                { cause: err }
+              );
+            }
+          }
+          throw err;
+        }
+      },
       {
-        env: { ...process.env, GH_TOKEN: token },
-        maxBuffer: 5 * 1024 * 1024,
+        retryDelaysMs: REVIEW_POST_RETRY_DELAYS_MS,
+        isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError,
       }
     );
     recordApiCall({
@@ -1165,22 +1305,26 @@ async function postGitHubReviewWithCapture({
   execFileImpl = execFileAsync,
   log = console,
   fetchImpl = globalThis.fetch,
+  readFileImpl = undefined,
   prepareReviewWrite = clearPendingReviewsForSelf,
   reviewerSpawnToken = null,
   reviewerIdentity = null,
+  reviewerTokenFetchTimeoutMs = undefined,
 } = {}) {
-  const token = process.env[botTokenEnv];
-  if (!token) {
+  const initialToken = process.env[botTokenEnv];
+  if (!initialToken) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
 
   await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
     rootDir,
     fetchImpl,
+    readFileImpl,
     log,
     prepareReviewWrite,
     reviewerSpawnToken,
     reviewerIdentity,
+    reviewerTokenFetchTimeoutMs,
   });
 
   // Capture postedAt AFTER the gh post returns so the candidate window
@@ -1207,7 +1351,7 @@ async function postGitHubReviewWithCapture({
     passKind,
     postedAt: effectivePostedAt,
     execFileImpl,
-    env: { ...process.env, [botTokenEnv]: token },
+    env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
     log,
   });
 }
@@ -1558,6 +1702,8 @@ const __test__ = {
   postGitHubReview,
   spawnCodexReview,
   postGitHubReviewWithCapture,
+  isRetryableGhTransportError,
+  isReviewerPostAuthFailure,
 };
 
 export {

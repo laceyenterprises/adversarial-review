@@ -3,6 +3,7 @@ import { strict as assert } from 'node:assert';
 
 import {
   refreshReviewerBrokerTokens,
+  resolveReviewerAppToken,
   _resetReviewerTokenRefreshClockForTest,
   REVIEWER_TOKEN_REFRESH_SKEW_MS,
   REVIEWER_TOKEN_FALLBACK_TTL_MS,
@@ -57,6 +58,46 @@ test('refreshes a broker-enabled reviewer token and writes it back to env', asyn
   assert.equal(summary.refreshed[0].role, 'claude-reviewer');
   assert.equal(summary.handoffSafe.length, 1);
   assert.equal(summary.handoffSafe[0].safe, true);
+});
+
+test('resolveReviewerAppToken builds the expected broker request for each reviewer identity', async () => {
+  const cases = [
+    {
+      identity: 'claude-reviewer-lacey',
+      envVar: 'GH_CLAUDE_REVIEWER_TOKEN',
+      provider: 'github-app-claude-reviewer',
+      token: 'ghs_claude_fresh',
+    },
+    {
+      identity: 'codex-reviewer-lacey',
+      envVar: 'GH_CODEX_REVIEWER_TOKEN',
+      provider: 'github-app-codex-reviewer',
+      token: 'ghs_codex_fresh',
+    },
+  ];
+
+  for (const testCase of cases) {
+    const env = makeEnv({ GH_CLAUDE_REVIEWER_TOKEN: 'ghs_old_claude', GH_CODEX_REVIEWER_TOKEN: 'ghs_old_codex' });
+    let calledUrl = null;
+    let calledAuth = null;
+    const resolved = await resolveReviewerAppToken(testCase.identity, {
+      env,
+      readFileImpl: readSecret,
+      fetchImpl: async (url, opts) => {
+        calledUrl = url;
+        calledAuth = opts.headers.Authorization;
+        return brokerOk(testCase.provider, testCase.token, {
+          expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+        });
+      },
+    });
+    assert.equal(calledUrl, `http://127.0.0.1:4099/token?provider=${testCase.provider}`);
+    assert.equal(calledAuth, 'Bearer broker-shared-secret');
+    assert.equal(resolved.role, testCase.provider.replace('github-app-', ''));
+    assert.equal(resolved.envVar, testCase.envVar);
+    assert.equal(resolved.token, testCase.token);
+    assert.equal(env[testCase.envVar], testCase.token);
+  }
 });
 
 test('keys the refresh schedule off the broker expires_at minus skew (when skew is the dominant lead)', async () => {

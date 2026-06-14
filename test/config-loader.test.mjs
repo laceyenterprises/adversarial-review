@@ -1839,6 +1839,64 @@ test('session_ledger postgres_runtime alias coerces', () => {
   }
 });
 
+test('roles.adversarial.orchestration_mode default, local override, env override, and accessor all resolve in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+
+    const defaultCfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(defaultCfg.get('roles.adversarial.orchestration_mode'), 'native');
+    assert.equal(defaultCfg.getOrchestrationMode(), 'native');
+
+    writeFile(join(tmp, 'config.local.yaml'), `
+      version: 1
+      roles:
+        adversarial:
+          orchestration_mode: agentos
+    `);
+    const localCfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(localCfg.get('roles.adversarial.orchestration_mode'), 'agentos');
+    assert.equal(localCfg.getOrchestrationMode(), 'agentos');
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos' },
+    });
+    assert.equal(envCfg.get('roles.adversarial.orchestration_mode'), 'agentos');
+    assert.equal(envCfg.getOrchestrationMode(), 'agentos');
+    assert.equal(
+      envCfg.resolutionTrace('roles.adversarial.orchestration_mode').at(-1).source,
+      'env:AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('roles.adversarial.orchestration_mode rejects unsupported values in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    assert.throws(
+      () => loadConfig({
+        topPath: top,
+        env: { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'managed' },
+      }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'roles.adversarial.orchestration_mode');
+        assert.equal(err.got, 'managed');
+        assert.equal(err.envName, 'AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // -------- §9 -----------------------------------------------------------------
 
 test('resolutionTrace returns ordered entries with stable source labels', () => {

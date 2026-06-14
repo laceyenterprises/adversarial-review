@@ -104,6 +104,40 @@ function writeWorkerLookupMetadata({
   }
 }
 
+function buildStructuredLogger() {
+  const events = [];
+  return {
+    events,
+    logger: {
+      info(line) {
+        events.push(JSON.parse(line));
+      },
+      warn() {},
+      error() {},
+      log() {},
+    },
+  };
+}
+
+function summarizeDispatchCall(call) {
+  const args = call?.args || [];
+  const readFlag = (flag) => {
+    const idx = args.indexOf(flag);
+    return idx >= 0 ? args[idx + 1] : null;
+  };
+  return {
+    cmd: call?.cmd || null,
+    workerClass: readFlag('--worker-class'),
+    taskKind: readFlag('--task-kind'),
+    priority: readFlag('--priority'),
+    repo: readFlag('--repo'),
+    pr: readFlag('--pr'),
+    ticket: readFlag('--ticket'),
+    parentSession: readFlag('--parent-session'),
+    project: readFlag('--project'),
+  };
+}
+
 function makeJob(overrides = {}) {
   return {
     repo: 'laceyenterprises/agent-os',
@@ -2303,6 +2337,52 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
     hqCalls[0].args.includes('--priority') && hqCalls[0].args.includes('normal'),
     'default merge-agent dispatches must stay on the normal lane'
   );
+});
+
+test('dispatchMergeAgentForPR is mode-invariant for merge-class dispatch', async () => {
+  const dispatches = [];
+  for (const orchestrationMode of ['native', 'agentos']) {
+    const rootDir = mkdtempSync(path.join(tmpdir(), `adversarial-review-${orchestrationMode}-`));
+    const hqCalls = [];
+    const { logger, events } = buildStructuredLogger();
+    const result = await dispatchMergeAgentForPR({
+      agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+      rootDir,
+      ...makeJob(),
+      orchestrationMode,
+      logger,
+      env: {
+        MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
+        MERGE_AGENT_HQ_PROJECT: 'merge-project',
+      },
+      execFileImpl: async (cmd, args) => {
+        hqCalls.push({ cmd, args: [...args] });
+        return {
+          stdout: 'warning: dispatch queued\n{"dispatchId":"disp_123","lrq":"lrq_456"}\n',
+        };
+      },
+      now: '2026-05-03T12:00:00.000Z',
+    });
+    dispatches.push({ orchestrationMode, result, hqCalls, events });
+  }
+
+  const nativeDispatch = dispatches.find(entry => entry.orchestrationMode === 'native');
+  const agentosDispatch = dispatches.find(entry => entry.orchestrationMode === 'agentos');
+  assert.equal(nativeDispatch.result.decision, 'dispatch');
+  assert.equal(agentosDispatch.result.decision, 'dispatch');
+  assert.equal(nativeDispatch.hqCalls.length, 1, 'native must still launch via hq dispatch');
+  assert.equal(agentosDispatch.hqCalls.length, 1, 'agentos must launch via hq dispatch');
+  assert.deepEqual(
+    summarizeDispatchCall(nativeDispatch.hqCalls[0]),
+    summarizeDispatchCall(agentosDispatch.hqCalls[0]),
+  );
+
+  const nativeNoopEvent = nativeDispatch.events.find((event) => event.event === 'merge_agent.orchestration_mode_noop');
+  const agentosNoopEvent = agentosDispatch.events.find((event) => event.event === 'merge_agent.orchestration_mode_noop');
+  assert.equal(nativeNoopEvent.route, 'hq-dispatch');
+  assert.equal(agentosNoopEvent.route, 'hq-dispatch');
+  assert.equal(nativeNoopEvent.workerClass, 'merge-agent');
+  assert.equal(agentosNoopEvent.workerClass, 'merge-agent');
 });
 
 test('dispatchMergeAgentForPR uses the critical lane only for merge-agent-requested', async () => {

@@ -4722,13 +4722,13 @@ test('worker-provenance hook rejects WORKER_CLASS values containing carriage ret
   assert.equal(readFileSync(msgPath, 'utf8'), original);
 });
 
-test('worker-provenance hook rejects PERSONA without WORKER_CLASS', () => {
+test('worker-provenance hook ignores ambient PERSONA without WORKER_CLASS', () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
   installWorkerProvenanceHook(workspaceDir);
 
   const msgPath = path.join(workspaceDir, 'commit-msg.txt');
-  const original = 'fix: persona requires class\n';
+  const original = 'fix: ambient persona\n';
   writeFileSync(msgPath, original, 'utf8');
 
   const result = spawnSync(
@@ -4743,8 +4743,7 @@ test('worker-provenance hook rejects PERSONA without WORKER_CLASS', () => {
     }
   );
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr.toString(), /PERSONA requires WORKER_CLASS/);
+  assert.equal(result.status, 0, `hook exited ${result.status}: ${result.stderr?.toString()}`);
   assert.equal(readFileSync(msgPath, 'utf8'), original);
 });
 

@@ -23,6 +23,7 @@ import {
   resolveMergeAgentCoexistenceForWatcher,
 } from '../src/watcher.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
+import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 
 // Pin AMA enabled/disabled for a test body regardless of the host's live
 // config.local.yaml (which may set roles.adversarial.merge_authority.enabled).
@@ -957,6 +958,93 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
     eventId: 'LE_adversarial_merge_requested',
     observedAt: '2026-06-11T23:20:00.000Z',
   });
+});
+
+test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger when neither candidate nor review row carries it', async () => {
+  // Root cause of "AMA closed 0 PRs ever": fetchMergeAgentCandidate never sets
+  // candidate.riskClass and reviewed_prs has no risk_class column, so the
+  // eligibility riskClass fell back to 'unknown' (always two-key) for EVERY PR.
+  // It must instead use the remediation ledger's latestRiskClass
+  // (DEFAULT_RISK_CLASS = 'medium' for a PR with no jobs) — the same class the
+  // round-budget path already computes.
+  let observed = null;
+  await maybeDispatchAmaClosureFor({
+    reviewStateRow: makeReviewRow({
+      last_verdict: 'Comment only',
+      // risk_class explicitly NULL — production reviewed_prs has no such column.
+      risk_class: null,
+      remediation_pending: 0,
+      reviewer_login: 'claude-reviewer-lacey',
+    }),
+    dispatchJob: {
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+    },
+    candidate: {
+      headSha: 'abc123',
+      // riskClass intentionally omitted — fetchMergeAgentCandidate never sets it.
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+      branchProtection: { requiredContexts: [] },
+      isDraft: false,
+    },
+    labelNames: [],
+    operatorApprovalEvent: null,
+    adversarialMergeRequestedEvent: null,
+    // Fixture repo/PR with no remediation jobs -> latestRiskClass defaults to
+    // DEFAULT_RISK_CLASS ('medium').
+    repoPath: 'laceyenterprises/nonexistent-ama-riskclass-fixture',
+    prNumber: 999999,
+    currentRevisionRef: 'abc123',
+    logger: { warn() {} },
+    loadConfigImpl: () => ({
+      getMergeAuthorityConfig() {
+        // Operator all-classes config: medium is allowlisted and branch
+        // protection is waived, so the ONLY thing that could refuse this
+        // settled-success PR is the risk-class resolution.
+        return {
+          enabled: true,
+          eligibility: {
+            riskClasses: ['low', 'medium', 'high', 'critical'],
+            highRiskRequiresTwoKey: false,
+          },
+          branchProtection: { required: false },
+        };
+      },
+    }),
+    maybeDispatchAmaCloserImpl: async (payload) => {
+      observed = payload;
+      return { dispatched: false, reason: 'fixture' };
+    },
+  });
+
+  assert.ok(observed, 'AMA closer payload should be built');
+  // (1) Resolution: the ledger default ('medium'), not 'unknown'.
+  assert.equal(observed.reviewState.riskClass, 'medium');
+  assert.notEqual(observed.reviewState.riskClass, 'unknown');
+
+  // (2) Full eligibility result: feeding the resolved reviewState through the
+  // real predicate under the all-classes config, the risk gate does NOT refuse
+  // this no-explicit-risk PR. Before the fix it resolved to 'unknown' ->
+  // always-two-key -> `risk-class-not-permitted` (the gate that made AMA close
+  // 0 PRs); now it resolves to the ledger default 'medium' and passes the risk
+  // gate. (Other structural gates here belong to the fixture, not this change.)
+  const eligibility = isEligibleForAmaClosure(
+    observed.reviewState,
+    observed.prMetadata,
+    observed.cfg,
+    observed.options,
+  );
+  assert.equal(
+    eligibility.reasons.includes('risk-class-not-permitted'),
+    false,
+    `unexpected risk-class refusal: ${JSON.stringify(eligibility.reasons)}`,
+  );
+  assert.equal(eligibility.trace.riskClass.resolved, 'medium');
+  assert.equal(eligibility.trace.riskClass.requiresTwoKey, false);
 });
 
 test('resolveMergeAgentCoexistenceForWatcher recovers AMA dispatch failures via merge-agent on the normal posted-review path', async () => {

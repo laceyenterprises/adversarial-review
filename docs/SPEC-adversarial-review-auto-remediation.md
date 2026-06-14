@@ -36,8 +36,23 @@ the configured gate, while `branch_protection_requirement_waived` means the
 explicit no-branch-protection plan opt-out satisfied §4.2 #9.
 
 AMA risk-class configuration accepts `low`, `medium`, `high`, and `critical`.
-`unknown` / unclassified risk is never a configured single-key class and always
-fails closed unless the explicit two-key override is present. By default,
+
+**Risk-class resolution (eligibility).** AMA resolves the PR's risk class in this
+precedence: (1) an explicit class on the merge-agent candidate, (2) the review
+row's `risk_class`, (3) the remediation ledger's `latestRiskClass`
+(`summarizePRRemediationLedger`), which resolves the PR's ticket class and falls
+back to `DEFAULT_RISK_CLASS` (`medium`) when no remediation job recorded a class,
+and finally (4) `unknown`. This is the **same** risk class the round-budget path
+(§4.2a) consumes, so eligibility and round-budget can never disagree on a PR's
+class. Because the ledger default is `medium`, a PR carrying no explicit ticket
+classification is treated as `medium` for eligibility — NOT `unknown` — and is
+therefore auto-closeable under an operator `risk_classes` allowlist that includes
+`medium`. A PR resolves to `unknown` only when the ledger probe itself is
+unavailable (e.g. it throws), in which case the risk gate keeps it fail-closed.
+
+`unknown` / unclassified risk (per the resolution above) is never a configured
+single-key class and always fails closed unless the explicit two-key override is
+present. By default,
 `roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key` is
 `true`, so `high` and `critical` still require both current-head
 `adversarial-merge-requested` evidence and current-head `operator-approved`

@@ -97,7 +97,18 @@ dispatcher debugging), see
    ```
 
    `risk_classes` may include `low`, `medium`, `high`, and `critical`.
-   `unknown` / unclassified risk is never single-key eligible. With the
+
+   **How a PR's risk class is resolved for eligibility:** candidate risk class →
+   review-row `risk_class` → remediation-ledger `latestRiskClass` (which falls
+   back to `DEFAULT_RISK_CLASS = medium` when no remediation job recorded a
+   class) → `unknown`. This matches the round-budget path. In practice a PR with
+   no explicit ticket classification resolves to **`medium`** (the ledger
+   default), so it is auto-closeable when `risk_classes` includes `medium`; a PR
+   only resolves to `unknown` if the ledger probe is unavailable, in which case
+   it stays fail-closed.
+
+   `unknown` / unclassified risk (per the resolution above) is never single-key
+   eligible. With the
    default `high_risk_requires_two_key: true`, high/critical still require the
    two-key `adversarial-merge-requested` + `operator-approved` turn. When the
    operator explicitly sets `high_risk_requires_two_key: false`, high/critical

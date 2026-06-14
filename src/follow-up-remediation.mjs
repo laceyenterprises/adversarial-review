@@ -48,6 +48,7 @@ import {
   validateStartupRoleConfig,
 } from './role-config.mjs';
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
+import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1698,8 +1699,29 @@ function applyMergeAgentBrokerEnv(env, sourceEnv = process.env) {
   };
 }
 
-function prepareCodexRemediationStartupEnv({ gitIdentity = null } = {}) {
-  const authPath = resolveCodexAuthPath();
+function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = null } = {}) {
+  const sharedAuthPath = resolveCodexAuthPath();
+  // Per-worker codex credential (burst OAuth-cascade fix). The remediation
+  // worker spawns `codex exec` against the shared ChatGPT OAuth credential;
+  // any refresh rotates-and-revokes it server-side and cascades across every
+  // concurrent codex worker on the host. Materialize a per-worker auth.json
+  // with a placeholder refresh_token so this worker can never rotate the shared
+  // token. The per-worker file is materialized UNDER the same operator home as
+  // the shared credential, so the HOME/owner contract below still resolves the
+  // same operator home (no policy violation). Fail-safe: null -> shared path.
+  // The detached worker reads its auth at startup; the file is reaped by the
+  // helper's stale-sweep (and overwritten on a same-job re-run), so we do NOT
+  // delete it here while the worker may still hold it open.
+  // Respect an explicitly pinned CODEX_AUTH_PATH (local mode / tests): the
+  // startup contract treats any resolved path that differs from the inherited
+  // pin as a violation, so we must not materialize away from an explicit pin.
+  const perWorkerAuth = process.env.CODEX_AUTH_PATH
+    ? null
+    : materializePerWorkerCodexAuth({
+        sharedAuthPath,
+        key: perWorkerKey ? `remediation-${perWorkerKey}` : `remediation-${process.pid}-${Date.now()}`,
+      });
+  const authPath = perWorkerAuth?.authPath || sharedAuthPath;
   const authHome = resolveCodexAuthHome(authPath);
   const authOwner = resolveCodexAuthOwner(authPath);
   const codexHome = dirname(authPath);
@@ -2416,7 +2438,10 @@ function spawnCodexRemediationWorker({
 }) {
   const codexCli = resolveCodexCliPath();
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({ gitIdentity });
+  const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({
+    gitIdentity,
+    perWorkerKey: jobId || launchRequestId || null,
+  });
   const replyContext = requireWorkerReplyContext({ replyPath, hqRoot, launchRequestId });
 
   // Worker-provenance env. The commit-msg hook installed by

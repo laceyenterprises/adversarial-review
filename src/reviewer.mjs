@@ -41,6 +41,7 @@ import {
 } from './prompt-context.mjs';
 import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
+import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   openReviewerFence,
@@ -992,47 +993,57 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const authPath = resolveCodexAuthPath();
+  // Per-worker codex credential (burst OAuth-cascade fix). Each reviewer spawn
+  // gets its own auth.json with a placeholder refresh_token so a review storm
+  // (or a reviewer racing the hq-dispatch fleet) cannot rotate-and-revoke the
+  // shared ChatGPT credential. Fail-safe: null -> use the shared path.
+  const perWorkerAuth = materializePerWorkerCodexAuth({
+    sharedAuthPath: authPath,
+    key: `reviewer-${process.pid}-${Date.now()}`,
+  });
+  const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
   const codexExecOverrides = resolveCodexExecOverrides();
 
   const { env } = scrubOAuthFallbackEnv({
     ...process.env,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-    CODEX_AUTH_PATH: authPath,
+    CODEX_AUTH_PATH: effectiveAuthPath,
     HOME: process.env.HOME || homedir(),
   });
 
-  let stdout = '';
-  let stderr = '';
   try {
-    console.error('[reviewWithCodex] invoking native Codex CLI');
-    const result = await spawnCodexReview(
-      {
-        codexCli: CODEX_CLI,
-        outputPath,
-        prompt,
-        model: codexExecOverrides.model,
-        modelProvider: codexExecOverrides.modelProvider,
-        configOverrides: codexExecOverrides.configOverrides,
-        env,
-        cwd: process.cwd(),
-        timeout: resolveReviewerTimeoutMs(env),
-        maxBuffer: 10 * 1024 * 1024,
+    let stdout = '';
+    let stderr = '';
+    try {
+      console.error('[reviewWithCodex] invoking native Codex CLI');
+      const result = await spawnCodexReview(
+        {
+          codexCli: CODEX_CLI,
+          outputPath,
+          prompt,
+          model: codexExecOverrides.model,
+          modelProvider: codexExecOverrides.modelProvider,
+          configOverrides: codexExecOverrides.configOverrides,
+          env,
+          cwd: process.cwd(),
+          timeout: resolveReviewerTimeoutMs(env),
+          maxBuffer: 10 * 1024 * 1024,
+        }
+      );
+      stdout = result.stdout || '';
+      stderr = result.stderr || '';
+    } catch (err) {
+      stdout = err.stdout || '';
+      stderr = err.stderr || '';
+      const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
+      if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
+        throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
       }
-    );
-    stdout = result.stdout || '';
-    stderr = result.stderr || '';
-  } catch (err) {
-    stdout = err.stdout || '';
-    stderr = err.stderr || '';
-    const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
-    if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
-      throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
+      throw new Error(`Native Codex exec failed: ${msg.substring(0, 800)}`);
     }
-    throw new Error(`Native Codex exec failed: ${msg.substring(0, 800)}`);
-  }
 
-  let fileOutput = '';
+    let fileOutput = '';
   const outputFileExists = existsSync(outputPath);
   try {
     if (outputFileExists) {
@@ -1062,10 +1073,13 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
     throw new Error(`Native Codex returned empty output.${hint}`);
   }
 
-  return {
-    reviewText: combined,
-    tokenUsage,
-  };
+    return {
+      reviewText: combined,
+      tokenUsage,
+    };
+  } finally {
+    perWorkerAuth?.cleanup();
+  }
 }
 
 // ── GitHub review posting ────────────────────────────────────────────────────

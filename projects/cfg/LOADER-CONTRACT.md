@@ -1,0 +1,73 @@
+# LOADER-CONTRACT.md - Cross-language config loader behavior spec
+
+This repository carries the Node.js adversarial-review implementation of the
+Agent OS CFG loader. The full Agent OS CFG contract lives at this same path in
+the parent Agent OS repository; this local mirror records the Node-facing
+behavior that must stay aligned with the Python and shell loaders.
+
+## Strict schema
+
+The v1 schema is strict by default. Unknown keys fail validation at startup,
+including nested keys under an otherwise-known section. Type and enum violations
+also fail loud with the offending dotted key, expected shape, rejected value, and
+source location when available.
+
+Direct validator calls are strict unless the caller explicitly opts into a
+documented compatibility mode. A source filename ending in `.local.yaml` or
+`.local.yml` is not enough to enable tolerance by itself.
+
+## Local sibling tolerance
+
+Layer 4 is the only automatic local override layer. The loader identifies it by
+deriving gitignored siblings from already-selected Layer 2 and Layer 3 sources:
+
+- top-level `config.yaml` -> top-level `config.local.yaml`
+- module `<module>/config.yaml` -> module `<module>/config.local.yaml`
+
+Only files discovered through that sibling path may automatically tolerate
+nested unknown keys. When enabled, a nested unknown key under a schema root this
+reader owns is dropped from the validated output instead of crashing the daemon.
+Unknown top-level keys still fail unless they are covered by the separate
+foreign-reader top-level exception below.
+
+This tolerance applies to both top-level local siblings and module local
+siblings, but only while they are loaded as Layer 4. A caller that points
+`topPath` directly at `config.local.yaml`, passes `mod.local.yaml` directly as a
+module path, or calls `validateSchema(..., { source: "/tmp/config.local.yaml" })`
+gets strict validation unless it deliberately passes the explicit
+`tolerateNestedUnknownLocalKeys` validator option.
+
+The compatibility mode exists for rolling cross-language schema deployments:
+operator-edited local override files may contain a newly-added nested key before
+every daemon's loader has been upgraded. Dropping that unknown nested key makes
+the old reader behave as though the future key were unset; it must not expose
+the unknown key as a resolved value.
+
+## Foreign top-level local sections
+
+Top-level `config.local.yaml` is shared by multiple CFG readers. A loader may
+ignore only root sections it explicitly allowlists as foreign to that reader
+because those sections are owned by another reader sharing the same local file.
+The adversarial-review Node loader may ignore the foreign `worker_pool` root
+when the caller explicitly enables foreign-top-level tolerance for an actual
+Layer-4 local sibling.
+
+This exception does not apply to checked-in `config.yaml`, checked-in module
+files, direct standalone validator calls, module-local direct loads,
+unallowlisted root keys, or nested keys.
+
+## Conformance expectations
+
+Python, Node, and shell CFG loaders must agree on this surface:
+
+- checked-in config files reject unknown keys at every strict section
+- direct validator calls remain strict even when `source` names a `.local.yaml`
+  file
+- Layer-4 local siblings may drop nested unknown keys under owned roots
+- Layer-4 local siblings still reject arbitrary unknown top-level typo roots
+- tolerated unknown keys are omitted from resolved values and provenance
+
+Any loader that infers nested-key tolerance from filename alone is out of
+contract; the tolerance must be scoped to the actual local-sibling layer or an
+explicit validator option used by a caller that is deliberately reproducing that
+layer.

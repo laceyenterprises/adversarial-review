@@ -94,6 +94,15 @@ function isLocalYamlSource(source) {
   return name.endsWith('.local.yaml') || name.endsWith('.local.yml');
 }
 
+// Silent by default. We deliberately do NOT console.warn unknown-key drops:
+// agent-os#1738 showed a config-loader warning leaking onto stderr can corrupt
+// positional config captures downstream. Opt in with ADVERSARIAL_CONFIG_DEBUG.
+function configDebugLog(message) {
+  if (process.env.ADVERSARIAL_CONFIG_DEBUG) {
+    process.stderr.write(`[adversarial-config] ${message}\n`);
+  }
+}
+
 // -------- Schema declaration -----------------------------------------------
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'adversarial'];
@@ -1486,7 +1495,14 @@ function buildLineMap(text, allowedTopKeys) {
   return out;
 }
 
-function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
+function validateDictPresentKeysOnly(
+  doc,
+  schema,
+  keyPath,
+  source,
+  lineMap,
+  tolerateUnknown = false,
+) {
   if (doc === null || doc === undefined) return {};
   if (typeof doc !== 'object' || Array.isArray(doc)) {
     throw new AgentOSConfigError(
@@ -1510,6 +1526,21 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
         const near = nearestValidKey(rawKey, Object.keys(allowed));
         const full = keyPath ? `${keyPath}.${rawKey}` : rawKey;
         const hint = near ? ` did you mean ${keyPath ? keyPath + '.' : ''}${JSON.stringify(near)}?` : '';
+        if (tolerateUnknown && keyPath) {
+          // Operator-local override (config.local.yaml / module *.local.yaml):
+          // a NESTED unknown key under a root this reader owns is dropped, not
+          // raised. This is the Node mirror of agent-os#1743: the local
+          // override is live-edited and read by multiple daemons (python/shell
+          // CFG loader + this Node adversarial loader) that may each be at a
+          // different deployed schema version during a rollout, so a premature
+          // key must be a no-op here instead of a watcher crash-loop. Debug-only
+          // (never stderr by default — see agent-os#1738 warning-leak lesson).
+          configDebugLog(
+            `dropping unknown key ${JSON.stringify(full)} from local override` +
+              `${source ? ` (${source})` : ''} — not in this reader's schema`,
+          );
+          continue;
+        }
         throw new AgentOSConfigError(
           `${full}: unknown key (strict schema)${hint}`,
           {
@@ -1529,7 +1560,8 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
     if (!(childKey in allowed)) {
       // Non-strict dict (e.g. `submodules`) is an extension point:
       // pass arbitrary subtrees through verbatim instead of silently
-      // dropping them. Strict dicts would have thrown above.
+      // dropping them. Strict dicts would have thrown above (or, under
+      // tolerateUnknown, been dropped above).
       if (!strict) out[childKey] = raw;
       continue;
     }
@@ -1537,7 +1569,14 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
     const full = keyPath ? `${keyPath}.${childKey}` : childKey;
     const childSource = annotateLine(source, lineMap, childKey);
     if (childSchema.__type === TYPE_DICT) {
-      out[childKey] = validateDictPresentKeysOnly(raw, childSchema, full, childSource, null);
+      out[childKey] = validateDictPresentKeysOnly(
+        raw,
+        childSchema,
+        full,
+        childSource,
+        null,
+        tolerateUnknown,
+      );
     } else {
       out[childKey] = checkLeaf(raw, childSchema, full, childSource);
     }
@@ -1547,7 +1586,12 @@ function validateDictPresentKeysOnly(doc, schema, keyPath, source, lineMap) {
 
 export function validateSchema(
   doc,
-  { source = null, rawText = null, tolerateForeignTopLevelSections = false } = {},
+  {
+    source = null,
+    rawText = null,
+    tolerateForeignTopLevelSections = false,
+    tolerateNestedUnknownLocalKeys = false,
+  } = {},
 ) {
   const schema = schemaV1();
   const lineMap = rawText ? buildLineMap(rawText, Object.keys(schema.__keys)) : null;
@@ -1575,12 +1619,31 @@ export function validateSchema(
       { key: 'version', expected: String(SCHEMA_VERSION), got: doc.version, source },
     );
   }
+  const knownTop = schema.__keys || {};
+  const filtered = filterForeignTopLevelSections(doc, knownTop, {
+    source,
+    tolerateForeignTopLevelSections,
+  });
+  return validateDictPresentKeysOnly(
+    filtered,
+    schema,
+    '',
+    source,
+    lineMap,
+    tolerateNestedUnknownLocalKeys,
+  );
+}
+
+function filterForeignTopLevelSections(
+  doc,
+  knownTop,
+  { source = null, tolerateForeignTopLevelSections = false } = {},
+) {
   // Tolerant top-level is scoped to Layer-4 multi-reader local siblings.
   // The public validator and checked-in Layer-3 config.yaml remain strict so
   // this reader cannot silently diverge from sibling CFG loaders.
-  const knownTop = schema.__keys || {};
   const filtered = {};
-  for (const topKey of Object.keys(doc)) {
+  for (const topKey of Object.keys(doc || {})) {
     if (topKey === 'version' || topKey.startsWith('__') || topKey in knownTop) {
       filtered[topKey] = doc[topKey];
     } else if (
@@ -1599,7 +1662,7 @@ export function validateSchema(
       filtered[topKey] = doc[topKey];
     }
   }
-  return validateDictPresentKeysOnly(filtered, schema, '', source, lineMap);
+  return filtered;
 }
 
 // -------- Module file validation -------------------------------------------
@@ -1646,7 +1709,15 @@ function getLeaf(source, dottedKey) {
 
 const MISSING = Symbol('missing');
 
-function validateModuleDoc(doc, source, rawText) {
+function validateModuleDoc(
+  doc,
+  source,
+  rawText,
+  {
+    tolerateForeignTopLevelSections = false,
+    tolerateNestedUnknownLocalKeys = false,
+  } = {},
+) {
   if (doc === null || doc === undefined) return { validated: {}, aliases: {} };
   if (typeof doc !== 'object' || Array.isArray(doc)) {
     throw new AgentOSConfigError(
@@ -1660,7 +1731,16 @@ function validateModuleDoc(doc, source, rawText) {
       { key: 'version', source },
     );
   }
-  const aliasesRaw = doc.__aliases || {};
+  const schema = schemaV1();
+  const moduleTop = {};
+  for (const [k, v] of Object.entries(schema.__keys)) {
+    if (k !== 'version') moduleTop[k] = v;
+  }
+  const filteredDoc = filterForeignTopLevelSections(doc, moduleTop, {
+    source,
+    tolerateForeignTopLevelSections,
+  });
+  const aliasesRaw = filteredDoc.__aliases || {};
   if (typeof aliasesRaw !== 'object' || Array.isArray(aliasesRaw)) {
     throw new AgentOSConfigError(
       `${source}: __aliases must be a mapping`,
@@ -1691,7 +1771,7 @@ function validateModuleDoc(doc, source, rawText) {
   }
 
   const body = {};
-  for (const [k, v] of Object.entries(doc)) {
+  for (const [k, v] of Object.entries(filteredDoc)) {
     if (k !== '__aliases') body[k] = v;
   }
 
@@ -1725,7 +1805,6 @@ function validateModuleDoc(doc, source, rawText) {
     setLeaf(canonicalBody, dotted, value);
   }
 
-  const schema = schemaV1();
   const moduleSchema = {
     __type: TYPE_DICT,
     __strict: schema.__strict,
@@ -1735,7 +1814,14 @@ function validateModuleDoc(doc, source, rawText) {
     if (k !== 'version') moduleSchema.__keys[k] = v;
   }
   const lineMap = rawText ? buildLineMap(rawText, Object.keys(moduleSchema.__keys)) : null;
-  const validated = validateDictPresentKeysOnly(canonicalBody, moduleSchema, '', source, lineMap);
+  const validated = validateDictPresentKeysOnly(
+    canonicalBody,
+    moduleSchema,
+    '',
+    source,
+    lineMap,
+    tolerateNestedUnknownLocalKeys,
+  );
   return { validated, aliases };
 }
 
@@ -2048,12 +2134,14 @@ export function loadConfig({
   // entirely for those rather than synthesize a `${name}.local` sibling.
   const localSources = [];
   const topLocal = localSibling(topPathResolved);
-  if (topLocal && existsSync(topLocal)) localSources.push(topLocal);
+  if (topLocal && existsSync(topLocal)) localSources.push({ path: topLocal, kind: 'top' });
   for (const rawPath of modulePaths) {
     const moduleLocal = localSibling(rawPath);
-    if (moduleLocal && existsSync(moduleLocal)) localSources.push(moduleLocal);
+    if (moduleLocal && existsSync(moduleLocal)) {
+      localSources.push({ path: moduleLocal, kind: 'module' });
+    }
   }
-  for (const local of localSources) {
+  for (const { path: local, kind } of localSources) {
     const { doc: localDoc, rawText: localRaw } = loadLayerFile(local);
     if (localDoc === null || localDoc === undefined || isEmptyDoc(localDoc)) continue;
     let validatedLocal;
@@ -2067,9 +2155,13 @@ export function loadConfig({
         source: local,
         rawText: localRaw,
         tolerateForeignTopLevelSections: true,
+        tolerateNestedUnknownLocalKeys: true,
       });
     } else {
-      const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw);
+      const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw, {
+        tolerateForeignTopLevelSections: kind === 'top',
+        tolerateNestedUnknownLocalKeys: true,
+      });
       validatedLocal = validated;
       for (const [moduleKey, canonicalKey] of Object.entries(aliases)) {
         if (!(moduleKey in moduleAliases)) moduleAliases[moduleKey] = canonicalKey;

@@ -512,6 +512,259 @@ test('versioned config.local.yaml tolerates allowlisted foreign worker_pool sect
   }
 });
 
+test('unversioned config.local.yaml tolerates allowlisted foreign worker_pool section', () => {
+  const tmp = freshTmp();
+  const originalWarn = console.warn;
+  try {
+    const warnings = [];
+    console.warn = (msg) => warnings.push(String(msg));
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      roots:
+        hq: /from-local
+      worker_pool:
+        anything: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('worker_pool.anything'), null);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /worker_pool/);
+    assert.match(warnings[0], /config\.local\.yaml/);
+  } finally {
+    console.warn = originalWarn;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('config.local.yaml tolerates a NESTED unknown key under an owned root (no watcher crash)', () => {
+  // Mirror of agent-os#1743: a nested unknown key under a root THIS reader owns
+  // (here retention.policies.standard_backup, a strict nested dict) must be
+  // dropped, not raised, when it appears in the live-edited local override.
+  // The watcher crash-loop class (enabling a feature via a schema key the
+  // running daemon's schema lags on) must become a no-op, not an outage.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 3
+            bogus_key_not_in_schema: 1
+    `);
+    // Must NOT throw — the unknown nested key is dropped.
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('retention.policies.standard_backup.daily'), 3);
+    assert.equal(
+      cfg.get('retention.policies.standard_backup.bogus_key_not_in_schema'),
+      null,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('config.local.yaml rejects arbitrary unknown top-level keys as typos', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      version: 1
+      retentoin:
+        policies:
+          standard_backup:
+            daily: 3
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /retentoin/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('checked-in config.yaml STILL rejects a nested unknown key (strict preserved)', () => {
+  // The tolerance is scoped to *.local.yaml only — the version-controlled
+  // config.yaml keeps catching genuine typos at review/CI time.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 3
+            bogus_key_not_in_schema: 1
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /bogus_key_not_in_schema/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('topPath deliberately pointed at config.local.yaml stays strict outside Layer 4', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 3
+            bogus_key_not_in_schema: 1
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /bogus_key_not_in_schema/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('module *.local.yaml tolerates a nested unknown key; module config.yaml stays strict', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const mod = join(tmp, 'mod.yaml');
+    const modLocal = join(tmp, 'mod.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(mod, `
+      roles:
+        reviewer: codex
+    `);
+    writeFile(modLocal, `
+      roles:
+        reviewer: claude-code
+      retention:
+        policies:
+          standard_backup:
+            bogus_key_not_in_schema: 1
+    `);
+    // module-local nested unknown is dropped, not raised.
+    const cfg = loadConfig({ topPath: top, modulePaths: [mod], env: {} });
+    assert.equal(cfg.get('roles.reviewer'), 'claude-code');
+    assert.equal(
+      cfg.get('retention.policies.standard_backup.bogus_key_not_in_schema'),
+      null,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('module path supplied directly as *.local.yaml stays strict outside Layer 4', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const modLocal = join(tmp, 'mod.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(modLocal, `
+      roles:
+        reviewer: claude-code
+      retention:
+        policies:
+          standard_backup:
+            bogus_key_not_in_schema: 1
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, modulePaths: [modLocal], env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /bogus_key_not_in_schema/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('module *.local.yaml rejects arbitrary unknown top-level keys as typos', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const mod = join(tmp, 'mod.yaml');
+    const modLocal = join(tmp, 'mod.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(mod, `
+      roles:
+        reviewer: codex
+    `);
+    writeFile(modLocal, `
+      retentoin:
+        policies:
+          standard_backup:
+            daily: 3
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, modulePaths: [mod], env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /retentoin/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('retention full block accepts schema-default values', () => {
   const tmp = freshTmp();
   try {
@@ -1703,7 +1956,10 @@ test('validateSchema rejects MHX title tags in shared CFG enums', () => {
 
 test('validateSchema rejects allowlisted foreign top-level keys unless local-layer tolerance is explicit', () => {
   assert.throws(
-    () => validateSchema({ version: 1, worker_pool: { anything: true } }),
+    () => validateSchema(
+      { version: 1, worker_pool: { anything: true } },
+      { source: '/tmp/config.local.yaml' },
+    ),
     (err) => {
       assert.ok(err instanceof AgentOSConfigError);
       assert.match(err.message, /worker_pool/);
@@ -1751,7 +2007,10 @@ test('validateSchema can explicitly tolerate allowlisted foreign top-level keys 
 
 test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {
   assert.throws(
-    () => validateSchema({ version: 1, not_a_section: { anything: true } }),
+    () => validateSchema(
+      { version: 1, not_a_section: { anything: true } },
+      { source: '/tmp/config.local.yaml' },
+    ),
     (err) => {
       assert.ok(err instanceof AgentOSConfigError);
       assert.match(err.message, /not_a_section/);
@@ -1762,16 +2021,41 @@ test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {
 });
 
 test('validateSchema stays strict on unknown keys INSIDE a known section', () => {
-  // Tolerance is top-level only — typos within a section this reader consumes
-  // still fail loud.
+  // Public validation stays strict even when the source filename looks like a
+  // local override; Layer-4 callers must opt in after discovering a real sibling.
   assert.throws(
-    () => validateSchema({ version: 1, remediation: { max_concur_jobs: 10 } }),
+    () => validateSchema(
+      { version: 1, remediation: { max_concur_jobs: 10 } },
+      { source: '/tmp/config.local.yaml' },
+    ),
     (err) => {
       assert.ok(err instanceof AgentOSConfigError);
       assert.match(err.message, /max_concur_jobs/);
       return true;
     },
   );
+});
+
+test('validateSchema can explicitly tolerate nested unknown keys for local-layer callers', () => {
+  const out = validateSchema(
+    {
+      version: 1,
+      retention: {
+        policies: {
+          standard_backup: {
+            daily: 3,
+            bogus_key_not_in_schema: 1,
+          },
+        },
+      },
+    },
+    {
+      source: '/tmp/config.local.yaml',
+      tolerateNestedUnknownLocalKeys: true,
+    },
+  );
+  assert.equal(out.retention.policies.standard_backup.daily, 3);
+  assert.equal(out.retention.policies.standard_backup.bogus_key_not_in_schema, undefined);
 });
 
 // -------- Null-handling: explicit null must NOT bypass the schema ---------

@@ -110,6 +110,21 @@ function resolveRemediationWorkerTokenMinLifetimeMs(env = process.env) {
     : DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS;
 }
 
+function reviewerTokenHandoffUnsafeRoles(summary = {}) {
+  const handoffSafe = Array.isArray(summary?.handoffSafe) ? summary.handoffSafe : [];
+  return handoffSafe.filter((entry) => entry?.safe === false);
+}
+
+function shouldConsumeAfterReviewerTokenRefresh(summary = {}) {
+  return reviewerTokenHandoffUnsafeRoles(summary).length === 0;
+}
+
+function describeUnsafeReviewerTokenHandoff(summary = {}) {
+  return reviewerTokenHandoffUnsafeRoles(summary)
+    .map((entry) => `${entry.role || entry.envVar || 'unknown'}:${entry.reason || 'unsafe'}`)
+    .join(',');
+}
+
 // Run a tick step, swallowing errors so one step's failure can't
 // stop the daemon. Each underlying function already moves jobs to
 // failed/ on its own internal failure paths; a thrown error here is
@@ -389,10 +404,13 @@ async function main() {
     // handoff floor instead of reusing the reviewer timeout default: detached
     // remediation workers can validly outlive a reviewer subprocess and still
     // need their inherited GitHub token for final fetch/push/comment operations.
-    await runStep('reviewer-token-refresh', () => refreshReviewerBrokerTokens({
-      log: console,
-      minTokenLifetimeMs: resolveRemediationWorkerTokenMinLifetimeMs(process.env),
-    }));
+    let reviewerTokenRefreshSummary = null;
+    await runStep('reviewer-token-refresh', async () => {
+      reviewerTokenRefreshSummary = await refreshReviewerBrokerTokens({
+        log: console,
+        minTokenLifetimeMs: resolveRemediationWorkerTokenMinLifetimeMs(process.env),
+      });
+    });
     if (stopping) break;
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
     if (stopping) break;
@@ -417,19 +435,26 @@ async function main() {
       );
     });
     if (stopping) break;
-    await runStep('consume', async () => {
-      const result = await consumeFollowUpJobsUntilCapacity({
-        maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
-        shouldStop: () => stopping,
+    if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
+      await runStep('consume', async () => {
+        const result = await consumeFollowUpJobsUntilCapacity({
+          maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
+          shouldStop: () => stopping,
+        });
+        logTick(
+          'consume',
+          `maxConcurrent=${result.maxConcurrent} activeAtStart=${result.activeAtStart} ` +
+          `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
+          `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
+          `capacityRemaining=${result.capacityRemaining}`
+        );
       });
+    } else {
       logTick(
         'consume',
-        `maxConcurrent=${result.maxConcurrent} activeAtStart=${result.activeAtStart} ` +
-        `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
-        `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
-        `capacityRemaining=${result.capacityRemaining}`
+        `skipped unsafe reviewer token handoff roles=${describeUnsafeReviewerTokenHandoff(reviewerTokenRefreshSummary)}`
       );
-    });
+    }
     if (stopping) break;
     await runStep('retry-comments', () => retryFailedCommentDeliveries());
     if (stopping) break;
@@ -468,6 +493,8 @@ export {
   resolveRemediationWorkerTokenMinLifetimeMs,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
+  reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
+  shouldConsumeAfterReviewerTokenRefresh,
   writeMaintenanceSweepState,
 };

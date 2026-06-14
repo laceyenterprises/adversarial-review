@@ -167,8 +167,10 @@ The watcher runs the refresh at the start of each `pollOnce`. The follow-up
 daemon runs the same refresh as its first tick step, before `consume` can spawn a
 remediation worker that snapshots `process.env` and before `retry-comments` can
 post a durable remediation comment. A refresh failure therefore degrades only the
-current token freshness; it does not reorder or block reconcile, consume, or
-comment retry work. The runtime refresh contract:
+current token freshness: reconcile, heartbeat, stuck-claim sweep, comment retry,
+and maintenance still run, but `consume` is skipped for that tick when the
+refresh summary cannot prove every broker-backed reviewer token remains safe for
+remediation-worker subprocess handoff. The runtime refresh contract:
 
 - **Scheduling is expiry-driven, not a blind TTL.** The next refresh is keyed
   off the broker response's `expires_at` minus a 15-minute skew; a fixed
@@ -184,7 +186,9 @@ comment retry work. The runtime refresh contract:
   `consume` can spawn detached workers. Short-lived cached broker responses are
   rejected and the prior token, if any, remains in place, because each spawned
   reviewer or remediation subprocess snapshots `process.env` at spawn and
-  cannot benefit from a later daemon refresh.
+  cannot benefit from a later daemon refresh. If that prior token has already
+  aged below the remediation-worker floor, the follow-up daemon leaves the token
+  untouched but skips only worker spawn until a handoff-safe token is available.
 - **Operator config rotations bypass the schedule.** The refresh clock records a
   per-role fingerprint covering broker URL, provider, expected app ID, expected
   installation ID, shared-secret file path, and the broker-mode flag. Any change

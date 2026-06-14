@@ -10,7 +10,9 @@ import {
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
   resolveRemediationWorkerTokenMinLifetimeMs,
+  reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
+  shouldConsumeAfterReviewerTokenRefresh,
   writeMaintenanceSweepState,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
 
@@ -369,4 +371,30 @@ test('resolves remediation worker token handoff lifetime from the dedicated env 
     }),
     DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS,
   );
+});
+
+test('consume gate blocks only unsafe reviewer token handoff summaries', () => {
+  assert.equal(shouldConsumeAfterReviewerTokenRefresh({ handoffSafe: [] }), true);
+  assert.equal(
+    shouldConsumeAfterReviewerTokenRefresh({
+      handoffSafe: [
+        { role: 'claude-reviewer', envVar: 'GH_CLAUDE_REVIEWER_TOKEN', safe: true },
+      ],
+    }),
+    true,
+  );
+
+  const unsafeSummary = {
+    handoffSafe: [
+      { role: 'claude-reviewer', envVar: 'GH_CLAUDE_REVIEWER_TOKEN', safe: true },
+      {
+        role: 'codex-reviewer',
+        envVar: 'GH_CODEX_REVIEWER_TOKEN',
+        safe: false,
+        reason: 'token-below-handoff-floor',
+      },
+    ],
+  };
+  assert.equal(shouldConsumeAfterReviewerTokenRefresh(unsafeSummary), false);
+  assert.deepEqual(reviewerTokenHandoffUnsafeRoles(unsafeSummary), [unsafeSummary.handoffSafe[1]]);
 });

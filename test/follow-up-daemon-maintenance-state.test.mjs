@@ -371,6 +371,17 @@ test('resolves remediation worker token handoff lifetime from the dedicated env 
     }),
     DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS,
   );
+  // The default floor must stay SATISFIABLE against the broker's served token
+  // lifetime. GitHub App tokens live at most 60min and the broker re-mints
+  // within its ~25min refresh window, so it serves >=25min tokens. A floor above
+  // that range (the old 50min) made the consume step skip remediation spawns
+  // almost every tick and stalled the pipeline. Pin the value so a regression to
+  // an unsatisfiable floor fails loudly here.
+  assert.equal(DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS, 22 * 60 * 1000);
+  assert.ok(
+    DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS < 25 * 60 * 1000,
+    'remediation handoff floor must stay below the broker default refresh window (~25min) to be satisfiable',
+  );
 });
 
 test('consume gate blocks only unsafe reviewer token handoff summaries', () => {

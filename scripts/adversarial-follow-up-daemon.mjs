@@ -62,7 +62,24 @@ const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
 const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
 export const REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV =
   'ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS';
-export const DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS = 50 * 60 * 1000;
+// The reviewer-token handoff floor for spawning a remediation worker. The old
+// 50-minute default was effectively UNSATISFIABLE: GitHub App installation
+// tokens live at most 60 minutes, and the OAuth broker only re-mints within its
+// refresh window (default ~25 min) — so it serves tokens with 25–60 min
+// remaining. A 50-minute floor is cleared only in the brief window just after a
+// re-mint (60 → 50), so the `consume` step skipped spawning almost every tick
+// ("token-below-handoff-floor"), remediation jobs piled up unclaimed, and the
+// whole review→remediate→re-review→AMA pipeline stalled (observed 2026-06-14:
+// 14 jobs backlogged, 0 spawned, watcher pollsSinceLastSpawn=33).
+//
+// 22 minutes matches the reviewer-side handoff floor
+// (REVIEWER_TOKEN_FALLBACK_TTL_MS 20m + REVIEWER_TOKEN_POST_SLACK_MS 2m) and is
+// reliably satisfiable with the broker's default refresh window: the broker
+// always serves ≥25 min, comfortably above 22. A remediation worker that runs
+// longer than its handed-off token re-resolves via the broker mid-run; the
+// floor only governs the freshness at hand-off, not the worker's whole lifetime.
+// Operators who want a higher floor can still set the env override below.
+export const DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS = 22 * 60 * 1000;
 const STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = positiveNumberEnv(
   'STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS',
   5 * 60,

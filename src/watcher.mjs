@@ -3077,6 +3077,10 @@ function writeDagAutowalkOnMergeRecord(rootDir, record) {
   );
 }
 
+function writeDagAutowalkOnMergeRecordPath(recordPath, record) {
+  writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`);
+}
+
 function listDagAutowalkOnMergeRecords(rootDir = ROOT) {
   const dir = dagAutowalkOnMergeDir(rootDir);
   try {
@@ -3125,6 +3129,38 @@ function resolveDagAutowalkOnMergeTimeoutMs(env = process.env) {
     10
   );
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS;
+}
+
+function isMalformedDagAutowalkOnMergeRecord(record) {
+  return !record?.repo || !record?.prNumber;
+}
+
+function failMalformedDagAutowalkOnMergeRecord(recordPath, record, {
+  logger = console,
+  now = new Date(),
+  maxAttempts = resolveDagAutowalkOnMergeMaxAttempts(),
+} = {}) {
+  const updatedAt = now.toISOString();
+  const failed = {
+    ...record,
+    status: 'failed',
+    attempts: Math.max(Number(record?.attempts || 0), maxAttempts),
+    updatedAt,
+    lastError: {
+      message: 'Malformed dag autowalk-on-merge record: missing repo or prNumber',
+      code: 'malformed-record',
+      signal: null,
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+    },
+  };
+  writeDagAutowalkOnMergeRecordPath(recordPath, failed);
+  logger.error?.(
+    `[watcher] dag autowalk-on-merge malformed owed record marked failed at ${recordPath}: ` +
+    'missing repo or prNumber'
+  );
+  return failed;
 }
 
 function shouldRetryDagAutowalkOnMerge(record, {
@@ -3255,6 +3291,11 @@ async function retryPendingDagAutowalkOnMerge({
   let attempted = 0;
   let skipped = 0;
   for (const item of pending) {
+    if (isMalformedDagAutowalkOnMergeRecord(item.record)) {
+      skipped += 1;
+      failMalformedDagAutowalkOnMergeRecord(item.path, item.record, { logger, maxAttempts });
+      continue;
+    }
     if (
       attempted >= maxPerPoll
       || !shouldRetryDagAutowalkOnMerge(item.record, { nowMs, retryMs, maxAttempts })

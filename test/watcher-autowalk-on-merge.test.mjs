@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -159,6 +159,56 @@ test('retryPendingDagAutowalkOnMerge keeps terminal diagnostics after max attemp
   assert.equal(record.attempts, 1);
   assert.equal(record.lastError.code, 'ENOENT');
   assert.equal(record.lastError.stderr, 'not found\n');
+});
+
+test('retryPendingDagAutowalkOnMerge marks malformed records failed without consuming retry budget', async (t) => {
+  const rootDir = makeRoot();
+  t.after(() => cleanupRoot(rootDir));
+  const logger = makeLogger();
+  const calls = [];
+  const execFileImpl = async (cmd, args) => {
+    calls.push({ cmd, args });
+    return { stdout: 'walked\n', stderr: '' };
+  };
+
+  fireDagAutowalkOnMerge({
+    rootDir,
+    repo: 'acme/agent-os',
+    prNumber: 42,
+    logger,
+    now: new Date('2026-06-14T10:01:00.000Z'),
+  });
+  writeFileSync(
+    join(recordDir(rootDir), '000-malformed.json'),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      status: 'pending',
+      createdAt: '2026-06-14T10:00:00.000Z',
+      updatedAt: '2026-06-14T10:00:00.000Z',
+      attempts: 0,
+      lastAttemptAt: null,
+      lastError: null,
+    }, null, 2)}\n`
+  );
+
+  const result = await retryPendingDagAutowalkOnMerge({
+    rootDir,
+    execFileImpl,
+    logger,
+    maxPerPoll: 1,
+    maxAttempts: 3,
+  });
+
+  assert.deepEqual(result, { attempted: 1, skipped: 1, pending: 2 });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, [
+    'dag', 'autowalk-on-merge', '--repo', 'acme/agent-os', '--pr', '42',
+  ]);
+  const { record } = readOnlyRecord(rootDir);
+  assert.equal(record.status, 'failed');
+  assert.equal(record.attempts, 3);
+  assert.equal(record.lastError.code, 'malformed-record');
+  assert.ok(logger.errors.some((m) => m.includes('malformed owed record marked failed')));
 });
 
 test('pollOnce keeps dag autowalk-on-merge retry as a single poll-level pass', () => {

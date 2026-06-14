@@ -265,12 +265,12 @@ export async function refreshReviewerBrokerTokens({
       });
       if (expiresAtMs != null && expiresAtMs - now <= requiredLifetimeMs) {
         throw new ReviewerTokenTooShortError(
-          `broker token expires too soon for reviewer handoff: remaining=${expiresAtMs - now}ms minimum=${requiredLifetimeMs}ms`
+          `broker token expires too soon for subprocess handoff: remaining=${expiresAtMs - now}ms minimum=${requiredLifetimeMs}ms`
         );
       }
       env[envVar] = token;
       // Re-fetch before the token crosses EITHER the refresh skew OR the
-      // reviewer-handoff minimum lifetime — whichever comes first. Using only
+      // subprocess-handoff minimum lifetime — whichever comes first. Using only
       // (expiry - skew) left a window where now < expiry - skew (treated as
       // "token-still-valid") but expiry - now <= requiredLifetimeMs, during which
       // a newly-spawned reviewer could inherit a token too short to survive its

@@ -147,6 +147,29 @@ test('rejects a cached token that cannot survive reviewer timeout plus post slac
   assert.match(summary.failed[0].reason, /expires too soon/);
 });
 
+test('rejects a cached token that clears reviewer timeout but not remediation handoff floor', async () => {
+  // A 30m cached installation token is long enough for the default reviewer
+  // floor (~22m), but too short for a detached remediation worker handoff.
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 9_250_000;
+  const fetchImpl = async () =>
+    brokerOk('github-app-claude-reviewer', 'ghs_reviewer_only_lifetime', {
+      expiresAt: new Date(t0 + 30 * 60 * 1000).toISOString(),
+    });
+  const summary = await refreshReviewerBrokerTokens({
+    env,
+    now: t0,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    minTokenLifetimeMs: 50 * 60 * 1000,
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.equal(summary.failed.length, 1);
+  assert.match(summary.failed[0].reason, /minimum=3000000ms/);
+});
+
 test('backs off briefly after a too-short broker token while keeping the existing token', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();

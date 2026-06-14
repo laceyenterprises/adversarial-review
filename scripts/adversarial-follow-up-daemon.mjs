@@ -60,6 +60,9 @@ const ROOT = resolve(__dirname, '..');
 const TICK_INTERVAL_SECONDS = Number(process.env.TICK_INTERVAL_SECONDS) || 120;
 const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
 const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
+export const REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV =
+  'ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS';
+export const DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS = 50 * 60 * 1000;
 const STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = positiveNumberEnv(
   'STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS',
   5 * 60,
@@ -95,6 +98,17 @@ const MAX_CONCURRENT_REMEDIATION_JOBS = resolveRemediationMaxConcurrentJobs(proc
     );
   },
 });
+
+function resolveRemediationWorkerTokenMinLifetimeMs(env = process.env) {
+  const raw = env?.[REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV];
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS;
+}
 
 // Run a tick step, swallowing errors so one step's failure can't
 // stop the daemon. Each underlying function already moves jobs to
@@ -371,8 +385,14 @@ async function main() {
     // not, so its comments silently stopped posting. TTL-gated + fail-safe (keeps
     // the existing token on any broker error; never throws). Runs first so the
     // same-tick `consume` (spawns workers that snapshot env) and `retry-comments`
-    // both see the refreshed token.
-    await runStep('reviewer-token-refresh', () => refreshReviewerBrokerTokens({ log: console }));
+    // both see the refreshed token. The daemon passes an explicit remediation
+    // handoff floor instead of reusing the reviewer timeout default: detached
+    // remediation workers can validly outlive a reviewer subprocess and still
+    // need their inherited GitHub token for final fetch/push/comment operations.
+    await runStep('reviewer-token-refresh', () => refreshReviewerBrokerTokens({
+      log: console,
+      minTokenLifetimeMs: resolveRemediationWorkerTokenMinLifetimeMs(process.env),
+    }));
     if (stopping) break;
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
     if (stopping) break;
@@ -445,6 +465,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
 export {
   main,
+  resolveRemediationWorkerTokenMinLifetimeMs,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
   runStoppedArchiveSweepIfDue,

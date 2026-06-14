@@ -174,13 +174,17 @@ comment retry work. The runtime refresh contract:
   off the broker response's `expires_at` minus a 15-minute skew; a fixed
   fallback TTL applies only when `expires_at` is absent. The first sight of a
   role always re-fetches (the startup token's expiry is unknown to the watcher).
-- **Worker handoff requires enough remaining lifetime.** A token with a
+- **Subprocess handoff requires enough remaining lifetime.** A token with a
   parseable `expires_at` is written into the runtime environment only when its
-  remaining lifetime exceeds the configured reviewer timeout plus the runtime
-  post slack (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). Short-lived cached
-  broker responses are rejected and the prior token, if any, remains in place,
-  because each spawned reviewer or remediation subprocess snapshots
-  `process.env` at spawn and cannot benefit from a later daemon refresh.
+  remaining lifetime exceeds the caller's handoff floor. The watcher uses the
+  configured reviewer timeout plus runtime post slack
+  (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). The follow-up daemon passes a
+  separate remediation-worker floor
+  (`ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS`, default 50m) before
+  `consume` can spawn detached workers. Short-lived cached broker responses are
+  rejected and the prior token, if any, remains in place, because each spawned
+  reviewer or remediation subprocess snapshots `process.env` at spawn and
+  cannot benefit from a later daemon refresh.
 - **Operator config rotations bypass the schedule.** The refresh clock records a
   per-role fingerprint covering broker URL, provider, expected app ID, expected
   installation ID, shared-secret file path, and the broker-mode flag. Any change

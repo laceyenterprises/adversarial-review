@@ -5,8 +5,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS,
+  REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
+  resolveRemediationWorkerTokenMinLifetimeMs,
   runStoppedArchiveSweepIfDue,
   writeMaintenanceSweepState,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
@@ -342,4 +345,28 @@ test('tick loop refreshes the reviewer broker token before any GitHub step', () 
   assert.ok(refreshIdx > 0, 'tick loop must run the reviewer-token-refresh step');
   assert.ok(consumeIdx > refreshIdx, 'refresh must run before consume (worker spawn)');
   assert.ok(retryIdx > refreshIdx, 'refresh must run before retry-comments (direct post)');
+  assert.match(
+    src,
+    /minTokenLifetimeMs:\s*resolveRemediationWorkerTokenMinLifetimeMs\(process\.env\)/,
+    'daemon must pass an explicit remediation-worker handoff floor',
+  );
+});
+
+test('resolves remediation worker token handoff lifetime from the dedicated env knob', () => {
+  assert.equal(
+    resolveRemediationWorkerTokenMinLifetimeMs({}),
+    DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS,
+  );
+  assert.equal(
+    resolveRemediationWorkerTokenMinLifetimeMs({
+      [REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV]: '2700000',
+    }),
+    2700000,
+  );
+  assert.equal(
+    resolveRemediationWorkerTokenMinLifetimeMs({
+      [REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV]: 'not-a-number',
+    }),
+    DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS,
+  );
 });

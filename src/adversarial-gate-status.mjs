@@ -126,6 +126,42 @@ function extractReviewBodyFromRow(reviewRow) {
   return reviewRow?.reviewBody ?? reviewRow?.review_body ?? reviewRow?.review_text ?? null;
 }
 
+/**
+ * Resolve a PR's settled review verdict + remediation-pending state from the
+ * SAME canonical source `pickAdversarialGateStatus()` uses: the latest
+ * follow-up job's review body when remediation ran (else the stored review
+ * row), and the job status for remediation activity.
+ *
+ * The AMA closure path needs this because `reviewed_prs` has NO `last_verdict`
+ * or `remediation_pending` columns — the AMA review-state builder read them off
+ * the row, got `undefined` -> verdict `''` -> never in SETTLED_SUCCESS_VERDICTS
+ * -> AMA reported `verdict-not-settled-success` for every PR and closed 0 ever
+ * (the same phantom-column class as the `risk_class` fix in the AMA path). This
+ * mirrors the gate's ordering: an active or queued-re-review remediation is NOT
+ * settled; everything else resolves the verdict from the posted body.
+ *
+ * @returns {{verdict: string, remediationPending: boolean}}
+ */
+function resolveSettledReviewVerdict(
+  rootDir,
+  { repo, prNumber, reviewRow = null, latestJobFinder = findLatestFollowUpJobForPR } = {}
+) {
+  const latestJob = latestJobFinder(rootDir, { repo, prNumber });
+  const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
+  if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {
+    return { verdict: '', remediationPending: true };
+  }
+  if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
+    return { verdict: '', remediationPending: true };
+  }
+  const body =
+    latestJob && typeof latestJob.reviewBody === 'string' && latestJob.reviewBody.trim()
+      ? latestJob.reviewBody
+      : extractReviewBodyFromRow(reviewRow);
+  const verdict = String(normalizeReviewVerdict(extractReviewVerdict(body)) || '').toLowerCase();
+  return { verdict, remediationPending: false };
+}
+
 function truncateDescription(description) {
   const text = String(description ?? '').trim().replace(/\s+/g, ' ');
   if (text.length <= DESCRIPTION_MAX_CHARS) return text;
@@ -527,4 +563,5 @@ export {
   projectAdversarialGateStatus,
   pruneGateRecordsForPR,
   publishAdversarialGateStatus,
+  resolveSettledReviewVerdict,
 };

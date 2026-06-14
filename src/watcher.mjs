@@ -100,6 +100,7 @@ import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
   deleteGateRecordsForPR,
   projectAdversarialGateStatus,
+  resolveSettledReviewVerdict,
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
@@ -3324,11 +3325,23 @@ async function maybeDispatchAmaClosureFor({
     );
   }
 
+  // Resolve verdict + remediation-pending from the SAME canonical source the
+  // adversarial gate uses (the posted review body via the latest follow-up
+  // job, else the stored review row). reviewed_prs has NO `last_verdict` /
+  // `remediation_pending` columns, so the previous reads were always
+  // `undefined` -> verdict '' -> never settled-success -> AMA closed 0 PRs
+  // ever. This is the verdict/remediation twin of the `risk_class` phantom-
+  // column fix above (the riskClass path was repaired; this one was missed).
+  const settledReview = resolveSettledReviewVerdict(rootDir, {
+    repo: repoPath,
+    prNumber,
+    reviewRow: reviewStateRow,
+  });
   const reviewState = {
-    verdict: String(reviewStateRow?.last_verdict || '').toLowerCase(),
+    verdict: settledReview.verdict,
     headSha: candidate?.headSha || currentRevisionRef || null,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
-    remediationPending: Boolean(reviewStateRow?.remediation_pending),
+    remediationPending: settledReview.remediationPending,
     reviewCycleExhausted,
     blockingFindingCount: Number(dispatchJob?.blockingFindingCount ?? 0),
     blockingFindingState: String(dispatchJob?.blockingFindingState || 'unknown').trim().toLowerCase(),

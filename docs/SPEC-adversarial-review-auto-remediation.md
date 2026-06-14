@@ -35,6 +35,19 @@ Audit/provenance strings must distinguish the two successful cases:
 the configured gate, while `branch_protection_requirement_waived` means the
 explicit no-branch-protection plan opt-out satisfied §4.2 #9.
 
+AMA risk-class configuration accepts `low`, `medium`, `high`, and `critical`.
+`unknown` / unclassified risk is never a configured single-key class and always
+fails closed unless the explicit two-key override is present. By default,
+`roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key` is
+`true`, so `high` and `critical` still require both current-head
+`adversarial-merge-requested` evidence and current-head `operator-approved`
+evidence. Operators may set that key to `false` when AMA is intended to be the
+single merge authority for every known risk class: in that mode, `high` and
+`critical` close on `risk_classes` membership alone, exactly like `low` and
+`medium`. The risk-class allowlist remains load-bearing; final-hammer review
+cycle exhaustion must not make a `high` or `critical` PR eligible when that
+class is absent from `risk_classes`.
+
 ### §4.2a — AMA final hammer (review-cycle exhaustion)
 
 AMA is the **final merge authority at the end of the review cycle**, by operator
@@ -58,14 +71,16 @@ convergence-dependent gates** so AMA can land the PR:
 - `blocking-findings-present` / `blocking-findings-unknown`
 - `branch-protection-missing-gate` (the structural gate this GitHub plan can't
   provide — the historical reason AMA closed zero PRs)
-- `risk-class-not-permitted` **only for the non-two-key classes**
+- `risk-class-not-permitted` only for low/medium allowlist misses. High/critical
+  allowlist misses are never waived; when high/critical are configured for
+  single-key AMA closure, the class must already be present in `risk_classes`.
 
 Exhaustion **never waives the hard safety gates** — these still block AMA even at
 cycle-end: PR open / non-draft / **mergeable**; **head-match** to the reviewed
 head (AMA still pins `--match-head-commit <reviewedSha>` at merge); **CI green**;
 **hard-stop labels** (including head-scoped `adversarial-merge-blocked`);
-fast-merge state; AMA enabled; and the **two-key override for high / critical /
-unknown risk** (the auth/billing/security/prod cluster keeps its human gate).
+fast-merge state; AMA enabled; the **two-key override for unknown risk**; and the
+configured high/critical risk contract described above.
 
 A PR that converges normally (settled-success `Comment only` / `Approved` with no
 standing blocking findings) merges via the ordinary path and never reaches this
@@ -971,7 +986,7 @@ Fast-merge state transitions are audit-bearing. Successful merges persist `fast_
 3. **Normal verdict path:** without a live override label, the latest follow-up job for the current head SHA must NOT be `pending` or `in-progress` (`in_progress` in the durable queue is normalized to `in-progress` at the merge-agent boundary). Older-head follow-up jobs do not block convergence for a newer reviewed head. Before any normal-verdict dispatch, the watcher reads the latest structured `## Blocking issues` section. Any known standing blocker (`blockingFindingCount > 0`) parks the dispatch at `skip-blockers-present` for every verdict, including `comment-only` and `approved`, unless a scoped operator override applies. Recovery is a fresh structured review whose blockers are `- None.`, a scoped `operator-approved` label that explicitly accepts the blockers, or a scoped `merge-agent-requested` label for that head. A clean `comment-only` verdict with no standing blockers dispatches immediately. That clean-verdict dispatch now carries the same converge-and-merge prompt contract as the budget-exhausted final pass: run `comment_only_followups.py`, apply actionable in-scope findings inline, wait only for real external CI on the pushed head, ignore the adversarial-review gate status as a merge blocker, and request another adversarial pass only for major in-PR refactors. A `request-changes` verdict dispatches only when the remediation budget is exhausted; if more rounds are claimable, the merge-agent waits for current-head remediation instead of racing it.
 4. **`merge-agent-requested` override:** a scoped `merge-agent-requested` label is the explicit "run the merge-agent now" escape hatch. "Scoped" is load-bearing: the watcher accepts the label only when the latest attributable GitHub `labeled` event is attached to the current head SHA, carries durable audit identity (`eventId` / `nodeId` plus `observedAt`), and is not older than the latest PR update on that same head. Same-login application is valid at single-operator scale; freshness and head scoping are the safety checks. When scoped, the label still respects the universal hard gates and the active-remediation guard, but it can bypass mergeability, checks, verdict parsing, and remediation-round exhaustion so the merge-agent can rebase or clean the branch on demand.
 
-AMA closer labels are separate from the merge-agent dispatch labels above. `adversarial-merge-blocked` is an AMA-only hard stop: when the current PR labels include it, AMA closure is refused unless a non-null, attributable label-event snapshot proves the latest block event is stale or unapplied for the current head. Missing or null block evidence fails closed on raw label presence. `adversarial-merge-requested` is an AMA-only risk-class request: it must be an attributable non-author label event scoped to the current head, bypasses only AMA's risk-class gate, and for high/critical/unknown risk still requires a simultaneous scoped `operator-approved` two-key turn plus all structural hard gates. The watcher initializes both labels idempotently by name and preserves operator-customized colors/descriptions.
+AMA closer labels are separate from the merge-agent dispatch labels above. `adversarial-merge-blocked` is an AMA-only hard stop: when the current PR labels include it, AMA closure is refused unless a non-null, attributable label-event snapshot proves the latest block event is stale or unapplied for the current head. Missing or null block evidence fails closed on raw label presence. `adversarial-merge-requested` is an AMA-only risk-class request: it must be an attributable non-author label event scoped to the current head and bypasses only AMA's risk-class gate. It is mandatory for unknown risk, and for high/critical risk unless `eligibility.high_risk_requires_two_key=false` and the concrete risk class is included in `risk_classes`; in that configured single-key mode, high/critical follow the same risk-class gate as low/medium. Whenever two-key is required, `adversarial-merge-requested` still needs simultaneous scoped `operator-approved` evidence plus all structural hard gates. The watcher initializes both labels idempotently by name and preserves operator-customized colors/descriptions.
 
 5. **Final-pass-on-budget-exhausted:** when `MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=1` is set in the per-call env (set on the follow-up daemon LaunchAgent in this repo) AND `remediationCurrentRound >= remediationMaxRounds` AND the verdict is still `request-changes` AND no scoped `operator-approved` label is present, the watcher first inspects the latest structured `## Blocking issues` section. A legacy or malformed `Request changes` review with no structured blocking section produces `skip-blocking-findings-unknown` and still fails closed. When blocker state is known, the watcher now emits **distinct machine-readable final-pass modes**:
    - standing blockers dispatch exactly once per PR/head progression with trigger `final-pass-blocker-remediation`, `MERGE_AGENT_BLOCKER_REMEDIATION_REQUIRED=1`, and `MERGE_AGENT_BLOCKING_FINDING_COUNT=<n>` so downstream code can refuse merge without parsing prompt prose;

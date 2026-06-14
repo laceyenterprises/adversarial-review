@@ -408,6 +408,24 @@ test('not eligible: high risk single-key still requires high in the allowlist', 
   assert.ok(result.reasons.includes('risk-class-not-permitted'));
 });
 
+test('not eligible: final hammer does not waive a missing high-risk allowlist entry', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      riskClass: 'high',
+      reviewCycleExhausted: true,
+    },
+    // High/critical may be single-key, but only when the class is configured.
+    cfg: eligibilityCfg(false, ['low', 'medium']),
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.riskClass.requiresTwoKey, false);
+  assert.equal(result.trace.riskClass.finalHammerWaivable, false);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+  assert.ok(!result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
+});
+
 test('not eligible: high risk still requires two-key by default (knob unset) even if allowlisted', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { riskClass: 'high' },
@@ -1116,13 +1134,27 @@ test('final hammer: NEVER waives a head-scoped adversarial-merge-blocked hard st
   assert.ok(result.reasons.some((r) => r.startsWith('label-')));
 });
 
-test('final hammer: still requires the two-key override for high/critical risk', () => {
+test('final hammer: by default still requires the two-key override for high/critical risk', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { verdict: 'request-changes', riskClass: 'critical', reviewCycleExhausted: true },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+test('final hammer: high/critical are single-key eligible when explicitly configured', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', riskClass: 'critical', reviewCycleExhausted: true },
+    cfg: eligibilityCfg(false),
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.riskClass.allowed, true);
+  assert.equal(result.trace.riskClass.requiresTwoKey, false);
+  assert.equal(result.trace.riskClass.permitted, true);
+  assert.ok(result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
+  assert.ok(!result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
 });
 
 test('final hammer: waives risk-class for a non-two-key class (medium not in allowlist)', () => {

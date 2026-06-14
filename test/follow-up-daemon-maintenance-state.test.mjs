@@ -5,9 +5,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS,
+  REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
+  resolveRemediationWorkerTokenMinLifetimeMs,
+  reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
+  shouldConsumeAfterReviewerTokenRefresh,
   writeMaintenanceSweepState,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
 
@@ -318,4 +323,78 @@ test('maintenance failed-step retry cooldown can be tuned by env', async (t) => 
     daemonModule.readMaintenanceSweepState(statePath).lastReapTerminalWorkspacesSweepMs,
     nowMs + 1000,
   );
+});
+
+// Regression guard for the per-tick reviewer-token refresh wiring. The tick
+// loop lives in main() (not exported), so we assert at the source level that
+// the refresh runs as the FIRST tick step — ahead of `consume` (which spawns
+// remediation workers that snapshot process.env) and `retry-comments` (which
+// posts directly). Without it, the daemon's broker App token expires ~1h after
+// (re)start and remediation reply comments silently 401 (2026-06-14 incident).
+test('tick loop refreshes the reviewer broker token before any GitHub step', () => {
+  const src = readFileSync(
+    new URL('../scripts/adversarial-follow-up-daemon.mjs', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    src,
+    /import \{ refreshReviewerBrokerTokens \} from '\.\.\/src\/reviewer-broker-refresh\.mjs'/,
+    'daemon must import refreshReviewerBrokerTokens',
+  );
+  const refreshIdx = src.indexOf("runStep('reviewer-token-refresh'");
+  const consumeIdx = src.indexOf("runStep('consume'");
+  const retryIdx = src.indexOf("runStep('retry-comments'");
+  assert.ok(refreshIdx > 0, 'tick loop must run the reviewer-token-refresh step');
+  assert.ok(consumeIdx > refreshIdx, 'refresh must run before consume (worker spawn)');
+  assert.ok(retryIdx > refreshIdx, 'refresh must run before retry-comments (direct post)');
+  assert.match(
+    src,
+    /minTokenLifetimeMs:\s*resolveRemediationWorkerTokenMinLifetimeMs\(process\.env\)/,
+    'daemon must pass an explicit remediation-worker handoff floor',
+  );
+});
+
+test('resolves remediation worker token handoff lifetime from the dedicated env knob', () => {
+  assert.equal(
+    resolveRemediationWorkerTokenMinLifetimeMs({}),
+    DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS,
+  );
+  assert.equal(
+    resolveRemediationWorkerTokenMinLifetimeMs({
+      [REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV]: '2700000',
+    }),
+    2700000,
+  );
+  assert.equal(
+    resolveRemediationWorkerTokenMinLifetimeMs({
+      [REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV]: 'not-a-number',
+    }),
+    DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS,
+  );
+});
+
+test('consume gate blocks only unsafe reviewer token handoff summaries', () => {
+  assert.equal(shouldConsumeAfterReviewerTokenRefresh({ handoffSafe: [] }), true);
+  assert.equal(
+    shouldConsumeAfterReviewerTokenRefresh({
+      handoffSafe: [
+        { role: 'claude-reviewer', envVar: 'GH_CLAUDE_REVIEWER_TOKEN', safe: true },
+      ],
+    }),
+    true,
+  );
+
+  const unsafeSummary = {
+    handoffSafe: [
+      { role: 'claude-reviewer', envVar: 'GH_CLAUDE_REVIEWER_TOKEN', safe: true },
+      {
+        role: 'codex-reviewer',
+        envVar: 'GH_CODEX_REVIEWER_TOKEN',
+        safe: false,
+        reason: 'token-below-handoff-floor',
+      },
+    ],
+  };
+  assert.equal(shouldConsumeAfterReviewerTokenRefresh(unsafeSummary), false);
+  assert.deepEqual(reviewerTokenHandoffUnsafeRoles(unsafeSummary), [unsafeSummary.handoffSafe[1]]);
 });

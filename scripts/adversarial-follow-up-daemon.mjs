@@ -45,6 +45,7 @@ import {
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
+import { refreshReviewerBrokerTokens } from '../src/reviewer-broker-refresh.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
@@ -59,6 +60,9 @@ const ROOT = resolve(__dirname, '..');
 const TICK_INTERVAL_SECONDS = Number(process.env.TICK_INTERVAL_SECONDS) || 120;
 const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
 const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
+export const REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV =
+  'ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS';
+export const DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS = 50 * 60 * 1000;
 const STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS = positiveNumberEnv(
   'STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS',
   5 * 60,
@@ -94,6 +98,32 @@ const MAX_CONCURRENT_REMEDIATION_JOBS = resolveRemediationMaxConcurrentJobs(proc
     );
   },
 });
+
+function resolveRemediationWorkerTokenMinLifetimeMs(env = process.env) {
+  const raw = env?.[REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV];
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS;
+}
+
+function reviewerTokenHandoffUnsafeRoles(summary = {}) {
+  const handoffSafe = Array.isArray(summary?.handoffSafe) ? summary.handoffSafe : [];
+  return handoffSafe.filter((entry) => entry?.safe === false);
+}
+
+function shouldConsumeAfterReviewerTokenRefresh(summary = {}) {
+  return reviewerTokenHandoffUnsafeRoles(summary).length === 0;
+}
+
+function describeUnsafeReviewerTokenHandoff(summary = {}) {
+  return reviewerTokenHandoffUnsafeRoles(summary)
+    .map((entry) => `${entry.role || entry.envVar || 'unknown'}:${entry.reason || 'unsafe'}`)
+    .join(',');
+}
 
 // Run a tick step, swallowing errors so one step's failure can't
 // stop the daemon. Each underlying function already moves jobs to
@@ -361,6 +391,27 @@ async function main() {
   );
 
   while (!stopping) {
+    // Keep the broker-minted reviewer GitHub App tokens fresh BEFORE any step
+    // that touches GitHub. This long-lived daemon resolved GH_*_REVIEWER_TOKEN
+    // once at startup; App installation tokens expire ~1h, so without this the
+    // remediation reply-comment POSTs (and the tokens that spawned remediation
+    // workers inherit) start failing with HTTP 401 about an hour after each
+    // (re)start — the watcher got this fix in pollOnce, the follow-up daemon did
+    // not, so its comments silently stopped posting. TTL-gated + fail-safe (keeps
+    // the existing token on any broker error; never throws). Runs first so the
+    // same-tick `consume` (spawns workers that snapshot env) and `retry-comments`
+    // both see the refreshed token. The daemon passes an explicit remediation
+    // handoff floor instead of reusing the reviewer timeout default: detached
+    // remediation workers can validly outlive a reviewer subprocess and still
+    // need their inherited GitHub token for final fetch/push/comment operations.
+    let reviewerTokenRefreshSummary = null;
+    await runStep('reviewer-token-refresh', async () => {
+      reviewerTokenRefreshSummary = await refreshReviewerBrokerTokens({
+        log: console,
+        minTokenLifetimeMs: resolveRemediationWorkerTokenMinLifetimeMs(process.env),
+      });
+    });
+    if (stopping) break;
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
     if (stopping) break;
     await runStep('heartbeat', () => {
@@ -384,19 +435,26 @@ async function main() {
       );
     });
     if (stopping) break;
-    await runStep('consume', async () => {
-      const result = await consumeFollowUpJobsUntilCapacity({
-        maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
-        shouldStop: () => stopping,
+    if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
+      await runStep('consume', async () => {
+        const result = await consumeFollowUpJobsUntilCapacity({
+          maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
+          shouldStop: () => stopping,
+        });
+        logTick(
+          'consume',
+          `maxConcurrent=${result.maxConcurrent} activeAtStart=${result.activeAtStart} ` +
+          `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
+          `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
+          `capacityRemaining=${result.capacityRemaining}`
+        );
       });
+    } else {
       logTick(
         'consume',
-        `maxConcurrent=${result.maxConcurrent} activeAtStart=${result.activeAtStart} ` +
-        `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
-        `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
-        `capacityRemaining=${result.capacityRemaining}`
+        `skipped unsafe reviewer token handoff roles=${describeUnsafeReviewerTokenHandoff(reviewerTokenRefreshSummary)}`
       );
-    });
+    }
     if (stopping) break;
     await runStep('retry-comments', () => retryFailedCommentDeliveries());
     if (stopping) break;
@@ -432,8 +490,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
 export {
   main,
+  resolveRemediationWorkerTokenMinLifetimeMs,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
+  reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
+  shouldConsumeAfterReviewerTokenRefresh,
   writeMaintenanceSweepState,
 };

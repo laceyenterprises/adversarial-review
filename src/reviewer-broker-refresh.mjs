@@ -95,6 +95,46 @@ export function _resetReviewerTokenRefreshClockForTest() {
 
 class ReviewerTokenTooShortError extends Error {}
 
+function reviewerTokenHandoffState({ role, envVar, env, now, requiredLifetimeMs }) {
+  const base = { role, envVar };
+  if (!env?.[envVar]) {
+    return { ...base, safe: false, reason: 'token-missing' };
+  }
+  const scheduled = refreshClock.get(envVar);
+  if (scheduled === undefined) {
+    return { ...base, safe: false, reason: 'token-expiry-untracked' };
+  }
+  const expiresAtMs = scheduled.expiresAtMs ?? null;
+  if (expiresAtMs == null) {
+    return { ...base, safe: false, reason: 'token-expiry-unknown' };
+  }
+  const remainingMs = expiresAtMs - now;
+  if (remainingMs > requiredLifetimeMs) {
+    return {
+      ...base,
+      safe: true,
+      reason: 'token-handoff-safe',
+      expiresAtMs,
+      remainingMs,
+      requiredLifetimeMs,
+    };
+  }
+  return {
+    ...base,
+    safe: false,
+    reason: 'token-below-handoff-floor',
+    expiresAtMs,
+    remainingMs,
+    requiredLifetimeMs,
+  };
+}
+
+function recordReviewerTokenHandoffState(summary, opts) {
+  const state = reviewerTokenHandoffState(opts);
+  summary.handoffSafe.push(state);
+  return state;
+}
+
 function brokerConfigForRole({ role, env, flag }) {
   const upper = roleUpper(role);
   const brokerUrl = (env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
@@ -214,7 +254,7 @@ export async function refreshReviewerBrokerTokens({
     postSlackMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_POST_SLACK_MS, REVIEWER_TOKEN_POST_SLACK_MS);
   const effectiveFailureRetryMs =
     failureRetryMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FAILURE_RETRY_MS, REVIEWER_TOKEN_FAILURE_RETRY_MS);
-  const summary = { refreshed: [], skipped: [], failed: [] };
+  const summary = { refreshed: [], skipped: [], failed: [], handoffSafe: [] };
   for (const { role, envVar, flag } of BROKER_REVIEWER_ROLES) {
     const configFingerprint = brokerConfigFingerprint(brokerConfigForRole({ role, env, flag }));
     if (String(env[flag] || '').trim() !== 'true') {
@@ -227,6 +267,12 @@ export async function refreshReviewerBrokerTokens({
         minTokenLifetimeMs ?? resolveReviewerTimeoutMs(env) + effectivePostSlackMs;
     } catch (err) {
       summary.failed.push({ role, reason: err?.message || String(err) });
+      summary.handoffSafe.push({
+        role,
+        envVar,
+        safe: false,
+        reason: 'handoff-floor-config-invalid',
+      });
       log?.warn?.(
         `[reviewer-broker-refresh] keeping existing ${envVar}; reviewer lifetime config for ${role} failed: ${err?.message || err}`
       );
@@ -247,11 +293,13 @@ export async function refreshReviewerBrokerTokens({
         const existingExpiresAtMs = scheduled.expiresAtMs ?? null;
         if (existingExpiresAtMs == null || existingExpiresAtMs - now > requiredLifetimeMs) {
           summary.skipped.push({ role, reason: 'broker-refresh-backoff' });
+          recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
           continue;
         }
       }
       if (now < scheduled.nextRefreshAtMs) {
         summary.skipped.push({ role, reason: 'token-still-valid' });
+        recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
         continue;
       }
     }
@@ -265,12 +313,12 @@ export async function refreshReviewerBrokerTokens({
       });
       if (expiresAtMs != null && expiresAtMs - now <= requiredLifetimeMs) {
         throw new ReviewerTokenTooShortError(
-          `broker token expires too soon for reviewer handoff: remaining=${expiresAtMs - now}ms minimum=${requiredLifetimeMs}ms`
+          `broker token expires too soon for subprocess handoff: remaining=${expiresAtMs - now}ms minimum=${requiredLifetimeMs}ms`
         );
       }
       env[envVar] = token;
       // Re-fetch before the token crosses EITHER the refresh skew OR the
-      // reviewer-handoff minimum lifetime — whichever comes first. Using only
+      // subprocess-handoff minimum lifetime — whichever comes first. Using only
       // (expiry - skew) left a window where now < expiry - skew (treated as
       // "token-still-valid") but expiry - now <= requiredLifetimeMs, during which
       // a newly-spawned reviewer could inherit a token too short to survive its
@@ -287,6 +335,7 @@ export async function refreshReviewerBrokerTokens({
         expiresAtMs: expiresAtMs ?? null,
       });
       summary.refreshed.push({ role, envVar, expiresAtMs: expiresAtMs ?? null });
+      recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
     } catch (err) {
       // Fail-safe: keep whatever token env already holds. Do NOT clear it, and
       // only apply a short backoff for too-short broker tokens while the prior
@@ -308,6 +357,7 @@ export async function refreshReviewerBrokerTokens({
         }
       }
       summary.failed.push({ role, reason: err?.message || String(err) });
+      recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
       log?.warn?.(
         `[reviewer-broker-refresh] keeping existing ${envVar}; broker refresh for ${role} failed: ${err?.message || err}`
       );

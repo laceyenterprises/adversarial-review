@@ -149,30 +149,46 @@ token, the launcher must not silently fall back to `op read`. That fail-closed
 path must also sleep before exit using the same launchd respawn-storm guard as
 the other startup secret failures.
 
-### Runtime reviewer-token refresh (watcher poll loop)
+### Runtime reviewer-token refresh (watcher and follow-up daemon ticks)
 
-The launcher mints the reviewer tokens **once**, at startup. The watcher,
-however, is a single long-lived process and the broker issues **GitHub App
-installation tokens that expire ~1h after issuance** (and may be served from the
-broker's cache already partway through that life). A token resolved only at
-startup therefore goes `401` mid-run, failing the GitHub review POST and
-stalling the pipeline until the daemon is restarted. To close that gap the
-watcher **re-resolves each broker-enabled reviewer token on every `pollOnce`
-tick** (`src/reviewer-broker-refresh.mjs`), writing the fresh token back into
-`process.env[botTokenEnv]` so subsequently-spawned reviewers inherit it. The
-runtime refresh contract:
+The launcher mints the reviewer tokens **once**, at startup. The watcher and
+follow-up daemon, however, are single long-lived processes and the broker issues
+**GitHub App installation tokens that expire ~1h after issuance** (and may be
+served from the broker's cache already partway through that life). A token
+resolved only at startup therefore goes `401` mid-run, failing the GitHub review
+POST, remediation worker handoff, or remediation comment delivery until the
+daemon is restarted. To close that gap both long-lived processes
+**re-resolve each broker-enabled reviewer token on every tick**
+(`src/reviewer-broker-refresh.mjs`), writing the fresh token back into
+`process.env[botTokenEnv]` so subsequently-spawned reviewer/remediation workers
+and in-process comment delivery inherit it.
+
+The watcher runs the refresh at the start of each `pollOnce`. The follow-up
+daemon runs the same refresh as its first tick step, before `consume` can spawn a
+remediation worker that snapshots `process.env` and before `retry-comments` can
+post a durable remediation comment. A refresh failure therefore degrades only the
+current token freshness: reconcile, heartbeat, stuck-claim sweep, comment retry,
+and maintenance still run, but `consume` is skipped for that tick when the
+refresh summary cannot prove every broker-backed reviewer token remains safe for
+remediation-worker subprocess handoff. The runtime refresh contract:
 
 - **Scheduling is expiry-driven, not a blind TTL.** The next refresh is keyed
   off the broker response's `expires_at` minus a 15-minute skew; a fixed
   fallback TTL applies only when `expires_at` is absent. The first sight of a
   role always re-fetches (the startup token's expiry is unknown to the watcher).
-- **Reviewer handoff requires enough remaining lifetime.** A token with a
-  parseable `expires_at` is written into the reviewer environment only when its
-  remaining lifetime exceeds the configured reviewer timeout plus the runtime
-  post slack (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). Short-lived cached
-  broker responses are rejected and the prior token, if any, remains in place,
-  because each reviewer subprocess snapshots `process.env` at spawn and cannot
-  benefit from a later watcher refresh.
+- **Subprocess handoff requires enough remaining lifetime.** A token with a
+  parseable `expires_at` is written into the runtime environment only when its
+  remaining lifetime exceeds the caller's handoff floor. The watcher uses the
+  configured reviewer timeout plus runtime post slack
+  (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). The follow-up daemon passes a
+  separate remediation-worker floor
+  (`ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS`, default 50m) before
+  `consume` can spawn detached workers. Short-lived cached broker responses are
+  rejected and the prior token, if any, remains in place, because each spawned
+  reviewer or remediation subprocess snapshots `process.env` at spawn and
+  cannot benefit from a later daemon refresh. If that prior token has already
+  aged below the remediation-worker floor, the follow-up daemon leaves the token
+  untouched but skips only worker spawn until a handoff-safe token is available.
 - **Operator config rotations bypass the schedule.** The refresh clock records a
   per-role fingerprint covering broker URL, provider, expected app ID, expected
   installation ID, shared-secret file path, and the broker-mode flag. Any change

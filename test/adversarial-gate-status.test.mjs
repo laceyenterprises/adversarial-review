@@ -943,7 +943,11 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
   assert.equal(result.dispatched, false);
   assert.equal(observed.reviewState.blockingFindingCount, 0);
   assert.equal(observed.reviewState.blockingFindingState, 'known');
-  assert.equal(observed.prMetadata.mergeableState, 'CLEAN');
+  // A mergeable PR (mergeable=MERGEABLE, mergeStateStatus=CLEAN) must resolve to
+  // 'MERGEABLE' so the eligibility gate (which compares against 'MERGEABLE')
+  // passes. The prior mapping yielded 'CLEAN' here, which !== 'MERGEABLE' and
+  // made AMA report `pr-not-mergeable` for every clean PR.
+  assert.equal(observed.prMetadata.mergeableState, 'MERGEABLE');
   assert.deepEqual(observed.prMetadata.statusCheckRollup, [
     { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
   ]);

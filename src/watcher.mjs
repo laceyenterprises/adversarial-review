@@ -3648,12 +3648,27 @@ async function maybeDispatchAmaClosureFor({
       : null,
     prAuthor: candidate?.prAuthor || null,
   };
+  // AMA's eligibility gate (SPEC §4.2 #7) compares `mergeableState` against
+  // 'MERGEABLE' — the vocabulary of GitHub's `mergeable` field (MERGEABLE /
+  // CONFLICTING / UNKNOWN), the authoritative merge-CONFLICT signal. The prior
+  // expression preferred `mergeStateStatus`, whose vocabulary is a DIFFERENT
+  // axis (CLEAN / BLOCKED / BEHIND / UNSTABLE / ...), so a perfectly mergeable PR
+  // (mergeStateStatus=CLEAN) resolved to 'CLEAN' !== 'MERGEABLE' and AMA reported
+  // `pr-not-mergeable` for EVERY clean PR — closing nothing even after the
+  // verdict fix (#291). Prefer the `mergeable` field; treat mergeStateStatus=CLEAN
+  // as MERGEABLE too (covers the window where GitHub still reports
+  // mergeable=UNKNOWN). CI state is gated separately via `ci-not-green`.
+  const candidateMergeable = String(candidate?.mergeable || '').toUpperCase();
+  const candidateMergeStateStatus = String(candidate?.mergeStateStatus || '').toUpperCase();
   const prMetadata = {
     prNumber,
     headSha: candidate?.headSha || currentRevisionRef || null,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
-    mergeableState: String(candidate?.mergeStateStatus || candidate?.mergeable || '').toUpperCase(),
+    mergeableState:
+      candidateMergeable === 'MERGEABLE' || candidateMergeStateStatus === 'CLEAN'
+        ? 'MERGEABLE'
+        : candidateMergeable || candidateMergeStateStatus,
     labels: Array.isArray(labelNames) ? labelNames : [],
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },

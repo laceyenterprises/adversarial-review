@@ -52,6 +52,11 @@ export const REVIEWER_TOKEN_FETCH_TIMEOUT_MS = 5_000;
 // survive that runtime plus a little post slack.
 export const REVIEWER_TOKEN_POST_SLACK_MS = 2 * 60 * 1000;
 
+// When the broker returns a cached token that is too short-lived for reviewer
+// handoff, do not hammer the broker on every watcher tick while the prior token
+// remains usable. Retry soon, but bounded.
+export const REVIEWER_TOKEN_FAILURE_RETRY_MS = 60 * 1000;
+
 // The reviewer roles that can be broker-backed. Mirrors the routes in
 // watcher.mjs + scripts/adversarial-watcher-start.sh. `envVar` is the
 // destination process.env key the reviewer subprocess reads (botTokenEnv);
@@ -79,14 +84,16 @@ function resolvePositiveMsEnv(rawValue, fallbackMs) {
 }
 
 // Module-level schedule clock, keyed by envVar → { nextRefreshAtMs,
-// configFingerprint }. nextRefreshAtMs is derived from the broker's expires_at
-// minus skew, or a fallback TTL. The fingerprint forces an immediate re-fetch
-// when operator-controlled broker routing/identity settings rotate. Exported
-// reset for tests.
+// configFingerprint, expiresAtMs, failureRetryUntilMs? }. nextRefreshAtMs is
+// derived from the broker's expires_at minus skew, or a fallback TTL. The
+// fingerprint forces an immediate re-fetch when operator-controlled broker
+// routing/identity settings rotate. Exported reset for tests.
 const refreshClock = new Map();
 export function _resetReviewerTokenRefreshClockForTest() {
   refreshClock.clear();
 }
+
+class ReviewerTokenTooShortError extends Error {}
 
 function brokerConfigForRole({ role, env, flag }) {
   const upper = roleUpper(role);
@@ -194,6 +201,7 @@ export async function refreshReviewerBrokerTokens({
   timeoutMs = null,
   postSlackMs = null,
   minTokenLifetimeMs = null,
+  failureRetryMs = null,
   force = false,
 } = {}) {
   // Operator-tunable knobs (documented in
@@ -204,11 +212,24 @@ export async function refreshReviewerBrokerTokens({
     timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
   const effectivePostSlackMs =
     postSlackMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_POST_SLACK_MS, REVIEWER_TOKEN_POST_SLACK_MS);
+  const effectiveFailureRetryMs =
+    failureRetryMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FAILURE_RETRY_MS, REVIEWER_TOKEN_FAILURE_RETRY_MS);
   const summary = { refreshed: [], skipped: [], failed: [] };
   for (const { role, envVar, flag } of BROKER_REVIEWER_ROLES) {
     const configFingerprint = brokerConfigFingerprint(brokerConfigForRole({ role, env, flag }));
     if (String(env[flag] || '').trim() !== 'true') {
       summary.skipped.push({ role, reason: 'broker-mode-disabled' });
+      continue;
+    }
+    let requiredLifetimeMs;
+    try {
+      requiredLifetimeMs =
+        minTokenLifetimeMs ?? resolveReviewerTimeoutMs(env) + effectivePostSlackMs;
+    } catch (err) {
+      summary.failed.push({ role, reason: err?.message || String(err) });
+      log?.warn?.(
+        `[reviewer-broker-refresh] keeping existing ${envVar}; reviewer lifetime config for ${role} failed: ${err?.message || err}`
+      );
       continue;
     }
     // Skip only while the token WE last fetched is still comfortably valid.
@@ -221,10 +242,18 @@ export async function refreshReviewerBrokerTokens({
       !force
       && scheduled !== undefined
       && scheduled.configFingerprint === configFingerprint
-      && now < scheduled.nextRefreshAtMs
     ) {
-      summary.skipped.push({ role, reason: 'token-still-valid' });
-      continue;
+      if (scheduled.failureRetryUntilMs != null && now < scheduled.failureRetryUntilMs) {
+        const existingExpiresAtMs = scheduled.expiresAtMs ?? null;
+        if (existingExpiresAtMs == null || existingExpiresAtMs - now > requiredLifetimeMs) {
+          summary.skipped.push({ role, reason: 'broker-refresh-backoff' });
+          continue;
+        }
+      }
+      if (now < scheduled.nextRefreshAtMs) {
+        summary.skipped.push({ role, reason: 'token-still-valid' });
+        continue;
+      }
     }
     try {
       const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
@@ -234,10 +263,8 @@ export async function refreshReviewerBrokerTokens({
         readFileImpl,
         timeoutMs: effectiveTimeoutMs,
       });
-      const requiredLifetimeMs =
-        minTokenLifetimeMs ?? resolveReviewerTimeoutMs(env) + effectivePostSlackMs;
       if (expiresAtMs != null && expiresAtMs - now <= requiredLifetimeMs) {
-        throw new Error(
+        throw new ReviewerTokenTooShortError(
           `broker token expires too soon for reviewer handoff: remaining=${expiresAtMs - now}ms minimum=${requiredLifetimeMs}ms`
         );
       }
@@ -254,11 +281,32 @@ export async function refreshReviewerBrokerTokens({
       const byExpiry = expiresAtMs != null ? expiresAtMs - refreshLeadMs : null;
       const byFallback = now + fallbackTtlMs;
       const next = byExpiry != null ? Math.max(byExpiry, now + 1) : byFallback;
-      refreshClock.set(envVar, { nextRefreshAtMs: next, configFingerprint });
+      refreshClock.set(envVar, {
+        nextRefreshAtMs: next,
+        configFingerprint,
+        expiresAtMs: expiresAtMs ?? null,
+      });
       summary.refreshed.push({ role, envVar, expiresAtMs: expiresAtMs ?? null });
     } catch (err) {
       // Fail-safe: keep whatever token env already holds. Do NOT clear it, and
-      // do NOT advance the schedule — retry on the next tick.
+      // only apply a short backoff for too-short broker tokens while the prior
+      // token remains outside the hard handoff floor. Other broker failures
+      // still retry next tick.
+      if (err instanceof ReviewerTokenTooShortError) {
+        const current = refreshClock.get(envVar);
+        const currentExpiresAtMs = current?.expiresAtMs ?? null;
+        const currentTooClose =
+          currentExpiresAtMs != null && currentExpiresAtMs - now <= requiredLifetimeMs;
+        if (!force && !currentTooClose) {
+          const retryAt = now + effectiveFailureRetryMs;
+          refreshClock.set(envVar, {
+            nextRefreshAtMs: retryAt,
+            configFingerprint,
+            expiresAtMs: currentExpiresAtMs,
+            failureRetryUntilMs: retryAt,
+          });
+        }
+      }
       summary.failed.push({ role, reason: err?.message || String(err) });
       log?.warn?.(
         `[reviewer-broker-refresh] keeping existing ${envVar}; broker refresh for ${role} failed: ${err?.message || err}`

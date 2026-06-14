@@ -7,6 +7,7 @@ import {
   REVIEWER_TOKEN_REFRESH_SKEW_MS,
   REVIEWER_TOKEN_FALLBACK_TTL_MS,
   REVIEWER_TOKEN_POST_SLACK_MS,
+  REVIEWER_TOKEN_FAILURE_RETRY_MS,
   BROKER_REVIEWER_ROLES,
 } from '../src/reviewer-broker-refresh.mjs';
 
@@ -144,6 +145,147 @@ test('rejects a cached token that cannot survive reviewer timeout plus post slac
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
   assert.equal(summary.failed.length, 1);
   assert.match(summary.failed[0].reason, /expires too soon/);
+});
+
+test('backs off briefly after a too-short broker token while keeping the existing token', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 9_500_000;
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    const token = calls === 1 ? 'ghs_too_close' : 'ghs_long_enough';
+    const lifetimeMs = calls === 1 ? 5 * 60 * 1000 : HOUR_MS;
+    return brokerOk('github-app-claude-reviewer', token, {
+      expiresAt: new Date(t0 + lifetimeMs).toISOString(),
+    });
+  };
+
+  const first = await refreshReviewerBrokerTokens({
+    env,
+    now: t0,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    failureRetryMs: 30_000,
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.equal(first.failed.length, 1);
+  assert.equal(calls, 1);
+
+  const skipped = await refreshReviewerBrokerTokens({
+    env,
+    now: t0 + 1_000,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    failureRetryMs: 30_000,
+  });
+  assert.equal(calls, 1);
+  assert.ok(skipped.skipped.some((s) => s.reason === 'broker-refresh-backoff'));
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+
+  await refreshReviewerBrokerTokens({
+    env,
+    now: t0 + 30_001,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    failureRetryMs: 30_000,
+  });
+  assert.equal(calls, 2);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_long_enough');
+});
+
+test('broker config rotation bypasses too-short-token backoff', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 9_700_000;
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return brokerOk('github-app-claude-reviewer', `ghs_too_close_${calls}`, {
+      expiresAt: new Date(t0 + 5 * 60 * 1000).toISOString(),
+    });
+  };
+
+  await refreshReviewerBrokerTokens({
+    env,
+    now: t0,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    failureRetryMs: 60_000,
+  });
+  env.OAUTH_BROKER_URL = 'http://127.0.0.1:4199';
+  await refreshReviewerBrokerTokens({
+    env,
+    now: t0 + 1_000,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    failureRetryMs: 60_000,
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+});
+
+test('too-short-token backoff does not defer once the known existing token is near hard expiry', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 10_000_000;
+  const minTokenLifetimeMs = 20 * 60 * 1000;
+  let calls = 0;
+  let curNow = t0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return brokerOk('github-app-claude-reviewer', 'ghs_initial_good', {
+        expiresAt: new Date(t0 + 30 * 60 * 1000).toISOString(),
+      });
+    }
+    return brokerOk('github-app-claude-reviewer', `ghs_too_close_${calls}`, {
+      expiresAt: new Date(curNow + 5 * 60 * 1000).toISOString(),
+    });
+  };
+
+  await refreshReviewerBrokerTokens({
+    env,
+    now: curNow,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    minTokenLifetimeMs,
+    failureRetryMs: REVIEWER_TOKEN_FAILURE_RETRY_MS,
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_initial_good');
+
+  curNow = t0 + 10 * 60 * 1000 + 1;
+  await refreshReviewerBrokerTokens({
+    env,
+    now: curNow,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    minTokenLifetimeMs,
+    failureRetryMs: REVIEWER_TOKEN_FAILURE_RETRY_MS,
+  });
+  assert.equal(calls, 2);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_initial_good');
+
+  curNow += 1_000;
+  await refreshReviewerBrokerTokens({
+    env,
+    now: curNow,
+    fetchImpl,
+    readFileImpl: readSecret,
+    log: silentLog,
+    minTokenLifetimeMs,
+    failureRetryMs: REVIEWER_TOKEN_FAILURE_RETRY_MS,
+  });
+  assert.equal(calls, 3);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_initial_good');
 });
 
 test('accepts a token that exceeds reviewer timeout plus post slack', async () => {

@@ -530,7 +530,16 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const riskAllowed = riskClass !== '' && allowedRiskClasses.has(riskClass);
   const adversarialMergeRequestedOverride =
     hasAdversarialMergeRequestedOverride(prMetadata, adversarialMergeRequestedEvidence);
-  const riskClassRequiresTwoKey = ['high', 'critical', 'unknown', ''].includes(riskClass);
+  // By default `high`/`critical` (and always `unknown`/unclassified) require the
+  // two-key override. Operators who make AMA the single authority for EVERY risk
+  // class set `eligibility.high_risk_requires_two_key: false`; then `high`/
+  // `critical` close on risk_classes membership alone, exactly like low/medium.
+  // `unknown`/'' is NEVER waived (the risk could not be established → fail-closed).
+  const highRiskRequiresTwoKey = cfg?.eligibility?.highRiskRequiresTwoKey !== false;
+  const alwaysTwoKeyClass = ['unknown', ''].includes(riskClass);
+  const highRiskTwoKeyClass =
+    highRiskRequiresTwoKey && ['high', 'critical'].includes(riskClass);
+  const riskClassRequiresTwoKey = alwaysTwoKeyClass || highRiskTwoKeyClass;
   const riskPermitted = riskClassRequiresTwoKey
     ? adversarialMergeRequestedOverride && operatorOverride
     : riskAllowed;
@@ -634,6 +643,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       resolved: riskClass,
       allowed: riskAllowed,
       requiresTwoKey: riskClassRequiresTwoKey,
+      highRiskRequiresTwoKey,
       permitted: riskPermitted,
       adversarialMergeRequestedOverride,
       mergeRequestedOverride: adversarialMergeRequestedOverride,

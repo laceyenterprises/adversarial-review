@@ -345,6 +345,90 @@ test('not eligible: `unknown` risk class is never in the default allowlist', () 
 });
 
 // ---------------------------------------------------------------------------
+// `eligibility.high_risk_requires_two_key` — opt-out that lets AMA be the
+// single authority for EVERY risk class. Default true preserves the two-key
+// requirement for high/critical; `unknown` is never waived.
+// ---------------------------------------------------------------------------
+
+// Full eligibility sub-config (the fixture spread replaces `cfg.eligibility`
+// wholesale, so each override must restate every key the predicate reads).
+const eligibilityCfg = (highRiskRequiresTwoKey, riskClasses = ['low', 'medium', 'high', 'critical']) => ({
+  eligibility: {
+    riskClasses,
+    fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
+    reviewerFamilyPolicy: 'audit_existing_gate_contract',
+    ciGreenClassifier: 'existingAdversarialMergeClassifier',
+    highRiskRequiresTwoKey,
+  },
+});
+
+test('eligible: high risk closes single-key when high_risk_requires_two_key=false and high is allowlisted', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'high' },
+    cfg: eligibilityCfg(false),
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.riskClass.requiresTwoKey, false);
+  assert.equal(result.trace.riskClass.highRiskRequiresTwoKey, false);
+  assert.equal(result.trace.riskClass.permitted, true);
+});
+
+test('eligible: critical risk closes single-key when high_risk_requires_two_key=false and critical is allowlisted', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'critical' },
+    cfg: eligibilityCfg(false),
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.riskClass.requiresTwoKey, false);
+  assert.equal(result.trace.riskClass.permitted, true);
+});
+
+test('not eligible: `unknown` risk still requires two-key even when high_risk_requires_two_key=false', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'unknown' },
+    cfg: eligibilityCfg(false),
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.riskClass.requiresTwoKey, true);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+test('not eligible: high risk single-key still requires high in the allowlist', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'high' },
+    // knob waives two-key, but high is NOT in risk_classes -> still refused.
+    cfg: eligibilityCfg(false, ['low', 'medium']),
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.riskClass.requiresTwoKey, false);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+test('not eligible: high risk still requires two-key by default (knob unset) even if allowlisted', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { riskClass: 'high' },
+    // highRiskRequiresTwoKey omitted -> predicate defaults it to true.
+    cfg: {
+      eligibility: {
+        riskClasses: ['low', 'medium', 'high', 'critical'],
+        fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
+        reviewerFamilyPolicy: 'audit_existing_gate_contract',
+        ciGreenClassifier: 'existingAdversarialMergeClassifier',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.riskClass.requiresTwoKey, true);
+  assert.equal(result.trace.riskClass.highRiskRequiresTwoKey, true);
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+});
+
+// ---------------------------------------------------------------------------
 // CI-green gate (SPEC §4.2 #5)
 // ---------------------------------------------------------------------------
 

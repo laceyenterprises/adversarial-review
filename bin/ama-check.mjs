@@ -28,6 +28,7 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from '../src/follow-up-jobs.mjs';
+import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -225,7 +226,7 @@ function buildPrMetadata({ prJson, protectionJson }) {
     headSha: String(prJson?.headRefOid || ''),
     isOpen: String(prJson?.state || '').toUpperCase() === 'OPEN',
     isDraft: prJson?.isDraft === true,
-    mergeableState: String(prJson?.mergeStateStatus || prJson?.mergeable || '').toUpperCase(),
+    mergeableState: normalizeGithubMergeability(prJson),
     labels: Array.isArray(prJson?.labels)
       ? prJson.labels.map((l) => String(l?.name || l)).filter(Boolean)
       : [],

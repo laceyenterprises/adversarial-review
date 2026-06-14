@@ -104,6 +104,7 @@ import {
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { normalizeGithubMergeability } from './github-mergeability.mjs';
 // AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
 // (AMA-01 defaults to false). When the operator opts in AND the
 // canonical eligibility predicate from SPEC §4.2 returns
@@ -3648,12 +3649,16 @@ async function maybeDispatchAmaClosureFor({
       : null,
     prAuthor: candidate?.prAuthor || null,
   };
+  // AMA's eligibility gate (SPEC §4.2 #7) compares `mergeableState` against
+  // 'MERGEABLE' — the vocabulary of GitHub's `mergeable` field. Use
+  // mergeStateStatus=CLEAN only as the UNKNOWN/empty fallback GitHub exposes
+  // while recomputing mergeability; never let it override CONFLICTING.
   const prMetadata = {
     prNumber,
     headSha: candidate?.headSha || currentRevisionRef || null,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
-    mergeableState: String(candidate?.mergeStateStatus || candidate?.mergeable || '').toUpperCase(),
+    mergeableState: normalizeGithubMergeability(candidate),
     labels: Array.isArray(labelNames) ? labelNames : [],
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },

@@ -220,10 +220,16 @@ export async function refreshReviewerBrokerTokens({
         );
       }
       env[envVar] = token;
-      // Re-check at (expiry - skew) when we know the real expiry; otherwise fall
-      // back to a fixed cadence. Clamp to > now so we always make forward
-      // progress even if the token is already inside the skew window.
-      const byExpiry = expiresAtMs != null ? expiresAtMs - skewMs : null;
+      // Re-fetch before the token crosses EITHER the refresh skew OR the
+      // reviewer-handoff minimum lifetime — whichever comes first. Using only
+      // (expiry - skew) left a window where now < expiry - skew (treated as
+      // "token-still-valid") but expiry - now <= requiredLifetimeMs, during which
+      // a newly-spawned reviewer could inherit a token too short to survive its
+      // run and post — the very HTTP 401 this module prevents. With the defaults
+      // (skew 15m, required ~22m) the required-lifetime bound is the earlier one.
+      // Clamp to > now so we always make forward progress.
+      const refreshLeadMs = Math.max(skewMs, requiredLifetimeMs);
+      const byExpiry = expiresAtMs != null ? expiresAtMs - refreshLeadMs : null;
       const byFallback = now + fallbackTtlMs;
       const next = byExpiry != null ? Math.max(byExpiry, now + 1) : byFallback;
       refreshClock.set(envVar, { nextRefreshAtMs: next, configFingerprint });

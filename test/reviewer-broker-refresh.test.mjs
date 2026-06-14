@@ -56,12 +56,16 @@ test('refreshes a broker-enabled reviewer token and writes it back to env', asyn
   assert.equal(summary.refreshed[0].role, 'claude-reviewer');
 });
 
-test('keys the refresh schedule off the broker expires_at minus skew', async () => {
+test('keys the refresh schedule off the broker expires_at minus skew (when skew is the dominant lead)', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();
   let calls = 0;
   const t0 = 5_000_000;
-  // First token expires in exactly 1h.
+  // Pin the handoff minimum BELOW the skew so the skew is the dominant refresh
+  // lead (max(skew, required) === skew); the dedicated required-lifetime test
+  // covers the other ordering.
+  const minTokenLifetimeMs = 5 * 60 * 1000;
+  const opts = { env, fetchImpl: undefined, readFileImpl: readSecret, log: silentLog, minTokenLifetimeMs };
   const fetchImpl = async () => {
     calls += 1;
     const issuedAt = calls === 1 ? t0 : t0 + HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS + 1;
@@ -69,20 +73,51 @@ test('keys the refresh schedule off the broker expires_at minus skew', async () 
       expiresAt: new Date(issuedAt + HOUR_MS).toISOString(),
     });
   };
-  await refreshReviewerBrokerTokens({ env, now: t0, fetchImpl, readFileImpl: readSecret, log: silentLog });
+  opts.fetchImpl = fetchImpl;
+  await refreshReviewerBrokerTokens({ ...opts, now: t0 });
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_1');
   // Comfortably before (expiry - skew): no re-fetch.
-  await refreshReviewerBrokerTokens({
-    env, now: t0 + HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS - 1,
-    fetchImpl, readFileImpl: readSecret, log: silentLog,
-  });
+  await refreshReviewerBrokerTokens({ ...opts, now: t0 + HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS - 1 });
   assert.equal(calls, 1);
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_1');
   // Inside the skew window (token nearly expired): re-fetch.
-  await refreshReviewerBrokerTokens({
-    env, now: t0 + HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS + 1,
-    fetchImpl, readFileImpl: readSecret, log: silentLog,
-  });
+  await refreshReviewerBrokerTokens({ ...opts, now: t0 + HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS + 1 });
+  assert.equal(calls, 2);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_2');
+});
+
+test('re-fetches before the required-lifetime floor, not only before the skew window', async () => {
+  // Guards the handoff window: with skew (15m) < required lifetime (22m here),
+  // scheduling only at expiry-skew left ~7m where the token reads
+  // "token-still-valid" yet is already too short for a freshly-spawned reviewer.
+  // The schedule must re-fetch at the EARLIER of (expiry-skew, expiry-required).
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  let calls = 0;
+  let curNow = 0;
+  const t0 = 7_000_000;
+  const skewMs = 15 * 60 * 1000;
+  const minTokenLifetimeMs = 22 * 60 * 1000;
+  // Each fetch returns a FRESH token expiring 1h from the fetch time (the broker
+  // re-mints on refresh), so the re-fetched token comfortably clears the floor.
+  const fetchImpl = async () => {
+    calls += 1;
+    return brokerOk('github-app-claude-reviewer', `ghs_token_${calls}`, {
+      expiresAt: new Date(curNow + HOUR_MS).toISOString(),
+    });
+  };
+  const opts = { env, fetchImpl, readFileImpl: readSecret, log: silentLog, skewMs, minTokenLifetimeMs };
+  curNow = t0;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(calls, 1); // schedule next at expiry - max(skew,required) = t0 + 60 - 22 = t0+38m
+  // Just BEFORE expiry - required (22m): still valid, no re-fetch.
+  curNow = t0 + HOUR_MS - minTokenLifetimeMs - 1;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(calls, 1);
+  // Just AFTER expiry - required (22m) but still before expiry - skew (15m):
+  // the OLD formula would say "token-still-valid"; the fix must re-fetch.
+  curNow = t0 + HOUR_MS - minTokenLifetimeMs + 1;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
   assert.equal(calls, 2);
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_2');
 });

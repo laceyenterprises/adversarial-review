@@ -169,7 +169,11 @@ resolve_alert_to_optional() {
 export WATCHER_GH_AUTH_VIA_BROKER
 WATCHER_GH_BROKER_ROLE="${WATCHER_GH_BROKER_ROLE:-merge-agent}"
 export WATCHER_GH_BROKER_ROLE
-if [ "${WATCHER_GH_AUTH_VIA_BROKER}" = "true" ] \
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  export GITHUB_TOKEN
+  export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+  echo "[adversarial-watcher] GITHUB_TOKEN from operator env/dotenv (broker role ${WATCHER_GH_BROKER_ROLE} skipped for preserved env token)" >&2
+elif [ "${WATCHER_GH_AUTH_VIA_BROKER}" = "true" ] \
   && resolve_reviewer_token_via_broker GITHUB_TOKEN "${WATCHER_GH_BROKER_ROLE}"; then
   export GH_TOKEN="$GITHUB_TOKEN"
   echo "[adversarial-watcher] GITHUB_TOKEN resolved via OAuth broker (role=${WATCHER_GH_BROKER_ROLE} App installation token; isolated rate-limit budget)" >&2

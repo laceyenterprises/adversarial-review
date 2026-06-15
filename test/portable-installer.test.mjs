@@ -47,6 +47,7 @@ async function runRenderedWatcherWrapper({
   alertTo = '',
   alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
   allowMissing = false,
+  githubToken = '',
   opServiceAccountToken = '',
   tokenResolverMode = 'missing',
   tokenResolverValue = 'resolved-token',
@@ -101,6 +102,10 @@ async function runRenderedWatcherWrapper({
       + '  fi\n'
       + '  echo "token missing" >&2\n'
       + '  exit 1\n'
+      + 'fi\n'
+      + 'if [[ "$1" == *"watcher.mjs" ]]; then\n'
+      + '  printf "{\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\"}\\n" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}"\n'
+      + '  exit 0\n'
       + 'fi\n'
       + 'exit 0\n',
   );
@@ -197,6 +202,7 @@ async function runRenderedWatcherWrapper({
     PATH: `${fakeBin}:/usr/bin:/bin`,
     TMPDIR: fakeTmp,
     ALERT_TO: alertTo,
+    GITHUB_TOKEN: githubToken,
     ADVERSARIAL_REVIEW_ALERT_TO_OP_REF: alertToOpRef,
     OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken,
     ADVERSARIAL_REVIEW_OP_CLI: opCliPath ?? path.join(fakeBin, 'op'),
@@ -360,6 +366,8 @@ test('the four shipped templates render with sample bindings and leave no placeh
       assert.match(rendered, /REVIEWER_BROKER_HELPER="\$REPO_RENDER_REPO_ROOT\/scripts\/lib\/reviewer-broker\.sh"/);
       assert.match(rendered, /resolve_reviewer_token_via_broker GITHUB_TOKEN "\$\{WATCHER_GH_BROKER_ROLE\}"/);
       assert.match(rendered, /WATCHER_GH_AUTH_VIA_BROKER:=true/);
+      assert.match(rendered, /\[ -n "\$\{GITHUB_TOKEN:-\}" \]/);
+      assert.match(rendered, /GH_TOKEN="\$\{GH_TOKEN:-\$GITHUB_TOKEN\}"/);
       assert.doesNotMatch(rendered, /\(\s*\. "\$OP_RATE_LIMIT_HELPER"\s*\)/);
       assert.match(rendered, /refusing to start without the shared cooldown primitive/);
       assert.match(rendered, /\/usr\/local\/bin\/op/);
@@ -485,6 +493,21 @@ test('rendered watcher wrapper defaults watcher GitHub auth to the broker token'
   });
   assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
   assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
+  assert.doesNotMatch(result.stderr, /GITHUB_TOKEN not set and gh auth token returned nothing/);
+});
+
+test('rendered watcher wrapper preserves operator GITHUB_TOKEN when broker and gh fallback fail', async () => {
+  const result = await runRenderedWatcherWrapper({
+    alertTo: 'direct-alert@example.com',
+    githubToken: 'env-token',
+    ghMode: 'fail',
+    watcherBrokerMode: 'fail',
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.equal(payload.githubToken, 'env-token');
+  assert.equal(payload.ghToken, 'env-token');
+  assert.match(result.stderr, /GITHUB_TOKEN from operator env\/dotenv/);
   assert.doesNotMatch(result.stderr, /GITHUB_TOKEN not set and gh auth token returned nothing/);
 });
 

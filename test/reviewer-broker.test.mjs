@@ -6,7 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,6 +17,11 @@ const SCRIPTS_DIR = join(__dirname, '..', 'scripts');
 const ZSH_PATH = '/bin/zsh';
 const ZSH_AVAILABLE = existsSync(ZSH_PATH);
 const SKIP_REASON_NO_ZSH = `${ZSH_PATH} is not available on this host`;
+
+function writeExecutable(filePath, body) {
+  writeFileSync(filePath, body, 'utf8');
+  chmodSync(filePath, 0o755);
+}
 
 function runHelperShell(snippet, env = {}) {
   return execFileSync(
@@ -112,6 +118,47 @@ test('resolve_reviewer_token_via_broker fails closed when the secret file is unr
   );
   assert.match(out, /is unreadable/);
   assert.match(out, /rc=1\n?$/);
+});
+
+test('resolve_reviewer_token_via_broker bounds broker curl with fetch timeout options', () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-broker-timeout-'));
+  const bin = join(root, 'bin');
+  const secretFile = join(root, 'secret');
+  const curlArgsFile = join(root, 'curl-args.txt');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(secretFile, 'shared-secret', 'utf8');
+  writeExecutable(
+    join(bin, 'curl'),
+    '#!/bin/bash\n'
+      + 'printf "%s\\n" "$@" >"$TEST_CURL_ARGS_FILE"\n'
+      + 'exit 28\n',
+  );
+  writeExecutable(
+    join(bin, 'jq'),
+    '#!/bin/bash\n'
+      + 'exit 1\n',
+  );
+  const out = execFileSync(
+    '/bin/bash',
+    [
+      '-c',
+      `source "${HELPER}"; resolve_reviewer_token_via_broker GH_FAKE_REVIEWER_TOKEN claude-reviewer 2>&1; echo "rc=$?"`,
+    ],
+    {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        OAUTH_BROKER_SHARED_SECRET_FILE: secretFile,
+        REVIEWER_TOKEN_FETCH_TIMEOUT_MS: '250',
+        TEST_CURL_ARGS_FILE: curlArgsFile,
+      },
+      encoding: 'utf8',
+    },
+  );
+  assert.match(out, /rc=1\n?$/);
+  const curlArgs = readFileSync(curlArgsFile, 'utf8');
+  assert.match(curlArgs, /--connect-timeout\n0\.250\n/);
+  assert.match(curlArgs, /--max-time\n0\.250\n/);
 });
 
 test('watcher start scripts source the reviewer-broker helper', () => {

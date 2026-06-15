@@ -432,6 +432,20 @@ test('placey watcher launcher defaults watcher GitHub auth to the broker token',
   assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
 });
 
+test('maintainer watcher launcher falls back to gh when watcher broker token resolution fails', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    brokerMode: 'fail',
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token' },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.equal(payload.githubToken, 'gh-token');
+  assert.equal(payload.ghToken, 'gh-token');
+  assert.match(result.stderr, /GITHUB_TOKEN from gh keychain PAT/);
+});
+
 test('maintainer watcher launcher ignores whitespace local LINEAR_API_KEY and falls back to 1Password', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
 }, async () => {

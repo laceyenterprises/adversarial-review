@@ -37,6 +37,9 @@
 # never propagated through worker env; only the FILE PATH is
 # referenced.
 #
+# REVIEWER_TOKEN_FETCH_TIMEOUT_MS bounds the broker fetch, including the
+# shell launchers' startup path. Default is 5000ms.
+#
 # To roll back: unset <ROLE>_AUTH_VIA_BROKER. The op-read fallback path
 # is unchanged.
 
@@ -48,6 +51,14 @@
 _reviewer_broker_indirect() {
     local varname="$1"
     eval "printf '%s' \"\${${varname}:-}\""
+}
+
+_reviewer_broker_fetch_timeout_seconds() {
+    local timeout_ms="${REVIEWER_TOKEN_FETCH_TIMEOUT_MS:-5000}"
+    if ! [[ "$timeout_ms" =~ ^[0-9]+$ ]] || [[ "$timeout_ms" -le 0 ]]; then
+        timeout_ms=5000
+    fi
+    awk -v ms="$timeout_ms" 'BEGIN { printf "%.3f", ms / 1000 }'
 }
 
 reviewer_broker_mode_enabled() {
@@ -111,10 +122,13 @@ resolve_reviewer_token_via_broker() {
         return 1
     fi
 
-    local response_file curl_stderr_file http_code response_body="" curl_stderr=""
+    local response_file curl_stderr_file http_code response_body="" curl_stderr="" timeout_seconds
+    timeout_seconds="$(_reviewer_broker_fetch_timeout_seconds)"
     response_file="$(mktemp -t reviewer-broker-resp.XXXXXX)"
     curl_stderr_file="$(mktemp -t reviewer-broker-curl.XXXXXX)"
     http_code="$(curl -sS --fail-with-body \
+        --connect-timeout "$timeout_seconds" \
+        --max-time "$timeout_seconds" \
         -w '%{http_code}' \
         -o "$response_file" \
         -H "Authorization: Bearer $broker_secret" \

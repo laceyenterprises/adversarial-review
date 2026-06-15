@@ -1120,6 +1120,67 @@ test('fetchReviewBodiesForHead honors deprecated singular authoritativeReviewerL
   assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);
 });
 
+test('fetchReviewBodiesForHead accepts App-bot reviewer logins carrying the [bot] suffix', async () => {
+  // Regression: the reviewer GitHub Apps surface as `lacey-codex-reviewer[bot]`
+  // in the REST reviews API, but the trusted set is the bare slug. Before the
+  // fix, normalizeLogin did not strip `[bot]`, so EVERY legitimate App-bot
+  // review was filtered out -> 0 bodies -> verdict '' -> AMA failed closed with
+  // `verdict-not-settled-success` on every PR (the gate, which reads GraphQL
+  // logins without the suffix, disagreed and reported success).
+  const { fetchReviewBodiesForHead } = await importGithubApiFresh();
+  const headSha = 'head-app-bot-suffix';
+  async function execFileImpl(command, args) {
+    assert.equal(command, 'gh');
+    assert.equal(args[0], 'api');
+    return {
+      stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify([
+        {
+          user: { login: 'lacey-codex-reviewer[bot]' },
+          body: '## Verdict\n\nComment only',
+          state: 'COMMENTED',
+          submitted_at: '2026-06-15T15:00:00.000Z',
+          commit_id: headSha,
+        },
+      ])}`,
+    };
+  }
+
+  const bodies = await fetchReviewBodiesForHead(execFileImpl, FIXTURE_REPO, FIXTURE_PR, headSha, {
+    // trusted set is the bare slug, as configured/derived — no `[bot]` suffix.
+    authoritativeReviewerLogins: ['lacey-codex-reviewer', 'codex-reviewer-lacey'],
+  });
+
+  assert.deepEqual(bodies, ['## Verdict\n\nComment only']);
+});
+
+test('fetchReviewBodiesForHead still rejects a non-reviewer login that merely ends in [bot]', async () => {
+  // Stripping `[bot]` must not widen trust: a different bot login still fails
+  // the set-membership check after normalization.
+  const { fetchReviewBodiesForHead } = await importGithubApiFresh();
+  const headSha = 'head-other-bot';
+  async function execFileImpl(command, args) {
+    assert.equal(command, 'gh');
+    assert.equal(args[0], 'api');
+    return {
+      stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify([
+        {
+          user: { login: 'some-other-app[bot]' },
+          body: '## Verdict\n\nComment only',
+          state: 'COMMENTED',
+          submitted_at: '2026-06-15T15:00:00.000Z',
+          commit_id: headSha,
+        },
+      ])}`,
+    };
+  }
+
+  const bodies = await fetchReviewBodiesForHead(execFileImpl, FIXTURE_REPO, FIXTURE_PR, headSha, {
+    authoritativeReviewerLogins: ['lacey-codex-reviewer', 'codex-reviewer-lacey'],
+  });
+
+  assert.deepEqual(bodies, []);
+});
+
 test('pagination cursor handling returns all comments, reviews, and checks without truncation', async () => {
   const expected = makeLargeExpectedRollup();
   const { fetchPullRequestRollup } = await importGithubApiFresh();

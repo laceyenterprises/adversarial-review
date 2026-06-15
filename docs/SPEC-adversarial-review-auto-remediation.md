@@ -85,11 +85,14 @@ canonical GitHub-PR reviewer routing tables before applying the anti-spoof
 author filter. Known Claude-authority values (`claude`, `claude-code`, and
 `clio-agent`) accept `lacey-claude-reviewer` and `claude-reviewer-lacey`. Known
 Codex-authority values (`codex`, `gemini`, `pi`, `opencode`, and `hermes`) accept
-`lacey-codex-reviewer` and `codex-reviewer-lacey`. Unknown or missing reviewer
-models resolve to an empty authoritative set and fail closed rather than
-trusting any live review body. Reviews from operators, unrelated bots, or
-missing/unknown authors are not merge authority even if they contain a
-structured `## Verdict` section.
+`lacey-codex-reviewer` and `codex-reviewer-lacey`. For REST PR reviews posted by
+GitHub Apps, AMA normalizes the GitHub-reserved `[bot]` suffix off the review
+author login before checking membership in this bare-slug authoritative set, so
+`lacey-codex-reviewer[bot]` matches `lacey-codex-reviewer` while unrelated App
+bots still fail the anti-spoof check. Unknown or missing reviewer models resolve
+to an empty authoritative set and fail closed rather than trusting any live
+review body. Reviews from operators, unrelated bots, or missing/unknown authors
+are not merge authority even if they contain a structured `## Verdict` section.
 
 The precedence is:
 

@@ -1048,6 +1048,11 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
       stdout: '{"dispatchId":"dispatch-bootstrap","launchRequestId":"lrq_bootstrap"}',
       stderr: '',
     }),
+    processKillImpl: () => {
+      const err = new Error('dead watcher pid');
+      err.code = 'ESRCH';
+      throw err;
+    },
     readTemplateImpl: () => 'stubbed',
   });
   assert.equal(bootstrap.dispatched, true);

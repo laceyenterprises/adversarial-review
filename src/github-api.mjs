@@ -733,11 +733,17 @@ async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
  * @returns {Promise<string[]>} review bodies on `headSha`, newest submitted first.
  */
 async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
-  authoritativeReviewerLogin = null,
+  authoritativeReviewerLogins = null,
 } = {}) {
   if (!headSha) return [];
-  const expectedReviewerLogin = normalizeLogin(authoritativeReviewerLogin);
-  if (authoritativeReviewerLogin != null && !expectedReviewerLogin) return [];
+  // Accept reviews from ANY login in the trusted reviewer-bot set (anti-spoof).
+  // The set carries both observed naming forms for the reviewer model. An
+  // explicit-but-empty/unresolvable set fails closed.
+  const loginList = Array.isArray(authoritativeReviewerLogins)
+    ? authoritativeReviewerLogins.map(normalizeLogin).filter(Boolean)
+    : [];
+  const expectedReviewerLoginSet = loginList.length ? new Set(loginList) : null;
+  if (authoritativeReviewerLogins != null && !expectedReviewerLoginSet) return [];
   const normalizedPrNumber = normalizePrNumber(prNumber);
   const reviews = await paginateRest(
     execFileImpl,
@@ -758,7 +764,7 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
       if (!SUBMITTED_REVIEW_STATES.has(String(review.state || '').toUpperCase())) {
         return false;
       }
-      if (expectedReviewerLogin && normalizeLogin(review.author?.login) !== expectedReviewerLogin) {
+      if (expectedReviewerLoginSet && !expectedReviewerLoginSet.has(normalizeLogin(review.author?.login))) {
         return false;
       }
       return true;

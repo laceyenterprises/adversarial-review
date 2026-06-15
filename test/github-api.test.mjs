@@ -1078,7 +1078,9 @@ test('fetchReviewBodiesForHead ignores newer non-authoritative verdict bodies', 
   }
 
   const bodies = await fetchReviewBodiesForHead(execFileImpl, FIXTURE_REPO, FIXTURE_PR, headSha, {
-    authoritativeReviewerLogin: 'codex-reviewer-lacey',
+    // trusted set carries both observed naming forms; the real review author
+    // (`lacey-codex-reviewer`) must be accepted while non-reviewers are ignored.
+    authoritativeReviewerLogins: ['lacey-codex-reviewer', 'codex-reviewer-lacey'],
   });
 
   assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);

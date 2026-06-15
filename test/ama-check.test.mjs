@@ -328,11 +328,14 @@ test('ama-check: --review-cycle-exhausted true waives the soft gates (final hamm
     assert.equal(strict.eligible, false);
     assert.ok(strict.reasons.includes('verdict-not-settled-success'));
 
-    // Exhausted → final hammer waives the soft gates → eligible.
+    // Exhausted → final hammer waives the STRUCTURAL gate (branch-protection)
+    // but NOT the verdict gate — that now requires a current-head operator
+    // override (fail-open fix). So still blocked on verdict-not-settled-success.
     const hammer = JSON.parse(run('true').stdout);
-    assert.equal(hammer.eligible, true, JSON.stringify(hammer, null, 2));
+    assert.equal(hammer.eligible, false, JSON.stringify(hammer, null, 2));
     assert.equal(hammer.trace.finalHammer.active, true);
-    assert.ok(hammer.trace.finalHammer.waived.includes('verdict-not-settled-success'));
+    assert.ok(hammer.reasons.includes('verdict-not-settled-success'));
+    assert.ok(!hammer.trace.finalHammer.waived.includes('verdict-not-settled-success'));
     assert.ok(hammer.trace.finalHammer.waived.includes('branch-protection-missing-gate'));
   } finally {
     rmSync(tmp, { recursive: true, force: true });

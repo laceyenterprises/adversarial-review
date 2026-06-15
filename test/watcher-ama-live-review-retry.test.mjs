@@ -28,7 +28,7 @@ function baseArgs(rootDir) {
       review_status: 'posted',
       review_body: '## Verdict\n\nComment only',
       reviewer_head_sha: 'head-live',
-      reviewer_login: 'adversarial-reviewer',
+      reviewer: 'codex',
     },
     dispatchJob: { blockingFindingCount: 0, blockingFindingState: 'known' },
     candidate: {

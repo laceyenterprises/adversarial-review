@@ -179,6 +179,39 @@ token, the launcher must not silently fall back to `op read`. That fail-closed
 path must also sleep before exit using the same launchd respawn-storm guard as
 the other startup secret failures.
 
+The watcher LaunchAgents also own a separate GitHub token for the watcher's
+own GitHub calls: poll-loop Octokit requests, branch/label/status probes, and
+watcher-side `gh` calls such as AMA eligibility checks. That token is not a
+reviewer bot token and is controlled by a watcher-specific surface:
+
+- `WATCHER_GH_AUTH_VIA_BROKER` defaults to `true` in the maintained airlock
+  wrapper, the canonical `placey` wrapper, and the portable rendered watcher
+  template.
+- `WATCHER_GH_BROKER_ROLE` defaults to `merge-agent`. Operators may point it at
+  a dedicated watcher role once provisioned; the startup and runtime refresh
+  paths both use the same role value.
+- On successful broker minting, launchers export the App installation token to
+  both `GITHUB_TOKEN` and `GH_TOKEN`. `GITHUB_TOKEN` is consumed by the
+  watcher's in-process Octokit client, while `GH_TOKEN` is the GitHub CLI
+  credential that `gh` prefers.
+- Startup watcher-token broker mode is fail-safe, not fail-closed: if
+  `WATCHER_GH_AUTH_VIA_BROKER=true` but the broker is unavailable, malformed,
+  or disabled by missing config, the launcher falls back to `gh auth token` and
+  logs that it is sharing the operator PAT's 5000/hr budget. If neither broker
+  nor `gh auth token` yields a token, startup fails and sleeps before exit.
+- Broker responses for the watcher-owned token use the same
+  `scripts/lib/reviewer-broker.sh` verification primitive as reviewer tokens:
+  provider is checked, and configured expected app/installation metadata pins
+  must match before the token is accepted.
+
+This watcher-owned token path is deliberately distinct from reviewer-token
+broker mode. Reviewer tokens are per reviewer identity and fail closed at
+startup when their `*_AUTH_VIA_BROKER=true` flag is set, because falling back to
+the wrong reviewer PAT changes review authorship. The watcher token is the
+daemon's operational GitHub identity; its broker path exists to move high-volume
+watcher reads off the operator PAT, but its fallback preserves daemon startup
+when the broker is temporarily unavailable.
+
 ### Runtime reviewer-token refresh (watcher and follow-up daemon ticks)
 
 The launcher mints the reviewer tokens **once**, at startup. The watcher and
@@ -241,6 +274,16 @@ remediation-worker subprocess handoff. The runtime refresh contract:
   pipeline down. The refresh retries on the next tick.
 - **Honors the per-role `*_AUTH_VIA_BROKER` flag** — a pure no-op when broker
   mode is off, so non-broker deployments are unaffected.
+
+The watcher performs an additional tick-start refresh for its own
+`GITHUB_TOKEN`/`GH_TOKEN` when `WATCHER_GH_AUTH_VIA_BROKER=true`
+(`refreshWatcherGithubToken`). That refresh uses `WATCHER_GH_BROKER_ROLE`,
+updates both environment variables together, honors broker metadata pins, and
+is fail-open like reviewer-token runtime refresh: transient broker failures
+leave the prior watcher token in place and retry on the next tick. The
+watcher's Octokit client is constructed without static `auth` in this mode and
+injects the current `process.env.GITHUB_TOKEN` into each request so an expired
+startup token cannot be re-applied by Octokit after the refresh hook runs.
 
 ### Reviewer Review-Post Auth Retry
 

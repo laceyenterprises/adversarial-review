@@ -128,6 +128,73 @@ test('loads reviewer runtime by name from domain config with cli-direct default'
   }
 });
 
+test('resolveReviewerRuntimeName forces agent-os-hq only in agentos mode', () => {
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'cli-direct' },
+      { orchestrationMode: 'agentos' },
+    ),
+    'agent-os-hq',
+  );
+  assert.equal(
+    resolveReviewerRuntimeName({}, { orchestrationMode: 'native' }),
+    'cli-direct',
+  );
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'acpx' },
+      { orchestrationMode: 'native' },
+    ),
+    'acpx',
+  );
+});
+
+test('createReviewerRuntimeAdapterForDomain applies orchestration override without mutating domain JSON', () => {
+  const rootDir = makeRoot();
+  const domainPath = join(rootDir, 'domains', 'code-pr.json');
+  const domainBody = JSON.stringify({
+    id: 'code-pr',
+    reviewerRuntime: 'cli-direct',
+  }, null, 2);
+  writeFileSync(domainPath, `${domainBody}\n`);
+  try {
+    const agentOsAdapter = createReviewerRuntimeAdapterForDomain({
+      rootDir,
+      domainId: 'code-pr',
+      orchestrationMode: 'agentos',
+      env: { HQ_ROOT: rootDir, USER: process.env.USER || 'test-user' },
+      hqBin: '/bin/hq',
+    });
+    assert.equal(agentOsAdapter.describe().id, 'agent-os-hq');
+
+    const nativeAdapter = createReviewerRuntimeAdapterForDomain({
+      rootDir,
+      domainId: 'code-pr',
+      orchestrationMode: 'native',
+    });
+    assert.equal(nativeAdapter.describe().id, 'cli-direct');
+    assert.equal(readFileSync(domainPath, 'utf8'), `${domainBody}\n`);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('createReviewerRuntimeAdapterForDomain preserves explicit native non-default reviewerRuntime', () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createReviewerRuntimeAdapterForDomain({
+      rootDir,
+      domainId: 'code-pr',
+      domainConfig: { id: 'code-pr', reviewerRuntime: 'acpx' },
+      orchestrationMode: 'native',
+      env: { CODEX_HOME: rootDir },
+    });
+    assert.equal(adapter.describe().id, 'acpx');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq dispatches via hq with artifact completion and stripped fallback env', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');
@@ -2456,6 +2523,134 @@ test('bounce recovery counts only rows it actually requeued', async () => {
     assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
   } finally {
     db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('bounce recovery routes reattach through the adapter recorded on each run', async () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'cli-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'cli-session',
+    });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'hq-session',
+      domain: 'code-pr',
+      runtime: 'agent-os-hq',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'hq-session',
+    });
+    const reattached = [];
+    const adapters = new Map([
+      ['cli-direct', {
+        reattach: async (record) => {
+          reattached.push(['cli-direct', record.sessionUuid]);
+          return {};
+        },
+      }],
+      ['agent-os-hq', {
+        reattach: async (record) => {
+          reattached.push(['agent-os-hq', record.sessionUuid]);
+          return {};
+        },
+      }],
+    ]);
+
+    const recovered = await recoverReviewerRunRecords({
+      rootDir,
+      adapter: adapters.get('cli-direct'),
+      adapterForRecord: (record) => adapters.get(record.runtime),
+      log: { log() {} },
+      now: new Date('2026-05-11T20:01:00.000Z'),
+    });
+
+    assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
+    assert.deepEqual(reattached.sort(), [
+      ['agent-os-hq', 'hq-session'],
+      ['cli-direct', 'cli-session'],
+    ]);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('bounce recovery isolates per-record adapter resolution and reattach failures', async () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'good-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'good-session',
+    });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'bad-session',
+      domain: 'code-pr',
+      runtime: 'removed-runtime',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'bad-session',
+    });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'throw-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'throw-session',
+    });
+    const reattached = [];
+    const errors = [];
+
+    const recovered = await recoverReviewerRunRecords({
+      rootDir,
+      adapter: {
+        reattach: async (record) => {
+          reattached.push(record.sessionUuid);
+          return {};
+        },
+      },
+      adapterForRecord: (record) => {
+        if (record.sessionUuid === 'bad-session') {
+          throw new Error('unknown stored runtime');
+        }
+        if (record.sessionUuid === 'throw-session') {
+          return {
+            reattach: async () => {
+              throw new Error('reattach failed');
+            },
+          };
+        }
+        return {
+          reattach: async (reattachRecord) => {
+            reattached.push(reattachRecord.sessionUuid);
+            return {};
+          },
+        };
+      },
+      log: {
+        log() {},
+        error(message) {
+          errors.push(String(message));
+        },
+      },
+      now: new Date('2026-05-11T20:01:00.000Z'),
+    });
+
+    assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
+    assert.deepEqual(reattached, ['good-session']);
+    assert.equal(errors.length, 2);
+    assert.ok(errors.some((message) => /bad-session/.test(message) && /unknown stored runtime/.test(message)));
+    assert.ok(errors.some((message) => /throw-session/.test(message) && /reattach failed/.test(message)));
+  } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

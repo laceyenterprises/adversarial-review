@@ -105,6 +105,30 @@ binary in this order: `ACPX_CLI`, then `acpx` on `PATH`, then
 `<install-root>/tools/acpx/node_modules/.bin/acpx`, then the historical
 `~/.openclaw/tools/acpx/node_modules/.bin/acpx` fallback.
 
+### AgentOS Reviewer Runtime Routing
+
+The GitHub-PR watcher resolves `roles.adversarial.orchestration_mode`
+once per poll tick. In the default `native` mode, `domains/code-pr.json`
+continues to select the reviewer runtime, normally `cli-direct`. In
+`agentos` mode, the watcher forces the reviewer runtime to `agent-os-hq`
+so first-pass reviews launch through HQ orchestration instead of a direct
+CLI subprocess.
+
+The watcher refreshes that runtime adapter before startup recovery and
+again at the beginning of each poll tick. Invalid orchestration-mode
+config is logged through a deduped persistent-failure signal, and the
+adapter refresh keeps the last-known-good mode (or `native` before any
+good value has been seen) so GitHub App token refresh is not skipped by
+a config typo in this adapter refresh path. This resilience is scoped:
+later strict config reads in the same tick can still fail and stall
+review work until the bad `orchestration_mode` value is corrected. The
+mode-mismatch signal covers failures while rebuilding the runtime adapter
+itself. Most `agentos` deployment mistakes, such as a missing `HQ_ROOT`,
+`HQ_PARENT_SESSION`, `HQ_PROJECT`, or `hq` binary, are validated lazily at
+review spawn time and surface as reviewer dispatch failures until the
+watcher environment is fixed. The adapter is rebuilt only when the
+resolved mode or `domains/code-pr.json` mtime changes.
+
 ---
 
 ## Why this works — the design notes worth reading

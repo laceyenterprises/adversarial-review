@@ -56,7 +56,9 @@ import {
 } from './reviewer-cascade.mjs';
 import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import {
+  createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
+  loadDomainConfig,
   recoverReviewerRunRecords,
 } from './adapters/reviewer-runtime/index.mjs';
 import {
@@ -205,11 +207,197 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 // Fail fast during watcher bootstrap; a bad gate-context override should not
 // leave reviews running while commit-status publication silently stops later.
 resolveGateStatusContext(process.env);
-const reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
+let reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
   rootDir: ROOT,
   domainId: 'code-pr',
   logger: console,
 });
+let reviewerRuntimeAdapterCache = null;
+let lastKnownReviewerOrchestrationMode = 'native';
+let activeReviewerRuntimeOrchestrationMode = 'native';
+let reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
+let reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
+const reviewerRuntimeAdapterByNameCache = new Map();
+
+function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = 'code-pr') {
+  return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;
+}
+
+function shouldEmitReviewerRuntimeFailureSignal(count) {
+  return count <= 2 || count === 5 || count % 10 === 0;
+}
+
+function recordReviewerRuntimeFailureSignal({ kind, key, message, logger }) {
+  const state = kind === 'config'
+    ? reviewerRuntimeConfigFailureSignal
+    : reviewerRuntimeAdapterFailureSignal;
+  if (state.key === key) {
+    state.count += 1;
+  } else {
+    state.key = key;
+    state.count = 1;
+  }
+  if (shouldEmitReviewerRuntimeFailureSignal(state.count)) {
+    logger?.error?.(
+      `[watcher] ALERT reviewer runtime ${kind} degraded consecutive=${state.count}: ${message}`
+    );
+  }
+}
+
+function clearReviewerRuntimeFailureSignal(kind) {
+  if (kind === 'config') {
+    reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
+  } else {
+    reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
+  }
+}
+
+function reviewerRuntimeAdapterId(adapter = reviewerRuntimeAdapter) {
+  try {
+    return adapter?.describe?.()?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+function signalReviewerRuntimeDomainConfigFailure({
+  rootDir = ROOT,
+  domainId = 'code-pr',
+  err,
+  phase,
+  logger = console,
+} = {}) {
+  const errorMessage = String(err?.message || err);
+  recordReviewerRuntimeFailureSignal({
+    kind: 'adapter',
+    key: `domain-config:${rootDir}:${domainId}:${phase}:${errorMessage}`,
+    logger,
+    message:
+      `domain=${domainId} reviewer runtime config unavailable during ${phase}; ` +
+      `per-record recovery/cancel will isolate affected records until the shared config is readable: ` +
+      errorMessage
+  });
+}
+
+function reviewerRuntimeAdapterForRunRecord(record = null, {
+  rootDir = ROOT,
+  logger = console,
+} = {}) {
+  const runtime = String(record?.runtime || '').trim();
+  if (!runtime) return reviewerRuntimeAdapter;
+  if (runtime === reviewerRuntimeAdapterId(reviewerRuntimeAdapter)) {
+    return reviewerRuntimeAdapter;
+  }
+  const domainId = record?.domain || 'code-pr';
+  let domainMtimeMs = null;
+  try {
+    domainMtimeMs = reviewerRuntimeDomainMtimeMs(rootDir, domainId);
+  } catch (err) {
+    signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'mtime', logger });
+    throw err;
+  }
+
+  const domainCacheKey = `${rootDir}\0${domainId}`;
+  let domainCache = reviewerRuntimeAdapterByNameCache.get(domainCacheKey);
+  if (!domainCache || domainCache.domainMtimeMs !== domainMtimeMs) {
+    domainCache = { domainMtimeMs, adaptersByRuntime: new Map() };
+    reviewerRuntimeAdapterByNameCache.set(domainCacheKey, domainCache);
+  }
+  if (!domainCache.adaptersByRuntime.has(runtime)) {
+    let domainConfig = null;
+    try {
+      domainConfig = loadDomainConfig(rootDir, domainId);
+    } catch (err) {
+      signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'load', logger });
+      throw err;
+    }
+    domainCache.adaptersByRuntime.set(runtime, createReviewerRuntimeAdapterByName(runtime, {
+      rootDir,
+      domainConfig,
+      logger,
+    }));
+  }
+  return domainCache.adaptersByRuntime.get(runtime);
+}
+
+function refreshReviewerRuntimeAdapter({
+  rootDir = ROOT,
+  logger = console,
+  loadConfigImpl = loadConfigCached,
+  createAdapterImpl = createReviewerRuntimeAdapterForDomain,
+  domainMtimeImpl = reviewerRuntimeDomainMtimeMs,
+} = {}) {
+  let orchestrationMode = lastKnownReviewerOrchestrationMode || 'native';
+  try {
+    orchestrationMode = loadConfigImpl().getOrchestrationMode();
+    clearReviewerRuntimeFailureSignal('config');
+  } catch (err) {
+    const errorMessage = String(err?.message || err);
+    recordReviewerRuntimeFailureSignal({
+      kind: 'config',
+      key: errorMessage,
+      logger,
+      message:
+        `config key=roles.adversarial.orchestration_mode failed (${errorMessage}); ` +
+        `keeping reviewer runtime orchestration_mode=${orchestrationMode}; ` +
+        `broker token refresh still runs, but later strict config reads may stall review work`
+    });
+  }
+
+  let domainMtimeMs = null;
+  try {
+    domainMtimeMs = domainMtimeImpl(rootDir, 'code-pr');
+    if (
+      reviewerRuntimeAdapterCache?.adapter &&
+      reviewerRuntimeAdapterCache.orchestrationMode === orchestrationMode &&
+      reviewerRuntimeAdapterCache.domainMtimeMs === domainMtimeMs
+    ) {
+      lastKnownReviewerOrchestrationMode = orchestrationMode;
+      activeReviewerRuntimeOrchestrationMode = orchestrationMode;
+      reviewerRuntimeAdapter = reviewerRuntimeAdapterCache.adapter;
+      clearReviewerRuntimeFailureSignal('adapter');
+      return reviewerRuntimeAdapter;
+    }
+
+    reviewerRuntimeAdapter = createAdapterImpl({
+      rootDir,
+      domainId: 'code-pr',
+      logger,
+      orchestrationMode,
+    });
+    reviewerRuntimeAdapterCache = {
+      adapter: reviewerRuntimeAdapter,
+      domainMtimeMs,
+      orchestrationMode,
+    };
+    lastKnownReviewerOrchestrationMode = orchestrationMode;
+    activeReviewerRuntimeOrchestrationMode = orchestrationMode;
+    clearReviewerRuntimeFailureSignal('adapter');
+  } catch (err) {
+    const errorMessage = String(err?.message || err);
+    if (orchestrationMode !== activeReviewerRuntimeOrchestrationMode) {
+      recordReviewerRuntimeFailureSignal({
+        kind: 'adapter',
+        key: `${orchestrationMode}->${activeReviewerRuntimeOrchestrationMode}:${errorMessage}`,
+        logger,
+        message:
+          `requested orchestration_mode=${orchestrationMode} but active adapter remains ` +
+          `${activeReviewerRuntimeOrchestrationMode}; first-pass reviews continue through the ` +
+          `active adapter until refresh succeeds: ${errorMessage}`
+      });
+    } else {
+      recordReviewerRuntimeFailureSignal({
+        kind: 'adapter',
+        key: `${orchestrationMode}->${activeReviewerRuntimeOrchestrationMode}:${errorMessage}`,
+        logger,
+        message:
+          `orchestration_mode=${orchestrationMode} adapter refresh failed; keeping existing adapter: ` +
+          errorMessage
+      });
+    }
+  }
+  return reviewerRuntimeAdapter;
+}
 
 // ── DB setup ────────────────────────────────────────────────────────────────
 
@@ -1532,15 +1720,47 @@ async function cancelInFlightReviewerRuntimeSessions(reason) {
   const sessions = Array.from(inFlightReviewerSessions);
   inFlightReviewerSessions.clear();
   await Promise.all(sessions.map(async (sessionUuid) => {
-    try {
-      await reviewerRuntimeAdapter.cancel(sessionUuid);
-    } catch (err) {
-      console.error(
-        `[watcher] reviewer_runtime_cancel_failed session=${sessionUuid} reason=${reason}:`,
-        err?.message || err
-      );
-    }
+    await cancelReviewerRuntimeSession({ sessionUuid, reason });
   }));
+}
+
+async function cancelReviewerRuntimeSession({
+  sessionUuid,
+  reason,
+  rootDir = ROOT,
+  logger = console,
+  readRunRecord = readReviewerRunRecord,
+  adapterForRecord = reviewerRuntimeAdapterForRunRecord,
+  defaultAdapter = reviewerRuntimeAdapter,
+} = {}) {
+  let record = null;
+  try {
+    record = readRunRecord(rootDir, sessionUuid);
+  } catch (err) {
+    logger.error?.(
+      `[watcher] reviewer_runtime_cancel_record_read_failed session=${sessionUuid} reason=${reason}; using default runtime: ${err?.message || err}`
+    );
+  }
+
+  let cancelAdapter = defaultAdapter;
+  if (record) {
+    try {
+      cancelAdapter = adapterForRecord(record, { rootDir, logger });
+    } catch (err) {
+      logger.error?.(
+        `[watcher] reviewer_runtime_cancel_adapter_resolve_failed session=${sessionUuid} runtime=${record.runtime} reason=${reason}; using default runtime: ${err?.message || err}`
+      );
+      cancelAdapter = defaultAdapter;
+    }
+  }
+
+  try {
+    await cancelAdapter.cancel(sessionUuid);
+  } catch (err) {
+    logger.error?.(
+      `[watcher] reviewer_runtime_cancel_failed session=${sessionUuid} reason=${reason}: ${err?.message || err}`
+    );
+  }
 }
 
 function emitFenceAuditEvent(stateDir = ADVERSARIAL_REVIEW_STATE_DIR, event) {
@@ -4560,6 +4780,7 @@ async function pollOnce(
   // see the same cached config); operator env rotations between ticks
   // propagate after this reset, not at next file-mtime change.
   resetRoleConfigCache();
+  refreshReviewerRuntimeAdapter();
   // Keep the reviewer-bot GitHub App installation tokens fresh. The watcher is
   // a single long-lived process that resolved these once at startup; App
   // installation tokens expire ~1h, so without a periodic refresh the GitHub
@@ -5736,9 +5957,11 @@ async function main() {
   await sweepReviewerFencesOnStartup();
   await processQueuedFenceCleanupJobs();
   await reconcileOrphanedReviewing(octokit);
+  refreshReviewerRuntimeAdapter();
   await recoverReviewerRunRecords({
     rootDir: ROOT,
     adapter: reviewerRuntimeAdapter,
+    adapterForRecord: (record) => reviewerRuntimeAdapterForRunRecord(record, { rootDir: ROOT, logger: console }),
     db,
     log: console,
     leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
@@ -5829,6 +6052,7 @@ export {
   classifyReviewerFailure,
   createWatcherOctokit,
   attemptDagAutowalkOnMerge,
+  cancelReviewerRuntimeSession,
   fireDagAutowalkOnMerge,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   probeRoutingTierReadiness,
@@ -5841,6 +6065,8 @@ export {
   handlePostedReviewRow,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
+  refreshReviewerRuntimeAdapter,
+  reviewerRuntimeAdapterForRunRecord,
   resolveMergeAgentCoexistenceForWatcher,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,

@@ -23,7 +23,7 @@ function fileUrl(...parts) {
 }
 
 function buildLoaderSource({
-  reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+  reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
   followUpMergeAgentSource = "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export function resolveFastMergePerPollCap() { return 5; } export function shouldUseReviewerTimeoutExhaustedMergeGate() { return false; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {} export function isScopedMergeAgentRequest() { return false; }",
 } = {}) {
   const reviewStateUrl = fileUrl('src', 'review-state.mjs');
@@ -46,6 +46,7 @@ function buildLoaderSource({
     [fileUrl('src', 'reviewer-cascade.mjs')]: 'fixture:reviewer-cascade',
     [fileUrl('src', 'reviewer-reattach.mjs')]: 'fixture:reviewer-reattach',
     [fileUrl('src', 'reviewer-timeout.mjs')]: 'fixture:reviewer-timeout',
+    [fileUrl('src', 'reviewer-broker-refresh.mjs')]: 'fixture:reviewer-broker-refresh',
     [fileUrl('src', 'stale-drift.mjs')]: 'fixture:stale-drift',
     [fileUrl('src', 'watcher-fail-loud.mjs')]: 'fixture:watcher-fail-loud',
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
@@ -217,6 +218,7 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-cascade': "export const CASCADE_FAILURE_CAP = 3; export function classifyReviewerFailure() { return 'unknown'; } export function clearCascadeState() {} export function formatTransientFailureBreakdown() { return ''; } export function isReviewerSubprocessTimeout() { return false; } export function readCascadeState() { return null; } export function recordCascadeFailure() { return { consecutiveTransientFailures: 1, transientFailureBreakdown: {}, backoffMinutes: 1 }; } export function shouldBackoffReviewerSpawn() { return { shouldBackoff: false }; }",
     'fixture:reviewer-reattach': "export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
     'fixture:reviewer-timeout': "export function resolveReviewerTimeoutMs() { return 300000; } export function resolveProgressTimeoutMs() { return 300000; }",
+    'fixture:reviewer-broker-refresh': "globalThis.__watcherClaimLoopBrokerRefreshes = 0; export async function refreshReviewerBrokerTokens() { globalThis.__watcherClaimLoopBrokerRefreshes += 1; return { refreshed: 0, failed: 0, skipped: 3 }; } export async function refreshWatcherGithubToken() { return { refreshed: false, reason: 'fixture' }; }",
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed-title path'); }",
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
@@ -362,11 +364,262 @@ try {
     fetchCalls,
     operatorWrites: globalThis.__watcherClaimLoopOperatorWrites || [],
     reviewerSpawns: globalThis.__watcherClaimLoopReviewerSpawns || [],
+    brokerRefreshes: globalThis.__watcherClaimLoopBrokerRefreshes || 0,
     pollError: pollError ? String(pollError.message || pollError) : null,
   }));
 } catch (err) {
   console.error(err?.stack || err?.message || err);
   process.exit(1);
+}
+`;
+}
+
+function buildRefreshRunnerSource() {
+  const watcherUrl = fileUrl('src', 'watcher.mjs');
+  return `
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+const {
+  cancelReviewerRuntimeSession,
+  refreshReviewerRuntimeAdapter,
+  reviewerRuntimeAdapterForRunRecord,
+} = await import(${JSON.stringify(watcherUrl)});
+const calls = [];
+const loggerMessages = [];
+const logger = { error: (message) => loggerMessages.push(String(message)) };
+
+let mode = 'native';
+let mtime = 1;
+let throwAgentosAdapter = false;
+function loadConfigImpl() {
+  if (mode === 'throw') throw new Error('invalid orchestration mode');
+  return { getOrchestrationMode: () => mode };
+}
+
+function createAdapterImpl({ orchestrationMode }) {
+  calls.push(orchestrationMode);
+  if (throwAgentosAdapter && orchestrationMode === 'agentos') {
+    throw new Error('agent-os-hq unavailable');
+  }
+  return { describe: () => ({ id: orchestrationMode }) };
+}
+
+const first = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+const second = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(first, second);
+assert.deepEqual(calls, ['native']);
+
+mode = 'agentos';
+throwAgentosAdapter = true;
+const third = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(third, second);
+assert.deepEqual(calls, ['native', 'agentos']);
+assert.ok(
+  loggerMessages.some((message) => /requested orchestration_mode=agentos but active adapter remains native/.test(message))
+);
+
+mode = 'native';
+const recoveredNative = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(recoveredNative, first);
+loggerMessages.length = 0;
+
+mode = 'agentos';
+const staleSignalCheck = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(staleSignalCheck, third);
+assert.ok(
+  loggerMessages.some((message) => /reviewer runtime adapter degraded consecutive=1/.test(message))
+);
+
+throwAgentosAdapter = false;
+const fourth = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.notEqual(fourth, third);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos']);
+
+throwAgentosAdapter = true;
+mtime = 2;
+loggerMessages.length = 0;
+const sameModeFailure = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(sameModeFailure, fourth);
+const repeatedSameModeFailure = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(repeatedSameModeFailure, fourth);
+assert.ok(
+  loggerMessages.some((message) => /reviewer runtime adapter degraded consecutive=1/.test(message))
+);
+assert.ok(
+  loggerMessages.some((message) => /reviewer runtime adapter degraded consecutive=2/.test(message))
+);
+assert.ok(
+  loggerMessages.some((message) => /orchestration_mode=agentos adapter refresh failed/.test(message))
+);
+throwAgentosAdapter = false;
+
+mtime = 1;
+mode = 'throw';
+const fifth = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(fifth, fourth);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos', 'agentos', 'agentos']);
+assert.ok(loggerMessages.some((message) => /invalid orchestration mode/.test(message)));
+assert.ok(loggerMessages.some((message) => /broker token refresh still runs/.test(message)));
+
+mtime = 3;
+mode = 'agentos';
+const sixth = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.notEqual(sixth, fifth);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos', 'agentos', 'agentos', 'agentos']);
+
+const cancelled = [];
+const cancelLogs = [];
+await cancelReviewerRuntimeSession({
+  sessionUuid: 'corrupt-record',
+  reason: 'test',
+  readRunRecord: () => {
+    throw new Error('bad json');
+  },
+  defaultAdapter: {
+    cancel: async (sessionUuid) => cancelled.push(['default', sessionUuid]),
+  },
+  logger: { error: (message) => cancelLogs.push(String(message)) },
+});
+assert.deepEqual(cancelled, [['default', 'corrupt-record']]);
+assert.ok(cancelLogs.some((message) => /cancel_record_read_failed/.test(message)));
+
+await cancelReviewerRuntimeSession({
+  sessionUuid: 'unknown-runtime',
+  reason: 'test',
+  readRunRecord: () => ({ sessionUuid: 'unknown-runtime', runtime: 'removed-runtime' }),
+  adapterForRecord: () => {
+    throw new Error('runtime removed');
+  },
+  defaultAdapter: {
+    cancel: async (sessionUuid) => cancelled.push(['fallback', sessionUuid]),
+  },
+  logger: { error: (message) => cancelLogs.push(String(message)) },
+});
+assert.deepEqual(cancelled, [
+  ['default', 'corrupt-record'],
+  ['fallback', 'unknown-runtime'],
+]);
+assert.ok(cancelLogs.some((message) => /cancel_adapter_resolve_failed/.test(message)));
+
+const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-runtime-cache-'));
+try {
+  mkdirSync(path.join(rootDir, 'domains'), { recursive: true });
+  const domainPath = path.join(rootDir, 'domains', 'code-pr.json');
+  writeFileSync(domainPath, '{"marker":"first"}\\n');
+  utimesSync(domainPath, new Date('2026-01-01T00:00:00.000Z'), new Date('2026-01-01T00:00:00.000Z'));
+  const firstByName = reviewerRuntimeAdapterForRunRecord(
+    { runtime: 'fixture-by-name', domain: 'code-pr' },
+    { rootDir, logger }
+  );
+  writeFileSync(domainPath, '{"marker":"second"}\\n');
+  utimesSync(domainPath, new Date('2026-01-01T00:00:01.000Z'), new Date('2026-01-01T00:00:01.000Z'));
+  const secondByName = reviewerRuntimeAdapterForRunRecord(
+    { runtime: 'fixture-by-name', domain: 'code-pr' },
+    { rootDir, logger }
+  );
+  const cachedSecondByName = reviewerRuntimeAdapterForRunRecord(
+    { runtime: 'fixture-by-name', domain: 'code-pr' },
+    { rootDir, logger }
+  );
+  assert.notEqual(firstByName, secondByName);
+  assert.equal(cachedSecondByName, secondByName);
+  assert.deepEqual(globalThis.__watcherRuntimeByNameCalls.map((call) => call.domainConfig.marker), [
+    'first',
+    'second',
+  ]);
+} finally {
+  rmSync(rootDir, { recursive: true, force: true });
+}
+
+loggerMessages.length = 0;
+const missingDomainRoot = mkdtempSync(path.join(tmpdir(), 'watcher-runtime-missing-domain-'));
+try {
+  mkdirSync(path.join(missingDomainRoot, 'domains'), { recursive: true });
+  assert.throws(
+    () => reviewerRuntimeAdapterForRunRecord(
+      { runtime: 'fixture-by-name', domain: 'code-pr' },
+      { rootDir: missingDomainRoot, logger }
+    ),
+    /ENOENT/
+  );
+  assert.ok(
+    loggerMessages.some((message) => /reviewer runtime adapter degraded/.test(message) && /domain=code-pr/.test(message) && /during mtime/.test(message))
+  );
+} finally {
+  rmSync(missingDomainRoot, { recursive: true, force: true });
+}
+
+loggerMessages.length = 0;
+const corruptDomainRoot = mkdtempSync(path.join(tmpdir(), 'watcher-runtime-corrupt-domain-'));
+try {
+  mkdirSync(path.join(corruptDomainRoot, 'domains'), { recursive: true });
+  const corruptDomainPath = path.join(corruptDomainRoot, 'domains', 'code-pr.json');
+  writeFileSync(corruptDomainPath, '{not-json}\\n');
+  assert.throws(
+    () => reviewerRuntimeAdapterForRunRecord(
+      { runtime: 'fixture-by-name', domain: 'code-pr' },
+      { rootDir: corruptDomainRoot, logger }
+    ),
+    /Expected property name|Unexpected token/
+  );
+  assert.ok(
+    loggerMessages.some((message) => /reviewer runtime adapter degraded/.test(message) && /domain=code-pr/.test(message) && /during load/.test(message))
+  );
+} finally {
+  rmSync(corruptDomainRoot, { recursive: true, force: true });
 }
 `;
 }
@@ -417,7 +670,11 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       'missing-PR detail edge should exercise the synthetic pulls.get fixture'
     );
     assert.deepEqual(summary.githubWrites, []);
-    assert.deepEqual(summary.fetchCalls, []);
+    assert.deepEqual(
+      summary.fetchCalls.filter(([url]) => url !== 'https://api.github.com/user'),
+      []
+    );
+    assert.equal(summary.brokerRefreshes, 1);
     assert.equal(summary.operatorWrites.length, 2);
     assert.deepEqual(
       summary.operatorWrites
@@ -437,6 +694,104 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT),
       'reviewer pass rows should retain the tool root so transcript token fallback can match Claude sessions on disk'
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher reviewer runtime refresh memoizes and falls back on config errors', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-refresh-runtime-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-refresh-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      reviewerRuntimeSource: `
+        import { readFileSync } from 'node:fs';
+        import { join } from 'node:path';
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        globalThis.__watcherRuntimeByNameCalls = [];
+        export function createReviewerRuntimeAdapterForDomain() {
+          return {
+            describe: () => ({ id: 'cli-direct' }),
+            spawnReviewer: async (payload) => {
+              globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+              return { ok: true, stdout: '', stderr: '' };
+            },
+            cancel: async () => {},
+            reattach: async () => ({}),
+          };
+        }
+        export function createReviewerRuntimeAdapterByName(name, options = {}) {
+          globalThis.__watcherRuntimeByNameCalls.push({
+            name,
+            domainConfig: options.domainConfig,
+          });
+          return {
+            describe: () => ({ id: name }),
+            cancel: async () => {},
+            reattach: async () => ({}),
+          };
+        }
+        export function loadDomainConfig(rootDir, domainId) {
+          return JSON.parse(readFileSync(join(rootDir, 'domains', \`\${domainId}.json\`), 'utf8'));
+        }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRefreshRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce refreshes broker tokens when orchestration_mode config is invalid', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv({
+          AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agent-os',
+        }),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /roles\.adversarial\.orchestration_mode/);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+    assert.equal(summary.brokerRefreshes, 1);
+    assert.match(summary.pollError, /AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE/);
+    assert.equal(summary.reviewerSpawns.length, 0);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -488,7 +843,7 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
   const runnerPath = path.join(tmp, 'fixture-runner.mjs');
   try {
     writeFileSync(loaderPath, buildLoaderSource({
-      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
     }));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));
@@ -529,7 +884,7 @@ test('watcher pollOnce serial fallback preserves stop-on-first-spawn-failure beh
   const runnerPath = path.join(tmp, 'fixture-runner.mjs');
   try {
     writeFileSync(loaderPath, buildLoaderSource({
-      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
     }));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));

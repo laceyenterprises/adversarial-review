@@ -11,7 +11,10 @@ function loadDomainConfig(rootDir, domainId) {
   return JSON.parse(readFileSync(join(rootDir, 'domains', `${domainId}.json`), 'utf8'));
 }
 
-function resolveReviewerRuntimeName(domainConfig = {}) {
+function resolveReviewerRuntimeName(domainConfig = {}, { orchestrationMode = 'native' } = {}) {
+  if (orchestrationMode === 'agentos') {
+    return 'agent-os-hq';
+  }
   return domainConfig.reviewerRuntime || 'cli-direct';
 }
 
@@ -34,9 +37,10 @@ function createReviewerRuntimeAdapterForDomain({
   rootDir,
   domainId,
   domainConfig = loadDomainConfig(rootDir, domainId),
+  orchestrationMode = 'native',
   ...options
 }) {
-  const runtimeName = resolveReviewerRuntimeName(domainConfig);
+  const runtimeName = resolveReviewerRuntimeName(domainConfig, { orchestrationMode });
   return createReviewerRuntimeAdapterByName(runtimeName, {
     rootDir,
     domainConfig,
@@ -47,6 +51,7 @@ function createReviewerRuntimeAdapterForDomain({
 async function recoverReviewerRunRecords({
   rootDir,
   adapter,
+  adapterForRecord = null,
   db = null,
   log = console,
   now = new Date(),
@@ -65,7 +70,18 @@ async function recoverReviewerRunRecords({
   const activeRecords = readRecoverableReviewerRunRecords(rootDir);
   let recovered = 0;
   for (const record of activeRecords) {
-    const result = await adapter.reattach(record);
+    let result = null;
+    try {
+      const recordAdapter = typeof adapterForRecord === 'function'
+        ? adapterForRecord(record)
+        : adapter;
+      result = await recordAdapter.reattach(record);
+    } catch (err) {
+      log.error?.(
+        `[watcher] reviewer_runtime_reattach_failed session=${record.sessionUuid} runtime=${record.runtime}: ${err?.message || err}`
+      );
+      continue;
+    }
     if (result.failureClass === 'daemon-bounce' && db) {
       const outcome = db.prepare(
         leaseRecoveryEnabled

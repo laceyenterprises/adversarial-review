@@ -182,6 +182,12 @@ configured, NOT a hardcoded `codex`):
    matches `<configured-worker-class>`, `task-kind` is `merge`,
    `completion-shape` is `decision-only`, `project` is
    `adversarial-merge-authority`.
+   Also verify the closer workspace repo set. For a PR whose repo basename is
+   not `agent-os`, `workspaceRepos` must include both the PR repo basename and
+   `agent-os` because the closer runs Agent OS AMA tooling and writes the audit
+   under `$HQ_ROOT`. For an `agent-os` PR, `workspaceRepos` must contain
+   `agent-os` only once; the closer must not duplicate the primary repo via an
+   additional workspace entry.
 4. The closer's prompt logs the gh CLI invocation:
    `gh pr merge <prUrl> --match-head-commit <sha> --<merge_method>`.
 5. PR closes; the commit on the target branch carries the §4.4 trailers

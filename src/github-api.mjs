@@ -714,6 +714,35 @@ async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
   );
 }
 
+/**
+ * Fetch the bodies of every POSTED review whose `commit_id` matches `headSha`,
+ * newest-first. The AMA closer uses this to reconcile its stored verdict source
+ * against the LIVE latest review on the current head — a completed remediation
+ * job's stored `reviewBody` can be stale relative to a fresh `Request changes`
+ * review on the same head, which let the closer fail-open merge #1824 / #1816.
+ * Reviews with no `submitted_at` (pending/unsubmitted) or a non-matching
+ * `commit_id` are excluded. Throws on API failure so the caller can fail closed.
+ *
+ * @returns {Promise<string[]>} review bodies on `headSha`, newest submitted first.
+ */
+async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha) {
+  if (!headSha) return [];
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  const reviews = await paginateRest(
+    execFileImpl,
+    `repos/${repo}/pulls/${normalizedPrNumber}/reviews`,
+    (data) => (Array.isArray(data) ? data : []).map((review) => ({
+      body: String(review?.body || ''),
+      submittedAt: review?.submitted_at || null,
+      commitId: review?.commit_id || null,
+    })),
+  );
+  return reviews
+    .filter((review) => review.submittedAt && review.commitId && String(review.commitId) === String(headSha))
+    .sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)))
+    .map((review) => review.body);
+}
+
 async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
   if (!headRefOid) return [];
   const checkRuns = await paginateRestWithTotalCount(
@@ -1400,6 +1429,7 @@ const __test__ = {
   fetchLegacyPr,
   fetchLegacyReviewContextWithTelemetry,
   fetchLegacyReviews,
+  fetchReviewBodiesForHead,
   normalizeCheck,
   normalizeComment,
   normalizePrNumber,
@@ -1418,4 +1448,5 @@ export {
   fetchPullRequestHeadAndState,
   fetchPullRequestReviewContext,
   fetchPullRequestRollup,
+  fetchReviewBodiesForHead,
 };

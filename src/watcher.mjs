@@ -113,6 +113,7 @@ import { normalizeGithubMergeability } from './github-mergeability.mjs';
 // runs unchanged. AMA-06A/06N flip the broader coexistence semantics
 // once the closer has soaked.
 import { maybeDispatchAmaCloser } from './ama/dispatch-closer.mjs';
+import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import {
   COEXISTENCE_ACTION,
   decideMergeAgentCoexistence,
@@ -148,9 +149,13 @@ import {
   fetchConditionalRestPage,
 } from './conditional-request.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
-import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
-import { fetchPullRequestHeadAndState, fetchPullRequestRollup } from './github-api.mjs';
+import {
+  fetchPullRequestHeadAndState,
+  fetchPullRequestRollup,
+  fetchReviewBodiesForHead,
+} from './github-api.mjs';
+import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
   classifyFenceOrphan,
@@ -3572,6 +3577,8 @@ async function maybeDispatchAmaClosureFor({
   logger,
   loadConfigImpl = loadConfigCached,
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
+  fetchLatestHeadReviewBodiesImpl = (repo, pr, head) =>
+    fetchReviewBodiesForHead(execFileAsync, repo, pr, head),
 }) {
   let cfg;
   let orchestrationMode;
@@ -3643,12 +3650,46 @@ async function maybeDispatchAmaClosureFor({
   // `undefined` -> verdict '' -> never settled-success -> AMA closed 0 PRs
   // ever. This is the verdict/remediation twin of the `risk_class` phantom-
   // column fix above (the riskClass path was repaired; this one was missed).
-  const settledReview = resolveSettledReviewVerdict(rootDir, {
+  const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
+  let settledReview = resolveSettledReviewVerdict(rootDir, {
     repo: repoPath,
     prNumber,
     reviewRow: reviewStateRow,
-    currentHeadSha: candidate?.headSha || currentRevisionRef || null,
+    currentHeadSha: settledReviewHeadSha,
   });
+  // FAIL-OPEN GUARD (#1824 / #1816): the stored follow-up-job / review-row body
+  // resolved above can be STALE relative to a fresh review on the SAME head — a
+  // completed remediation job's comment-only body is not updated when a later
+  // adversarial pass posts `Request changes`, so the closer fail-open merged
+  // PRs whose live verdict was `Request changes`. ONLY when the stored body
+  // already reads settled-success (the sole case a stale body could cause a
+  // fail-open merge) do we reconcile against the LIVE latest review on the head;
+  // this bounds the extra GitHub call to apparently-mergeable PRs. A fresh
+  // `Request changes` then wins, and a lookup failure fails closed.
+  if (
+    settledReviewHeadSha &&
+    settledReview.remediationPending === false &&
+    SETTLED_SUCCESS_VERDICTS.has(settledReview.verdict)
+  ) {
+    let liveHeadReview;
+    try {
+      const bodies = await fetchLatestHeadReviewBodiesImpl(repoPath, prNumber, settledReviewHeadSha);
+      liveHeadReview = { resolved: true, bodies: Array.isArray(bodies) ? bodies : [] };
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] AMA live-review reconcile failed for ${repoPath}#${prNumber}@${settledReviewHeadSha}; ` +
+          `failing closed: ${err?.message || err}`,
+      );
+      liveHeadReview = { resolved: false };
+    }
+    settledReview = resolveSettledReviewVerdict(rootDir, {
+      repo: repoPath,
+      prNumber,
+      reviewRow: reviewStateRow,
+      currentHeadSha: settledReviewHeadSha,
+      liveHeadReview,
+    });
+  }
   // Proven reviewed head ONLY — do NOT fall back to the current PR head. AMA's
   // eligibility compares reviewState.headSha (reviewed head) against
   // prMetadata.headSha (current head); synthesizing the reviewed head from the

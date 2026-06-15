@@ -56,7 +56,7 @@ const HARD_STOP_LABELS = Object.freeze([
  * Values are normalized to lowercase by the watcher record builder; the
  * predicate compares accordingly.
  */
-const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
+export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
 
 /**
  * @typedef {Object} OperatorApprovalEvidence

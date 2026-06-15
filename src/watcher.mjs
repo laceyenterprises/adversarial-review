@@ -3577,8 +3577,8 @@ async function maybeDispatchAmaClosureFor({
   logger,
   loadConfigImpl = loadConfigCached,
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
-  fetchLatestHeadReviewBodiesImpl = (repo, pr, head) =>
-    fetchReviewBodiesForHead(execFileAsync, repo, pr, head),
+  fetchLatestHeadReviewBodiesImpl = (repo, pr, head, options = {}) =>
+    fetchReviewBodiesForHead(execFileAsync, repo, pr, head, options),
 }) {
   let cfg;
   let orchestrationMode;
@@ -3672,8 +3672,19 @@ async function maybeDispatchAmaClosureFor({
     SETTLED_SUCCESS_VERDICTS.has(settledReview.verdict)
   ) {
     let liveHeadReview;
+    const authoritativeReviewerLogin = String(reviewStateRow?.reviewer_login || '').trim();
     try {
-      const bodies = await fetchLatestHeadReviewBodiesImpl(repoPath, prNumber, settledReviewHeadSha);
+      const bodies = authoritativeReviewerLogin
+        ? await fetchLatestHeadReviewBodiesImpl(repoPath, prNumber, settledReviewHeadSha, {
+            authoritativeReviewerLogin,
+          })
+        : [];
+      if (!authoritativeReviewerLogin) {
+        logger?.warn?.(
+          `[watcher] AMA live-review reconcile missing authoritative reviewer login for ` +
+            `${repoPath}#${prNumber}@${settledReviewHeadSha}; failing closed`,
+        );
+      }
       liveHeadReview = { resolved: true, bodies: Array.isArray(bodies) ? bodies : [] };
     } catch (err) {
       logger?.warn?.(

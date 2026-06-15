@@ -15,6 +15,7 @@ const GRAPHQL_COMPLEXITY_ERROR_TYPES = new Set([
   'MAX_QUERY_COST_EXCEEDED',
   'RESOURCE_LIMIT_EXCEEDED',
 ]);
+const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
 
 const GRAPHQL_ROLLUP_QUERY = `
 query PullRequestRollup(
@@ -389,6 +390,10 @@ function normalizeAuthor(author) {
   return login ? { login } : null;
 }
 
+function normalizeLogin(login) {
+  return String(login || '').trim().toLowerCase();
+}
+
 function normalizeLabel(label) {
   const name = String(label?.name || '').trim();
   return name ? { name } : null;
@@ -715,30 +720,49 @@ async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
 }
 
 /**
- * Fetch the bodies of every POSTED review whose `commit_id` matches `headSha`,
- * newest-first. The AMA closer uses this to reconcile its stored verdict source
- * against the LIVE latest review on the current head — a completed remediation
- * job's stored `reviewBody` can be stale relative to a fresh `Request changes`
- * review on the same head, which let the closer fail-open merge #1824 / #1816.
- * Reviews with no `submitted_at` (pending/unsubmitted) or a non-matching
- * `commit_id` are excluded. Throws on API failure so the caller can fail closed.
+ * Fetch the bodies of every submitted review whose `commit_id` matches
+ * `headSha`, newest-first. The AMA closer uses this to reconcile its stored
+ * verdict source against the LIVE latest authoritative review on the current
+ * head — a completed remediation job's stored `reviewBody` can be stale
+ * relative to a fresh `Request changes` review on the same head, which let the
+ * closer fail-open merge #1824 / #1816. Reviews with no `submitted_at`, a
+ * non-submitted state, a non-matching `commit_id`, or (when supplied) a
+ * non-authoritative author are excluded. Throws on API failure so the caller can
+ * fail closed.
  *
  * @returns {Promise<string[]>} review bodies on `headSha`, newest submitted first.
  */
-async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha) {
+async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
+  authoritativeReviewerLogin = null,
+} = {}) {
   if (!headSha) return [];
+  const expectedReviewerLogin = normalizeLogin(authoritativeReviewerLogin);
+  if (authoritativeReviewerLogin != null && !expectedReviewerLogin) return [];
   const normalizedPrNumber = normalizePrNumber(prNumber);
   const reviews = await paginateRest(
     execFileImpl,
     `repos/${repo}/pulls/${normalizedPrNumber}/reviews`,
     (data) => (Array.isArray(data) ? data : []).map((review) => ({
+      author: normalizeAuthor(review?.user),
       body: String(review?.body || ''),
+      state: review?.state || null,
       submittedAt: review?.submitted_at || null,
       commitId: review?.commit_id || null,
     })),
   );
   return reviews
-    .filter((review) => review.submittedAt && review.commitId && String(review.commitId) === String(headSha))
+    .filter((review) => {
+      if (!review.submittedAt || !review.commitId || String(review.commitId) !== String(headSha)) {
+        return false;
+      }
+      if (!SUBMITTED_REVIEW_STATES.has(String(review.state || '').toUpperCase())) {
+        return false;
+      }
+      if (expectedReviewerLogin && normalizeLogin(review.author?.login) !== expectedReviewerLogin) {
+        return false;
+      }
+      return true;
+    })
     .sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)))
     .map((review) => review.body);
 }

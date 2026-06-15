@@ -77,10 +77,19 @@ When the stored source is settled success and there is no pending remediation,
 the watcher must reconcile it against live GitHub PR reviews on the current
 head before dispatching the closer. Live reconciliation is scoped to submitted
 reviews whose `commit_id` equals the current head SHA, whose state is one of
-`APPROVED`, `CHANGES_REQUESTED`, or `COMMENTED`, and whose author login matches
-the adversarial reviewer recorded in `reviewed_prs.reviewer_login`. Reviews
-from operators, unrelated bots, or missing/unknown authors are not merge
-authority even if they contain a structured `## Verdict` section.
+`APPROVED`, `CHANGES_REQUESTED`, or `COMMENTED`, and whose author login is in
+the authoritative reviewer-login set resolved from `reviewed_prs.reviewer`.
+The stored `reviewer` value is the reviewer model/family or supported
+builder-tag alias, not a GitHub login. AMA resolves that value through the
+canonical GitHub-PR reviewer routing tables before applying the anti-spoof
+author filter. Known Claude-authority values (`claude`, `claude-code`, and
+`clio-agent`) accept `lacey-claude-reviewer` and `claude-reviewer-lacey`. Known
+Codex-authority values (`codex`, `gemini`, `pi`, `opencode`, and `hermes`) accept
+`lacey-codex-reviewer` and `codex-reviewer-lacey`. Unknown or missing reviewer
+models resolve to an empty authoritative set and fail closed rather than
+trusting any live review body. Reviews from operators, unrelated bots, or
+missing/unknown authors are not merge authority even if they contain a
+structured `## Verdict` section.
 
 The precedence is:
 
@@ -91,13 +100,13 @@ The precedence is:
 3. If the stored current-head source is settled success, the newest
    verdict-bearing live review from the authoritative adversarial reviewer on
    that same head replaces the stored verdict.
-4. If the reviewer login is unavailable or no authoritative verdict-bearing
-   same-head review is found, AMA fails closed with an empty review verdict
-   rather than trusting stale stored success. Transient live-lookup failures
-   from the watcher-side GitHub CLI path, such as timeouts, TLS/socket
-   interruptions, HTTP 429, or HTTP 502/503/504, are retried with a small
-   bounded budget before this fail-closed decision; non-transient lookup
-   failures fail closed immediately.
+4. If the reviewer model cannot be mapped to authoritative GitHub login(s), or
+   no authoritative verdict-bearing same-head review is found, AMA fails closed
+   with an empty review verdict rather than trusting stale stored success.
+   Transient live-lookup failures from the watcher-side GitHub CLI path, such
+   as timeouts, TLS/socket interruptions, HTTP 429, or HTTP 502/503/504, are
+   retried with a small bounded budget before this fail-closed decision;
+   non-transient lookup failures fail closed immediately.
 
 This reconciliation is deliberately not an author-agnostic "latest review wins"
 rule. A newer `Comment only` review by an operator or unrelated automation must
@@ -119,15 +128,19 @@ current repo/PR before applying any waiver, using the same effective budget
 resolution. Any probe error, missing repo identity, or ledger read failure fails
 safe by treating the cycle as NOT exhausted (normal strict gates apply).
 
-When the cycle is exhausted, the eligibility predicate **waives the soft,
-convergence-dependent gates** so AMA can land the PR:
+When the cycle is exhausted, the eligibility predicate may waive the soft,
+convergence-dependent gates so AMA can land the PR:
 
-- `verdict-not-settled-success` (the verdict may still be `Request changes`)
+- `verdict-not-settled-success` and `blocking-findings-present` /
+  `blocking-findings-unknown` only when a current-head `operator-approved`
+  override is present. The `adversarial-merge-requested` label is not merge
+  authority for verdict or blocking-finding gates; it is scoped to the
+  risk-class decision below.
 - `remediation-pending` / `remediation-state-unknown`
-- `blocking-findings-present` / `blocking-findings-unknown`
 - `branch-protection-missing-gate` (the structural gate this GitHub plan can't
   provide — the historical reason AMA closed zero PRs)
-- `risk-class-not-permitted` only for low/medium allowlist misses. High/critical
+- `risk-class-not-permitted` only for low/medium allowlist misses when a
+  current-head `adversarial-merge-requested` request is present. High/critical
   allowlist misses are never waived; when high/critical are configured for
   single-key AMA closure, the class must already be present in `risk_classes`.
 

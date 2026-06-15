@@ -14,6 +14,8 @@ import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
+  REVIEWER_ROUTE_BY_MODEL,
+  ROUTE_BY_BUILDER_CLASS,
   defaultReviewerRouteFromEnv,
   describeCrossModelReviewWaiver,
   isCrossModelReviewWaived,
@@ -3793,11 +3795,28 @@ function isTransientAmaLiveReviewLookupError(err) {
   );
 }
 
+const AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL = Object.freeze({
+  claude: ['lacey-claude-reviewer', 'claude-reviewer-lacey'],
+  codex: ['lacey-codex-reviewer', 'codex-reviewer-lacey'],
+});
+
+// The reviewer bot's GitHub account; accept BOTH observed naming forms so the
+// AMA live-review anti-spoof filter is robust to the known discrepancy between
+// the live account (`lacey-<model>-reviewer`) and the legacy config form
+// (`<model>-reviewer-lacey`). Keyed on the `reviewed_prs.reviewer` model/family,
+// with builder tags resolved through the canonical GitHub-PR reviewer route.
+function amaAuthoritativeReviewerLoginsForModel(reviewerModel) {
+  const m = String(reviewerModel ?? '').trim().toLowerCase();
+  if (!m) return [];
+  const route = REVIEWER_ROUTE_BY_MODEL[m] || ROUTE_BY_BUILDER_CLASS[m];
+  return AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL[route?.reviewerModel] || [];
+}
+
 async function fetchLatestHeadReviewBodiesWithRetry({
   repoPath,
   prNumber,
   headSha,
-  authoritativeReviewerLogin,
+  authoritativeReviewerLogins,
   fetchLatestHeadReviewBodiesImpl,
   retryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
   logger,
@@ -3806,7 +3825,7 @@ async function fetchLatestHeadReviewBodiesWithRetry({
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     try {
       return await fetchLatestHeadReviewBodiesImpl(repoPath, prNumber, headSha, {
-        authoritativeReviewerLogin,
+        authoritativeReviewerLogins,
       });
     } catch (err) {
       const canRetry = attempt < delays.length && isTransientAmaLiveReviewLookupError(err);
@@ -3954,22 +3973,32 @@ async function maybeDispatchAmaClosureFor({
     SETTLED_SUCCESS_VERDICTS.has(settledReview.verdict)
   ) {
     let liveHeadReview;
-    const authoritativeReviewerLogin = String(reviewStateRow?.reviewer_login || '').trim();
+    // Resolve the authoritative reviewer login(s) from the REAL `reviewer` model
+    // field (e.g. 'codex'/'claude'), NOT a `reviewer_login` column — that column
+    // does NOT exist on reviewed_prs, so the prior `reviewStateRow?.reviewer_login`
+    // was ALWAYS empty and the reconcile fail-CLOSED on every legit settled-success
+    // PR (#1834 stuck despite `Comment only`). We accept BOTH observed reviewer-bot
+    // login forms (the live `lacey-<model>-reviewer` account AND the legacy
+    // `<model>-reviewer-lacey` config form) so the anti-spoof filter is robust to
+    // the known naming discrepancy without mutating the globally-used
+    // REVIEWER_BOT_LOGINS map (which review-body-capture / closeout-scraper rely on).
+    const authoritativeReviewerLogins = amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer);
     try {
-      const bodies = authoritativeReviewerLogin
+      const bodies = authoritativeReviewerLogins.length
         ? await fetchLatestHeadReviewBodiesWithRetry({
             repoPath,
             prNumber,
             headSha: settledReviewHeadSha,
-            authoritativeReviewerLogin,
+            authoritativeReviewerLogins,
             fetchLatestHeadReviewBodiesImpl,
             retryDelaysMs: liveReviewRetryDelaysMs,
             logger,
           })
         : [];
-      if (!authoritativeReviewerLogin) {
+      if (!authoritativeReviewerLogins.length) {
         logger?.warn?.(
-          `[watcher] AMA live-review reconcile missing authoritative reviewer login for ` +
+          `[watcher] AMA live-review reconcile could not resolve an authoritative reviewer ` +
+            `login from reviewer='${reviewStateRow?.reviewer ?? ''}' for ` +
             `${repoPath}#${prNumber}@${settledReviewHeadSha}; failing closed`,
         );
       }
@@ -6049,6 +6078,7 @@ if (isMain) {
 }
 
 export {
+  amaAuthoritativeReviewerLoginsForModel,
   classifyReviewerFailure,
   createWatcherOctokit,
   attemptDagAutowalkOnMerge,

@@ -1056,7 +1056,7 @@ test('__testables__ settled-success verdict set matches SPEC §4.2 #1', () => {
 // AMA waives the soft convergence gates but keeps the hard safety gates.
 // ---------------------------------------------------------------------------
 
-test('final hammer: exhausted cycle waives a Request-changes verdict + blocking findings', () => {
+test('final hammer: exhausted cycle does NOT waive verdict/blocking without an operator override (fail-open fix)', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -1066,17 +1066,84 @@ test('final hammer: exhausted cycle waives a Request-changes verdict + blocking 
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  // Budget exhaustion ALONE must NOT auto-merge a Request-changes head with a
+  // blocking finding (#1830 fail-open). The merge gate stays strict.
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
   assert.equal(result.trace.finalHammer.active, true);
-  assert.ok(result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
-  assert.ok(result.trace.finalHammer.waived.includes('blocking-findings-present'));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.ok(!result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
+});
+
+test('final hammer: adversarial-merge-requested without operator-approved does not waive verdict/blocking', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['adversarial-merge-requested'] },
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 2,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    adversarialMergeRequested: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_adversarial_merge_requested',
+      observedAt: '2026-06-10T20:00:00Z',
+    },
+  });
+
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.riskClass.adversarialMergeRequestedOverride, true);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.ok(!result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
+  assert.ok(!result.trace.finalHammer.waived.includes('blocking-findings-present'));
+});
+
+test('final hammer + current-head operator override waives verdict/blocking and is eligible', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 3,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_abc',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
 test('final hammer: waives the structural branch-protection-missing-gate', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    reviewState: { verdict: 'request-changes', reviewCycleExhausted: true },
+    // verdict satisfied by a current-head operator override so this isolates the
+    // structural branch-protection waiver (verdict gate now needs the override).
+    reviewState: {
+      verdict: 'request-changes',
+      reviewCycleExhausted: true,
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_abc',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
     // repo GitHub plan offers no branch protection at all
-    prMetadata: { branchProtection: { requiredContexts: [] } },
+    prMetadata: { labels: ['operator-approved'], branchProtection: { requiredContexts: [] } },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
@@ -1145,7 +1212,20 @@ test('final hammer: by default still requires the two-key override for high/crit
 
 test('final hammer: high/critical are single-key eligible when explicitly configured', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    reviewState: { verdict: 'request-changes', riskClass: 'critical', reviewCycleExhausted: true },
+    // verdict satisfied via operator override so this isolates the risk-class path.
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      riskClass: 'critical',
+      reviewCycleExhausted: true,
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_abc',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
     cfg: eligibilityCfg(false),
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
@@ -1153,16 +1233,61 @@ test('final hammer: high/critical are single-key eligible when explicitly config
   assert.equal(result.trace.riskClass.allowed, true);
   assert.equal(result.trace.riskClass.requiresTwoKey, false);
   assert.equal(result.trace.riskClass.permitted, true);
-  assert.ok(result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
   assert.ok(!result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
 });
 
-test('final hammer: waives risk-class for a non-two-key class (medium not in allowlist)', () => {
+test('final hammer: operator-approved alone does not waive risk-class for medium not in allowlist', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    reviewState: { verdict: 'request-changes', riskClass: 'medium', reviewCycleExhausted: true },
+    // verdict satisfied via operator override so this isolates the risk-class waiver.
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'request-changes',
+      riskClass: 'medium',
+      reviewCycleExhausted: true,
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_abc',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
     cfg: { eligibility: { riskClasses: ['low'] } }, // medium NOT permitted normally
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+  assert.ok(!result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
+});
+
+test('final hammer: waives risk-class for medium not in allowlist with adversarial merge request', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    // verdict satisfied via operator override so this isolates the risk-class waiver.
+    prMetadata: { labels: ['operator-approved', 'adversarial-merge-requested'] },
+    reviewState: {
+      verdict: 'request-changes',
+      riskClass: 'medium',
+      reviewCycleExhausted: true,
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_abc',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+    cfg: { eligibility: { riskClasses: ['low'] } }, // medium NOT permitted normally
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    adversarialMergeRequested: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_adversarial_merge_requested',
+      observedAt: '2026-06-10T20:00:00Z',
+    },
+  });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.ok(result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
 });

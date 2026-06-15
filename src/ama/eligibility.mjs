@@ -541,7 +541,9 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const highRiskTwoKeyClass = highRiskRequiresTwoKey && highOrCriticalClass;
   const riskClassRequiresTwoKey = alwaysTwoKeyClass || highRiskTwoKeyClass;
   const riskClassFinalHammerWaivable =
-    !riskClassRequiresTwoKey && !(highOrCriticalClass && !riskAllowed);
+    adversarialMergeRequestedOverride &&
+    !riskClassRequiresTwoKey &&
+    !(highOrCriticalClass && !riskAllowed);
   const riskPermitted = riskClassRequiresTwoKey
     ? adversarialMergeRequestedOverride && operatorOverride
     : riskAllowed;
@@ -594,14 +596,14 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
 
   // AMA "final hammer" (operator directive 2026-06-14): once the review cycle is
   // EXHAUSTED — the remediation round budget is fully spent and the verdict still
-  // hasn't converged — AMA must be the final authority that LANDS the PR rather
-  // than leaving it blocked forever in a perpetual review loop. At cycle-end we
-  // WAIVE the soft, convergence-dependent gates (verdict, remediation state,
-  // blocking findings, the structural branch-protection gate, and the low/medium
-  // risk-class allowlist gate). We NEVER waive the hard safety gates: the PR
-  // must still be open/non-draft/mergeable, the head must still match the
-  // reviewed head (AMA pins --match-head-commit so a moved head can't be closed),
-  // CI must still be green, hard-stop labels (incl. head-scoped
+  // has not converged — AMA may waive only the documented cycle-end soft gates.
+  // Remediation state and the structural branch-protection gate are waivable at
+  // cycle-end. Verdict and blocking-finding gates require current-head
+  // `operator-approved`, and low/medium risk-class allowlist misses require
+  // current-head `adversarial-merge-requested`. We NEVER waive the hard safety
+  // gates: the PR must still be open/non-draft/mergeable, the head must still
+  // match the reviewed head (AMA pins --match-head-commit so a moved head cannot
+  // be closed), CI must still be green, hard-stop labels (incl. head-scoped
   // adversarial-merge-blocked) still block, fast-merge state still blocks, AMA
   // must be enabled, unknown risk still requires the explicit two-key override,
   // and high/critical risk still requires either the configured single-key
@@ -617,14 +619,34 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'blocking-findings-unknown',
     'branch-protection-missing-gate',
   ]);
+  // FAIL-OPEN FIX (2026-06-15): budget exhaustion ALONE must NOT auto-waive the
+  // VERDICT gate. The final hammer previously waived `verdict-not-settled-success`
+  // and `blocking-findings-*` automatically, so AMA merged #1830 on a
+  // `Request changes` head WITH a real blocking finding. Per CLAUDE.md the merge
+  // gate stays STRICT after the cap unless a current-head operator override
+  // applies. Require an operator override to waive the verdict/blocking gates;
+  // the remediation and branch-protection waivers keep their existing
+  // final-hammer behavior, and the risk-class waiver stays its own operator knob.
+  const FINAL_HAMMER_VERDICT_GATE_REASONS = new Set([
+    'verdict-not-settled-success',
+    'blocking-findings-present',
+    'blocking-findings-unknown',
+  ]);
+  const finalHammerVerdictWaiverAllowed =
+    operatorOverride === true;
   const waivedByFinalHammer = [];
   let effectiveReasons = reasons;
   if (reviewCycleExhausted) {
     effectiveReasons = [];
     for (const reason of reasons) {
-      const waivable =
-        FINAL_HAMMER_WAIVABLE_REASONS.has(reason) ||
-        (reason === 'risk-class-not-permitted' && riskClassFinalHammerWaivable);
+      let waivable = false;
+      if (reason === 'risk-class-not-permitted' && riskClassFinalHammerWaivable) {
+        waivable = true;
+      } else if (FINAL_HAMMER_VERDICT_GATE_REASONS.has(reason)) {
+        waivable = finalHammerVerdictWaiverAllowed;
+      } else if (FINAL_HAMMER_WAIVABLE_REASONS.has(reason)) {
+        waivable = true;
+      }
       if (waivable) waivedByFinalHammer.push(reason);
       else effectiveReasons.push(reason);
     }

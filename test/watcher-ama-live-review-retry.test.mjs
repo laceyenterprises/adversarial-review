@@ -4,7 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
+import {
+  amaAuthoritativeReviewerLoginsForModel,
+  maybeDispatchAmaClosureFor,
+} from '../src/watcher.mjs';
 
 function tempRoot() {
   return mkdtempSync(join(tmpdir(), 'watcher-ama-live-review-retry-'));
@@ -28,7 +31,7 @@ function baseArgs(rootDir) {
       review_status: 'posted',
       review_body: '## Verdict\n\nComment only',
       reviewer_head_sha: 'head-live',
-      reviewer_login: 'adversarial-reviewer',
+      reviewer: 'codex',
     },
     dispatchJob: { blockingFindingCount: 0, blockingFindingState: 'known' },
     candidate: {
@@ -50,6 +53,31 @@ function baseArgs(rootDir) {
     logger: { warn() {} },
   };
 }
+
+test('AMA authoritative reviewer login resolver follows canonical reviewer routing aliases', () => {
+  const claudeLogins = ['lacey-claude-reviewer', 'claude-reviewer-lacey'];
+  const codexLogins = ['lacey-codex-reviewer', 'codex-reviewer-lacey'];
+  const cases = [
+    ['claude', claudeLogins],
+    ['claude-code', claudeLogins],
+    ['clio-agent', claudeLogins],
+    ['codex', codexLogins],
+    ['gemini', codexLogins],
+    ['pi', codexLogins],
+    ['opencode', codexLogins],
+    ['hermes', codexLogins],
+    ['unknown-model', []],
+    ['', []],
+  ];
+
+  for (const [reviewerModel, expected] of cases) {
+    assert.deepEqual(
+      amaAuthoritativeReviewerLoginsForModel(reviewerModel),
+      expected,
+      reviewerModel,
+    );
+  }
+});
 
 test('AMA live review reconciliation retries a transient lookup and lets authoritative Request changes win', async () => {
   const rootDir = tempRoot();
@@ -77,6 +105,38 @@ test('AMA live review reconciliation retries a transient lookup and lets authori
     assert.equal(seenReviewStates[0].verdict, 'request-changes');
     assert.equal(seenReviewStates[0].headSha, 'head-live');
     assert.deepEqual(result, { dispatched: false, reason: 'request-changes', amaEnabled: true });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('AMA live review reconciliation treats opencode as Codex reviewer authority', async () => {
+  const rootDir = tempRoot();
+  try {
+    let fetchOptions = null;
+    const seenReviewStates = [];
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      reviewStateRow: {
+        ...baseArgs(rootDir).reviewStateRow,
+        reviewer: 'opencode',
+      },
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, _head, options) => {
+        fetchOptions = options;
+        return ['## Summary\n\nLooks settled.\n\n## Verdict\n\nComment only'];
+      },
+      maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
+        seenReviewStates.push(reviewState);
+        return { dispatched: true, reason: reviewState.verdict };
+      },
+    });
+
+    assert.deepEqual(fetchOptions?.authoritativeReviewerLogins, [
+      'lacey-codex-reviewer',
+      'codex-reviewer-lacey',
+    ]);
+    assert.equal(seenReviewStates[0].verdict, 'comment-only');
+    assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

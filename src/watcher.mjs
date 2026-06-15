@@ -260,6 +260,25 @@ function reviewerRuntimeAdapterId(adapter = reviewerRuntimeAdapter) {
   }
 }
 
+function signalReviewerRuntimeDomainConfigFailure({
+  rootDir = ROOT,
+  domainId = 'code-pr',
+  err,
+  phase,
+  logger = console,
+} = {}) {
+  const errorMessage = String(err?.message || err);
+  recordReviewerRuntimeFailureSignal({
+    kind: 'adapter',
+    key: `domain-config:${rootDir}:${domainId}:${phase}:${errorMessage}`,
+    logger,
+    message:
+      `domain=${domainId} reviewer runtime config unavailable during ${phase}; ` +
+      `per-record recovery/cancel will isolate affected records until the shared config is readable: ` +
+      errorMessage
+  });
+}
+
 function reviewerRuntimeAdapterForRunRecord(record = null, {
   rootDir = ROOT,
   logger = console,
@@ -269,15 +288,36 @@ function reviewerRuntimeAdapterForRunRecord(record = null, {
   if (runtime === reviewerRuntimeAdapterId(reviewerRuntimeAdapter)) {
     return reviewerRuntimeAdapter;
   }
-  const cacheKey = `${rootDir}\0${runtime}`;
-  if (!reviewerRuntimeAdapterByNameCache.has(cacheKey)) {
-    reviewerRuntimeAdapterByNameCache.set(cacheKey, createReviewerRuntimeAdapterByName(runtime, {
+  const domainId = record?.domain || 'code-pr';
+  let domainMtimeMs = null;
+  try {
+    domainMtimeMs = reviewerRuntimeDomainMtimeMs(rootDir, domainId);
+  } catch (err) {
+    signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'mtime', logger });
+    throw err;
+  }
+
+  const domainCacheKey = `${rootDir}\0${domainId}`;
+  let domainCache = reviewerRuntimeAdapterByNameCache.get(domainCacheKey);
+  if (!domainCache || domainCache.domainMtimeMs !== domainMtimeMs) {
+    domainCache = { domainMtimeMs, adaptersByRuntime: new Map() };
+    reviewerRuntimeAdapterByNameCache.set(domainCacheKey, domainCache);
+  }
+  if (!domainCache.adaptersByRuntime.has(runtime)) {
+    let domainConfig = null;
+    try {
+      domainConfig = loadDomainConfig(rootDir, domainId);
+    } catch (err) {
+      signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'load', logger });
+      throw err;
+    }
+    domainCache.adaptersByRuntime.set(runtime, createReviewerRuntimeAdapterByName(runtime, {
       rootDir,
-      domainConfig: loadDomainConfig(rootDir, record?.domain || 'code-pr'),
+      domainConfig,
       logger,
     }));
   }
-  return reviewerRuntimeAdapterByNameCache.get(cacheKey);
+  return domainCache.adaptersByRuntime.get(runtime);
 }
 
 function refreshReviewerRuntimeAdapter({
@@ -346,9 +386,14 @@ function refreshReviewerRuntimeAdapter({
           `active adapter until refresh succeeds: ${errorMessage}`
       });
     } else {
-      logger?.error?.(
-        `[watcher] ERROR reviewer runtime adapter refresh failed: ${errorMessage}; keeping existing adapter`
-      );
+      recordReviewerRuntimeFailureSignal({
+        kind: 'adapter',
+        key: `${orchestrationMode}->${activeReviewerRuntimeOrchestrationMode}:${errorMessage}`,
+        logger,
+        message:
+          `orchestration_mode=${orchestrationMode} adapter refresh failed; keeping existing adapter: ` +
+          errorMessage
+      });
     }
   }
   return reviewerRuntimeAdapter;
@@ -1675,16 +1720,47 @@ async function cancelInFlightReviewerRuntimeSessions(reason) {
   const sessions = Array.from(inFlightReviewerSessions);
   inFlightReviewerSessions.clear();
   await Promise.all(sessions.map(async (sessionUuid) => {
-    try {
-      const record = readReviewerRunRecord(ROOT, sessionUuid);
-      await reviewerRuntimeAdapterForRunRecord(record, { rootDir: ROOT, logger: console }).cancel(sessionUuid);
-    } catch (err) {
-      console.error(
-        `[watcher] reviewer_runtime_cancel_failed session=${sessionUuid} reason=${reason}:`,
-        err?.message || err
-      );
-    }
+    await cancelReviewerRuntimeSession({ sessionUuid, reason });
   }));
+}
+
+async function cancelReviewerRuntimeSession({
+  sessionUuid,
+  reason,
+  rootDir = ROOT,
+  logger = console,
+  readRunRecord = readReviewerRunRecord,
+  adapterForRecord = reviewerRuntimeAdapterForRunRecord,
+  defaultAdapter = reviewerRuntimeAdapter,
+} = {}) {
+  let record = null;
+  try {
+    record = readRunRecord(rootDir, sessionUuid);
+  } catch (err) {
+    logger.error?.(
+      `[watcher] reviewer_runtime_cancel_record_read_failed session=${sessionUuid} reason=${reason}; using default runtime: ${err?.message || err}`
+    );
+  }
+
+  let cancelAdapter = defaultAdapter;
+  if (record) {
+    try {
+      cancelAdapter = adapterForRecord(record, { rootDir, logger });
+    } catch (err) {
+      logger.error?.(
+        `[watcher] reviewer_runtime_cancel_adapter_resolve_failed session=${sessionUuid} runtime=${record.runtime} reason=${reason}; using default runtime: ${err?.message || err}`
+      );
+      cancelAdapter = defaultAdapter;
+    }
+  }
+
+  try {
+    await cancelAdapter.cancel(sessionUuid);
+  } catch (err) {
+    logger.error?.(
+      `[watcher] reviewer_runtime_cancel_failed session=${sessionUuid} reason=${reason}: ${err?.message || err}`
+    );
+  }
 }
 
 function emitFenceAuditEvent(stateDir = ADVERSARIAL_REVIEW_STATE_DIR, event) {
@@ -5976,6 +6052,7 @@ export {
   classifyReviewerFailure,
   createWatcherOctokit,
   attemptDagAutowalkOnMerge,
+  cancelReviewerRuntimeSession,
   fireDagAutowalkOnMerge,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   probeRoutingTierReadiness,
@@ -5989,6 +6066,7 @@ export {
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
   refreshReviewerRuntimeAdapter,
+  reviewerRuntimeAdapterForRunRecord,
   resolveMergeAgentCoexistenceForWatcher,
   maybeFireFleetWideFalseDeferralAlert,
   maybeFireMergeAgentStuckAlert,

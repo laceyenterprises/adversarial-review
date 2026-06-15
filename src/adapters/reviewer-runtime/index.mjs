@@ -70,10 +70,18 @@ async function recoverReviewerRunRecords({
   const activeRecords = readRecoverableReviewerRunRecords(rootDir);
   let recovered = 0;
   for (const record of activeRecords) {
-    const recordAdapter = typeof adapterForRecord === 'function'
-      ? adapterForRecord(record)
-      : adapter;
-    const result = await recordAdapter.reattach(record);
+    let result = null;
+    try {
+      const recordAdapter = typeof adapterForRecord === 'function'
+        ? adapterForRecord(record)
+        : adapter;
+      result = await recordAdapter.reattach(record);
+    } catch (err) {
+      log.error?.(
+        `[watcher] reviewer_runtime_reattach_failed session=${record.sessionUuid} runtime=${record.runtime}: ${err?.message || err}`
+      );
+      continue;
+    }
     if (result.failureClass === 'daemon-bounce' && db) {
       const outcome = db.prepare(
         leaseRecoveryEnabled

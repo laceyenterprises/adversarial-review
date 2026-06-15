@@ -2580,6 +2580,81 @@ test('bounce recovery routes reattach through the adapter recorded on each run',
   }
 });
 
+test('bounce recovery isolates per-record adapter resolution and reattach failures', async () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'good-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'good-session',
+    });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'bad-session',
+      domain: 'code-pr',
+      runtime: 'removed-runtime',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'bad-session',
+    });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'throw-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'throw-session',
+    });
+    const reattached = [];
+    const errors = [];
+
+    const recovered = await recoverReviewerRunRecords({
+      rootDir,
+      adapter: {
+        reattach: async (record) => {
+          reattached.push(record.sessionUuid);
+          return {};
+        },
+      },
+      adapterForRecord: (record) => {
+        if (record.sessionUuid === 'bad-session') {
+          throw new Error('unknown stored runtime');
+        }
+        if (record.sessionUuid === 'throw-session') {
+          return {
+            reattach: async () => {
+              throw new Error('reattach failed');
+            },
+          };
+        }
+        return {
+          reattach: async (reattachRecord) => {
+            reattached.push(reattachRecord.sessionUuid);
+            return {};
+          },
+        };
+      },
+      log: {
+        log() {},
+        error(message) {
+          errors.push(String(message));
+        },
+      },
+      now: new Date('2026-05-11T20:01:00.000Z'),
+    });
+
+    assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
+    assert.deepEqual(reattached, ['good-session']);
+    assert.equal(errors.length, 2);
+    assert.ok(errors.some((message) => /bad-session/.test(message) && /unknown stored runtime/.test(message)));
+    assert.ok(errors.some((message) => /throw-session/.test(message) && /reattach failed/.test(message)));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('bounce recovery requeues reviewing rows for cancelled reviewer run records', async () => {
   const rootDir = makeRoot();
   const db = new Database(':memory:');

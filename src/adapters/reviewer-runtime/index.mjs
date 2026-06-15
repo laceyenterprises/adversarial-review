@@ -51,6 +51,7 @@ function createReviewerRuntimeAdapterForDomain({
 async function recoverReviewerRunRecords({
   rootDir,
   adapter,
+  adapterForRecord = null,
   db = null,
   log = console,
   now = new Date(),
@@ -69,7 +70,10 @@ async function recoverReviewerRunRecords({
   const activeRecords = readRecoverableReviewerRunRecords(rootDir);
   let recovered = 0;
   for (const record of activeRecords) {
-    const result = await adapter.reattach(record);
+    const recordAdapter = typeof adapterForRecord === 'function'
+      ? adapterForRecord(record)
+      : adapter;
+    const result = await recordAdapter.reattach(record);
     if (result.failureClass === 'daemon-bounce' && db) {
       const outcome = db.prepare(
         leaseRecoveryEnabled

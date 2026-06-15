@@ -56,7 +56,9 @@ import {
 } from './reviewer-cascade.mjs';
 import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import {
+  createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
+  loadDomainConfig,
   recoverReviewerRunRecords,
 } from './adapters/reviewer-runtime/index.mjs';
 import {
@@ -215,6 +217,7 @@ let lastKnownReviewerOrchestrationMode = 'native';
 let activeReviewerRuntimeOrchestrationMode = 'native';
 let reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
 let reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
+const reviewerRuntimeAdapterByNameCache = new Map();
 
 function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = 'code-pr') {
   return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;
@@ -247,6 +250,34 @@ function clearReviewerRuntimeFailureSignal(kind) {
   } else {
     reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
   }
+}
+
+function reviewerRuntimeAdapterId(adapter = reviewerRuntimeAdapter) {
+  try {
+    return adapter?.describe?.()?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+function reviewerRuntimeAdapterForRunRecord(record = null, {
+  rootDir = ROOT,
+  logger = console,
+} = {}) {
+  const runtime = String(record?.runtime || '').trim();
+  if (!runtime) return reviewerRuntimeAdapter;
+  if (runtime === reviewerRuntimeAdapterId(reviewerRuntimeAdapter)) {
+    return reviewerRuntimeAdapter;
+  }
+  const cacheKey = `${rootDir}\0${runtime}`;
+  if (!reviewerRuntimeAdapterByNameCache.has(cacheKey)) {
+    reviewerRuntimeAdapterByNameCache.set(cacheKey, createReviewerRuntimeAdapterByName(runtime, {
+      rootDir,
+      domainConfig: loadDomainConfig(rootDir, record?.domain || 'code-pr'),
+      logger,
+    }));
+  }
+  return reviewerRuntimeAdapterByNameCache.get(cacheKey);
 }
 
 function refreshReviewerRuntimeAdapter({
@@ -284,6 +315,7 @@ function refreshReviewerRuntimeAdapter({
       lastKnownReviewerOrchestrationMode = orchestrationMode;
       activeReviewerRuntimeOrchestrationMode = orchestrationMode;
       reviewerRuntimeAdapter = reviewerRuntimeAdapterCache.adapter;
+      clearReviewerRuntimeFailureSignal('adapter');
       return reviewerRuntimeAdapter;
     }
 
@@ -1644,7 +1676,8 @@ async function cancelInFlightReviewerRuntimeSessions(reason) {
   inFlightReviewerSessions.clear();
   await Promise.all(sessions.map(async (sessionUuid) => {
     try {
-      await reviewerRuntimeAdapter.cancel(sessionUuid);
+      const record = readReviewerRunRecord(ROOT, sessionUuid);
+      await reviewerRuntimeAdapterForRunRecord(record, { rootDir: ROOT, logger: console }).cancel(sessionUuid);
     } catch (err) {
       console.error(
         `[watcher] reviewer_runtime_cancel_failed session=${sessionUuid} reason=${reason}:`,
@@ -5852,6 +5885,7 @@ async function main() {
   await recoverReviewerRunRecords({
     rootDir: ROOT,
     adapter: reviewerRuntimeAdapter,
+    adapterForRecord: (record) => reviewerRuntimeAdapterForRunRecord(record, { rootDir: ROOT, logger: console }),
     db,
     log: console,
     leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,

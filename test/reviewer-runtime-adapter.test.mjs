@@ -2527,6 +2527,59 @@ test('bounce recovery counts only rows it actually requeued', async () => {
   }
 });
 
+test('bounce recovery routes reattach through the adapter recorded on each run', async () => {
+  const rootDir = makeRoot();
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'cli-session',
+      domain: 'code-pr',
+      runtime: 'cli-direct',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'cli-session',
+    });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'hq-session',
+      domain: 'code-pr',
+      runtime: 'agent-os-hq',
+      state: 'heartbeating',
+      spawnedAt: '2026-05-11T20:00:00.000Z',
+      reattachToken: 'hq-session',
+    });
+    const reattached = [];
+    const adapters = new Map([
+      ['cli-direct', {
+        reattach: async (record) => {
+          reattached.push(['cli-direct', record.sessionUuid]);
+          return {};
+        },
+      }],
+      ['agent-os-hq', {
+        reattach: async (record) => {
+          reattached.push(['agent-os-hq', record.sessionUuid]);
+          return {};
+        },
+      }],
+    ]);
+
+    const recovered = await recoverReviewerRunRecords({
+      rootDir,
+      adapter: adapters.get('cli-direct'),
+      adapterForRecord: (record) => adapters.get(record.runtime),
+      log: { log() {} },
+      now: new Date('2026-05-11T20:01:00.000Z'),
+    });
+
+    assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
+    assert.deepEqual(reattached.sort(), [
+      ['agent-os-hq', 'hq-session'],
+      ['cli-direct', 'cli-session'],
+    ]);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('bounce recovery requeues reviewing rows for cancelled reviewer run records', async () => {
   const rootDir = makeRoot();
   const db = new Database(':memory:');

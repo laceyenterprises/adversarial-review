@@ -121,11 +121,13 @@ adapter refresh keeps the last-known-good mode (or `native` before any
 good value has been seen) so GitHub App token refresh is not skipped by
 a config typo in this adapter refresh path. This resilience is scoped:
 later strict config reads in the same tick can still fail and stall
-review work until the bad `orchestration_mode` value is corrected. If
-`agentos` is requested but the `agent-os-hq` adapter cannot be built,
-the watcher emits a persistent mode-mismatch signal while reviews keep
-using the active adapter. The adapter is rebuilt only when the resolved
-mode or `domains/code-pr.json` mtime changes.
+review work until the bad `orchestration_mode` value is corrected. The
+mode-mismatch signal covers failures while rebuilding the runtime adapter
+itself. Most `agentos` deployment mistakes, such as a missing `HQ_ROOT`,
+`HQ_PARENT_SESSION`, `HQ_PROJECT`, or `hq` binary, are validated lazily at
+review spawn time and surface as reviewer dispatch failures until the
+watcher environment is fixed. The adapter is rebuilt only when the
+resolved mode or `domains/code-pr.json` mtime changes.
 
 ---
 

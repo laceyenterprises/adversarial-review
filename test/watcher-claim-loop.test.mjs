@@ -23,7 +23,7 @@ function fileUrl(...parts) {
 }
 
 function buildLoaderSource({
-  reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+  reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
   followUpMergeAgentSource = "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export function resolveFastMergePerPollCap() { return 5; } export function shouldUseReviewerTimeoutExhaustedMergeGate() { return false; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {} export function isScopedMergeAgentRequest() { return false; }",
 } = {}) {
   const reviewStateUrl = fileUrl('src', 'review-state.mjs');
@@ -429,6 +429,28 @@ assert.ok(
   loggerMessages.some((message) => /requested orchestration_mode=agentos but active adapter remains native/.test(message))
 );
 
+mode = 'native';
+const recoveredNative = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(recoveredNative, first);
+loggerMessages.length = 0;
+
+mode = 'agentos';
+const staleSignalCheck = refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+assert.equal(staleSignalCheck, third);
+assert.ok(
+  loggerMessages.some((message) => /reviewer runtime adapter degraded consecutive=1/.test(message))
+);
+
 throwAgentosAdapter = false;
 const fourth = refreshReviewerRuntimeAdapter({
   logger,
@@ -437,7 +459,7 @@ const fourth = refreshReviewerRuntimeAdapter({
   domainMtimeImpl: () => mtime,
 });
 assert.notEqual(fourth, third);
-assert.deepEqual(calls, ['native', 'agentos', 'agentos']);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos']);
 
 mode = 'throw';
 const fifth = refreshReviewerRuntimeAdapter({
@@ -447,7 +469,7 @@ const fifth = refreshReviewerRuntimeAdapter({
   domainMtimeImpl: () => mtime,
 });
 assert.equal(fifth, fourth);
-assert.deepEqual(calls, ['native', 'agentos', 'agentos']);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos']);
 assert.ok(loggerMessages.some((message) => /invalid orchestration mode/.test(message)));
 assert.ok(loggerMessages.some((message) => /broker token refresh still runs/.test(message)));
 
@@ -460,7 +482,7 @@ const sixth = refreshReviewerRuntimeAdapter({
   domainMtimeImpl: () => mtime,
 });
 assert.notEqual(sixth, fifth);
-assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos']);
+assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos', 'agentos']);
 `;
 }
 
@@ -650,7 +672,7 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
   const runnerPath = path.join(tmp, 'fixture-runner.mjs');
   try {
     writeFileSync(loaderPath, buildLoaderSource({
-      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
     }));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));
@@ -691,7 +713,7 @@ test('watcher pollOnce serial fallback preserves stop-on-first-spawn-failure beh
   const runnerPath = path.join(tmp, 'fixture-runner.mjs');
   try {
     writeFileSync(loaderPath, buildLoaderSource({
-      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); throw new Error('fixture reviewer spawn failure'); }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
     }));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({ expectPollError: true }));

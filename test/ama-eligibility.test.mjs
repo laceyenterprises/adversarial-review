@@ -1236,7 +1236,7 @@ test('final hammer: high/critical are single-key eligible when explicitly config
   assert.ok(!result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
 });
 
-test('final hammer: waives risk-class for a non-two-key class (medium not in allowlist)', () => {
+test('final hammer: operator-approved alone does not waive risk-class for medium not in allowlist', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     // verdict satisfied via operator override so this isolates the risk-class waiver.
     prMetadata: { labels: ['operator-approved'] },
@@ -1255,6 +1255,39 @@ test('final hammer: waives risk-class for a non-two-key class (medium not in all
     cfg: { eligibility: { riskClasses: ['low'] } }, // medium NOT permitted normally
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+  assert.ok(!result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
+});
+
+test('final hammer: waives risk-class for medium not in allowlist with adversarial merge request', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    // verdict satisfied via operator override so this isolates the risk-class waiver.
+    prMetadata: { labels: ['operator-approved', 'adversarial-merge-requested'] },
+    reviewState: {
+      verdict: 'request-changes',
+      riskClass: 'medium',
+      reviewCycleExhausted: true,
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_abc',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+    cfg: { eligibility: { riskClasses: ['low'] } }, // medium NOT permitted normally
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    adversarialMergeRequested: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_adversarial_merge_requested',
+      observedAt: '2026-06-10T20:00:00Z',
+    },
+  });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.ok(result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
 });

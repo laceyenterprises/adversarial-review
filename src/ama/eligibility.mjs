@@ -541,7 +541,9 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const highRiskTwoKeyClass = highRiskRequiresTwoKey && highOrCriticalClass;
   const riskClassRequiresTwoKey = alwaysTwoKeyClass || highRiskTwoKeyClass;
   const riskClassFinalHammerWaivable =
-    !riskClassRequiresTwoKey && !(highOrCriticalClass && !riskAllowed);
+    adversarialMergeRequestedOverride &&
+    !riskClassRequiresTwoKey &&
+    !(highOrCriticalClass && !riskAllowed);
   const riskPermitted = riskClassRequiresTwoKey
     ? adversarialMergeRequestedOverride && operatorOverride
     : riskAllowed;

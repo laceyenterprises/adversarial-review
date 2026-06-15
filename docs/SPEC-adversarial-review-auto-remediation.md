@@ -91,9 +91,13 @@ The precedence is:
 3. If the stored current-head source is settled success, the newest
    verdict-bearing live review from the authoritative adversarial reviewer on
    that same head replaces the stored verdict.
-4. If the live lookup fails, the reviewer login is unavailable, or no
-   authoritative verdict-bearing same-head review is found, AMA fails closed
-   with an empty review verdict rather than trusting stale stored success.
+4. If the reviewer login is unavailable or no authoritative verdict-bearing
+   same-head review is found, AMA fails closed with an empty review verdict
+   rather than trusting stale stored success. Transient live-lookup failures
+   from the watcher-side GitHub CLI path, such as timeouts, TLS/socket
+   interruptions, HTTP 429, or HTTP 502/503/504, are retried with a small
+   bounded budget before this fail-closed decision; non-transient lookup
+   failures fail closed immediately.
 
 This reconciliation is deliberately not an author-agnostic "latest review wins"
 rule. A newer `Comment only` review by an operator or unrelated automation must

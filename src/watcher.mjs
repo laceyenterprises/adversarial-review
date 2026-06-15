@@ -223,6 +223,7 @@ const DEFAULT_DAG_AUTOWALK_ON_MERGE_RETRY_MS = 5 * 60 * 1000;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_PER_POLL = 2;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_MAX_ATTEMPTS = 5;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS = 2 * 60 * 1000;
+const AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS = [250, 1_000];
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
 const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({ watcherConfig: config });
@@ -3543,6 +3544,66 @@ async function retryPendingMergeCloseouts({
 
 // ── AMA-03: closer dispatch pre-empt ─────────────────────────────────────────
 
+function isTransientAmaLiveReviewLookupError(err) {
+  const haystack = [
+    err?.code,
+    err?.name,
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+    err?.status,
+    err?.statusCode,
+    err?.response?.status,
+    err?.response?.statusCode,
+  ]
+    .filter((part) => part !== undefined && part !== null)
+    .map((part) => String(part))
+    .join('\n')
+    .toLowerCase();
+
+  if (!haystack) return false;
+  if (/\b(401|403|404|422)\b/.test(haystack)) return false;
+  if (/\b(econnreset|etimedout|eai_again|enotfound|econnrefused|socket hang up)\b/.test(haystack)) {
+    return true;
+  }
+  return (
+    /\b(429|502|503|504)\b/.test(haystack) ||
+    /timed?\s*out|timeout|tls handshake|temporary failure|temporarily unavailable/.test(haystack) ||
+    /rate limit|rate-limit|secondary rate limit|abuse detection/.test(haystack)
+  );
+}
+
+async function fetchLatestHeadReviewBodiesWithRetry({
+  repoPath,
+  prNumber,
+  headSha,
+  authoritativeReviewerLogin,
+  fetchLatestHeadReviewBodiesImpl,
+  retryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
+  logger,
+}) {
+  const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      return await fetchLatestHeadReviewBodiesImpl(repoPath, prNumber, headSha, {
+        authoritativeReviewerLogin,
+      });
+    } catch (err) {
+      const canRetry = attempt < delays.length && isTransientAmaLiveReviewLookupError(err);
+      if (!canRetry) throw err;
+      const delayMs = Math.max(0, Number(delays[attempt]) || 0);
+      logger?.warn?.(
+        `[watcher] AMA live-review reconcile transient lookup failure for ` +
+          `${repoPath}#${prNumber}@${headSha}; retrying in ${delayMs}ms: ${err?.message || err}`,
+      );
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  return [];
+}
+
 /**
  * Resolve the AMA cfg subtree, build (reviewState, prMetadata)
  * snapshots from the watcher's existing row + candidate data, and
@@ -3579,6 +3640,7 @@ async function maybeDispatchAmaClosureFor({
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
   fetchLatestHeadReviewBodiesImpl = (repo, pr, head, options = {}) =>
     fetchReviewBodiesForHead(execFileAsync, repo, pr, head, options),
+  liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
 }) {
   let cfg;
   let orchestrationMode;
@@ -3675,8 +3737,14 @@ async function maybeDispatchAmaClosureFor({
     const authoritativeReviewerLogin = String(reviewStateRow?.reviewer_login || '').trim();
     try {
       const bodies = authoritativeReviewerLogin
-        ? await fetchLatestHeadReviewBodiesImpl(repoPath, prNumber, settledReviewHeadSha, {
+        ? await fetchLatestHeadReviewBodiesWithRetry({
+            repoPath,
+            prNumber,
+            headSha: settledReviewHeadSha,
             authoritativeReviewerLogin,
+            fetchLatestHeadReviewBodiesImpl,
+            retryDelaysMs: liveReviewRetryDelaysMs,
+            logger,
           })
         : [];
       if (!authoritativeReviewerLogin) {

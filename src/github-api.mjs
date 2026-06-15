@@ -734,16 +734,24 @@ async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
  */
 async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
   authoritativeReviewerLogins = null,
+  authoritativeReviewerLogin = null,
 } = {}) {
   if (!headSha) return [];
   // Accept reviews from ANY login in the trusted reviewer-bot set (anti-spoof).
   // The set carries both observed naming forms for the reviewer model. An
-  // explicit-but-empty/unresolvable set fails closed.
-  const loginList = Array.isArray(authoritativeReviewerLogins)
-    ? authoritativeReviewerLogins.map(normalizeLogin).filter(Boolean)
+  // explicit-but-empty/unresolvable set fails closed. Keep the deprecated
+  // singular option as a transition alias so stale callers cannot accidentally
+  // disable filtering.
+  const reviewerLoginCandidates = authoritativeReviewerLogins != null
+    ? authoritativeReviewerLogins
+    : authoritativeReviewerLogin == null
+      ? null
+      : [authoritativeReviewerLogin];
+  const loginList = Array.isArray(reviewerLoginCandidates)
+    ? reviewerLoginCandidates.map(normalizeLogin).filter(Boolean)
     : [];
   const expectedReviewerLoginSet = loginList.length ? new Set(loginList) : null;
-  if (authoritativeReviewerLogins != null && !expectedReviewerLoginSet) return [];
+  if (reviewerLoginCandidates != null && !expectedReviewerLoginSet) return [];
   const normalizedPrNumber = normalizePrNumber(prNumber);
   const reviews = await paginateRest(
     execFileImpl,

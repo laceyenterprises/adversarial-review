@@ -1087,6 +1087,39 @@ test('fetchReviewBodiesForHead ignores newer non-authoritative verdict bodies', 
   assert.equal(calls.length, 1);
 });
 
+test('fetchReviewBodiesForHead honors deprecated singular authoritativeReviewerLogin filter', async () => {
+  const { fetchReviewBodiesForHead } = await importGithubApiFresh();
+  const headSha = 'head-singular-filter';
+  async function execFileImpl(command, args) {
+    assert.equal(command, 'gh');
+    assert.equal(args[0], 'api');
+    return {
+      stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify([
+        {
+          user: { login: 'operator-bot' },
+          body: '## Verdict\n\nComment only',
+          state: 'COMMENTED',
+          submitted_at: '2026-06-15T02:20:00.000Z',
+          commit_id: headSha,
+        },
+        {
+          user: { login: 'codex-reviewer-lacey' },
+          body: '## Verdict\n\nRequest changes',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-06-15T02:10:00.000Z',
+          commit_id: headSha,
+        },
+      ])}`,
+    };
+  }
+
+  const bodies = await fetchReviewBodiesForHead(execFileImpl, FIXTURE_REPO, FIXTURE_PR, headSha, {
+    authoritativeReviewerLogin: 'codex-reviewer-lacey',
+  });
+
+  assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);
+});
+
 test('pagination cursor handling returns all comments, reviews, and checks without truncation', async () => {
   const expected = makeLargeExpectedRollup();
   const { fetchPullRequestRollup } = await importGithubApiFresh();

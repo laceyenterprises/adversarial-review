@@ -1075,6 +1075,36 @@ test('final hammer: exhausted cycle does NOT waive verdict/blocking without an o
   assert.ok(!result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
 });
 
+test('final hammer: adversarial-merge-requested without operator-approved does not waive verdict/blocking', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['adversarial-merge-requested'] },
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 2,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    adversarialMergeRequested: {
+      applied: true,
+      observedRevisionRef: 'abc12345',
+      actor: 'paul-the-operator',
+      eventId: 'LE_adversarial_merge_requested',
+      observedAt: '2026-06-10T20:00:00Z',
+    },
+  });
+
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.riskClass.adversarialMergeRequestedOverride, true);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.ok(!result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
+  assert.ok(!result.trace.finalHammer.waived.includes('blocking-findings-present'));
+});
+
 test('final hammer + current-head operator override waives verdict/blocking and is eligible', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['operator-approved'] },

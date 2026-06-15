@@ -631,7 +631,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'blocking-findings-unknown',
   ]);
   const finalHammerVerdictWaiverAllowed =
-    operatorOverride === true || adversarialMergeRequestedOverride === true;
+    operatorOverride === true;
   const waivedByFinalHammer = [];
   let effectiveReasons = reasons;
   if (reviewCycleExhausted) {

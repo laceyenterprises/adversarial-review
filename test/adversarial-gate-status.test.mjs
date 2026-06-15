@@ -900,11 +900,21 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
       last_verdict: 'Comment only',
       risk_class: 'low',
       remediation_pending: 0,
+      reviewer: 'claude',
       reviewer_login: 'claude-reviewer-lacey',
+      // The closer resolves blocking-findings from the SAME authoritative
+      // current-head body it resolves the verdict from
+      // (`resolveSettledReviewVerdict`), NOT from an injected
+      // `dispatchJob.blockingFindingState`. A settled `Comment only` body whose
+      // `## Blocking Issues` section is `- None.` is `known: 0`.
+      reviewer_head_sha: 'abc123',
+      review_body: '## Summary\nLooks fine.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.',
     }),
+    // dispatchJob blocker fields are intentionally stale here: they are no
+    // longer the source of truth for the closer's blocking-findings axis.
     dispatchJob: {
-      blockingFindingCount: 0,
-      blockingFindingState: 'known',
+      blockingFindingCount: 5,
+      blockingFindingState: 'unknown',
     },
     candidate: {
       headSha: 'abc123',
@@ -929,6 +939,12 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
     prNumber: 265,
     currentRevisionRef: 'abc123',
     logger: { warn() {} },
+    // Live-review reconcile fires because the stored body is settled-success;
+    // return the same settled comment-only body on the head so the authoritative
+    // path resolves `known: 0`.
+    fetchLatestHeadReviewBodiesImpl: async () => [
+      '## Summary\nLooks fine.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.',
+    ],
     loadConfigImpl: () => ({
       getMergeAuthorityConfig() {
         return { enabled: true };

@@ -391,7 +391,17 @@ function normalizeAuthor(author) {
 }
 
 function normalizeLogin(login) {
-  return String(login || '').trim().toLowerCase();
+  // GitHub App actors (the reviewer bots) surface their login as
+  // `<app-slug>[bot]` in the REST reviews API, but the trusted-reviewer set is
+  // configured/derived as the bare slug (`lacey-codex-reviewer`). Strip the
+  // GitHub-reserved `[bot]` actor-type suffix so the AMA anti-spoof filter in
+  // `fetchReviewBodiesForHead` matches App-bot reviews. This does NOT weaken the
+  // anti-spoof guarantee: GitHub usernames cannot contain `[` or `]`, so only
+  // genuine App actors ever carry the suffix and no human account can forge it.
+  return String(login || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\[bot\]$/, '');
 }
 
 function normalizeLabel(label) {

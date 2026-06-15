@@ -4032,8 +4032,17 @@ async function maybeDispatchAmaClosureFor({
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: settledReview.remediationPending,
     reviewCycleExhausted,
-    blockingFindingCount: Number(dispatchJob?.blockingFindingCount ?? 0),
-    blockingFindingState: String(dispatchJob?.blockingFindingState || 'unknown').trim().toLowerCase(),
+    // Blocking-findings classification MUST come from the same authoritative
+    // current-head body `settledReview` resolved the verdict from (live head
+    // body when reconciled, else the stored job/row body). The `dispatchJob`
+    // here is `buildMergeAgentDispatchJob`'s output, whose `classifyBlockingFindings`
+    // reads the latest *follow-up-job* body — which is stale/missing for a clean
+    // `comment-only` review with no remediation job, so it defaulted to
+    // 'unknown' and made the closer fail `blocking-findings-unknown` and never
+    // merge (live on agent-os#1856). `settledReview` always carries these keys;
+    // fall back to 'unknown' only if absent (fail-closed).
+    blockingFindingCount: Number(settledReview.blockingFindingCount ?? 0),
+    blockingFindingState: String(settledReview.blockingFindingState || 'unknown').trim().toLowerCase(),
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,

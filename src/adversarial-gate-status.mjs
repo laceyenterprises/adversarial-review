@@ -7,6 +7,7 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import {
   buildScopedOperatorApproval,
+  classifyBlockingFindings,
   extractReviewVerdict,
   findLatestFollowUpJobForPR,
   normalizeFollowUpJobStatus,
@@ -157,6 +158,26 @@ function extractReviewBodyFromRow(reviewRow) {
  *        skip reconciliation. `{resolved:false}` (or malformed) => fail closed.
  * @returns {{verdict: string, remediationPending: boolean, reviewedHeadSha: string|null}}
  */
+// Blocking-finding state for a return path that has NO authoritative body to
+// classify (non-posted row, stale head, remediation-pending, live-lookup
+// failure). The AMA gate fails closed on `unknown`; never synthesize `known:0`
+// out of nothing.
+const UNKNOWN_BLOCKERS = { blockingFindingState: 'unknown', blockingFindingCount: 0 };
+
+/**
+ * Classify standing blocking findings from the SAME authoritative body the
+ * verdict is derived from, reusing the merge-agent classifier so the AMA-closer
+ * path and the merge-agent path agree. An empty / `- None.` `## Blocking Issues`
+ * section on a settled body resolves to `known: 0`; a populated section yields
+ * `count >= 1`; a legacy `request-changes` body with no structured section stays
+ * `unknown`. A missing/blank body fails closed to `unknown`.
+ */
+function classifyBlockersFromBody(body, verdict) {
+  if (!String(body ?? '').trim()) return { ...UNKNOWN_BLOCKERS };
+  const { count, state } = classifyBlockingFindings(body, { lastVerdict: verdict || null });
+  return { blockingFindingState: state, blockingFindingCount: count };
+}
+
 function resolveSettledReviewVerdict(
   rootDir,
   {
@@ -171,10 +192,10 @@ function resolveSettledReviewVerdict(
   const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
   const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
   if (reviewStatus !== 'posted') {
-    return { verdict: '', remediationPending: false, reviewedHeadSha };
+    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
-    return { verdict: '', remediationPending: false, reviewedHeadSha };
+    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
 
   const latestJobQuery = { repo, prNumber };
@@ -182,35 +203,49 @@ function resolveSettledReviewVerdict(
   const latestJob = latestJobFinder(rootDir, latestJobQuery);
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
   if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {
-    return { verdict: '', remediationPending: true, reviewedHeadSha };
+    return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
-    return { verdict: '', remediationPending: true, reviewedHeadSha };
+    return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
 
   // Live-review reconciliation: when supplied, the live latest review on the
   // current head wins over the (possibly stale) stored body. Fail closed if the
   // lookup did not resolve or returned no verdict-bearing review on this head.
+  // The blocking-findings classification is derived from the SAME live body the
+  // verdict came from so the two can never disagree.
   if (liveHeadReview !== undefined) {
     if (!liveHeadReview || liveHeadReview.resolved !== true || !Array.isArray(liveHeadReview.bodies)) {
-      return { verdict: '', remediationPending: false, reviewedHeadSha };
+      return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
     }
     let liveVerdict = '';
+    let liveBodyForBlockers = '';
     for (const liveBody of liveHeadReview.bodies) {
       const candidate = String(normalizeReviewVerdict(extractReviewVerdict(liveBody)) || '').toLowerCase();
       if (candidate) {
         liveVerdict = candidate;
+        liveBodyForBlockers = liveBody;
         break;
       }
     }
-    return { verdict: liveVerdict, remediationPending: false, reviewedHeadSha };
+    return {
+      verdict: liveVerdict,
+      remediationPending: false,
+      reviewedHeadSha,
+      ...classifyBlockersFromBody(liveBodyForBlockers, liveVerdict),
+    };
   }
 
   const body = latestJob
     ? latestJob.reviewBody
     : extractReviewBodyFromRow(reviewRow);
   const verdict = String(normalizeReviewVerdict(extractReviewVerdict(body)) || '').toLowerCase();
-  return { verdict, remediationPending: false, reviewedHeadSha };
+  return {
+    verdict,
+    remediationPending: false,
+    reviewedHeadSha,
+    ...classifyBlockersFromBody(body, verdict),
+  };
 }
 
 function truncateDescription(description) {

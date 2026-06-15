@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { resolveSettledReviewVerdict } from '../src/adversarial-gate-status.mjs';
+import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
+import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
 
 // These cover the AMA phantom-column fix: AMA must resolve the verdict +
 // remediation-pending from the canonical follow-up-job / review-row body, NOT
@@ -295,4 +297,250 @@ test('omitting liveHeadReview preserves the legacy body-derived behavior (back-c
     latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nComment only' }),
   });
   assert.equal(res.verdict, 'comment-only');
+});
+
+// --- Blocking-findings classification (agent-os#1856 fail-closed bug) -------
+// The AMA closer used to read blocking-findings off the merge-agent dispatch
+// job (`dispatchJob.blockingFindingState`), which is computed from the latest
+// *follow-up-job* body. A clean `comment-only` review with NO remediation job
+// has no such body, so the closer defaulted to `'unknown'` and the eligibility
+// predicate emitted `blocking-findings-unknown` -> `eligible: false` -> the
+// closer deferred without merging. The classification must instead come from
+// the SAME authoritative current-head body the verdict is resolved from.
+
+const REVIEW_BODY = (verdict, blockingSection = null) =>
+  `## Summary\nLooks fine.\n\n## Verdict\n\n${verdict}` +
+  (blockingSection === null ? '' : `\n\n## Blocking Issues\n\n${blockingSection}`);
+
+test('comment-only + empty `- None.` Blocking Issues section resolves to known: 0 (live head)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1856,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    liveHeadReview: { resolved: true, bodies: [REVIEW_BODY('Comment only', '- None.')] },
+  });
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.blockingFindingState, 'known');
+  assert.equal(res.blockingFindingCount, 0);
+});
+
+test('comment-only with NO Blocking Issues section resolves to known: 0 (live head)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1857,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only') }),
+    liveHeadReview: { resolved: true, bodies: [REVIEW_BODY('Comment only')] },
+  });
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.blockingFindingState, 'known');
+  assert.equal(res.blockingFindingCount, 0);
+});
+
+test('comment-only with a REAL blocking finding resolves to count >= 1 (still ineligible)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1858,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    liveHeadReview: {
+      resolved: true,
+      bodies: [REVIEW_BODY('Comment only', '### 1. Null deref in handler\nThis crashes on empty input.\n')],
+    },
+  });
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.blockingFindingState, 'known');
+  assert.ok(res.blockingFindingCount >= 1, `expected >= 1, got ${res.blockingFindingCount}`);
+});
+
+test('live-review lookup failure fails CLOSED on blocking-findings (unknown)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1859,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    liveHeadReview: { resolved: false },
+  });
+  assert.equal(res.verdict, '');
+  assert.equal(res.blockingFindingState, 'unknown');
+  assert.equal(res.blockingFindingCount, 0);
+});
+
+test('no verdict-bearing live body fails CLOSED on blocking-findings (unknown)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1860,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    liveHeadReview: { resolved: true, bodies: ['LGTM (no verdict section)'] },
+  });
+  assert.equal(res.verdict, '');
+  assert.equal(res.blockingFindingState, 'unknown');
+  assert.equal(res.blockingFindingCount, 0);
+});
+
+test('stale reviewer_head_sha fails CLOSED on blocking-findings (unknown)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1861,
+    currentHeadSha: 'b'.repeat(40),
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD, review_body: REVIEW_BODY('Comment only', '- None.') },
+    latestJobFinder: finder(null),
+  });
+  assert.equal(res.verdict, '');
+  assert.equal(res.blockingFindingState, 'unknown');
+});
+
+test('non-posted review row fails CLOSED on blocking-findings (unknown)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1862,
+    reviewRow: { review_status: 'reviewing', review_body: REVIEW_BODY('Comment only', '- None.') },
+    latestJobFinder: finder(null),
+  });
+  assert.equal(res.blockingFindingState, 'unknown');
+});
+
+test('remediation-pending fails CLOSED on blocking-findings (unknown)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1863,
+    reviewRow: { review_status: 'posted' },
+    latestJobFinder: finder({ status: 'in-progress', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+  });
+  assert.equal(res.remediationPending, true);
+  assert.equal(res.blockingFindingState, 'unknown');
+});
+
+test('back-compat (no liveHeadReview): stored comment-only body classifies known: 0', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1864,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+  });
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.blockingFindingState, 'known');
+  assert.equal(res.blockingFindingCount, 0);
+});
+
+// --- End-to-end through the eligibility predicate --------------------------
+// The whole point of the fix: a clean comment-only review with an empty
+// Blocking Issues section must no longer emit `blocking-findings-unknown`, and
+// a real finding / request-changes must STILL be ineligible.
+
+function eligibilityFor(settledReview, { riskClass = 'low' } = {}) {
+  const headSha = 'abc12345';
+  const reviewState = {
+    verdict: settledReview.verdict,
+    headSha,
+    riskClass,
+    remediationPending: settledReview.remediationPending,
+    operatorApprovedEvidence: null,
+    blockingFindingCount: settledReview.blockingFindingCount,
+    blockingFindingState: settledReview.blockingFindingState,
+    prAuthor: 'codex-worker-bot',
+  };
+  const prMetadata = {
+    prNumber: 1856,
+    headSha,
+    isOpen: true,
+    isDraft: false,
+    mergeableState: 'MERGEABLE',
+    labels: [],
+    statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+    branchProtection: { requiredContexts: [DEFAULT_ADVERSARIAL_GATE_CONTEXT] },
+    author: 'codex-worker-bot',
+  };
+  const cfg = {
+    enabled: true,
+    workerClass: 'codex',
+    mergeMethod: 'squash',
+    eligibility: { riskClasses: ['low'], reviewerFamilyPolicy: 'audit_existing_gate_contract' },
+    branchProtection: { requiredGateContextSource: 'resolveGateStatusContext' },
+  };
+  return isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: { ADV_GATE_STATUS_CONTEXT: DEFAULT_ADVERSARIAL_GATE_CONTEXT },
+  });
+}
+
+test('E2E: comment-only + empty section no longer emits blocking-findings-unknown', () => {
+  const HEAD2 = 'a'.repeat(40);
+  const settled = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1856,
+    currentHeadSha: HEAD2,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD2 },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    liveHeadReview: { resolved: true, bodies: [REVIEW_BODY('Comment only', '- None.')] },
+  });
+  const result = eligibilityFor(settled);
+  assert.ok(
+    !result.reasons.includes('blocking-findings-unknown'),
+    `unexpected reasons: ${JSON.stringify(result.reasons)}`,
+  );
+  assert.ok(
+    !result.reasons.includes('blocking-findings-present'),
+    `unexpected reasons: ${JSON.stringify(result.reasons)}`,
+  );
+  assert.ok(
+    !result.reasons.includes('verdict-not-settled-success'),
+    `unexpected reasons: ${JSON.stringify(result.reasons)}`,
+  );
+  assert.equal(result.eligible, true, `expected eligible, reasons: ${JSON.stringify(result.reasons)}`);
+});
+
+test('E2E: comment-only + real blocking finding stays ineligible (blocking-findings-present)', () => {
+  const HEAD2 = 'a'.repeat(40);
+  const settled = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1858,
+    currentHeadSha: HEAD2,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD2 },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    liveHeadReview: {
+      resolved: true,
+      bodies: [REVIEW_BODY('Comment only', '### 1. Null deref\nCrashes on empty input.\n')],
+    },
+  });
+  const result = eligibilityFor(settled);
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('blocking-findings-present'), JSON.stringify(result.reasons));
+});
+
+test('E2E: request-changes stays ineligible (verdict-not-settled-success)', () => {
+  const HEAD2 = 'a'.repeat(40);
+  const settled = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1865,
+    currentHeadSha: HEAD2,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD2 },
+    latestJobFinder: finder({ status: 'stopped', reviewBody: REVIEW_BODY('Request changes') }),
+    liveHeadReview: { resolved: true, bodies: [REVIEW_BODY('Request changes')] },
+  });
+  const result = eligibilityFor(settled);
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'), JSON.stringify(result.reasons));
+});
+
+test('E2E: live-lookup failure stays ineligible (blocking-findings-unknown, fail-closed)', () => {
+  const HEAD2 = 'a'.repeat(40);
+  const settled = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1866,
+    currentHeadSha: HEAD2,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD2 },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    liveHeadReview: { resolved: false },
+  });
+  const result = eligibilityFor(settled);
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('blocking-findings-unknown'), JSON.stringify(result.reasons));
 });

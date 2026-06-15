@@ -5151,6 +5151,7 @@ export {
   clearMergeAgentLifecycleCleanup,
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
+  classifyBlockingFindings,
   describeStaleDispatch,
   scanStuckMergeAgentDispatches,
   isTerminalMergeAgentCancelDetail,

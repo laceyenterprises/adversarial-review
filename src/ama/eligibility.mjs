@@ -596,14 +596,14 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
 
   // AMA "final hammer" (operator directive 2026-06-14): once the review cycle is
   // EXHAUSTED — the remediation round budget is fully spent and the verdict still
-  // hasn't converged — AMA must be the final authority that LANDS the PR rather
-  // than leaving it blocked forever in a perpetual review loop. At cycle-end we
-  // WAIVE the soft, convergence-dependent gates (verdict, remediation state,
-  // blocking findings, the structural branch-protection gate, and the low/medium
-  // risk-class allowlist gate). We NEVER waive the hard safety gates: the PR
-  // must still be open/non-draft/mergeable, the head must still match the
-  // reviewed head (AMA pins --match-head-commit so a moved head can't be closed),
-  // CI must still be green, hard-stop labels (incl. head-scoped
+  // has not converged — AMA may waive only the documented cycle-end soft gates.
+  // Remediation state and the structural branch-protection gate are waivable at
+  // cycle-end. Verdict and blocking-finding gates require current-head
+  // `operator-approved`, and low/medium risk-class allowlist misses require
+  // current-head `adversarial-merge-requested`. We NEVER waive the hard safety
+  // gates: the PR must still be open/non-draft/mergeable, the head must still
+  // match the reviewed head (AMA pins --match-head-commit so a moved head cannot
+  // be closed), CI must still be green, hard-stop labels (incl. head-scoped
   // adversarial-merge-blocked) still block, fast-merge state still blocks, AMA
   // must be enabled, unknown risk still requires the explicit two-key override,
   // and high/critical risk still requires either the configured single-key

@@ -877,7 +877,7 @@ export async function load(url, context, nextLoad) {
   const simpleStubs = {
     'fixture:routing': "export function routeSubject() { return null; } export function defaultReviewerRouteFromEnv() { return null; } export function describeCrossModelReviewWaiver() { return null; } export function isCrossModelReviewWaived() { return false; }",
     'fixture:role-config': "export function loadRoleConfig() { return { get: (_key, defaultValue) => defaultValue }; } export function resetRoleConfigCache() {}",
-    'fixture:config-loader': "export function loadConfigCached() { return {}; }",
+    'fixture:config-loader': "export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos']; export function loadConfigCached() { return {}; }",
     'fixture:octokit-rest': "export class Octokit {}",
     'fixture:operator-surface': "globalThis.__githubApiWatcherTriage = []; export function createCompositeOperatorSurface() { return { extractLinearTicketId() { return null; }, syncTriageStatus: async (subjectRef, state) => { globalThis.__githubApiWatcherTriage.push({ subjectRef, state }); }, observeOperatorApproved: async () => null, observeLabelControl: async () => null }; }",
     'fixture:reviewer-runtime': "export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async () => ({ ok: true }), cancel: async () => {} }; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",

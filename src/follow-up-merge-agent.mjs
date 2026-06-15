@@ -3839,6 +3839,11 @@ async function dispatchMergeAgentForPR({
     prNumber,
     workerClass: mergeAgentWorkerClass,
   });
+  if (mergeDispatchRoute !== 'hq-dispatch') {
+    throw new Error(
+      `[merge-agent] unsupported merge dispatch route=${JSON.stringify(mergeDispatchRoute)}`,
+    );
+  }
   const hqDispatchHeadArgs = [
     'dispatch',
     '--worker-class', mergeAgentWorkerClass,

@@ -793,6 +793,22 @@ export async function maybeDispatchAmaCloser({
   const priorRetryCount = existingRecordIsReclaimableInterruption
     ? Math.max(0, Number(existingRecord?.retryCount || 1) - 1)
     : Number(existingRecord?.retryCount || 0);
+  // AOM-04: the orchestration switch is a deliberate no-op for merge-class
+  // dispatch. Native and agentos both stay on `hq dispatch` because no bare
+  // merge orchestration exists to fall back to.
+  const mergeDispatchRoute = resolveMergeClassDispatchRoute({
+    orchestrationMode: dispatchContext?.orchestrationMode ?? null,
+    logger,
+    repo,
+    prNumber,
+    workerClass,
+    completionShape: 'decision-only',
+  });
+  if (mergeDispatchRoute !== 'hq-dispatch') {
+    throw new Error(
+      `[ama-closer] unsupported merge dispatch route=${JSON.stringify(mergeDispatchRoute)}`,
+    );
+  }
   writeAmaCloserDispatchRecord(rootDir, dispatchIdentity, {
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,
@@ -874,17 +890,6 @@ export async function maybeDispatchAmaCloser({
   //   - `--project adversarial-merge-authority` to keep audit + token
   //     accounting separate from the merge-agent stream.
   //   - `--ticket AMA-PR-<n>` so the launch is traceable per-PR.
-  // AOM-04: the orchestration switch is a deliberate no-op for merge-class
-  // dispatch. Native and agentos both stay on `hq dispatch` because no bare
-  // merge orchestration exists to fall back to.
-  const mergeDispatchRoute = resolveMergeClassDispatchRoute({
-    orchestrationMode: dispatchContext?.orchestrationMode ?? null,
-    logger,
-    repo,
-    prNumber,
-    workerClass,
-    completionShape: 'decision-only',
-  });
   const args = [
     'dispatch',
     '--worker-class', workerClass,

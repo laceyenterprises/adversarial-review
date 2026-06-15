@@ -12,6 +12,7 @@ import {
   maybeDispatchAmaCloser,
   substituteTemplate,
 } from '../src/ama/dispatch-closer.mjs';
+import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
 import {
   amaAuditFilePath,
   amaAuditTraceRef,
@@ -139,6 +140,40 @@ function buildWriteMock() {
   return { impl, captured };
 }
 
+function buildStructuredLogger() {
+  const events = [];
+  return {
+    events,
+    logger: {
+      info(line) {
+        events.push(JSON.parse(line));
+      },
+      warn() {},
+      error() {},
+      log() {},
+    },
+  };
+}
+
+function summarizeDispatchCall(call) {
+  const args = call?.args || [];
+  const readFlag = (flag) => {
+    const idx = args.indexOf(flag);
+    return idx >= 0 ? args[idx + 1] : null;
+  };
+  return {
+    cmd: call?.cmd || null,
+    workerClass: readFlag('--worker-class'),
+    taskKind: readFlag('--task-kind'),
+    completionShape: readFlag('--completion-shape'),
+    project: readFlag('--project'),
+    repo: readFlag('--repo'),
+    pr: readFlag('--pr'),
+    ticket: readFlag('--ticket'),
+    parentSession: readFlag('--parent-session'),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Test 1 — cfg.enabled=false short-circuits before any I/O.
 // ---------------------------------------------------------------------------
@@ -238,6 +273,55 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes('Risk-Class: low'));
   assert.ok(write.captured.body.includes('Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345'));
   assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
+});
+
+test('maybeDispatchAmaCloser is mode-invariant for merge-class dispatch', async (t) => {
+  const dispatches = [];
+  for (const orchestrationMode of ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE) {
+    const rootDir = mkdtempSync(join(tmpdir(), `ama-dispatch-${orchestrationMode}-`));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+      dispatchContext: { rootDir, orchestrationMode },
+    });
+    const exec = buildExecMock();
+    const write = buildWriteMock();
+    const { logger, events } = buildStructuredLogger();
+    const result = await maybeDispatchAmaCloser({
+      reviewState,
+      prMetadata,
+      cfg,
+      dispatchContext,
+      execFileImpl: exec.impl,
+      writeFileImpl: write.impl,
+      readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+      logger,
+    });
+    dispatches.push({
+      orchestrationMode,
+      result,
+      calls: exec.calls.map((call) => ({ cmd: call.cmd, args: [...call.args] })),
+      events,
+    });
+  }
+
+  const nativeDispatch = dispatches.find(entry => entry.orchestrationMode === 'native');
+  const agentosDispatch = dispatches.find(entry => entry.orchestrationMode === 'agentos');
+  assert.equal(dispatches.length, ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE.length);
+  assert.equal(nativeDispatch.result.dispatched, true);
+  assert.equal(agentosDispatch.result.dispatched, true);
+  assert.equal(nativeDispatch.calls.length, 1, 'native must still launch via hq dispatch');
+  assert.equal(agentosDispatch.calls.length, 1, 'agentos must still launch via hq dispatch');
+  assert.deepEqual(
+    summarizeDispatchCall(nativeDispatch.calls[0]),
+    summarizeDispatchCall(agentosDispatch.calls[0]),
+  );
+
+  const nativeNoopEvent = nativeDispatch.events.find((event) => event.event === 'ama_closer.orchestration_mode_noop');
+  const agentosNoopEvent = agentosDispatch.events.find((event) => event.event === 'ama_closer.orchestration_mode_noop');
+  assert.equal(nativeNoopEvent.route, 'hq-dispatch');
+  assert.equal(agentosNoopEvent.route, 'hq-dispatch');
+  assert.equal(nativeNoopEvent.completionShape, 'decision-only');
+  assert.equal(agentosNoopEvent.completionShape, 'decision-only');
 });
 
 test('cfg.enabled=true + branch protection opt-out records waived eligibility reason', async (t) => {

@@ -3483,6 +3483,26 @@ const PENDING_MERGE_CLOSEOUTS_PER_TICK = 20;
 // chronic-failure tail — exactly the rows it is safe to defer.
 const PENDING_MERGE_CLOSEOUTS_BUDGET_MS = 60_000;
 
+function resolveOrchestrationMode({
+  loadedConfig = null,
+  loadConfigImpl = loadConfigCached,
+  logger = console,
+  context = 'merge-agent dispatch',
+} = {}) {
+  let orchestrationMode = 'native';
+  try {
+    const cfg = loadedConfig || loadConfigImpl();
+    if (typeof cfg?.getOrchestrationMode === 'function') {
+      orchestrationMode = cfg.getOrchestrationMode() || 'native';
+    }
+  } catch (cfgErr) {
+    logger?.warn?.(
+      `[watcher] orchestration_mode load failed for ${context}; defaulting to native: ${cfgErr?.message || cfgErr}`,
+    );
+  }
+  return orchestrationMode;
+}
+
 async function retryPendingMergeCloseouts({
   octokit,
   limit = PENDING_MERGE_CLOSEOUTS_PER_TICK,
@@ -3554,8 +3574,15 @@ async function maybeDispatchAmaClosureFor({
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
 }) {
   let cfg;
+  let orchestrationMode;
   try {
-    cfg = loadConfigImpl().getMergeAuthorityConfig();
+    const loadedConfig = loadConfigImpl();
+    cfg = loadedConfig.getMergeAuthorityConfig();
+    orchestrationMode = resolveOrchestrationMode({
+      loadedConfig,
+      logger,
+      context: 'AMA closure dispatch',
+    });
   } catch (err) {
     // CFG load failure isn't an AMA problem; let the existing
     // merge-agent path handle the tick.
@@ -3676,35 +3703,43 @@ async function maybeDispatchAmaClosureFor({
     reviewedBy: reviewStateRow?.reviewer_login || '',
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    orchestrationMode,
   };
 
-  const result = await maybeDispatchAmaCloserImpl({
-    reviewState,
-    prMetadata,
-    cfg,
-    options: {
-      env: process.env,
-      adversarialMergeRequested: adversarialMergeRequestedEvent
-        ? {
-            applied: true,
-            observedRevisionRef:
-              adversarialMergeRequestedEvent.headSha ||
-              adversarialMergeRequestedEvent.head_sha ||
-              null,
-            actor: adversarialMergeRequestedEvent.actor || null,
-            eventId:
-              adversarialMergeRequestedEvent.id ||
-              adversarialMergeRequestedEvent.nodeId ||
-              null,
-            observedAt:
-              adversarialMergeRequestedEvent.createdAt ||
-              adversarialMergeRequestedEvent.created_at ||
-              null,
-          }
-        : null,
-    },
-    dispatchContext,
-  });
+  let result;
+  try {
+    result = await maybeDispatchAmaCloserImpl({
+      reviewState,
+      prMetadata,
+      cfg,
+      options: {
+        env: process.env,
+        adversarialMergeRequested: adversarialMergeRequestedEvent
+          ? {
+              applied: true,
+              observedRevisionRef:
+                adversarialMergeRequestedEvent.headSha ||
+                adversarialMergeRequestedEvent.head_sha ||
+                null,
+              actor: adversarialMergeRequestedEvent.actor || null,
+              eventId:
+                adversarialMergeRequestedEvent.id ||
+                adversarialMergeRequestedEvent.nodeId ||
+                null,
+              observedAt:
+                adversarialMergeRequestedEvent.createdAt ||
+                adversarialMergeRequestedEvent.created_at ||
+                null,
+            }
+          : null,
+      },
+      dispatchContext,
+      logger,
+    });
+  } catch (err) {
+    logger?.warn?.(`[watcher] AMA dispatch failed: ${err?.message || err}`);
+    return { dispatched: false, reason: 'ama-dispatch-failed', amaEnabled: Boolean(cfg?.enabled) };
+  }
   // AMA-06N — expose `amaEnabled` so the watcher's coexistence
   // decision (downstream of this helper) can branch on it. The
   // upstream code paths (`cfg-load-failed`, `ama-disabled`) already
@@ -3925,6 +3960,10 @@ async function handlePostedReviewRow({
       return;
     }
 
+    const orchestrationMode = resolveOrchestrationMode({
+      logger,
+      context: 'merge-agent dispatch',
+    });
     const { coexistence, dispatchEnv } = coexistenceDecision;
     // AMA-06N: when the operator-fallback lane is selected, override
     // the dispatch trigger to 'merge-agent-requested' so the critical-
@@ -3952,6 +3991,7 @@ async function handlePostedReviewRow({
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
+      orchestrationMode,
       ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
       ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
     });
@@ -4139,6 +4179,10 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       );
       return { handled: true, dispatchJob, amaClosureResult };
     }
+    const orchestrationMode = resolveOrchestrationMode({
+      logger,
+      context: 'reviewer-timeout merge-agent handoff',
+    });
     const { coexistence, dispatchEnv } = coexistenceDecision;
     // AMA-06N: timeout-exhaustion path also honors triggerOverride on
     // the operator-fallback lane, same rationale as the green-path
@@ -4162,6 +4206,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
     const dispatched = await dispatchMergeAgentForPRImpl({
       rootDir,
       ...dispatchJob,
+      orchestrationMode,
       ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
       ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
     });

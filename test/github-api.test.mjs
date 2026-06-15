@@ -902,7 +902,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "export function writeFileAtomic() {}",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchReviewBodiesForHead() { return []; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
@@ -1038,6 +1038,51 @@ test('feature flag fallback runs the legacy cluster path and preserves shape', a
     graphqlTelemetry.events.map((entry) => entry.category),
     ['graphql_pr_rollup'],
   );
+});
+
+test('fetchReviewBodiesForHead ignores newer non-authoritative verdict bodies', async () => {
+  const { fetchReviewBodiesForHead } = await importGithubApiFresh();
+  const headSha = 'head-authoritative';
+  const calls = [];
+  async function execFileImpl(command, args) {
+    calls.push({ command, args: [...args] });
+    assert.equal(command, 'gh');
+    assert.equal(args[0], 'api');
+    assert.equal(args[1], '-i');
+    assert.match(args[2], new RegExp(`repos/${FIXTURE_REPO}/pulls/${FIXTURE_PR}/reviews`));
+    return {
+      stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify([
+        {
+          user: { login: 'operator-bot' },
+          body: '## Verdict\n\nComment only',
+          state: 'COMMENTED',
+          submitted_at: '2026-06-15T02:20:00.000Z',
+          commit_id: headSha,
+        },
+        {
+          user: { login: 'codex-reviewer-lacey' },
+          body: '## Verdict\n\nRequest changes',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-06-15T02:10:00.000Z',
+          commit_id: headSha,
+        },
+        {
+          user: { login: 'codex-reviewer-lacey' },
+          body: '## Verdict\n\nComment only',
+          state: 'DISMISSED',
+          submitted_at: '2026-06-15T02:30:00.000Z',
+          commit_id: headSha,
+        },
+      ])}`,
+    };
+  }
+
+  const bodies = await fetchReviewBodiesForHead(execFileImpl, FIXTURE_REPO, FIXTURE_PR, headSha, {
+    authoritativeReviewerLogin: 'codex-reviewer-lacey',
+  });
+
+  assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);
+  assert.equal(calls.length, 1);
 });
 
 test('pagination cursor handling returns all comments, reviews, and checks without truncation', async () => {

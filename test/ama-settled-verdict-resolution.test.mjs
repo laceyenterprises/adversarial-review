@@ -196,3 +196,103 @@ test('no job and no row body yields empty verdict (not falsely settled)', () => 
   assert.equal(res.verdict, '');
   assert.equal(res.remediationPending, false);
 });
+
+// --- Live-review reconciliation (fail-open guard, #1824 / #1816) ----------
+// A completed remediation job's stored comment-only body can be STALE relative
+// to a fresh `Request changes` review posted on the SAME head. When the caller
+// supplies the live latest review(s) on currentHeadSha, they override the stale
+// body and the closer must NOT see settled-success.
+
+const HEAD = 'a'.repeat(40);
+
+test('live Request-changes on head OVERRIDES a stale comment-only job body (the #1824 fail-open)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1824,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    // Stale job body the closer used to trust:
+    latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nComment only' }),
+    // Live latest review on the same head says Request changes (newest-first):
+    liveHeadReview: { resolved: true, bodies: ['## Verdict\n\nRequest changes'] },
+  });
+  assert.equal(res.verdict, 'request-changes');
+  assert.equal(res.remediationPending, false);
+});
+
+test('live-review lookup failure fails CLOSED (empty verdict, never settled-success)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1816,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nComment only' }),
+    liveHeadReview: { resolved: false },
+  });
+  assert.equal(res.verdict, '');
+  assert.equal(res.remediationPending, false);
+});
+
+test('no verdict-bearing live review on the head fails CLOSED', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 100,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nComment only' }),
+    liveHeadReview: { resolved: true, bodies: [] },
+  });
+  assert.equal(res.verdict, '');
+});
+
+test('legit settled-success survives reconciliation (live comment-only on head, the #1792 path)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1792,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nComment only' }),
+    liveHeadReview: { resolved: true, bodies: ['## Verdict\n\nComment only'] },
+  });
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.remediationPending, false);
+});
+
+test('reconciliation picks the NEWEST verdict-bearing live body (newest-first ordering)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 101,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nComment only' }),
+    // newest first: a non-verdict comment, then the real newest verdict, then an older one
+    liveHeadReview: {
+      resolved: true,
+      bodies: ['LGTM (no verdict section)', '## Verdict\n\nRequest changes', '## Verdict\n\nComment only'],
+    },
+  });
+  assert.equal(res.verdict, 'request-changes');
+});
+
+test('malformed liveHeadReview (missing bodies array) fails CLOSED', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 102,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nComment only' }),
+    liveHeadReview: { resolved: true },
+  });
+  assert.equal(res.verdict, '');
+});
+
+test('omitting liveHeadReview preserves the legacy body-derived behavior (back-compat)', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 103,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: '## Verdict\n\nComment only' }),
+  });
+  assert.equal(res.verdict, 'comment-only');
+});

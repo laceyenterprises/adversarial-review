@@ -63,6 +63,47 @@ single merge authority for every known risk class: in that mode, `high` and
 cycle exhaustion must not make a `high` or `critical` PR eligible when that
 class is absent from `risk_classes`.
 
+### AMA current-head review reconciliation
+
+AMA review authority is resolved from the same durable source as the
+adversarial gate: the latest current-head follow-up job review body when one
+exists, otherwise the posted `reviewed_prs` row body. That stored source is not
+enough by itself when it resolves to settled success (`Comment only` or
+`Approved`), because a completed remediation job can retain an older
+comment-only body after a later adversarial review posts `Request changes` on
+the same commit.
+
+When the stored source is settled success and there is no pending remediation,
+the watcher must reconcile it against live GitHub PR reviews on the current
+head before dispatching the closer. Live reconciliation is scoped to submitted
+reviews whose `commit_id` equals the current head SHA, whose state is one of
+`APPROVED`, `CHANGES_REQUESTED`, or `COMMENTED`, and whose author login matches
+the adversarial reviewer recorded in `reviewed_prs.reviewer_login`. Reviews
+from operators, unrelated bots, or missing/unknown authors are not merge
+authority even if they contain a structured `## Verdict` section.
+
+The precedence is:
+
+1. Active or queued remediation remains not settled and blocks ordinary AMA
+   eligibility.
+2. If the stored current-head source is not settled success, the stored verdict
+   stands and no live lookup is needed.
+3. If the stored current-head source is settled success, the newest
+   verdict-bearing live review from the authoritative adversarial reviewer on
+   that same head replaces the stored verdict.
+4. If the reviewer login is unavailable or no authoritative verdict-bearing
+   same-head review is found, AMA fails closed with an empty review verdict
+   rather than trusting stale stored success. Transient live-lookup failures
+   from the watcher-side GitHub CLI path, such as timeouts, TLS/socket
+   interruptions, HTTP 429, or HTTP 502/503/504, are retried with a small
+   bounded budget before this fail-closed decision; non-transient lookup
+   failures fail closed immediately.
+
+This reconciliation is deliberately not an author-agnostic "latest review wins"
+rule. A newer `Comment only` review by an operator or unrelated automation must
+not override an authoritative adversarial `Request changes` review on the same
+head.
+
 ### §4.2a — AMA final hammer (review-cycle exhaustion)
 
 AMA is the **final merge authority at the end of the review cycle**, by operator

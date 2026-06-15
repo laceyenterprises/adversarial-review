@@ -141,6 +141,20 @@ function extractReviewBodyFromRow(reviewRow) {
  * queued-re-review remediation are NOT settled, and review-based authority is
  * only current when reviewer_head_sha matches the live head.
  *
+ * FAIL-OPEN GUARD (`liveHeadReview`): the stored follow-up-job / review-row body
+ * can be STALE relative to a fresh review posted on the SAME head. A completed
+ * remediation job's `reviewBody` (a comment-only round) is not updated when a
+ * later adversarial pass posts `Request changes` on the remediated head, so the
+ * AMA closer read the stale comment-only body and fail-open merged PRs whose
+ * live verdict was `Request changes` (#1824 / #1816, head trailers falsely
+ * claimed `latest_review_settled_success`). When the caller supplies the live
+ * latest reviews on `currentHeadSha`, those are AUTHORITATIVE and override the
+ * stored body; a lookup failure fails closed (verdict ''). Callers that don't
+ * pass `liveHeadReview` (e.g. the advisory gate path) keep the prior behavior.
+ *
+ * @param {{resolved: boolean, bodies?: string[]}=} options.liveHeadReview
+ *        Live latest review bodies on `currentHeadSha`, newest-first. Omit to
+ *        skip reconciliation. `{resolved:false}` (or malformed) => fail closed.
  * @returns {{verdict: string, remediationPending: boolean, reviewedHeadSha: string|null}}
  */
 function resolveSettledReviewVerdict(
@@ -151,6 +165,7 @@ function resolveSettledReviewVerdict(
     reviewRow = null,
     currentHeadSha = null,
     latestJobFinder = findLatestFollowUpJobForPR,
+    liveHeadReview = undefined,
   } = {}
 ) {
   const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
@@ -172,6 +187,25 @@ function resolveSettledReviewVerdict(
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
     return { verdict: '', remediationPending: true, reviewedHeadSha };
   }
+
+  // Live-review reconciliation: when supplied, the live latest review on the
+  // current head wins over the (possibly stale) stored body. Fail closed if the
+  // lookup did not resolve or returned no verdict-bearing review on this head.
+  if (liveHeadReview !== undefined) {
+    if (!liveHeadReview || liveHeadReview.resolved !== true || !Array.isArray(liveHeadReview.bodies)) {
+      return { verdict: '', remediationPending: false, reviewedHeadSha };
+    }
+    let liveVerdict = '';
+    for (const liveBody of liveHeadReview.bodies) {
+      const candidate = String(normalizeReviewVerdict(extractReviewVerdict(liveBody)) || '').toLowerCase();
+      if (candidate) {
+        liveVerdict = candidate;
+        break;
+      }
+    }
+    return { verdict: liveVerdict, remediationPending: false, reviewedHeadSha };
+  }
+
   const body = latestJob
     ? latestJob.reviewBody
     : extractReviewBodyFromRow(reviewRow);

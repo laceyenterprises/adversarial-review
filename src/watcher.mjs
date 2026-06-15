@@ -113,6 +113,7 @@ import { normalizeGithubMergeability } from './github-mergeability.mjs';
 // runs unchanged. AMA-06A/06N flip the broader coexistence semantics
 // once the closer has soaked.
 import { maybeDispatchAmaCloser } from './ama/dispatch-closer.mjs';
+import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import {
   COEXISTENCE_ACTION,
   decideMergeAgentCoexistence,
@@ -148,9 +149,13 @@ import {
   fetchConditionalRestPage,
 } from './conditional-request.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
-import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
-import { fetchPullRequestHeadAndState, fetchPullRequestRollup } from './github-api.mjs';
+import {
+  fetchPullRequestHeadAndState,
+  fetchPullRequestRollup,
+  fetchReviewBodiesForHead,
+} from './github-api.mjs';
+import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
   classifyFenceOrphan,
@@ -218,6 +223,7 @@ const DEFAULT_DAG_AUTOWALK_ON_MERGE_RETRY_MS = 5 * 60 * 1000;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_PER_POLL = 2;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_MAX_ATTEMPTS = 5;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS = 2 * 60 * 1000;
+const AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS = [250, 1_000];
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
 const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({ watcherConfig: config });
@@ -3538,6 +3544,66 @@ async function retryPendingMergeCloseouts({
 
 // ── AMA-03: closer dispatch pre-empt ─────────────────────────────────────────
 
+function isTransientAmaLiveReviewLookupError(err) {
+  const haystack = [
+    err?.code,
+    err?.name,
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+    err?.status,
+    err?.statusCode,
+    err?.response?.status,
+    err?.response?.statusCode,
+  ]
+    .filter((part) => part !== undefined && part !== null)
+    .map((part) => String(part))
+    .join('\n')
+    .toLowerCase();
+
+  if (!haystack) return false;
+  if (/\b(401|403|404|422)\b/.test(haystack)) return false;
+  if (/\b(econnreset|etimedout|eai_again|enotfound|econnrefused|socket hang up)\b/.test(haystack)) {
+    return true;
+  }
+  return (
+    /\b(429|502|503|504)\b/.test(haystack) ||
+    /timed?\s*out|timeout|tls handshake|temporary failure|temporarily unavailable/.test(haystack) ||
+    /rate limit|rate-limit|secondary rate limit|abuse detection/.test(haystack)
+  );
+}
+
+async function fetchLatestHeadReviewBodiesWithRetry({
+  repoPath,
+  prNumber,
+  headSha,
+  authoritativeReviewerLogin,
+  fetchLatestHeadReviewBodiesImpl,
+  retryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
+  logger,
+}) {
+  const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      return await fetchLatestHeadReviewBodiesImpl(repoPath, prNumber, headSha, {
+        authoritativeReviewerLogin,
+      });
+    } catch (err) {
+      const canRetry = attempt < delays.length && isTransientAmaLiveReviewLookupError(err);
+      if (!canRetry) throw err;
+      const delayMs = Math.max(0, Number(delays[attempt]) || 0);
+      logger?.warn?.(
+        `[watcher] AMA live-review reconcile transient lookup failure for ` +
+          `${repoPath}#${prNumber}@${headSha}; retrying in ${delayMs}ms: ${err?.message || err}`,
+      );
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  return [];
+}
+
 /**
  * Resolve the AMA cfg subtree, build (reviewState, prMetadata)
  * snapshots from the watcher's existing row + candidate data, and
@@ -3572,6 +3638,9 @@ async function maybeDispatchAmaClosureFor({
   logger,
   loadConfigImpl = loadConfigCached,
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
+  fetchLatestHeadReviewBodiesImpl = (repo, pr, head, options = {}) =>
+    fetchReviewBodiesForHead(execFileAsync, repo, pr, head, options),
+  liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
 }) {
   let cfg;
   let orchestrationMode;
@@ -3643,12 +3712,63 @@ async function maybeDispatchAmaClosureFor({
   // `undefined` -> verdict '' -> never settled-success -> AMA closed 0 PRs
   // ever. This is the verdict/remediation twin of the `risk_class` phantom-
   // column fix above (the riskClass path was repaired; this one was missed).
-  const settledReview = resolveSettledReviewVerdict(rootDir, {
+  const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
+  let settledReview = resolveSettledReviewVerdict(rootDir, {
     repo: repoPath,
     prNumber,
     reviewRow: reviewStateRow,
-    currentHeadSha: candidate?.headSha || currentRevisionRef || null,
+    currentHeadSha: settledReviewHeadSha,
   });
+  // FAIL-OPEN GUARD (#1824 / #1816): the stored follow-up-job / review-row body
+  // resolved above can be STALE relative to a fresh review on the SAME head — a
+  // completed remediation job's comment-only body is not updated when a later
+  // adversarial pass posts `Request changes`, so the closer fail-open merged
+  // PRs whose live verdict was `Request changes`. ONLY when the stored body
+  // already reads settled-success (the sole case a stale body could cause a
+  // fail-open merge) do we reconcile against the LIVE latest review on the head;
+  // this bounds the extra GitHub call to apparently-mergeable PRs. A fresh
+  // `Request changes` then wins, and a lookup failure fails closed.
+  if (
+    settledReviewHeadSha &&
+    settledReview.remediationPending === false &&
+    SETTLED_SUCCESS_VERDICTS.has(settledReview.verdict)
+  ) {
+    let liveHeadReview;
+    const authoritativeReviewerLogin = String(reviewStateRow?.reviewer_login || '').trim();
+    try {
+      const bodies = authoritativeReviewerLogin
+        ? await fetchLatestHeadReviewBodiesWithRetry({
+            repoPath,
+            prNumber,
+            headSha: settledReviewHeadSha,
+            authoritativeReviewerLogin,
+            fetchLatestHeadReviewBodiesImpl,
+            retryDelaysMs: liveReviewRetryDelaysMs,
+            logger,
+          })
+        : [];
+      if (!authoritativeReviewerLogin) {
+        logger?.warn?.(
+          `[watcher] AMA live-review reconcile missing authoritative reviewer login for ` +
+            `${repoPath}#${prNumber}@${settledReviewHeadSha}; failing closed`,
+        );
+      }
+      liveHeadReview = { resolved: true, bodies: Array.isArray(bodies) ? bodies : [] };
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] AMA live-review reconcile failed for ${repoPath}#${prNumber}@${settledReviewHeadSha}; ` +
+          `failing closed: ${err?.message || err}`,
+      );
+      liveHeadReview = { resolved: false };
+    }
+    settledReview = resolveSettledReviewVerdict(rootDir, {
+      repo: repoPath,
+      prNumber,
+      reviewRow: reviewStateRow,
+      currentHeadSha: settledReviewHeadSha,
+      liveHeadReview,
+    });
+  }
   // Proven reviewed head ONLY — do NOT fall back to the current PR head. AMA's
   // eligibility compares reviewState.headSha (reviewed head) against
   // prMetadata.headSha (current head); synthesizing the reviewed head from the

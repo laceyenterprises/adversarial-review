@@ -10,6 +10,16 @@ worker. Validation examples and cutover checks must therefore substitute the
 configured worker class and verify the dispatched `workerClass` against that
 config value.
 
+AMA closer dispatch must also declare the workspace repo set required by the
+closer prompt. The PR repository is always passed as the primary `--repo`. When
+that repo basename is not `agent-os`, the dispatch must additionally include
+`agent-os` in the workspace repo set, e.g. via `--additional-repo agent-os`,
+because the closer prompt runs the Agent OS AMA tooling and writes its audit
+under `$HQ_ROOT`. When the PR repository is already `agent-os`, the closer must
+not add a duplicate `agent-os` workspace entry; the primary repo already grants
+the required scope. Cutover validation must inspect the launch contract's
+`workspaceRepos` (or equivalent `hq dispatch status` field) for both cases.
+
 AMA's §4.2 branch-protection gate is enabled by default:
 `roles.adversarial.merge_authority.branch_protection.required` defaults to
 `true`, and the target branch must require the resolved adversarial-gate

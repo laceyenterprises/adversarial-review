@@ -79,10 +79,12 @@ head before dispatching the closer. Live reconciliation is scoped to submitted
 reviews whose `commit_id` equals the current head SHA, whose state is one of
 `APPROVED`, `CHANGES_REQUESTED`, or `COMMENTED`, and whose author login is in
 the authoritative reviewer-login set resolved from `reviewed_prs.reviewer`.
-The stored `reviewer` value is the reviewer model/family, not a GitHub login.
-Known Claude-family values (`claude`, `claude-code`, `clio-agent`, and
-`opencode`) accept `lacey-claude-reviewer` and `claude-reviewer-lacey`. Known
-Codex-family values (`codex`, `gemini`, `pi`, and `hermes`) accept
+The stored `reviewer` value is the reviewer model/family or supported
+builder-tag alias, not a GitHub login. AMA resolves that value through the
+canonical GitHub-PR reviewer routing tables before applying the anti-spoof
+author filter. Known Claude-authority values (`claude`, `claude-code`, and
+`clio-agent`) accept `lacey-claude-reviewer` and `claude-reviewer-lacey`. Known
+Codex-authority values (`codex`, `gemini`, `pi`, `opencode`, and `hermes`) accept
 `lacey-codex-reviewer` and `codex-reviewer-lacey`. Unknown or missing reviewer
 models resolve to an empty authoritative set and fail closed rather than
 trusting any live review body. Reviews from operators, unrelated bots, or

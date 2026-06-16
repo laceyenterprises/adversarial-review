@@ -19,7 +19,14 @@ The predicate is the gate. Trust nothing else.
 - **Reviewed head SHA:** `abc12345abc12345abc12345abc12345abc12345`
 - **Risk class:** `low`
 - **Merge method:** `squash` (NEVER rebase; SPEC §4.4 requires one canonical landed commit for provenance)
-- **Required gate context:** `agent-os/adversarial-gate`
+<!-- Do NOT print the raw agent-os/adversarial-gate value here as an inline
+     token: it is a CI check-context name whose "<org-slash-name>" shape is
+     misread by the WBH prompt-scope cross-repo path detector as an
+     out-of-workspace reference, which fail-closes the closer dispatch
+     (policy_denied) for any non-agent-os PR. The value still appears in the
+     fenced audit-JSON example below (fenced blocks are ignored by the detector)
+     and the closer reads it from its own config, not this line. -->
+- **Required gate context:** the adversarial-review gate check for this PR (see the `requiredGateContexts` field in the audit-JSON shape below).
 - **HQ owner user:** `unknown`
 - **Audit JSON destination:** `/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json`
 

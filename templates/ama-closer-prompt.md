@@ -19,7 +19,14 @@ The predicate is the gate. Trust nothing else.
 - **Reviewed head SHA:** `<<REVIEWED_SHA>>`
 - **Risk class:** `<<RISK_CLASS>>`
 - **Merge method:** `<<MERGE_METHOD>>` (NEVER rebase; SPEC §4.4 requires one canonical landed commit for provenance)
-- **Required gate context:** `<<REQUIRED_GATE_CONTEXT>>`
+<!-- Do NOT print the raw <<REQUIRED_GATE_CONTEXT>> value here as an inline
+     token: it is a CI check-context name whose "<org-slash-name>" shape is
+     misread by the WBH prompt-scope cross-repo path detector as an
+     out-of-workspace reference, which fail-closes the closer dispatch
+     (policy_denied) for any non-agent-os PR. The value still appears in the
+     fenced audit-JSON example below (fenced blocks are ignored by the detector)
+     and the closer reads it from its own config, not this line. -->
+- **Required gate context:** the adversarial-review gate check for this PR (see the `requiredGateContexts` field in the audit-JSON shape below).
 - **HQ owner user:** `<<HQ_OWNER>>`
 - **Audit JSON destination:** `<<AUDIT_PATH>>`
 

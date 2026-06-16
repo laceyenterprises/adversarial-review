@@ -28,7 +28,32 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from '../src/follow-up-jobs.mjs';
+import { classifyBlockingFindings } from '../src/follow-up-merge-agent.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
+
+// Blocking-finding state for a head with NO authoritative review body to
+// classify (no review on the reviewed head, blank body). The AMA gate fails
+// closed on `unknown`; never synthesize `known: 0` out of nothing. Mirrors
+// `adversarial-gate-status.mjs::UNKNOWN_BLOCKERS`.
+const UNKNOWN_BLOCKERS = Object.freeze({
+  blockingFindingState: 'unknown',
+  blockingFindingCount: 0,
+});
+
+// Classify standing blocking findings from the SAME authoritative review body
+// the verdict is derived from, reusing the merge-agent classifier so the
+// AMA-closer pre-merge path and the merge-agent path agree. An empty /
+// `- None.` `## Blocking Issues` section on a settled body resolves to
+// `known: 0`; a populated section yields `count >= 1`; a missing/blank body
+// fails closed to `unknown`. Mirrors `classifyBlockersFromBody` in
+// `adversarial-gate-status.mjs`.
+function classifyBlockersFromReviewBody(body, verdict) {
+  if (!String(body ?? '').trim()) return { ...UNKNOWN_BLOCKERS };
+  const { count, state } = classifyBlockingFindings(body, {
+    lastVerdict: verdict || null,
+  });
+  return { blockingFindingState: state, blockingFindingCount: count };
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -165,6 +190,23 @@ function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, risk
   };
   const verdict = verdictMap[ghState] || String(latest?.state || '').toLowerCase();
 
+  // Standing blocking findings must come from an authoritative review body
+  // ON the reviewed head — never the off-head fallback, and never synthesized.
+  // Without this, `reviewState.blockingFindingState` is `undefined`, so the
+  // eligibility predicate's `classifyBlockingFindings` returns
+  // `{ known: false }` for EVERY PR, pushing `blocking-findings-unknown` +
+  // `verdict-not-settled-success` and deferring every settled-success closure
+  // (the watcher's eligibility pass set these from the durable job, so it
+  // passed while this pre-merge re-verification always failed closed).
+  const latestOnHead = reviewsForHead.length > 0
+    ? reviewsForHead
+        .slice()
+        .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')))[0]
+    : null;
+  const { blockingFindingState, blockingFindingCount } = latestOnHead
+    ? classifyBlockersFromReviewBody(latestOnHead.body, verdict)
+    : { ...UNKNOWN_BLOCKERS };
+
   // Walk the timeline for the latest current-head `operator-approved`
   // labeled event. The eligibility predicate applies the head-scope +
   // attribution + non-author rules itself; this layer only normalizes
@@ -192,6 +234,11 @@ function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, risk
     // merge-time closer recomputes exhaustion from the durable ledger before
     // passing a true value here.
     reviewCycleExhausted: reviewCycleExhausted === true,
+    // Authoritative blocking-finding classification from the on-head review
+    // body. The eligibility predicate's settled-success gate requires
+    // `blockingFindingState === 'known'` AND `blockingFindingCount === 0`.
+    blockingFindingState,
+    blockingFindingCount,
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,

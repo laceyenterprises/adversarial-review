@@ -28,7 +28,83 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from '../src/follow-up-jobs.mjs';
+import { classifyBlockingFindings } from '../src/follow-up-merge-agent.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
+import { amaAuthoritativeReviewerLoginsForModel } from '../src/ama/reviewer-authority.mjs';
+import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
+
+// Blocking-finding state for a head with NO authoritative review body to
+// classify (no review on the reviewed head, blank body). The AMA gate fails
+// closed on `unknown`; never synthesize `known: 0` out of nothing. Mirrors
+// `adversarial-gate-status.mjs::UNKNOWN_BLOCKERS`.
+const UNKNOWN_BLOCKERS = Object.freeze({
+  blockingFindingState: 'unknown',
+  blockingFindingCount: 0,
+});
+
+const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
+
+function normalizeLogin(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/\[bot\]$/, '');
+}
+
+function reviewAuthorLogin(review) {
+  return review?.author?.login || review?.user?.login || null;
+}
+
+function reviewCommitOid(review) {
+  return review?.commit?.oid || review?.commit_id || review?.commitId || null;
+}
+
+function reviewSubmittedAt(review) {
+  return review?.submittedAt || review?.submitted_at || null;
+}
+
+function normalizedStructuredVerdict(body) {
+  return String(normalizeReviewVerdict(extractReviewVerdict(body)) || '').toLowerCase();
+}
+
+function isAuthoritativeReview(review, reviewedSha, authoritativeReviewerLogins) {
+  if (!reviewSubmittedAt(review) || String(reviewCommitOid(review) || '') !== String(reviewedSha || '')) {
+    return false;
+  }
+  if (!SUBMITTED_REVIEW_STATES.has(String(review?.state || '').toUpperCase())) {
+    return false;
+  }
+  if (!authoritativeReviewerLogins.has(normalizeLogin(reviewAuthorLogin(review)))) {
+    return false;
+  }
+  return true;
+}
+
+// Matches a markdown `## Blocking Issues` (or `Blocking Issue`) heading on its
+// own line, any heading level / surrounding whitespace. The AMA path requires
+// this section to be PRESENT before it will trust a known-zero blocker count.
+const BLOCKING_SECTION_HEADING_RE = /^[ \t]*#{1,6}[ \t]+Blocking[ \t]+Issues?[ \t]*$/im;
+
+// Classify standing blocking findings from the SAME authoritative review body
+// the verdict is derived from, reusing the merge-agent classifier so the
+// AMA-closer pre-merge path and the merge-agent path agree. A present `##
+// Blocking Issues` section that is empty / `- None.` resolves to `known: 0`; a
+// populated section yields `count >= 1`; a missing/blank body fails closed to
+// `unknown`. Mirrors `classifyBlockersFromBody` in `adversarial-gate-status.mjs`.
+//
+// AMA-specific stricter contract: the shared `classifyBlockingFindings`
+// returns `{ known: 0 }` for a non-`Request changes` body that omits the
+// `## Blocking Issues` section ENTIRELY (lenient merge-agent behavior). For
+// autonomous closure that is a fail-open — a missing structured section is not
+// evidence of zero blockers, it is absence of evidence. So we require the
+// section to be present before trusting known-zero; an absent section fails
+// closed to `unknown` and the closer parks at `blocking-findings-unknown`.
+function classifyBlockersFromReviewBody(body, verdict) {
+  const text = String(body ?? '');
+  if (!text.trim()) return { ...UNKNOWN_BLOCKERS };
+  if (!BLOCKING_SECTION_HEADING_RE.test(text)) return { ...UNKNOWN_BLOCKERS };
+  const { count, state } = classifyBlockingFindings(text, {
+    lastVerdict: verdict || null,
+  });
+  return { blockingFindingState: state, blockingFindingCount: count };
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -37,7 +113,7 @@ const USAGE = `\
 Usage:
   ama-check --pr <pr.json> --reviews <reviews.json>
             --protection <protection.json> --timeline <timeline.json>
-            --reviewed-sha <sha> --risk-class <class>
+            --reviewed-sha <sha> --reviewer <model> --risk-class <class>
 
 Inputs:
   --pr            JSON from \`gh pr view --json number,headRefOid,state,isDraft,
@@ -51,6 +127,8 @@ Inputs:
   --timeline      JSON from \`gh api repos/<owner>/<repo>/issues/<n>/timeline --paginate\`
   --reviewed-sha  the head SHA the watcher authorized; the predicate's
                   head-match gate is against this value.
+  --reviewer      expected reviewer model/family from reviewed_prs.reviewer
+                  or the configured builder route. Unknown values fail closed.
   --risk-class    resolved risk class from the spec/plan/dispatch sidecar
                   (low | medium | high | critical | unknown)
 
@@ -67,6 +145,7 @@ function parseInputs(argv) {
       protection: { type: 'string' },
       timeline: { type: 'string' },
       'reviewed-sha': { type: 'string' },
+      reviewer: { type: 'string' },
       'risk-class': { type: 'string' },
       repo: { type: 'string' },
       'root-dir': { type: 'string' },
@@ -139,31 +218,54 @@ function recomputeReviewCycleExhausted({ rootDir, repo, prNumber }) {
  * predicate consumes. Picks the latest review submitted at or after
  * the reviewed SHA was set.
  *
- * Reviewer-family resolution is best-effort: the predicate records
- * cross-model attribution per SPEC §4.2 #2 but does NOT gate on it
- * (audit-only). If the reviewer login isn't easily classifiable, the
- * `reviewerFamily` field stays null — the predicate's structural
- * gates still fire.
+ * Reviewer-family resolution is fail-closed: live review authority is scoped
+ * to the reviewer model/family from the dispatch context. If that route cannot
+ * be resolved, no live review body is trusted.
  */
-function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, riskClass, reviewCycleExhausted = false }) {
+function buildReviewState({
+  reviewsJson,
+  prJson,
+  timelineJson,
+  reviewedSha,
+  reviewer,
+  riskClass,
+  reviewCycleExhausted = false,
+}) {
   const reviews = Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : [];
-  // Take the most recent review on the reviewed head; fall back to the
-  // most recent review overall.
-  const reviewsForHead = reviews.filter((r) => r?.commit?.oid === reviewedSha);
-  const latest = (reviewsForHead.length > 0 ? reviewsForHead : reviews)
-    .slice()
-    .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')))[0]
-    || null;
-  // Map GitHub review states to the predicate's normalized verdict
-  // strings. APPROVED -> 'approved'; COMMENTED -> 'comment-only';
-  // CHANGES_REQUESTED -> 'request-changes'.
-  const ghState = String(latest?.state || '').toUpperCase();
-  const verdictMap = {
-    APPROVED: 'approved',
-    COMMENTED: 'comment-only',
-    CHANGES_REQUESTED: 'request-changes',
-  };
-  const verdict = verdictMap[ghState] || String(latest?.state || '').toLowerCase();
+  const authoritativeReviewerLogins = new Set(
+    amaAuthoritativeReviewerLoginsForModel(reviewer).map((login) => normalizeLogin(login)),
+  );
+  // Use the newest submitted review on the reviewed head from the routed
+  // adversarial reviewer bot. The body from that exact review is merge
+  // authority; malformed or unknown verdict prose fails closed instead of
+  // searching backward for an older permissive verdict.
+  const authoritativeReviewsForHead = authoritativeReviewerLogins.size
+    ? reviews
+      .filter((r) => isAuthoritativeReview(r, reviewedSha, authoritativeReviewerLogins))
+      .map((review) => ({
+        review,
+        verdict: normalizedStructuredVerdict(review?.body),
+      }))
+      .sort((a, b) => String(reviewSubmittedAt(b.review) || '').localeCompare(String(reviewSubmittedAt(a.review) || '')))
+    : [];
+  const authoritativeReview = authoritativeReviewsForHead[0] || null;
+  const verdict = authoritativeReview?.verdict === 'unknown'
+    ? ''
+    : authoritativeReview?.verdict || '';
+
+  // Standing blocking findings must come from an authoritative review body
+  // ON the reviewed head — never the off-head fallback, and never synthesized.
+  // Without this, `reviewState.blockingFindingState` is `undefined`, so the
+  // eligibility predicate's `classifyBlockingFindings` returns
+  // `{ known: false }` for EVERY PR, pushing `blocking-findings-unknown` +
+  // `verdict-not-settled-success` and deferring every settled-success closure
+  // (the watcher's eligibility pass set these from the durable job, so it
+  // passed while this pre-merge re-verification always failed closed).
+  const { blockingFindingState, blockingFindingCount } = authoritativeReview
+    ? (verdict
+      ? classifyBlockersFromReviewBody(authoritativeReview.review.body, verdict)
+      : { ...UNKNOWN_BLOCKERS })
+    : { ...UNKNOWN_BLOCKERS };
 
   // Walk the timeline for the latest current-head `operator-approved`
   // labeled event. The eligibility predicate applies the head-scope +
@@ -192,6 +294,11 @@ function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, risk
     // merge-time closer recomputes exhaustion from the durable ledger before
     // passing a true value here.
     reviewCycleExhausted: reviewCycleExhausted === true,
+    // Authoritative blocking-finding classification from the on-head review
+    // body. The eligibility predicate's settled-success gate requires
+    // `blockingFindingState === 'known'` AND `blockingFindingCount === 0`.
+    blockingFindingState,
+    blockingFindingCount,
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,
@@ -237,7 +344,7 @@ function main(argv = process.argv.slice(2)) {
     process.stdout.write(USAGE);
     return 0;
   }
-  for (const required of ['pr', 'reviews', 'protection', 'timeline', 'reviewed-sha', 'risk-class']) {
+  for (const required of ['pr', 'reviews', 'protection', 'timeline', 'reviewed-sha', 'reviewer', 'risk-class']) {
     if (!args[required]) {
       process.stderr.write(`error: --${required} is required\n${USAGE}`);
       return 1;
@@ -276,6 +383,7 @@ function main(argv = process.argv.slice(2)) {
     prJson,
     timelineJson,
     reviewedSha: args['reviewed-sha'],
+    reviewer: args.reviewer,
     riskClass: args['risk-class'],
     reviewCycleExhausted,
   });

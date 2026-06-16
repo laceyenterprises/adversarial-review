@@ -93,6 +93,7 @@ function eligibleFixture(overrides = {}) {
     riskClass: 'low',
     requiredGateContext: 'agent-os/adversarial-gate',
     reviewedBy: 'claude-reviewer-lacey',
+    reviewer: 'claude',
     parentSession: 'session:test:watcher',
     hqProject: 'adversarial-merge-authority',
     hqPath: '/bin/true-stub-hq',
@@ -285,6 +286,7 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes('--body-file "$TRAILERS_FILE"'));
   assert.ok(write.captured.body.includes('Closed-By: codex-closer (adversarial-pipe-mode)'));
   assert.ok(write.captured.body.includes('Reviewed-By: claude-reviewer-lacey'));
+  assert.ok(write.captured.body.includes('--reviewer claude'));
   assert.ok(write.captured.body.includes('Risk-Class: low'));
   assert.ok(write.captured.body.includes('Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345'));
   assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
@@ -552,6 +554,7 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
     rootDir: dispatchContext.rootDir,
     hqOwnerUser: 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
+    reviewer: dispatchContext.reviewer,
     dispatchedAt: dispatchContext.dispatchedAt,
     amaTrailers: [
       'Closed-By: codex-closer (adversarial-pipe-mode)',
@@ -598,6 +601,7 @@ test('composed prompt documents that branch_protection.required=false does not r
     rootDir: dispatchContext.rootDir,
     hqOwnerUser: 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
+    reviewer: dispatchContext.reviewer,
     dispatchedAt: dispatchContext.dispatchedAt,
     amaTrailers: 'Eligibility-Reason: branch_protection_requirement_waived',
     templateBody: readFileSync(TEMPLATE_PATH, 'utf8'),

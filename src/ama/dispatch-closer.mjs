@@ -482,6 +482,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.rootDir         — adversarial-review checkout root for ama-check ledger probes
  * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
+ * @param {string} args.reviewer
  * @param {string} args.dispatchedAt    — ISO 8601 UTC
  * @param {string} args.amaTrailers     — provenance trailer block passed to `gh pr merge`
  * @param {string} args.templateBody    — raw template content
@@ -500,6 +501,7 @@ export function composeCloserPrompt({
   rootDir = SUBMODULE_ROOT,
   hqOwnerUser,
   reviewedBy,
+  reviewer,
   dispatchedAt,
   amaTrailers,
   templateBody,
@@ -518,6 +520,7 @@ export function composeCloserPrompt({
     ROOT_DIR: rootDir,
     HQ_OWNER: hqOwnerUser,
     REVIEWED_BY: reviewedBy,
+    REVIEWER: reviewer,
     DISPATCHED_AT: dispatchedAt,
     AMA_TRAILERS: amaTrailers,
     // Dispatch-time final-hammer observation forwarded only as audit context;
@@ -632,6 +635,7 @@ export async function maybeDispatchAmaCloser({
     rootDir,
     hqOwnerUser: ownerUser || 'unknown',
     reviewedBy: dispatchContext.reviewedBy,
+    reviewer: dispatchContext.reviewer,
     dispatchedAt: dispatchContext.dispatchedAt,
     amaTrailers,
     templateBody,

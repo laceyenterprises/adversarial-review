@@ -2646,6 +2646,25 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
   }
 });
 
+test('AMA merge_authority accepts hammer as closer worker class in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            worker_class: hammer
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'hammer');
+    assert.equal(cfg.getMergeAuthorityConfig().workerClass, 'hammer');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AMA merge_authority risk_classes reject unsupported values in Node loader', () => {
   const tmp = freshTmp();
   try {

@@ -301,7 +301,11 @@ test('first-pass reviewer pool: legacy ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_
 
 test('first-pass reviewer pool: falls back to internal default when CFG + env both unset', () => {
   const env = {};
-  const cfg = resolveFirstPassReviewerPoolConfig({ env, watcherConfig: {} });
+  const cfg = resolveFirstPassReviewerPoolConfig({
+    env,
+    watcherConfig: {},
+    topPath: '/dev/null',
+  });
   // DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3
   assert.strictEqual(cfg.maxConcurrent, 3);
 });

@@ -633,7 +633,7 @@ function schemaV1() {
                   worker_class: {
                     __type: TYPE_STRING,
                     __default: 'codex',
-                    __enum: ['codex', 'claude-code'],
+                    __enum: ['codex', 'claude-code', 'hammer'],
                   },
                   merge_method: {
                     __type: TYPE_STRING,

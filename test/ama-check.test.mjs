@@ -545,6 +545,45 @@ test('ama-check classifies a settled comment-only on-head review as eligible (bl
   }
 });
 
+test('ama-check fails closed when a settled comment-only body omits the blocking section entirely', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-missing-blocking-section-'));
+  try {
+    // A settled `Comment only` verdict whose body has NO `## Blocking Issues`
+    // section at all. The shared merge-agent classifier is lenient here
+    // (returns known:0 for a non-request-changes body lacking the section);
+    // the AMA path must NOT trust that — absence of structured blocker
+    // evidence is not evidence of zero blockers. Park at unknown.
+    const noBlockingSectionBody = [
+      '## Summary',
+      'Looks fine.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n');
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviews: [
+        {
+          state: 'COMMENTED',
+          body: noBlockingSectionBody,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.blockingFindings.known, false, JSON.stringify(verdict, null, 2));
+    assert.ok(verdict.reasons.includes('blocking-findings-unknown'));
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('ama-check counts a populated blocking section on the on-head review (not synthesized known:0)', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-blocking-present-'));
   try {

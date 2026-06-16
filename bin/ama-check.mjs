@@ -77,16 +77,30 @@ function isAuthoritativeReview(review, reviewedSha, authoritativeReviewerLogins)
   return true;
 }
 
+// Matches a markdown `## Blocking Issues` (or `Blocking Issue`) heading on its
+// own line, any heading level / surrounding whitespace. The AMA path requires
+// this section to be PRESENT before it will trust a known-zero blocker count.
+const BLOCKING_SECTION_HEADING_RE = /^[ \t]*#{1,6}[ \t]+Blocking[ \t]+Issues?[ \t]*$/im;
+
 // Classify standing blocking findings from the SAME authoritative review body
 // the verdict is derived from, reusing the merge-agent classifier so the
-// AMA-closer pre-merge path and the merge-agent path agree. An empty /
-// `- None.` `## Blocking Issues` section on a settled body resolves to
-// `known: 0`; a populated section yields `count >= 1`; a missing/blank body
-// fails closed to `unknown`. Mirrors `classifyBlockersFromBody` in
-// `adversarial-gate-status.mjs`.
+// AMA-closer pre-merge path and the merge-agent path agree. A present `##
+// Blocking Issues` section that is empty / `- None.` resolves to `known: 0`; a
+// populated section yields `count >= 1`; a missing/blank body fails closed to
+// `unknown`. Mirrors `classifyBlockersFromBody` in `adversarial-gate-status.mjs`.
+//
+// AMA-specific stricter contract: the shared `classifyBlockingFindings`
+// returns `{ known: 0 }` for a non-`Request changes` body that omits the
+// `## Blocking Issues` section ENTIRELY (lenient merge-agent behavior). For
+// autonomous closure that is a fail-open — a missing structured section is not
+// evidence of zero blockers, it is absence of evidence. So we require the
+// section to be present before trusting known-zero; an absent section fails
+// closed to `unknown` and the closer parks at `blocking-findings-unknown`.
 function classifyBlockersFromReviewBody(body, verdict) {
-  if (!String(body ?? '').trim()) return { ...UNKNOWN_BLOCKERS };
-  const { count, state } = classifyBlockingFindings(body, {
+  const text = String(body ?? '');
+  if (!text.trim()) return { ...UNKNOWN_BLOCKERS };
+  if (!BLOCKING_SECTION_HEADING_RE.test(text)) return { ...UNKNOWN_BLOCKERS };
+  const { count, state } = classifyBlockingFindings(text, {
     lastVerdict: verdict || null,
   });
   return { blockingFindingState: state, blockingFindingCount: count };

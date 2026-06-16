@@ -30,6 +30,7 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import { classifyBlockingFindings } from '../src/follow-up-merge-agent.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
+import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
 
 // Blocking-finding state for a head with NO authoritative review body to
 // classify (no review on the reviewed head, blank body). The AMA gate fails
@@ -39,6 +40,47 @@ const UNKNOWN_BLOCKERS = Object.freeze({
   blockingFindingState: 'unknown',
   blockingFindingCount: 0,
 });
+
+const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
+const AUTHORITATIVE_REVIEWER_LOGINS = new Set([
+  'lacey-claude-reviewer',
+  'claude-reviewer-lacey',
+  'lacey-codex-reviewer',
+  'codex-reviewer-lacey',
+]);
+
+function normalizeLogin(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/\[bot\]$/, '');
+}
+
+function reviewAuthorLogin(review) {
+  return review?.author?.login || review?.user?.login || null;
+}
+
+function reviewCommitOid(review) {
+  return review?.commit?.oid || review?.commit_id || review?.commitId || null;
+}
+
+function reviewSubmittedAt(review) {
+  return review?.submittedAt || review?.submitted_at || null;
+}
+
+function normalizedStructuredVerdict(body) {
+  return String(normalizeReviewVerdict(extractReviewVerdict(body)) || '').toLowerCase();
+}
+
+function isAuthoritativeReview(review, reviewedSha) {
+  if (!reviewSubmittedAt(review) || String(reviewCommitOid(review) || '') !== String(reviewedSha || '')) {
+    return false;
+  }
+  if (!SUBMITTED_REVIEW_STATES.has(String(review?.state || '').toUpperCase())) {
+    return false;
+  }
+  if (!AUTHORITATIVE_REVIEWER_LOGINS.has(normalizeLogin(reviewAuthorLogin(review)))) {
+    return false;
+  }
+  return true;
+}
 
 // Classify standing blocking findings from the SAME authoritative review body
 // the verdict is derived from, reusing the merge-agent classifier so the
@@ -172,23 +214,20 @@ function recomputeReviewCycleExhausted({ rootDir, repo, prNumber }) {
  */
 function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, riskClass, reviewCycleExhausted = false }) {
   const reviews = Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : [];
-  // Take the most recent review on the reviewed head; fall back to the
-  // most recent review overall.
-  const reviewsForHead = reviews.filter((r) => r?.commit?.oid === reviewedSha);
-  const latest = (reviewsForHead.length > 0 ? reviewsForHead : reviews)
-    .slice()
-    .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')))[0]
-    || null;
-  // Map GitHub review states to the predicate's normalized verdict
-  // strings. APPROVED -> 'approved'; COMMENTED -> 'comment-only';
-  // CHANGES_REQUESTED -> 'request-changes'.
-  const ghState = String(latest?.state || '').toUpperCase();
-  const verdictMap = {
-    APPROVED: 'approved',
-    COMMENTED: 'comment-only',
-    CHANGES_REQUESTED: 'request-changes',
-  };
-  const verdict = verdictMap[ghState] || String(latest?.state || '').toLowerCase();
+  // Use the newest verdict-bearing review on the reviewed head from a trusted
+  // adversarial reviewer bot. GitHub's raw review state is not merge authority:
+  // an unrelated later COMMENTED review, or a bot review body with no
+  // structured `## Verdict`, must not synthesize comment-only / known:0.
+  const authoritativeReviewsForHead = reviews
+    .filter((r) => isAuthoritativeReview(r, reviewedSha))
+    .map((review) => ({
+      review,
+      verdict: normalizedStructuredVerdict(review?.body),
+    }))
+    .filter((entry) => entry.verdict && entry.verdict !== 'unknown')
+    .sort((a, b) => String(reviewSubmittedAt(b.review) || '').localeCompare(String(reviewSubmittedAt(a.review) || '')));
+  const authoritativeReview = authoritativeReviewsForHead[0] || null;
+  const verdict = authoritativeReview?.verdict || '';
 
   // Standing blocking findings must come from an authoritative review body
   // ON the reviewed head — never the off-head fallback, and never synthesized.
@@ -198,13 +237,8 @@ function buildReviewState({ reviewsJson, prJson, timelineJson, reviewedSha, risk
   // `verdict-not-settled-success` and deferring every settled-success closure
   // (the watcher's eligibility pass set these from the durable job, so it
   // passed while this pre-merge re-verification always failed closed).
-  const latestOnHead = reviewsForHead.length > 0
-    ? reviewsForHead
-        .slice()
-        .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')))[0]
-    : null;
-  const { blockingFindingState, blockingFindingCount } = latestOnHead
-    ? classifyBlockersFromReviewBody(latestOnHead.body, verdict)
+  const { blockingFindingState, blockingFindingCount } = authoritativeReview
+    ? classifyBlockersFromReviewBody(authoritativeReview.review.body, verdict)
     : { ...UNKNOWN_BLOCKERS };
 
   // Walk the timeline for the latest current-head `operator-approved`

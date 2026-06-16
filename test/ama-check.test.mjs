@@ -17,6 +17,32 @@ const REPO_ROOT = resolve(__dirname, '..');
 const AMA_CHECK = join(REPO_ROOT, 'bin', 'ama-check.mjs');
 const HEAD_SHA = 'abc12345abc12345abc12345abc12345abc12345';
 const REPO = 'acme/myrepo';
+const AUTHORITATIVE_REVIEWER = { login: 'codex-reviewer-lacey' };
+
+const SETTLED_COMMENT_BODY = [
+  '## Summary',
+  'Looks good.',
+  '',
+  '## Blocking Issues',
+  '- None.',
+  '',
+  '## Non-blocking Issues',
+  '- Consider a follow-up.',
+  '',
+  '## Verdict',
+  'Comment only',
+].join('\n');
+
+const BLOCKING_COMMENT_BODY = [
+  '## Summary',
+  'Needs work.',
+  '',
+  '## Blocking Issues',
+  '- **Auth path not threaded.** Pass the effective auth source into the profile.',
+  '',
+  '## Verdict',
+  'Request changes',
+].join('\n');
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -46,7 +72,9 @@ function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {}, reviews =
   writeJson(paths.reviews, {
     reviews: reviews || [
       {
-        state: 'APPROVED',
+        state: 'COMMENTED',
+        body: SETTLED_COMMENT_BODY,
+        author: AUTHORITATIVE_REVIEWER,
         submittedAt: '2026-06-13T12:00:00Z',
         commit: { oid: HEAD_SHA },
       },
@@ -472,31 +500,6 @@ test('ama-check fails closed when final-hammer recomputation lacks repo identity
 // merge-agent (which the AMA-06A admit gate then refused). These tests pin
 // the on-head body as the source of truth and the fail-closed default.
 
-const SETTLED_COMMENT_BODY = [
-  '## Summary',
-  'Looks good.',
-  '',
-  '## Blocking Issues',
-  '- None.',
-  '',
-  '## Non-blocking Issues',
-  '- Consider a follow-up.',
-  '',
-  '## Verdict',
-  'Comment only',
-].join('\n');
-
-const BLOCKING_COMMENT_BODY = [
-  '## Summary',
-  'Needs work.',
-  '',
-  '## Blocking Issues',
-  '- **Auth path not threaded.** Pass the effective auth source into the profile.',
-  '',
-  '## Verdict',
-  'Request changes',
-].join('\n');
-
 test('ama-check classifies a settled comment-only on-head review as eligible (blocking-findings known:0)', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-settled-comment-'));
   try {
@@ -510,6 +513,7 @@ test('ama-check classifies a settled comment-only on-head review as eligible (bl
         {
           state: 'COMMENTED',
           body: SETTLED_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
           submittedAt: '2026-06-15T12:00:00Z',
           commit: { oid: HEAD_SHA },
         },
@@ -539,6 +543,7 @@ test('ama-check counts a populated blocking section on the on-head review (not s
         {
           state: 'CHANGES_REQUESTED',
           body: BLOCKING_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
           submittedAt: '2026-06-15T12:00:00Z',
           commit: { oid: HEAD_SHA },
         },
@@ -568,6 +573,7 @@ test('ama-check fails closed to blocking-findings-unknown when no review is on t
         {
           state: 'COMMENTED',
           body: SETTLED_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
           submittedAt: '2026-06-15T12:00:00Z',
           commit: { oid: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' },
         },
@@ -577,6 +583,74 @@ test('ama-check fails closed to blocking-findings-unknown when no review is on t
     const verdict = JSON.parse(result.stdout);
     assert.equal(verdict.trace.verdict.blockingFindings.known, false, JSON.stringify(verdict, null, 2));
     assert.ok(verdict.reasons.includes('blocking-findings-unknown'));
+    assert.equal(verdict.eligible, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check ignores a newer same-head review from a non-authoritative author', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-ignore-operator-comment-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviews: [
+        {
+          state: 'CHANGES_REQUESTED',
+          body: BLOCKING_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+        {
+          state: 'COMMENTED',
+          body: 'LGTM',
+          author: { login: 'paul-the-operator' },
+          submittedAt: '2026-06-15T12:05:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.normalized, 'request-changes', JSON.stringify(verdict, null, 2));
+    assert.ok(verdict.reasons.includes('blocking-findings-present'));
+    assert.equal(verdict.eligible, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check does not synthesize comment-only from a same-head reviewer comment without a Verdict section', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-ignore-unstructured-comment-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviews: [
+        {
+          state: 'CHANGES_REQUESTED',
+          body: BLOCKING_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+        {
+          state: 'COMMENTED',
+          body: 'LGTM',
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:05:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.normalized, 'request-changes', JSON.stringify(verdict, null, 2));
+    assert.ok(verdict.reasons.includes('blocking-findings-present'));
     assert.equal(verdict.eligible, false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });

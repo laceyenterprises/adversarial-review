@@ -56,11 +56,6 @@ const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
-// The repo whose tooling the closer runs (ama-check.mjs / ama-audit.mjs) and
-// whose $HQ_ROOT holds the §4.4 audit. A closer for a PR in any OTHER repo must
-// declare this as an additional workspace repo so the closer prompt's agent-os
-// references clear the WBH prompt-scope gate.
-const AGENT_OS_TOOLING_REPO = 'agent-os';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
@@ -895,34 +890,19 @@ export async function maybeDispatchAmaCloser({
   //   - `--project adversarial-merge-authority` to keep audit + token
   //     accounting separate from the merge-agent stream.
   //   - `--ticket AMA-PR-<n>` so the launch is traceable per-PR.
-  //   - For a PR in a repo OTHER than agent-os, `--additional-repo agent-os`
-  //     is required: the closer prompt instructs the worker to run the
-  //     agent-os tools (`tools/adversarial-review/bin/ama-check.mjs`,
-  //     `ama-audit.mjs`) and write the §4.4 audit under `$HQ_ROOT`, so the
-  //     prompt references the agent-os repo. Without agent-os in the workspace
-  //     allowlist, the WBH `prompt-scope-exceeds-workspace` gate refuses the
-  //     dispatch with `policy_denied` before the worker can spawn — which is
-  //     why AMA could close agent-os PRs but never foundry/other-repo PRs
-  //     (closers for foundry#2/#3 both died `prompt-scope-exceeds-workspace`).
-  //     XRW-04: the gate composes with declared `additionalRepos`. agent-os
-  //     PRs already have agent-os as `--repo`, so this is skipped for them.
-  const prRepoShort = repo.split('/')[1] || repo;
   const args = [
     'dispatch',
     '--worker-class', workerClass,
     '--task-kind', 'merge',
     '--completion-shape', 'decision-only',
     '--project', hqProject,
-    '--repo', prRepoShort,
+    '--repo', repo.split('/')[1] || repo,
     '--pr', String(prNumber),
     '--ticket', `AMA-PR-${prNumber}`,
     '--parent-session', dispatchContext.parentSession,
     '--prompt', promptPath,
     '--root', hqRoot,
   ];
-  if (prRepoShort !== AGENT_OS_TOOLING_REPO) {
-    args.push('--additional-repo', AGENT_OS_TOOLING_REPO);
-  }
 
   let execResult;
   let transientRetryIndex = 0;

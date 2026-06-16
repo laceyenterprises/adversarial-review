@@ -161,6 +161,13 @@ function summarizeDispatchCall(call) {
     const idx = args.indexOf(flag);
     return idx >= 0 ? args[idx + 1] : null;
   };
+  const readFlags = (flag) => {
+    const values = [];
+    for (let i = 0; i < args.length; i += 1) {
+      if (args[i] === flag) values.push(args[i + 1]);
+    }
+    return values;
+  };
   return {
     cmd: call?.cmd || null,
     workerClass: readFlag('--worker-class'),
@@ -168,6 +175,7 @@ function summarizeDispatchCall(call) {
     completionShape: readFlag('--completion-shape'),
     project: readFlag('--project'),
     repo: readFlag('--repo'),
+    additionalRepos: readFlags('--additional-repo'),
     pr: readFlag('--pr'),
     ticket: readFlag('--ticket'),
     parentSession: readFlag('--parent-session'),
@@ -261,6 +269,13 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.equal(args[args.indexOf('--completion-shape') + 1], 'decision-only');
   assert.ok(args.includes('--project'));
   assert.equal(args[args.indexOf('--project') + 1], 'adversarial-merge-authority');
+  assert.equal(args[args.indexOf('--repo') + 1], 'myrepo');
+  assert.deepEqual(
+    args
+      .map((value, index) => (value === '--additional-repo' ? args[index + 1] : null))
+      .filter(Boolean),
+    ['agent-os'],
+  );
   // Prompt body was written; capture inspected for substitutions.
   assert.ok(write.captured.body, 'prompt body must be written');
   assert.equal(write.captured.dir, `${rootDir}/data/follow-up-jobs/ama-closer-prompts`);
@@ -273,6 +288,33 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes('Risk-Class: low'));
   assert.ok(write.captured.body.includes('Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345'));
   assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
+});
+
+test('eligible agent-os dispatch does not add agent-os as a duplicate workspace repo', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-agent-os-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: {
+      rootDir,
+      repo: 'laceyenterprises/agent-os',
+      prUrl: 'https://github.com/laceyenterprises/agent-os/pull/1234',
+    },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(exec.calls.length, 1);
+  assert.equal(exec.calls[0].args[exec.calls[0].args.indexOf('--repo') + 1], 'agent-os');
+  assert.equal(exec.calls[0].args.includes('--additional-repo'), false);
 });
 
 test('maybeDispatchAmaCloser is mode-invariant for merge-class dispatch', async (t) => {

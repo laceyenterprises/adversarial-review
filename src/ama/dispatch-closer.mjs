@@ -56,6 +56,7 @@ const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
+const AGENT_OS_TOOLING_REPO = 'agent-os';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
@@ -890,19 +891,23 @@ export async function maybeDispatchAmaCloser({
   //   - `--project adversarial-merge-authority` to keep audit + token
   //     accounting separate from the merge-agent stream.
   //   - `--ticket AMA-PR-<n>` so the launch is traceable per-PR.
+  const repoBasename = repo.split('/')[1] || repo;
   const args = [
     'dispatch',
     '--worker-class', workerClass,
     '--task-kind', 'merge',
     '--completion-shape', 'decision-only',
     '--project', hqProject,
-    '--repo', repo.split('/')[1] || repo,
+    '--repo', repoBasename,
     '--pr', String(prNumber),
     '--ticket', `AMA-PR-${prNumber}`,
     '--parent-session', dispatchContext.parentSession,
     '--prompt', promptPath,
     '--root', hqRoot,
   ];
+  if (repoBasename !== AGENT_OS_TOOLING_REPO) {
+    args.push('--additional-repo', AGENT_OS_TOOLING_REPO);
+  }
 
   let execResult;
   let transientRetryIndex = 0;

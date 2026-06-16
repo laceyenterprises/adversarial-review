@@ -99,7 +99,7 @@ const USAGE = `\
 Usage:
   ama-check --pr <pr.json> --reviews <reviews.json>
             --protection <protection.json> --timeline <timeline.json>
-            --reviewed-sha <sha> --risk-class <class>
+            --reviewed-sha <sha> --reviewer <model> --risk-class <class>
 
 Inputs:
   --pr            JSON from \`gh pr view --json number,headRefOid,state,isDraft,

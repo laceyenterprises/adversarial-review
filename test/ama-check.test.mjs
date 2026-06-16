@@ -209,34 +209,44 @@ test('ama-check accepts GitHub-plan protection sentinel only when branch protect
     assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
     assert.equal(verdict.trace.branchProtection.required, false);
     assert.equal(verdict.trace.branchProtection.ok, true);
+    assert.equal(verdict.trace.branchProtection.auditReason, 'branch_protection_requirement_waived');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('ama-check rejects ambiguous empty protection input when branch protection is waived', () => {
-  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-empty-protection-'));
+test('ama-check accepts unavailable 404-style protection input when branch protection is waived', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-404-protection-'));
   try {
     const result = runAmaCheck(tmp, {
       branchProtectionRequired: false,
-      protectionBody: '{}\n',
+      protectionBody: '{ "message": "Branch not protected", "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection", "status": "404" }\n',
     });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /branch protection waiver requires branchProtectionUnavailable sentinel/);
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.branchProtection.required, false);
+    assert.equal(verdict.trace.branchProtection.ok, true);
+    assert.equal(verdict.trace.branchProtection.auditReason, 'branch_protection_requirement_waived');
+    assert.ok(!verdict.reasons.includes('branch-protection-missing-gate'));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('ama-check rejects non-sentinel protection input when branch protection is waived', () => {
-  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-wrong-protection-'));
+test('ama-check accepts ordinary protection JSON when branch protection is waived', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-protection-json-'));
   try {
     const result = runAmaCheck(tmp, {
       branchProtectionRequired: false,
       protectionBody: '{ "required_status_checks": { "contexts": ["agent-os/adversarial-gate"] } }\n',
     });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /branch protection waiver requires branchProtectionUnavailable sentinel/);
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.branchProtection.required, false);
+    assert.equal(verdict.trace.branchProtection.ok, true);
+    assert.equal(verdict.trace.branchProtection.auditReason, 'branch_protection_requirement_waived');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -265,6 +275,25 @@ test('ama-check rejects GitHub-plan protection sentinel when branch protection i
     });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /branch protection is required/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check keeps branch protection enforced when required=true and the gate context is missing', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-required-missing-gate-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody: '{ "message": "Branch not protected", "status": "404" }\n',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false);
+    assert.ok(verdict.reasons.includes('branch-protection-missing-gate'));
+    assert.equal(verdict.trace.branchProtection.required, true);
+    assert.equal(verdict.trace.branchProtection.ok, false);
+    assert.equal(verdict.trace.branchProtection.auditReason, null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -404,6 +404,7 @@ test('cfg.enabled=true + branch protection opt-out records waived eligibility re
     audit.eligibilityReasons.filter(reason => reason.includes('branch')),
     ['branch_protection_requirement_waived'],
   );
+  assert.equal(audit.attempts[0].eligibilityTrace.branchProtection.auditReason, 'branch_protection_requirement_waived');
 });
 
 test('eligible dispatch bootstraps the watcher-owned audit record before the first closer append', async (t) => {
@@ -573,6 +574,36 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /protection_max_attempts=3/);
   assert.match(prompt, /grep -Eiq "\$protection_transient_re" "\$protection_err"/);
   assert.match(prompt, /cat "\$protection_err" >&2\n  rm -f "\$protection_err"\n  exit 1/);
+});
+
+test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {
+  const { cfg, dispatchContext, prMetadata } = eligibleFixture({
+    cfg: {
+      branchProtection: {
+        requiredGateContextSource: 'resolveGateStatusContext',
+        required: false,
+      },
+    },
+  });
+  const prompt = composeCloserPrompt({
+    prUrl: dispatchContext.prUrl,
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    reviewedSha: dispatchContext.reviewedSha,
+    riskClass: dispatchContext.riskClass,
+    mergeMethod: cfg.mergeMethod,
+    requiredGateContext: dispatchContext.requiredGateContext,
+    auditPath: '/tmp/audit.json',
+    hqRoot: dispatchContext.hqRoot,
+    rootDir: dispatchContext.rootDir,
+    hqOwnerUser: 'unknown',
+    reviewedBy: dispatchContext.reviewedBy,
+    dispatchedAt: dispatchContext.dispatchedAt,
+    amaTrailers: 'Eligibility-Reason: branch_protection_requirement_waived',
+    templateBody: readFileSync(TEMPLATE_PATH, 'utf8'),
+  });
+  assert.match(prompt, /structured sentinel below is one\s+# accepted shape/);
+  assert.doesNotMatch(prompt, /only that case with a structured sentinel/);
 });
 
 // ---------------------------------------------------------------------------

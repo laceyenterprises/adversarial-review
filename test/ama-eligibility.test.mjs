@@ -557,6 +557,8 @@ test('eligible: branch_protection.required=false drops ONLY the gate requirement
   assert.ok(!result.reasons.includes('branch-protection-missing-gate'));
   assert.equal(result.trace.branchProtection.required, false);
   assert.equal(result.trace.branchProtection.ok, true);
+  assert.equal(result.trace.branchProtection.waived, true);
+  assert.equal(result.trace.branchProtection.auditReason, 'branch_protection_requirement_waived');
 });
 
 test('not eligible: branch_protection.required=false still enforces every OTHER §4.2 gate', () => {

@@ -161,6 +161,13 @@ function summarizeDispatchCall(call) {
     const idx = args.indexOf(flag);
     return idx >= 0 ? args[idx + 1] : null;
   };
+  const readFlags = (flag) => {
+    const values = [];
+    for (let i = 0; i < args.length; i += 1) {
+      if (args[i] === flag) values.push(args[i + 1]);
+    }
+    return values;
+  };
   return {
     cmd: call?.cmd || null,
     workerClass: readFlag('--worker-class'),
@@ -168,6 +175,7 @@ function summarizeDispatchCall(call) {
     completionShape: readFlag('--completion-shape'),
     project: readFlag('--project'),
     repo: readFlag('--repo'),
+    additionalRepos: readFlags('--additional-repo'),
     pr: readFlag('--pr'),
     ticket: readFlag('--ticket'),
     parentSession: readFlag('--parent-session'),
@@ -261,12 +269,13 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.equal(args[args.indexOf('--completion-shape') + 1], 'decision-only');
   assert.ok(args.includes('--project'));
   assert.equal(args[args.indexOf('--project') + 1], 'adversarial-merge-authority');
-  // Non-agent-os PR repo (fixture: acme/myrepo) must declare agent-os as an
-  // additional workspace repo, else the closer prompt's agent-os tool/audit
-  // references trip the WBH prompt-scope-exceeds-workspace gate (policy_denied
-  // before spawn) — the bug that blocked AMA from ever closing foundry PRs.
-  assert.ok(args.includes('--additional-repo'), '--additional-repo must be present for non-agent-os PR repo');
-  assert.equal(args[args.indexOf('--additional-repo') + 1], 'agent-os');
+  assert.equal(args[args.indexOf('--repo') + 1], 'myrepo');
+  assert.deepEqual(
+    args
+      .map((value, index) => (value === '--additional-repo' ? args[index + 1] : null))
+      .filter(Boolean),
+    ['agent-os'],
+  );
   // Prompt body was written; capture inspected for substitutions.
   assert.ok(write.captured.body, 'prompt body must be written');
   assert.equal(write.captured.dir, `${rootDir}/data/follow-up-jobs/ama-closer-prompts`);
@@ -281,8 +290,8 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
 });
 
-test('agent-os PR repo does NOT add a redundant --additional-repo agent-os', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-agentos-'));
+test('eligible agent-os dispatch does not add agent-os as a duplicate workspace repo', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-agent-os-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
     dispatchContext: {
@@ -303,11 +312,9 @@ test('agent-os PR repo does NOT add a redundant --additional-repo agent-os', asy
     readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
   });
   assert.equal(result.dispatched, true);
-  const args = exec.calls[0].args;
-  assert.equal(args[args.indexOf('--repo') + 1], 'agent-os');
-  // agent-os is already the primary workspace repo, so no additional-repo is
-  // needed — the closer's agent-os references are already in scope.
-  assert.ok(!args.includes('--additional-repo'), 'agent-os PR must not add a redundant --additional-repo');
+  assert.equal(exec.calls.length, 1);
+  assert.equal(exec.calls[0].args[exec.calls[0].args.indexOf('--repo') + 1], 'agent-os');
+  assert.equal(exec.calls[0].args.includes('--additional-repo'), false);
 });
 
 test('maybeDispatchAmaCloser is mode-invariant for merge-class dispatch', async (t) => {

@@ -92,6 +92,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --repo acme/myrepo \
   --root-dir /tmp/ama-test-root \
   --reviewed-sha abc12345abc12345abc12345abc12345abc12345 \
+  --reviewer claude \
   --risk-class low \
   --review-cycle-exhausted false \
   > /tmp/ama-verdict.json

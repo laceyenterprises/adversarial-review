@@ -17,7 +17,9 @@ const REPO_ROOT = resolve(__dirname, '..');
 const AMA_CHECK = join(REPO_ROOT, 'bin', 'ama-check.mjs');
 const HEAD_SHA = 'abc12345abc12345abc12345abc12345abc12345';
 const REPO = 'acme/myrepo';
-const AUTHORITATIVE_REVIEWER = { login: 'codex-reviewer-lacey' };
+const CODEX_REVIEWER = { login: 'codex-reviewer-lacey' };
+const CLAUDE_REVIEWER = { login: 'claude-reviewer-lacey' };
+const AUTHORITATIVE_REVIEWER = CODEX_REVIEWER;
 
 const SETTLED_COMMENT_BODY = [
   '## Summary',
@@ -159,7 +161,14 @@ function writeCompletedLedgerJob(rootDir, { currentRound, maxRounds }) {
   });
 }
 
-function runAmaCheck(tmp, { branchProtectionRequired, protectionBody, prPatch, reviews, riskClass = 'low' }) {
+function runAmaCheck(tmp, {
+  branchProtectionRequired,
+  protectionBody,
+  prPatch,
+  reviews,
+  reviewer = 'codex',
+  riskClass = 'low',
+}) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
   const configPath = writeConfig(tmp, { branchProtectionRequired });
   return spawnSync(
@@ -171,6 +180,7 @@ function runAmaCheck(tmp, { branchProtectionRequired, protectionBody, prPatch, r
       '--protection', paths.protection,
       '--timeline', paths.timeline,
       '--reviewed-sha', HEAD_SHA,
+      '--reviewer', reviewer,
       '--risk-class', riskClass,
     ],
     {
@@ -376,6 +386,7 @@ test('ama-check: --review-cycle-exhausted true waives the soft gates (final hamm
       AMA_CHECK,
       '--pr', paths.pr, '--reviews', paths.reviews, '--protection', paths.protection,
       '--timeline', paths.timeline, '--reviewed-sha', HEAD_SHA, '--risk-class', 'low',
+      '--reviewer', 'codex',
       '--repo', REPO, '--root-dir', rootDir,
       '--review-cycle-exhausted', exhausted,
     ], { encoding: 'utf8', env: { ...process.env, AGENT_OS_CONFIG_PATH: configPath } });
@@ -427,6 +438,7 @@ test('ama-check recomputes final-hammer exhaustion from raised closer-time ledge
       AMA_CHECK,
       '--pr', paths.pr, '--reviews', paths.reviews, '--protection', paths.protection,
       '--timeline', paths.timeline, '--reviewed-sha', HEAD_SHA, '--risk-class', 'low',
+      '--reviewer', 'codex',
       '--repo', REPO, '--root-dir', rootDir,
       '--review-cycle-exhausted', 'true',
     ], { encoding: 'utf8', env: { ...process.env, AGENT_OS_CONFIG_PATH: configPath } });
@@ -470,6 +482,7 @@ test('ama-check fails closed when final-hammer recomputation lacks repo identity
       AMA_CHECK,
       '--pr', paths.pr, '--reviews', paths.reviews, '--protection', paths.protection,
       '--timeline', paths.timeline, '--reviewed-sha', HEAD_SHA, '--risk-class', 'low',
+      '--reviewer', 'codex',
       '--root-dir', rootDir,
       '--review-cycle-exhausted', 'true',
     ], { encoding: 'utf8', env: { ...process.env, AGENT_OS_CONFIG_PATH: configPath } });
@@ -623,7 +636,7 @@ test('ama-check ignores a newer same-head review from a non-authoritative author
   }
 });
 
-test('ama-check does not synthesize comment-only from a same-head reviewer comment without a Verdict section', () => {
+test('ama-check fails closed on a newer same-head reviewer comment without a normalizable Verdict', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-ignore-unstructured-comment-'));
   try {
     const result = runAmaCheck(tmp, {
@@ -642,6 +655,113 @@ test('ama-check does not synthesize comment-only from a same-head reviewer comme
           state: 'COMMENTED',
           body: 'LGTM',
           author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:05:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.normalized, '', JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.verdict.blockingFindings.known, false);
+    assert.ok(verdict.reasons.includes('blocking-findings-unknown'));
+    assert.ok(verdict.reasons.includes('verdict-not-settled-success'));
+    assert.equal(verdict.eligible, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check does not search past an unknown newest same-head authoritative verdict', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-newest-unknown-authoritative-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviews: [
+        {
+          state: 'COMMENTED',
+          body: SETTLED_COMMENT_BODY,
+          author: CODEX_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+        {
+          state: 'COMMENTED',
+          body: '## Summary\nAmbiguous.\n\n## Blocking Issues\n- None.\n\n## Verdict\n\nUnclear',
+          author: CODEX_REVIEWER,
+          submittedAt: '2026-06-15T12:05:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.normalized, '', JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.verdict.blockingFindings.known, false);
+    assert.ok(verdict.reasons.includes('blocking-findings-unknown'));
+    assert.equal(verdict.eligible, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check scopes Codex authority and ignores a newer Claude-family clean review', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-codex-authority-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewer: 'codex',
+      reviews: [
+        {
+          state: 'CHANGES_REQUESTED',
+          body: BLOCKING_COMMENT_BODY,
+          author: CODEX_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+        {
+          state: 'COMMENTED',
+          body: SETTLED_COMMENT_BODY,
+          author: CLAUDE_REVIEWER,
+          submittedAt: '2026-06-15T12:05:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.normalized, 'request-changes', JSON.stringify(verdict, null, 2));
+    assert.ok(verdict.reasons.includes('blocking-findings-present'));
+    assert.equal(verdict.eligible, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check scopes Claude authority and ignores a newer Codex-family clean review', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-claude-authority-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewer: 'claude-code',
+      reviews: [
+        {
+          state: 'CHANGES_REQUESTED',
+          body: BLOCKING_COMMENT_BODY,
+          author: CLAUDE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+        {
+          state: 'COMMENTED',
+          body: SETTLED_COMMENT_BODY,
+          author: CODEX_REVIEWER,
           submittedAt: '2026-06-15T12:05:00Z',
           commit: { oid: HEAD_SHA },
         },

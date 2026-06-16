@@ -14,8 +14,6 @@ import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
-  REVIEWER_ROUTE_BY_MODEL,
-  ROUTE_BY_BUILDER_CLASS,
   defaultReviewerRouteFromEnv,
   describeCrossModelReviewWaiver,
   isCrossModelReviewWaived,
@@ -118,6 +116,7 @@ import { normalizeGithubMergeability } from './github-mergeability.mjs';
 // once the closer has soaked.
 import { maybeDispatchAmaCloser } from './ama/dispatch-closer.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
+import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import {
   COEXISTENCE_ACTION,
   decideMergeAgentCoexistence,
@@ -3795,23 +3794,6 @@ function isTransientAmaLiveReviewLookupError(err) {
   );
 }
 
-const AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL = Object.freeze({
-  claude: ['lacey-claude-reviewer', 'claude-reviewer-lacey'],
-  codex: ['lacey-codex-reviewer', 'codex-reviewer-lacey'],
-});
-
-// The reviewer bot's GitHub account; accept BOTH observed naming forms so the
-// AMA live-review anti-spoof filter is robust to the known discrepancy between
-// the live account (`lacey-<model>-reviewer`) and the legacy config form
-// (`<model>-reviewer-lacey`). Keyed on the `reviewed_prs.reviewer` model/family,
-// with builder tags resolved through the canonical GitHub-PR reviewer route.
-function amaAuthoritativeReviewerLoginsForModel(reviewerModel) {
-  const m = String(reviewerModel ?? '').trim().toLowerCase();
-  if (!m) return [];
-  const route = REVIEWER_ROUTE_BY_MODEL[m] || ROUTE_BY_BUILDER_CLASS[m];
-  return AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL[route?.reviewerModel] || [];
-}
-
 async function fetchLatestHeadReviewBodiesWithRetry({
   repoPath,
   prNumber,
@@ -4079,6 +4061,7 @@ async function maybeDispatchAmaClosureFor({
     riskClass: reviewState.riskClass,
     requiredGateContext: resolveGateStatusContext(),
     reviewedBy: reviewStateRow?.reviewer_login || '',
+    reviewer: reviewStateRow?.reviewer || '',
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     orchestrationMode,

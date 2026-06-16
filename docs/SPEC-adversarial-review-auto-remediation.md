@@ -110,12 +110,14 @@ The precedence is:
    eligibility.
 2. If the stored current-head source is not settled success, the stored verdict
    stands and no live lookup is needed.
-3. If the stored current-head source is settled success, the newest
-   verdict-bearing live review from the authoritative adversarial reviewer on
-   that same head replaces the stored verdict.
+3. If the stored current-head source is settled success, the newest submitted
+   live review from the authoritative adversarial reviewer on that same head
+   replaces the stored verdict. That exact body is authoritative even when its
+   `## Verdict` section is malformed, ambiguous, or missing.
 4. If the reviewer model cannot be mapped to authoritative GitHub login(s), or
-   no authoritative verdict-bearing same-head review is found, AMA fails closed
-   with an empty review verdict rather than trusting stale stored success.
+   no authoritative same-head review is found, or the newest authoritative
+   same-head review has no normalizable verdict, AMA fails closed with an empty
+   review verdict rather than trusting stale stored success.
    Transient live-lookup failures from the watcher-side GitHub CLI path, such
    as timeouts, TLS/socket interruptions, HTTP 429, or HTTP 502/503/504, are
    retried with a small bounded budget before this fail-closed decision;

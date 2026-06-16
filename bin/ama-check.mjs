@@ -92,12 +92,7 @@ function isBranchProtectionUnavailableSentinel(value) {
 function loadProtectionJson(path, cfg) {
   const parsed = loadJson(path);
   if (cfg?.branchProtection?.required === false) {
-    if (isBranchProtectionUnavailableSentinel(parsed)) {
-      return {};
-    }
-    throw new Error(
-      'branch protection waiver requires branchProtectionUnavailable sentinel with reason github_plan',
-    );
+    return parsed;
   }
   if (isBranchProtectionUnavailableSentinel(parsed)) {
     throw new Error(

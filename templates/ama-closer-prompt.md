@@ -43,10 +43,11 @@ gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStat
 gh pr view <<PR_URL>> --json reviews > /tmp/ama-reviews.json
 
 # Branch protection for the target branch. GitHub returns a known 403
-# upgrade/forbidden response on plans without branch protection; represent
-# only that case with a structured sentinel so ama-check can apply
-# branch_protection.required=false. Retry recognized transient gh/GitHub
-# failures briefly; any non-transient or exhausted failure is a hard stop.
+# upgrade/forbidden response on plans without branch protection; preserve
+# that unavailable-plan evidence (the structured sentinel below is one
+# accepted shape) so ama-check can honor branch_protection.required=false.
+# Retry recognized transient gh/GitHub failures briefly; any non-transient
+# or exhausted failure is a hard stop.
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
 protection_err=$(mktemp)
 protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)'

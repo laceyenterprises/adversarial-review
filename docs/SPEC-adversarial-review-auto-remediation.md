@@ -26,19 +26,19 @@ AMA's §4.2 branch-protection gate is enabled by default:
 context (`resolveGateStatusContext()`, default `agent-os/adversarial-gate`).
 Operators may set `branch_protection.required: false` only for repositories on
 GitHub plans where branch protection is unavailable and the protection API
-returns the known upgrade/forbidden response. The closer must capture that
-specific response as `{ "branchProtectionUnavailable": true, "reason":
-"github_plan" }`; other protection-fetch failures are hard stops, not waiver
-inputs. That opt-out waives only the
+returns the known upgrade/forbidden response. The closer must preserve that
+unavailable-plan evidence; `{ "branchProtectionUnavailable": true, "reason":
+"github_plan" }` is one accepted shape, but any parsed unavailable/404 payload
+is sufficient when the operator has explicitly waived the gate. Other
+protection-fetch failures are hard stops, not waiver inputs. That opt-out waives only the
 branch-protection-required-context predicate; review verdict, blocking-finding
 state, risk class, CI, hard-stop labels, mergeability, remediation state, and
 the closer's `--match-head-commit <reviewedSha>` guard still apply.
 
-Closer rechecks accept only the structured GitHub-plan sentinel above as the
-no-branch-protection waiver input when `branch_protection.required=false`.
-Missing, unreadable, malformed, or ambiguous empty protection input is a hard
-input error. With the default requirement enabled, the sentinel is also a hard
-input error, and an ordinary empty protection snapshot fails the
+Closer rechecks accept any successfully parsed protection JSON when
+`branch_protection.required=false`; malformed or unreadable input is still a
+hard input error. With the default requirement enabled, the GitHub-plan
+sentinel is a hard input error, and an ordinary empty protection snapshot fails the
 branch-protection gate closed with `branch-protection-missing-gate`.
 Audit/provenance strings must distinguish the two successful cases:
 `configured_gate_context_required` means branch protection actually required

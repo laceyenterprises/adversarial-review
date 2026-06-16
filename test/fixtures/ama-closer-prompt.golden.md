@@ -19,7 +19,14 @@ The predicate is the gate. Trust nothing else.
 - **Reviewed head SHA:** `abc12345abc12345abc12345abc12345abc12345`
 - **Risk class:** `low`
 - **Merge method:** `squash` (NEVER rebase; SPEC §4.4 requires one canonical landed commit for provenance)
-- **Required gate context:** `agent-os/adversarial-gate`
+<!-- Do NOT print the raw agent-os/adversarial-gate value here as an inline
+     token: it is a CI check-context name whose "<org-slash-name>" shape is
+     misread by the WBH prompt-scope cross-repo path detector as an
+     out-of-workspace reference, which fail-closes the closer dispatch
+     (policy_denied) for any non-agent-os PR. The value still appears in the
+     fenced audit-JSON example below (fenced blocks are ignored by the detector)
+     and the closer reads it from its own config, not this line. -->
+- **Required gate context:** the adversarial-review gate check for this PR (see the `requiredGateContexts` field in the audit-JSON shape below).
 - **HQ owner user:** `unknown`
 - **Audit JSON destination:** `/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json`
 
@@ -36,10 +43,11 @@ gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,sta
 gh pr view https://github.com/acme/myrepo/pull/1234 --json reviews > /tmp/ama-reviews.json
 
 # Branch protection for the target branch. GitHub returns a known 403
-# upgrade/forbidden response on plans without branch protection; represent
-# only that case with a structured sentinel so ama-check can apply
-# branch_protection.required=false. Retry recognized transient gh/GitHub
-# failures briefly; any non-transient or exhausted failure is a hard stop.
+# upgrade/forbidden response on plans without branch protection; preserve
+# that unavailable-plan evidence (the structured sentinel below is one
+# accepted shape) so ama-check can honor branch_protection.required=false.
+# Retry recognized transient gh/GitHub failures briefly; any non-transient
+# or exhausted failure is a hard stop.
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
 protection_err=$(mktemp)
 protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)'

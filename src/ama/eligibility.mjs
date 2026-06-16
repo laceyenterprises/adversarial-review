@@ -568,6 +568,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const requiredContext = branchProtectionRequired
     ? resolveRequiredGateContext(cfg, env)
     : null;
+  const branchProtectionWaived = branchProtectionRequired === false;
   const protectionOk =
     !branchProtectionRequired ||
     branchProtectionRequiresGate(prMetadata, requiredContext);
@@ -680,6 +681,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       required: branchProtectionRequired,
       requiredContext,
       ok: protectionOk,
+      waived: branchProtectionWaived,
+      auditReason: branchProtectionWaived ? 'branch_protection_requirement_waived' : null,
     },
     blockLabels: blockingLabels,
     fastMerge,

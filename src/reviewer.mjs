@@ -41,6 +41,7 @@ import {
 } from './prompt-context.mjs';
 import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
+import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
@@ -1198,6 +1199,15 @@ function createReviewerPreWriteLogProxy(log = console) {
 // fail, log and continue — the post may still succeed, and a failure here is
 // strictly less bad than the leak it's trying to prevent.
 async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync, opts = {}) {
+  // GMW-06 safety net: a gemini reviewer must never silently mis-post under
+  // another identity's token, and the legacy GEMINI_REVIEWER_GH_TOKEN item name
+  // must never leak into the runtime. Fails closed with a legible error before
+  // we read/use any token.
+  preflightGeminiReviewerToken({
+    env: process.env,
+    botTokenEnv,
+    reviewerIdentity: opts.reviewerIdentity,
+  });
   let token = process.env[botTokenEnv];
   if (!token) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
@@ -1325,6 +1335,11 @@ async function postGitHubReviewWithCapture({
   reviewerIdentity = null,
   reviewerTokenFetchTimeoutMs = undefined,
 } = {}) {
+  // GMW-06: run the gemini-reviewer preflight before the generic env check so a
+  // gemini post with an unresolved token fails with the legible runbook-naming
+  // error (and the legacy-conflict guard fires) rather than the bare
+  // "Missing env var" — and never falls through to another identity's token.
+  preflightGeminiReviewerToken({ env: process.env, botTokenEnv, reviewerIdentity });
   const initialToken = process.env[botTokenEnv];
   if (!initialToken) {
     throw new Error(`Missing env var: ${botTokenEnv}`);

@@ -694,6 +694,58 @@ test('role table covers the three reviewer families', () => {
   assert.deepEqual(roles, ['claude-reviewer', 'codex-reviewer', 'gemini-reviewer']);
 });
 
+test('gemini-reviewer role registers the canonical GH_GEMINI_REVIEWER_TOKEN env var and flag', () => {
+  const gemini = BROKER_REVIEWER_ROLES.find((r) => r.role === 'gemini-reviewer');
+  assert.ok(gemini, 'gemini-reviewer role must be registered');
+  assert.equal(gemini.envVar, 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.equal(gemini.flag, 'GEMINI_REVIEWER_AUTH_VIA_BROKER');
+});
+
+test('broker activation reads GEMINI_REVIEWER_AUTH_VIA_BROKER and resolves the gemini-reviewer role', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv({
+    // Only the gemini flag is on; claude defaults to true in makeEnv so disable it
+    // to prove the gemini role activates independently off its own flag.
+    CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'false',
+    GEMINI_REVIEWER_AUTH_VIA_BROKER: 'true',
+    GH_GEMINI_REVIEWER_TOKEN: 'ghs_OLD_gemini',
+  });
+  let calledUrl = null;
+  const fetchImpl = async (url) => {
+    calledUrl = url;
+    return brokerOk('github-app-gemini-reviewer', 'ghs_FRESH_gemini', {
+      expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+    });
+  };
+  const summary = await refreshReviewerBrokerTokens({
+    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
+  });
+  assert.match(calledUrl, /\/token\?provider=github-app-gemini-reviewer$/);
+  assert.equal(env.GH_GEMINI_REVIEWER_TOKEN, 'ghs_FRESH_gemini');
+  assert.ok(summary.refreshed.some((r) => r.role === 'gemini-reviewer' && r.envVar === 'GH_GEMINI_REVIEWER_TOKEN'));
+  // claude is flag-disabled → skipped, token untouched.
+  assert.ok(summary.skipped.some((s) => s.role === 'claude-reviewer' && s.reason === 'broker-mode-disabled'));
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+});
+
+test('resolveReviewerAppToken resolves the gemini-reviewer-lacey identity to GH_GEMINI_REVIEWER_TOKEN', async () => {
+  const env = makeEnv({ GH_GEMINI_REVIEWER_TOKEN: 'ghs_old_gemini' });
+  let calledUrl = null;
+  const resolved = await resolveReviewerAppToken('gemini-reviewer-lacey', {
+    env,
+    readFileImpl: readSecret,
+    fetchImpl: async (url) => {
+      calledUrl = url;
+      return brokerOk('github-app-gemini-reviewer', 'ghs_gemini_fresh');
+    },
+  });
+  assert.equal(resolved.role, 'gemini-reviewer');
+  assert.equal(resolved.envVar, 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.equal(resolved.token, 'ghs_gemini_fresh');
+  assert.match(calledUrl, /\/token\?provider=github-app-gemini-reviewer$/);
+  assert.equal(env.GH_GEMINI_REVIEWER_TOKEN, 'ghs_gemini_fresh');
+});
+
 // ── Watcher's OWN GitHub token (rate-limit isolation) ────────────────────────
 
 function makeWatcherEnv(overrides = {}) {

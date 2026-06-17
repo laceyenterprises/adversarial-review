@@ -236,7 +236,7 @@ test('follow-up-tick script sources the broker helper + gates op-read on the fla
   );
   assert.match(
     script,
-    /_tick_op_read_reviewer_pat 'op:\/\/Cliovault\/GEMINI_REVIEWER_GH_TOKEN\/credential'/,
-    'follow-up-tick must preserve the gemini-reviewer op-read fallback',
+    /_tick_op_read_reviewer_pat 'op:\/\/Cliovault\/GEMINI_REVIEWER_GH_TOKEN\/token'/,
+    'follow-up-tick must preserve the gemini-reviewer op-read fallback (field: token, GMW-06)',
   );
 });

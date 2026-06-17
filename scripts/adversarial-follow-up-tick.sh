@@ -217,7 +217,7 @@ if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
     broker_fail_closed_exit "GEMINI_REVIEWER_AUTH_VIA_BROKER"
   fi
 else
-  GH_GEMINI_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/credential')
+  GH_GEMINI_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token')
   export GH_GEMINI_REVIEWER_TOKEN
 fi
 if [[ -z "${GH_CLAUDE_REVIEWER_TOKEN:-}" ]]; then

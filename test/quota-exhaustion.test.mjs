@@ -135,6 +135,37 @@ test('parseQuotaResetAt returns null when there is no reset hint', () => {
   assert.equal(parseQuotaResetAt(''), null);
 });
 
+test('parseQuotaResetAt accepts ISO timestamps with a +HH:MM / -HH:MM offset', () => {
+  // Providers commonly emit offset-bearing timestamps; these must parse to the
+  // same instant rather than silently falling back to the fixed window.
+  assert.equal(parseQuotaResetAt('resets at 2026-06-17T17:39:00-07:00'), '2026-06-18T00:39:00.000Z');
+  assert.equal(parseQuotaResetAt('try again at 2026-06-17T17:39:00.000+00:00'), '2026-06-17T17:39:00.000Z');
+});
+
+test('quotaHoldDecision does NOT hold forever when the row has no durable anchor', () => {
+  // Regression: no reset, no failed_at, no last_attempted_at. Anchoring on `now`
+  // each poll would suspend the row forever. It must release to bounded recovery.
+  const row = { failure_message: '[quota-exhausted] out of credits' };
+  const poll1 = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T12:00:00Z') });
+  assert.equal(poll1.hold, false);
+  assert.equal(poll1.source, 'no-anchor');
+  const poll2 = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T12:30:00Z') });
+  assert.equal(poll2.hold, false);
+});
+
+test('quotaHoldDecision releases after the fixed window when anchored on failed_at (two polls)', () => {
+  const row = { failure_message: '[quota-exhausted] out of credits', failed_at: '2026-06-17T12:00:00Z' };
+  const backoff = 15 * 60 * 1000;
+  const during = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T12:10:00Z'), fallbackBackoffMs: backoff });
+  assert.equal(during.hold, true);
+  assert.equal(during.source, 'fallback-window');
+  // 20 min after the SAME durable anchor → window cleared → release (anchor does
+  // not drift with now).
+  const after = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T12:20:00Z'), fallbackBackoffMs: backoff });
+  assert.equal(after.hold, false);
+  assert.equal(after.waitUntilMs, Date.parse('2026-06-17T12:15:00Z'));
+});
+
 // ---------------------------------------------------------------------------
 // classifier wiring — quota wins over oauth/cascade, transient 429 does not
 // ---------------------------------------------------------------------------
@@ -269,12 +300,14 @@ test('quotaHoldDecision falls back to a fixed window when no reset is parseable'
   assert.equal(releaseNow.hold, false);
 });
 
-test('quotaHoldDecision anchors the fallback window at now when no timestamp exists', () => {
-  // First-ever observation with no failed_at and no reset: must hold once.
+test('quotaHoldDecision does NOT hold when no durable timestamp anchor exists', () => {
+  // With no reset and no failed_at/last_attempted_at there is no durable anchor.
+  // Anchoring on `now` would recompute now+window every poll and suspend the row
+  // forever (the reviewer-flagged bug), so the decision releases to bounded
+  // recovery instead of holding.
   const row = { failure_message: '[quota-exhausted] out of credits' };
   const nowMs = Date.parse('2026-06-16T12:00:00Z');
   const d = quotaHoldDecision(row, { nowMs, fallbackBackoffMs: 15 * 60 * 1000 });
-  assert.equal(d.hold, true);
-  assert.equal(d.source, 'fallback-window');
-  assert.equal(d.waitUntilMs, nowMs + 15 * 60 * 1000);
+  assert.equal(d.hold, false);
+  assert.equal(d.source, 'no-anchor');
 });

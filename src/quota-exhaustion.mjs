@@ -56,7 +56,7 @@ function _matches(text, patterns) {
 function parseQuotaResetAt(text, { nowMs = null } = {}) {
   const t = String(text || '');
   // Prefer an explicit ISO timestamp if the provider gave one.
-  const iso = t.match(/(?:try again at|resets? at)\s+(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)/i);
+  const iso = t.match(/(?:try again at|resets? at)\s+(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i);
   if (iso) {
     const d = new Date(iso[1]);
     if (!Number.isNaN(d.getTime())) return d.toISOString();
@@ -143,13 +143,25 @@ const DEFAULT_QUOTA_BACKOFF_MS = 15 * 60 * 1000;
 function quotaHoldDecision(row, { nowMs = null, fallbackBackoffMs = DEFAULT_QUOTA_BACKOFF_MS } = {}) {
   const now = nowMs == null ? Date.now() : nowMs;
   const lastFailureMs = Date.parse(row?.failed_at || row?.last_attempted_at || '');
-  const observationMs = Number.isNaN(lastFailureMs) ? now : lastFailureMs;
+  const hasAnchor = !Number.isNaN(lastFailureMs);
+  const observationMs = hasAnchor ? lastFailureMs : now;
   const resetIso = parseQuotaResetAt(row?.failure_message, { nowMs: observationMs });
   const resetMs = resetIso ? Date.parse(resetIso) : NaN;
   if (!Number.isNaN(resetMs)) {
     return { hold: now < resetMs, waitUntilMs: resetMs, source: 'provider-reported' };
   }
-  const waitUntilMs = observationMs + fallbackBackoffMs;
+  // No parseable provider reset. Fall back to a fixed window anchored on the
+  // DURABLE failure timestamp (failed_at / last_attempted_at). When NO durable
+  // anchor exists, do NOT hold: anchoring on `now` would recompute now+window on
+  // every poll and suspend the row forever (nothing persists `now` before the
+  // watcher continues). A `failed` row always carries failed_at in practice, so
+  // this guards the pathological no-timestamp case — release it to bounded
+  // recovery (capped by INFRA_AUTO_RECOVER_CAP) so a recoverable quota outage
+  // resumes and operators see exhaustion rather than a permanent hang.
+  if (!hasAnchor) {
+    return { hold: false, waitUntilMs: now, source: 'no-anchor' };
+  }
+  const waitUntilMs = lastFailureMs + fallbackBackoffMs;
   return { hold: now < waitUntilMs, waitUntilMs, source: 'fallback-window' };
 }
 

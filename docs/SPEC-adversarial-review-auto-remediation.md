@@ -583,15 +583,19 @@ local OAuth/runtime launch breakage before any reviewer verdict exists.
 retry. The reviewer/runtime classifier must preserve the provider's reset hint
 in the failed-row evidence with a `[quota-exhausted]` prefix. Before claiming
 that row again, the watcher parses provider reset strings from the stored
-message, including Codex month/day strings, explicit ISO timestamps, and
-Claude clock-only strings such as `resets at 5:39 PM` anchored to the host's
-local date and rolled to the next day if the clock time has already elapsed. If
-the reset is still in the future, the watcher leaves the row `failed`, skips the
-spawn for that poll, and does not consume an infrastructure auto-recovery
-attempt. If no provider reset can be parsed, the row is held for the fixed
-quota fallback window anchored to `failed_at`, then `last_attempted_at`, then
-the current observation time so the first unparseable cap still waits once
-before retry.
+message, including Codex month/day strings, explicit ISO timestamps (with a
+trailing `Z` or a `+HH:MM`/`-HH:MM` offset), and Claude clock-only strings such
+as `resets at 5:39 PM` anchored to the host's local date and rolled to the next
+day if the clock time has already elapsed. If the reset is still in the future,
+the watcher leaves the row `failed`, skips the spawn for that poll, and does not
+consume an infrastructure auto-recovery attempt. If no provider reset can be
+parsed, the row is held for the fixed quota fallback window anchored to a
+**durable** timestamp (`failed_at`, then `last_attempted_at`). When no durable
+anchor exists at all, the row is **not** held: anchoring the window on the
+current poll time would recompute `now + window` every tick and suspend the row
+forever, so the decision releases it to bounded recovery (capped by the
+infrastructure auto-recovery budget) instead. A `failed` row always carries
+`failed_at` in practice, so this guards only the pathological no-timestamp case.
 
 The same hard-cap contract applies to follow-up remediation workers that spawn
 direct harness CLIs outside the dispatch lane. Reconcile may move a

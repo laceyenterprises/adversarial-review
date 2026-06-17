@@ -2939,14 +2939,31 @@ function resolveReviewerTimeoutFallbackModel(env = process.env) {
   return null;
 }
 
+function normalizeReviewerAttribution(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function rowReviewerMatches(row, expectedReviewerModel) {
+  const expected = normalizeReviewerAttribution(expectedReviewerModel);
+  if (!expected) return true;
+  const candidates = [
+    row?.reviewer,
+    row?.reviewer_model,
+    row?.reviewerModel,
+    row?.reviewer_class,
+  ].map(normalizeReviewerAttribution).filter(Boolean);
+  return candidates.some((candidate) => candidate === expected);
+}
+
 // GMW-02 fallback signal. `reviewer.gemini.mode=fallback` selects gemini only
 // when the assigned primary reviewer is quota-capped. We reuse the HRR
-// quota-exhaustion signal: a row whose last failure is the hard provider
-// usage-cap class AND whose cap window has not yet cleared means the primary
-// reviewer cannot succeed right now, so gemini absorbs the pass instead of the
-// row being held. Pure over the stored row so it stays testable.
-function primaryReviewerQuotaCappedForRow(row, { nowMs = null } = {}) {
+// quota-exhaustion signal, but only when the failed row is attributed to the
+// primary reviewer Gemini would replace. If Gemini already handled a retry and
+// then hit quota, the row must remain on the normal quota hold instead of
+// recursively selecting Gemini again.
+function primaryReviewerQuotaCappedForRow(row, { nowMs = null, expectedReviewerModel = null } = {}) {
   if (!row || row.review_status !== 'failed') return false;
+  if (!rowReviewerMatches(row, expectedReviewerModel)) return false;
   if (infraRecoverableFailureClass(row) !== QUOTA_EXHAUSTED_FAILURE_CLASS) return false;
   return quotaHoldDecision(row, {
     nowMs,
@@ -2954,7 +2971,10 @@ function primaryReviewerQuotaCappedForRow(row, { nowMs = null } = {}) {
   }).hold;
 }
 
-function shouldBypassPrimaryReviewerQuotaHold(route) {
+function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
+  if (row && !rowReviewerMatches(row, route?.geminiReviewerSelection?.replacedReviewerModel)) {
+    return false;
+  }
   return (
     route?.reviewerModel === 'gemini'
     && route?.botTokenEnv === 'GH_GEMINI_REVIEWER_TOKEN'
@@ -5350,7 +5370,9 @@ async function pollOnce(
         mode: geminiReviewerMode,
         primaryReviewerQuotaCapped:
           geminiReviewerMode === 'fallback'
-            ? primaryReviewerQuotaCappedForRow(existing)
+            ? primaryReviewerQuotaCappedForRow(existing, {
+                expectedReviewerModel: baseRoute.reviewerModel,
+              })
             : false,
       });
       if (geminiBaseRoute.geminiReviewerSelection) {
@@ -5619,7 +5641,7 @@ async function pollOnce(
           fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,
         });
         if (quotaHold.hold) {
-          if (shouldBypassPrimaryReviewerQuotaHold(route)) {
+          if (shouldBypassPrimaryReviewerQuotaHold(route, current)) {
             console.log(
               `[watcher] Bypassing quota hold for ${repoPath}#${prNumber}: ` +
                 `reviewer.gemini.mode=fallback selected gemini while primary reviewer is capped`

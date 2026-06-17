@@ -19,10 +19,15 @@ test('GMW-02 watcher: quota-exhausted held row signals primary reviewer capped',
   const recentlyFailed = new Date(Date.now() - 60_000).toISOString();
   const cappedRow = {
     review_status: 'failed',
+    reviewer: 'codex',
     failure_message: '[quota-exhausted] hit your usage limit',
     failed_at: recentlyFailed,
   };
   assert.equal(primaryReviewerQuotaCappedForRow(cappedRow), true);
+  assert.equal(
+    primaryReviewerQuotaCappedForRow(cappedRow, { expectedReviewerModel: 'codex' }),
+    true,
+  );
 });
 
 test('GMW-02 watcher: non-quota / healthy rows do not signal capped', () => {
@@ -50,6 +55,26 @@ test('GMW-02 watcher: an elapsed quota window no longer signals capped', () => {
   );
 });
 
+test('GMW-02 watcher: Gemini quota failure does not masquerade as primary quota cap', () => {
+  const recentlyFailed = new Date(Date.now() - 60_000).toISOString();
+  const geminiCappedRow = {
+    review_status: 'failed',
+    reviewer: 'gemini',
+    reviewer_model: 'gemini',
+    failure_message: '[quota-exhausted] hit your usage limit',
+    failed_at: recentlyFailed,
+  };
+
+  assert.equal(
+    primaryReviewerQuotaCappedForRow(geminiCappedRow, { expectedReviewerModel: 'codex' }),
+    false,
+  );
+  assert.equal(
+    primaryReviewerQuotaCappedForRow(geminiCappedRow, { expectedReviewerModel: 'gemini' }),
+    true,
+  );
+});
+
 test('GMW-02 watcher: fallback wiring end-to-end (capped → gemini, healthy → codex)', () => {
   const baseRoute = {
     builderClass: 'claude-code',
@@ -60,6 +85,7 @@ test('GMW-02 watcher: fallback wiring end-to-end (capped → gemini, healthy →
 
   const cappedRow = {
     review_status: 'failed',
+    reviewer: 'codex',
     failure_message: '[quota-exhausted] hit your usage limit',
     failed_at: new Date(Date.now() - 60_000).toISOString(),
   };
@@ -67,7 +93,9 @@ test('GMW-02 watcher: fallback wiring end-to-end (capped → gemini, healthy →
     builderClass: 'claude-code',
     baseRoute,
     mode: 'fallback',
-    primaryReviewerQuotaCapped: primaryReviewerQuotaCappedForRow(cappedRow),
+    primaryReviewerQuotaCapped: primaryReviewerQuotaCappedForRow(cappedRow, {
+      expectedReviewerModel: baseRoute.reviewerModel,
+    }),
   });
   assert.equal(capped.reviewerModel, 'gemini');
 
@@ -78,6 +106,20 @@ test('GMW-02 watcher: fallback wiring end-to-end (capped → gemini, healthy →
     primaryReviewerQuotaCapped: primaryReviewerQuotaCappedForRow({ review_status: 'pending' }),
   });
   assert.equal(healthy.reviewerModel, 'codex');
+
+  const geminiCappedRow = {
+    ...cappedRow,
+    reviewer: 'gemini',
+  };
+  const geminiAlreadyCapped = applyGeminiReviewerRoute({
+    builderClass: 'claude-code',
+    baseRoute,
+    mode: 'fallback',
+    primaryReviewerQuotaCapped: primaryReviewerQuotaCappedForRow(geminiCappedRow, {
+      expectedReviewerModel: baseRoute.reviewerModel,
+    }),
+  });
+  assert.equal(geminiAlreadyCapped.reviewerModel, 'codex');
 });
 
 test('GMW-02 watcher: fallback gemini route bypasses the primary reviewer quota hold', () => {
@@ -93,16 +135,27 @@ test('GMW-02 watcher: fallback gemini route bypasses the primary reviewer quota 
     mode: 'fallback',
     primaryReviewerQuotaCapped: true,
   });
+  const primaryCappedRow = {
+    review_status: 'failed',
+    reviewer: 'codex',
+    failure_message: '[quota-exhausted] hit your usage limit',
+    failed_at: new Date(Date.now() - 60_000).toISOString(),
+  };
+  const geminiCappedRow = {
+    ...primaryCappedRow,
+    reviewer: 'gemini',
+  };
 
-  assert.equal(shouldBypassPrimaryReviewerQuotaHold(route), true);
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, primaryCappedRow), true);
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, geminiCappedRow), false);
   assert.equal(
     shouldBypassPrimaryReviewerQuotaHold({
       ...route,
       geminiReviewerSelection: { mode: 'always-on', reason: 'always-on-third-reviewer' },
-    }),
+    }, primaryCappedRow),
     false,
   );
-  assert.equal(shouldBypassPrimaryReviewerQuotaHold(baseRoute), false);
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(baseRoute, primaryCappedRow), false);
 });
 
 test('GMW-02 watcher: selectReviewerRouteForAttempt passes a gemini route through', () => {

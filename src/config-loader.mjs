@@ -110,6 +110,7 @@ const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'adversarial'];
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
+const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS = ['codex', 'claude-code', 'hammer', 'gemini'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
@@ -633,7 +634,7 @@ function schemaV1() {
                   worker_class: {
                     __type: TYPE_STRING,
                     __default: 'codex',
-                    __enum: ['codex', 'claude-code', 'hammer'],
+                    __enum: ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
                   },
                   merge_method: {
                     __type: TYPE_STRING,

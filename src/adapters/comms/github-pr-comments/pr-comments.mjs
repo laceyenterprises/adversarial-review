@@ -22,6 +22,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from '../../../follow-up-jobs.mjs';
+import { preflightGeminiReviewerToken } from '../../../gemini-reviewer-preflight.mjs';
 import { awaitThrottleIfNeeded } from '../../../rate-limit-throttle.mjs';
 import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
@@ -973,6 +974,22 @@ async function postRemediationOutcomeComment({
       `[pr-comments] skipping comment: no bot-token env mapping for worker class "${workerClass}"`
     );
     return { posted: false, reason: 'no-token-mapping', workerClass };
+  }
+
+  try {
+    preflightGeminiReviewerToken({ env, botTokenEnv: tokenEnvName });
+  } catch (err) {
+    const message = err?.message || String(err);
+    log.error?.(
+      `[pr-comments] skipping comment: Gemini reviewer token preflight failed for worker class "${workerClass}": ${message}`
+    );
+    return {
+      posted: false,
+      reason: 'gemini-token-preflight-failed',
+      tokenEnvName,
+      workerClass,
+      error: message,
+    };
   }
 
   const token = env[tokenEnvName];

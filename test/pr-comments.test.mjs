@@ -521,6 +521,32 @@ test('postRemediationOutcomeComment posts gemini comments with only the Gemini b
   assert.equal(calls[0].options.env.GH_CLAUDE_REVIEWER_TOKEN, undefined);
 });
 
+test('postRemediationOutcomeComment refuses gemini comments when legacy Gemini env leaks', async () => {
+  const calls = [];
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'gemini',
+    body: '### Remediation Worker (gemini) — round 1\n\nSummary',
+    env: {
+      GH_GEMINI_REVIEWER_TOKEN: 'test-pat-gemini',
+      GEMINI_REVIEWER_GH_TOKEN: 'legacy-item-named-value',
+      PATH: '/usr/bin',
+    },
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      throw new Error('gh should not be invoked when Gemini preflight fails');
+    },
+    log: { error() {} },
+  });
+
+  assert.equal(result.posted, false);
+  assert.equal(result.reason, 'gemini-token-preflight-failed');
+  assert.equal(result.tokenEnvName, 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.match(result.error, /legacy GEMINI_REVIEWER_GH_TOKEN env var is present/);
+  assert.equal(calls.length, 0);
+});
+
 test('postRemediationOutcomeComment passes only an allowlisted env to gh', async () => {
   // The daemon's parent env carries unrelated high-value secrets. The gh
   // subprocess must NOT see them. Only PATH, HOME, and the selected

@@ -508,7 +508,7 @@ test('broker-mode launchers sleep before fail-closed exit when broker is unavail
   }
 });
 
-test('watcher launchers fail closed when the legacy GEMINI_REVIEWER_GH_TOKEN env var is present', {
+test('watcher launchers recover by unsetting legacy GEMINI_REVIEWER_GH_TOKEN env var', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
 }, async () => {
   for (const scriptName of [
@@ -522,11 +522,13 @@ test('watcher launchers fail closed when the legacy GEMINI_REVIEWER_GH_TOKEN env
         GEMINI_REVIEWER_GH_TOKEN: 'ghs_leaked_item_named_value',
       },
     });
-    assert.equal(result.code, 1, `${scriptName} stderr:\n${result.stderr}`);
+    assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
     assert.match(result.stderr, /legacy GEMINI_REVIEWER_GH_TOKEN env var is present/);
     assert.match(result.stderr, /adversarial-review consumes GH_GEMINI_REVIEWER_TOKEN only/);
+    assert.match(result.stderr, /unsetting GEMINI_REVIEWER_GH_TOKEN and continuing canonical token resolution/);
     assert.match(result.stderr, /docs\/RUNBOOK-gemini-reviewer-app\.md/);
-    assert.equal(result.sleepLog.trim(), '3600', `${scriptName} sleep log:\n${result.sleepLog}`);
+    assert.doesNotMatch(result.stderr, /GH_GEMINI_REVIEWER_TOKEN unresolved/);
+    assert.equal(result.sleepLog.trim(), '', `${scriptName} sleep log:\n${result.sleepLog}`);
   }
 });
 

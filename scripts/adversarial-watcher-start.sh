@@ -369,15 +369,13 @@ fi
 # GMW-06: gemini-reviewer wiring. adversarial-review consumes the gemini token
 # from GH_GEMINI_REVIEWER_TOKEN ONLY; the 1Password item is named
 # GEMINI_REVIEWER_GH_TOKEN (mapped in config/watcher-op.env as
-# op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token). Fail closed if the legacy
-# item-named env var leaked into the runtime: a stray GEMINI_REVIEWER_GH_TOKEN
-# must never shadow the canonical var or cause a mis-post under another reviewer
-# identity. See docs/RUNBOOK-gemini-reviewer-app.md.
+# op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token). If the legacy item-named env
+# var leaked into the runtime, recover locally by unsetting it before resolving
+# the canonical GH_GEMINI_REVIEWER_TOKEN value. See
+# docs/RUNBOOK-gemini-reviewer-app.md.
 if [[ -n "${GEMINI_REVIEWER_GH_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: legacy GEMINI_REVIEWER_GH_TOKEN env var is present — adversarial-review consumes GH_GEMINI_REVIEWER_TOKEN only; unset GEMINI_REVIEWER_GH_TOKEN and map op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token → GH_GEMINI_REVIEWER_TOKEN (see docs/RUNBOOK-gemini-reviewer-app.md)." >&2
-  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; unset the legacy GEMINI_REVIEWER_GH_TOKEN env var and bootout the agent to recover sooner." >&2
-  sleep 3600
-  exit 1
+  echo "[adversarial-watcher] WARNING: legacy GEMINI_REVIEWER_GH_TOKEN env var is present — adversarial-review consumes GH_GEMINI_REVIEWER_TOKEN only; unsetting GEMINI_REVIEWER_GH_TOKEN and continuing canonical token resolution (see docs/RUNBOOK-gemini-reviewer-app.md)." >&2
+  unset GEMINI_REVIEWER_GH_TOKEN
 fi
 if reviewer_broker_mode_enabled "gemini-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer; then

@@ -402,6 +402,30 @@ test('composeAmaTrailers produces the SPEC §4.4 trailer block', () => {
   );
 });
 
+test('composeAmaTrailers renders Closed-By: gemini-closer for the gemini harness', () => {
+  // GMW-04: only the executing harness changes; the trailer is generic
+  // (`${workerClass}-closer`), so a gemini closer must attribute as
+  // `gemini-closer (adversarial-pipe-mode)`.
+  const auditRef = amaAuditTraceRef('acme/myrepo', 1234, 'abc12345');
+  const block = composeAmaTrailers({
+    workerClass: 'gemini',
+    reviewerFamily: 'codex-reviewer-lacey',
+    riskClass: 'high',
+    eligibilityReason: 'clean review, reviewer family recorded, high risk',
+    auditRef,
+  });
+  assert.equal(
+    block,
+    [
+      'Closed-By: gemini-closer (adversarial-pipe-mode)',
+      'Reviewed-By: codex-reviewer-lacey',
+      'Risk-Class: high',
+      'Eligibility-Reason: clean review, reviewer family recorded, high risk',
+      'Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345',
+    ].join('\n'),
+  );
+});
+
 test('composeAmaTrailers refuses CR/LF injection in any field', () => {
   for (const field of ['workerClass', 'reviewerFamily', 'riskClass', 'eligibilityReason', 'auditRef']) {
     const base = {

@@ -142,14 +142,14 @@ const DEFAULT_QUOTA_BACKOFF_MS = 15 * 60 * 1000;
 // recovery is attempted.
 function quotaHoldDecision(row, { nowMs = null, fallbackBackoffMs = DEFAULT_QUOTA_BACKOFF_MS } = {}) {
   const now = nowMs == null ? Date.now() : nowMs;
-  const resetIso = parseQuotaResetAt(row?.failure_message, { nowMs: now });
+  const lastFailureMs = Date.parse(row?.failed_at || row?.last_attempted_at || '');
+  const observationMs = Number.isNaN(lastFailureMs) ? now : lastFailureMs;
+  const resetIso = parseQuotaResetAt(row?.failure_message, { nowMs: observationMs });
   const resetMs = resetIso ? Date.parse(resetIso) : NaN;
   if (!Number.isNaN(resetMs)) {
     return { hold: now < resetMs, waitUntilMs: resetMs, source: 'provider-reported' };
   }
-  const lastFailureMs = Date.parse(row?.failed_at || row?.last_attempted_at || '');
-  const base = Number.isNaN(lastFailureMs) ? now : lastFailureMs;
-  const waitUntilMs = base + fallbackBackoffMs;
+  const waitUntilMs = observationMs + fallbackBackoffMs;
   return { hold: now < waitUntilMs, waitUntilMs, source: 'fallback-window' };
 }
 

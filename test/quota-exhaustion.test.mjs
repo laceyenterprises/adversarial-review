@@ -220,6 +220,33 @@ test('quotaHoldDecision RELEASES once the provider-reported reset has passed', (
   assert.equal(d.source, 'provider-reported');
 });
 
+test('quotaHoldDecision RELEASES Claude clock-only caps after the observed reset time passes', () => {
+  const failedAt = new Date(2026, 5, 17, 12, 39, 0, 0);
+  const now = new Date(2026, 5, 17, 18, 0, 0, 0);
+  const row = {
+    failure_message: '[quota-exhausted] Claude usage limit reached. Your 5-hour limit reached; resets at 5:39 PM',
+    failed_at: failedAt.toISOString(),
+    last_attempted_at: new Date(2026, 5, 17, 12, 30, 0, 0).toISOString(),
+  };
+  const d = quotaHoldDecision(row, { nowMs: now.getTime() });
+  assert.equal(d.hold, false);
+  assert.equal(d.source, 'provider-reported');
+  assert.equal(d.waitUntilMs, new Date(2026, 5, 17, 17, 39, 0, 0).getTime());
+});
+
+test('quotaHoldDecision anchors Claude clock-only caps to last_attempted_at when failed_at is absent', () => {
+  const lastAttemptedAt = new Date(2026, 5, 17, 12, 39, 0, 0);
+  const now = new Date(2026, 5, 17, 18, 0, 0, 0);
+  const row = {
+    failure_message: '[quota-exhausted] Claude usage limit reached. Your 5-hour limit reached; resets at 5:39 PM',
+    last_attempted_at: lastAttemptedAt.toISOString(),
+  };
+  const d = quotaHoldDecision(row, { nowMs: now.getTime() });
+  assert.equal(d.hold, false);
+  assert.equal(d.source, 'provider-reported');
+  assert.equal(d.waitUntilMs, new Date(2026, 5, 17, 17, 39, 0, 0).getTime());
+});
+
 test('quotaHoldDecision falls back to a fixed window when no reset is parseable', () => {
   const row = {
     failure_message: '[quota-exhausted] you are out of credits', // no reset hint

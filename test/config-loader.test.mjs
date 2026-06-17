@@ -17,9 +17,9 @@ import {
   AgentOSConfig,
   AgentOSConfigError,
   loadConfig,
+  loadConfigCached,
   validateSchema,
   SCHEMA_VERSION,
-  getConfig,
   resetConfigCache,
 } from '../src/config-loader.mjs';
 
@@ -456,7 +456,24 @@ test('local.yaml overrides top', () => {
   }
 });
 
-test('top-level config.yaml rejects foreign worker_pool section', () => {
+test('top-level config.yaml accepts shared worker_pool dag retry default', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dag:
+          default_retry_max_attempts: 3
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.dag.default_retry_max_attempts'), 3);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('top-level config.yaml rejects unknown worker_pool keys', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -471,7 +488,7 @@ test('top-level config.yaml rejects foreign worker_pool section', () => {
         assert.ok(err instanceof AgentOSConfigError);
         assert.match(err.message, /worker_pool/);
         assert.match(err.message, /unknown key/);
-        assert.equal(err.source, top);
+        assert.match(err.source, new RegExp(`${top.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\d+`));
         return true;
       },
     );
@@ -480,7 +497,52 @@ test('top-level config.yaml rejects foreign worker_pool section', () => {
   }
 });
 
-test('versioned config.local.yaml tolerates allowlisted foreign worker_pool section', () => {
+test('worker_pool dag retry default enforces bounds and env aliases', () => {
+  const defaultTmp = freshTmp();
+  try {
+    const defaults = loadConfig({ topPath: join(defaultTmp, 'missing.yaml'), env: {} });
+    assert.equal(defaults.get('worker_pool.dag.default_retry_max_attempts'), 2);
+  } finally {
+    rmSync(defaultTmp, { recursive: true, force: true });
+  }
+  assert.throws(
+    () => validateSchema({
+      version: 1,
+      worker_pool: { dag: { default_retry_max_attempts: 0 } },
+    }),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /worker_pool\.dag\.default_retry_max_attempts/);
+      assert.match(err.message, /below minimum 1/);
+      return true;
+    },
+  );
+
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dag:
+          default_retry_max_attempts: 3
+    `);
+    const canonical = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_WORKER_POOL_DAG_DEFAULT_RETRY_MAX_ATTEMPTS: '4' },
+    });
+    assert.equal(canonical.get('worker_pool.dag.default_retry_max_attempts'), 4);
+    const legacy = loadConfig({
+      topPath: top,
+      env: { HQ_DAG_DEFAULT_RETRY_MAX_ATTEMPTS: '5' },
+    });
+    assert.equal(legacy.get('worker_pool.dag.default_retry_max_attempts'), 5);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('versioned config.local.yaml tolerates nested unknown worker_pool keys', () => {
   const tmp = freshTmp();
   const originalWarn = console.warn;
   try {
@@ -498,21 +560,22 @@ test('versioned config.local.yaml tolerates allowlisted foreign worker_pool sect
       roots:
         hq: /from-local
       worker_pool:
-        anything: true
+        dag:
+          default_retry_max_attempts: 4
+          future_retry_knob: true
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roots.hq'), '/from-local');
-    assert.equal(cfg.get('worker_pool.anything'), null);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /worker_pool/);
-    assert.match(warnings[0], /config\.local\.yaml/);
+    assert.equal(cfg.get('worker_pool.dag.default_retry_max_attempts'), 4);
+    assert.equal(cfg.get('worker_pool.dag.future_retry_knob'), null);
+    assert.equal(warnings.length, 0);
   } finally {
     console.warn = originalWarn;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('unversioned config.local.yaml tolerates allowlisted foreign worker_pool section', () => {
+test('unversioned config.local.yaml tolerates nested unknown worker_pool keys', () => {
   const tmp = freshTmp();
   const originalWarn = console.warn;
   try {
@@ -529,14 +592,15 @@ test('unversioned config.local.yaml tolerates allowlisted foreign worker_pool se
       roots:
         hq: /from-local
       worker_pool:
-        anything: true
+        dag:
+          default_retry_max_attempts: 4
+          future_retry_knob: true
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roots.hq'), '/from-local');
-    assert.equal(cfg.get('worker_pool.anything'), null);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /worker_pool/);
-    assert.match(warnings[0], /config\.local\.yaml/);
+    assert.equal(cfg.get('worker_pool.dag.default_retry_max_attempts'), 4);
+    assert.equal(cfg.get('worker_pool.dag.future_retry_knob'), null);
+    assert.equal(warnings.length, 0);
   } finally {
     console.warn = originalWarn;
     rmSync(tmp, { recursive: true, force: true });
@@ -2042,22 +2106,27 @@ test('validateSchema keeps foreign top-level tolerance scoped to local YAML sour
   );
 });
 
-test('validateSchema can explicitly tolerate allowlisted foreign top-level keys for local files', () => {
+test('validateSchema can explicitly tolerate nested unknown worker_pool keys for local files', () => {
   // config.local.yaml is shared by several loaders (CFG-01 python loader, this
-  // adversarial-review loader, ...). A top-level section owned by a DIFFERENT
-  // reader must be explicitly allowlisted before this loader ignores it.
+  // adversarial-review loader, ...). This loader owns only the declared
+  // worker_pool subtree, so future nested keys under that subtree are dropped
+  // through the local nested-unknown tolerance path.
   const originalWarn = console.warn;
   try {
     const warnings = [];
     console.warn = (msg) => warnings.push(String(msg));
     const out = validateSchema(
-      { version: 1, worker_pool: { anything: true } },
-      { source: '/tmp/config.local.yaml', tolerateForeignTopLevelSections: true },
+      { version: 1, worker_pool: { dag: { default_retry_max_attempts: 4, anything: true } } },
+      {
+        source: '/tmp/config.local.yaml',
+        tolerateForeignTopLevelSections: true,
+        tolerateNestedUnknownLocalKeys: true,
+      },
     );
-    assert.equal(out.worker_pool, undefined, 'foreign top-level section is dropped, not thrown');
+    assert.equal(out.worker_pool.dag.default_retry_max_attempts, 4);
+    assert.equal(out.worker_pool.dag.anything, undefined);
     assert.equal(out.version, 1);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /worker_pool/);
+    assert.equal(warnings.length, 0);
   } finally {
     console.warn = originalWarn;
   }
@@ -2308,19 +2377,17 @@ test('localSibling refuses non-yaml/yml top path (Layer 4 skipped)', () => {
   }
 });
 
-test('getConfig invalidates cache when top YAML mtime changes', () => {
+test('loadConfigCached invalidates cache when top YAML mtime changes', () => {
   const tmp = freshTmp();
   const top = join(tmp, 'config.yaml');
-  const originalEnv = process.env.AGENT_OS_CONFIG_PATH;
   try {
-    process.env.AGENT_OS_CONFIG_PATH = top;
     resetConfigCache();
     writeFile(top, `
       version: 1
       roles:
         reviewer: codex
     `);
-    assert.equal(getConfig('roles.reviewer'), 'codex');
+    assert.equal(loadConfigCached({ topPath: top, env: {} }).get('roles.reviewer'), 'codex');
 
     // Sleep enough to guarantee a fresh mtime even on coarse filesystems.
     // Using a busy-wait to keep the test synchronous.
@@ -2331,10 +2398,8 @@ test('getConfig invalidates cache when top YAML mtime changes', () => {
       roles:
         reviewer: adversarial
     `);
-    assert.equal(getConfig('roles.reviewer'), 'adversarial');
+    assert.equal(loadConfigCached({ topPath: top, env: {} }).get('roles.reviewer'), 'adversarial');
   } finally {
-    if (originalEnv === undefined) delete process.env.AGENT_OS_CONFIG_PATH;
-    else process.env.AGENT_OS_CONFIG_PATH = originalEnv;
     resetConfigCache();
     rmSync(tmp, { recursive: true, force: true });
   }

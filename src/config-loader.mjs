@@ -579,6 +579,28 @@ function schemaV1() {
         __strict: false,
         __keys: {},
       },
+      // Worker-pool-owned CFG keys that are legal in the shared top-level
+      // config.yaml must still parse in this strict Node loader. Keep the
+      // subtree narrow and in lockstep with the Python schema for keys this
+      // loader does not consume directly.
+      worker_pool: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          dag: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              default_retry_max_attempts: {
+                __type: TYPE_INT,
+                __default: 2,
+                __min: 1,
+                __max: 10,
+              },
+            },
+          },
+        },
+      },
       roles: {
         __type: TYPE_DICT,
         __strict: true,
@@ -1268,6 +1290,10 @@ export const ENV_ALIASES = {
   'dispatch.default_worker_class_by_task_kind.merge_agent_failure_recovery': {
     canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_AGENT_FAILURE_RECOVERY',
     aliases: [],
+  },
+  'worker_pool.dag.default_retry_max_attempts': {
+    canonical: 'AGENT_OS_WORKER_POOL_DAG_DEFAULT_RETRY_MAX_ATTEMPTS',
+    aliases: [['HQ_DAG_DEFAULT_RETRY_MAX_ATTEMPTS', identity]],
   },
   'feature_flags.live_steer_allow_unvetted': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_LIVE_STEER_ALLOW_UNVETTED',

@@ -122,7 +122,7 @@ test('GMW-02 watcher: fallback wiring end-to-end (capped → gemini, healthy →
   assert.equal(geminiAlreadyCapped.reviewerModel, 'codex');
 });
 
-test('GMW-02 watcher: fallback gemini route bypasses the primary reviewer quota hold', () => {
+test('GMW-02 watcher: fallback gemini route bypasses the original primary reviewer quota hold', () => {
   const baseRoute = {
     builderClass: 'claude-code',
     tag: '[claude-code]',
@@ -147,6 +147,9 @@ test('GMW-02 watcher: fallback gemini route bypasses the primary reviewer quota 
   };
 
   assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, primaryCappedRow), true);
+  // The watcher persists reviewer=gemini before re-reading current state; the
+  // bypass decision must be made from the pre-update primary row, not this
+  // rewritten row.
   assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, geminiCappedRow), false);
   assert.equal(
     shouldBypassPrimaryReviewerQuotaHold({

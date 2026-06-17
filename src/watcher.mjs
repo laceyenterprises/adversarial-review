@@ -5421,6 +5421,7 @@ async function pollOnce(
 
       const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       let liveLabels = null;
+      const preRoutingUpdateRow = existing;
       if (!existing) {
         liveLabels = await fetchLivePRLabels(octokit, {
           owner,
@@ -5641,7 +5642,7 @@ async function pollOnce(
           fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,
         });
         if (quotaHold.hold) {
-          if (shouldBypassPrimaryReviewerQuotaHold(route, current)) {
+          if (shouldBypassPrimaryReviewerQuotaHold(route, preRoutingUpdateRow)) {
             console.log(
               `[watcher] Bypassing quota hold for ${repoPath}#${prNumber}: ` +
                 `reviewer.gemini.mode=fallback selected gemini while primary reviewer is capped`

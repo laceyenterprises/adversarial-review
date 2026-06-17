@@ -20,6 +20,7 @@ import {
   geminiMayReviewBuilder,
   normalizeGeminiReviewerMode,
   reviewerRoster,
+  routePR,
   routeSubject,
   GEMINI_REVIEWABLE_BUILDER_CLASSES,
 } from '../src/adapters/subject/github-pr/routing.mjs';
@@ -125,6 +126,34 @@ test('GMW-02 integrity: an operator gemini pin onto a [gemini] PR is stripped', 
     assert.equal(route.geminiIntegrityGuard.blockedReviewerModel, 'gemini', `mode=${mode}`);
     assert.equal(route.geminiIntegrityGuard.fellBackTo, 'codex', `mode=${mode}`);
   }
+});
+
+test('GMW-02 integrity: exported routing helpers strip a gemini pin from [gemini] PRs', () => {
+  const pinnedGeminiConfig = () => ({
+    get(key, fallback = null) {
+      if (key === 'roles.reviewer') return 'gemini';
+      if (key === 'linear.issue_prefix') return 'LAC';
+      return fallback;
+    },
+  });
+
+  const subjectRoute = routeSubject(
+    { builderClass: 'gemini' },
+    { env: {}, loaderImpl: pinnedGeminiConfig },
+  );
+  assert.equal(subjectRoute.reviewerModel, 'codex');
+  assert.equal(subjectRoute.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
+  assert.equal(subjectRoute.geminiIntegrityGuard.blockedReviewerModel, 'gemini');
+  assert.equal(subjectRoute.geminiIntegrityGuard.fellBackTo, 'codex');
+
+  const prRoute = routePR('[gemini] LAC-484: direct route guard', null, {
+    env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' },
+    loaderImpl: pinnedGeminiConfig,
+  });
+  assert.equal(prRoute.reviewerModel, 'codex');
+  assert.equal(prRoute.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
+  assert.equal(prRoute.geminiIntegrityGuard.blockedReviewerModel, 'gemini');
+  assert.equal(prRoute.linearTicketId, 'LAC-484');
 });
 
 test('GMW-02 integrity: gemini may review every non-gemini builder, never gemini', () => {

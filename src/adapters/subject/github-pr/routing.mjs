@@ -249,6 +249,14 @@ function applyGeminiReviewerRoute({
   };
 }
 
+function applyGeminiIntegrityGuard(route) {
+  return applyGeminiReviewerRoute({
+    builderClass: route?.builderClass,
+    baseRoute: route,
+    mode: 'off',
+  });
+}
+
 // reviewer-roster debug surface (SPEC §1 mockup). Returns, for each reviewer
 // model, the builder classes it is eligible to review (cross-model only) plus a
 // gemini status note reflecting the configured mode. The matrix is derived from
@@ -328,12 +336,12 @@ function routeSubject(subject, { env = process.env, topPath, modulePaths, loader
     }
     throw err;
   }
-  return {
+  return applyGeminiIntegrityGuard({
     builderClass,
     tag: tagFromBuilderClass(builderClass),
     reviewerModel: route.reviewerModel,
     botTokenEnv: route.botTokenEnv,
-  };
+  });
 }
 
 function linearIssuePrefix(options = {}) {
@@ -376,6 +384,7 @@ function routePR(prTitle, subject = null, options = {}) {
     tag: route.tag,
     reviewerModel: route.reviewerModel,
     botTokenEnv: route.botTokenEnv,
+    ...(route.geminiIntegrityGuard ? { geminiIntegrityGuard: route.geminiIntegrityGuard } : {}),
     linearTicketId: extractLinearTicketId(prTitle, options),
   };
 }
@@ -395,6 +404,7 @@ export {
   extractLinearTicketId,
   REVIEWER_ROUTE_BY_MODEL,
   ROUTE_BY_BUILDER_CLASS,
+  applyGeminiIntegrityGuard,
   applyGeminiReviewerRoute,
   describeCrossModelReviewWaiver,
   defaultReviewerRouteFromEnv,

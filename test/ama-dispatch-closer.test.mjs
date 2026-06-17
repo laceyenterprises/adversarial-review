@@ -493,6 +493,38 @@ test('cfg.workerClass=claude-code routes the closer to claude-code', async (t) =
   assert.equal(args[args.indexOf('--worker-class') + 1], 'claude-code');
 });
 
+test('cfg.workerClass=gemini routes the closer to gemini with gemini-closer provenance', async (t) => {
+  // GMW-04: gemini is a selectable AMA closer. Only the executing harness
+  // changes — the dispatch shape (--task-kind merge --completion-shape
+  // decision-only) and the generic `${workerClass}-closer` provenance are
+  // unchanged, so the closer attributes as `gemini-closer`.
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-gemini-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'gemini' },
+    dispatchContext: { rootDir },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(result.workerClass, 'gemini');
+  const args = exec.calls[0].args;
+  assert.equal(args[args.indexOf('--worker-class') + 1], 'gemini');
+  // The AMA dispatch shape is unchanged — only the harness differs.
+  assert.equal(args[args.indexOf('--task-kind') + 1], 'merge');
+  assert.equal(args[args.indexOf('--completion-shape') + 1], 'decision-only');
+  assert.ok(write.captured.body.includes('Closed-By: gemini-closer (adversarial-pipe-mode)'));
+});
+
 test('eligible dispatch refuses watcher audit writes when runtime user is not the HQ owner', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-owner-mismatch-'));
   const hqRoot = mkdtempSync(join(tmpdir(), 'ama-hq-owner-mismatch-'));

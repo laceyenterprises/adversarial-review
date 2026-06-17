@@ -88,7 +88,7 @@ dispatcher debugging), see
      adversarial:
        merge_authority:
          enabled: true
-         worker_class: codex     # or claude-code
+         worker_class: codex     # or claude-code or gemini
          merge_method: squash    # or merge — never rebase (SPEC §4.4)
          eligibility:
            risk_classes: [low]   # widen later; start conservative
@@ -165,10 +165,11 @@ dispatcher debugging), see
 
 Cut a low-risk test PR (any work that would normally trip the
 adversarial-review path, e.g. a docs-only change with a worker-class
-title prefix matching the configured class — `[codex]` or
-`[claude-code]`). Expected sequence (substitute `<configured-worker-class>`
+title prefix matching the configured class — `[codex]`, `[claude-code]`,
+or `[gemini]`). Expected sequence (substitute `<configured-worker-class>`
 with the value of `roles.adversarial.merge_authority.worker_class` from
-your CFG; the reviewer/closer identities follow whatever class you
+your CFG; supported values are `codex`, `claude-code`, `hammer`, and
+`gemini`, and the reviewer/closer identities follow whatever class you
 configured, NOT a hardcoded `codex`):
 
 1. Worker opens PR with `[<configured-worker-class>]` prefix.
@@ -181,6 +182,10 @@ configured, NOT a hardcoded `codex`):
    matches `<configured-worker-class>`, `task-kind` is `merge`,
    `completion-shape` is `decision-only`, `project` is
    `adversarial-merge-authority`.
+   For a Gemini cutover, the validation is specifically
+   `hq dispatch --worker-class gemini --task-kind merge --completion-shape decision-only ...`,
+   and the closer provenance trailer below must read
+   `Closed-By: gemini-closer (adversarial-pipe-mode)`.
    Also verify the closer workspace repo set. For a PR whose repo basename is
    not `agent-os`, `workspaceRepos` must include both the PR repo basename and
    `agent-os` because the closer runs Agent OS AMA tooling and writes the audit

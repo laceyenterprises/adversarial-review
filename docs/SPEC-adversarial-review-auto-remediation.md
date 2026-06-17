@@ -6,9 +6,13 @@ _Related: `SPEC.md`, `docs/follow-up-runbook.md`_
 For the AMA closer lane documented in [`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md),
 the operator-facing contract is that closure dispatch uses the configured
 `roles.adversarial.merge_authority.worker_class`, not a hardcoded `codex`
-worker. Validation examples and cutover checks must therefore substitute the
-configured worker class and verify the dispatched `workerClass` against that
-config value.
+worker. Supported closer worker classes are `codex`, `claude-code`, `hammer`,
+and `gemini`. Validation examples and cutover checks must therefore substitute
+the configured worker class and verify the dispatched `workerClass` against
+that config value; for the Gemini harness this means validating an
+`hq dispatch --worker-class gemini --task-kind merge --completion-shape decision-only`
+launch and the generic provenance trailer
+`Closed-By: gemini-closer (adversarial-pipe-mode)`.
 
 AMA closer dispatch must also declare the workspace repo set required by the
 closer prompt. The PR repository is always passed as the primary `--repo`. When

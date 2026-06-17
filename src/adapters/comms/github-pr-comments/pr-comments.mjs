@@ -8,7 +8,8 @@
 //
 // Identity: the comment posts under the worker's matching reviewer-bot PAT
 // (claude-code worker → `GH_CLAUDE_REVIEWER_TOKEN`,
-//  codex worker → `GH_CODEX_REVIEWER_TOKEN`). The body header always names
+//  codex worker → `GH_CODEX_REVIEWER_TOKEN`,
+//  gemini worker → `GH_GEMINI_REVIEWER_TOKEN`). The body header always names
 // "Remediation Worker (<class>)" so the actual role is unambiguous even
 // though the GitHub identity says "...-reviewer-lacey".
 //
@@ -21,6 +22,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from '../../../follow-up-jobs.mjs';
+import { preflightGeminiReviewerToken } from '../../../gemini-reviewer-preflight.mjs';
 import { awaitThrottleIfNeeded } from '../../../rate-limit-throttle.mjs';
 import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
@@ -47,7 +49,7 @@ const BULLET_LIST_MAX_ITEMS = 25;
 const WORKER_CLASS_TO_BOT_TOKEN_ENV = {
   codex: 'GH_CODEX_REVIEWER_TOKEN',
   'claude-code': 'GH_CLAUDE_REVIEWER_TOKEN',
-  gemini: 'GH_CODEX_REVIEWER_TOKEN',
+  gemini: 'GH_GEMINI_REVIEWER_TOKEN',
   pi: 'GH_CODEX_REVIEWER_TOKEN',
   opencode: 'GH_CODEX_REVIEWER_TOKEN',
   hermes: 'GH_CODEX_REVIEWER_TOKEN',
@@ -972,6 +974,22 @@ async function postRemediationOutcomeComment({
       `[pr-comments] skipping comment: no bot-token env mapping for worker class "${workerClass}"`
     );
     return { posted: false, reason: 'no-token-mapping', workerClass };
+  }
+
+  try {
+    preflightGeminiReviewerToken({ env, botTokenEnv: tokenEnvName });
+  } catch (err) {
+    const message = err?.message || String(err);
+    log.error?.(
+      `[pr-comments] skipping comment: Gemini reviewer token preflight failed for worker class "${workerClass}": ${message}`
+    );
+    return {
+      posted: false,
+      reason: 'gemini-token-preflight-failed',
+      tokenEnvName,
+      workerClass,
+      error: message,
+    };
   }
 
   const token = env[tokenEnvName];

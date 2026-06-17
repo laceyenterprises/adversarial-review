@@ -435,6 +435,7 @@ const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
+  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
 });
 let lastEtagCacheSweepAtMs = 0;
 
@@ -6135,6 +6136,7 @@ export {
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
   resolvePendingDraftRespawnAgeSeconds,
+  resolveReviewerIdentity,
   resolveStuckDispatchAlertDebounceMs,
   resolveWatcherDrainMaxMs,
   resolveFirstPassReviewerPoolConfig,

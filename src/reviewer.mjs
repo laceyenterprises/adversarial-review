@@ -41,6 +41,7 @@ import {
 } from './prompt-context.mjs';
 import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
+import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
@@ -58,6 +59,16 @@ import { fetchPullRequestReviewContext } from './github-api.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
+
+const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
+  GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
+  GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
+  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
+});
+
+function resolveReviewerIdentityForBotTokenEnv(botTokenEnv, fallbackIdentity = null) {
+  return REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV[botTokenEnv] || fallbackIdentity || botTokenEnv;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1198,6 +1209,15 @@ function createReviewerPreWriteLogProxy(log = console) {
 // fail, log and continue — the post may still succeed, and a failure here is
 // strictly less bad than the leak it's trying to prevent.
 async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync, opts = {}) {
+  // GMW-06 safety net: a gemini reviewer must never silently mis-post under
+  // another identity's token, and the legacy GEMINI_REVIEWER_GH_TOKEN item name
+  // must never leak into the runtime. Fails closed with a legible error before
+  // we read/use any token.
+  preflightGeminiReviewerToken({
+    env: process.env,
+    botTokenEnv,
+    reviewerIdentity: opts.reviewerIdentity,
+  });
   let token = process.env[botTokenEnv];
   if (!token) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
@@ -1205,7 +1225,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
 
   const prepareReviewWrite = opts.prepareReviewWrite || clearPendingReviewsForSelf;
   const log = opts.log || console;
-  const reviewerIdentity = opts.reviewerIdentity || botTokenEnv;
+  const refreshIdentity = resolveReviewerIdentityForBotTokenEnv(botTokenEnv, opts.reviewerIdentity);
   let refreshedAfterAuthFailure = false;
 
   const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, opts.env || process.env);
@@ -1254,7 +1274,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             preWriteSaw401: preWriteLog.tracker.saw401,
           });
           if (!refreshedAfterAuthFailure && authRetryable) {
-            const refreshed = await resolveReviewerAppToken(reviewerIdentity, {
+            const refreshed = await resolveReviewerAppToken(refreshIdentity, {
               env: process.env,
               fetchImpl: opts.fetchImpl,
               readFileImpl: opts.readFileImpl,
@@ -1265,7 +1285,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               );
               return null;
             });
-            if (refreshed?.token) {
+            if (refreshed?.token && refreshed.envVar === botTokenEnv) {
               refreshedAfterAuthFailure = true;
               token = refreshed.token;
               log.warn?.(
@@ -1274,6 +1294,11 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               throw new ReviewerPostAuthRefreshRetryableError(
                 `Retry GitHub review post after refreshing ${botTokenEnv}`,
                 { cause: err }
+              );
+            }
+            if (refreshed?.token && refreshed.envVar !== botTokenEnv) {
+              log.warn?.(
+                `[reviewer] refused refreshed ${refreshed.envVar || '<unknown>'} token for ${botTokenEnv} after GitHub auth failure`
               );
             }
           }
@@ -1325,6 +1350,11 @@ async function postGitHubReviewWithCapture({
   reviewerIdentity = null,
   reviewerTokenFetchTimeoutMs = undefined,
 } = {}) {
+  // GMW-06: run the gemini-reviewer preflight before the generic env check so a
+  // gemini post with an unresolved token fails with the legible runbook-naming
+  // error (and the legacy-conflict guard fires) rather than the bare
+  // "Missing env var" — and never falls through to another identity's token.
+  preflightGeminiReviewerToken({ env: process.env, botTokenEnv, reviewerIdentity });
   const initialToken = process.env[botTokenEnv];
   if (!initialToken) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
@@ -1629,7 +1659,10 @@ async function main() {
       botTokenEnv,
       passKind,
       reviewerSpawnToken,
-      reviewerIdentity: effectiveModel === 'codex' ? 'codex-reviewer-lacey' : 'claude-reviewer-lacey',
+      reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
+        botTokenEnv,
+        effectiveModel === 'codex' ? 'codex-reviewer-lacey' : 'claude-reviewer-lacey'
+      ),
       execFileImpl: execFileAsync,
       log: console,
     });
@@ -1718,6 +1751,7 @@ const __test__ = {
   postGitHubReviewWithCapture,
   isRetryableGhTransportError,
   isReviewerPostAuthFailure,
+  resolveReviewerIdentityForBotTokenEnv,
 };
 
 export {

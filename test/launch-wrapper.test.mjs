@@ -197,6 +197,11 @@ async function runMaintainerWatcherLauncher(scriptName, {
 	      + '    echo "[reviewer-broker] simulated broker failure for $2" >&2\n'
 	      + '    return 1\n'
 	      + '  fi\n'
+	      + '  if [[ "${TEST_REVIEWER_BROKER_MODE:-healthy}" == "blank-gemini" && "$2" == "gemini-reviewer" ]]; then\n'
+	      + '    export "$1="\n'
+	      + '    echo "[reviewer-broker] resolved empty $1 via OAuth broker" >&2\n'
+	      + '    return 0\n'
+	      + '  fi\n'
 	      + '  export "$1=broker-token"\n'
 	      + '  echo "[reviewer-broker] resolved $1 via OAuth broker" >&2\n'
 	      + '  return 0\n'
@@ -500,6 +505,76 @@ test('broker-mode launchers sleep before fail-closed exit when broker is unavail
     assert.equal(result.code, 1, `${scriptName} stderr:\n${result.stderr}`);
     assert.match(result.stderr, /broker fetch failed/);
     assert.equal(result.sleepLog.trim(), '3600', `${scriptName} sleep log:\n${result.sleepLog}`);
+  }
+});
+
+test('watcher launchers recover by unsetting legacy GEMINI_REVIEWER_GH_TOKEN env var', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const result = await runMaintainerWatcherLauncher(scriptName, {
+      extraEnv: {
+        LINEAR_API_KEY: 'linear-test-token',
+        ...BROKER_MODE_TEST_ENV,
+        GEMINI_REVIEWER_GH_TOKEN: 'ghs_leaked_item_named_value',
+      },
+    });
+    assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
+    assert.match(result.stderr, /legacy GEMINI_REVIEWER_GH_TOKEN env var is present/);
+    assert.match(result.stderr, /adversarial-review consumes GH_GEMINI_REVIEWER_TOKEN only/);
+    assert.match(result.stderr, /unsetting GEMINI_REVIEWER_GH_TOKEN and continuing canonical token resolution/);
+    assert.match(result.stderr, /docs\/RUNBOOK-gemini-reviewer-app\.md/);
+    assert.doesNotMatch(result.stderr, /GH_GEMINI_REVIEWER_TOKEN unresolved/);
+    assert.equal(result.sleepLog.trim(), '', `${scriptName} sleep log:\n${result.sleepLog}`);
+  }
+});
+
+test('watcher launchers resolve the gemini reviewer token via the broker and assert it is non-empty', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const result = await runMaintainerWatcherLauncher(scriptName, {
+      extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+    });
+    assert.equal(result.code, 0, `${scriptName} stderr:\n${result.stderr}`);
+    // The non-empty gemini preflight assertion must NOT fire on the healthy path.
+    assert.doesNotMatch(result.stderr, /GH_GEMINI_REVIEWER_TOKEN unresolved/);
+  }
+});
+
+test('placey watcher launcher fails closed when the gemini reviewer token resolves empty', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start-placey.sh', {
+    brokerMode: 'blank-gemini',
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
+  assert.match(result.stderr, /GH_GEMINI_REVIEWER_TOKEN unresolved/);
+  assert.match(result.stderr, /docs\/RUNBOOK-gemini-reviewer-app\.md/);
+  assert.equal(result.sleepLog.trim(), '3600', `sleep log:\n${result.sleepLog}`);
+});
+
+test('watcher start scripts carry the gemini reviewer wiring + preflight', () => {
+  for (const scriptName of [
+    'adversarial-watcher-start.sh',
+    'adversarial-watcher-start-placey.sh',
+  ]) {
+    const script = readScript(scriptName);
+    assert.match(script, /resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer/);
+    assert.match(script, /op:\/\/Cliovault\/GEMINI_REVIEWER_GH_TOKEN\/token/);
+    assert.match(
+      script,
+      /gemini reviewer selected but GH_GEMINI_REVIEWER_TOKEN unresolved — check the op\.env mapping for GEMINI_REVIEWER_GH_TOKEN \(see docs\/RUNBOOK-gemini-reviewer-app\.md\)/,
+    );
+    // Must NOT export the 1Password item name into the runtime.
+    assert.doesNotMatch(script, /export GEMINI_REVIEWER_GH_TOKEN(=|\b)/);
   }
 });
 

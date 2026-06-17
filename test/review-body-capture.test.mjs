@@ -172,6 +172,8 @@ test('reviewer capture uses the refreshed token after a 401-triggered post retry
   await withEnv({
     GH_CODEX_REVIEWER_TOKEN: 'ghs_stale_token',
     CODEX_REVIEWER_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID: '333',
+    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID: '126',
     OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
   }, () => postGitHubReviewWithCapture({
     rootDir,
@@ -199,7 +201,7 @@ test('reviewer capture uses the refreshed token after a 401-triggered post retry
           return {
             access_token: 'ghs_fresh_token',
             provider: 'github-app-codex-reviewer',
-            metadata: {},
+            metadata: { app_id: '333', installation_id: '126' },
             expires_at: '2026-05-29T13:01:00.000Z',
           };
         },

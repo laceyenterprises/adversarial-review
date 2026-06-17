@@ -159,6 +159,8 @@ test('postGitHubReview refreshes the reviewer App token once after a 401 and ret
     await withEnv({
       GH_CLAUDE_REVIEWER_TOKEN: 'ghs_stale_token',
       CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID: '111',
+      OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID: '42',
       OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
       ADVERSARIAL_REVIEW_STATE_DIR: stateDir,
     }, async () => {
@@ -197,7 +199,7 @@ test('postGitHubReview refreshes the reviewer App token once after a 401 and ret
                 return {
                   access_token: 'ghs_fresh_token',
                   provider: 'github-app-claude-reviewer',
-                  metadata: {},
+                  metadata: { app_id: '111', installation_id: '42' },
                   expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
                 };
               },
@@ -211,6 +213,80 @@ test('postGitHubReview refreshes the reviewer App token once after a 401 and ret
     assert.equal(ghCalls, 2);
     assert.deepEqual(prepareTokens, ['ghs_stale_token', 'ghs_fresh_token']);
     assert.deepEqual(ghTokens, ['ghs_stale_token', 'ghs_fresh_token']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('postGitHubReview refreshes Gemini by botTokenEnv even when reviewerIdentity is stale', async () => {
+  const rootDir = makeRootDir('reviewer-post-gemini-refresh-retry-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const prepareTokens = [];
+    const ghTokens = [];
+    let brokerCalls = 0;
+    let ghCalls = 0;
+    await withEnv({
+      GH_GEMINI_REVIEWER_TOKEN: 'ghs_stale_gemini',
+      GH_CLAUDE_REVIEWER_TOKEN: 'ghs_stale_claude',
+      GEMINI_REVIEWER_AUTH_VIA_BROKER: 'true',
+      CLAUDE_REVIEWER_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID: '222',
+      OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_INSTALLATION_ID: '84',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
+      ADVERSARIAL_REVIEW_STATE_DIR: stateDir,
+      GEMINI_REVIEWER_GH_TOKEN: undefined,
+    }, async () => {
+      await postGitHubReview(
+        'laceyenterprises/adversarial-review',
+        177,
+        'body',
+        'GH_GEMINI_REVIEWER_TOKEN',
+        async (_command, _args, options) => {
+          ghCalls += 1;
+          ghTokens.push(options.env.GH_TOKEN);
+          if (ghCalls === 1) {
+            const err = new Error('gh review failed');
+            err.stderr = 'HTTP 401 Unauthorized';
+            throw err;
+          }
+          return { stdout: '', stderr: '' };
+        },
+        {
+          rootDir,
+          reviewerIdentity: 'claude-reviewer-lacey',
+          prepareReviewWrite: async ({ token, log }) => {
+            prepareTokens.push(token);
+            if (prepareTokens.length === 1) {
+              log.warn?.('[reviewer-pre-write] self-login probe returned HTTP 401');
+            }
+            return { cleared: 0, listed: 0 };
+          },
+          fetchImpl: async (url) => {
+            brokerCalls += 1;
+            assert.match(url, /\/token\?provider=github-app-gemini-reviewer$/);
+            assert.doesNotMatch(url, /github-app-claude-reviewer/);
+            return {
+              ok: true,
+              status: 200,
+              async json() {
+                return {
+                  access_token: 'ghs_fresh_gemini',
+                  provider: 'github-app-gemini-reviewer',
+                  metadata: { app_id: '222', installation_id: '84' },
+                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+                };
+              },
+            };
+          },
+          readFileImpl: () => 'broker-shared-secret',
+        },
+      );
+    });
+    assert.equal(brokerCalls, 1);
+    assert.equal(ghCalls, 2);
+    assert.deepEqual(prepareTokens, ['ghs_stale_gemini', 'ghs_fresh_gemini']);
+    assert.deepEqual(ghTokens, ['ghs_stale_gemini', 'ghs_fresh_gemini']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

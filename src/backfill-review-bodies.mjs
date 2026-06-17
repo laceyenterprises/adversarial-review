@@ -16,11 +16,16 @@ const REVIEWER_LOGIN_BY_CLASS = new Map([
   ['claude', 'claude-reviewer-lacey'],
   ['claude-code', 'claude-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
-  ['gemini', 'gemini-reviewer-lacey'],
+  ['gemini', 'codex-reviewer-lacey'],
   ['pi', 'codex-reviewer-lacey'],
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
   ['opencode', 'codex-reviewer-lacey'],
   ['hermes', 'codex-reviewer-lacey'],
+]);
+const REVIEWER_LOGIN_BY_MODEL = new Map([
+  ['claude', 'claude-reviewer-lacey'],
+  ['codex', 'codex-reviewer-lacey'],
+  ['gemini', 'gemini-reviewer-lacey'],
 ]);
 const BODY_CAPTURE_GRACE_MS = 5 * 60 * 1000;
 const REMEDIATION_MARKER_REQUIRED_FROM = '2026-05-04T00:00:00.000Z';
@@ -40,7 +45,11 @@ function closeOwnedReviewDb(db) {
   db?.close();
 }
 
-function reviewerLoginForClass(value) {
+function reviewerLoginForClass(value, row = null) {
+  const reviewerModel = String(row?.reviewer_model || '').trim().toLowerCase();
+  if (REVIEWER_LOGIN_BY_MODEL.has(reviewerModel)) {
+    return REVIEWER_LOGIN_BY_MODEL.get(reviewerModel);
+  }
   const normalized = String(value || '').trim().toLowerCase();
   return REVIEWER_LOGIN_BY_CLASS.get(normalized) || null;
 }
@@ -178,7 +187,7 @@ function buildReviewerPassQuery({ repo = null, since = null, limit = null } = {}
   }
   const limitClause = Number.isInteger(limit) ? ` LIMIT ${limit}` : '';
   return {
-    sql: `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, started_at, ended_at, status, reviewer_class
+    sql: `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, started_at, ended_at, status, reviewer_class, reviewer_model
             FROM reviewer_passes
            WHERE ${where.join(' AND ')}
            ORDER BY repo, pr_number, attempt_number, pass_kind${limitClause}`,
@@ -262,7 +271,7 @@ function remediationRowAllowsLegacyFallback(row) {
 }
 
 function matchReviewerPassArtifact(row, { reviews, comments }) {
-  const login = reviewerLoginForClass(row.reviewer_class);
+  const login = reviewerLoginForClass(row.reviewer_class, row);
   if (!login) return { matched: null, reason: 'login_mismatch' };
 
   if (row.pass_kind === 'first-pass' || row.pass_kind === 'rereview') {

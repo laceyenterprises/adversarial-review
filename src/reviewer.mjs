@@ -1197,6 +1197,47 @@ function buildGeminiReviewArgs({ model }) {
   return ['-m', model, '-o', 'text', '--prompt', ''];
 }
 
+function isRetryableGeminiSubprocessError(err) {
+  const detail = buildGhErrorDetail(err);
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|tls)\b/.test(detail)
+    || detail.includes('timeout')
+    || detail.includes('timed out')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable')
+    || detail.includes('socket hang up')
+    || detail.includes('network')
+    || detail.includes('connection reset')
+    || detail.includes('connection refused')
+    || detail.includes('service unavailable')
+    || detail.includes('503')
+    || detail.includes('504')
+    || detail.includes('429')
+    || detail.includes('rate limit');
+}
+
+async function withGeminiSubprocessRetry(operation, {
+  retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+  log = console,
+} = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableGeminiSubprocessError(err) || attempt >= retryDelaysMs.length) {
+        throw err;
+      }
+      log.warn?.(
+        `[reviewWithGemini] transient Gemini subprocess failure on attempt ${attempt + 1}/${retryDelaysMs.length + 1}; retrying: ${err?.message || err}`
+      );
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastErr;
+}
+
 async function spawnGeminiReview({
   geminiCli = GEMINI_CLI,
   prompt,
@@ -1231,6 +1272,8 @@ async function reviewWithGemini(diff, extraContext = '', {
   promptStage = 'first',
   assertOAuthImpl = assertGeminiOAuth,
   spawnGeminiReviewImpl = spawnGeminiReview,
+  retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
 } = {}) {
   console.error('[reviewWithGemini] asserting OAuth...');
   await assertOAuthImpl();
@@ -1252,15 +1295,18 @@ async function reviewWithGemini(diff, extraContext = '', {
   let stderr = '';
   try {
     console.error(`[reviewWithGemini] invoking native Gemini CLI (model=${model})`);
-    const result = await spawnGeminiReviewImpl({
-      geminiCli: GEMINI_CLI,
-      prompt,
-      model,
-      env,
-      cwd: process.cwd(),
-      timeout: resolveReviewerTimeoutMs(env),
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    const result = await withGeminiSubprocessRetry(
+      () => spawnGeminiReviewImpl({
+        geminiCli: GEMINI_CLI,
+        prompt,
+        model,
+        env,
+        cwd: process.cwd(),
+        timeout: resolveReviewerTimeoutMs(env),
+        maxBuffer: 10 * 1024 * 1024,
+      }),
+      { retryDelaysMs, sleepImpl },
+    );
     stdout = result.stdout || '';
     stderr = result.stderr || '';
   } catch (err) {
@@ -1988,6 +2034,7 @@ const __test__ = {
   resolveGeminiReviewerModel,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
+  isRetryableGeminiSubprocessError,
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,

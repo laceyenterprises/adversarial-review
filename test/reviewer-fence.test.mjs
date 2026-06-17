@@ -900,6 +900,46 @@ test('processQueuedFenceCleanupJobs drains queued cleanup jobs', async () => {
   }
 });
 
+test('processQueuedFenceCleanupJobs resolves Gemini cleanup jobs to the Gemini token env', async () => {
+  const rootDir = makeRootDir('watcher-fence-gemini-cleanup-');
+  try {
+    const stateDir = path.join(rootDir, 'data');
+    const fence = openReviewerFence({
+      stateDir,
+      spawnToken: '88888888-8888-4888-8888-888888888888',
+      repo: 'laceyenterprises/adversarial-review',
+      pr: 315,
+      identity: 'gemini-reviewer-lacey',
+    });
+    const activeSpawnMap = new Map([[
+      fence.record.spawnToken,
+      { ...fence.record, repo: 'laceyenterprises/adversarial-review' },
+    ]]);
+    await waitForActiveReviewerFencesOnSigterm({
+      stateDir,
+      graceSeconds: 1,
+      staleTtlSeconds: 90,
+      activeSpawnMap,
+      sleepImpl: async () => {},
+    });
+    const calls = [];
+    await withEnv({ GH_GEMINI_REVIEWER_TOKEN: 'gemini-token' }, () => processQueuedFenceCleanupJobs({
+      stateDir,
+      clearPendingReviewsImpl: async (args) => {
+        calls.push(args);
+        return { cleared: 1 };
+      },
+    }));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].repo, 'laceyenterprises/adversarial-review');
+    assert.equal(calls[0].token, 'gemini-token');
+    assert.equal(listCleanupJobs(stateDir).length, 0);
+    fence.clear();
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('processQueuedFenceCleanupJobs quarantines corrupt cleanup jobs and continues', async () => {
   const rootDir = makeRootDir('watcher-fence-corrupt-cleanup-');
   try {

@@ -26,6 +26,7 @@ const {
   resolveGeminiReviewerModel,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
+  isRetryableGeminiSubprocessError,
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
@@ -736,12 +737,44 @@ test('reviewWithGemini wraps non-auth spawn failures as a Gemini exec error', as
       assertOAuthImpl: async () => {},
       spawnGeminiReviewImpl: async () => {
         const err = new Error('spawn ENOENT');
-        err.stderr = 'transient network blip';
+        err.stderr = 'invalid command-line flag';
         throw err;
       },
     }),
     (err) => err?.isOAuthError !== true && /Gemini exec failed/.test(err.message),
   );
+});
+
+test('reviewWithGemini retries transient Gemini subprocess failures before succeeding', async () => {
+  const attempts = [];
+  const sleeps = [];
+  const result = await reviewWithGemini('+diff\n', '', {
+    assertOAuthImpl: async () => {},
+    retryDelaysMs: [0, 0],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    spawnGeminiReviewImpl: async () => {
+      attempts.push('spawn');
+      if (attempts.length < 3) {
+        const err = new Error('Command failed');
+        err.code = attempts.length === 1 ? 'ETIMEDOUT' : 'ECONNRESET';
+        err.stderr = attempts.length === 1
+          ? 'TLS handshake timeout'
+          : '503 service unavailable';
+        throw err;
+      }
+      return { stdout: '## Verdict\n\nComment only', stderr: '' };
+    },
+  });
+
+  assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null });
+  assert.equal(attempts.length, 3);
+  assert.deepEqual(sleeps, [0, 0]);
+});
+
+test('Gemini subprocess retry classifier does not retry auth failures', () => {
+  const err = new Error('Command failed');
+  err.stderr = '401 Unauthorized login required';
+  assert.equal(isRetryableGeminiSubprocessError(err), false);
 });
 
 test('reviewer selection routes gemini to reviewWithGemini, never reviewWithCodex', async () => {

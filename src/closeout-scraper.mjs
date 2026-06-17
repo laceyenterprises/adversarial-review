@@ -36,6 +36,8 @@ const DEFAULT_MAX_ATTEMPTS = DEFAULT_RETRY_BACKOFF_MS.length + 1;
 // Both reviewer-side AND builder-side defensive fallbacks are encoded here:
 //   - reviewer-side: 'claude' → claude-reviewer-lacey, 'codex' → codex-reviewer-lacey
 //     (these are the values reviewer_class / reviewer_model authoritatively hold).
+//     Native Gemini rows are resolved from reviewer_model, not this fallback
+//     map, so historical [gemini] builder-tag rows still exclude Codex.
 //   - builder-side defensive fallbacks: in legacy rows or job-schema corruption
 //     paths, the *builder* tag can end up in reviewer_class. For those rows we
 //     must exclude the actual *reviewer* bot per the cross-model routing table.
@@ -51,11 +53,16 @@ const REVIEWER_LOGIN_BY_CLASS = new Map([
   ['claude-code', 'codex-reviewer-lacey'],
   ['clio-agent', 'codex-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
-  ['gemini', 'gemini-reviewer-lacey'],
+  ['gemini', 'codex-reviewer-lacey'],
   ['pi', 'codex-reviewer-lacey'],
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
   ['opencode', 'codex-reviewer-lacey'],
   ['hermes', 'codex-reviewer-lacey'],
+]);
+const REVIEWER_LOGIN_BY_MODEL = new Map([
+  ['claude', 'claude-reviewer-lacey'],
+  ['codex', 'codex-reviewer-lacey'],
+  ['gemini', 'gemini-reviewer-lacey'],
 ]);
 
 // Builder-bot identities that can self-comment on their own PRs (status
@@ -93,7 +100,11 @@ function parseIsoMs(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function reviewerLoginForClass(value) {
+function reviewerLoginForClass(value, row = null) {
+  const reviewerModel = String(row?.reviewer_model || '').trim().toLowerCase();
+  if (REVIEWER_LOGIN_BY_MODEL.has(reviewerModel)) {
+    return REVIEWER_LOGIN_BY_MODEL.get(reviewerModel);
+  }
   return REVIEWER_LOGIN_BY_CLASS.get(String(value || '').trim().toLowerCase()) || null;
 }
 

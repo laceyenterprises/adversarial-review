@@ -57,12 +57,13 @@ function baseArgs(rootDir) {
 test('AMA authoritative reviewer login resolver follows canonical reviewer routing aliases', () => {
   const claudeLogins = ['lacey-claude-reviewer', 'claude-reviewer-lacey'];
   const codexLogins = ['lacey-codex-reviewer', 'codex-reviewer-lacey'];
+  const geminiLogins = ['lacey-gemini-reviewer', 'gemini-reviewer-lacey'];
   const cases = [
     ['claude', claudeLogins],
     ['claude-code', claudeLogins],
     ['clio-agent', claudeLogins],
     ['codex', codexLogins],
-    ['gemini', codexLogins],
+    ['gemini', geminiLogins],
     ['pi', codexLogins],
     ['opencode', codexLogins],
     ['hermes', codexLogins],
@@ -76,6 +77,38 @@ test('AMA authoritative reviewer login resolver follows canonical reviewer routi
       expected,
       reviewerModel,
     );
+  }
+});
+
+test('AMA live review reconciliation uses Gemini reviewer authority for native Gemini reviews', async () => {
+  const rootDir = tempRoot();
+  try {
+    let fetchOptions = null;
+    const seenReviewStates = [];
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      reviewStateRow: {
+        ...baseArgs(rootDir).reviewStateRow,
+        reviewer: 'gemini',
+      },
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, _head, options) => {
+        fetchOptions = options;
+        return ['## Summary\n\nLooks settled.\n\n## Verdict\n\nComment only'];
+      },
+      maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
+        seenReviewStates.push(reviewState);
+        return { dispatched: true, reason: reviewState.verdict };
+      },
+    });
+
+    assert.deepEqual(fetchOptions?.authoritativeReviewerLogins, [
+      'lacey-gemini-reviewer',
+      'gemini-reviewer-lacey',
+    ]);
+    assert.equal(seenReviewStates[0].verdict, 'comment-only');
+    assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
   }
 });
 

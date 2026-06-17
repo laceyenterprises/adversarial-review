@@ -56,6 +56,10 @@ test('GMW-02 off: routing is the pre-GMW cross-model reviewer (no gemini)', () =
     'claude-code': 'codex',
     codex: 'claude',
     'clio-agent': 'claude',
+    gemini: 'codex',
+    pi: 'codex',
+    opencode: 'codex',
+    hermes: 'codex',
   };
   for (const [builderClass, expected] of Object.entries(cases)) {
     const base = baseRouteFor(builderClass);

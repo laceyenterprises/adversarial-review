@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 
 import {
   primaryReviewerQuotaCappedForRow,
+  resolveGeminiReviewerModeForWatcher,
   selectReviewerRouteForAttempt,
   shouldBypassPrimaryReviewerQuotaHold,
 } from '../src/watcher.mjs';
@@ -186,6 +187,19 @@ test('GMW-02 watcher: always-on gemini bypasses replaced primary quota holds onl
 
   assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, primaryCappedRow), true);
   assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, geminiCappedRow), false);
+});
+
+test('GMW-02 watcher: invalid gemini mode resolution fails closed to off', () => {
+  const failure = new Error('reviewer.gemini.mode must be one of: off, fallback, always-on');
+  const resolved = resolveGeminiReviewerModeForWatcher({
+    env: { ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE: 'typo' },
+    resolver() {
+      throw failure;
+    },
+  });
+
+  assert.equal(resolved.mode, 'off');
+  assert.equal(resolved.error, failure);
 });
 
 test('GMW-02 watcher: existing-row routing updates happen only after spawn claim', () => {

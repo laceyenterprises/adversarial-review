@@ -2992,6 +2992,17 @@ function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
   );
 }
 
+function resolveGeminiReviewerModeForWatcher({
+  env = process.env,
+  resolver = resolveGeminiReviewerMode,
+} = {}) {
+  try {
+    return { mode: resolver({ env }), error: null };
+  } catch (err) {
+    return { mode: 'off', error: err };
+  }
+}
+
 function selectReviewerRouteForAttempt({
   subject,
   baseRoute,
@@ -5361,16 +5372,13 @@ async function pollOnce(
       // The integrity hard guard inside applyGeminiReviewerRoute also strips any
       // gemini-on-gemini route that an operator `roles.reviewer=gemini` pin
       // could otherwise produce.
-      let geminiReviewerMode = 'always-on';
-      try {
-        geminiReviewerMode = resolveGeminiReviewerMode({ env: process.env });
-      } catch (err) {
-        // Config was already validated above (configBroken returns earlier in
-        // the loop); default to the operator-decided always-on if a late read
-        // somehow throws so a config hiccup never strands the lane.
-        console.warn(
+      const geminiModeResolution = resolveGeminiReviewerModeForWatcher({ env: process.env });
+      const geminiReviewerMode = geminiModeResolution.mode;
+      if (geminiModeResolution.error) {
+        console.error(
           `[watcher] gemini reviewer-mode resolve failed for ${repoPath}#${prNumber}: ` +
-            `${err?.message || err}; defaulting to always-on`
+            `${geminiModeResolution.error?.message || geminiModeResolution.error}; ` +
+            `fail-closed to reviewer.gemini.mode=off`
         );
       }
       const geminiBaseRoute = applyGeminiReviewerRoute({
@@ -5652,7 +5660,8 @@ async function pollOnce(
           if (shouldBypassPrimaryReviewerQuotaHold(route, preRoutingUpdateRow)) {
             console.log(
               `[watcher] Bypassing quota hold for ${repoPath}#${prNumber}: ` +
-                `reviewer.gemini.mode=fallback selected gemini while primary reviewer is capped`
+                `reviewer.gemini.mode=${route.geminiReviewerSelection?.mode || geminiReviewerMode} ` +
+                `selected gemini while replaced reviewer is capped`
             );
           } else {
             console.log(
@@ -6269,6 +6278,7 @@ export {
   retryPendingMergeCloseouts,
   primaryReviewerQuotaCappedForRow,
   shouldBypassPrimaryReviewerQuotaHold,
+  resolveGeminiReviewerModeForWatcher,
   selectReviewerRouteForAttempt,
   shouldDeferReviewForActiveFollowUp,
   shouldRetryMergeAgentLifecycleCleanup,

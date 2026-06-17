@@ -142,9 +142,10 @@ prefix (internal worker classes) for the GitHub-PR domain, and by
 not a heuristic, because heuristic routing would re-introduce same-model review
 under load. Operators can deliberately pin the first-pass reviewer with
 `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|gemini`; when unset, the base
-opposite-agent route is Codex PRs to Claude and Claude/Clio/Gemini-family PRs
-to Codex, then `reviewer.gemini.mode=always-on` routes Codex, Claude Code, and
-Clio first-pass reviews to Gemini by default. Gemini never reviews Gemini-built
+opposite-agent route is Codex PRs to Claude, Claude Code PRs to Codex, Clio
+PRs to Claude because Clio dispatches Codex-family writers, and Gemini-family
+PRs to Codex. `reviewer.gemini.mode=always-on` then routes Codex, Claude Code,
+and Clio first-pass reviews to Gemini by default. Gemini never reviews Gemini-built
 PRs; those stay on Codex even under a Gemini pin. Invalid override values fail
 at watcher startup with a `FATAL config` log line, and same-family override pins
 are stamped into the posted review body as an explicit waiver of the default

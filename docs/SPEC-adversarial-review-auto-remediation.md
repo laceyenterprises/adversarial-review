@@ -196,8 +196,10 @@ for every supported title prefix:
 
 - `[codex]` PRs route first-pass review to Claude and use
   `GH_CLAUDE_REVIEWER_TOKEN`.
-- `[claude-code]` and `[clio-agent]` PRs route first-pass review to Codex and
+- `[claude-code]` PRs route first-pass review to Codex and
   use `GH_CODEX_REVIEWER_TOKEN`.
+- `[clio-agent]` PRs route first-pass review to Claude and use
+  `GH_CLAUDE_REVIEWER_TOKEN` because Clio dispatches Codex-family writers.
 - `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs also route first-pass
   review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
 

@@ -116,6 +116,28 @@ test('a claude-harness quota cap is also held (both harnesses we know the shape 
   assert.equal(reconciled.job.remediationPlan.retryHistory.at(-1).retryMetadata.harness, 'claude');
 });
 
+test('a gemini-harness quota cap is also held (GMW-03 regression: generic resource_exhausted shape)', async () => {
+  // GMW-03 makes gemini a real remediation worker class. The gemini CLI
+  // surfaces a hard cap as a RESOURCE_EXHAUSTED / "Quota exceeded" shape,
+  // which the shared GENERIC_QUOTA_PATTERNS already match — so a capped
+  // gemini remediation worker holds-until-recovery exactly like codex/claude
+  // instead of terminal-failing. Gemini gives no parseable reset, so it lands
+  // on the fixed fallback window.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const log = `[reviewer] gemini remediation worker starting...
+{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for quota metric 'Gemini requests'."}}`;
+  const reconciled = await reconcileDeadWorkerWithLog(rootDir, log);
+
+  assert.equal(reconciled.reconciled, false);
+  assert.equal(reconciled.reason, 'quota-exhausted');
+  assert.equal(reconciled.job.status, 'pending');
+  const expected = new Date(Date.parse('2026-06-16T10:05:00.000Z') + 15 * 60 * 1000).toISOString();
+  assert.equal(reconciled.job.remediationPlan.retryAfter, expected);
+  const historyEntry = reconciled.job.remediationPlan.retryHistory.at(-1);
+  assert.equal(historyEntry.retryMetadata.code, 'quota-exhausted');
+  assert.equal(historyEntry.retryMetadata.source, 'fallback-window');
+});
+
 test('a quota cap with no parseable reset falls back to a fixed hold window', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const reconciled = await reconcileDeadWorkerWithLog(rootDir, 'Error: you are out of credits');

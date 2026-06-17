@@ -168,9 +168,9 @@ adversarial-review path, e.g. a docs-only change with a worker-class
 title prefix matching the configured class — `[codex]`, `[claude-code]`,
 or `[gemini]`). Expected sequence (substitute `<configured-worker-class>`
 with the value of `roles.adversarial.merge_authority.worker_class` from
-your CFG; supported values are `codex`, `claude-code`, and `gemini`, and
-the reviewer/closer identities follow whatever class you configured, NOT
-a hardcoded `codex`):
+your CFG; supported values are `codex`, `claude-code`, `hammer`, and
+`gemini`, and the reviewer/closer identities follow whatever class you
+configured, NOT a hardcoded `codex`):
 
 1. Worker opens PR with `[<configured-worker-class>]` prefix.
 2. Adversarial-watcher posts the cross-class reviewer review

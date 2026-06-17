@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2682,6 +2682,28 @@ test('AMA merge_authority accepts gemini as closer worker class in Node loader',
     assert.equal(cfg.getMergeAuthorityConfig().workerClass, 'gemini');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA merge_authority public docs list the Node loader worker_class enum', () => {
+  const source = readFileSync(join(REPO_ROOT, 'src/config-loader.mjs'), 'utf8');
+  const enumMatch = source.match(/worker_class:\s*\{[\s\S]*?__enum:\s*\[([^\]]+)\]/);
+  assert.ok(enumMatch, 'expected merge_authority.worker_class enum in config-loader schema');
+  const enumValues = Array.from(enumMatch[1].matchAll(/'([^']+)'/g), (match) => match[1]);
+  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'gemini']);
+
+  for (const relativePath of [
+    'projects/adversarial-merge-authority/SPEC.md',
+    'docs/SPEC-adversarial-review-auto-remediation.md',
+    'docs/RUNBOOK-ama-closure.md',
+  ]) {
+    const doc = readFileSync(join(REPO_ROOT, relativePath), 'utf8');
+    for (const workerClass of enumValues) {
+      assert.ok(
+        doc.includes(`\`${workerClass}\``),
+        `${relativePath} must document ${workerClass} as an AMA closer worker class`,
+      );
+    }
   }
 });
 

@@ -55,6 +55,7 @@ import {
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
 import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
 import {
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
@@ -2204,6 +2205,17 @@ const stmtGetPendingFastMergeAudits = db.prepare(
 // The counter below bounds those claim-path recoveries so a persistent infra
 // failure eventually remains terminal instead of retrying forever.
 const INFRA_AUTO_RECOVER_CAP = 3;
+// Quota-exhaustion (hard provider usage cap) graceful-degradation backoff.
+// When a reviewer CLI hits a hard usage cap, HRR's domain is "suspend until the
+// cap clears, then resume" — NOT "burn the infra auto-recover budget retrying a
+// cap that physically cannot lift yet". The reviewer runs the codex/claude CLI
+// directly (outside the dispatch daemon that owns HRR suspend/resume), so this
+// gate re-creates the same hold-until-reset behavior in the watcher: while the
+// provider-reported reset time (or, if unparseable, a fixed fallback window
+// since the last failure) has not elapsed, the row is skipped WITHOUT consuming
+// an infra_auto_recover attempt. Once the window clears, normal bounded
+// auto-recovery resumes and the cap (INFRA_AUTO_RECOVER_CAP) still applies.
+const QUOTA_EXHAUSTED_BACKOFF_MS = 15 * 60 * 1000;
 const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -2233,7 +2245,8 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
          lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
        )) OR
-       (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%')
+       (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%') OR
+       (? = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%')
      )`
 );
 const stmtMarkFastMergeAuditPending = db.prepare(
@@ -2725,6 +2738,7 @@ function settleReviewerAttempt({
   ]);
   const defaultFailureMessages = {
     cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
+    'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',
@@ -5517,6 +5531,27 @@ async function pollOnce(
         );
         continue;
       }
+      // HRR graceful-degradation for hard provider usage caps. A quota-exhausted
+      // reviewer cannot succeed until the provider's cap window lifts, so retrying
+      // before then would only burn the bounded infra auto-recover budget against a
+      // wall. Hold the row until the provider-reported reset (or a fixed fallback
+      // window since the last failure) elapses — WITHOUT consuming an attempt — then
+      // let normal bounded recovery resume. Applies to both harnesses we know the
+      // shape for (codex / claude), since the failure_message tag carries the cap.
+      if (infraRecoveryClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
+        const quotaHold = quotaHoldDecision(current, {
+          fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,
+        });
+        if (quotaHold.hold) {
+          console.log(
+            `[watcher] Holding quota-exhausted review ${repoPath}#${prNumber}: ` +
+              `provider usage cap not yet cleared (waiting until ` +
+              `${new Date(quotaHold.waitUntilMs).toISOString()} [${quotaHold.source}]); ` +
+              `not consuming infra auto-recover attempt`
+          );
+          continue;
+        }
+      }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
       if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
         console.log(
@@ -5614,6 +5649,7 @@ async function pollOnce(
                 repoPath,
                 prNumber,
                 INFRA_AUTO_RECOVER_CAP,
+                infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,

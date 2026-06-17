@@ -1988,13 +1988,24 @@ function requeueInProgressFollowUpJobForRetry({
   retryReason = 'Transient remediation worker failure; retrying on a future tick.',
   remediationWorker = null,
   retryMetadata = null,
+  // HRR quota graceful degradation: the direct-CLI remediation worker (the
+  // default path when ADV_WITH_HQ_INTEGRATION is unset) spawns the codex/claude
+  // CLI outside the dispatch daemon, so a hard provider usage cap bypasses HRR
+  // exactly like the reviewer. When `allowDirectWorkerRetry` is set the hq-only
+  // guard is relaxed so a quota-hit direct worker can be held-until-reset on a
+  // future tick. `retryAfterOverride` (an ISO timestamp) pins the hold window to
+  // the provider-reported reset instead of the default exponential backoff; the
+  // consume gate (`claimNextFollowUpJob`) already skips pending jobs whose
+  // `remediationPlan.retryAfter` is still in the future.
+  allowDirectWorkerRetry = false,
+  retryAfterOverride = null,
 }) {
   const currentJob = readFollowUpJob(jobPath);
   if (currentJob?.status !== 'in_progress') {
     throw new Error(`Cannot retry follow-up job ${currentJob?.jobId || '<unknown>'} from status ${currentJob?.status || 'unknown'}`);
   }
   const effectiveWorker = remediationWorker || currentJob.remediationWorker || null;
-  if (effectiveWorker?.dispatchMode !== 'hq') {
+  if (effectiveWorker?.dispatchMode !== 'hq' && !allowDirectWorkerRetry) {
     throw new Error(`Cannot retry follow-up job ${currentJob?.jobId || '<unknown>'}: transient retry requeue is only valid for HQ remediation workers`);
   }
 
@@ -2002,9 +2013,10 @@ function requeueInProgressFollowUpJobForRetry({
   const priorTransientRetries = Number(currentJob?.remediationPlan?.transientRetries || 0);
   const nextTransientRetries = priorTransientRetries + 1;
   const requeuedAtMs = parseIsoTimestamp(requeuedAt) ?? Date.now();
-  const retryAfter = new Date(
-    requeuedAtMs + computeTransientRetryBackoffMs(nextTransientRetries)
-  ).toISOString();
+  const overrideRetryAfterMs = retryAfterOverride ? parseIsoTimestamp(retryAfterOverride) : null;
+  const retryAfter = overrideRetryAfterMs !== null
+    ? new Date(overrideRetryAfterMs).toISOString()
+    : new Date(requeuedAtMs + computeTransientRetryBackoffMs(nextTransientRetries)).toISOString();
   const activeRound = currentRoundNumber > 0 ? getCurrentRound(currentJob) : null;
   const nextCurrentRound = Math.max(0, currentRoundNumber - 1);
   let nextJob = {

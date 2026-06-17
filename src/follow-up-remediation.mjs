@@ -49,6 +49,7 @@ import {
 } from './role-config.mjs';
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
+import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -572,6 +573,25 @@ function resolveMaxTransientRemediationRetries(env = process.env) {
   return Number.isInteger(parsed) && parsed >= 0
     ? parsed
     : DEFAULT_MAX_TRANSIENT_RETRIES;
+}
+
+// Fallback hold window for a quota-exhausted remediation worker when the
+// provider did not hand back a parseable reset time. Mirrors the reviewer
+// path's QUOTA_EXHAUSTED_BACKOFF_MS (15 min) so both worker classes degrade
+// the same way under a hard usage cap.
+const QUOTA_REMEDIATION_BACKOFF_MS = 15 * 60 * 1000;
+
+// Best-effort read of a remediation worker's stderr log. The direct-CLI worker
+// routes both stdout and stderr to this log (see spawnClaudeRemediationWorker /
+// spawnCodexRemediationWorker), so a hard provider usage-cap banner lands here.
+// Returns '' on any read failure — quota detection then simply does not fire.
+function readWorkerStderrLogSafe(logPath) {
+  if (!logPath || !existsSync(logPath)) return '';
+  try {
+    return readFileSync(logPath, 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 function buildDrainSummaryLogLine(drain) {
@@ -4242,6 +4262,104 @@ async function reconcileFollowUpJob({
       reason: 'hq-dispatch-transient',
       job: requeued.job,
       jobPath: requeued.jobPath,
+    };
+  }
+
+  // HRR graceful degradation for a quota-exhausted remediation worker. The
+  // direct-CLI remediation worker (default path when ADV_WITH_HQ_INTEGRATION is
+  // unset) spawns the codex/claude CLI outside the dispatch daemon, so a hard
+  // provider usage cap bypasses HRR exactly like the reviewer and surfaces here
+  // as an empty/missing artifact — which without this block would post a
+  // misleading "remediation worker exited without an artifact / needs human"
+  // terminal failure. Instead: detect the cap in the worker's stderr log and
+  // requeue the job to pending with retryAfter pinned to the provider reset (or
+  // a fixed fallback), so the consume gate holds it until quota returns and a
+  // future tick re-spawns the remediation worker. Bounded by the shared
+  // transient-retry budget so a persistent cap eventually becomes terminal.
+  // Applies to both harnesses we know the shape for (codex / claude).
+  const quotaLogText = readWorkerStderrLogSafe(paths.logPath);
+  const quotaSignal = detectQuotaExhaustion(quotaLogText);
+  if (quotaSignal.isQuotaExhausted) {
+    const parsedCompletedAtMs = Date.parse(String(completedAt || ''));
+    const completedAtMs = Number.isNaN(parsedCompletedAtMs) ? Date.now() : parsedCompletedAtMs;
+    const nextQuotaRetry = Number(job?.remediationPlan?.transientRetries || 0) + 1;
+    const maxQuotaRetries = resolveMaxTransientRemediationRetries();
+    if (nextQuotaRetry <= maxQuotaRetries) {
+      const resetIso = parseQuotaResetAt(quotaLogText, { nowMs: completedAtMs });
+      const retryAfter = resetIso
+        || new Date(completedAtMs + QUOTA_REMEDIATION_BACKOFF_MS).toISOString();
+      const retryReason = `Provider usage cap hit (${quotaSignal.harness} harness); holding remediation until ${retryAfter} (HRR graceful degradation, retry ${nextQuotaRetry}/${maxQuotaRetries}).`;
+      const requeued = requeueInProgressFollowUpJobForRetry({
+        rootDir,
+        jobPath,
+        requeuedAt: completedAt,
+        retryReason,
+        retryAfterOverride: retryAfter,
+        allowDirectWorkerRetry: true,
+        retryMetadata: {
+          code: 'quota-exhausted',
+          harness: quotaSignal.harness,
+          resetAt: resetIso || null,
+          source: resetIso ? 'provider-reported' : 'fallback-window',
+        },
+      });
+      log?.log?.(
+        `[follow-up-remediation] Held ${job.repo}#${job.prNumber} -> quota-exhausted ` +
+          `(${quotaSignal.harness}) until ${retryAfter} [${resetIso ? 'provider-reported' : 'fallback-window'}]`
+      );
+      return {
+        action: 'requeued',
+        reason: 'quota-exhausted',
+        job: requeued.job,
+        jobPath: requeued.jobPath,
+      };
+    }
+    // Quota retry budget exhausted: fall through to a distinct terminal code so
+    // the operator comment names the real cause (a sustained provider cap) and
+    // does not read as a worker bug.
+    const quotaBudgetFailure = {
+      code: 'quota-exhausted-budget-exhausted',
+      message: `Remediation worker repeatedly hit a hard provider usage cap (${quotaSignal.harness} harness); exhausted the retry budget (${nextQuotaRetry - 1}/${maxQuotaRetries}). The PR's remediation is paused for operator action (wait for the cap to clear or add credits).`,
+    };
+    const { commentDelivery: quotaBudgetDelivery } = buildReconcileCommentDelivery({
+      job, worker, action: 'failed', failure: quotaBudgetFailure, now,
+    });
+    const failed = markFollowUpJobFailed({
+      rootDir,
+      jobPath,
+      failedAt: completedAt,
+      failureCode: quotaBudgetFailure.code,
+      error: new Error(quotaBudgetFailure.message),
+      remediationWorker: {
+        ...workerState,
+        state: 'failed',
+      },
+      failure: {
+        code: quotaBudgetFailure.code,
+        message: quotaBudgetFailure.message,
+        harness: quotaSignal.harness,
+        quotaRetryBudget: { attempted: nextQuotaRetry - 1, max: maxQuotaRetries },
+        logPath: worker.logPath || null,
+      },
+      commentDelivery: quotaBudgetDelivery,
+    });
+    await postReconcileOutcomeCommentSafe({
+      rootDir,
+      jobPath: failed.jobPath,
+      job: failed.job,
+      worker,
+      action: 'failed',
+      failure: quotaBudgetFailure,
+      postCommentImpl,
+      alreadyTerminal: failed.alreadyTerminal,
+      now,
+      log,
+    });
+    return {
+      action: 'failed',
+      reason: quotaBudgetFailure.code,
+      job: failed.job,
+      jobPath: failed.jobPath,
     };
   }
 

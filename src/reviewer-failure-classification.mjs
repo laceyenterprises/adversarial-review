@@ -1,12 +1,18 @@
 import { classifyReviewerFailure } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { QUOTA_EXHAUSTED_FAILURE_CLASS } from './quota-exhaustion.mjs';
 
 function reviewerFailureClassFromStoredRow(reviewRow) {
   const rawMessage = String(reviewRow?.failure_message || '');
   const message = rawMessage.toLowerCase();
-  const tagMatch = message.match(/^\[(reviewer-timeout|launchctl-bootstrap|cascade)\]/);
+  const tagMatch = message.match(/^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted)\]/);
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);
-  if (legacyClass === 'cascade' || legacyClass === 'reviewer-timeout' || legacyClass === 'launchctl-bootstrap') {
+  if (
+    legacyClass === 'cascade'
+    || legacyClass === 'reviewer-timeout'
+    || legacyClass === 'launchctl-bootstrap'
+    || legacyClass === QUOTA_EXHAUSTED_FAILURE_CLASS
+  ) {
     return legacyClass;
   }
   if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {

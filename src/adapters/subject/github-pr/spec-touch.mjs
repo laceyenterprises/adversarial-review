@@ -107,7 +107,7 @@ function isWatcherRetryContractChange(lines) {
     if ((!line.startsWith('+') && !line.startsWith('-')) || line.startsWith('+++') || line.startsWith('---')) {
       return false;
     }
-    return /infra_auto_recover_attempts|INFRA_AUTO_RECOVER_CAP|stmtMark(?:InfraAutoRecovery)?AttemptStarted|review_status\s*=\s*'failed'|pending-upstream|failed-orphan|reviewer-timeout|launchctl-bootstrap|oauth-broken/.test(line);
+    return /infra_auto_recover_attempts|INFRA_AUTO_RECOVER_CAP|stmtMark(?:InfraAutoRecovery)?AttemptStarted|review_status\s*=\s*'failed'|pending-upstream|failed-orphan|reviewer-timeout|launchctl-bootstrap|oauth-broken|quota-exhausted/.test(line);
   });
 }
 

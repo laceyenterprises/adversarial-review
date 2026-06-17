@@ -1522,14 +1522,14 @@ test('canonical + alias same value ok', () => {
   }
 });
 
-test('MHX title tags do not widen Python-backed role and dispatch enums', () => {
+test('unsupported MHX title tags do not widen role and dispatch enums', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
     writeFile(top, `
       version: 1
       roles:
-        reviewer: gemini
+        reviewer: opencode
         merge_agent_worker_class: hermes
       dispatch:
         default_worker_class_by_task_kind:
@@ -1541,8 +1541,8 @@ test('MHX title tags do not widen Python-backed role and dispatch enums', () => 
       (err) => {
         assert.ok(err instanceof AgentOSConfigError);
         assert.match(err.message, /roles\.reviewer/);
-        assert.match(err.message, /gemini/);
-        assert.match(err.message, /claude-code|codex|claude|adversarial/);
+        assert.match(err.message, /opencode/);
+        assert.match(err.message, /claude-code|codex|claude|gemini|adversarial/);
         return true;
       },
     );
@@ -1988,7 +1988,7 @@ test('validateSchema returns present keys only', () => {
   assert.deepEqual(validated, { version: 1, roots: { hq: '/foo' } });
 });
 
-test('validateSchema rejects MHX title tags in shared CFG enums', () => {
+test('validateSchema rejects unsupported MHX title tags in shared CFG enums', () => {
   assert.throws(
     () => validateSchema({
       version: 1,

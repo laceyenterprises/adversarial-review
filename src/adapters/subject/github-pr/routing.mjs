@@ -62,6 +62,10 @@ const REVIEWER_ROUTE_BY_MODEL = {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
+  gemini: {
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  },
 };
 
 // Map each builder tag to the *writer* model it represents. Used by
@@ -95,6 +99,8 @@ function normalizeReviewerModel(reviewerInput) {
       return 'claude';
     case 'codex':
       return 'codex';
+    case 'gemini':
+      return 'gemini';
     default:
       return null;
   }

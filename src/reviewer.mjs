@@ -1163,20 +1163,38 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
 // overrides the default at runtime — set it to the cheaper fallback
 // (gemini-2.5-flash) when pro is unavailable or quota-capped.
 const DEFAULT_GEMINI_REVIEWER_MODEL = 'gemini-2.5-pro';
+const REVIEWER_METADATA_BY_MODEL = Object.freeze({
+  claude: {
+    displayName: 'Claude',
+    reviewerIdentity: 'claude-reviewer-lacey',
+  },
+  codex: {
+    displayName: 'Codex',
+    reviewerIdentity: 'codex-reviewer-lacey',
+  },
+  gemini: {
+    displayName: 'Gemini',
+    reviewerIdentity: 'gemini-reviewer-lacey',
+  },
+});
 
 function resolveGeminiReviewerModel(env = process.env) {
   const override = String(env.GEMINI_REVIEWER_MODEL || '').trim();
   return override || DEFAULT_GEMINI_REVIEWER_MODEL;
 }
 
+function resolveReviewerMetadata(reviewerModel) {
+  const key = String(reviewerModel || '').trim().toLowerCase();
+  return REVIEWER_METADATA_BY_MODEL[key] || REVIEWER_METADATA_BY_MODEL.codex;
+}
+
 /**
- * Build the headless Gemini argv. The prompt, diff, and extra context are
- * NEVER passed via argv (no `-p`); they travel over stdin so they cannot
- * leak through the process table. argv carries only the model selector and
- * the text output mode.
+ * Build the headless Gemini argv. The actual prompt, diff, and extra context
+ * still travel over stdin; `--prompt ''` only switches the Gemini CLI out of
+ * interactive mode so stdin is consumed as headless prompt content.
  */
 function buildGeminiReviewArgs({ model }) {
-  return ['-m', model, '-o', 'text'];
+  return ['-m', model, '-o', 'text', '--prompt', ''];
 }
 
 async function spawnGeminiReview({
@@ -1848,10 +1866,8 @@ async function main() {
   console.log(`[reviewer] Review generated (${reviewText.length} chars)`);
 
   // 3. Post to GitHub
-  const header =
-    effectiveModel === 'claude'
-      ? '## Adversarial Review — Claude (claude-reviewer-lacey)\n\n'
-      : '## Adversarial Review — Codex (codex-reviewer-lacey)\n\n';
+  const reviewerMetadata = resolveReviewerMetadata(effectiveModel);
+  const header = `## Adversarial Review — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n`;
   const waiverAuditBlock = crossModelReviewWaived
     ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
     : '';
@@ -1879,7 +1895,7 @@ async function main() {
       reviewerSpawnToken,
       reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
         botTokenEnv,
-        effectiveModel === 'codex' ? 'codex-reviewer-lacey' : 'claude-reviewer-lacey'
+        reviewerMetadata.reviewerIdentity
       ),
       execFileImpl: execFileAsync,
       log: console,
@@ -1970,6 +1986,7 @@ const __test__ = {
   resolveGeminiOAuthCredsPath,
   assertGeminiOAuth,
   resolveGeminiReviewerModel,
+  resolveReviewerMetadata,
   buildGeminiReviewArgs,
   spawnGeminiReview,
   reviewWithGemini,

@@ -208,23 +208,28 @@ Any other prefix is malformed and must fail loud instead of silently falling
 back to same-model review or an unregistered worker class.
 
 Operators may deliberately pin the reviewer with
-`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|claude-code`.
+`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|claude-code|gemini`.
 A non-empty override wins over the title-prefix route for every supported
-builder class and also selects the matching reviewer bot token. The aliases
-`claude` and `claude-code` both normalize to the Claude reviewer route.
+builder class and also selects the matching reviewer bot token:
+`GH_CODEX_REVIEWER_TOKEN`, `GH_CLAUDE_REVIEWER_TOKEN`, or
+`GH_GEMINI_REVIEWER_TOKEN`. The aliases `claude` and `claude-code` both
+normalize to the Claude reviewer route.
 Watcher startup validates this override once and exits non-zero on invalid
 values instead of discovering the typo mid-poll. When the override intentionally
 pins the same reviewer family as the builder, the posted review body carries an
 explicit cross-model-waiver note so the audit trail shows the guarantee was
 deliberately suspended.
 
-The MHX-09 `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` values are
-GitHub-PR title-prefix builder tags, not shared CFG role enum values. They must
-not be accepted in `roles.reviewer`,
-`roles.merge_agent_worker_class`, or
+The MHX-09 `[pi]`, `[opencode]`, and `[hermes]` values remain GitHub-PR
+title-prefix builder tags, not shared CFG role enum values. They must not be
+accepted in `roles.reviewer`, `roles.merge_agent_worker_class`, or
 `dispatch.default_worker_class_by_task_kind` until the Python
-`agent_os_config` loader widens the same enums. No same-family waiver is
-inferred for `[opencode]` without a future explicit writer-family config knob.
+`agent_os_config` loader widens the same enums. `[gemini]` is the exception:
+the native Gemini reviewer runtime is operator-selectable through
+`roles.reviewer: gemini` / `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=gemini`, posts
+as `gemini-reviewer-lacey`, captures reviews against that login, and uses
+`GH_GEMINI_REVIEWER_TOKEN`. No same-family waiver is inferred for `[opencode]`
+without a future explicit writer-family config knob.
 
 Follow-up remediation defaults to the `codex` worker class while the LAC-358
 codex override remains active. Operators may pin remediation with

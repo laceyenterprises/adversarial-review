@@ -195,7 +195,8 @@ test('github-pr routing exposes same-family review waiver detection for override
   assert.equal(isCrossModelReviewWaived('clio-agent', 'codex'), true);
   assert.equal(isCrossModelReviewWaived('clio-agent', 'claude'), false);
   assert.equal(isCrossModelReviewWaived('codex', 'claude'), false);
-  assert.equal(isCrossModelReviewWaived('gemini', 'gemini'), false);
+  assert.equal(isCrossModelReviewWaived('gemini', 'gemini'), true);
+  assert.equal(isCrossModelReviewWaived('codex', 'gemini'), false);
   assert.equal(isCrossModelReviewWaived('opencode', 'opencode'), false);
   assert.equal(isCrossModelReviewWaived('opencode', 'claude'), false);
 
@@ -206,6 +207,21 @@ test('github-pr routing exposes same-family review waiver detection for override
   );
   assert.match(reason, /ADVERSARIAL_REVIEW_DEFAULT_REVIEWER="codex"/);
   assert.match(reason, /cross-model review guarantee is waived/i);
+});
+
+test('github-pr routing allows operators to pin the Gemini reviewer', () => {
+  assert.deepEqual(routePR('[codex] LAC-484: force gemini review', null, {
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+    },
+  }), {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
 });
 
 test('github-pr routing assigns supported MHX-09 builder tags to the expected cross-model reviewers', () => {

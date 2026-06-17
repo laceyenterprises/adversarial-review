@@ -18,13 +18,14 @@ const REVIEWER_BOT_LOGINS = Object.freeze({
   claude: 'claude-reviewer-lacey',
   codex: 'codex-reviewer-lacey',
   'claude-code': 'claude-reviewer-lacey',
-  gemini: 'codex-reviewer-lacey',
+  gemini: 'gemini-reviewer-lacey',
   pi: 'codex-reviewer-lacey',
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
   opencode: 'codex-reviewer-lacey',
   hermes: 'codex-reviewer-lacey',
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
+  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
 });
 const REVIEWER_PASS_KINDS = new Set(['first-pass', 'rereview', 'remediation']);
 

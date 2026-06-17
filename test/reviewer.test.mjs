@@ -24,6 +24,7 @@ const {
   resolveGeminiOAuthCredsPath,
   assertGeminiOAuth,
   resolveGeminiReviewerModel,
+  resolveReviewerMetadata,
   buildGeminiReviewArgs,
   spawnGeminiReview,
   reviewWithGemini,
@@ -637,11 +638,12 @@ test('resolveGeminiReviewerModel returns the default and honors the override env
   );
 });
 
-test('buildGeminiReviewArgs carries only model + text-output flags, never the prompt body', () => {
+test('buildGeminiReviewArgs enters headless mode without carrying the prompt body', () => {
   const args = buildGeminiReviewArgs({ model: 'gemini-2.5-pro' });
-  assert.deepEqual(args, ['-m', 'gemini-2.5-pro', '-o', 'text']);
-  // No argv entry may carry prompt/diff content (no `-p <prompt>`).
-  assert.ok(!args.includes('-p'));
+  assert.deepEqual(args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
+  // The prompt flag is intentionally empty: it enables non-interactive stdin
+  // handling without putting prompt/diff content in argv.
+  assert.equal(args[args.indexOf('--prompt') + 1], '');
 });
 
 test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', async () => {
@@ -664,7 +666,7 @@ test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', a
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, '/usr/local/bin/gemini');
-  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text']);
+  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
   // The prompt (and the diff body inside it) is observed ONLY on stdin.
   assert.equal(calls[0].options.input, prompt);
   for (const arg of calls[0].args) {
@@ -675,6 +677,21 @@ test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', a
     { cwd: calls[0].options.cwd, timeout: calls[0].options.timeout, maxBuffer: calls[0].options.maxBuffer },
     { cwd: '/tmp/repo', timeout: 9_999, maxBuffer: 555 },
   );
+});
+
+test('resolveReviewerMetadata labels Gemini reviews with the Gemini reviewer identity', () => {
+  assert.deepEqual(resolveReviewerMetadata('claude'), {
+    displayName: 'Claude',
+    reviewerIdentity: 'claude-reviewer-lacey',
+  });
+  assert.deepEqual(resolveReviewerMetadata('codex'), {
+    displayName: 'Codex',
+    reviewerIdentity: 'codex-reviewer-lacey',
+  });
+  assert.deepEqual(resolveReviewerMetadata('gemini'), {
+    displayName: 'Gemini',
+    reviewerIdentity: 'gemini-reviewer-lacey',
+  });
 });
 
 test('reviewWithGemini happy path returns the captured review text', async () => {

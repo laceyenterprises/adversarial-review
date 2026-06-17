@@ -1551,6 +1551,49 @@ test('unsupported MHX title tags do not widen role and dispatch enums', () => {
   }
 });
 
+test('roles.remediator accepts gemini from top-level config and both env names', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        remediator: gemini
+    `);
+    const fileCfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(fileCfg.get('roles.remediator'), 'gemini');
+    assert.equal(fileCfg.resolutionTrace('roles.remediator').at(-1).source, 'top');
+
+    const canonicalCfg = loadConfig({
+      topPath: '/dev/null',
+      env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'gemini',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+    });
+    assert.equal(canonicalCfg.get('roles.remediator'), 'gemini');
+    assert.equal(
+      canonicalCfg.resolutionTrace('roles.remediator').at(-1).source,
+      'env:AGENT_OS_ROLES_REMEDIATOR',
+    );
+
+    const legacyCfg = loadConfig({
+      topPath: '/dev/null',
+      env: {
+        ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+    });
+    assert.equal(legacyCfg.get('roles.remediator'), 'gemini');
+    assert.equal(
+      legacyCfg.resolutionTrace('roles.remediator').at(-1).source,
+      'env:ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('canonical + alias conflict fails loud', () => {
   const tmp = freshTmp();
   try {

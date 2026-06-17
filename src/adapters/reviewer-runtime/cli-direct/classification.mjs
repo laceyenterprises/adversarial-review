@@ -1,4 +1,8 @@
 import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
+import {
+  QUOTA_EXHAUSTED_FAILURE_CLASS,
+  detectQuotaExhaustion,
+} from '../../../quota-exhaustion.mjs';
 
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
@@ -106,6 +110,17 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 
   if (/forbidden fallback|env-strip violation|oauth strip.*violation|api[-_ ]?key fallback/.test(lower)) {
     return 'forbidden-fallback';
+  }
+
+  // Provider usage CAP (hard quota) wins over oauth-broken and cascade: a
+  // "you've hit your usage limit / try again at <time>" is neither an auth
+  // problem (no token to rotate) nor a transient upstream cascade — it is HRR's
+  // domain (suspend until the cap clears, then resume), and the operator action
+  // is "wait or buy credits", not "rotate the token". Detected for both
+  // harnesses (codex / claude). Transient HTTP-429 throttles are intentionally
+  // NOT matched here — they keep riding the cascade short-backoff path.
+  if (detectQuotaExhaustion(text).isQuotaExhausted) {
+    return QUOTA_EXHAUSTED_FAILURE_CLASS;
   }
 
   // Order matters: OAuth wins over cascade when BOTH match. Cascade is often

@@ -71,3 +71,20 @@ Any loader that infers nested-key tolerance from filename alone is out of
 contract; the tolerance must be scoped to the actual local-sibling layer or an
 explicit validator option used by a caller that is deliberately reproducing that
 layer.
+
+## Role enums
+
+`roles.remediator` is a shared CFG role pin. All CFG loaders must accept the
+same values for this key:
+
+- `adversarial` - default sentinel; select the remediation worker from the
+  reviewed PR's builder tag
+- `claude-code`
+- `codex`
+- `gemini`
+
+The canonical environment override is `AGENT_OS_ROLES_REMEDIATOR`. The
+adversarial-review legacy alias is `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR`.
+When both environment names are set to different values, startup must fail loud
+with both env names in the diagnostic; when both are set to the same value, the
+canonical env source wins provenance.

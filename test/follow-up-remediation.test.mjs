@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   REMEDIATION_WORKER_TRAILER_CLASS,
+  GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
   applyMergeAgentBrokerEnv,
   assertClaudeCodeOAuth,
@@ -28,6 +29,7 @@ import {
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   prepareCodexRemediationStartupEnv,
+  prepareGeminiRemediationStartupEnv,
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
@@ -46,7 +48,10 @@ import {
   resolveRemediationMaxConcurrentJobs,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
+  spawnGeminiRemediationWorker,
   spawnRemediationWorker,
+  resolveGeminiRemediationModel,
+  remediationWorkerTrailerClass,
   validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
 
@@ -1670,18 +1675,43 @@ test('pickRemediationWorkerClass canonical env wins over legacy alias on match',
 
 test('pickRemediationWorkerClass rejects unknown default remediator env values', () => {
   // Loader enforces §10.3 enum; error message names the env var the operator
-  // actually set (legacy alias) plus the canonical key path.
+  // actually set (legacy alias) plus the canonical key path. `gemini` is now
+  // a valid remediator (GMW-03), so this uses a still-unknown value.
   assert.throws(
     () => pickRemediationWorkerClass(
       { builderTag: 'codex', reviewerModel: 'claude' },
-      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini', AGENT_OS_CONFIG_PATH: '/dev/null' } }
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'mistral', AGENT_OS_CONFIG_PATH: '/dev/null' } }
     ),
     (err) => {
       assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
-      assert.match(err.message, /gemini/);
+      assert.match(err.message, /mistral/);
       assert.match(err.message, /claude-code/);
       return true;
     }
+  );
+});
+
+test('pickRemediationWorkerClass resolves gemini from the legacy default-remediator env (GMW-03)', () => {
+  // Operator pins ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=gemini to run
+  // remediation on the third model — e.g. while both codex and claude lanes
+  // are squeezed. The env override wins over per-builderTag cross-model
+  // routing regardless of the PR's writer.
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'claude-code', reviewerModel: 'codex' },
+      { env: { ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini', AGENT_OS_CONFIG_PATH: '/dev/null' } }
+    ),
+    'gemini'
+  );
+});
+
+test('pickRemediationWorkerClass resolves gemini from the canonical role env (GMW-03)', () => {
+  assert.equal(
+    pickRemediationWorkerClass(
+      { builderTag: 'codex', reviewerModel: 'claude' },
+      { env: { AGENT_OS_ROLES_REMEDIATOR: 'gemini', AGENT_OS_CONFIG_PATH: '/dev/null' } }
+    ),
+    'gemini'
   );
 });
 
@@ -1706,16 +1736,27 @@ test('pickRemediationWorkerClass fails loud on canonical+legacy env conflict (CF
 });
 
 test('validateStartupRemediationConfig rejects unknown default remediator env values', () => {
+  // `gemini` is now an accepted remediator (GMW-03); an unrecognized value
+  // still fails loud at boot.
   assert.throws(
     () => validateStartupRemediationConfig({
-      ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini',
+      ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'mistral',
       AGENT_OS_CONFIG_PATH: '/dev/null',
     }),
     (err) => {
       assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
-      assert.match(err.message, /gemini/);
+      assert.match(err.message, /mistral/);
       return true;
     }
+  );
+});
+
+test('validateStartupRemediationConfig accepts gemini as the default remediator (GMW-03)', () => {
+  assert.doesNotThrow(
+    () => validateStartupRemediationConfig({
+      ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini',
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+    })
   );
 });
 
@@ -1797,6 +1838,348 @@ test('spawnRemediationWorker throws on unknown class', () => {
     () => spawnRemediationWorker('not-a-class', {}),
     /unknown remediation worker class/
   );
+});
+
+// ── Gemini remediation worker (GMW-03) ─────────────────────────────────────
+
+// Set up a workspace with a temp HOME holding a gemini OAuth credential so
+// the per-spawn HOME/auth resolution has something to anchor on, plus a
+// prompt whose body contains a recognizable secret marker we then assert is
+// NEVER present in the spawned argv.
+function setupGeminiSpawn(promptBody = 'Fix the bug. SENSITIVE-DIFF-BODY-MARKER\n') {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'gemini-last-message.md');
+  const logPath = path.join(workspaceDir, 'gemini.log');
+  const geminiHome = path.join(workspaceDir, '.gemini');
+  mkdirSync(geminiHome, { recursive: true });
+  writeFileSync(promptPath, promptBody, 'utf8');
+  writeFileSync(
+    path.join(geminiHome, 'oauth_creds.json'),
+    JSON.stringify({ access_token: 'a', refresh_token: 'b', token_type: 'Bearer' }),
+    'utf8'
+  );
+  return { workspaceDir, promptPath, outputPath, logPath, geminiHome, promptBody };
+}
+
+test('spawnGeminiRemediationWorker builds the gemini headless argv and never embeds the prompt body', () => {
+  const { workspaceDir, promptPath, outputPath, logPath, promptBody } = setupGeminiSpawn();
+
+  const prevHome = process.env.HOME;
+  process.env.HOME = workspaceDir;
+
+  let capturedCli;
+  let capturedArgs;
+  let result;
+  try {
+    result = spawnGeminiRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      jobId: 'job-gem-1',
+      now: () => '2026-06-17T20:00:00Z',
+      spawnImpl: (cmd, args) => {
+        capturedCli = cmd;
+        capturedArgs = args;
+        return { pid: 4242, unref() {} };
+      },
+    });
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+  }
+
+  assert.match(capturedCli, /gemini/);
+  // `--approval-mode yolo` (headless auto-approve) + `--skip-trust` (fresh
+  // workspace trust bypass) + `-m <model>`; the prompt is delivered through
+  // stdin, so it must NOT appear on argv.
+  assert.deepEqual(capturedArgs, [
+    '--approval-mode',
+    'yolo',
+    '--skip-trust',
+    '-m',
+    'gemini-2.5-pro',
+  ]);
+  assert.equal(result.model, 'gemini');
+  assert.equal(result.workerClass, 'gemini');
+  assert.deepEqual(result.command, [
+    'gemini',
+    '--approval-mode',
+    'yolo',
+    '--skip-trust',
+    '-m',
+    'gemini-2.5-pro',
+  ]);
+
+  // The full prompt/diff body never leaks into the process argv.
+  const joinedArgs = capturedArgs.join('\n');
+  assert.equal(joinedArgs.includes('SENSITIVE-DIFF-BODY-MARKER'), false);
+  assert.equal(joinedArgs.includes(promptBody.trim()), false);
+  assert.equal(capturedArgs.includes(promptPath), false);
+});
+
+test('spawnGeminiRemediationWorker honors a pinned gemini model in argv', () => {
+  const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
+
+  const prev = { HOME: process.env.HOME, GEMINI_MODEL: process.env.GEMINI_MODEL };
+  process.env.HOME = workspaceDir;
+  process.env.GEMINI_MODEL = 'gemini-2.5-flash';
+
+  let capturedArgs;
+  try {
+    spawnGeminiRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      now: () => '2026-06-17T20:00:00Z',
+      spawnImpl: (_cmd, args) => {
+        capturedArgs = args;
+        return { pid: 4243, unref() {} };
+      },
+    });
+  } finally {
+    for (const k of ['HOME', 'GEMINI_MODEL']) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+
+  assert.deepEqual(capturedArgs, [
+    '--approval-mode',
+    'yolo',
+    '--skip-trust',
+    '-m',
+    'gemini-2.5-flash',
+  ]);
+});
+
+test('spawnGeminiRemediationWorker stamps the gemini-remediation provenance trailer class', () => {
+  const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
+
+  const prevHome = process.env.HOME;
+  process.env.HOME = workspaceDir;
+
+  let capturedEnv;
+  try {
+    spawnGeminiRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      jobId: 'job-gem-2',
+      now: () => '2026-06-17T20:00:00Z',
+      spawnImpl: (_cmd, _args, opts) => {
+        capturedEnv = opts.env;
+        return { pid: 4244, unref() {} };
+      },
+    });
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+  }
+
+  // Provenance trailer class is `gemini-remediation` (distinct from the
+  // `gemini` model class), mirroring `codex-remediation`.
+  assert.equal(GEMINI_REMEDIATION_WORKER_TRAILER_CLASS, 'gemini-remediation');
+  assert.equal(capturedEnv.WORKER_CLASS, 'gemini-remediation');
+  assert.equal(capturedEnv.WORKER_JOB_ID, 'job-gem-2');
+  assert.equal(capturedEnv.WORKER_RUN_AT, '2026-06-17T20:00:00Z');
+});
+
+test('spawnGeminiRemediationWorker scrubs Gemini API, ADC, and Vertex credentials from the spawn env', () => {
+  const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
+
+  const prev = {
+    HOME: process.env.HOME,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
+    GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+    GOOGLE_GENAI_USE_VERTEXAI: process.env.GOOGLE_GENAI_USE_VERTEXAI,
+    GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
+    GOOGLE_CLOUD_LOCATION: process.env.GOOGLE_CLOUD_LOCATION,
+    GOOGLE_CLOUD_QUOTA_PROJECT: process.env.GOOGLE_CLOUD_QUOTA_PROJECT,
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: process.env.CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE,
+  };
+  process.env.HOME = workspaceDir;
+  process.env.GEMINI_API_KEY = 'gem-key-test';
+  process.env.GOOGLE_API_KEY = 'goog-key-test';
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = path.join(workspaceDir, 'adc.json');
+  process.env.GOOGLE_GENAI_USE_VERTEXAI = 'true';
+  process.env.GOOGLE_CLOUD_PROJECT = 'vertex-project';
+  process.env.GOOGLE_CLOUD_LOCATION = 'us-central1';
+  process.env.GOOGLE_CLOUD_QUOTA_PROJECT = 'quota-project';
+  process.env.CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE = path.join(workspaceDir, 'gcloud.json');
+
+  let capturedEnv;
+  let capturedStartupEvidence;
+  try {
+    spawnGeminiRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      now: () => '2026-06-17T20:00:00Z',
+      spawnImpl: (_cmd, _args, opts) => {
+        capturedEnv = opts.env;
+        return { pid: 4245, unref() {} };
+      },
+    });
+    capturedStartupEvidence = prepareGeminiRemediationStartupEnv().startupEvidence;
+  } finally {
+    for (const k of [
+      'HOME',
+      'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      'GOOGLE_GENAI_USE_VERTEXAI',
+      'GOOGLE_CLOUD_PROJECT',
+      'GOOGLE_CLOUD_LOCATION',
+      'GOOGLE_CLOUD_QUOTA_PROJECT',
+      'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
+    ]) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+
+  // Metered API keys, ADC, and Vertex selectors are stripped so the worker can
+  // only use the OAuth subscription billing path; HOME is pinned to the gemini auth home.
+  for (const key of [
+    'GEMINI_API_KEY',
+    'GOOGLE_API_KEY',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GOOGLE_GENAI_USE_VERTEXAI',
+    'GOOGLE_CLOUD_PROJECT',
+    'GOOGLE_CLOUD_LOCATION',
+    'GOOGLE_CLOUD_QUOTA_PROJECT',
+    'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, key), false, `${key} should be stripped`);
+    assert.ok(capturedStartupEvidence.resolvedStartup.strippedEnv.includes(key), `${key} should be recorded`);
+  }
+  assert.equal(capturedEnv.HOME, workspaceDir);
+  assert.equal(capturedEnv.GEMINI_HOME, path.join(workspaceDir, '.gemini'));
+});
+
+test('spawnRemediationWorker dispatches "gemini" to spawnGeminiRemediationWorker', () => {
+  const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
+
+  const prevHome = process.env.HOME;
+  process.env.HOME = workspaceDir;
+
+  let invokedCli;
+  let invokedArgs;
+  let result;
+  try {
+    result = spawnRemediationWorker('gemini', {
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      spawnImpl: (cmd, args) => {
+        invokedCli = cmd;
+        invokedArgs = args;
+        return { pid: 333, unref() {} };
+      },
+    });
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+  }
+
+  assert.equal(result.model, 'gemini');
+  assert.match(invokedCli, /gemini/);
+  assert.deepEqual(invokedArgs, [
+    '--approval-mode',
+    'yolo',
+    '--skip-trust',
+    '-m',
+    'gemini-2.5-pro',
+  ]);
+});
+
+test('remediationWorkerTrailerClass maps each worker class to its provenance trailer', () => {
+  assert.equal(remediationWorkerTrailerClass('codex'), 'codex-remediation');
+  assert.equal(remediationWorkerTrailerClass('claude-code'), 'claude-code-remediation');
+  assert.equal(remediationWorkerTrailerClass('gemini'), 'gemini-remediation');
+  // Back-compat: unknown / unspecified falls back to the codex trailer.
+  assert.equal(remediationWorkerTrailerClass(undefined), 'codex-remediation');
+});
+
+test('buildRemediationPrompt embeds the gemini provenance trailer for the hq-dispatch worker', () => {
+  const prompt = buildRemediationPrompt(makeJob(), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+    workerTrailerClass: 'gemini-remediation',
+  });
+  assert.match(prompt, /WORKER_CLASS=gemini-remediation/);
+  assert.doesNotMatch(prompt, /WORKER_CLASS=codex-remediation/);
+});
+
+test('buildRemediationPrompt defaults the provenance trailer to codex-remediation', () => {
+  const prompt = buildRemediationPrompt(makeJob(), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+  assert.match(prompt, /WORKER_CLASS=codex-remediation/);
+});
+
+test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overrides', () => {
+  assert.equal(resolveGeminiRemediationModel({}), 'gemini-2.5-pro');
+  assert.equal(
+    resolveGeminiRemediationModel({ GEMINI_MODEL: 'gemini-2.5-flash' }),
+    'gemini-2.5-flash'
+  );
+  // The remediation-specific pin wins over the generic GEMINI_MODEL.
+  assert.equal(
+    resolveGeminiRemediationModel({
+      GEMINI_REMEDIATION_MODEL: 'gemini-3.0-pro',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+    }),
+    'gemini-3.0-pro'
+  );
+});
+
+test('assertRemediationWorkerOAuth routes gemini to the gemini OAuth pre-flight', async () => {
+  const { workspaceDir } = setupGeminiSpawn();
+  const prevHome = process.env.HOME;
+  process.env.HOME = workspaceDir;
+  try {
+    // Credential present (written by setupGeminiSpawn) → passes.
+    await assertRemediationWorkerOAuth('gemini');
+  } finally {
+    resetOAuthPreflightCache('gemini');
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+  }
+});
+
+test('assertRemediationWorkerOAuth fails with an OAuthError when the gemini credential is missing', async () => {
+  const emptyHome = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const prevHome = process.env.HOME;
+  process.env.HOME = emptyHome;
+  try {
+    await assert.rejects(
+      () => assertRemediationWorkerOAuth('gemini'),
+      (err) => {
+        assert.equal(err.isOAuthError, true);
+        assert.equal(err.model, 'gemini');
+        assert.match(err.message, /oauth_creds\.json missing/);
+        return true;
+      }
+    );
+  } finally {
+    resetOAuthPreflightCache('gemini');
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+  }
 });
 
 // ── Claude Code spawn-side env hygiene ─────────────────────────────────────
@@ -3819,6 +4202,101 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
   }
 });
 
+test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without local oauth_creds.json (GMW-03)', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  const previous = {
+    HOME: process.env.HOME,
+    GEMINI_HOME: process.env.GEMINI_HOME,
+    GEMINI_AUTH_PATH: process.env.GEMINI_AUTH_PATH,
+    ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR,
+    AGENT_OS_CONFIG_PATH: process.env.AGENT_OS_CONFIG_PATH,
+  };
+  process.env.HOME = rootDir;
+  process.env.GEMINI_HOME = path.join(rootDir, '.gemini-without-local-oauth');
+  process.env.GEMINI_AUTH_PATH = path.join(rootDir, '.gemini-without-local-oauth', 'oauth_creds.json');
+  // Operator pins gemini as the remediator; AGENT_OS_CONFIG_PATH=/dev/null so
+  // the cascade doesn't read the host config.yaml.
+  process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'gemini';
+  process.env.AGENT_OS_CONFIG_PATH = '/dev/null';
+
+  try {
+    await withHqDispatchEnv(rootDir, async (hqRoot) => {
+      createFollowUpJob({
+        rootDir,
+        repo: 'laceyenterprises/clio',
+        prNumber: 73,
+        reviewerModel: 'codex',
+        builderTag: 'claude-code',
+        linearTicketId: 'LAC-273',
+        reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
+        reviewPostedAt: '2026-06-17T08:00:00.000Z',
+        critical: true,
+      });
+
+      const commands = [];
+      const result = await consumeNextFollowUpJob({
+        rootDir,
+        promptTemplate: 'You are a remediation worker.',
+        now: () => '2026-06-17T10:00:00.000Z',
+        execFileImpl: async (command, args) => {
+          commands.push([command, ...args]);
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'gemini/fix-pr-73', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
+          }
+          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            return {
+              stdout: JSON.stringify({
+                status: 'queued',
+                workspacePath: path.join(hqRoot, 'workers', 'lrq_gem_dispatch'),
+              }),
+              stderr: '',
+            };
+          }
+          if (command === 'hq' && args[0] === 'dispatch') {
+            return {
+              stdout: JSON.stringify({
+                launchRequestId: 'lrq_gem_dispatch',
+                dispatchId: 'dispatch_gem_dispatch',
+              }),
+              stderr: '',
+            };
+          }
+          return { stdout: '', stderr: '' };
+        },
+        spawnImpl: () => {
+          throw new Error('legacy spawn path should not run when HQ dispatch is enabled');
+        },
+      });
+
+      assert.equal(result.consumed, true);
+      assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
+      const dispatchCall = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status');
+      assert.ok(dispatchCall);
+      // hq-dispatch accepts gemini as the worker class (already allowlisted in
+      // HQ_WORKER_CLASSES).
+      assert.equal(dispatchCall[dispatchCall.indexOf('--worker-class') + 1], 'gemini');
+      // The prompt carries the gemini provenance trailer so the worker-pool
+      // worker stamps gemini-remediation, not codex-remediation.
+      const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
+      assert.match(prompt, /WORKER_CLASS=gemini-remediation/);
+      assert.doesNotMatch(prompt, /WORKER_CLASS=codex-remediation/);
+    });
+  } finally {
+    resetOAuthPreflightCache('gemini');
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon bounce and then completes from the worker-pool reply', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 72, linearTicketId: 'LAC-272' });
@@ -4878,7 +5356,9 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
   const prevDefaultRemediator = process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
 
   try {
-    process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'gemini';
+    // `gemini` is now a valid remediator (GMW-03); use a still-invalid value
+    // to exercise the config-blocked requeue path.
+    process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'mistral';
 
     createFollowUpJob({
       rootDir,
@@ -4902,7 +5382,7 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
       }),
       (err) => {
         assert.match(err.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
-        assert.match(err.message, /gemini/);
+        assert.match(err.message, /mistral/);
         return true;
       }
     );
@@ -4926,7 +5406,7 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
     assert.deepEqual(pendingJob.remediationPlan.rounds, []);
     assert.equal(pendingJob.lastConfigValidationFailure.code, 'config-validation-failure');
     assert.match(pendingJob.lastConfigValidationFailure.message, /ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR/);
-    assert.match(pendingJob.lastConfigValidationFailure.message, /gemini/);
+    assert.match(pendingJob.lastConfigValidationFailure.message, /mistral/);
   } finally {
     if (prevDefaultRemediator === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
     else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = prevDefaultRemediator;

@@ -74,6 +74,27 @@ test('CFG-02 remediator: env override beats module file (canonical env)', async 
   }
 });
 
+test('CFG-02 remediator: canonical env accepts gemini', async () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, 'roles:\n  remediator: codex\n');
+    const cfg = loadRoleConfig({
+      env: {
+        AGENT_OS_ROLES_REMEDIATOR: 'gemini',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    });
+    assert.equal(cfg.get('roles.remediator'), 'gemini');
+    const trace = cfg.resolutionTrace('roles.remediator');
+    assert.equal(trace[trace.length - 1].source, 'env:AGENT_OS_ROLES_REMEDIATOR');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('CFG-02 remediator: legacy env alias honored when canonical unset', () => {
   const tmp = makeTmp();
   try {
@@ -88,6 +109,27 @@ test('CFG-02 remediator: legacy env alias honored when canonical unset', () => {
       modulePaths: [modulePath],
     });
     assert.equal(cfg.get('roles.remediator'), 'claude-code');
+    const trace = cfg.resolutionTrace('roles.remediator');
+    assert.equal(trace[trace.length - 1].source, 'env:ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CFG-02 remediator: legacy env alias accepts gemini', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, 'roles:\n  remediator: codex\n');
+    const cfg = loadRoleConfig({
+      env: {
+        ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini',
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+      },
+      topPath: '/dev/null',
+      modulePaths: [modulePath],
+    });
+    assert.equal(cfg.get('roles.remediator'), 'gemini');
     const trace = cfg.resolutionTrace('roles.remediator');
     assert.equal(trace[trace.length - 1].source, 'env:ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR');
   } finally {
@@ -137,6 +179,26 @@ test('CFG-02 remediator: top-level beats module on canonical key', () => {
       modulePaths: [modulePath],
     });
     assert.equal(cfg.get('roles.remediator'), 'claude-code');
+    const trace = cfg.resolutionTrace('roles.remediator');
+    assert.equal(trace[trace.length - 1].source, 'top');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CFG-02 remediator: top-level accepts gemini', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    const topPath = join(tmp, 'top.yaml');
+    writeYaml(modulePath, 'roles:\n  remediator: codex\n');
+    writeYaml(topPath, 'version: 1\nroles:\n  remediator: gemini\n');
+    const cfg = loadRoleConfig({
+      env: {},
+      topPath,
+      modulePaths: [modulePath],
+    });
+    assert.equal(cfg.get('roles.remediator'), 'gemini');
     const trace = cfg.resolutionTrace('roles.remediator');
     assert.equal(trace[trace.length - 1].source, 'top');
   } finally {

@@ -289,6 +289,26 @@ export function resolveDefaultReviewer({
   return route;
 }
 
+// resolveGeminiReviewerMode — returns the gemini always-on-third-reviewer
+// selection mode (`off` | `fallback` | `always-on`) through the same file→env
+// cascade as the role pins. Default is `always-on` (operator decision). The
+// loader enforces the enum allowlist before this function sees the value.
+export function resolveGeminiReviewerMode({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'reviewer.gemini.mode',
+  });
+  return cfg.get('reviewer.gemini.mode', 'always-on');
+}
+
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker
 // class (always a real value — default `merge-agent`). The loader enforces
 // the §10.3 allowlist and applies the §10.2 module-to-top alias.

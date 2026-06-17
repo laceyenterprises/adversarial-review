@@ -15,11 +15,16 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
   defaultReviewerRouteFromEnv,
+  applyGeminiReviewerRoute,
   describeCrossModelReviewWaiver,
   isCrossModelReviewWaived,
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
-import { loadRoleConfig, resetRoleConfigCache } from './role-config.mjs';
+import {
+  loadRoleConfig,
+  resetRoleConfigCache,
+  resolveGeminiReviewerMode,
+} from './role-config.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -2934,6 +2939,21 @@ function resolveReviewerTimeoutFallbackModel(env = process.env) {
   return null;
 }
 
+// GMW-02 fallback signal. `reviewer.gemini.mode=fallback` selects gemini only
+// when the assigned primary reviewer is quota-capped. We reuse the HRR
+// quota-exhaustion signal: a row whose last failure is the hard provider
+// usage-cap class AND whose cap window has not yet cleared means the primary
+// reviewer cannot succeed right now, so gemini absorbs the pass instead of the
+// row being held. Pure over the stored row so it stays testable.
+function primaryReviewerQuotaCappedForRow(row, { nowMs = null } = {}) {
+  if (!row || row.review_status !== 'failed') return false;
+  if (infraRecoverableFailureClass(row) !== QUOTA_EXHAUSTED_FAILURE_CLASS) return false;
+  return quotaHoldDecision(row, {
+    nowMs,
+    fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,
+  }).hold;
+}
+
 function selectReviewerRouteForAttempt({
   subject,
   baseRoute,
@@ -5297,9 +5317,49 @@ async function pollOnce(
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
       }
+      // GMW-02 — layer the gemini always-on / fallback third-reviewer selection
+      // on top of the resolved cross-model baseRoute, then let the existing
+      // reviewer-timeout fallback apply on the (possibly gemini-pinned) result.
+      // The integrity hard guard inside applyGeminiReviewerRoute also strips any
+      // gemini-on-gemini route that an operator `roles.reviewer=gemini` pin
+      // could otherwise produce.
+      let geminiReviewerMode = 'always-on';
+      try {
+        geminiReviewerMode = resolveGeminiReviewerMode({ env: process.env });
+      } catch (err) {
+        // Config was already validated above (configBroken returns earlier in
+        // the loop); default to the operator-decided always-on if a late read
+        // somehow throws so a config hiccup never strands the lane.
+        console.warn(
+          `[watcher] gemini reviewer-mode resolve failed for ${repoPath}#${prNumber}: ` +
+            `${err?.message || err}; defaulting to always-on`
+        );
+      }
+      const geminiBaseRoute = applyGeminiReviewerRoute({
+        builderClass: baseRoute.builderClass,
+        baseRoute,
+        mode: geminiReviewerMode,
+        primaryReviewerQuotaCapped:
+          geminiReviewerMode === 'fallback'
+            ? primaryReviewerQuotaCappedForRow(existing)
+            : false,
+      });
+      if (geminiBaseRoute.geminiReviewerSelection) {
+        console.log(
+          `[watcher] reviewer-selection ${repoPath}#${prNumber} → gemini ` +
+            `(${geminiBaseRoute.geminiReviewerSelection.reason}; mode=${geminiReviewerMode}; ` +
+            `replaced reviewer=${geminiBaseRoute.geminiReviewerSelection.replacedReviewerModel})`
+        );
+      } else if (geminiBaseRoute.geminiIntegrityGuard) {
+        console.warn(
+          `[watcher] reviewer-integrity-guard ${repoPath}#${prNumber}: blocked gemini from ` +
+            `reviewing a ${geminiBaseRoute.geminiIntegrityGuard.builderClass}-built PR; ` +
+            `fell back to reviewer=${geminiBaseRoute.geminiIntegrityGuard.fellBackTo}`
+        );
+      }
       const route = selectReviewerRouteForAttempt({
         subject,
-        baseRoute,
+        baseRoute: geminiBaseRoute,
         rootDir: ROOT,
         repoPath,
         prNumber,
@@ -6158,6 +6218,7 @@ export {
   retryPendingMergeAgentLifecycleCleanups,
   retryPendingDagAutowalkOnMerge,
   retryPendingMergeCloseouts,
+  primaryReviewerQuotaCappedForRow,
   selectReviewerRouteForAttempt,
   shouldDeferReviewForActiveFollowUp,
   shouldRetryMergeAgentLifecycleCleanup,

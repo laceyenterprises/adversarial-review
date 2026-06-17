@@ -286,6 +286,19 @@ else
   OP_SERVICE_ACCOUNT_TOKEN="$_WATCHER_PRIMARY_OP_SA_TOKEN"
   export OP_SERVICE_ACCOUNT_TOKEN
 fi
+# GMW-06: gemini-reviewer wiring. adversarial-review consumes the gemini token
+# from GH_GEMINI_REVIEWER_TOKEN ONLY; the 1Password item is named
+# GEMINI_REVIEWER_GH_TOKEN (mapped in config/watcher-op.env as
+# op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token). Fail closed if the legacy
+# item-named env var leaked into the runtime: a stray GEMINI_REVIEWER_GH_TOKEN
+# must never shadow the canonical var or cause a mis-post under another reviewer
+# identity. See docs/RUNBOOK-gemini-reviewer-app.md.
+if [[ -n "${GEMINI_REVIEWER_GH_TOKEN:-}" ]]; then
+  echo "[adversarial-watcher] ERROR: legacy GEMINI_REVIEWER_GH_TOKEN env var is present — adversarial-review consumes GH_GEMINI_REVIEWER_TOKEN only; unset GEMINI_REVIEWER_GH_TOKEN and map op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token → GH_GEMINI_REVIEWER_TOKEN (see docs/RUNBOOK-gemini-reviewer-app.md)." >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; unset the legacy GEMINI_REVIEWER_GH_TOKEN env var and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 1
+fi
 if reviewer_broker_mode_enabled "gemini-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer; then
     echo "[adversarial-watcher] ERROR: GEMINI_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
@@ -298,6 +311,15 @@ else
   fi
   OP_SERVICE_ACCOUNT_TOKEN="$_WATCHER_PRIMARY_OP_SA_TOKEN"
   export OP_SERVICE_ACCOUNT_TOKEN
+fi
+# Preflight safety net (GMW-06): never proceed to start the watcher with an
+# unresolved gemini token — a downstream gemini review would otherwise post
+# under another identity's token. Mirror the node preflight's exact message.
+if [[ -z "${GH_GEMINI_REVIEWER_TOKEN:-}" ]]; then
+  echo "[adversarial-watcher] ERROR: gemini reviewer selected but GH_GEMINI_REVIEWER_TOKEN unresolved — check the op.env mapping for GEMINI_REVIEWER_GH_TOKEN (see docs/RUNBOOK-gemini-reviewer-app.md)" >&2
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the GH_GEMINI_REVIEWER_TOKEN mapping and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 1
 fi
 
 resolve_alert_to_optional() {

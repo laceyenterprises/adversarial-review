@@ -2954,6 +2954,15 @@ function primaryReviewerQuotaCappedForRow(row, { nowMs = null } = {}) {
   }).hold;
 }
 
+function shouldBypassPrimaryReviewerQuotaHold(route) {
+  return (
+    route?.reviewerModel === 'gemini'
+    && route?.botTokenEnv === 'GH_GEMINI_REVIEWER_TOKEN'
+    && route?.geminiReviewerSelection?.mode === 'fallback'
+    && route?.geminiReviewerSelection?.reason === 'primary-reviewer-quota-capped'
+  );
+}
+
 function selectReviewerRouteForAttempt({
   subject,
   baseRoute,
@@ -5610,13 +5619,20 @@ async function pollOnce(
           fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,
         });
         if (quotaHold.hold) {
-          console.log(
-            `[watcher] Holding quota-exhausted review ${repoPath}#${prNumber}: ` +
-              `provider usage cap not yet cleared (waiting until ` +
-              `${new Date(quotaHold.waitUntilMs).toISOString()} [${quotaHold.source}]); ` +
-              `not consuming infra auto-recover attempt`
-          );
-          continue;
+          if (shouldBypassPrimaryReviewerQuotaHold(route)) {
+            console.log(
+              `[watcher] Bypassing quota hold for ${repoPath}#${prNumber}: ` +
+                `reviewer.gemini.mode=fallback selected gemini while primary reviewer is capped`
+            );
+          } else {
+            console.log(
+              `[watcher] Holding quota-exhausted review ${repoPath}#${prNumber}: ` +
+                `provider usage cap not yet cleared (waiting until ` +
+                `${new Date(quotaHold.waitUntilMs).toISOString()} [${quotaHold.source}]); ` +
+                `not consuming infra auto-recover attempt`
+            );
+            continue;
+          }
         }
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
@@ -6219,6 +6235,7 @@ export {
   retryPendingDagAutowalkOnMerge,
   retryPendingMergeCloseouts,
   primaryReviewerQuotaCappedForRow,
+  shouldBypassPrimaryReviewerQuotaHold,
   selectReviewerRouteForAttempt,
   shouldDeferReviewForActiveFollowUp,
   shouldRetryMergeAgentLifecycleCleanup,

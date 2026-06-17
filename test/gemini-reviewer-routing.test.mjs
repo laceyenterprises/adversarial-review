@@ -113,15 +113,18 @@ test('GMW-02 integrity: an operator gemini pin onto a [gemini] PR is stripped', 
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
   };
-  const route = applyGeminiReviewerRoute({
-    builderClass: 'gemini',
-    baseRoute: pinnedBase,
-    mode: 'always-on',
-  });
-  assert.equal(route.reviewerModel, 'codex');
-  assert.equal(route.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
-  assert.equal(route.geminiIntegrityGuard.blockedReviewerModel, 'gemini');
-  assert.equal(route.geminiIntegrityGuard.fellBackTo, 'codex');
+  for (const mode of ['off', 'fallback', 'always-on']) {
+    const route = applyGeminiReviewerRoute({
+      builderClass: 'gemini',
+      baseRoute: pinnedBase,
+      mode,
+      primaryReviewerQuotaCapped: true,
+    });
+    assert.equal(route.reviewerModel, 'codex', `mode=${mode}`);
+    assert.equal(route.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN', `mode=${mode}`);
+    assert.equal(route.geminiIntegrityGuard.blockedReviewerModel, 'gemini', `mode=${mode}`);
+    assert.equal(route.geminiIntegrityGuard.fellBackTo, 'codex', `mode=${mode}`);
+  }
 });
 
 test('GMW-02 integrity: gemini may review every non-gemini builder, never gemini', () => {

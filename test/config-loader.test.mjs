@@ -1501,6 +1501,22 @@ test('legacy env alias wins without canonical', () => {
   }
 });
 
+test('roles.reviewer accepts gemini from the legacy default reviewer env', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const cfg = loadConfig({
+      topPath: top,
+      env: { ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini' },
+    });
+    assert.equal(cfg.get('roles.reviewer'), 'gemini');
+    const sources = cfg.resolutionTrace('roles.reviewer').map((e) => e.source);
+    assert.ok(sources.includes('env:ADVERSARIAL_REVIEW_DEFAULT_REVIEWER'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('canonical + alias same value ok', () => {
   const tmp = freshTmp();
   try {

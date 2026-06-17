@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import {
   primaryReviewerQuotaCappedForRow,
   selectReviewerRouteForAttempt,
+  shouldBypassPrimaryReviewerQuotaHold,
 } from '../src/watcher.mjs';
 import { applyGeminiReviewerRoute } from '../src/adapters/subject/github-pr/routing.mjs';
 
@@ -77,6 +78,31 @@ test('GMW-02 watcher: fallback wiring end-to-end (capped → gemini, healthy →
     primaryReviewerQuotaCapped: primaryReviewerQuotaCappedForRow({ review_status: 'pending' }),
   });
   assert.equal(healthy.reviewerModel, 'codex');
+});
+
+test('GMW-02 watcher: fallback gemini route bypasses the primary reviewer quota hold', () => {
+  const baseRoute = {
+    builderClass: 'claude-code',
+    tag: '[claude-code]',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  };
+  const route = applyGeminiReviewerRoute({
+    builderClass: 'claude-code',
+    baseRoute,
+    mode: 'fallback',
+    primaryReviewerQuotaCapped: true,
+  });
+
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(route), true);
+  assert.equal(
+    shouldBypassPrimaryReviewerQuotaHold({
+      ...route,
+      geminiReviewerSelection: { mode: 'always-on', reason: 'always-on-third-reviewer' },
+    }),
+    false,
+  );
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(baseRoute), false);
 });
 
 test('GMW-02 watcher: selectReviewerRouteForAttempt passes a gemini route through', () => {

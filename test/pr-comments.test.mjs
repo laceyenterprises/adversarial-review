@@ -105,7 +105,7 @@ test('defangUntrustedMarkdown neutralizes block-level markdown starts', () => {
 test('resolveCommentBotTokenEnv maps known worker classes to their bot env vars', () => {
   assert.equal(resolveCommentBotTokenEnv('codex'), 'GH_CODEX_REVIEWER_TOKEN');
   assert.equal(resolveCommentBotTokenEnv('claude-code'), 'GH_CLAUDE_REVIEWER_TOKEN');
-  assert.equal(resolveCommentBotTokenEnv('gemini'), 'GH_CODEX_REVIEWER_TOKEN');
+  assert.equal(resolveCommentBotTokenEnv('gemini'), 'GH_GEMINI_REVIEWER_TOKEN');
   assert.equal(resolveCommentBotTokenEnv('pi'), 'GH_CODEX_REVIEWER_TOKEN');
   assert.equal(resolveCommentBotTokenEnv('opencode'), 'GH_CODEX_REVIEWER_TOKEN');
   assert.equal(resolveCommentBotTokenEnv('hermes'), 'GH_CODEX_REVIEWER_TOKEN');
@@ -491,6 +491,34 @@ test('postRemediationOutcomeComment posts via gh pr comment with the bot token i
   ]);
   // The bot PAT is exposed to the gh CLI via GH_TOKEN, scoped to this exec.
   assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-claude');
+});
+
+test('postRemediationOutcomeComment posts gemini comments with only the Gemini bot token', async () => {
+  const calls = [];
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'gemini',
+    body: '### Remediation Worker (gemini) — round 1\n\nSummary',
+    env: {
+      GH_GEMINI_REVIEWER_TOKEN: 'test-pat-gemini',
+      GH_CODEX_REVIEWER_TOKEN: 'test-pat-codex',
+      GH_CLAUDE_REVIEWER_TOKEN: 'test-pat-claude',
+      PATH: '/usr/bin',
+    },
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(result.posted, true);
+  assert.equal(result.workerClass, 'gemini');
+  assert.equal(result.tokenEnvName, 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-gemini');
+  assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN, undefined);
+  assert.equal(calls[0].options.env.GH_CLAUDE_REVIEWER_TOKEN, undefined);
 });
 
 test('postRemediationOutcomeComment passes only an allowlisted env to gh', async () => {

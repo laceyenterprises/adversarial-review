@@ -8,7 +8,8 @@
 //
 // Identity: the comment posts under the worker's matching reviewer-bot PAT
 // (claude-code worker → `GH_CLAUDE_REVIEWER_TOKEN`,
-//  codex worker → `GH_CODEX_REVIEWER_TOKEN`). The body header always names
+//  codex worker → `GH_CODEX_REVIEWER_TOKEN`,
+//  gemini worker → `GH_GEMINI_REVIEWER_TOKEN`). The body header always names
 // "Remediation Worker (<class>)" so the actual role is unambiguous even
 // though the GitHub identity says "...-reviewer-lacey".
 //
@@ -47,7 +48,7 @@ const BULLET_LIST_MAX_ITEMS = 25;
 const WORKER_CLASS_TO_BOT_TOKEN_ENV = {
   codex: 'GH_CODEX_REVIEWER_TOKEN',
   'claude-code': 'GH_CLAUDE_REVIEWER_TOKEN',
-  gemini: 'GH_CODEX_REVIEWER_TOKEN',
+  gemini: 'GH_GEMINI_REVIEWER_TOKEN',
   pi: 'GH_CODEX_REVIEWER_TOKEN',
   opencode: 'GH_CODEX_REVIEWER_TOKEN',
   hermes: 'GH_CODEX_REVIEWER_TOKEN',

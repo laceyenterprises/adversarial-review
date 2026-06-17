@@ -60,6 +60,16 @@ import { fetchPullRequestReviewContext } from './github-api.mjs';
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
 
+const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
+  GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
+  GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
+  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
+});
+
+function resolveReviewerIdentityForBotTokenEnv(botTokenEnv, fallbackIdentity = null) {
+  return REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV[botTokenEnv] || fallbackIdentity || botTokenEnv;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1215,7 +1225,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
 
   const prepareReviewWrite = opts.prepareReviewWrite || clearPendingReviewsForSelf;
   const log = opts.log || console;
-  const reviewerIdentity = opts.reviewerIdentity || botTokenEnv;
+  const refreshIdentity = resolveReviewerIdentityForBotTokenEnv(botTokenEnv, opts.reviewerIdentity);
   let refreshedAfterAuthFailure = false;
 
   const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, opts.env || process.env);
@@ -1264,7 +1274,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             preWriteSaw401: preWriteLog.tracker.saw401,
           });
           if (!refreshedAfterAuthFailure && authRetryable) {
-            const refreshed = await resolveReviewerAppToken(reviewerIdentity, {
+            const refreshed = await resolveReviewerAppToken(refreshIdentity, {
               env: process.env,
               fetchImpl: opts.fetchImpl,
               readFileImpl: opts.readFileImpl,
@@ -1275,7 +1285,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               );
               return null;
             });
-            if (refreshed?.token) {
+            if (refreshed?.token && refreshed.envVar === botTokenEnv) {
               refreshedAfterAuthFailure = true;
               token = refreshed.token;
               log.warn?.(
@@ -1284,6 +1294,11 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               throw new ReviewerPostAuthRefreshRetryableError(
                 `Retry GitHub review post after refreshing ${botTokenEnv}`,
                 { cause: err }
+              );
+            }
+            if (refreshed?.token && refreshed.envVar !== botTokenEnv) {
+              log.warn?.(
+                `[reviewer] refused refreshed ${refreshed.envVar || '<unknown>'} token for ${botTokenEnv} after GitHub auth failure`
               );
             }
           }
@@ -1644,7 +1659,10 @@ async function main() {
       botTokenEnv,
       passKind,
       reviewerSpawnToken,
-      reviewerIdentity: effectiveModel === 'codex' ? 'codex-reviewer-lacey' : 'claude-reviewer-lacey',
+      reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
+        botTokenEnv,
+        effectiveModel === 'codex' ? 'codex-reviewer-lacey' : 'claude-reviewer-lacey'
+      ),
       execFileImpl: execFileAsync,
       log: console,
     });
@@ -1733,6 +1751,7 @@ const __test__ = {
   postGitHubReviewWithCapture,
   isRetryableGhTransportError,
   isReviewerPostAuthFailure,
+  resolveReviewerIdentityForBotTokenEnv,
 };
 
 export {

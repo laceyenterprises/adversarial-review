@@ -19,6 +19,7 @@ import {
 } from '../src/reviewer-cascade.mjs';
 import {
   probeRoutingTierReadiness,
+  resolveReviewerIdentity,
   selectReviewerRouteForAttempt,
   settleReviewerAttempt,
 } from '../src/watcher.mjs';
@@ -515,6 +516,23 @@ test('reviewer-timeout fallback stays on the cross-model reviewer by default aft
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('resolveReviewerIdentity maps the Gemini bot token env to the Gemini reviewer identity', () => {
+  assert.equal(
+    resolveReviewerIdentity({
+      reviewerModel: 'gemini',
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    }),
+    'gemini-reviewer-lacey',
+  );
+  assert.equal(
+    resolveReviewerIdentity({
+      reviewerModel: 'claude',
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    }),
+    'gemini-reviewer-lacey',
+  );
 });
 
 test('reviewer-timeout fallback switches reviewer model after threshold only with explicit opt-in', () => {

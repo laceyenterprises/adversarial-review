@@ -1892,12 +1892,26 @@ test('spawnGeminiRemediationWorker builds the gemini headless argv and never emb
   }
 
   assert.match(capturedCli, /gemini/);
-  // `--approval-mode yolo` (headless auto-approve) + `-m <model>`; the prompt
-  // is delivered through stdin, so it must NOT appear on argv.
-  assert.deepEqual(capturedArgs, ['--approval-mode', 'yolo', '-m', 'gemini-2.5-pro']);
+  // `--approval-mode yolo` (headless auto-approve) + `--skip-trust` (fresh
+  // workspace trust bypass) + `-m <model>`; the prompt is delivered through
+  // stdin, so it must NOT appear on argv.
+  assert.deepEqual(capturedArgs, [
+    '--approval-mode',
+    'yolo',
+    '--skip-trust',
+    '-m',
+    'gemini-2.5-pro',
+  ]);
   assert.equal(result.model, 'gemini');
   assert.equal(result.workerClass, 'gemini');
-  assert.deepEqual(result.command, ['gemini', '--approval-mode', 'yolo', '-m', 'gemini-2.5-pro']);
+  assert.deepEqual(result.command, [
+    'gemini',
+    '--approval-mode',
+    'yolo',
+    '--skip-trust',
+    '-m',
+    'gemini-2.5-pro',
+  ]);
 
   // The full prompt/diff body never leaks into the process argv.
   const joinedArgs = capturedArgs.join('\n');
@@ -1934,7 +1948,13 @@ test('spawnGeminiRemediationWorker honors a pinned gemini model in argv', () => 
     }
   }
 
-  assert.deepEqual(capturedArgs, ['--approval-mode', 'yolo', '-m', 'gemini-2.5-flash']);
+  assert.deepEqual(capturedArgs, [
+    '--approval-mode',
+    'yolo',
+    '--skip-trust',
+    '-m',
+    'gemini-2.5-flash',
+  ]);
 });
 
 test('spawnGeminiRemediationWorker stamps the gemini-remediation provenance trailer class', () => {
@@ -2076,7 +2096,13 @@ test('spawnRemediationWorker dispatches "gemini" to spawnGeminiRemediationWorker
 
   assert.equal(result.model, 'gemini');
   assert.match(invokedCli, /gemini/);
-  assert.deepEqual(invokedArgs, ['--approval-mode', 'yolo', '-m', 'gemini-2.5-pro']);
+  assert.deepEqual(invokedArgs, [
+    '--approval-mode',
+    'yolo',
+    '--skip-trust',
+    '-m',
+    'gemini-2.5-pro',
+  ]);
 });
 
 test('remediationWorkerTrailerClass maps each worker class to its provenance trailer', () => {

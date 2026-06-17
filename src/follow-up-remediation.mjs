@@ -1491,11 +1491,11 @@ function spawnGeminiRemediationWorker({
   // codex's --dangerously-bypass-approvals-and-sandbox and claude's
   // --dangerously-skip-permissions: in unattended mode there is no human to
   // answer per-tool prompts, so the worker can edit AND run git/test commands
-  // non-interactively. The yolo scope is the per-job workspace (the existing
-  // sandbox boundary), exactly like the codex bypass flag. The full prompt
-  // body is delivered through stdin (promptFd) — NEVER on argv — so the diff
-  // and review context never land in the process table or the worker log.
-  const geminiArgs = ['--approval-mode', 'yolo', '-m', model];
+  // non-interactively. `--skip-trust` keeps fresh per-job workspaces from
+  // blocking on folder-trust prompts. The full prompt body is delivered through
+  // stdin (promptFd) — NEVER on argv — so the diff and review context never
+  // land in the process table or the worker log.
+  const geminiArgs = ['--approval-mode', 'yolo', '--skip-trust', '-m', model];
 
   // Gemini reads its prompt from stdin in non-interactive mode and writes the
   // final assistant message to stdout. Capture stdout directly to outputPath

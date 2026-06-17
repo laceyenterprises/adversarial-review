@@ -7,6 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   primaryReviewerQuotaCappedForRow,
@@ -147,18 +148,61 @@ test('GMW-02 watcher: fallback gemini route bypasses the original primary review
   };
 
   assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, primaryCappedRow), true);
-  // The watcher persists reviewer=gemini before re-reading current state; the
-  // bypass decision must be made from the pre-update primary row, not this
-  // rewritten row.
+  // If a stale/reordered path ever rewrites reviewer=gemini before spawn, this
+  // row must not be mistaken for primary-reviewer quota evidence.
   assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, geminiCappedRow), false);
   assert.equal(
     shouldBypassPrimaryReviewerQuotaHold({
       ...route,
       geminiReviewerSelection: { mode: 'always-on', reason: 'always-on-third-reviewer' },
     }, primaryCappedRow),
-    false,
+    true,
   );
   assert.equal(shouldBypassPrimaryReviewerQuotaHold(baseRoute, primaryCappedRow), false);
+});
+
+test('GMW-02 watcher: always-on gemini bypasses replaced primary quota holds only', () => {
+  const route = {
+    builderClass: 'claude-code',
+    tag: '[claude-code]',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    geminiReviewerSelection: {
+      mode: 'always-on',
+      replacedReviewerModel: 'codex',
+      reason: 'always-on-third-reviewer',
+    },
+  };
+  const primaryCappedRow = {
+    review_status: 'failed',
+    reviewer: 'codex',
+    failure_message: '[quota-exhausted] hit your usage limit',
+    failed_at: new Date(Date.now() - 60_000).toISOString(),
+  };
+  const geminiCappedRow = {
+    ...primaryCappedRow,
+    reviewer: 'gemini',
+  };
+
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, primaryCappedRow), true);
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, geminiCappedRow), false);
+});
+
+test('GMW-02 watcher: existing-row routing updates happen only after spawn claim', () => {
+  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const createRowStart = source.indexOf('if (!existing) {\n        stmtCreateReviewRow.run(');
+  const currentRead = source.indexOf('const current = stmtGetReviewRow.get(repoPath, prNumber);', createRowStart);
+  assert.notEqual(createRowStart, -1);
+  assert.notEqual(currentRead, -1);
+  const preGateBlock = source.slice(createRowStart, currentRead);
+  assert.doesNotMatch(preGateBlock, /stmtUpdateReviewRouting\.run/);
+
+  const claimWin = source.indexOf('if (claim.changes === 0) {');
+  const infraLog = source.indexOf('if (infraRecoveryClass) {', claimWin);
+  assert.notEqual(claimWin, -1);
+  assert.notEqual(infraLog, -1);
+  const postClaimBlock = source.slice(claimWin, infraLog);
+  assert.match(postClaimBlock, /stmtUpdateReviewRouting\.run\(route\.reviewerModel/);
 });
 
 test('GMW-02 watcher: selectReviewerRouteForAttempt passes a gemini route through', () => {

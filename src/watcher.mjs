@@ -2975,11 +2975,20 @@ function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
   if (row && !rowReviewerMatches(row, route?.geminiReviewerSelection?.replacedReviewerModel)) {
     return false;
   }
+  const reason = route?.geminiReviewerSelection?.reason;
   return (
     route?.reviewerModel === 'gemini'
     && route?.botTokenEnv === 'GH_GEMINI_REVIEWER_TOKEN'
-    && route?.geminiReviewerSelection?.mode === 'fallback'
-    && route?.geminiReviewerSelection?.reason === 'primary-reviewer-quota-capped'
+    && (
+      (
+        route?.geminiReviewerSelection?.mode === 'fallback'
+        && reason === 'primary-reviewer-quota-capped'
+      )
+      || (
+        route?.geminiReviewerSelection?.mode === 'always-on'
+        && reason === 'always-on-third-reviewer'
+      )
+    )
   );
 }
 
@@ -5573,8 +5582,6 @@ async function pollOnce(
           'pending',
           JSON.stringify(Array.isArray(liveLabels) ? liveLabels : (Array.isArray(subject.labels) ? subject.labels : []))
         );
-      } else {
-        stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
       }
 
       const current = stmtGetReviewRow.get(repoPath, prNumber);
@@ -5780,6 +5787,9 @@ async function pollOnce(
                 `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
               );
               return;
+            }
+            if (existing) {
+              stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
             }
             if (infraRecoveryClass) {
               console.log(

@@ -1283,6 +1283,69 @@ test('cli-direct path discovery honors env override, PATH fallback, and clear mi
   }
 });
 
+test('cli-direct Gemini preflight uses Gemini CLI and OAuth instead of Claude', async () => {
+  const rootDir = makeRoot();
+  const envKeys = [
+    'GEMINI_CLI_PATH',
+    'GEMINI_CLI',
+    'GEMINI_HOME',
+    'GEMINI_OAUTH_CREDS_PATH',
+    'CLAUDE_CLI',
+    'PATH',
+  ];
+  const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  try {
+    const binDir = join(rootDir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const geminiPath = join(binDir, 'gemini');
+    writeFileSync(geminiPath, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "gemini 1.0"; exit 0; fi\nexit 0\n', 'utf8');
+    chmodSync(geminiPath, 0o755);
+    const geminiHome = join(rootDir, '.gemini');
+    mkdirSync(geminiHome, { recursive: true });
+    writeFileSync(
+      join(geminiHome, 'oauth_creds.json'),
+      JSON.stringify({ access_token: 'gemini-oauth-token', token_type: 'Bearer' }),
+      'utf8',
+    );
+
+    process.env.GEMINI_CLI_PATH = geminiPath;
+    delete process.env.GEMINI_CLI;
+    process.env.GEMINI_HOME = geminiHome;
+    delete process.env.GEMINI_OAUTH_CREDS_PATH;
+    process.env.CLAUDE_CLI = join(rootDir, 'missing-claude');
+    process.env.PATH = '';
+
+    let childEnv;
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        childEnv = options.env;
+        options.onSpawn({ pgid: 6262 });
+        return { stdout: 'ok', stderr: '' };
+      },
+      now: () => '2026-05-11T20:00:00.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'gemini',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+      timeoutMs: 100,
+      sessionUuid: 'gemini-cli-direct-preflight-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(childEnv.GEMINI_CLI, geminiPath);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct preflight failures are oauth-broken and prevent reviewer spawn', async () => {
   const rootDir = makeRoot();
   let spawnCount = 0;

@@ -147,7 +147,7 @@ function readReviewerPassLogins(db, { repo, prNumber, reviewerLoginResolver = ()
   const seen = new Set();
   for (const row of rows) {
     for (const candidate of [row?.reviewer_model, row?.reviewer_class]) {
-      const login = reviewerLoginResolver(candidate);
+      const login = reviewerLoginResolver(candidate, row);
       const normalized = String(login || '').trim().toLowerCase();
       if (!normalized || seen.has(normalized)) continue;
       seen.add(normalized);

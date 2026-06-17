@@ -741,6 +741,68 @@ test('clio-agent reviewer-class login excludes the codex reviewer bot', async ()
   assert.match(row.closeout_body_md, /Operator closeout stays/);
 });
 
+test('historical gemini builder-tag closeouts still exclude the Codex reviewer bot', async () => {
+  const db = setupDb();
+  seedReviewerPass(db, { reviewerClass: 'gemini', reviewerModel: null });
+
+  await scrapeMergeCloseout({
+    db,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 17,
+    mergedAt: '2026-05-20T20:55:00.000Z',
+    now: new Date('2026-05-20T20:56:00.000Z'),
+    fetchIssueCommentsImpl: async () => ([
+      {
+        id: 'IC_codex_reviewer',
+        login: 'codex-reviewer-lacey',
+        created_at: '2026-05-20T20:40:00.000Z',
+        body: 'Historical Codex reviewer comment must be excluded.',
+      },
+      {
+        id: 'IC_operator',
+        login: 'virtualpaul',
+        created_at: '2026-05-20T20:45:00.000Z',
+        body: 'Operator closeout stays.',
+      },
+    ]),
+  });
+
+  const row = readCloseoutRow(db);
+  assert.doesNotMatch(row.closeout_body_md, /Historical Codex reviewer comment must be excluded/);
+  assert.match(row.closeout_body_md, /Operator closeout stays/);
+});
+
+test('native Gemini closeouts exclude the Gemini reviewer bot', async () => {
+  const db = setupDb();
+  seedReviewerPass(db, { reviewerClass: 'gemini', reviewerModel: 'gemini' });
+
+  await scrapeMergeCloseout({
+    db,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 17,
+    mergedAt: '2026-05-20T20:55:00.000Z',
+    now: new Date('2026-05-20T20:56:00.000Z'),
+    fetchIssueCommentsImpl: async () => ([
+      {
+        id: 'IC_gemini_reviewer',
+        login: 'gemini-reviewer-lacey',
+        created_at: '2026-05-20T20:40:00.000Z',
+        body: 'Native Gemini reviewer comment must be excluded.',
+      },
+      {
+        id: 'IC_operator',
+        login: 'virtualpaul',
+        created_at: '2026-05-20T20:45:00.000Z',
+        body: 'Operator closeout stays.',
+      },
+    ]),
+  });
+
+  const row = readCloseoutRow(db);
+  assert.doesNotMatch(row.closeout_body_md, /Native Gemini reviewer comment must be excluded/);
+  assert.match(row.closeout_body_md, /Operator closeout stays/);
+});
+
 test('successful capture clears scrape_attempt_count and scrape_last_error', async () => {
   // Reviewer flagged that recovered rows kept their failure-derived
   // attempt count and stale last-error string forever, breaking triage

@@ -25,7 +25,7 @@ __aliases:
 # CFG-02 wires resolvers for these three knobs to consult this file FIRST,
 # then env override LAST.
 roles:
-  reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / adversarial
+  reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / gemini / adversarial
   remediator: adversarial           # enum: claude-code / codex / adversarial
   merge-agent:
     fallback_path: none

@@ -137,6 +137,11 @@ const MAINTAINER_ACPX_CLI = join(homedir(), '.openclaw', 'tools', 'acpx', 'node_
 // Raw Codex CLI is still used only for login-status probing.
 const CODEX_CLI = resolveCodexCliPath();
 
+// Native Gemini CLI — used for adversarial reviews when reviewerModel='gemini'.
+// Like Claude/Codex, it MUST authenticate via OAuth (~/.gemini/oauth_creds.json);
+// GEMINI_API_KEY / GOOGLE_API_KEY are scrubbed from the env before invoking.
+const GEMINI_CLI = resolveGeminiCliPath();
+
 // OPENAI_API_KEY is stripped from env so Codex cannot fall back to API-key auth.
 
 function resolveClaudeAuthProbeTimeoutMs(env = process.env) {
@@ -158,6 +163,10 @@ function resolveClaudeCliPath(env = process.env) {
 
 function resolveCodexCliPath(env = process.env) {
   return env.CODEX_CLI_PATH || env.CODEX_CLI || findOnPath('codex', env.PATH) || 'codex';
+}
+
+function resolveGeminiCliPath(env = process.env) {
+  return env.GEMINI_CLI_PATH || env.GEMINI_CLI || findOnPath('gemini', env.PATH) || 'gemini';
 }
 
 function resolveAcpxCliPath({ env = process.env, preferLocalAcpx = false } = {}) {
@@ -327,6 +336,61 @@ async function assertCodexOAuth() {
   // Verify auth.json is readable and contains valid OAuth tokens.
   // This is more reliable than CLI probes, which may not support `login status`.
   assertCodexAuthReadable();
+}
+
+// ── Gemini OAuth checks ──────────────────────────────────────────────────────
+
+/**
+ * Resolve the Gemini OAuth credential file. Mirrors the worker adapter
+ * contract (`modules/worker-pool/lib/adapters/acpx-gemini.sh`): a pinned
+ * HOME holds a private `~/.gemini/oauth_creds.json`. GEMINI_OAUTH_CREDS_PATH
+ * overrides explicitly; GEMINI_HOME (when set) points at the `.gemini` dir.
+ */
+function resolveGeminiOAuthCredsPath(env = process.env) {
+  if (env.GEMINI_OAUTH_CREDS_PATH) return env.GEMINI_OAUTH_CREDS_PATH;
+  const geminiHome = env.GEMINI_HOME || join(env.HOME || homedir(), '.gemini');
+  return join(geminiHome, 'oauth_creds.json');
+}
+
+/**
+ * Verify the Gemini OAuth creds file exists, is readable, and carries an
+ * access token. Reads the file directly rather than trusting CLI probes,
+ * matching assertCodexAuthReadable.
+ */
+function assertGeminiAuthReadable(env = process.env) {
+  const credsPath = resolveGeminiOAuthCredsPath(env);
+  if (!existsSync(credsPath)) {
+    throw new OAuthError('gemini', `OAuth oauth_creds.json missing: ${credsPath}`);
+  }
+
+  let raw;
+  try {
+    raw = readFileSync(credsPath, 'utf8');
+  } catch (err) {
+    throw new OAuthError('gemini', `cannot read ${credsPath}: ${err.message}`);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new OAuthError('gemini', `invalid oauth_creds.json at ${credsPath}: ${err.message}`);
+  }
+
+  if (!parsed?.access_token) {
+    throw new OAuthError('gemini', `Gemini oauth_creds.json missing access_token: ${credsPath}`);
+  }
+
+  return credsPath;
+}
+
+async function assertGeminiOAuth(env = process.env) {
+  if (!existsSync(GEMINI_CLI)) {
+    throw new OAuthError('gemini', `gemini CLI not found at ${GEMINI_CLI}`);
+  }
+
+  // Verify oauth_creds.json is readable and carries an access token.
+  assertGeminiAuthReadable(env);
 }
 
 /**
@@ -1093,6 +1157,221 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
   }
 }
 
+// ── Gemini review ─────────────────────────────────────────────────────────────
+
+// Default to the best available reviewer model. GEMINI_REVIEWER_MODEL
+// overrides the default at runtime — set it to the cheaper fallback
+// (gemini-2.5-flash) when pro is unavailable or quota-capped.
+const DEFAULT_GEMINI_REVIEWER_MODEL = 'gemini-2.5-pro';
+const REVIEWER_METADATA_BY_MODEL = Object.freeze({
+  claude: {
+    displayName: 'Claude',
+    reviewerIdentity: 'claude-reviewer-lacey',
+  },
+  codex: {
+    displayName: 'Codex',
+    reviewerIdentity: 'codex-reviewer-lacey',
+  },
+  gemini: {
+    displayName: 'Gemini',
+    reviewerIdentity: 'gemini-reviewer-lacey',
+  },
+});
+
+function resolveGeminiReviewerModel(env = process.env) {
+  const override = String(env.GEMINI_REVIEWER_MODEL || '').trim();
+  return override || DEFAULT_GEMINI_REVIEWER_MODEL;
+}
+
+function resolveReviewerMetadata(reviewerModel) {
+  const key = String(reviewerModel || '').trim().toLowerCase();
+  return REVIEWER_METADATA_BY_MODEL[key] || REVIEWER_METADATA_BY_MODEL.codex;
+}
+
+/**
+ * Build the headless Gemini argv. The actual prompt, diff, and extra context
+ * still travel over stdin; `--prompt ''` only switches the Gemini CLI out of
+ * interactive mode so stdin is consumed as headless prompt content.
+ */
+function buildGeminiReviewArgs({ model }) {
+  return ['-m', model, '-o', 'text', '--prompt', ''];
+}
+
+function isRetryableGeminiSubprocessError(err) {
+  const detail = buildGhErrorDetail(err);
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|tls)\b/.test(detail)
+    || detail.includes('timeout')
+    || detail.includes('timed out')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable')
+    || detail.includes('socket hang up')
+    || detail.includes('network')
+    || detail.includes('connection reset')
+    || detail.includes('connection refused')
+    || detail.includes('service unavailable')
+    || detail.includes('503')
+    || detail.includes('504')
+    || detail.includes('429')
+    || detail.includes('rate limit');
+}
+
+async function withGeminiSubprocessRetry(operation, {
+  retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+  log = console,
+} = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableGeminiSubprocessError(err) || attempt >= retryDelaysMs.length) {
+        throw err;
+      }
+      log.warn?.(
+        `[reviewWithGemini] transient Gemini subprocess failure on attempt ${attempt + 1}/${retryDelaysMs.length + 1}; retrying: ${err?.message || err}`
+      );
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastErr;
+}
+
+async function spawnGeminiReview({
+  geminiCli = GEMINI_CLI,
+  prompt,
+  model = resolveGeminiReviewerModel(),
+  env,
+  cwd = process.cwd(),
+  timeout = resolveReviewerTimeoutMs(env),
+  maxBuffer = 10 * 1024 * 1024,
+  spawnWithInputImpl = spawnWithInput,
+}) {
+  // Prompt content is delivered on stdin only — see buildGeminiReviewArgs.
+  return spawnWithInputImpl(
+    geminiCli,
+    buildGeminiReviewArgs({ model }),
+    {
+      env,
+      cwd,
+      input: prompt,
+      timeout,
+      maxBuffer,
+    },
+  );
+}
+
+/**
+ * Run adversarial review using the native Gemini CLI (OAuth only).
+ * GEMINI_API_KEY / GOOGLE_API_KEY are scrubbed from the env so Gemini uses
+ * its stored OAuth credentials only. The prompt is fed over stdin (never
+ * argv). Gemini token-usage parsing is out of scope, so tokenUsage is null.
+ */
+async function reviewWithGemini(diff, extraContext = '', {
+  promptStage = 'first',
+  assertOAuthImpl = assertGeminiOAuth,
+  spawnGeminiReviewImpl = spawnGeminiReview,
+  retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+} = {}) {
+  console.error('[reviewWithGemini] asserting OAuth...');
+  await assertOAuthImpl();
+  console.error('[reviewWithGemini] OAuth OK');
+
+  const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
+  const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+  const model = resolveGeminiReviewerModel();
+
+  // Strip API keys (incl. GEMINI_API_KEY / GOOGLE_API_KEY) so the gemini CLI
+  // falls through to OAuth. Pin HOME so it reads the same oauth_creds.json
+  // asserted above.
+  const { env } = scrubOAuthFallbackEnv({
+    ...process.env,
+    HOME: process.env.HOME || homedir(),
+  });
+
+  let stdout = '';
+  let stderr = '';
+  try {
+    console.error(`[reviewWithGemini] invoking native Gemini CLI (model=${model})`);
+    const result = await withGeminiSubprocessRetry(
+      () => spawnGeminiReviewImpl({
+        geminiCli: GEMINI_CLI,
+        prompt,
+        model,
+        env,
+        cwd: process.cwd(),
+        timeout: resolveReviewerTimeoutMs(env),
+        maxBuffer: 10 * 1024 * 1024,
+      }),
+      { retryDelaysMs, sleepImpl },
+    );
+    stdout = result.stdout || '';
+    stderr = result.stderr || '';
+  } catch (err) {
+    stdout = err.stdout || '';
+    stderr = err.stderr || '';
+    const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
+    if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
+      throw new OAuthError('gemini', `CLI returned auth error: ${msg.substring(0, 200)}`);
+    }
+    throw new Error(`Gemini exec failed: ${msg.substring(0, 800)}`);
+  }
+
+  console.error(`[reviewWithGemini] gemini returned stdout length=${stdout.length}; stderr length=${stderr.length}`);
+  console.error(`[reviewWithGemini] stdout preview: ${previewText(stdout)}`);
+  console.error(`[reviewWithGemini] stderr preview: ${previewText(stderr)}`);
+
+  const combined = normalizeWhitespace(stdout || stderr || '');
+  if (!combined) {
+    // Forensic: surface the raw output in the thrown error rather than
+    // silently dropping it (mirrors the codex empty-output handling).
+    const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
+    throw new Error(`Gemini returned empty output.${hint}`);
+  }
+
+  return { reviewText: combined, tokenUsage: null };
+}
+
+// ── Reviewer-model selection ──────────────────────────────────────────────────
+
+/**
+ * Route a review to the reviewer matching `effectiveModel`. This is the
+ * single selection site: 'gemini' MUST land on reviewWithGemini and never
+ * fall through to codex (the GMW-01 regression this guards). Codex output
+ * still needs sanitization by the caller, so the codex branch returns the
+ * raw text with reviewText=null and needsSanitize=true; claude/gemini are
+ * returned ready to post.
+ */
+async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
+  promptStage = 'first',
+  reviewWithClaudeImpl = reviewWithClaude,
+  reviewWithCodexImpl = reviewWithCodex,
+  reviewWithGeminiImpl = reviewWithGemini,
+} = {}) {
+  if (effectiveModel === 'claude') {
+    const text = await reviewWithClaudeImpl(diff, extraContext, { promptStage });
+    return { rawReviewText: text, reviewText: text, tokenUsage: null, needsSanitize: false };
+  }
+  if (effectiveModel === 'gemini') {
+    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage });
+    return {
+      rawReviewText: result.reviewText,
+      reviewText: result.reviewText,
+      tokenUsage: result.tokenUsage ?? null,
+      needsSanitize: false,
+    };
+  }
+  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage });
+  return {
+    rawReviewText: codexResult.reviewText,
+    reviewText: null,
+    tokenUsage: codexResult.tokenUsage,
+    needsSanitize: true,
+  };
+}
+
 // ── GitHub review posting ────────────────────────────────────────────────────
 
 class ReviewerPostAuthRefreshRetryableError extends Error {
@@ -1579,13 +1858,14 @@ async function main() {
   let tokenUsage = null;
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
-    if (effectiveModel === 'claude') {
-      rawReviewText = await reviewWithClaude(diff, extraContext, { promptStage: reviewerPromptStage });
-      reviewText = rawReviewText;
-    } else {
-      const codexResult = await reviewWithCodex(diff, extraContext, { promptStage: reviewerPromptStage });
-      rawReviewText = codexResult.reviewText;
-      tokenUsage = codexResult.tokenUsage;
+    // Single selection site (GMW-01): claude / gemini / codex. gemini routes
+    // to reviewWithGemini and never falls through to codex.
+    const dispatch = await dispatchReviewerModel(effectiveModel, diff, extraContext, {
+      promptStage: reviewerPromptStage,
+    });
+    rawReviewText = dispatch.rawReviewText;
+    tokenUsage = dispatch.tokenUsage;
+    if (dispatch.needsSanitize) {
       console.error(`[reviewer] DEBUG: raw Codex review length=${rawReviewText.length}; preview=${previewText(rawReviewText)}`);
       try {
         reviewText = sanitizeCodexReviewPayload(rawReviewText);
@@ -1610,6 +1890,8 @@ async function main() {
         }
         throw sanitizeErr;
       }
+    } else {
+      reviewText = dispatch.reviewText;
     }
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
@@ -1630,10 +1912,8 @@ async function main() {
   console.log(`[reviewer] Review generated (${reviewText.length} chars)`);
 
   // 3. Post to GitHub
-  const header =
-    effectiveModel === 'claude'
-      ? '## Adversarial Review — Claude (claude-reviewer-lacey)\n\n'
-      : '## Adversarial Review — Codex (codex-reviewer-lacey)\n\n';
+  const reviewerMetadata = resolveReviewerMetadata(effectiveModel);
+  const header = `## Adversarial Review — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n`;
   const waiverAuditBlock = crossModelReviewWaived
     ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
     : '';
@@ -1661,7 +1941,7 @@ async function main() {
       reviewerSpawnToken,
       reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
         botTokenEnv,
-        effectiveModel === 'codex' ? 'codex-reviewer-lacey' : 'claude-reviewer-lacey'
+        reviewerMetadata.reviewerIdentity
       ),
       execFileImpl: execFileAsync,
       log: console,
@@ -1748,6 +2028,16 @@ const __test__ = {
   parseCodexJsonTokenUsage,
   postGitHubReview,
   spawnCodexReview,
+  resolveGeminiCliPath,
+  resolveGeminiOAuthCredsPath,
+  assertGeminiOAuth,
+  resolveGeminiReviewerModel,
+  resolveReviewerMetadata,
+  buildGeminiReviewArgs,
+  isRetryableGeminiSubprocessError,
+  spawnGeminiReview,
+  reviewWithGemini,
+  dispatchReviewerModel,
   postGitHubReviewWithCapture,
   isRetryableGhTransportError,
   isReviewerPostAuthFailure,
@@ -1757,6 +2047,7 @@ const __test__ = {
 export {
   CLAUDE_CLI,
   CODEX_CLI,
+  GEMINI_CLI,
   assertClaudeOAuth,
   assertCodexOAuth,
   sanitizeCodexReviewPayload,

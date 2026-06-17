@@ -20,6 +20,16 @@ const {
   resolveReviewerTimeoutMs,
   spawnCodexReview,
   spawnClaude,
+  resolveGeminiCliPath,
+  resolveGeminiOAuthCredsPath,
+  assertGeminiOAuth,
+  resolveGeminiReviewerModel,
+  resolveReviewerMetadata,
+  buildGeminiReviewArgs,
+  isRetryableGeminiSubprocessError,
+  spawnGeminiReview,
+  reviewWithGemini,
+  dispatchReviewerModel,
 } = __test__;
 
 function withEnv(overrides, fn) {
@@ -610,4 +620,241 @@ test('spawnClaude classifies launchctl session failures separately from oauth fa
     }),
     (err) => err?.isLaunchctlSessionError === true && /bootstrap failed/i.test(err.message)
   );
+});
+
+// ── GMW-01: Gemini reviewer ───────────────────────────────────────────────────
+
+test('resolveGeminiReviewerModel returns the default and honors the override env', () => {
+  assert.equal(
+    withEnv({ GEMINI_REVIEWER_MODEL: undefined }, () => resolveGeminiReviewerModel()),
+    'gemini-2.5-pro',
+  );
+  assert.equal(
+    withEnv({ GEMINI_REVIEWER_MODEL: '   ' }, () => resolveGeminiReviewerModel()),
+    'gemini-2.5-pro',
+  );
+  assert.equal(
+    withEnv({ GEMINI_REVIEWER_MODEL: 'gemini-2.5-flash' }, () => resolveGeminiReviewerModel()),
+    'gemini-2.5-flash',
+  );
+});
+
+test('buildGeminiReviewArgs enters headless mode without carrying the prompt body', () => {
+  const args = buildGeminiReviewArgs({ model: 'gemini-2.5-pro' });
+  assert.deepEqual(args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
+  // The prompt flag is intentionally empty: it enables non-interactive stdin
+  // handling without putting prompt/diff content in argv.
+  assert.equal(args[args.indexOf('--prompt') + 1], '');
+});
+
+test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', async () => {
+  const prompt = 'ADVERSARIAL PROMPT\n\n---\n\n```diff\n+secret diff body\n```';
+  const calls = [];
+
+  await spawnGeminiReview({
+    geminiCli: '/usr/local/bin/gemini',
+    prompt,
+    model: 'gemini-2.5-pro',
+    env: { HOME: '/tmp/home', PATH: process.env.PATH },
+    cwd: '/tmp/repo',
+    timeout: 9_999,
+    maxBuffer: 555,
+    spawnWithInputImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, '/usr/local/bin/gemini');
+  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
+  // The prompt (and the diff body inside it) is observed ONLY on stdin.
+  assert.equal(calls[0].options.input, prompt);
+  for (const arg of calls[0].args) {
+    assert.ok(!arg.includes('secret diff body'), `argv leaked prompt body: ${arg}`);
+    assert.ok(!arg.includes('ADVERSARIAL PROMPT'), `argv leaked prompt body: ${arg}`);
+  }
+  assert.deepEqual(
+    { cwd: calls[0].options.cwd, timeout: calls[0].options.timeout, maxBuffer: calls[0].options.maxBuffer },
+    { cwd: '/tmp/repo', timeout: 9_999, maxBuffer: 555 },
+  );
+});
+
+test('resolveReviewerMetadata labels Gemini reviews with the Gemini reviewer identity', () => {
+  assert.deepEqual(resolveReviewerMetadata('claude'), {
+    displayName: 'Claude',
+    reviewerIdentity: 'claude-reviewer-lacey',
+  });
+  assert.deepEqual(resolveReviewerMetadata('codex'), {
+    displayName: 'Codex',
+    reviewerIdentity: 'codex-reviewer-lacey',
+  });
+  assert.deepEqual(resolveReviewerMetadata('gemini'), {
+    displayName: 'Gemini',
+    reviewerIdentity: 'gemini-reviewer-lacey',
+  });
+});
+
+test('reviewWithGemini happy path returns the captured review text', async () => {
+  const captured = [];
+  const result = await reviewWithGemini('+diff body\n', 'EXTRA CONTEXT', {
+    promptStage: 'first',
+    assertOAuthImpl: async () => {},
+    spawnGeminiReviewImpl: async ({ prompt, model }) => {
+      captured.push({ prompt, model });
+      return { stdout: 'BLOCKING: real finding\n\nVERDICT: blocked', stderr: '' };
+    },
+  });
+
+  assert.deepEqual(result, {
+    reviewText: 'BLOCKING: real finding\n\nVERDICT: blocked',
+    tokenUsage: null,
+  });
+  // The prompt fed to gemini carries the extra context and the diff fence.
+  assert.equal(captured.length, 1);
+  assert.match(captured[0].prompt, /EXTRA CONTEXT/);
+  assert.match(captured[0].prompt, /```diff\n\+diff body/);
+  assert.equal(captured[0].model, 'gemini-2.5-pro');
+});
+
+test('reviewWithGemini maps auth-failure spawn output to OAuthError(gemini)', async () => {
+  await assert.rejects(
+    () => reviewWithGemini('+diff\n', '', {
+      assertOAuthImpl: async () => {},
+      spawnGeminiReviewImpl: async () => {
+        const err = new Error('Command failed');
+        err.stderr = 'Error: 401 Unauthorized — login required';
+        throw err;
+      },
+    }),
+    (err) => err?.isOAuthError === true && err?.model === 'gemini',
+  );
+});
+
+test('reviewWithGemini wraps non-auth spawn failures as a Gemini exec error', async () => {
+  await assert.rejects(
+    () => reviewWithGemini('+diff\n', '', {
+      assertOAuthImpl: async () => {},
+      spawnGeminiReviewImpl: async () => {
+        const err = new Error('spawn ENOENT');
+        err.stderr = 'invalid command-line flag';
+        throw err;
+      },
+    }),
+    (err) => err?.isOAuthError !== true && /Gemini exec failed/.test(err.message),
+  );
+});
+
+test('reviewWithGemini retries transient Gemini subprocess failures before succeeding', async () => {
+  const attempts = [];
+  const sleeps = [];
+  const result = await reviewWithGemini('+diff\n', '', {
+    assertOAuthImpl: async () => {},
+    retryDelaysMs: [0, 0],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    spawnGeminiReviewImpl: async () => {
+      attempts.push('spawn');
+      if (attempts.length < 3) {
+        const err = new Error('Command failed');
+        err.code = attempts.length === 1 ? 'ETIMEDOUT' : 'ECONNRESET';
+        err.stderr = attempts.length === 1
+          ? 'TLS handshake timeout'
+          : '503 service unavailable';
+        throw err;
+      }
+      return { stdout: '## Verdict\n\nComment only', stderr: '' };
+    },
+  });
+
+  assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null });
+  assert.equal(attempts.length, 3);
+  assert.deepEqual(sleeps, [0, 0]);
+});
+
+test('Gemini subprocess retry classifier does not retry auth failures', () => {
+  const err = new Error('Command failed');
+  err.stderr = '401 Unauthorized login required';
+  assert.equal(isRetryableGeminiSubprocessError(err), false);
+});
+
+test('reviewer selection routes gemini to reviewWithGemini, never reviewWithCodex', async () => {
+  const calls = [];
+  const dispatch = await dispatchReviewerModel('gemini', '+diff\n', 'ctx', {
+    promptStage: 'first',
+    reviewWithClaudeImpl: async () => { calls.push('claude'); return 'claude text'; },
+    reviewWithCodexImpl: async () => { calls.push('codex'); return { reviewText: 'codex text', tokenUsage: null }; },
+    reviewWithGeminiImpl: async () => { calls.push('gemini'); return { reviewText: 'gemini text', tokenUsage: null }; },
+  });
+
+  assert.deepEqual(calls, ['gemini']);
+  assert.ok(!calls.includes('codex'), 'gemini must not fall through to codex');
+  assert.equal(dispatch.reviewText, 'gemini text');
+  assert.equal(dispatch.rawReviewText, 'gemini text');
+  assert.equal(dispatch.needsSanitize, false);
+});
+
+test('reviewer selection still routes codex (needsSanitize) and claude correctly', async () => {
+  const codexDispatch = await dispatchReviewerModel('codex', '+diff\n', 'ctx', {
+    reviewWithCodexImpl: async () => ({ reviewText: 'raw codex', tokenUsage: { total: 5 } }),
+  });
+  assert.equal(codexDispatch.rawReviewText, 'raw codex');
+  assert.equal(codexDispatch.reviewText, null);
+  assert.equal(codexDispatch.needsSanitize, true);
+  assert.deepEqual(codexDispatch.tokenUsage, { total: 5 });
+
+  const claudeDispatch = await dispatchReviewerModel('claude', '+diff\n', 'ctx', {
+    reviewWithClaudeImpl: async () => 'claude review text',
+  });
+  assert.equal(claudeDispatch.reviewText, 'claude review text');
+  assert.equal(claudeDispatch.needsSanitize, false);
+});
+
+test('assertGeminiOAuth accepts a valid creds file and rejects a missing/invalid one', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'gemini-oauth-'));
+  const geminiHome = join(rootDir, '.gemini');
+  mkdirSync(geminiHome, { recursive: true });
+  const credsPath = join(geminiHome, 'oauth_creds.json');
+
+  const env = { GEMINI_OAUTH_CREDS_PATH: credsPath };
+  try {
+    // Missing creds → OAuthError(gemini).
+    await assert.rejects(() => assertGeminiOAuth(env), (err) => err?.isOAuthError === true && err?.model === 'gemini');
+
+    // Creds without access_token → OAuthError(gemini).
+    writeFileSync(credsPath, JSON.stringify({ token_type: 'Bearer' }));
+    await assert.rejects(() => assertGeminiOAuth(env), (err) => err?.isOAuthError === true && err?.model === 'gemini');
+
+    // Valid creds → assertGeminiAuthReadable passes; only the CLI-presence
+    // check can still fail (gemini may be absent in CI). Either way it must
+    // not be a creds-readability failure.
+    writeFileSync(credsPath, JSON.stringify({ access_token: 'tok', token_type: 'Bearer', expiry_date: 1 }));
+    try {
+      await assertGeminiOAuth(env);
+    } catch (err) {
+      assert.match(err.message, /gemini CLI not found/);
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveGeminiOAuthCredsPath honors explicit override, GEMINI_HOME, then HOME', () => {
+  assert.equal(
+    resolveGeminiOAuthCredsPath({ GEMINI_OAUTH_CREDS_PATH: '/explicit/creds.json' }),
+    '/explicit/creds.json',
+  );
+  assert.equal(
+    resolveGeminiOAuthCredsPath({ GEMINI_HOME: '/work/.gemini' }),
+    join('/work/.gemini', 'oauth_creds.json'),
+  );
+  assert.equal(
+    resolveGeminiOAuthCredsPath({ HOME: '/home/u' }),
+    join('/home/u', '.gemini', 'oauth_creds.json'),
+  );
+});
+
+test('resolveGeminiCliPath prefers GEMINI_CLI_PATH / GEMINI_CLI overrides', () => {
+  assert.equal(resolveGeminiCliPath({ GEMINI_CLI_PATH: '/a/gemini', PATH: '' }), '/a/gemini');
+  assert.equal(resolveGeminiCliPath({ GEMINI_CLI: '/b/gemini', PATH: '' }), '/b/gemini');
+  assert.equal(resolveGeminiCliPath({ PATH: '' }), 'gemini');
 });

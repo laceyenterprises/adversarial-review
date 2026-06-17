@@ -231,15 +231,31 @@ as `gemini-reviewer-lacey`, captures reviews against that login, and uses
 `GH_GEMINI_REVIEWER_TOKEN`. No same-family waiver is inferred for `[opencode]`
 without a future explicit writer-family config knob.
 
-Follow-up remediation defaults to the `codex` worker class while the LAC-358
-codex override remains active. Operators may pin remediation with
-`ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex|claude-code`; aliases
-`claude`, `codex-remediation`, and `claude-code-remediation` are accepted and
-normalized to the worker classes that the dispatcher can spawn. The follow-up
-daemon validates the override during startup and exits before claiming work if
-the value is invalid. Consume-time worker selection also runs inside the
-claimed-job failure handler so direct/helper callers cannot strand a job in
-`in-progress/` on a bad override.
+Follow-up remediation defaults to cross-model routing by PR builder tag:
+`[codex]` PRs route to `claude-code`, `[claude-code]` PRs route to `codex`,
+and `[clio-agent]` PRs route to `claude-code`. When the durable builder tag is
+missing or unknown, the degraded fallback is `codex`. Operators may pin
+remediation with `roles.remediator`,
+`AGENT_OS_ROLES_REMEDIATOR`, or
+`ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex|claude-code|gemini`; aliases
+`claude`, `codex-remediation`, `claude-code-remediation`, and
+`gemini-remediation` are accepted and normalized to the worker classes that the
+dispatcher can spawn. The follow-up daemon validates the override during
+startup and exits before claiming work if the value is invalid. Consume-time
+worker selection also runs inside the claimed-job failure handler so
+direct/helper callers cannot strand a job in `in-progress/` on a bad override.
+
+Gemini remediation is a public third-lane remediator. In direct dispatch, the
+daemon spawns the native `gemini` CLI in headless approval mode, requires local
+subscription OAuth at `GEMINI_AUTH_PATH` or `${GEMINI_HOME:-$HOME/.gemini}/oauth_creds.json`,
+strips API-key, ADC, and Vertex fallback environment before spawn, and stamps
+worker-provenance commits with the `gemini-remediation` trailer class. In HQ
+dispatch, the daemon sends `hq dispatch --worker-class gemini` and lets the
+worker-pool Gemini adapter own broker-backed OAuth seeding (`broker-oauth`);
+the HQ path must not require an operator-local `~/.gemini/oauth_creds.json`
+before dispatch. The remediation prompt still carries
+`WORKER_CLASS=gemini-remediation` so the broker-backed worker stamps the same
+provenance trailer as the direct path.
 
 Invalid non-empty override values are configuration errors. The runtime must
 not silently fall back from an invalid value because that can route work to an

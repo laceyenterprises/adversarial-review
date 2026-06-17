@@ -1286,6 +1286,15 @@ function resolveGeminiCliPath() {
 // Shares the `gemini-2.5-pro` default GMW-01's reviewer model resolution uses,
 // so reviewer and remediator agree on the model family.
 const DEFAULT_GEMINI_REMEDIATION_MODEL = 'gemini-2.5-pro';
+const GEMINI_OAUTH_FALLBACK_ENV_STRIP_LIST = Object.freeze([
+  ...OAUTH_ENV_STRIP_LIST,
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'GOOGLE_GENAI_USE_VERTEXAI',
+  'GOOGLE_CLOUD_PROJECT',
+  'GOOGLE_CLOUD_LOCATION',
+  'GOOGLE_CLOUD_QUOTA_PROJECT',
+  'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
+]);
 
 function resolveGeminiRemediationModel(env = process.env) {
   const pinned = String(
@@ -1316,6 +1325,18 @@ function resolveGeminiAuthHome(authPath) {
     return `/${segments[0]}/${segments[1]}`;
   }
   return dirname(dirname(normalizedAuthPath));
+}
+
+function scrubGeminiOAuthFallbackEnv(sourceEnv = process.env) {
+  const env = { ...sourceEnv };
+  const stripped = [];
+  for (const key of GEMINI_OAUTH_FALLBACK_ENV_STRIP_LIST) {
+    if (env[key] !== undefined) {
+      delete env[key];
+      stripped.push(key);
+    }
+  }
+  return { env, stripped };
 }
 
 async function assertGeminiOAuth() {
@@ -1368,10 +1389,10 @@ async function assertGeminiOAuth() {
 
 function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
   // Strip provider API credentials so the worker can never silently route
-  // through a metered GEMINI_API_KEY / GOOGLE_API_KEY when the OAuth
-  // subscription is the expected billing path. scrubOAuthFallbackEnv already
-  // carries GEMINI_API_KEY + GOOGLE_API_KEY in its strip list.
-  const { env, stripped } = scrubOAuthFallbackEnv(process.env);
+  // through metered API keys or ADC/Vertex when the OAuth subscription is the
+  // expected billing path. Mirror the worker-pool Gemini adapter's forbidden
+  // fallback envelope for this direct CLI spawn path.
+  const { env, stripped } = scrubGeminiOAuthFallbackEnv(process.env);
   env.PATH = buildInheritedPath(env.PATH || '');
 
   // Per-spawn HOME/auth: pin HOME (and GEMINI_HOME) to the operator home that
@@ -1408,7 +1429,7 @@ function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
       authMode: 'local-oauth',
       authHome,
       authPath,
-      forbiddenFallbacks: ['api-key', 'gemini-api-key', 'google-api-key', 'vertex'],
+      forbiddenFallbacks: ['api-key', 'gemini-api-key', 'google-api-key', 'adc', 'vertex'],
     },
     resolvedStartup: {
       resolvedAuthMode: 'local-oauth',
@@ -4962,9 +4983,12 @@ async function consumeNextFollowUpJob({
     // OAuth pre-flight runs inside the try so an expired/missing OAuth
     // session moves the already-claimed job to `failed/` via the catch
     // below, rather than exiting with a still-`in_progress` ledger row.
-    // The runbook contract is that launch-preparation failures become
-    // terminal queue state, not orphaned in_progress claims.
-    await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
+    // Gemini HQ dispatch is broker-backed: the worker-pool adapter seeds
+    // OAuth at dispatch time, so the local ~/.gemini gate applies only to
+    // the direct CLI path.
+    if (!(hqDispatchEnabled && workerClass === 'gemini')) {
+      await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
+    }
     const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: process.env });
     const artifactWorkspaceDir = join(workspaceRootDir, claimed.job.jobId);
     let workspaceDir = artifactWorkspaceDir;

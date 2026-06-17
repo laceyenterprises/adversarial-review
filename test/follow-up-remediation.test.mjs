@@ -29,6 +29,7 @@ import {
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   prepareCodexRemediationStartupEnv,
+  prepareGeminiRemediationStartupEnv,
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
@@ -1970,19 +1971,32 @@ test('spawnGeminiRemediationWorker stamps the gemini-remediation provenance trai
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-06-17T20:00:00Z');
 });
 
-test('spawnGeminiRemediationWorker scrubs GEMINI/GOOGLE API credentials from the spawn env', () => {
+test('spawnGeminiRemediationWorker scrubs Gemini API, ADC, and Vertex credentials from the spawn env', () => {
   const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
 
   const prev = {
     HOME: process.env.HOME,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
     GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
+    GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+    GOOGLE_GENAI_USE_VERTEXAI: process.env.GOOGLE_GENAI_USE_VERTEXAI,
+    GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
+    GOOGLE_CLOUD_LOCATION: process.env.GOOGLE_CLOUD_LOCATION,
+    GOOGLE_CLOUD_QUOTA_PROJECT: process.env.GOOGLE_CLOUD_QUOTA_PROJECT,
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: process.env.CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE,
   };
   process.env.HOME = workspaceDir;
   process.env.GEMINI_API_KEY = 'gem-key-test';
   process.env.GOOGLE_API_KEY = 'goog-key-test';
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = path.join(workspaceDir, 'adc.json');
+  process.env.GOOGLE_GENAI_USE_VERTEXAI = 'true';
+  process.env.GOOGLE_CLOUD_PROJECT = 'vertex-project';
+  process.env.GOOGLE_CLOUD_LOCATION = 'us-central1';
+  process.env.GOOGLE_CLOUD_QUOTA_PROJECT = 'quota-project';
+  process.env.CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE = path.join(workspaceDir, 'gcloud.json');
 
   let capturedEnv;
+  let capturedStartupEvidence;
   try {
     spawnGeminiRemediationWorker({
       workspaceDir,
@@ -1996,17 +2010,39 @@ test('spawnGeminiRemediationWorker scrubs GEMINI/GOOGLE API credentials from the
         return { pid: 4245, unref() {} };
       },
     });
+    capturedStartupEvidence = prepareGeminiRemediationStartupEnv().startupEvidence;
   } finally {
-    for (const k of ['HOME', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']) {
+    for (const k of [
+      'HOME',
+      'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      'GOOGLE_GENAI_USE_VERTEXAI',
+      'GOOGLE_CLOUD_PROJECT',
+      'GOOGLE_CLOUD_LOCATION',
+      'GOOGLE_CLOUD_QUOTA_PROJECT',
+      'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
+    ]) {
       if (prev[k] === undefined) delete process.env[k];
       else process.env[k] = prev[k];
     }
   }
 
-  // Metered API keys are stripped so the worker can only use the OAuth
-  // subscription billing path; HOME is pinned to the gemini auth home.
-  assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'GEMINI_API_KEY'), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, 'GOOGLE_API_KEY'), false);
+  // Metered API keys, ADC, and Vertex selectors are stripped so the worker can
+  // only use the OAuth subscription billing path; HOME is pinned to the gemini auth home.
+  for (const key of [
+    'GEMINI_API_KEY',
+    'GOOGLE_API_KEY',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GOOGLE_GENAI_USE_VERTEXAI',
+    'GOOGLE_CLOUD_PROJECT',
+    'GOOGLE_CLOUD_LOCATION',
+    'GOOGLE_CLOUD_QUOTA_PROJECT',
+    'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(capturedEnv, key), false, `${key} should be stripped`);
+    assert.ok(capturedStartupEvidence.resolvedStartup.strippedEnv.includes(key), `${key} should be recorded`);
+  }
   assert.equal(capturedEnv.HOME, workspaceDir);
   assert.equal(capturedEnv.GEMINI_HOME, path.join(workspaceDir, '.gemini'));
 });
@@ -4140,15 +4176,8 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
   }
 });
 
-test('consumeNextFollowUpJob dispatches a gemini remediation through hq with --worker-class gemini and gemini provenance (GMW-03)', async () => {
+test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without local oauth_creds.json (GMW-03)', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const geminiHome = path.join(rootDir, '.gemini');
-  mkdirSync(geminiHome, { recursive: true });
-  writeFileSync(
-    path.join(geminiHome, 'oauth_creds.json'),
-    JSON.stringify({ access_token: 'a', refresh_token: 'b', token_type: 'Bearer' }),
-    'utf8'
-  );
 
   const previous = {
     HOME: process.env.HOME,
@@ -4158,8 +4187,8 @@ test('consumeNextFollowUpJob dispatches a gemini remediation through hq with --w
     AGENT_OS_CONFIG_PATH: process.env.AGENT_OS_CONFIG_PATH,
   };
   process.env.HOME = rootDir;
-  delete process.env.GEMINI_HOME;
-  delete process.env.GEMINI_AUTH_PATH;
+  process.env.GEMINI_HOME = path.join(rootDir, '.gemini-without-local-oauth');
+  process.env.GEMINI_AUTH_PATH = path.join(rootDir, '.gemini-without-local-oauth', 'oauth_creds.json');
   // Operator pins gemini as the remediator; AGENT_OS_CONFIG_PATH=/dev/null so
   // the cascade doesn't read the host config.yaml.
   process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'gemini';

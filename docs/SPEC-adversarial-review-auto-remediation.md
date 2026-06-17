@@ -191,8 +191,8 @@ the runtime-bound JSDoc consumers in sync.
 
 ## Default Agent Routing Overrides
 
-The GitHub-PR adapter preserves opposite-agent review routing when no override
-is configured:
+The GitHub-PR adapter first resolves the historical opposite-agent base route
+for every supported title prefix:
 
 - `[codex]` PRs route first-pass review to Claude and use
   `GH_CLAUDE_REVIEWER_TOKEN`.
@@ -200,6 +200,21 @@ is configured:
   use `GH_CODEX_REVIEWER_TOKEN`.
 - `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs also route first-pass
   review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
+
+Before the watcher spawns the first-pass reviewer, it applies
+`reviewer.gemini.mode` to that base route. The default mode is `always-on`, so
+the public default matrix is:
+
+- `[codex]`, `[claude-code]`, and `[clio-agent]` PRs route first-pass review to
+  Gemini and use `GH_GEMINI_REVIEWER_TOKEN`.
+- `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs keep the base Codex
+  route and use `GH_CODEX_REVIEWER_TOKEN`.
+
+`reviewer.gemini.mode: fallback` selects Gemini only when the base reviewer is
+inside the quota-exhausted hold window. `reviewer.gemini.mode: off` preserves
+the base route above. Gemini is never permitted to review a `[gemini]` PR: even
+an operator pin or default route that resolves to `reviewerModel: gemini` for a
+Gemini-built PR is stripped back to the Codex base route before dispatch.
 
 The canonical GitHub-PR title-prefix allowlist is therefore:
 `[codex]`, `[claude-code]`, `[clio-agent]`, `[gemini]`, `[pi]`, `[opencode]`,

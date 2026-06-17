@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -266,4 +266,16 @@ test('GMW-02 reviewer-roster CLI --json emits structured roster', () => {
   assert.ok(['off', 'fallback', 'always-on'].includes(parsed.mode));
   const gemini = parsed.roster.find((r) => r.reviewerModel === 'gemini');
   assert.deepEqual(gemini.reviews, ['claude-code', 'codex', 'clio-agent']);
+});
+
+test('GMW-02 docs record the always-on routing contract and hard guard', () => {
+  const spec = readFileSync('docs/SPEC-adversarial-review-auto-remediation.md', 'utf8');
+  const runbook = readFileSync('docs/follow-up-runbook.md', 'utf8');
+  for (const doc of [spec, runbook]) {
+    assert.match(doc, /reviewer\.gemini\.mode/);
+    assert.match(doc, /default [`"]?always-on[`"]?|default mode is [`"]?always-on[`"]?/i);
+    assert.match(doc, /\[codex\].*\[claude-code\].*\[clio-agent\].*Gemini/s);
+    assert.match(doc, /GH_GEMINI_REVIEWER_TOKEN/);
+    assert.match(doc, /Gemini is never (?:permitted|allowed) to review .*?\[gemini\]/i);
+  }
 });

@@ -89,6 +89,24 @@ diff --git a/src/watcher.mjs b/src/watcher.mjs
   ]);
 });
 
+test('watcher quota-exhausted recovery changes require the adversarial-review SPEC touch', () => {
+  const findings = evaluateSpecTouch(`
+diff --git a/src/watcher.mjs b/src/watcher.mjs
+@@
++  if (failureClass === 'quota-exhausted') return holdUntilReset(row);
+`);
+
+  assert.deepEqual(findings, [
+    {
+      ruleId: 'adversarial-review-watcher-retry-contract',
+      path: 'src/watcher.mjs',
+      label: 'watcher reviewer retry/recovery contract changes',
+      specPaths: ['docs/SPEC-adversarial-review-auto-remediation.md'],
+      covered: false,
+    },
+  ]);
+});
+
 test('adversarial-review SPEC touch covers watcher retry contract changes', () => {
   const findings = evaluateSpecTouch(`
 diff --git a/src/watcher.mjs b/src/watcher.mjs

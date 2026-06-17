@@ -70,6 +70,31 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
     const d = new Date(candidate);
     if (!Number.isNaN(d.getTime())) return d.toISOString();
   }
+  // Claude often prints only a local clock time for rolling caps:
+  // "resets at 5:39 PM". Anchor that to today's local date, then roll forward
+  // one day if that wall-clock time has already elapsed.
+  const clockOnly = t.match(/resets? at\s+(\d{1,2}):(\d{2})\s*(am|pm)\b/i);
+  if (clockOnly) {
+    const base = nowMs != null ? new Date(nowMs) : new Date();
+    let hour = Number(clockOnly[1]);
+    const minute = Number(clockOnly[2]);
+    const meridiem = clockOnly[3].toLowerCase();
+    if (hour >= 1 && hour <= 12 && minute >= 0 && minute <= 59) {
+      if (hour === 12) hour = 0;
+      if (meridiem === 'pm') hour += 12;
+      const d = new Date(
+        base.getFullYear(),
+        base.getMonth(),
+        base.getDate(),
+        hour,
+        minute,
+        0,
+        0
+      );
+      if (d.getTime() <= base.getTime()) d.setDate(d.getDate() + 1);
+      return d.toISOString();
+    }
+  }
   return null;
 }
 

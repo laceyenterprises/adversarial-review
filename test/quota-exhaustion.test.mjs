@@ -100,6 +100,36 @@ test('parseQuotaResetAt infers the year from nowMs when the provider omits it', 
   assert.equal(new Date(iso).getUTCFullYear(), 2026);
 });
 
+test('parseQuotaResetAt handles Claude clock-only reset times before the local reset', () => {
+  const base = new Date(2026, 5, 17, 12, 0, 0, 0);
+  const iso = parseQuotaResetAt('Claude usage limit reached; resets at 5:39 PM', {
+    nowMs: base.getTime(),
+  });
+  assert.equal(iso, new Date(2026, 5, 17, 17, 39, 0, 0).toISOString());
+});
+
+test('parseQuotaResetAt rolls Claude clock-only reset times to tomorrow when already elapsed', () => {
+  const base = new Date(2026, 5, 17, 18, 0, 0, 0);
+  const iso = parseQuotaResetAt('Claude usage limit reached; resets at 5:39 PM', {
+    nowMs: base.getTime(),
+  });
+  assert.equal(iso, new Date(2026, 5, 18, 17, 39, 0, 0).toISOString());
+});
+
+test('parseQuotaResetAt treats Claude clock-only reset times as host-local wall time', () => {
+  const base = new Date(2026, 5, 17, 16, 0, 0, 0);
+  const iso = parseQuotaResetAt('Your 5-hour limit reached; resets at 5:39 PM', {
+    nowMs: base.getTime(),
+  });
+  assert.ok(iso);
+  const d = new Date(iso);
+  assert.equal(d.getFullYear(), 2026);
+  assert.equal(d.getMonth(), 5);
+  assert.equal(d.getDate(), 17);
+  assert.equal(d.getHours(), 17);
+  assert.equal(d.getMinutes(), 39);
+});
+
 test('parseQuotaResetAt returns null when there is no reset hint', () => {
   assert.equal(parseQuotaResetAt('you are out of credits'), null);
   assert.equal(parseQuotaResetAt(''), null);
@@ -163,6 +193,21 @@ test('quotaHoldDecision HOLDS before the provider-reported reset elapses', () =>
   assert.equal(d.hold, true);
   assert.equal(d.source, 'provider-reported');
   assert.equal(d.waitUntilMs, Date.parse('2026-06-17T17:39:00Z'));
+});
+
+test('quotaHoldDecision uses Claude clock-only 5-hour caps instead of the fallback window', () => {
+  const now = new Date(2026, 5, 17, 12, 39, 0, 0);
+  const row = {
+    failure_message: '[quota-exhausted] Claude usage limit reached. Your 5-hour limit reached; resets at 5:39 PM',
+    failed_at: now.toISOString(),
+  };
+  const d = quotaHoldDecision(row, {
+    nowMs: now.getTime(),
+    fallbackBackoffMs: 15 * 60 * 1000,
+  });
+  assert.equal(d.hold, true);
+  assert.equal(d.source, 'provider-reported');
+  assert.equal(d.waitUntilMs, new Date(2026, 5, 17, 17, 39, 0, 0).getTime());
 });
 
 test('quotaHoldDecision RELEASES once the provider-reported reset has passed', () => {

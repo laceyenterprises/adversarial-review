@@ -571,13 +571,38 @@ must allow dispatch, memory admission must pass, and the routing-tier readiness
 gate above must report healthy before an infrastructure failed row is claimed.
 
 Eligible infrastructure classes are routing-tier `cascade`,
-`reviewer-timeout`, `launchctl-bootstrap`, and reviewer-spawn
-`oauth-broken`. `forbidden-fallback`, `failed-orphan`, `malformed`, inactive
-repos, closed or merged PRs, undiscovered PRs, drain-skipped rows, and rows
-blocked by active follow-up jobs are not recovered by this path. `oauth-broken`
-is included only for spawn failures recorded in the watcher row, because those
-failures can represent local OAuth/runtime launch breakage before any reviewer
-verdict exists.
+`reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and
+hard provider usage caps recorded as `quota-exhausted`. `forbidden-fallback`,
+`failed-orphan`, `malformed`, inactive repos, closed or merged PRs,
+undiscovered PRs, drain-skipped rows, and rows blocked by active follow-up jobs
+are not recovered by this path. `oauth-broken` is included only for spawn
+failures recorded in the watcher row, because those failures can represent
+local OAuth/runtime launch breakage before any reviewer verdict exists.
+
+`quota-exhausted` is a hold-until-reset recovery class, not a normal immediate
+retry. The reviewer/runtime classifier must preserve the provider's reset hint
+in the failed-row evidence with a `[quota-exhausted]` prefix. Before claiming
+that row again, the watcher parses provider reset strings from the stored
+message, including Codex month/day strings, explicit ISO timestamps, and
+Claude clock-only strings such as `resets at 5:39 PM` anchored to the host's
+local date and rolled to the next day if the clock time has already elapsed. If
+the reset is still in the future, the watcher leaves the row `failed`, skips the
+spawn for that poll, and does not consume an infrastructure auto-recovery
+attempt. If no provider reset can be parsed, the row is held for the fixed
+quota fallback window anchored to `failed_at`, then `last_attempted_at`, then
+the current observation time so the first unparseable cap still waits once
+before retry.
+
+The same hard-cap contract applies to follow-up remediation workers that spawn
+direct harness CLIs outside the dispatch lane. Reconcile may move a
+quota-exhausted in-progress remediation job back to `pending` with
+`retryAfter` pinned to the provider reset or the fixed fallback window. That
+hold does not request re-review and does not consume the PR's normal
+remediation round by itself; it is a delayed retry of the same worker round.
+If the remediation job exhausts its bounded quota retry budget before the
+provider window clears or the worker can produce a valid remediation reply, it
+must become terminal with `quota-exhausted-budget-exhausted` so operators see a
+loud stop instead of an endless suspended loop.
 
 The recovery budget is lifecycle-scoped to the current failed-row incident, not
 PR-row lifetime state. The watcher atomically promotes an eligible failed row to

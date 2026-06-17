@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
@@ -9,6 +10,7 @@ const execFileAsync = promisify(execFile);
 const INSTALL_HINTS = Object.freeze({
   claude: 'Install Claude Code CLI: https://docs.anthropic.com/en/docs/claude-code/setup',
   codex: 'Install Codex CLI: https://developers.openai.com/codex/cli',
+  gemini: 'Install Gemini CLI and run `gemini auth` to create OAuth credentials.',
 });
 
 class CliDirectPreflightError extends Error {
@@ -61,6 +63,54 @@ async function resolveCliBinary({
     `${binaryName} CLI not found. Set ${envVar} to the CLI path or put ${binaryName} on PATH. ${INSTALL_HINTS[binaryName] || ''}`.trim(),
     { layer: `${binaryName}-path`, command: `which ${binaryName}` },
   );
+}
+
+async function resolveGeminiCliBinary({ env = process.env } = {}) {
+  const override = String(env?.GEMINI_CLI_PATH || env?.GEMINI_CLI || '').trim();
+  if (override) return override;
+  const fromPath = await findOnPath('gemini', env?.PATH || '');
+  if (fromPath) return fromPath;
+  throw new CliDirectPreflightError(
+    `gemini CLI not found. Set GEMINI_CLI_PATH or GEMINI_CLI to the CLI path or put gemini on PATH. ${INSTALL_HINTS.gemini}`.trim(),
+    { layer: 'gemini-path', command: 'which gemini' },
+  );
+}
+
+function resolveGeminiOAuthCredsPath(env = process.env) {
+  if (env?.GEMINI_OAUTH_CREDS_PATH) return env.GEMINI_OAUTH_CREDS_PATH;
+  const geminiHome = env?.GEMINI_HOME || join(env?.HOME || homedir(), '.gemini');
+  return join(geminiHome, 'oauth_creds.json');
+}
+
+async function assertGeminiOAuthReadable(env = process.env) {
+  const credsPath = resolveGeminiOAuthCredsPath(env);
+  let raw;
+  try {
+    await access(credsPath, constants.R_OK);
+    raw = await readFile(credsPath, 'utf8');
+  } catch (err) {
+    throw new CliDirectPreflightError(
+      `Gemini OAuth credentials unavailable at ${credsPath}: ${err.message}`,
+      { layer: 'gemini-oauth', command: `read ${credsPath}`, cause: err },
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new CliDirectPreflightError(
+      `Gemini OAuth credentials are invalid JSON at ${credsPath}: ${err.message}`,
+      { layer: 'gemini-oauth', command: `parse ${credsPath}`, cause: err },
+    );
+  }
+  if (!parsed?.access_token) {
+    throw new CliDirectPreflightError(
+      `Gemini OAuth credentials at ${credsPath} do not contain access_token`,
+      { layer: 'gemini-oauth', command: `parse ${credsPath}` },
+    );
+  }
+  return credsPath;
 }
 
 function formatProbeFailure({ label, command, args, err }) {
@@ -186,6 +236,25 @@ async function probeCodexCli({
   return { codexCli };
 }
 
+async function probeGeminiCli({
+  env = process.env,
+  cwd = process.cwd(),
+  timeout = 30_000,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const geminiCli = await resolveGeminiCliBinary({ env });
+  await runProbe(geminiCli, ['--version'], {
+    env,
+    cwd,
+    timeout,
+    execFileImpl,
+    layer: 'gemini-cli-version',
+    label: 'Gemini CLI version probe',
+  });
+  const geminiOAuthCredsPath = await assertGeminiOAuthReadable(env);
+  return { geminiCli, geminiOAuthCredsPath };
+}
+
 async function probeReviewerCliOAuth({
   model,
   env = process.env,
@@ -198,6 +267,9 @@ async function probeReviewerCliOAuth({
   if (normalized.includes('codex')) {
     return probeCodexCli({ env, cwd, timeout, execFileImpl, requireMcpOAuth });
   }
+  if (normalized.includes('gemini')) {
+    return probeGeminiCli({ env, cwd, timeout, execFileImpl });
+  }
   return probeClaudeCli({ env, cwd, timeout, execFileImpl });
 }
 
@@ -206,7 +278,9 @@ export {
   findOnPath,
   probeClaudeCli,
   probeCodexCli,
+  probeGeminiCli,
   probeReviewerCliOAuth,
   resolveCliBinary,
+  resolveGeminiOAuthCredsPath,
   validateCodexMcpListOutput,
 };

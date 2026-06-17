@@ -382,6 +382,7 @@ function createCliDirectReviewerRuntimeAdapter({
         });
         if (preflightResult?.claudeCli) reviewerEnv.CLAUDE_CLI = preflightResult.claudeCli;
         if (preflightResult?.codexCli) reviewerEnv.CODEX_CLI = preflightResult.codexCli;
+        if (preflightResult?.geminiCli) reviewerEnv.GEMINI_CLI = preflightResult.geminiCli;
       }
     } catch (err) {
       const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();

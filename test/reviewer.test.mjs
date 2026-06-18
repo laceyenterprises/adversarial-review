@@ -38,6 +38,7 @@ const {
   buildLocalReviewShadowRequest,
   persistLocalReviewShadowRequestBeforeHostedPost,
   markLocalReviewShadowHostedPosted,
+  buildLocalReviewShadowSubprocessEnv,
   runLocalReviewShadowRequest,
   reconcileLocalReviewShadow,
   localReviewShadowArtifactPath,
@@ -174,6 +175,16 @@ test('config-scope fixture keeps local shadow model out of shared CFG keys', () 
   assert.equal(checkedInConfig.includes('local_reviewer_model'), false);
 });
 
+test('local shadow contract is documented in the follow-up runbook', () => {
+  const runbook = readFileSync(join(process.cwd(), 'docs/follow-up-runbook.md'), 'utf8');
+  assert.match(runbook, /run-local-review-shadow/);
+  assert.match(runbook, /ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL/);
+  assert.match(runbook, /ADVERSARIAL_REVIEW_LOCAL_SHADOW_TIMEOUT_MS/);
+  assert.match(runbook, /data\/local-review-shadow\/requests/);
+  assert.match(runbook, /data\/local-review-shadow\/artifacts/);
+  assert.match(runbook, /non-gating/);
+});
+
 test('durable local shadow request is written before hosted completion marker', () => {
   const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-order-'));
   try {
@@ -253,6 +264,65 @@ test('local shadow execution is sequenced after hosted post marker', async () =>
       },
     });
     assert.deepEqual(events, ['request', 'hosted-posted', 'litellm-started']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('local shadow LiteLLM subprocess receives only local routing env', async () => {
+  const allowed = buildLocalReviewShadowSubprocessEnv({
+    PATH: '/usr/bin:/bin',
+    OLLAMA_HOST: 'http://127.0.0.1:11434',
+    LITELLM_BASE_URL: 'http://127.0.0.1:4000',
+    GH_CODEX_REVIEWER_TOKEN: 'gho_secret',
+    GITHUB_TOKEN: 'ghp_secret',
+    ANTHROPIC_API_KEY: 'anthropic-secret',
+    OPENAI_API_KEY: 'openai-secret',
+    OP_SERVICE_ACCOUNT_TOKEN: 'op-secret',
+    REVIEWER_BROKER_TOKEN: 'broker-secret',
+    HOME: '/Users/reviewer',
+  });
+  assert.deepEqual(allowed, {
+    PATH: '/usr/bin:/bin',
+    LITELLM_BASE_URL: 'http://127.0.0.1:4000',
+    OLLAMA_HOST: 'http://127.0.0.1:11434',
+  });
+
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-env-'));
+  try {
+    const shadow = persistLocalReviewShadowRequestBeforeHostedPost({
+      rootDir: root,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 450,
+      headSha: 'env',
+      builderTag: '[codex]',
+      hostedReviewerModel: 'gemini',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir: root, request: shadow.request });
+    let subprocessEnv = null;
+    await runLocalReviewShadowRequest({
+      rootDir: root,
+      request: marked.request,
+      diff: 'diff --git a/file b/file',
+      hostedReviewText: 'hosted review',
+      env: {
+        PATH: '/usr/local/bin',
+        OLLAMA_HOST: 'http://127.0.0.1:11434',
+        GH_CLAUDE_REVIEWER_TOKEN: 'gho_secret',
+        GITHUB_TOKEN: 'ghp_secret',
+        OPENAI_API_KEY: 'openai-secret',
+      },
+      execFileImpl: async (_command, _args, options) => {
+        subprocessEnv = options.env;
+        return { stdout: 'local review text', stderr: '' };
+      },
+    });
+    assert.deepEqual(subprocessEnv, {
+      PATH: '/usr/local/bin',
+      OLLAMA_HOST: 'http://127.0.0.1:11434',
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

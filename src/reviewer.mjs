@@ -64,6 +64,18 @@ const LOCAL_REVIEW_SHADOW_LABEL = 'run-local-review-shadow';
 const LOCAL_REVIEW_SHADOW_MODEL_ENV = 'ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL';
 const LOCAL_REVIEW_SHADOW_TIMEOUT_MS_ENV = 'ADVERSARIAL_REVIEW_LOCAL_SHADOW_TIMEOUT_MS';
 const DEFAULT_LOCAL_REVIEW_SHADOW_TIMEOUT_MS = 5 * 60 * 1000;
+const LOCAL_REVIEW_SHADOW_ENV_ALLOWLIST = Object.freeze([
+  'PATH',
+  'LITELLM_API_BASE',
+  'LITELLM_BASE_URL',
+  'LITELLM_PROXY_URL',
+  'LITELLM_CONFIG',
+  'LITELLM_CONFIG_PATH',
+  'OLLAMA_HOST',
+  'LM_STUDIO_BASE_URL',
+  'LOCALAI_API_BASE',
+  'NO_PROXY',
+]);
 
 const REVIEWER_FAMILY_BY_BUILDER_CLASS = Object.freeze({
   codex: 'codex',
@@ -330,6 +342,17 @@ function buildLocalReviewShadowArtifact({ request, output, now = new Date().toIS
   ].join('\n');
 }
 
+function buildLocalReviewShadowSubprocessEnv(env = process.env) {
+  const subprocessEnv = {};
+  for (const key of LOCAL_REVIEW_SHADOW_ENV_ALLOWLIST) {
+    const value = env?.[key];
+    if (value !== undefined && value !== null && String(value) !== '') {
+      subprocessEnv[key] = String(value);
+    }
+  }
+  return subprocessEnv;
+}
+
 async function runLocalReviewShadowRequest({
   rootDir = ROOT,
   request,
@@ -371,7 +394,7 @@ async function runLocalReviewShadowRequest({
       litellmCli,
       ['completion', '--model', inProgress.localReview.model, '--prompt', prompt],
       {
-        env: { ...process.env, ...env },
+        env: buildLocalReviewShadowSubprocessEnv(env),
         timeout: inProgress.localReview.timeoutMs,
         maxBuffer: 5 * 1024 * 1024,
       },
@@ -2370,16 +2393,13 @@ async function main() {
       console.error(`[reviewer] WARNING local-review-shadow failed to mark hosted-posted for ${repo}#${prNumber}: ${err.message}`);
     }
     if (hostedPostedShadowRequest) {
-      await runLocalReviewShadowRequest({
-        rootDir: ROOT,
-        request: hostedPostedShadowRequest,
-        diff,
-        extraContext,
-        hostedReviewText: reviewText,
-        env: process.env,
-        execFileImpl: execFileAsync,
-        log: console,
-      });
+      console.log(JSON.stringify({
+        type: 'local-review-shadow',
+        event: 'ready-for-reconcile',
+        requestKey: hostedPostedShadowRequest.requestKey,
+        repo,
+        prNumber,
+      }));
     }
   }
 
@@ -2482,6 +2502,7 @@ const __test__ = {
   buildLocalReviewShadowRequest,
   persistLocalReviewShadowRequestBeforeHostedPost,
   markLocalReviewShadowHostedPosted,
+  buildLocalReviewShadowSubprocessEnv,
   runLocalReviewShadowRequest,
   reconcileLocalReviewShadow,
   localReviewShadowRequestPath,

@@ -2141,6 +2141,10 @@ export class AgentOSConfig {
    * as its `cfg` argument. Returning a plain object (not a getter
    * proxy) keeps the predicate easy to test — fixtures can build a
    * matching literal and pass it directly without mocking the loader.
+   * This is a snapshot of the current `AgentOSConfig` instance, not a live
+   * view over future file/env changes. Long-lived callers must reload or
+   * reacquire config before each decision point instead of caching this object
+   * across watcher ticks or operator edits.
    *
    * The Python loader and the underlying YAML schema keep snake_case;
    * the conversion is only applied at this surface for JS ergonomic

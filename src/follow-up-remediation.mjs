@@ -423,15 +423,27 @@ function validateReplyStorageKey(key, label = 'replyStorageKey') {
   return value;
 }
 
+const HQ_REMEDIATION_DISPATCH_TRIGGER =
+  'remediation dispatches via hq (orchestration_mode=agentos or --with-hq-integration)';
+
+function markRemediationConfigError(err, { configKey, requestedValue = null } = {}) {
+  if (err && err.name === 'AgentOSConfigError') {
+    err.isRemediationConfigError = true;
+    err.configKey = err.envName || configKey || DEFAULT_REMEDIATOR_ENV;
+    err.requestedValue = requestedValue;
+  }
+  return err;
+}
+
 function resolveHqRoot(env = process.env, { requireExists = false } = {}) {
   if (!env.HQ_ROOT) {
-    throw new Error('HQ_ROOT must be set when --with-hq-integration is enabled');
+    throw new Error(`HQ_ROOT must be set when ${HQ_REMEDIATION_DISPATCH_TRIGGER}`);
   }
   const root = resolve(env.HQ_ROOT);
   if (requireExists && !existsSync(root)) {
     throw new Error(
       `HQ remediation root does not exist: ${root}. ` +
-      'Set HQ_ROOT to an existing agent-os-hq checkout and run with --with-hq-integration before consuming follow-up jobs.'
+      `Set HQ_ROOT to an existing agent-os-hq checkout before consuming follow-up jobs when ${HQ_REMEDIATION_DISPATCH_TRIGGER}.`
     );
   }
   return root;
@@ -442,10 +454,18 @@ function shouldUseHqIntegration(env = process.env) {
 }
 
 function resolveRemediationOrchestrationMode(env = process.env) {
-  const cfg = loadRoleConfig({
-    env,
-    contextKey: 'roles.adversarial.orchestration_mode',
-  });
+  let cfg;
+  try {
+    cfg = loadRoleConfig({
+      env,
+      contextKey: 'roles.adversarial.orchestration_mode',
+    });
+  } catch (err) {
+    throw markRemediationConfigError(err, {
+      configKey: 'roles.adversarial.orchestration_mode',
+      requestedValue: env.AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE || null,
+    });
+  }
   if (typeof cfg?.getOrchestrationMode === 'function') {
     return cfg.getOrchestrationMode() || 'native';
   }
@@ -461,6 +481,21 @@ function resolveRemediationDispatchPathForJob(job, env = process.env) {
   const persisted = String(job?.remediationPlan?.dispatchPath || '').trim();
   if (persisted === 'hq' || persisted === 'bare') {
     return persisted;
+  }
+  const legacyWorker = job?.remediationWorker || {};
+  const legacyMode = String(legacyWorker.dispatchMode || '').trim();
+  if (legacyMode === 'hq' || legacyWorker.dispatchId || legacyWorker.launchRequestId) {
+    return 'hq';
+  }
+  if (
+    legacyMode === 'bare'
+    || legacyWorker.pid
+    || legacyWorker.workspaceDir
+    || legacyWorker.promptPath
+    || legacyWorker.logPath
+    || legacyWorker.outputPath
+  ) {
+    return 'bare';
   }
   return shouldDispatchRemediationViaHq(env) ? 'hq' : 'bare';
 }
@@ -1626,12 +1661,10 @@ function defaultRemediatorWorkerClassFromEnv(env = process.env, opts = {}) {
   try {
     return resolveDefaultRemediator({ env, ...opts });
   } catch (err) {
-    if (err && err.name === 'AgentOSConfigError') {
-      err.isRemediationConfigError = true;
-      err.configKey = err.envName || DEFAULT_REMEDIATOR_ENV;
-      err.requestedValue = null;
-    }
-    throw err;
+    throw markRemediationConfigError(err, {
+      configKey: DEFAULT_REMEDIATOR_ENV,
+      requestedValue: null,
+    });
   }
 }
 
@@ -1647,12 +1680,12 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
     requireHqDispatchEnvValue(
       env,
       'HQ_PARENT_SESSION',
-      'HQ_PARENT_SESSION must be set when --with-hq-integration is enabled for remediation dispatch'
+      `HQ_PARENT_SESSION must be set when ${HQ_REMEDIATION_DISPATCH_TRIGGER}`
     );
     requireHqDispatchEnvValue(
       env,
       'HQ_PROJECT',
-      'HQ_PROJECT must be set when --with-hq-integration is enabled for remediation dispatch'
+      `HQ_PROJECT must be set when ${HQ_REMEDIATION_DISPATCH_TRIGGER}`
     );
     assertHqDispatchOwnerMatches(env);
   }

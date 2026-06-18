@@ -1326,6 +1326,26 @@ function hamEvidence({ headSha = 'def67890', parentSha = 'abc12345', audit = tru
   };
 }
 
+function hamGroundTruth({ headSha = 'def67890', parentSha = 'abc12345', audit = true, workerClass = 'hammer' } = {}) {
+  return {
+    commit: {
+      sha: headSha,
+      parentSha,
+      trailers: {
+        'Worker-Class': workerClass,
+        'Worker-Ticket': 'HAM-02',
+        'Closed-By': 'hammer (adversarial-pipe-mode)',
+        'Remediated-Findings': '2 addressed (1 blocking, 1 non-blocking)',
+      },
+    },
+    auditComment: audit
+      ? {
+          body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        }
+      : null,
+  };
+}
+
 test('ham terminal remediation: HAM-authored live head over reviewed parent is eligible and records marker', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
@@ -1337,7 +1357,17 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    hamTerminalRemediation: hamEvidence(),
+    hamTerminalRemediation: {
+      ...hamEvidence(),
+      auditComment: {
+        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        findings: [
+          { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+          { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+        ],
+      },
+    },
+    hamTerminalRemediationGroundTruth: hamGroundTruth(),
   });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
@@ -1359,6 +1389,7 @@ test('ham terminal remediation: later non-HAM live head is rejected', () => {
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     hamTerminalRemediation: hamEvidence({ headSha: 'def67890' }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ headSha: 'def67890' }),
   });
   assert.equal(result.eligible, false);
   assert.equal(result.trace.hamTerminalRemediation.ok, false);
@@ -1378,6 +1409,7 @@ test('ham terminal remediation: absent audit/provenance evidence is rejected', (
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     hamTerminalRemediation: hamEvidence({ audit: false, workerClass: 'codex' }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ audit: false, workerClass: 'codex' }),
   });
   assert.equal(result.eligible, false);
   assert.equal(result.trace.hamTerminalRemediation.ok, false);
@@ -1402,9 +1434,84 @@ test('ham terminal remediation: failed live-head checks still block merge', () =
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    hamTerminalRemediation: hamEvidence(),
+    hamTerminalRemediation: {
+      ...hamEvidence(),
+      auditComment: {
+        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        findings: [
+          { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+          { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+        ],
+      },
+    },
+    hamTerminalRemediationGroundTruth: hamGroundTruth(),
   });
   assert.equal(result.eligible, false);
   assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
   assert.ok(result.reasons.includes('ci-not-green'));
+});
+
+test('ham terminal remediation: forged self-attested parent and trailers do not waive gates', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: {
+      ...hamEvidence(),
+      auditComment: {
+        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        findings: [
+          { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+          { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+        ],
+      },
+    },
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      parentSha: '00000000',
+      workerClass: 'codex',
+    }),
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.workerClass, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.parent, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('ham terminal remediation composes with final-hammer waivers', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+    },
+    prMetadata: {
+      headSha: 'def67890',
+      branchProtection: { requiredContexts: [] },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: {
+      ...hamEvidence(),
+      auditComment: {
+        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        findings: [
+          { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+          { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+        ],
+      },
+    },
+    hamTerminalRemediationGroundTruth: hamGroundTruth(),
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(result.trace.hamTerminalRemediation.waived.includes('blocking-findings-present'));
+  assert.ok(result.trace.finalHammer.waived.includes('branch-protection-missing-gate'));
 });

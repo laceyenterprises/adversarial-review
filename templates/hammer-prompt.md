@@ -33,6 +33,8 @@ not replace the machine gate.
    Worker-Class: hammer
    Worker-Ticket: HAM-02
    Reviewed-Head: <<REVIEWED_SHA>>
+   Closed-By: hammer (adversarial-pipe-mode)
+   Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)
    ```
 
 4. Comment on PR <<PR_URL>> with an audit note that maps each final finding to
@@ -69,7 +71,9 @@ git add <changed files>
 git commit -m "HAM-02 remediate final adversarial findings" \
   -m "Worker-Class: hammer" \
   -m "Worker-Ticket: HAM-02" \
-  -m "Reviewed-Head: <<REVIEWED_SHA>>"
+  -m "Reviewed-Head: <<REVIEWED_SHA>>" \
+  -m "Closed-By: hammer (adversarial-pipe-mode)" \
+  -m "Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
 ```
 
 Post the PR audit comment. It must list every final finding, whether it was
@@ -86,10 +90,13 @@ gh pr view <<PR_URL>> --json reviews > /tmp/ham-reviews.json
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-pr-after.json)" | jq -sRr @uri)
 gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ham-protection.json
 gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-timeline.json
+gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-commit.json
 ```
 
-Build `/tmp/ham-terminal-remediation.json` from the actual HAM commit trailers
-and the PR audit comment you posted:
+Build `/tmp/ham-terminal-remediation.json` as the claim to verify. `ama-check`
+must confirm the commit parent/trailers from `/tmp/ham-commit.json` and confirm
+the audit comment body exists in `/tmp/ham-timeline.json`; the JSON claim alone
+does not satisfy the predicate.
 
 ```json
 {
@@ -128,6 +135,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --reviewer <<REVIEWER>> \
   --risk-class <<RISK_CLASS>> \
   --ham-terminal-remediation /tmp/ham-terminal-remediation.json \
+  --ham-commit /tmp/ham-commit.json \
   > /tmp/ham-verdict.json
 ```
 

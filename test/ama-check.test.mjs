@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,7 +68,7 @@ function hamTerminalEvidence({
     },
     auditComment: audit
       ? {
-          body: 'HAM audit: addressed Auth path in src/auth.js and README note in README.md',
+          body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
           findings: [
             { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
             { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
@@ -80,6 +80,10 @@ function hamTerminalEvidence({
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function loadJson(path) {
+  return JSON.parse(readFileSync(path, 'utf8'));
 }
 
 function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {}, reviews = null } = {}) {
@@ -126,6 +130,28 @@ function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {}, reviews =
     },
   ]);
   return paths;
+}
+
+function hamCommitFixture({ headSha = HAM_SHA, parentSha = HEAD_SHA, workerClass = 'hammer' } = {}) {
+  return {
+    sha: headSha,
+    parents: [{ sha: parentSha }],
+    commit: {
+      message: [
+        'HAM-02 remediate final adversarial findings',
+        '',
+        `Worker-Class: ${workerClass}`,
+        '',
+        'Worker-Ticket: HAM-02',
+        '',
+        `Reviewed-Head: ${parentSha}`,
+        '',
+        'Closed-By: hammer (adversarial-pipe-mode)',
+        '',
+        'Remediated-Findings: 2 addressed (1 blocking, 1 non-blocking)',
+      ].join('\n'),
+    },
+  };
 }
 
 function writeConfig(tmp, { branchProtectionRequired }) {
@@ -207,8 +233,29 @@ function runAmaCheck(tmp, {
   const extraArgs = [];
   if (hamTerminalRemediation) {
     paths.hamTerminalRemediation = join(tmp, 'ham-terminal-remediation.json');
+    paths.hamCommit = join(tmp, 'ham-commit.json');
     writeJson(paths.hamTerminalRemediation, hamTerminalRemediation);
-    extraArgs.push('--ham-terminal-remediation', paths.hamTerminalRemediation);
+    writeJson(paths.hamCommit, hamCommitFixture({
+      headSha: HAM_SHA,
+      parentSha: HEAD_SHA,
+      workerClass: hamTerminalRemediation?.commit?.trailers?.['Worker-Class'] || 'hammer',
+    }));
+    const timeline = loadJson(paths.timeline);
+    if (hamTerminalRemediation?.auditComment?.body) {
+      timeline.push({
+        event: 'commented',
+        body: hamTerminalRemediation.auditComment.body,
+        user: { login: 'hammer-worker' },
+        created_at: '2026-06-13T12:30:00Z',
+      });
+      writeJson(paths.timeline, timeline);
+    }
+    extraArgs.push(
+      '--ham-terminal-remediation',
+      paths.hamTerminalRemediation,
+      '--ham-commit',
+      paths.hamCommit,
+    );
   }
   return spawnSync(
     process.execPath,

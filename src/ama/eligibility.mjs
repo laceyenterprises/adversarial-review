@@ -453,7 +453,7 @@ function validateHamFindingMap(findings) {
   for (const finding of findings) {
     const title = String(finding?.title || finding?.finding || '').trim();
     const file = String(finding?.file || finding?.path || '').trim();
-    const addressed = finding?.addressed !== false;
+    const addressed = finding?.addressed === true;
     if (!title || !file || !addressed) {
       return { ok: false, count: findings.length, blocking, nonBlocking };
     }
@@ -463,33 +463,75 @@ function validateHamFindingMap(findings) {
   return { ok: true, count: findings.length, blocking, nonBlocking };
 }
 
-function validateHamTerminalRemediationEvidence(evidence, { reviewedHead, currentHead } = {}) {
-  const trailers = normalizeTrailerMap(evidence?.commit?.trailers || evidence?.trailers);
+function hamAuditBodyCoversFindings(body, findings) {
+  const text = String(body || '').toLowerCase();
+  if (!text) return false;
+  for (const finding of findings || []) {
+    const title = String(finding?.title || finding?.finding || '').trim().toLowerCase();
+    const file = String(finding?.file || finding?.path || '').trim().toLowerCase();
+    if (!title || !file || !text.includes(title) || !text.includes(file)) return false;
+  }
+  return true;
+}
+
+function validateHamTerminalRemediationEvidence(
+  evidence,
+  {
+    reviewedHead,
+    currentHead,
+    verifiedCommit = null,
+    verifiedAuditComment = null,
+    blockingFindings = { known: false, count: 0 },
+  } = {},
+) {
+  const verifiedTrailers = normalizeTrailerMap(verifiedCommit?.trailers);
   const findingMap = validateHamFindingMap(
     evidence?.auditComment?.findings || evidence?.addressedFindings,
   );
   const commitSha = String(evidence?.commit?.sha || evidence?.headSha || '').trim();
   const parentSha = String(evidence?.commit?.parentSha || evidence?.parentSha || '').trim();
-  const auditBody = String(evidence?.auditComment?.body || '').trim();
-  const ticket = String(trailers.ticket || trailers['worker-ticket'] || evidence?.ticket || '').trim();
-  const closedBy = String(trailers['closed-by'] || '').trim();
-  const remediatedFindings = String(trailers['remediated-findings'] || '').trim();
+  const verifiedCommitSha = String(verifiedCommit?.sha || '').trim();
+  const verifiedParentSha = String(verifiedCommit?.parentSha || '').trim();
+  const claimedAuditBody = String(evidence?.auditComment?.body || '').trim();
+  const verifiedAuditBody = String(verifiedAuditComment?.body || '').trim();
+  const ticket = String(verifiedTrailers.ticket || verifiedTrailers['worker-ticket'] || '').trim();
+  const closedBy = String(verifiedTrailers['closed-by'] || '').trim();
+  const remediatedFindings = String(verifiedTrailers['remediated-findings'] || '').trim();
+  const expectedBlockingCount = Number(blockingFindings?.count);
+  const blockingCountMatches =
+    blockingFindings?.known === true
+      ? Number.isInteger(expectedBlockingCount) && findingMap.blocking === expectedBlockingCount
+      : false;
   const checks = {
-    workerClass: trailers['worker-class'] === 'hammer',
+    workerClass: verifiedTrailers['worker-class'] === 'hammer',
     ticket: /^HAM-\d+$/i.test(ticket),
-    head: commitSha !== '' && commitSha === String(currentHead || ''),
-    parent: parentSha !== '' && parentSha === String(reviewedHead || ''),
-    auditComment: auditBody !== '' && findingMap.ok,
-    closedBy: closedBy === '' || /^hammer\b/i.test(closedBy),
-    remediatedFindings: remediatedFindings === '' || /\d+\s+addressed/i.test(remediatedFindings),
+    head:
+      verifiedCommitSha !== ''
+      && verifiedCommitSha === String(currentHead || '')
+      && commitSha === verifiedCommitSha,
+    parent:
+      verifiedParentSha !== ''
+      && verifiedParentSha === String(reviewedHead || '')
+      && parentSha === verifiedParentSha,
+    auditComment:
+      claimedAuditBody !== ''
+      && verifiedAuditBody !== ''
+      && claimedAuditBody === verifiedAuditBody
+      && findingMap.ok
+      && hamAuditBodyCoversFindings(
+        verifiedAuditBody,
+        evidence?.auditComment?.findings || evidence?.addressedFindings,
+      ),
+    closedBy: /^hammer\b/i.test(closedBy),
+    remediatedFindings: /\d+\s+addressed/i.test(remediatedFindings) && blockingCountMatches,
   };
   const ok = Object.values(checks).every(Boolean);
   return {
     active: evidence?.enabled === true || evidence?.active === true,
     ok,
     checks,
-    reviewedParent: parentSha || null,
-    remediationHead: commitSha || null,
+    reviewedParent: verifiedParentSha || parentSha || null,
+    remediationHead: verifiedCommitSha || commitSha || null,
     addressedFindings: findingMap,
     marker: ok ? 'ham_terminal_remediation_validated' : null,
   };
@@ -657,7 +699,13 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
 
   const hamTerminalRemediation = validateHamTerminalRemediationEvidence(
     options?.hamTerminalRemediation || null,
-    { reviewedHead, currentHead },
+    {
+      reviewedHead,
+      currentHead,
+      verifiedCommit: options?.hamTerminalRemediationGroundTruth?.commit || null,
+      verifiedAuditComment: options?.hamTerminalRemediationGroundTruth?.auditComment || null,
+      blockingFindings,
+    },
   );
 
   // AMA "final hammer" (operator directive 2026-06-14): once the review cycle is
@@ -712,8 +760,9 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'blocking-findings-unknown',
   ]);
   if (hamTerminalRemediation.active && hamTerminalRemediation.ok) {
+    const inputReasons = effectiveReasons;
     effectiveReasons = [];
-    for (const reason of reasons) {
+    for (const reason of inputReasons) {
       if (HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS.has(reason)) {
         waivedByHamTerminalRemediation.push(reason);
       } else {
@@ -722,8 +771,9 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     }
   }
   if (reviewCycleExhausted) {
+    const inputReasons = effectiveReasons;
     effectiveReasons = [];
-    for (const reason of reasons) {
+    for (const reason of inputReasons) {
       let waivable = false;
       if (reason === 'risk-class-not-permitted' && riskClassFinalHammerWaivable) {
         waivable = true;

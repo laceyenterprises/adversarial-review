@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
@@ -30,7 +30,22 @@ const {
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
+  LOCAL_REVIEW_SHADOW_LABEL,
+  hasLocalReviewShadowLabel,
+  evaluateLocalReviewShadowEligibility,
+  persistLocalReviewShadowRequest,
+  persistLocalReviewShadowRequestFailOpen,
+  markLocalReviewShadowHostedPosted,
+  completeLocalReviewShadowRequest,
+  startLocalReviewShadowCompletion,
+  reconcileLocalReviewShadow,
+  formatLocalReviewShadowArtifact,
+  readJsonFileIfExists,
 } = __test__;
+
+const LOCAL_SHADOW_TEST_ENV = {
+  ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL: 'litellm-local/qwen3-coder',
+};
 
 function withEnv(overrides, fn) {
   const previous = {};
@@ -127,6 +142,506 @@ test('follow-up handoff refuses to queue when baseBranch is unknown', () => {
       },
     });
   }, /baseBranch is required/);
+});
+
+test('run-local-review-shadow label leaves hosted reviewer selection unchanged and records a durable request', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-'));
+  try {
+    const labels = [{ name: LOCAL_REVIEW_SHADOW_LABEL }];
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels,
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    assert.equal(eligibility.eligible, true);
+    assert.equal('claude', 'claude', 'hosted reviewer fixture remains unchanged');
+
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 123,
+      headSha: 'abc123',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      hostedReviewerIdentity: 'claude-reviewer-lacey',
+      eligibility,
+    });
+
+    assert.equal(persisted.persisted, true);
+    assert.equal(existsSync(persisted.requestPath), true);
+    const request = JSON.parse(readFileSync(persisted.requestPath, 'utf8'));
+    assert.equal(request.kind, 'local-review-shadow-request');
+    assert.equal(request.label, LOCAL_REVIEW_SHADOW_LABEL);
+    assert.equal(request.reviewerModel, 'claude');
+    assert.equal(request.localFamily, 'qwen');
+    assert.equal(request.status, 'requested');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('config-scope fixture: local shadow does not add shared reviewer.local_reviewer_model CFG key', () => {
+  const reviewerSource = readFileSync(new URL('../src/reviewer.mjs', import.meta.url), 'utf8');
+  const moduleConfig = readFileSync(new URL('../config.yaml', import.meta.url), 'utf8');
+  assert.doesNotMatch(reviewerSource, /reviewer\.local_reviewer_model/);
+  assert.doesNotMatch(moduleConfig, /local_reviewer_model/);
+});
+
+test('durable request is written before hosted-review completion marker', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-order-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[claude-code]',
+      reviewerModel: 'codex',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 124,
+      headSha: 'def456',
+      builderTag: '[claude-code]',
+      reviewerModel: 'codex',
+      eligibility,
+    });
+    assert.equal(existsSync(persisted.requestPath), true);
+    assert.equal(JSON.parse(readFileSync(persisted.requestPath, 'utf8')).status, 'requested');
+
+    const marked = markLocalReviewShadowHostedPosted({
+      rootDir,
+      request: persisted.request,
+      hostedPostedAt: '2026-06-18T12:00:00.000Z',
+    });
+    assert.equal(marked.requestPath, persisted.requestPath);
+    const request = JSON.parse(readFileSync(marked.requestPath, 'utf8'));
+    assert.equal(request.status, 'hosted-posted');
+    assert.equal(request.hostedPostedAt, '2026-06-18T12:00:00.000Z');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow request persistence fails open when existing state is corrupt', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-corrupt-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 129,
+      headSha: 'bad-json',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    writeFileSync(persisted.requestPath, '{not json\n');
+
+    const warnings = [];
+    const result = persistLocalReviewShadowRequestFailOpen({
+      log: { warn: (message) => warnings.push(message) },
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 129,
+      headSha: 'bad-json',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+
+    assert.equal(result.persisted, false);
+    assert.equal(result.reason, 'request-persist-failed');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /request-persist-failed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow request persistence fails open when request directory is not writable', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-unwritable-request-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const warnings = [];
+    const result = persistLocalReviewShadowRequestFailOpen({
+      log: { warn: (message) => warnings.push(message) },
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 131,
+      headSha: 'unwritable-request',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+      ensureWritableImpl: () => {
+        const err = new Error('EACCES: permission denied, access shadow requests');
+        err.code = 'EACCES';
+        throw err;
+      },
+    });
+
+    assert.equal(result.persisted, false);
+    assert.equal(result.reason, 'request-persist-failed');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /request-persist-failed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow completion skips before local model work when artifact directory is not writable', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-unwritable-artifact-'));
+  try {
+    let calledLocalModel = false;
+    const warnings = [];
+    const result = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: {
+        repo: 'laceyenterprises/adversarial-review',
+        prNumber: 132,
+        headSha: 'unwritable-artifact',
+        reviewerModel: 'claude',
+        localModel: LOCAL_SHADOW_TEST_ENV.ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL,
+        localFamily: 'qwen',
+      },
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { warn: (message) => warnings.push(message) },
+      ensureWritableImpl: () => {
+        const err = new Error('EACCES: permission denied, access shadow artifacts');
+        err.code = 'EACCES';
+        throw err;
+      },
+      callLiteLLMImpl: async () => {
+        calledLocalModel = true;
+        return 'should not run';
+      },
+    });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.retryable, true);
+    assert.equal(result.reason, 'shadow-storage-unwritable');
+    assert.equal(calledLocalModel, false);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /shadow-storage-unwritable/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readJsonFileIfExists treats a missing file as absent without a separate existence check', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-read-missing-'));
+  try {
+    assert.equal(readJsonFileIfExists(join(rootDir, 'missing.json')), null);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('family guard fails closed to hosted-only for codex, claude-code, and clio-agent when local family is missing or same-family', () => {
+  const cases = [
+    { builderTag: '[codex]', reviewerModel: 'claude', env: { ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL: 'unknown-local' }, reason: 'local-model-family-unproven' },
+    { builderTag: '[claude-code]', reviewerModel: 'codex', env: { ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL: 'codex' }, familyByModel: { codex: 'codex' }, reason: 'local-model-same-family' },
+    { builderTag: '[clio-agent]', reviewerModel: 'claude', env: { ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL: 'codex' }, familyByModel: { codex: 'codex' }, reason: 'local-model-same-family' },
+  ];
+  for (const item of cases) {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: item.builderTag,
+      reviewerModel: item.reviewerModel,
+      env: item.env,
+      familyByModel: item.familyByModel,
+    });
+    assert.equal(eligibility.eligible, false, item.builderTag);
+    assert.equal(eligibility.reason, item.reason, item.builderTag);
+  }
+});
+
+test('without run-local-review-shadow label shadow behavior is unchanged and no request is recorded', () => {
+  assert.equal(hasLocalReviewShadowLabel([{ name: 'other' }]), false);
+  const eligibility = evaluateLocalReviewShadowEligibility({
+    labels: [{ name: 'other' }],
+    builderTag: '[codex]',
+    reviewerModel: 'claude',
+    env: LOCAL_SHADOW_TEST_ENV,
+  });
+  assert.deepEqual(eligibility, { eligible: false, reason: 'label-absent' });
+});
+
+test('sequencing: shadow work waits until hosted review is marked posted', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-seq-'));
+  try {
+    const calls = [];
+    const beforePost = await reconcileLocalReviewShadow({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 125,
+      headSha: 'abc',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+      hostedReviewPosted: false,
+      callLiteLLMImpl: async () => {
+        calls.push('litellm');
+        return 'should not run';
+      },
+    });
+    assert.equal(beforePost.reason, 'hosted-review-not-posted');
+    assert.deepEqual(calls, []);
+
+    const afterPost = await reconcileLocalReviewShadow({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 125,
+      headSha: 'abc',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+      hostedReviewPosted: true,
+      hostedReviewText: 'hosted review',
+      diff: 'diff --git a/a b/a',
+      callLiteLLMImpl: async () => {
+        calls.push('litellm');
+        return 'local finding';
+      },
+    });
+    assert.equal(afterPost.completed, true);
+    assert.deepEqual(calls, ['litellm']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('crash recovery: hosted-posted plus missing artifact is reconciled idempotently without reposting gate', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-recover-'));
+  try {
+    const calls = [];
+    const first = await reconcileLocalReviewShadow({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 126,
+      headSha: 'abc',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+      hostedReviewPosted: true,
+      hostedReviewText: 'hosted review',
+      diff: 'diff --git a/a b/a',
+      callLiteLLMImpl: async () => {
+        calls.push('litellm');
+        return 'local recovered finding';
+      },
+    });
+    assert.equal(first.completed, true);
+    assert.equal(calls.length, 1);
+
+    const second = await reconcileLocalReviewShadow({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 126,
+      headSha: 'abc',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+      hostedReviewPosted: true,
+      hostedReviewText: 'hosted review',
+      diff: 'diff --git a/a b/a',
+      callLiteLLMImpl: async () => {
+        calls.push('litellm-again');
+        return 'duplicate';
+      },
+    });
+    assert.equal(second.completed, true);
+    assert.equal(second.idempotent, true);
+    assert.deepEqual(calls, ['litellm']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow timeout or unavailable model records warning artifact without mutating hosted gate', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-timeout-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 127,
+      headSha: 'abc',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir, request: persisted.request });
+    const warnings = [];
+    const result = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { warn: (message) => warnings.push(message) },
+      callLiteLLMImpl: async () => {
+        throw new Error('model unavailable');
+      },
+    });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.retryable, true);
+    assert.equal(warnings.length, 1);
+    const artifact = readFileSync(result.artifactPath, 'utf8');
+    assert.match(artifact, /WARNING: local OSS shadow review skipped/);
+    assert.match(artifact, /not a merge gate verdict/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('retryable shadow warning artifacts do not suppress later successful retry', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-retry-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 133,
+      headSha: 'retryable',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir, request: persisted.request });
+    const calls = [];
+    const first = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { warn() {} },
+      callLiteLLMImpl: async () => {
+        calls.push('fail');
+        throw new Error('temporary model outage');
+      },
+    });
+    const warningArtifact = readFileSync(first.artifactPath, 'utf8');
+    assert.equal(first.retryable, true);
+    assert.match(warningArtifact, /WARNING: local OSS shadow review skipped/);
+
+    const second = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { warn() {} },
+      callLiteLLMImpl: async () => {
+        calls.push('success');
+        return 'retry succeeded with local finding';
+      },
+    });
+
+    assert.equal(second.completed, true);
+    assert.equal(second.idempotent, undefined);
+    assert.deepEqual(calls, ['fail', 'success']);
+    const completedArtifact = readFileSync(second.artifactPath, 'utf8');
+    assert.match(completedArtifact, /retry succeeded with local finding/);
+    assert.doesNotMatch(completedArtifact, /temporary model outage/);
+    const paths = __test__.localReviewShadowPaths(rootDir, marked.request);
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    assert.equal(state.status, 'completed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow completion is scheduled without awaiting the local model', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-async-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 130,
+      headSha: 'async',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir, request: persisted.request });
+    let resolveShadow;
+    const pendingShadow = new Promise((resolve) => {
+      resolveShadow = resolve;
+    });
+
+    const scheduled = startLocalReviewShadowCompletion({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { log() {}, warn() {} },
+      callLiteLLMImpl: async () => pendingShadow,
+    });
+
+    let settled = false;
+    scheduled.completion.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    assert.equal(scheduled.started, true);
+    assert.equal(settled, false);
+
+    resolveShadow('local async finding');
+    const result = await scheduled.completion;
+    assert.equal(result.completed, true);
+    assert.equal(settled, true);
+    assert.match(readFileSync(result.artifactPath, 'utf8'), /local async finding/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow artifact provenance is explicitly local-model-generated and non-gating', () => {
+  const artifact = formatLocalReviewShadowArtifact({
+    request: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 128,
+      headSha: 'abc',
+      reviewerModel: 'claude',
+      localModel: 'litellm-local/gpt-oss-120b',
+    },
+    reviewText: 'No additional findings.',
+  });
+  assert.match(artifact, /Local OSS Model Shadow Review \(Non-Gating\)/);
+  assert.match(artifact, /generated by local OSS model `litellm-local\/gpt-oss-120b` via LiteLLM/);
+  assert.match(artifact, /not Codex\/Claude\/Gemini reviewer identity/);
+  assert.doesNotMatch(artifact, /^## Adversarial Review —/m);
 });
 
 test('new follow-up jobs preserve an elevated prior cap to avoid truncating an active PR cycle', () => {

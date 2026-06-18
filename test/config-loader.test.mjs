@@ -1707,6 +1707,29 @@ test('unknown key fails loud naming nearest valid', () => {
   }
 });
 
+test('OMB-08 does not promote reviewer.local_reviewer_model into shared CFG', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      reviewer:
+        local_reviewer_model: local-oss-reviewer
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /reviewer\.local_reviewer_model/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('wrong type fails loud', () => {
   const tmp = freshTmp();
   try {

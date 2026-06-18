@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
@@ -30,6 +30,12 @@ const {
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
+  LOCAL_REVIEW_SHADOW_LABEL,
+  evaluateLocalReviewShadowEligibility,
+  recordLocalReviewShadowRequestAfterHostedPost,
+  reconcileLocalReviewShadowRequest,
+  formatLocalReviewShadowArtifact,
+  localReviewShadowPaths,
 } = __test__;
 
 function withEnv(overrides, fn) {
@@ -857,4 +863,259 @@ test('resolveGeminiCliPath prefers GEMINI_CLI_PATH / GEMINI_CLI overrides', () =
   assert.equal(resolveGeminiCliPath({ GEMINI_CLI_PATH: '/a/gemini', PATH: '' }), '/a/gemini');
   assert.equal(resolveGeminiCliPath({ GEMINI_CLI: '/b/gemini', PATH: '' }), '/b/gemini');
   assert.equal(resolveGeminiCliPath({ PATH: '' }), 'gemini');
+});
+
+test('local-review-shadow label preserves hosted reviewer choice and records durable request', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-record-'));
+  try {
+    const env = { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' };
+    const beforeHostedReviewer = 'claude';
+    const result = recordLocalReviewShadowRequestAfterHostedPost({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 88,
+      headSha: 'abc123',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'codex',
+      hostedReviewerModel: beforeHostedReviewer,
+      hostedPostedAt: '2026-06-18T12:00:00.000Z',
+      diff: '+diff',
+      hostedReviewBody: 'hosted body',
+      env,
+      log: { log() {}, warn() {} },
+    });
+
+    assert.equal(beforeHostedReviewer, 'claude');
+    assert.equal(result.recorded, true);
+    assert.equal(result.eligible, true);
+    const request = JSON.parse(readFileSync(result.requestPath, 'utf8'));
+    assert.equal(request.status, 'pending');
+    assert.equal(request.hostedReviewerModel, 'claude');
+    assert.equal(request.builderTag, 'codex');
+    assert.equal(request.eligibility.localFamily, 'oss');
+    assert.equal(existsSync(request.inputPath), true);
+    const input = JSON.parse(readFileSync(request.inputPath, 'utf8'));
+    assert.equal(input.diff, '+diff');
+    assert.equal(input.hostedReviewBody, 'hosted body');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('local-review-shadow absent label leaves behavior unchanged and writes no request', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-absent-'));
+  try {
+    const result = recordLocalReviewShadowRequestAfterHostedPost({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 89,
+      headSha: 'abc123',
+      labels: [],
+      builderTag: 'codex',
+      hostedReviewerModel: 'claude',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn() {} },
+    });
+    assert.deepEqual(result, { recorded: false, reason: 'label-absent' });
+    const paths = localReviewShadowPaths(rootDir, {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 89,
+      headSha: 'abc123',
+      label: LOCAL_REVIEW_SHADOW_LABEL,
+    });
+    assert.equal(existsSync(paths.requestPath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('local-review-shadow family guard fails closed for codex, claude-code, and clio-agent when family is missing or same-family', () => {
+  for (const builderTag of ['codex', 'claude-code', 'clio-agent']) {
+    const missing = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag,
+      hostedReviewerModel: builderTag === 'claude-code' ? 'codex' : 'claude',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'unlisted-local-model' },
+    });
+    assert.equal(missing.eligible, false, `${builderTag} missing metadata must fail closed`);
+    assert.equal(missing.reason, 'local-shadow-family-unproven');
+  }
+
+  const sameCodex = evaluateLocalReviewShadowEligibility({
+    labels: [LOCAL_REVIEW_SHADOW_LABEL],
+    builderTag: 'clio-agent',
+    hostedReviewerModel: 'claude',
+    env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-codex-family-reviewer' },
+  });
+  assert.equal(sameCodex.eligible, false);
+  assert.equal(sameCodex.reason, 'local-shadow-family-not-distinct');
+
+  const sameClaude = evaluateLocalReviewShadowEligibility({
+    labels: [LOCAL_REVIEW_SHADOW_LABEL],
+    builderTag: 'claude-code',
+    hostedReviewerModel: 'codex',
+    env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-claude-family-reviewer' },
+  });
+  assert.equal(sameClaude.eligible, false);
+  assert.equal(sameClaude.reason, 'local-shadow-family-not-distinct');
+});
+
+test('local-review-shadow durable request is written before shadow execution starts', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-sequence-'));
+  try {
+    const calls = [];
+    const result = await reconcileLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 90,
+      headSha: 'def456',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'codex',
+      hostedReviewerModel: 'claude',
+      hostedPostedAt: '2026-06-18T12:00:00.000Z',
+      diff: '+change',
+      hostedReviewBody: 'hosted review body',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn() {} },
+      fetchImpl: async () => {
+        calls.push('fetch');
+        const paths = localReviewShadowPaths(rootDir, {
+          repo: 'laceyenterprises/adversarial-review',
+          prNumber: 90,
+          headSha: 'def456',
+          label: LOCAL_REVIEW_SHADOW_LABEL,
+        });
+        assert.equal(existsSync(paths.requestPath), true);
+        const request = JSON.parse(readFileSync(paths.requestPath, 'utf8'));
+        assert.equal(request.status, 'pending');
+        return {
+          ok: true,
+          async json() {
+            return { choices: [{ message: { content: 'local model notes' } }] };
+          },
+        };
+      },
+    });
+    assert.equal(result.action, 'completed');
+    assert.deepEqual(calls, ['fetch']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('local-review-shadow crash recovery completes missing artifact idempotently without reposting hosted review', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-recover-'));
+  try {
+    const request = recordLocalReviewShadowRequestAfterHostedPost({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 91,
+      headSha: 'feedbeef',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'clio-agent',
+      hostedReviewerModel: 'claude',
+      diff: '+persisted recovery diff',
+      hostedReviewBody: 'persisted hosted review',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn() {} },
+    });
+    assert.equal(JSON.parse(readFileSync(request.requestPath, 'utf8')).status, 'pending');
+
+    let fetchCount = 0;
+    const completed = await reconcileLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 91,
+      headSha: 'feedbeef',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'clio-agent',
+      hostedReviewerModel: 'claude',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn() {} },
+      fetchImpl: async (_url, init) => {
+        fetchCount += 1;
+        const body = JSON.parse(init.body);
+        assert.match(body.messages[0].content, /\+persisted recovery diff/);
+        assert.match(body.messages[0].content, /persisted hosted review/);
+        return {
+          ok: true,
+          async json() {
+            return { choices: [{ message: { content: 'recovered shadow review' } }] };
+          },
+        };
+      },
+    });
+    assert.equal(completed.action, 'completed');
+    assert.equal(fetchCount, 1);
+
+    const idempotent = await reconcileLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 91,
+      headSha: 'feedbeef',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'clio-agent',
+      hostedReviewerModel: 'claude',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn() {} },
+      fetchImpl: async () => {
+        fetchCount += 1;
+        throw new Error('should not fetch after completion');
+      },
+    });
+    assert.equal(idempotent.action, 'unchanged');
+    assert.equal(idempotent.reason, 'already-completed');
+    assert.equal(fetchCount, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('local-review-shadow timeout or unavailable LiteLLM records retryable warning state', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-timeout-'));
+  try {
+    const warnings = [];
+    const result = await reconcileLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 92,
+      headSha: 'badc0de',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'claude-code',
+      hostedReviewerModel: 'codex',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn(message) { warnings.push(String(message)); } },
+      fetchImpl: async () => ({ ok: false, status: 503, async json() { return {}; } }),
+    });
+    assert.equal(result.action, 'retryable');
+    assert.match(result.reason, /HTTP 503/);
+    assert.equal(warnings.some((line) => line.includes('"event":"local-review-shadow"') && line.includes('"action":"retryable"')), true);
+    const request = JSON.parse(readFileSync(result.requestPath, 'utf8'));
+    assert.equal(request.status, 'retryable');
+    assert.match(request.lastError, /HTTP 503/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('local-review-shadow artifact provenance is explicitly non-gating and local-model generated', () => {
+  const artifact = formatLocalReviewShadowArtifact({
+    request: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 93,
+      headSha: 'cafe',
+      label: LOCAL_REVIEW_SHADOW_LABEL,
+      hostedReviewerModel: 'claude',
+    },
+    eligibility: {
+      localModel: 'local-oss-reviewer',
+      localFamily: 'oss',
+    },
+    reviewText: 'A local observation.',
+    completedAt: '2026-06-18T12:30:00.000Z',
+  });
+  assert.match(artifact, /Local Review Shadow \(Non-Gating\)/);
+  assert.match(artifact, /generated by a local OSS model through LiteLLM/);
+  assert.match(artifact, /hosted adversarial reviewer remains the merge-blocking verdict/);
+  assert.doesNotMatch(artifact, /^## Adversarial Review/m);
 });

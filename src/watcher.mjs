@@ -113,6 +113,7 @@ import {
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
+import { reconcileLocalReviewShadowRequest } from './reviewer.mjs';
 // AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
 // (AMA-01 defaults to false). When the operator opts in AND the
 // canonical eligibility predicate from SPEC §4.2 returns
@@ -4279,6 +4280,7 @@ async function handlePostedReviewRow({
   subjectRef,
   currentRevisionRef,
   labelNames = [],
+  builderTag = null,
   projectGateStatusSafe,
   execFileImpl = execFileAsync,
   fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
@@ -4289,6 +4291,24 @@ async function handlePostedReviewRow({
   logger = console,
 } = {}) {
   await projectGateStatusSafe(existing);
+
+  try {
+    await reconcileLocalReviewShadowRequest({
+      rootDir,
+      repo: repoPath,
+      prNumber,
+      headSha: existing?.reviewer_head_sha || currentRevisionRef || null,
+      labels: labelNames,
+      builderTag,
+      hostedReviewerModel: existing?.reviewer || null,
+      hostedPostedAt: existing?.posted_at || null,
+      log: logger,
+    });
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] local-review-shadow reconciliation warning for ${repoPath}#${prNumber}: ${err?.message || err}`
+    );
+  }
 
   try {
     let operatorApprovalEvent;
@@ -5295,6 +5315,7 @@ async function pollOnce(
           subjectRef: subject.ref,
           currentRevisionRef: subject.ref.revisionRef,
           labelNames: prLabelNames,
+          builderTag: subject.builderClass || null,
           projectGateStatusSafe,
           execFileImpl: execFileAsync,
           operatorSurface,

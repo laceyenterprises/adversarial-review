@@ -113,7 +113,7 @@ import {
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
-import { reconcileLocalReviewShadowRequest } from './reviewer.mjs';
+import { startLocalReviewShadowReconciliation } from './reviewer.mjs';
 // AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
 // (AMA-01 defaults to false). When the operator opts in AND the
 // canonical eligibility predicate from SPEC §4.2 returns
@@ -4293,7 +4293,7 @@ async function handlePostedReviewRow({
   await projectGateStatusSafe(existing);
 
   try {
-    await reconcileLocalReviewShadowRequest({
+    const shadowStart = startLocalReviewShadowReconciliation({
       rootDir,
       repo: repoPath,
       prNumber,
@@ -4304,6 +4304,11 @@ async function handlePostedReviewRow({
       hostedPostedAt: existing?.posted_at || null,
       log: logger,
     });
+    if (shadowStart.action === 'deferred' && shadowStart.reason === 'retry-backoff') {
+      logger.log?.(
+        `[watcher] local-review-shadow retry deferred for ${repoPath}#${prNumber} until ${shadowStart.nextAttemptAt}`
+      );
+    }
   } catch (err) {
     logger.warn?.(
       `[watcher] local-review-shadow reconciliation warning for ${repoPath}#${prNumber}: ${err?.message || err}`

@@ -63,6 +63,9 @@ const REVIEW_POST_RETRY_DELAYS_MS = [0];
 const LOCAL_REVIEW_SHADOW_LABEL = 'run-local-review-shadow';
 const DEFAULT_LOCAL_REVIEW_SHADOW_TIMEOUT_MS = 90_000;
 const DEFAULT_LOCAL_REVIEW_SHADOW_URL = 'http://127.0.0.1:4000/v1/chat/completions';
+const LOCAL_REVIEW_SHADOW_FILE_MODE = 0o600;
+const LOCAL_REVIEW_SHADOW_RETRY_BACKOFF_MS = 15 * 60 * 1000;
+const activeLocalReviewShadowReconciliations = new Set();
 
 const BUILDER_FAMILY_BY_TAG = Object.freeze({
   codex: 'codex',
@@ -940,6 +943,11 @@ function readJsonFileSafe(filePath) {
 function writeLocalReviewShadowRequest(rootDir, request, { now = new Date().toISOString() } = {}) {
   const paths = localReviewShadowPaths(rootDir, request);
   const existing = readJsonFileSafe(paths.requestPath);
+  const status = existing?.status === 'completed' ? 'completed' : (request.status || existing?.status || 'pending');
+  const inputPath = request.inputPath || existing?.inputPath || (status === 'pending' || status === 'retryable' || status === 'completed'
+    ? paths.inputPath
+    : undefined);
+  const hasRequestField = (field) => Object.prototype.hasOwnProperty.call(request, field);
   const next = {
     ...(existing || {}),
     type: 'local-review-shadow-request',
@@ -951,15 +959,19 @@ function writeLocalReviewShadowRequest(rootDir, request, { now = new Date().toIS
     builderTag: request.builderTag || null,
     hostedReviewerModel: request.hostedReviewerModel || null,
     hostedPostedAt: request.hostedPostedAt || null,
-    status: existing?.status === 'completed' ? 'completed' : (request.status || existing?.status || 'pending'),
+    status,
     artifactPath: existing?.artifactPath || paths.artifactPath,
-    inputPath: request.inputPath || existing?.inputPath || paths.inputPath,
+    ...(inputPath ? { inputPath } : {}),
     createdAt: existing?.createdAt || now,
     updatedAt: now,
-    lastError: request.lastError ?? existing?.lastError ?? null,
+    lastError: hasRequestField('lastError') ? request.lastError : (existing?.lastError ?? null),
     eligibility: request.eligibility || existing?.eligibility || null,
+    attemptCount: Number.isFinite(Number(request.attemptCount))
+      ? Number(request.attemptCount)
+      : Number(existing?.attemptCount || 0),
+    nextAttemptAt: hasRequestField('nextAttemptAt') ? request.nextAttemptAt : (existing?.nextAttemptAt ?? null),
   };
-  writeFileAtomic(paths.requestPath, `${JSON.stringify(next, null, 2)}\n`);
+  writeFileAtomic(paths.requestPath, `${JSON.stringify(next, null, 2)}\n`, { mode: LOCAL_REVIEW_SHADOW_FILE_MODE });
   return { request: next, ...paths };
 }
 
@@ -979,7 +991,7 @@ function writeLocalReviewShadowInput(rootDir, request, {
     diff,
     hostedReviewBody,
     createdAt: now,
-  }, null, 2)}\n`);
+  }, null, 2)}\n`, { mode: LOCAL_REVIEW_SHADOW_FILE_MODE });
   return paths.inputPath;
 }
 
@@ -1188,12 +1200,14 @@ async function reconcileLocalReviewShadowRequest({
       reviewText,
       completedAt,
     });
-    writeFileAtomic(persisted.artifactPath, artifact);
+    writeFileAtomic(persisted.artifactPath, artifact, { mode: LOCAL_REVIEW_SHADOW_FILE_MODE });
     const completed = writeLocalReviewShadowRequest(rootDir, {
       ...baseRequest,
       status: 'completed',
       eligibility,
       lastError: null,
+      attemptCount: Number(current.attemptCount || 0),
+      nextAttemptAt: null,
     }, { now: completedAt });
     log.log?.(
       JSON.stringify({
@@ -1208,11 +1222,16 @@ async function reconcileLocalReviewShadowRequest({
     return { action: 'completed', requestPath: completed.requestPath, artifactPath: persisted.artifactPath };
   } catch (err) {
     const detail = err?.message || String(err);
+    const now = new Date();
+    const attemptCount = Number(current.attemptCount || 0) + 1;
+    const nextAttemptAt = new Date(now.getTime() + LOCAL_REVIEW_SHADOW_RETRY_BACKOFF_MS).toISOString();
     const failed = writeLocalReviewShadowRequest(rootDir, {
       ...baseRequest,
       status: 'retryable',
       eligibility,
       lastError: detail,
+      attemptCount,
+      nextAttemptAt,
     });
     log.warn?.(
       JSON.stringify({
@@ -1222,10 +1241,97 @@ async function reconcileLocalReviewShadowRequest({
         prNumber: Number(prNumber),
         headSha: headSha || null,
         reason: detail,
+        nextAttemptAt,
       })
     );
-    return { action: 'retryable', reason: detail, requestPath: failed.requestPath, artifactPath: persisted.artifactPath };
+    return { action: 'retryable', reason: detail, requestPath: failed.requestPath, artifactPath: persisted.artifactPath, nextAttemptAt };
   }
+}
+
+function localReviewShadowDueState(rootDir, request, { nowMs = Date.now() } = {}) {
+  const paths = localReviewShadowPaths(rootDir, request);
+  const existing = readJsonFileSafe(paths.requestPath);
+  if (!existing) return { due: true, reason: 'missing-request', paths, request: null };
+  if (existing.status === 'completed' && existsSync(existing.artifactPath || paths.artifactPath)) {
+    return { due: false, reason: 'already-completed', paths, request: existing };
+  }
+  if (existing.status === 'skipped') {
+    return { due: false, reason: 'skipped', paths, request: existing };
+  }
+  if (existing.status === 'retryable' && existing.nextAttemptAt) {
+    const dueAtMs = Date.parse(existing.nextAttemptAt);
+    if (Number.isFinite(dueAtMs) && dueAtMs > nowMs) {
+      return {
+        due: false,
+        reason: 'retry-backoff',
+        nextAttemptAt: existing.nextAttemptAt,
+        paths,
+        request: existing,
+      };
+    }
+  }
+  return { due: true, reason: existing.status || 'pending', paths, request: existing };
+}
+
+function startLocalReviewShadowReconciliation({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  headSha,
+  labels = [],
+  builderTag = null,
+  hostedReviewerModel = null,
+  hostedPostedAt = null,
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  log = console,
+  nowMs = Date.now(),
+} = {}) {
+  const baseRequest = {
+    repo,
+    prNumber: Number(prNumber),
+    headSha: headSha || null,
+    label: LOCAL_REVIEW_SHADOW_LABEL,
+  };
+  if (!hasLocalReviewShadowLabel(labels)) {
+    return { action: 'unchanged', reason: 'label-absent' };
+  }
+  const dueState = localReviewShadowDueState(rootDir, baseRequest, { nowMs });
+  if (!dueState.due) {
+    return {
+      action: 'deferred',
+      reason: dueState.reason,
+      requestPath: dueState.paths.requestPath,
+      nextAttemptAt: dueState.nextAttemptAt || null,
+    };
+  }
+  if (activeLocalReviewShadowReconciliations.has(dueState.paths.key)) {
+    return { action: 'deferred', reason: 'already-running', requestPath: dueState.paths.requestPath };
+  }
+  activeLocalReviewShadowReconciliations.add(dueState.paths.key);
+  Promise.resolve()
+    .then(() => reconcileLocalReviewShadowRequest({
+      rootDir,
+      repo,
+      prNumber,
+      headSha,
+      labels,
+      builderTag,
+      hostedReviewerModel,
+      hostedPostedAt,
+      env,
+      fetchImpl,
+      log,
+    }))
+    .catch((err) => {
+      log.warn?.(
+        `[reviewer] local-review-shadow background reconciliation warning for ${repo}#${prNumber}: ${err?.message || err}`
+      );
+    })
+    .finally(() => {
+      activeLocalReviewShadowReconciliations.delete(dueState.paths.key);
+    });
+  return { action: 'started', requestPath: dueState.paths.requestPath };
 }
 
 function recordLocalReviewShadowRequestAfterHostedPost({
@@ -1263,12 +1369,20 @@ function recordLocalReviewShadowRequestAfterHostedPost({
     lastError: eligibility.eligible ? null : eligibility.reason,
     eligibility,
   };
-  const inputPath = writeLocalReviewShadowInput(rootDir, request, {
+  if (!eligibility.eligible) {
+    const skipped = recordLocalReviewShadowSkip(rootDir, request, eligibility.reason, { log });
+    return {
+      recorded: true,
+      eligible: false,
+      reason: eligibility.reason,
+      requestPath: skipped.requestPath,
+    };
+  }
+  request.inputPath = writeLocalReviewShadowInput(rootDir, request, {
     diff,
     hostedReviewBody,
     now: hostedPostedAt,
   });
-  request.inputPath = inputPath;
   const persisted = writeLocalReviewShadowRequest(rootDir, request, { now: hostedPostedAt });
   log.log?.(
     JSON.stringify({
@@ -2459,6 +2573,9 @@ async function main() {
     : '';
   const fullComment = header + waiverAuditBlock + reviewText;
 
+  const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
+    ? Number(reviewDbAttemptNumber)
+    : Number(reviewAttemptNumber);
   try {
     console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);
     // Use reviewDbAttemptNumber to match the row beginReviewerPass created
@@ -2466,9 +2583,6 @@ async function main() {
     // only advances on round completion, while reviewDbAttemptNumber
     // (review_attempts + 1) advances on every launch attempt — they diverge
     // on retry-within-round, and the row key is the launch-attempt counter.
-    const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
-      ? Number(reviewDbAttemptNumber)
-      : Number(reviewAttemptNumber);
     await postGitHubReviewWithCapture({
       rootDir: ROOT,
       repo,
@@ -2486,7 +2600,13 @@ async function main() {
       execFileImpl: execFileAsync,
       log: console,
     });
-    console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
+  } catch (err) {
+    console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err.message);
+    process.exit(1);
+  }
+
+  console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
+  try {
     const shadowRecord = recordLocalReviewShadowRequestAfterHostedPost({
       rootDir: ROOT,
       repo,
@@ -2505,8 +2625,7 @@ async function main() {
       console.log(`[reviewer] Local review shadow request ${shadowRecord.eligible ? 'recorded' : 'skipped'} at ${shadowRecord.requestPath}`);
     }
   } catch (err) {
-    console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err.message);
-    process.exit(1);
+    console.warn(`[reviewer] Local review shadow request warning for ${repo}#${prNumber}:`, err.message);
   }
 
   const critical = isCritical(reviewText);
@@ -2601,6 +2720,7 @@ const __test__ = {
   evaluateLocalReviewShadowEligibility,
   recordLocalReviewShadowRequestAfterHostedPost,
   reconcileLocalReviewShadowRequest,
+  startLocalReviewShadowReconciliation,
   resolveLocalReviewShadowModel,
   runLocalReviewShadowViaLiteLLM,
   formatLocalReviewShadowArtifact,
@@ -2623,6 +2743,7 @@ export {
   isFinalReviewRound,
   detectSpecTouchViolations,
   reconcileLocalReviewShadowRequest,
+  startLocalReviewShadowReconciliation,
   clearPendingReviewsForSelf,
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,

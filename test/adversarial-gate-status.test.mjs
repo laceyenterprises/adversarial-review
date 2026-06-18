@@ -22,8 +22,14 @@ import {
   maybeDispatchAmaClosureFor,
   resolveMergeAgentCoexistenceForWatcher,
 } from '../src/watcher.mjs';
+import { __test__ as reviewerTest } from '../src/reviewer.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
+
+const {
+  LOCAL_REVIEW_SHADOW_LABEL,
+  localReviewShadowPaths,
+} = reviewerTest;
 
 // Pin AMA enabled/disabled for a test body regardless of the host's live
 // config.local.yaml (which may set roles.adversarial.merge_authority.enabled).
@@ -845,6 +851,75 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
     assert.ok(ghCalls[0].args.includes(`repos/laceyenterprises/adversarial-review/statuses/${headSha}`));
     assert.ok(ghCalls[0].args.includes('state=success'));
     assert.ok(ghCalls[0].args.includes(`context=${ADVERSARIAL_GATE_CONTEXT}`));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('posted watcher rows do not wait for local-review-shadow retry backoff before merge dispatch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-shadow-backoff-'));
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 55;
+    const headSha = 'abc123shadow';
+    const reviewRow = makeReviewRow({
+      pr_number: prNumber,
+      reviewer_head_sha: headSha,
+      reviewer: 'codex',
+      posted_at: '2026-06-18T12:00:00.000Z',
+    });
+    const paths = localReviewShadowPaths(rootDir, {
+      repo,
+      prNumber,
+      headSha,
+      label: LOCAL_REVIEW_SHADOW_LABEL,
+    });
+    mkdirSync(path.dirname(paths.requestPath), { recursive: true });
+    writeFileSync(paths.requestPath, `${JSON.stringify({
+      type: 'local-review-shadow-request',
+      version: 1,
+      repo,
+      prNumber,
+      headSha,
+      label: LOCAL_REVIEW_SHADOW_LABEL,
+      status: 'retryable',
+      nextAttemptAt: '2999-01-01T00:00:00.000Z',
+      attemptCount: 1,
+    }, null, 2)}\n`);
+
+    const events = [];
+    await withMergeAuthorityEnabled(false, () => handlePostedReviewRow({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      existing: reviewRow,
+      labelNames: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'claude-code',
+      currentRevisionRef: headSha,
+      projectGateStatusSafe: async () => {
+        events.push('status');
+      },
+      fetchMergeAgentCandidateImpl: async () => {
+        events.push('merge-fetch');
+        return { repo, prNumber };
+      },
+      buildMergeAgentDispatchJobImpl: (_rootDir, candidate) => candidate,
+      dispatchMergeAgentForPRImpl: async () => {
+        events.push('merge-dispatch');
+        return { decision: 'skip-test' };
+      },
+      resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+        outcome: 'dispatch-merge-agent',
+        dispatchEnv: null,
+      }),
+      logger: {
+        log() {},
+        warn() {},
+        error() {},
+      },
+    }));
+
+    assert.deepEqual(events, ['status', 'merge-fetch', 'merge-dispatch']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

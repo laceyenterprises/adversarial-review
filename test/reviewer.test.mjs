@@ -34,6 +34,7 @@ const {
   evaluateLocalReviewShadowEligibility,
   recordLocalReviewShadowRequestAfterHostedPost,
   reconcileLocalReviewShadowRequest,
+  startLocalReviewShadowReconciliation,
   formatLocalReviewShadowArtifact,
   localReviewShadowPaths,
 } = __test__;
@@ -960,6 +961,41 @@ test('local-review-shadow family guard fails closed for codex, claude-code, and 
   assert.equal(sameClaude.reason, 'local-shadow-family-not-distinct');
 });
 
+test('local-review-shadow skipped request does not persist diff or hosted review payload', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-skip-no-input-'));
+  try {
+    const result = recordLocalReviewShadowRequestAfterHostedPost({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 94,
+      headSha: 'abc123',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'codex',
+      hostedReviewerModel: 'claude',
+      hostedPostedAt: '2026-06-18T12:00:00.000Z',
+      diff: '+private source',
+      hostedReviewBody: 'hosted body with private context',
+      env: {},
+      log: { log() {}, warn() {} },
+    });
+
+    assert.equal(result.recorded, true);
+    assert.equal(result.eligible, false);
+    const request = JSON.parse(readFileSync(result.requestPath, 'utf8'));
+    assert.equal(request.status, 'skipped');
+    assert.equal(request.inputPath, undefined);
+    const paths = localReviewShadowPaths(rootDir, {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 94,
+      headSha: 'abc123',
+      label: LOCAL_REVIEW_SHADOW_LABEL,
+    });
+    assert.equal(existsSync(paths.inputPath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('local-review-shadow durable request is written before shadow execution starts', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-sequence-'));
   try {
@@ -1089,10 +1125,81 @@ test('local-review-shadow timeout or unavailable LiteLLM records retryable warni
     });
     assert.equal(result.action, 'retryable');
     assert.match(result.reason, /HTTP 503/);
+    assert.match(result.nextAttemptAt, /^20/);
     assert.equal(warnings.some((line) => line.includes('"event":"local-review-shadow"') && line.includes('"action":"retryable"')), true);
     const request = JSON.parse(readFileSync(result.requestPath, 'utf8'));
     assert.equal(request.status, 'retryable');
     assert.match(request.lastError, /HTTP 503/);
+    assert.equal(request.attemptCount, 1);
+    assert.equal(request.nextAttemptAt, result.nextAttemptAt);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('local-review-shadow watcher starter respects retry backoff and does not invoke LiteLLM inline', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-start-backoff-'));
+  try {
+    const first = await reconcileLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 95,
+      headSha: 'badcafe',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'claude-code',
+      hostedReviewerModel: 'codex',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn() {} },
+      fetchImpl: async () => ({ ok: false, status: 503, async json() { return {}; } }),
+    });
+    assert.equal(first.action, 'retryable');
+
+    let fetchStarted = false;
+    const deferred = startLocalReviewShadowReconciliation({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 95,
+      headSha: 'badcafe',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'claude-code',
+      hostedReviewerModel: 'codex',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn() {} },
+      fetchImpl: async () => {
+        fetchStarted = true;
+        throw new Error('should be deferred by backoff');
+      },
+      nowMs: Date.parse(first.nextAttemptAt) - 1,
+    });
+    assert.equal(deferred.action, 'deferred');
+    assert.equal(deferred.reason, 'retry-backoff');
+    assert.equal(fetchStarted, false);
+
+    const started = startLocalReviewShadowReconciliation({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 95,
+      headSha: 'badcafe',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'claude-code',
+      hostedReviewerModel: 'codex',
+      env: { LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer' },
+      log: { log() {}, warn() {} },
+      fetchImpl: async () => {
+        fetchStarted = true;
+        return {
+          ok: true,
+          async json() {
+            return { choices: [{ message: { content: 'local notes' } }] };
+          },
+        };
+      },
+      nowMs: Date.parse(first.nextAttemptAt) + 1,
+    });
+    assert.equal(started.action, 'started');
+    assert.equal(fetchStarted, false);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fetchStarted, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

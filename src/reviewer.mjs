@@ -20,7 +20,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,6 +56,7 @@ import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { fetchPullRequestReviewContext } from './github-api.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -63,7 +64,11 @@ const REVIEW_POST_RETRY_DELAYS_MS = [0];
 const LOCAL_REVIEW_SHADOW_LABEL = 'run-local-review-shadow';
 const LOCAL_REVIEW_SHADOW_MODEL_ENV = 'ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL';
 const LOCAL_REVIEW_SHADOW_TIMEOUT_MS_ENV = 'ADVERSARIAL_REVIEW_LOCAL_SHADOW_TIMEOUT_MS';
+const LOCAL_REVIEW_SHADOW_SWEEP_LIMIT_ENV = 'ADVERSARIAL_REVIEW_LOCAL_SHADOW_SWEEP_LIMIT';
+const LOCAL_REVIEW_SHADOW_RETRY_BACKOFF_MS_ENV = 'ADVERSARIAL_REVIEW_LOCAL_SHADOW_RETRY_BACKOFF_MS';
 const DEFAULT_LOCAL_REVIEW_SHADOW_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_LOCAL_REVIEW_SHADOW_SWEEP_LIMIT = 5;
+const DEFAULT_LOCAL_REVIEW_SHADOW_RETRY_BACKOFF_MS = 10 * 60 * 1000;
 const LOCAL_REVIEW_SHADOW_ENV_ALLOWLIST = Object.freeze([
   'PATH',
   'LITELLM_API_BASE',
@@ -180,6 +185,16 @@ function resolveLocalReviewShadowTimeoutMs(env = process.env) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LOCAL_REVIEW_SHADOW_TIMEOUT_MS;
 }
 
+function resolveLocalReviewShadowSweepLimit(env = process.env) {
+  const parsed = Number.parseInt(String(env?.[LOCAL_REVIEW_SHADOW_SWEEP_LIMIT_ENV] || ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LOCAL_REVIEW_SHADOW_SWEEP_LIMIT;
+}
+
+function resolveLocalReviewShadowRetryBackoffMs(env = process.env) {
+  const parsed = Number.parseInt(String(env?.[LOCAL_REVIEW_SHADOW_RETRY_BACKOFF_MS_ENV] || ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LOCAL_REVIEW_SHADOW_RETRY_BACKOFF_MS;
+}
+
 function localReviewShadowBaseDir(rootDir = ROOT) {
   return join(rootDir, 'data', 'local-review-shadow');
 }
@@ -200,9 +215,66 @@ function localReviewShadowArtifactPath(rootDir, requestKey) {
   return join(localReviewShadowBaseDir(rootDir), 'artifacts', `${requestKey}.md`);
 }
 
+function localReviewShadowPromptPath(rootDir, requestKey) {
+  return join(localReviewShadowBaseDir(rootDir), 'tmp', `${requestKey}.prompt.md`);
+}
+
 function readJsonFileIfExists(filePath) {
   if (!existsSync(filePath)) return null;
   return JSON.parse(readFileSync(filePath, 'utf8'));
+}
+
+function listLocalReviewShadowRequestPaths(rootDir = ROOT) {
+  const requestDir = join(localReviewShadowBaseDir(rootDir), 'requests');
+  if (!existsSync(requestDir)) return [];
+  return readdirSync(requestDir)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map((name) => join(requestDir, name));
+}
+
+function parseEpochMs(value) {
+  const parsed = Date.parse(value || '');
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isLocalReviewShadowRetryDue(request, now = new Date().toISOString()) {
+  const retryAfterMs = parseEpochMs(request?.warning?.retryAfter);
+  const nowMs = parseEpochMs(now) ?? Date.now();
+  return !retryAfterMs || retryAfterMs <= nowMs;
+}
+
+function hasRecoverableHostedReviewPost(rootDir, request) {
+  const repo = request?.repo;
+  const prNumber = Number(request?.prNumber);
+  const headSha = String(request?.headSha || '').trim();
+  if (!repo || !Number.isInteger(prNumber) || !headSha) return false;
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare(
+      `SELECT review_status, posted_at, reviewer_head_sha
+         FROM reviewed_prs
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).get(repo, prNumber);
+    if (String(row?.reviewer_head_sha || '').trim() !== headSha) return false;
+    if (row?.review_status === 'posted' && row?.posted_at) return true;
+    const captured = db.prepare(
+      `SELECT 1
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND status = 'completed'
+          AND body_md IS NOT NULL
+        ORDER BY attempt_number DESC
+        LIMIT 1`
+    ).get(repo, prNumber);
+    return Boolean(captured);
+  } finally {
+    db.close();
+  }
 }
 
 function writeLocalReviewShadowRequest(rootDir, request) {
@@ -219,6 +291,9 @@ function buildLocalReviewShadowRequest({
   builderTag,
   hostedReviewerModel,
   label = LOCAL_REVIEW_SHADOW_LABEL,
+  diff = '',
+  extraContext = '',
+  hostedReviewText = '',
   env = process.env,
   now = new Date().toISOString(),
 } = {}) {
@@ -268,6 +343,11 @@ function buildLocalReviewShadowRequest({
       timeoutMs: resolveLocalReviewShadowTimeoutMs(env),
       artifactPath: localReviewShadowArtifactPath(rootDir, requestKey),
     },
+    promptInputs: {
+      diff: String(diff || ''),
+      extraContext: String(extraContext || ''),
+      hostedReviewText: String(hostedReviewText || ''),
+    },
     builder: {
       tag: builderTag || null,
       family: builderFamily,
@@ -293,11 +373,21 @@ function persistLocalReviewShadowRequestBeforeHostedPost(options = {}) {
   return { request, requestPath };
 }
 
-function markLocalReviewShadowHostedPosted({ rootDir = ROOT, request, now = new Date().toISOString() } = {}) {
+function markLocalReviewShadowHostedPosted({
+  rootDir = ROOT,
+  request,
+  hostedReviewText = null,
+  now = new Date().toISOString(),
+} = {}) {
   if (!request) return null;
+  const promptInputs = {
+    ...(request.promptInputs || {}),
+    ...(hostedReviewText === null ? {} : { hostedReviewText: String(hostedReviewText || '') }),
+  };
   const next = {
     ...request,
     updatedAt: now,
+    promptInputs,
     hostedReview: {
       ...request.hostedReview,
       posted: true,
@@ -356,11 +446,11 @@ function buildLocalReviewShadowSubprocessEnv(env = process.env) {
 async function runLocalReviewShadowRequest({
   rootDir = ROOT,
   request,
-  diff,
-  extraContext = '',
-  hostedReviewText = '',
+  diff = null,
+  extraContext = null,
+  hostedReviewText = null,
   env = process.env,
-  execFileImpl = execFileAsync,
+  execFileImpl = null,
   log = console,
   now = new Date().toISOString(),
 } = {}) {
@@ -379,6 +469,9 @@ async function runLocalReviewShadowRequest({
     log.warn?.(`[reviewer] WARNING local-review-shadow skipped for ${latest.repo}#${latest.prNumber}: ${latest.skipReason}`);
     return { ran: false, reason: latest.skipReason || 'hosted-only' };
   }
+  if (latest.status === 'retryable-warning' && !isLocalReviewShadowRetryDue(latest, now)) {
+    return { ran: false, reason: 'retry-backoff', retryAfter: latest.warning?.retryAfter || null };
+  }
 
   const inProgress = {
     ...latest,
@@ -388,17 +481,32 @@ async function runLocalReviewShadowRequest({
   writeLocalReviewShadowRequest(rootDir, inProgress);
 
   try {
-    const prompt = buildLocalReviewShadowPrompt({ diff, extraContext, hostedReviewText });
+    const prompt = buildLocalReviewShadowPrompt({
+      diff: diff ?? inProgress.promptInputs?.diff ?? '',
+      extraContext: extraContext ?? inProgress.promptInputs?.extraContext ?? '',
+      hostedReviewText: hostedReviewText ?? inProgress.promptInputs?.hostedReviewText ?? '',
+    });
     const litellmCli = env.LITELLM_CLI_PATH || 'litellm';
-    const result = await execFileImpl(
-      litellmCli,
-      ['completion', '--model', inProgress.localReview.model, '--prompt', prompt],
-      {
+    const promptPath = localReviewShadowPromptPath(rootDir, inProgress.requestKey);
+    writeFileAtomic(promptPath, prompt);
+    let result;
+    try {
+      const args = ['completion', '--model', inProgress.localReview.model, '--prompt-file', promptPath];
+      const options = {
         env: buildLocalReviewShadowSubprocessEnv(env),
         timeout: inProgress.localReview.timeoutMs,
         maxBuffer: 5 * 1024 * 1024,
-      },
-    );
+      };
+      result = execFileImpl
+        ? await execFileImpl(litellmCli, args, options)
+        : await execFileAsync(litellmCli, args, options);
+    } finally {
+      try {
+        unlinkSync(promptPath);
+      } catch {
+        // Best-effort cleanup only; the temp prompt lives under the shadow dir.
+      }
+    }
     const output = String(result?.stdout || result?.stderr || '').trim();
     writeFileAtomic(artifactPath, buildLocalReviewShadowArtifact({ request: inProgress, output, now }));
     const completed = {
@@ -429,6 +537,8 @@ async function runLocalReviewShadowRequest({
       warning: {
         message: err?.message || String(err),
         code: err?.code || null,
+        warnedAt: now,
+        retryAfter: new Date((parseEpochMs(now) ?? Date.now()) + resolveLocalReviewShadowRetryBackoffMs(env)).toISOString(),
       },
     };
     writeLocalReviewShadowRequest(rootDir, failed);
@@ -483,6 +593,98 @@ async function reconcileLocalReviewShadow({
     log,
   });
   return { reconciled: true, requestPath, requestKey, ...result };
+}
+
+async function reconcileLocalReviewShadowRequestFile({
+  rootDir = ROOT,
+  requestPath,
+  env = process.env,
+  execFileImpl = null,
+  log = console,
+  now = new Date().toISOString(),
+} = {}) {
+  const request = readJsonFileIfExists(requestPath);
+  if (!request) return { reconciled: false, reason: 'request-missing', requestPath };
+  if (request.status === 'completed' || request.status === 'hosted-only') {
+    return { reconciled: false, reason: request.status, requestPath, requestKey: request.requestKey };
+  }
+  if (request.status === 'running') {
+    return { reconciled: false, reason: 'already-running', requestPath, requestKey: request.requestKey };
+  }
+  let readyRequest = request;
+  if (!readyRequest.hostedReview?.posted && hasRecoverableHostedReviewPost(rootDir, readyRequest)) {
+    ({ request: readyRequest } = markLocalReviewShadowHostedPosted({
+      rootDir,
+      request: readyRequest,
+      hostedReviewText: readyRequest.promptInputs?.hostedReviewText || '',
+      now,
+    }));
+  }
+  if (!readyRequest.hostedReview?.posted) {
+    return {
+      reconciled: false,
+      reason: 'hosted-review-not-posted',
+      requestPath,
+      requestKey: readyRequest.requestKey,
+    };
+  }
+  const result = await runLocalReviewShadowRequest({
+    rootDir,
+    request: readyRequest,
+    env,
+    execFileImpl,
+    log,
+    now,
+  });
+  return { reconciled: true, requestPath, requestKey: readyRequest.requestKey, ...result };
+}
+
+async function sweepLocalReviewShadowRequests({
+  rootDir = ROOT,
+  env = process.env,
+  execFileImpl = null,
+  log = console,
+  limit = resolveLocalReviewShadowSweepLimit(env),
+  now = new Date().toISOString(),
+} = {}) {
+  const requestPaths = listLocalReviewShadowRequestPaths(rootDir);
+  const summary = {
+    scanned: 0,
+    reconciled: 0,
+    completed: 0,
+    hostedOnly: 0,
+    retryableWarnings: 0,
+    skipped: 0,
+    errors: 0,
+  };
+  for (const requestPath of requestPaths) {
+    if (summary.scanned >= limit) break;
+    summary.scanned += 1;
+    try {
+      const result = await reconcileLocalReviewShadowRequestFile({
+        rootDir,
+        requestPath,
+        env,
+        execFileImpl,
+        log,
+        now,
+      });
+      if (!result.reconciled) {
+        summary.skipped += 1;
+        if (result.reason === 'hosted-only') summary.hostedOnly += 1;
+        continue;
+      }
+      summary.reconciled += 1;
+      if (result.status === 'completed') summary.completed += 1;
+      if (result.reason === 'retryable-warning' || result.status === 'retryable-warning') {
+        summary.retryableWarnings += 1;
+      }
+    } catch (err) {
+      summary.errors += 1;
+      log.warn?.(`[reviewer] WARNING local-review-shadow sweep failed for ${requestPath}: ${err?.message || err}`);
+    }
+  }
+  return summary;
 }
 
 async function spawnWithInput(command, args, {
@@ -2338,6 +2540,8 @@ async function main() {
     builderTag,
     hostedReviewerModel: effectiveModel,
     labels,
+    diff,
+    extraContext,
     env: process.env,
   });
 
@@ -2388,6 +2592,7 @@ async function main() {
       ({ request: hostedPostedShadowRequest } = markLocalReviewShadowHostedPosted({
         rootDir: ROOT,
         request: localReviewShadow.request,
+        hostedReviewText: fullComment,
       }));
     } catch (err) {
       console.error(`[reviewer] WARNING local-review-shadow failed to mark hosted-posted for ${repo}#${prNumber}: ${err.message}`);
@@ -2495,16 +2700,20 @@ const __test__ = {
   resolveReviewerIdentityForBotTokenEnv,
   LOCAL_REVIEW_SHADOW_LABEL,
   LOCAL_REVIEW_SHADOW_MODEL_ENV,
+  LOCAL_REVIEW_SHADOW_SWEEP_LIMIT_ENV,
   hasLocalReviewShadowLabel,
   resolveBuilderFamily,
   resolveHostedReviewerFamily,
   resolveLocalShadowModelFamily,
+  resolveLocalReviewShadowSweepLimit,
   buildLocalReviewShadowRequest,
   persistLocalReviewShadowRequestBeforeHostedPost,
   markLocalReviewShadowHostedPosted,
   buildLocalReviewShadowSubprocessEnv,
   runLocalReviewShadowRequest,
   reconcileLocalReviewShadow,
+  reconcileLocalReviewShadowRequestFile,
+  sweepLocalReviewShadowRequests,
   localReviewShadowRequestPath,
   localReviewShadowArtifactPath,
 };
@@ -2518,6 +2727,7 @@ export {
   sanitizeCodexReviewPayload,
   buildReviewerPromptPrefix,
   spawnCaptured,
+  sweepLocalReviewShadowRequests,
   resolveReviewerTimeoutMs,
   isFinalReviewRound,
   detectSpecTouchViolations,

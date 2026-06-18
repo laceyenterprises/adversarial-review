@@ -18,13 +18,15 @@
 //
 // The daemon's tick loop:
 //   1. reconcileInProgressFollowUpJobs — finalize exited workers
-//   2. emitHeartbeatsForActiveJobs — refresh live detached workers so
+//   2. sweepLocalReviewShadowRequests — reconcile opt-in non-gating local
+//      reviewer artifacts after hosted reviews are durably posted
+//   3. emitHeartbeatsForActiveJobs — refresh live detached workers so
 //      daemon bounces do not age them into the stale-claim path
-//   3. sweepStuckInProgressClaims — reclaim only genuinely stale claims
-//   4. consumeFollowUpJobsUntilCapacity — claim + spawn pending jobs
+//   4. sweepStuckInProgressClaims — reclaim only genuinely stale claims
+//   5. consumeFollowUpJobsUntilCapacity — claim + spawn pending jobs
 //      until active workers reach ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS
 //      (default 1, preserving the legacy one-worker behavior)
-//   5. retryFailedCommentDeliveries — bounded historical retry drain
+//   6. retryFailedCommentDeliveries — bounded historical retry drain
 //
 // Workers spawned by the consume step are detached subprocesses of `codex` /
 // `claude` (separate binaries with their own TCC identity), not
@@ -46,6 +48,7 @@ import {
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { refreshReviewerBrokerTokens } from '../src/reviewer-broker-refresh.mjs';
+import { sweepLocalReviewShadowRequests } from '../src/reviewer.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
@@ -430,6 +433,16 @@ async function main() {
     });
     if (stopping) break;
     await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
+    if (stopping) break;
+    await runStep('local-shadow-reconcile', async () => {
+      const result = await sweepLocalReviewShadowRequests({ rootDir: ROOT });
+      logTick(
+        'local-shadow-reconcile',
+        `scanned=${result.scanned} reconciled=${result.reconciled} completed=${result.completed} ` +
+        `hostedOnly=${result.hostedOnly} retryableWarnings=${result.retryableWarnings} ` +
+        `skipped=${result.skipped} errors=${result.errors}`
+      );
+    });
     if (stopping) break;
     await runStep('heartbeat', () => {
       const result = emitHeartbeatsForActiveJobs({

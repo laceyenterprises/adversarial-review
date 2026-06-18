@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
 const {
   CLAUDE_STRIPPED_ENV_VARS,
@@ -41,6 +42,7 @@ const {
   buildLocalReviewShadowSubprocessEnv,
   runLocalReviewShadowRequest,
   reconcileLocalReviewShadow,
+  sweepLocalReviewShadowRequests,
   localReviewShadowArtifactPath,
 } = __test__;
 
@@ -302,6 +304,7 @@ test('local shadow LiteLLM subprocess receives only local routing env', async ()
     });
     const marked = markLocalReviewShadowHostedPosted({ rootDir: root, request: shadow.request });
     let subprocessEnv = null;
+    let subprocessArgs = null;
     await runLocalReviewShadowRequest({
       rootDir: root,
       request: marked.request,
@@ -314,7 +317,8 @@ test('local shadow LiteLLM subprocess receives only local routing env', async ()
         GITHUB_TOKEN: 'ghp_secret',
         OPENAI_API_KEY: 'openai-secret',
       },
-      execFileImpl: async (_command, _args, options) => {
+      execFileImpl: async (_command, args, options) => {
+        subprocessArgs = args;
         subprocessEnv = options.env;
         return { stdout: 'local review text', stderr: '' };
       },
@@ -323,6 +327,10 @@ test('local shadow LiteLLM subprocess receives only local routing env', async ()
       PATH: '/usr/local/bin',
       OLLAMA_HOST: 'http://127.0.0.1:11434',
     });
+    assert.deepEqual(subprocessArgs.slice(0, 3), ['completion', '--model', 'ollama/qwen2.5-coder']);
+    assert.equal(subprocessArgs[3], '--prompt-file');
+    assert.equal(subprocessArgs.length, 5);
+    assert.doesNotMatch(subprocessArgs.join('\n'), /diff --git a\/file b\/file/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -371,6 +379,81 @@ test('crash recovery reconciles hosted-posted missing shadow artifact idempotent
     });
     assert.equal(second.reason, 'artifact-already-exists');
     assert.equal(calls, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('local shadow sweep recovers hosted post marker from durable review state', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-sweep-'));
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 460;
+    const headSha = 'recover-marker';
+    const shadow = persistLocalReviewShadowRequestBeforeHostedPost({
+      rootDir: root,
+      repo,
+      prNumber,
+      headSha,
+      builderTag: '[codex]',
+      hostedReviewerModel: 'gemini',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      diff: 'diff --git a/file b/file\n+changed',
+      extraContext: 'governing docs',
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+    });
+
+    const db = openReviewStateDb(root);
+    try {
+      ensureReviewStateSchema(db);
+      db.prepare(
+        `INSERT INTO reviewed_prs (
+           repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+           review_attempts, labels_json, posted_at, reviewer_head_sha
+         ) VALUES (?, ?, ?, ?, 'open', 'posted', 1, ?, ?, ?)`
+      ).run(
+        repo,
+        prNumber,
+        '2026-06-18T12:00:00.000Z',
+        'gemini',
+        JSON.stringify([LOCAL_REVIEW_SHADOW_LABEL]),
+        '2026-06-18T12:01:00.000Z',
+        headSha,
+      );
+      db.prepare(
+        `INSERT INTO reviewer_passes (
+           repo, pr_number, attempt_number, reviewer_class, reviewer_model,
+           pass_kind, started_at, ended_at, status, metadata_json, body_md
+         ) VALUES (?, ?, 1, 'gemini', 'gemini', 'first-pass', ?, ?, 'completed', '{}', ?)`
+      ).run(
+        repo,
+        prNumber,
+        '2026-06-18T12:00:00.000Z',
+        '2026-06-18T12:01:00.000Z',
+        'hosted review body',
+      );
+    } finally {
+      db.close();
+    }
+
+    let litellmCalls = 0;
+    const summary = await sweepLocalReviewShadowRequests({
+      rootDir: root,
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+      execFileImpl: async (_command, args) => {
+        litellmCalls += 1;
+        assert.equal(args[3], '--prompt-file');
+        return { stdout: 'swept local review', stderr: '' };
+      },
+    });
+
+    assert.equal(summary.reconciled, 1);
+    assert.equal(summary.completed, 1);
+    assert.equal(litellmCalls, 1);
+    const persisted = JSON.parse(readFileSync(shadow.requestPath, 'utf8'));
+    assert.equal(persisted.hostedReview.posted, true);
+    assert.equal(persisted.status, 'completed');
+    assert.match(readFileSync(localReviewShadowArtifactPath(root, shadow.request.requestKey), 'utf8'), /swept local review/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -354,6 +354,28 @@ test('tick loop refreshes the reviewer broker token before any GitHub step', () 
   );
 });
 
+test('tick loop reconciles local shadow reviews before remediation consume', () => {
+  const src = readFileSync(
+    new URL('../scripts/adversarial-follow-up-daemon.mjs', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    src,
+    /import \{ sweepLocalReviewShadowRequests \} from '\.\.\/src\/reviewer\.mjs'/,
+    'daemon must import sweepLocalReviewShadowRequests',
+  );
+  const reconcileIdx = src.indexOf("runStep('reconcile'");
+  const localShadowIdx = src.indexOf("runStep('local-shadow-reconcile'");
+  const consumeIdx = src.indexOf("runStep('consume'");
+  assert.ok(localShadowIdx > reconcileIdx, 'local shadow reconciliation must run after follow-up reconcile');
+  assert.ok(consumeIdx > localShadowIdx, 'local shadow reconciliation must run before consume');
+  assert.match(
+    src,
+    /sweepLocalReviewShadowRequests\(\{ rootDir: ROOT \}\)/,
+    'daemon tick must invoke the local shadow sweep against the production root',
+  );
+});
+
 test('resolves remediation worker token handoff lifetime from the dedicated env knob', () => {
   assert.equal(
     resolveRemediationWorkerTokenMinLifetimeMs({}),

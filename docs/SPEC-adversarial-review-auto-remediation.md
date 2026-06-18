@@ -12,7 +12,10 @@ the configured worker class and verify the dispatched `workerClass` against
 that config value; for the Gemini harness this means validating an
 `hq dispatch --worker-class gemini --task-kind merge --completion-shape decision-only`
 launch and the generic provenance trailer
-`Closed-By: gemini-closer (adversarial-pipe-mode)`.
+`Closed-By: gemini-closer (adversarial-pipe-mode)`. HAM terminal-remediation
+is the exception to the generic suffix rule: its remediation commit uses
+`Closed-By: hammer (adversarial-pipe-mode)` exactly, per the HAM predicate
+contract.
 
 AMA closer dispatch must also declare the workspace repo set required by the
 closer prompt. The PR repository is always passed as the primary `--repo`. When

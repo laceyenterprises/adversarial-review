@@ -51,6 +51,11 @@ function hamTerminalEvidence({
   headSha = HAM_SHA,
   parentSha = HEAD_SHA,
   workerClass = 'hammer',
+  closedBy = 'hammer (adversarial-pipe-mode)',
+  remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
+  commitAuthor = 'hammer-worker',
+  auditAuthor = 'hammer-worker',
+  changedFiles = ['src/auth.js'],
   audit = true,
 } = {}) {
   return {
@@ -62,13 +67,16 @@ function hamTerminalEvidence({
       trailers: {
         'Worker-Class': workerClass,
         'Worker-Ticket': 'HAM-02',
-        'Closed-By': 'hammer (adversarial-pipe-mode)',
-        'Remediated-Findings': '2 addressed (1 blocking, 1 non-blocking)',
+        'Closed-By': closedBy,
+        'Remediated-Findings': remediatedFindings,
       },
+      author: commitAuthor,
+      files: changedFiles,
     },
     auditComment: audit
       ? {
           body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+          author: auditAuthor,
           findings: [
             { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
             { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
@@ -132,10 +140,21 @@ function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {}, reviews =
   return paths;
 }
 
-function hamCommitFixture({ headSha = HAM_SHA, parentSha = HEAD_SHA, workerClass = 'hammer' } = {}) {
+function hamCommitFixture({
+  headSha = HAM_SHA,
+  parentSha = HEAD_SHA,
+  workerClass = 'hammer',
+  closedBy = 'hammer (adversarial-pipe-mode)',
+  remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
+  author = 'hammer-worker',
+  changedFiles = ['src/auth.js'],
+} = {}) {
   return {
     sha: headSha,
     parents: [{ sha: parentSha }],
+    author: { login: author },
+    committer: { login: author },
+    files: changedFiles.map((filename) => ({ filename })),
     commit: {
       message: [
         'HAM-02 remediate final adversarial findings',
@@ -146,9 +165,9 @@ function hamCommitFixture({ headSha = HAM_SHA, parentSha = HEAD_SHA, workerClass
         '',
         `Reviewed-Head: ${parentSha}`,
         '',
-        'Closed-By: hammer (adversarial-pipe-mode)',
+        `Closed-By: ${closedBy}`,
         '',
-        'Remediated-Findings: 2 addressed (1 blocking, 1 non-blocking)',
+        `Remediated-Findings: ${remediatedFindings}`,
       ].join('\n'),
     },
   };
@@ -239,13 +258,21 @@ function runAmaCheck(tmp, {
       headSha: HAM_SHA,
       parentSha: HEAD_SHA,
       workerClass: hamTerminalRemediation?.commit?.trailers?.['Worker-Class'] || 'hammer',
+      closedBy: hamTerminalRemediation?.commit?.trailers?.['Closed-By'] || 'hammer (adversarial-pipe-mode)',
+      remediatedFindings:
+        hamTerminalRemediation?.commit?.trailers?.['Remediated-Findings']
+        || '2 addressed (1 blocking, 1 non-blocking)',
+      author: hamTerminalRemediation?.commit?.author || 'hammer-worker',
+      changedFiles: Array.isArray(hamTerminalRemediation?.commit?.files)
+        ? hamTerminalRemediation.commit.files
+        : ['src/auth.js'],
     }));
     const timeline = loadJson(paths.timeline);
     if (hamTerminalRemediation?.auditComment?.body) {
       timeline.push({
         event: 'commented',
         body: hamTerminalRemediation.auditComment.body,
-        user: { login: 'hammer-worker' },
+        user: { login: hamTerminalRemediation.auditComment.author || 'hammer-worker' },
         created_at: '2026-06-13T12:30:00Z',
       });
       writeJson(paths.timeline, timeline);
@@ -356,6 +383,29 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
       passingVerdict.trace.hamTerminalRemediation.marker,
       'ham_terminal_remediation_validated',
     );
+    assert.equal(passingVerdict.trace.hamTerminalRemediation.auditComment.author, 'hammer-worker');
+    assert.deepEqual(passingVerdict.trace.hamTerminalRemediation.verifiedCommit.changedFiles, ['src/auth.js']);
+
+    const abbreviatedClaim = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({
+        headSha: HAM_SHA.slice(0, 12),
+        parentSha: HEAD_SHA.slice(0, 12),
+      }),
+    });
+    assert.equal(abbreviatedClaim.status, 0, abbreviatedClaim.stderr);
+    const abbreviatedVerdict = JSON.parse(abbreviatedClaim.stdout);
+    assert.equal(abbreviatedVerdict.eligible, true, JSON.stringify(abbreviatedVerdict, null, 2));
 
     const laterNonHam = runAmaCheck(tmp, {
       branchProtectionRequired: true,
@@ -396,6 +446,84 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     assert.equal(missingVerdict.eligible, false);
     assert.equal(missingVerdict.trace.hamTerminalRemediation.checks.workerClass, false);
     assert.equal(missingVerdict.trace.hamTerminalRemediation.checks.auditComment, false);
+
+    const forgedAuthor = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({ auditAuthor: 'codex-worker-bot' }),
+    });
+    assert.equal(forgedAuthor.status, 0, forgedAuthor.stderr);
+    const forgedAuthorVerdict = JSON.parse(forgedAuthor.stdout);
+    assert.equal(forgedAuthorVerdict.eligible, false);
+    assert.equal(forgedAuthorVerdict.trace.hamTerminalRemediation.checks.auditCommentAuthor, false);
+
+    const looseClosedBy = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({ closedBy: 'hammer-closer (adversarial-pipe-mode)' }),
+    });
+    assert.equal(looseClosedBy.status, 0, looseClosedBy.stderr);
+    const looseClosedByVerdict = JSON.parse(looseClosedBy.stdout);
+    assert.equal(looseClosedByVerdict.eligible, false);
+    assert.equal(looseClosedByVerdict.trace.hamTerminalRemediation.checks.closedBy, false);
+
+    const mismatchedCounts = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({
+        remediatedFindings: '2 addressed (0 blocking, 2 non-blocking)',
+      }),
+    });
+    assert.equal(mismatchedCounts.status, 0, mismatchedCounts.stderr);
+    const mismatchedCountsVerdict = JSON.parse(mismatchedCounts.stdout);
+    assert.equal(mismatchedCountsVerdict.eligible, false);
+    assert.equal(mismatchedCountsVerdict.trace.hamTerminalRemediation.checks.remediatedFindings, false);
+
+    const emptyDiff = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({ changedFiles: [] }),
+    });
+    assert.equal(emptyDiff.status, 0, emptyDiff.stderr);
+    const emptyDiffVerdict = JSON.parse(emptyDiff.stdout);
+    assert.equal(emptyDiffVerdict.eligible, false);
+    assert.equal(emptyDiffVerdict.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

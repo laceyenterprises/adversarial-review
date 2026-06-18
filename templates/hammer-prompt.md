@@ -39,14 +39,18 @@ not replace the machine gate.
 
 4. Comment on PR <<PR_URL>> with an audit note that maps each final finding to
    the files/changes that addressed it. Include counts for blocking and
-   non-blocking findings.
+   non-blocking findings. The predicate accepts only a matched timeline comment
+   whose author is the verified HAM commit author or an allowlisted hammer bot.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
    your commit, run or verify the required checks for that exact SHA, then
    re-run the closer eligibility predicate in SPEC §1.1.1 HAM
    terminal-remediation mode for that same live head. The predicate must prove
    the HAM-authored remediation commit, provenance trailers, PR audit comment,
-   reviewed-parent coverage, successful live-head checks, and non-waived gates.
-   It must record `ham_terminal_remediation_validated`.
+   reviewed-parent coverage, non-empty verified diff, successful live-head
+   checks, and non-waived gates. It must record
+   `ham_terminal_remediation_validated`. Finding resolution is a HAM
+   attestation; the predicate verifies evidence and counts, not semantic code
+   correctness.
 6. Merge only after the exact-head HAM predicate passes, using
    `gh pr merge --match-head-commit <validated-post-remediation-sha>`.
 
@@ -95,7 +99,8 @@ gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-commit.json
 
 Build `/tmp/ham-terminal-remediation.json` as the claim to verify. `ama-check`
 must confirm the commit parent/trailers from `/tmp/ham-commit.json` and confirm
-the audit comment body exists in `/tmp/ham-timeline.json`; the JSON claim alone
+the audit comment body and author exist in `/tmp/ham-timeline.json`; the raw
+commit payload must include a non-empty `files[]` diff. The JSON claim alone
 does not satisfy the predicate.
 
 ```json

@@ -1326,21 +1326,35 @@ function hamEvidence({ headSha = 'def67890', parentSha = 'abc12345', audit = tru
   };
 }
 
-function hamGroundTruth({ headSha = 'def67890', parentSha = 'abc12345', audit = true, workerClass = 'hammer' } = {}) {
+function hamGroundTruth({
+  headSha = 'def67890',
+  parentSha = 'abc12345',
+  audit = true,
+  workerClass = 'hammer',
+  closedBy = 'hammer (adversarial-pipe-mode)',
+  remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
+  auditAuthor = 'hammer-worker',
+  changedFiles = ['src/auth.js'],
+} = {}) {
   return {
     commit: {
       sha: headSha,
       parentSha,
+      author: 'hammer-worker',
+      changedFiles,
       trailers: {
         'Worker-Class': workerClass,
         'Worker-Ticket': 'HAM-02',
-        'Closed-By': 'hammer (adversarial-pipe-mode)',
-        'Remediated-Findings': '2 addressed (1 blocking, 1 non-blocking)',
+        'Closed-By': closedBy,
+        'Remediated-Findings': remediatedFindings,
       },
     },
     auditComment: audit
       ? {
           body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+          author: auditAuthor,
+          createdAt: '2026-06-13T12:30:00Z',
+          id: 'IC_ham_audit',
         }
       : null,
   };
@@ -1371,6 +1385,8 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
   });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  assert.equal(result.trace.hamTerminalRemediation.auditComment.author, 'hammer-worker');
+  assert.deepEqual(result.trace.hamTerminalRemediation.verifiedCommit.changedFiles, ['src/auth.js']);
   assert.deepEqual(
     result.trace.hamTerminalRemediation.waived.sort(),
     ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success'].sort(),
@@ -1482,6 +1498,59 @@ test('ham terminal remediation: forged self-attested parent and trailers do not 
   assert.equal(result.trace.hamTerminalRemediation.checks.workerClass, false);
   assert.equal(result.trace.hamTerminalRemediation.checks.parent, false);
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('ham terminal remediation: forged audit author, loose closed-by, bad counts, or empty diff are rejected', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const validEvidence = {
+    ...hamEvidence(),
+    auditComment: {
+      body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+      findings: [
+        { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+        { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+      ],
+    },
+  };
+
+  const forgedAuthor = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: validEvidence,
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ auditAuthor: 'codex-worker-bot' }),
+  });
+  assert.equal(forgedAuthor.eligible, false);
+  assert.equal(forgedAuthor.trace.hamTerminalRemediation.checks.auditCommentAuthor, false);
+
+  const looseClosedBy = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: validEvidence,
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ closedBy: 'hammer-closer (adversarial-pipe-mode)' }),
+  });
+  assert.equal(looseClosedBy.eligible, false);
+  assert.equal(looseClosedBy.trace.hamTerminalRemediation.checks.closedBy, false);
+
+  const mismatchedCounts = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: validEvidence,
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ remediatedFindings: '2 addressed (0 blocking, 2 non-blocking)' }),
+  });
+  assert.equal(mismatchedCounts.eligible, false);
+  assert.equal(mismatchedCounts.trace.hamTerminalRemediation.checks.remediatedFindings, false);
+
+  const emptyDiff = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: validEvidence,
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ changedFiles: [] }),
+  });
+  assert.equal(emptyDiff.eligible, false);
+  assert.equal(emptyDiff.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
 });
 
 test('ham terminal remediation composes with final-hammer waivers', () => {

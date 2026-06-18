@@ -372,10 +372,18 @@ function buildVerifiedHamCommit(commitJson) {
       || '',
   ).trim();
   const message = commitJson?.commit?.message || commitJson?.message || '';
+  const changedFiles = Array.isArray(commitJson?.files)
+    ? commitJson.files
+      .map((file) => String(file?.filename || file?.path || '').trim())
+      .filter(Boolean)
+    : [];
   return {
     sha,
     parentSha,
     trailers: parseCommitTrailers(message),
+    author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
+    committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
+    changedFiles,
   };
 }
 

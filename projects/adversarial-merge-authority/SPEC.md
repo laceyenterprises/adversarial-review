@@ -19,14 +19,22 @@ must verify that claim against durable GitHub state:
 
 - the live PR head SHA is the claimed HAM remediation commit;
 - the live commit's first parent is exactly the reviewed head;
+- the live commit has a non-empty verified GitHub diff;
 - the live commit message trailers include `Worker-Class: hammer`,
   `Worker-Ticket: HAM-<n>`, `Closed-By: hammer (adversarial-pipe-mode)`, and a
   `Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)` count;
 - the PR timeline contains the claimed audit comment body;
+- the matched audit comment author is the verified commit author or an
+  allowlisted hammer bot identity, and the eligibility trace records the
+  comment `author`, `createdAt`, and `id`;
 - the audit comment body names each claimed finding title and changed file;
 - each claimed finding has `addressed: true`; and
 - the claimed blocking-finding count matches the blocking-finding count from
   the authoritative final review state.
+
+HAM attests that each mapped finding was resolved; the predicate verifies the
+commit, trailers, audit mapping, counts, and non-empty diff, but it does not
+semantically prove the code change fixes the reviewer's finding.
 
 Only after those checks pass may the predicate record
 `ham_terminal_remediation_validated`. That marker may waive
@@ -91,4 +99,6 @@ Supported closer worker classes are `codex`, `claude-code`, `hammer`, and
 `gemini`. Closer dispatch must pass the configured value to HQ as
 `--worker-class <configured-worker-class>` with `--task-kind merge` and
 `--completion-shape decision-only`; provenance must attribute the actual closer
-class as `Closed-By: <configured-worker-class>-closer (adversarial-pipe-mode)`.
+class as `Closed-By: <configured-worker-class>-closer (adversarial-pipe-mode)`,
+except HAM terminal-remediation commits, which use the exact
+`Closed-By: hammer (adversarial-pipe-mode)` trailer from §1.1.1.

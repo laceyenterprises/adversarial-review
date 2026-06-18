@@ -27,6 +27,12 @@ import {
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
+const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
+  'hammer-worker',
+  'lacey-hammer-worker',
+  'lacey-hammer-reviewer',
+  'github-actions',
+]);
 
 /**
  * Hard-stop labels imported from the existing adversarial-review / merge-agent
@@ -444,6 +450,41 @@ function normalizeTrailerMap(value) {
   return out;
 }
 
+function shaClaimMatches(claimed, verified) {
+  const lhs = String(claimed || '').trim();
+  const rhs = String(verified || '').trim();
+  if (!lhs || !rhs) return false;
+  if (lhs === rhs) return true;
+  const minPrefixLength = 7;
+  return lhs.length >= minPrefixLength && rhs.startsWith(lhs);
+}
+
+function parseRemediatedFindingsTrailer(value) {
+  const match = /^\s*(\d+)\s+addressed\s+\((\d+)\s+blocking,\s+(\d+)\s+non-blocking\)\s*$/i
+    .exec(String(value || ''));
+  if (!match) return null;
+  const total = Number(match[1]);
+  const blocking = Number(match[2]);
+  const nonBlocking = Number(match[3]);
+  if (![total, blocking, nonBlocking].every(Number.isInteger)) return null;
+  return { total, blocking, nonBlocking };
+}
+
+function hamAuditCommentAuthorMatches(verifiedAuditComment, verifiedCommit) {
+  const commentAuthor = normalizeLogin(verifiedAuditComment?.author);
+  if (!commentAuthor) return false;
+  const commitAuthor = normalizeLogin(verifiedCommit?.author || verifiedCommit?.committer);
+  if (commitAuthor && commentAuthor === commitAuthor) return true;
+  return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
+}
+
+function verifiedCommitHasNonEmptyDiff(verifiedCommit) {
+  if (!verifiedCommit || !Object.prototype.hasOwnProperty.call(verifiedCommit, 'changedFiles')) {
+    return false;
+  }
+  return Array.isArray(verifiedCommit.changedFiles) && verifiedCommit.changedFiles.length > 0;
+}
+
 function validateHamFindingMap(findings) {
   if (!Array.isArray(findings) || findings.length === 0) {
     return { ok: false, count: 0, blocking: 0, nonBlocking: 0 };
@@ -497,22 +538,31 @@ function validateHamTerminalRemediationEvidence(
   const ticket = String(verifiedTrailers.ticket || verifiedTrailers['worker-ticket'] || '').trim();
   const closedBy = String(verifiedTrailers['closed-by'] || '').trim();
   const remediatedFindings = String(verifiedTrailers['remediated-findings'] || '').trim();
+  const remediatedFindingCounts = parseRemediatedFindingsTrailer(remediatedFindings);
   const expectedBlockingCount = Number(blockingFindings?.count);
   const blockingCountMatches =
     blockingFindings?.known === true
       ? Number.isInteger(expectedBlockingCount) && findingMap.blocking === expectedBlockingCount
       : false;
+  const remediatedFindingCountsMatch =
+    remediatedFindingCounts !== null
+    && remediatedFindingCounts.total === findingMap.count
+    && remediatedFindingCounts.total === findingMap.blocking + findingMap.nonBlocking
+    && remediatedFindingCounts.blocking === findingMap.blocking
+    && remediatedFindingCounts.nonBlocking === findingMap.nonBlocking
+    && (!blockingFindings?.known || remediatedFindingCounts.blocking === expectedBlockingCount);
   const checks = {
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
     ticket: /^HAM-\d+$/i.test(ticket),
     head:
       verifiedCommitSha !== ''
       && verifiedCommitSha === String(currentHead || '')
-      && commitSha === verifiedCommitSha,
+      && shaClaimMatches(commitSha, verifiedCommitSha),
     parent:
       verifiedParentSha !== ''
       && verifiedParentSha === String(reviewedHead || '')
-      && parentSha === verifiedParentSha,
+      && shaClaimMatches(parentSha, verifiedParentSha),
+    nonEmptyCommit: verifiedCommitHasNonEmptyDiff(verifiedCommit),
     auditComment:
       claimedAuditBody !== ''
       && verifiedAuditBody !== ''
@@ -522,8 +572,9 @@ function validateHamTerminalRemediationEvidence(
         verifiedAuditBody,
         evidence?.auditComment?.findings || evidence?.addressedFindings,
       ),
-    closedBy: /^hammer\b/i.test(closedBy),
-    remediatedFindings: /\d+\s+addressed/i.test(remediatedFindings) && blockingCountMatches,
+    auditCommentAuthor: hamAuditCommentAuthorMatches(verifiedAuditComment, verifiedCommit),
+    closedBy: closedBy === 'hammer (adversarial-pipe-mode)',
+    remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,
   };
   const ok = Object.values(checks).every(Boolean);
   return {
@@ -533,6 +584,23 @@ function validateHamTerminalRemediationEvidence(
     reviewedParent: verifiedParentSha || parentSha || null,
     remediationHead: verifiedCommitSha || commitSha || null,
     addressedFindings: findingMap,
+    remediatedFindingCounts,
+    verifiedCommit: verifiedCommit
+      ? {
+          author: verifiedCommit.author || null,
+          committer: verifiedCommit.committer || null,
+          changedFiles: Array.isArray(verifiedCommit.changedFiles)
+            ? verifiedCommit.changedFiles
+            : [],
+        }
+      : null,
+    auditComment: verifiedAuditComment
+      ? {
+          author: verifiedAuditComment.author || null,
+          createdAt: verifiedAuditComment.createdAt || null,
+          id: verifiedAuditComment.id || null,
+        }
+      : null,
     marker: ok ? 'ham_terminal_remediation_validated' : null,
   };
 }

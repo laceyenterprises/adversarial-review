@@ -1293,3 +1293,118 @@ test('final hammer: waives risk-class for medium not in allowlist with adversari
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.ok(result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
 });
+
+// ---------------------------------------------------------------------------
+// HAM terminal remediation (SPEC §1.1.1): a HAM-authored commit on top of the
+// reviewed head can satisfy final-review findings without a re-review, but only
+// with provenance, audit-comment mapping, live-head checks, and non-waived gates.
+// ---------------------------------------------------------------------------
+
+function hamEvidence({ headSha = 'def67890', parentSha = 'abc12345', audit = true, workerClass = 'hammer' } = {}) {
+  return {
+    active: true,
+    ticket: 'HAM-02',
+    commit: {
+      sha: headSha,
+      parentSha,
+      trailers: {
+        'Worker-Class': workerClass,
+        'Worker-Ticket': 'HAM-02',
+        'Closed-By': 'hammer (adversarial-pipe-mode)',
+        'Remediated-Findings': '2 addressed (1 blocking, 1 non-blocking)',
+      },
+    },
+    auditComment: audit
+      ? {
+          body: 'HAM audit: addressed Auth path in src/auth.js and docs note in README.md',
+          findings: [
+            { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+            { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+          ],
+        }
+      : null,
+  };
+}
+
+test('ham terminal remediation: HAM-authored live head over reviewed parent is eligible and records marker', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence(),
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  assert.deepEqual(
+    result.trace.hamTerminalRemediation.waived.sort(),
+    ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success'].sort(),
+  );
+});
+
+test('ham terminal remediation: later non-HAM live head is rejected', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'fedcba09' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: 'def67890' }),
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.trace.hamTerminalRemediation.marker, null);
+  assert.ok(result.reasons.includes('stale-review-head'));
+});
+
+test('ham terminal remediation: absent audit/provenance evidence is rejected', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ audit: false, workerClass: 'codex' }),
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.workerClass, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.auditComment, false);
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('ham terminal remediation: failed live-head checks still block merge', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: {
+      headSha: 'def67890',
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' },
+      ],
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence(),
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  assert.ok(result.reasons.includes('ci-not-green'));
+});

@@ -426,6 +426,18 @@ test('composeAmaTrailers renders Closed-By: gemini-closer for the gemini harness
   );
 });
 
+test('composeAmaTrailers renders the HAM §1.2 Closed-By trailer for hammer', () => {
+  const block = composeAmaTrailers({
+    workerClass: 'hammer',
+    reviewerFamily: 'claude-reviewer-lacey',
+    riskClass: 'medium',
+    eligibilityReason: 'ham_terminal_remediation_validated',
+    auditRef: 'ama-audit:acme/myrepo:pr-1234:head-def67890',
+  });
+  assert.ok(block.includes('Closed-By: hammer (adversarial-pipe-mode)'));
+  assert.equal(block.includes('Closed-By: hammer-closer'), false);
+});
+
 test('composeAmaTrailers refuses CR/LF injection in any field', () => {
   for (const field of ['workerClass', 'reviewerFamily', 'riskClass', 'eligibilityReason', 'auditRef']) {
     const base = {

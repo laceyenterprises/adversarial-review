@@ -435,6 +435,66 @@ function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
   };
 }
 
+function normalizeTrailerMap(value) {
+  if (!value || typeof value !== 'object') return {};
+  const out = {};
+  for (const [key, trailerValue] of Object.entries(value)) {
+    out[String(key || '').trim().toLowerCase()] = String(trailerValue || '').trim();
+  }
+  return out;
+}
+
+function validateHamFindingMap(findings) {
+  if (!Array.isArray(findings) || findings.length === 0) {
+    return { ok: false, count: 0, blocking: 0, nonBlocking: 0 };
+  }
+  let blocking = 0;
+  let nonBlocking = 0;
+  for (const finding of findings) {
+    const title = String(finding?.title || finding?.finding || '').trim();
+    const file = String(finding?.file || finding?.path || '').trim();
+    const addressed = finding?.addressed !== false;
+    if (!title || !file || !addressed) {
+      return { ok: false, count: findings.length, blocking, nonBlocking };
+    }
+    if (finding?.blocking === true) blocking += 1;
+    else nonBlocking += 1;
+  }
+  return { ok: true, count: findings.length, blocking, nonBlocking };
+}
+
+function validateHamTerminalRemediationEvidence(evidence, { reviewedHead, currentHead } = {}) {
+  const trailers = normalizeTrailerMap(evidence?.commit?.trailers || evidence?.trailers);
+  const findingMap = validateHamFindingMap(
+    evidence?.auditComment?.findings || evidence?.addressedFindings,
+  );
+  const commitSha = String(evidence?.commit?.sha || evidence?.headSha || '').trim();
+  const parentSha = String(evidence?.commit?.parentSha || evidence?.parentSha || '').trim();
+  const auditBody = String(evidence?.auditComment?.body || '').trim();
+  const ticket = String(trailers.ticket || trailers['worker-ticket'] || evidence?.ticket || '').trim();
+  const closedBy = String(trailers['closed-by'] || '').trim();
+  const remediatedFindings = String(trailers['remediated-findings'] || '').trim();
+  const checks = {
+    workerClass: trailers['worker-class'] === 'hammer',
+    ticket: /^HAM-\d+$/i.test(ticket),
+    head: commitSha !== '' && commitSha === String(currentHead || ''),
+    parent: parentSha !== '' && parentSha === String(reviewedHead || ''),
+    auditComment: auditBody !== '' && findingMap.ok,
+    closedBy: closedBy === '' || /^hammer\b/i.test(closedBy),
+    remediatedFindings: remediatedFindings === '' || /\d+\s+addressed/i.test(remediatedFindings),
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    active: evidence?.enabled === true || evidence?.active === true,
+    ok,
+    checks,
+    reviewedParent: parentSha || null,
+    remediationHead: commitSha || null,
+    addressedFindings: findingMap,
+    marker: ok ? 'ham_terminal_remediation_validated' : null,
+  };
+}
+
 /**
  * Evaluate AMA eligibility per SPEC §4.2.
  *
@@ -595,6 +655,11 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('fast-merge-state-unsupported');
   }
 
+  const hamTerminalRemediation = validateHamTerminalRemediationEvidence(
+    options?.hamTerminalRemediation || null,
+    { reviewedHead, currentHead },
+  );
+
   // AMA "final hammer" (operator directive 2026-06-14): once the review cycle is
   // EXHAUSTED — the remediation round budget is fully spent and the verdict still
   // has not converged — AMA may waive only the documented cycle-end soft gates.
@@ -637,6 +702,25 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     operatorOverride === true;
   const waivedByFinalHammer = [];
   let effectiveReasons = reasons;
+  const waivedByHamTerminalRemediation = [];
+  const HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS = new Set([
+    'stale-review-head',
+    'verdict-not-settled-success',
+    'remediation-pending',
+    'remediation-state-unknown',
+    'blocking-findings-present',
+    'blocking-findings-unknown',
+  ]);
+  if (hamTerminalRemediation.active && hamTerminalRemediation.ok) {
+    effectiveReasons = [];
+    for (const reason of reasons) {
+      if (HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS.has(reason)) {
+        waivedByHamTerminalRemediation.push(reason);
+      } else {
+        effectiveReasons.push(reason);
+      }
+    }
+  }
   if (reviewCycleExhausted) {
     effectiveReasons = [];
     for (const reason of reasons) {
@@ -665,6 +749,10 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     finalHammer: {
       active: reviewCycleExhausted,
       waived: waivedByFinalHammer,
+    },
+    hamTerminalRemediation: {
+      ...hamTerminalRemediation,
+      waived: waivedByHamTerminalRemediation,
     },
     riskClass: {
       resolved: riskClass,

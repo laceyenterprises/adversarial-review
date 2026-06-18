@@ -28,7 +28,9 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const TEMPLATE_PATH = join(REPO_ROOT, 'templates', 'ama-closer-prompt.md');
+const HAMMER_TEMPLATE_PATH = join(REPO_ROOT, 'templates', 'hammer-prompt.md');
 const GOLDEN_PROMPT_PATH = join(__dirname, 'fixtures', 'ama-closer-prompt.golden.md');
+const HAMMER_GOLDEN_PROMPT_PATH = join(__dirname, 'fixtures', 'hammer-prompt.golden.md');
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 
 /**
@@ -525,6 +527,39 @@ test('cfg.workerClass=gemini routes the closer to gemini with gemini-closer prov
   assert.ok(write.captured.body.includes('Closed-By: gemini-closer (adversarial-pipe-mode)'));
 });
 
+test('cfg.workerClass=hammer selects the terminal HAM mandate prompt', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const readPaths = [];
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    dispatchContext: { rootDir, templatePath: null },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: (path) => {
+      readPaths.push(path);
+      return readFileSync(path, 'utf8');
+    },
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(result.workerClass, 'hammer');
+  assert.deepEqual(readPaths, [HAMMER_TEMPLATE_PATH]);
+  assert.match(write.captured.body, /remediate, commit, comment, validate, merge/i);
+  assert.match(write.captured.body, /Do not request another adversarial review round/);
+  assert.match(write.captured.body, /Do not defer the review findings into follow-up PRs/);
+  assert.match(write.captured.body, /ham_terminal_remediation_validated/);
+  assert.match(write.captured.body, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
+  assert.match(write.captured.body, /failed, missing, stale, or\s+unchecked required checks/);
+});
+
 test('eligible dispatch refuses watcher audit writes when runtime user is not the HQ owner', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-owner-mismatch-'));
   const hqRoot = mkdtempSync(join(tmpdir(), 'ama-hq-owner-mismatch-'));
@@ -609,6 +644,51 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /protection_max_attempts=3/);
   assert.match(prompt, /grep -Eiq "\$protection_transient_re" "\$protection_err"/);
   assert.match(prompt, /cat "\$protection_err" >&2\n  rm -f "\$protection_err"\n  exit 1/);
+});
+
+test('composed hammer prompt body matches the checked-in golden snapshot', () => {
+  const { prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    dispatchContext: {
+      rootDir: '/tmp/ama-test-root',
+      hqRoot: '/tmp/ama-test-hqroot',
+    },
+  });
+  const templateBody = readFileSync(HAMMER_TEMPLATE_PATH, 'utf8');
+  const auditPath =
+    `${dispatchContext.hqRoot}/dispatch/audit/adversarial-merge-authority/` +
+    `${dispatchContext.repo.replace('/', '-')}-pr-${prMetadata.prNumber}-${dispatchContext.reviewedSha}.json`;
+  const auditRef = amaAuditTraceRef(dispatchContext.repo, prMetadata.prNumber, dispatchContext.reviewedSha);
+  const prompt = composeCloserPrompt({
+    prUrl: dispatchContext.prUrl,
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    reviewedSha: dispatchContext.reviewedSha,
+    riskClass: dispatchContext.riskClass,
+    mergeMethod: cfg.mergeMethod,
+    requiredGateContext: dispatchContext.requiredGateContext,
+    auditPath,
+    hqRoot: dispatchContext.hqRoot,
+    rootDir: dispatchContext.rootDir,
+    hqOwnerUser: 'unknown',
+    reviewedBy: dispatchContext.reviewedBy,
+    reviewer: dispatchContext.reviewer,
+    dispatchedAt: dispatchContext.dispatchedAt,
+    amaTrailers: [
+      'Closed-By: hammer (adversarial-pipe-mode)',
+      'Reviewed-By: claude-reviewer-lacey',
+      'Risk-Class: low',
+      `Eligibility-Trace: ${auditRef}`,
+    ].join('\n'),
+    templateBody,
+  });
+  const golden = readFileSync(HAMMER_GOLDEN_PROMPT_PATH, 'utf8');
+  assert.equal(prompt, golden);
+  assert.match(prompt, /Remediate ALL final comments, blocking and non-blocking/);
+  assert.match(prompt, /Do not request another adversarial review round/);
+  assert.match(prompt, /No follow-up PRs\/issues for the final findings/);
+  assert.match(prompt, /ham_terminal_remediation_validated/);
+  assert.match(prompt, /Do not merge unless all of these are true/);
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {

@@ -15,7 +15,7 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
   defaultReviewerRouteFromEnv,
-  applyGeminiReviewerRoute,
+  applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
   isCrossModelReviewWaived,
   routeSubject,
@@ -5310,7 +5310,7 @@ async function pollOnce(
       }
 
       let crossModelWaiverReason = null;
-      const baseRoute = routeSubject(subject);
+      const baseRoute = routeSubject(subject, { geminiReviewerMode: 'off' });
       // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject can now
       // return a tagged `configBroken: true` sentinel when a runtime
       // edit to config.yaml violates the strict schema (instead of
@@ -5367,9 +5367,10 @@ async function pollOnce(
         continue;
       }
       // GMW-02 — layer the gemini always-on / fallback third-reviewer selection
-      // on top of the resolved cross-model baseRoute, then let the existing
+      // on top of the resolved cross-model baseRoute using the same effective
+      // route helper exported to operator surfaces, then let the existing
       // reviewer-timeout fallback apply on the (possibly gemini-pinned) result.
-      // The integrity hard guard inside applyGeminiReviewerRoute also strips any
+      // The integrity hard guard inside the effective helper also strips any
       // gemini-on-gemini route that an operator `roles.reviewer=gemini` pin
       // could otherwise produce.
       const geminiModeResolution = resolveGeminiReviewerModeForWatcher({ env: process.env });
@@ -5381,7 +5382,7 @@ async function pollOnce(
             `fail-closed to reviewer.gemini.mode=off`
         );
       }
-      const geminiBaseRoute = applyGeminiReviewerRoute({
+      const geminiBaseRoute = applyEffectiveReviewerRoute({
         builderClass: baseRoute.builderClass,
         baseRoute,
         mode: geminiReviewerMode,

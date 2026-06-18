@@ -875,7 +875,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
-    'fixture:routing': "export const REVIEWER_ROUTE_BY_MODEL = {}; export const ROUTE_BY_BUILDER_CLASS = {}; export function routeSubject() { return null; } export function defaultReviewerRouteFromEnv() { return null; } export function describeCrossModelReviewWaiver() { return null; } export function isCrossModelReviewWaived() { return false; } export function applyGeminiReviewerRoute(opts) { return opts && opts.baseRoute; }",
+    'fixture:routing': "export const REVIEWER_ROUTE_BY_MODEL = {}; export const ROUTE_BY_BUILDER_CLASS = {}; export function routeSubject() { return null; } export function defaultReviewerRouteFromEnv() { return null; } export function describeCrossModelReviewWaiver() { return null; } export function isCrossModelReviewWaived() { return false; } export function applyGeminiReviewerRoute(opts) { return opts && opts.baseRoute; } export function applyEffectiveReviewerRoute(opts) { return opts && opts.baseRoute; }",
     'fixture:role-config': "export function loadRoleConfig() { return { get: (_key, defaultValue) => defaultValue }; } export function resetRoleConfigCache() {} export function resolveGeminiReviewerMode() { return 'always-on'; }",
     'fixture:config-loader': "export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos']; export function loadConfigCached() { return {}; }",
     'fixture:octokit-rest': "export class Octokit {}",

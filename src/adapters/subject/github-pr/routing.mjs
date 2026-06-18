@@ -9,7 +9,10 @@
  */
 
 import { builderClassFromTitle, tagFromBuilderClass } from './title-tagging.mjs';
-import { resolveDefaultReviewer as resolveDefaultReviewerFromConfig } from '../../../role-config.mjs';
+import {
+  resolveDefaultReviewer as resolveDefaultReviewerFromConfig,
+  resolveGeminiReviewerMode as resolveGeminiReviewerModeFromConfig,
+} from '../../../role-config.mjs';
 import { loadConfigCached } from '../../../config-loader.mjs';
 
 const ROUTE_BY_BUILDER_CLASS = {
@@ -176,6 +179,29 @@ function normalizeGeminiReviewerMode(modeInput) {
   return GEMINI_REVIEWER_MODES.includes(mode) ? mode : DEFAULT_GEMINI_REVIEWER_MODE;
 }
 
+function markOperatorPinnedRoute(route, operatorPinnedReviewer = false) {
+  if (!route || !operatorPinnedReviewer) return route;
+  Object.defineProperty(route, 'operatorPinnedReviewer', {
+    value: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return route;
+}
+
+function resolveGeminiReviewerModeForRoute({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+  geminiReviewerMode,
+} = {}) {
+  if (geminiReviewerMode !== undefined && geminiReviewerMode !== null) {
+    return normalizeGeminiReviewerMode(geminiReviewerMode);
+  }
+  return resolveGeminiReviewerModeFromConfig({ env, topPath, modulePaths, loaderImpl });
+}
+
 // Adversarial-integrity hard guard: gemini may review any builder class EXCEPT
 // its own family (a `[gemini]`-built PR). Unknown builder classes are not
 // gemini-reviewable (fail-closed). This is the single source of truth the
@@ -230,6 +256,9 @@ function applyGeminiReviewerRoute({
   // Base already routes to gemini for a non-gemini builder (e.g. operator pin) —
   // cross-model already satisfied, nothing to layer on.
   if (baseIsGemini) return baseRoute;
+  // Explicit operator reviewer pins are stronger than the Gemini default layer.
+  // The Gemini-on-Gemini hard guard above still applies to a Gemini pin.
+  if (baseRoute.operatorPinnedReviewer) return baseRoute;
   if (!normalizedBuilder || !geminiMayReviewBuilder(normalizedBuilder)) return baseRoute;
   if (!GEMINI_REVIEWABLE_BUILDER_CLASSES.includes(normalizedBuilder)) return baseRoute;
   if (normalizedMode === 'fallback' && !primaryReviewerQuotaCapped) return baseRoute;
@@ -249,6 +278,10 @@ function applyGeminiReviewerRoute({
   };
 }
 
+function applyEffectiveReviewerRoute(options = {}) {
+  return applyGeminiReviewerRoute(options);
+}
+
 function applyGeminiIntegrityGuard(route) {
   return applyGeminiReviewerRoute({
     builderClass: route?.builderClass,
@@ -258,11 +291,11 @@ function applyGeminiIntegrityGuard(route) {
 }
 
 // reviewer-roster debug surface (SPEC §1 mockup). Returns, for each reviewer
-// model, the builder classes it is eligible to review (cross-model only) plus a
-// gemini status note reflecting the configured mode. The matrix is derived from
-// the same `REVIEWER_FAMILY_BY_BUILDER_CLASS` integrity rule the router uses, so
-// it can never drift from actual routing.
-const ROSTER_BUILDER_CLASSES = Object.freeze(['claude-code', 'codex', 'clio-agent', 'gemini']);
+// model, both the effective default route matrix and the broader cross-model
+// eligibility matrix. The default matrix is computed through
+// `applyEffectiveReviewerRoute` so operator-facing output cannot drift from
+// routePR()/watcher dispatch semantics.
+const ROSTER_BUILDER_CLASSES = Object.freeze(Object.keys(ROUTE_BY_BUILDER_CLASS));
 const ROSTER_REVIEWER_MODELS = Object.freeze(['claude', 'codex', 'gemini']);
 const REVIEWER_MODEL_FAMILY = Object.freeze({ claude: 'claude', codex: 'codex', gemini: 'gemini' });
 
@@ -283,12 +316,30 @@ function reviewerRoster({ mode = DEFAULT_GEMINI_REVIEWER_MODE } = {}) {
   const normalizedMode = normalizeGeminiReviewerMode(mode);
   return ROSTER_REVIEWER_MODELS.map((reviewerModel) => {
     const family = REVIEWER_MODEL_FAMILY[reviewerModel];
-    const reviews = ROSTER_BUILDER_CLASSES.filter(
-      (builderClass) => REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] !== family,
-    );
+    const eligibleBuilderClasses = ROSTER_BUILDER_CLASSES.filter((builderClass) => {
+      if (reviewerModel === 'gemini') {
+        return GEMINI_REVIEWABLE_BUILDER_CLASSES.includes(builderClass);
+      }
+      return REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] !== family;
+    });
+    const defaultBuilderClasses = ROSTER_BUILDER_CLASSES.filter((builderClass) => {
+      const crossModelRoute = ROUTE_BY_BUILDER_CLASS[builderClass];
+      const route = applyEffectiveReviewerRoute({
+        builderClass,
+        baseRoute: {
+          builderClass,
+          tag: tagFromBuilderClass(builderClass),
+          reviewerModel: crossModelRoute.reviewerModel,
+          botTokenEnv: crossModelRoute.botTokenEnv,
+        },
+        mode: normalizedMode,
+      });
+      return route?.reviewerModel === reviewerModel;
+    });
     return {
       reviewerModel,
-      reviews,
+      defaultBuilderClasses,
+      eligibleBuilderClasses,
       note: reviewerModel === 'gemini' ? geminiRosterNote(normalizedMode) : null,
     };
   });
@@ -296,11 +347,50 @@ function reviewerRoster({ mode = DEFAULT_GEMINI_REVIEWER_MODE } = {}) {
 
 function formatReviewerRoster(roster) {
   return roster
-    .map(({ reviewerModel, reviews, note }) => {
-      const line = `  ${String(reviewerModel).padEnd(8)} → reviews: [${reviews.join(', ')}]`;
+    .map(({ reviewerModel, defaultBuilderClasses, eligibleBuilderClasses, note }) => {
+      const line = (
+        `  ${String(reviewerModel).padEnd(8)} -> ` +
+        `default: [${defaultBuilderClasses.join(', ')}]; ` +
+        `eligible: [${eligibleBuilderClasses.join(', ')}]`
+      );
       return note ? `${line}   (${note})` : line;
     })
     .join('\n');
+}
+
+function configBrokenRoute(builderClass, err) {
+  return {
+    configBroken: true,
+    error: err,
+    builderClass,
+    tag: tagFromBuilderClass(builderClass),
+    reviewerModel: null,
+    botTokenEnv: null,
+  };
+}
+
+function baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl } = {}) {
+  let route;
+  let operatorPinnedReviewer = false;
+  try {
+    const pinnedRoute = defaultReviewerRouteFromEnv(env, { topPath, modulePaths, loaderImpl });
+    operatorPinnedReviewer = Boolean(pinnedRoute);
+    route = pinnedRoute || ROUTE_BY_BUILDER_CLASS[builderClass];
+  } catch (err) {
+    if (err && err.name === 'AgentOSConfigError') {
+      return configBrokenRoute(builderClass, err);
+    }
+    throw err;
+  }
+  return markOperatorPinnedRoute(
+    applyGeminiIntegrityGuard({
+      builderClass,
+      tag: tagFromBuilderClass(builderClass),
+      reviewerModel: route.reviewerModel,
+      botTokenEnv: route.botTokenEnv,
+    }),
+    operatorPinnedReviewer,
+  );
 }
 
 // CFG-02 round-1 review B3 fix (2026-05-30): catch AgentOSConfigError
@@ -311,37 +401,39 @@ function formatReviewerRoster(roster) {
 // throw-on-bad-config behavior should use the explicit boot-time
 // validator (`validateDefaultReviewerRouteConfig`) at startup, which is
 // already wired in `watcher.mjs:main()`.
-function routeSubject(subject, { env = process.env, topPath, modulePaths, loaderImpl } = {}) {
+function routeSubject(subject, {
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+  geminiReviewerMode,
+  primaryReviewerQuotaCapped = false,
+  applyGeminiReviewerMode = true,
+} = {}) {
   const builderClass = normalizeBuilderClass(subject?.builderClass);
   if (!builderClass) return null;
-  let route;
+  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl });
+  if (baseRoute?.configBroken || !applyGeminiReviewerMode) return baseRoute;
   try {
-    route = defaultReviewerRouteFromEnv(env, { topPath, modulePaths, loaderImpl })
-      || ROUTE_BY_BUILDER_CLASS[builderClass];
+    const mode = resolveGeminiReviewerModeForRoute({
+      env,
+      topPath,
+      modulePaths,
+      loaderImpl,
+      geminiReviewerMode,
+    });
+    return applyEffectiveReviewerRoute({
+      builderClass,
+      baseRoute,
+      mode,
+      primaryReviewerQuotaCapped,
+    });
   } catch (err) {
     if (err && err.name === 'AgentOSConfigError') {
-      // Surface a tagged sentinel so the watcher's per-PR loop can
-      // route to a dedicated "config-broken" disposition + back off,
-      // without losing the in-progress batch. The boot-time validator
-      // is the legitimate fail-loud path; runtime edits should not
-      // abort a tick.
-      return {
-        configBroken: true,
-        error: err,
-        builderClass,
-        tag: tagFromBuilderClass(builderClass),
-        reviewerModel: null,
-        botTokenEnv: null,
-      };
+      return configBrokenRoute(builderClass, err);
     }
     throw err;
   }
-  return applyGeminiIntegrityGuard({
-    builderClass,
-    tag: tagFromBuilderClass(builderClass),
-    reviewerModel: route.reviewerModel,
-    botTokenEnv: route.botTokenEnv,
-  });
 }
 
 function linearIssuePrefix(options = {}) {
@@ -384,6 +476,7 @@ function routePR(prTitle, subject = null, options = {}) {
     tag: route.tag,
     reviewerModel: route.reviewerModel,
     botTokenEnv: route.botTokenEnv,
+    ...(route.geminiReviewerSelection ? { geminiReviewerSelection: route.geminiReviewerSelection } : {}),
     ...(route.geminiIntegrityGuard ? { geminiIntegrityGuard: route.geminiIntegrityGuard } : {}),
     linearTicketId: extractLinearTicketId(prTitle, options),
   };
@@ -404,6 +497,7 @@ export {
   extractLinearTicketId,
   REVIEWER_ROUTE_BY_MODEL,
   ROUTE_BY_BUILDER_CLASS,
+  applyEffectiveReviewerRoute,
   applyGeminiIntegrityGuard,
   applyGeminiReviewerRoute,
   describeCrossModelReviewWaiver,

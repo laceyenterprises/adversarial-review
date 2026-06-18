@@ -203,9 +203,8 @@ for every supported title prefix:
 - `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs also route first-pass
   review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
 
-Before the watcher spawns the first-pass reviewer, it applies
-`reviewer.gemini.mode` to that base route. The default mode is `always-on`, so
-the public default matrix is:
+The exported GitHub-PR route helpers and watcher dispatch path then apply
+`reviewer.gemini.mode` through the same effective-route helper. The default mode is `always-on`, so the public default matrix is:
 
 - `[codex]`, `[claude-code]`, and `[clio-agent]` PRs route first-pass review to
   Gemini and use `GH_GEMINI_REVIEWER_TOKEN`.
@@ -226,8 +225,9 @@ back to same-model review or an unregistered worker class.
 
 Operators may deliberately pin the reviewer with
 `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|claude-code|gemini`.
-A non-empty override wins over the title-prefix route for every supported
-builder class and also selects the matching reviewer bot token:
+A non-empty override wins over the title-prefix route and the Gemini default
+layer for every supported builder class, except for the Gemini-on-Gemini hard
+guard. It also selects the matching reviewer bot token:
 `GH_CODEX_REVIEWER_TOKEN`, `GH_CLAUDE_REVIEWER_TOKEN`, or
 `GH_GEMINI_REVIEWER_TOKEN`. The aliases `claude` and `claude-code` both
 normalize to the Claude reviewer route.

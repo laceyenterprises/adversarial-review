@@ -16,8 +16,8 @@ Usage:
   adversarial-review reviewer-roster [--json]
 `;
 
-// GMW-02 — reviewer-roster debug surface. Prints which builder tags each
-// reviewer model reviews (cross-model only) plus the gemini selection mode,
+// GMW-02 — reviewer-roster debug surface. Prints the effective default route
+// matrix alongside reviewer eligibility plus the gemini selection mode,
 // matching the SPEC §1 mockup. Resolves the live `reviewer.gemini.mode` from
 // the config cascade so the gemini-row note reflects the deployed mode.
 function reviewerRosterMain(argv, io = {}) {
@@ -35,7 +35,7 @@ function reviewerRosterMain(argv, io = {}) {
   if (json) {
     stdout.write(`${JSON.stringify({ mode, roster }, null, 2)}\n`);
   } else {
-    stdout.write(`reviewer roster (reviewer.gemini.mode=${mode}):\n`);
+    stdout.write(`reviewer route roster (reviewer.gemini.mode=${mode}):\n`);
     stdout.write(`${formatReviewerRoster(roster)}\n`);
   }
   return 0;

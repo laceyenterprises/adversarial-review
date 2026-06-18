@@ -32,7 +32,7 @@ import { reviewerBotLogin } from '../src/reviewer-reattach.mjs';
 const HERMETIC = { env: {}, topPath: '/dev/null' };
 
 function baseRouteFor(builderClass) {
-  return routeSubject({ builderClass }, HERMETIC);
+  return routeSubject({ builderClass }, { ...HERMETIC, geminiReviewerMode: 'off' });
 }
 
 // ── mode knob drives selection ─────────────────────────────────────────────
@@ -92,6 +92,20 @@ test('GMW-02 fallback: gemini only when the primary reviewer is quota-capped', (
   });
   assert.equal(capped.reviewerModel, 'gemini', 'primary capped → gemini');
   assert.equal(capped.geminiReviewerSelection.reason, 'primary-reviewer-quota-capped');
+});
+
+test('GMW-02 exported route surfaces default to effective always-on Gemini routing', () => {
+  for (const builderClass of ['claude-code', 'codex', 'clio-agent']) {
+    const subjectRoute = routeSubject({ builderClass }, HERMETIC);
+    assert.equal(subjectRoute.reviewerModel, 'gemini', `${builderClass} subject route`);
+    assert.equal(subjectRoute.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
+    assert.equal(subjectRoute.geminiReviewerSelection.reason, 'always-on-third-reviewer');
+
+    const prRoute = routePR(`[${builderClass}] LAC-484: effective route`, null, HERMETIC);
+    assert.equal(prRoute.reviewerModel, 'gemini', `${builderClass} PR route`);
+    assert.equal(prRoute.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
+    assert.equal(prRoute.geminiReviewerSelection.reason, 'always-on-third-reviewer');
+  }
 });
 
 // ── adversarial integrity hard guard ───────────────────────────────────────
@@ -259,19 +273,25 @@ test('GMW-02 identity: builder-side reviewer of a [gemini] PR stays codex-review
 
 test('GMW-02 roster matches the SPEC §1 capability matrix', () => {
   const roster = reviewerRoster({ mode: 'always-on' });
-  const byModel = Object.fromEntries(roster.map((r) => [r.reviewerModel, r.reviews]));
-  assert.deepEqual(byModel.claude, ['codex', 'clio-agent', 'gemini']);
-  assert.deepEqual(byModel.codex, ['claude-code', 'gemini']);
-  assert.deepEqual(byModel.gemini, ['claude-code', 'codex', 'clio-agent']);
+  const defaultsByModel = Object.fromEntries(roster.map((r) => [r.reviewerModel, r.defaultBuilderClasses]));
+  assert.deepEqual(defaultsByModel.claude, []);
+  assert.deepEqual(defaultsByModel.codex, ['gemini', 'pi', 'opencode', 'hermes']);
+  assert.deepEqual(defaultsByModel.gemini, ['codex', 'claude-code', 'clio-agent']);
+
+  const eligibleByModel = Object.fromEntries(roster.map((r) => [r.reviewerModel, r.eligibleBuilderClasses]));
+  assert.deepEqual(eligibleByModel.claude, ['codex', 'clio-agent', 'gemini', 'pi', 'opencode', 'hermes']);
+  assert.deepEqual(eligibleByModel.codex, ['claude-code', 'gemini', 'pi', 'opencode', 'hermes']);
+  assert.deepEqual(eligibleByModel.gemini, ['codex', 'claude-code', 'clio-agent']);
   // gemini never reviews gemini.
-  assert.ok(!byModel.gemini.includes('gemini'));
+  assert.ok(!defaultsByModel.gemini.includes('gemini'));
+  assert.ok(!eligibleByModel.gemini.includes('gemini'));
 });
 
 test('GMW-02 roster formatting + gemini note reflects the mode', () => {
   const out = formatReviewerRoster(reviewerRoster({ mode: 'always-on' }));
-  assert.match(out, /claude\s+→ reviews: \[codex, clio-agent, gemini\]/);
-  assert.match(out, /codex\s+→ reviews: \[claude-code, gemini\]/);
-  assert.match(out, /gemini\s+→ reviews: \[claude-code, codex, clio-agent\]\s+\(always-on, GMW\)/);
+  assert.match(out, /claude\s+-> default: \[\]; eligible: \[codex, clio-agent, gemini, pi, opencode, hermes\]/);
+  assert.match(out, /codex\s+-> default: \[gemini, pi, opencode, hermes\]; eligible: \[claude-code, gemini, pi, opencode, hermes\]/);
+  assert.match(out, /gemini\s+-> default: \[codex, claude-code, clio-agent\]; eligible: \[codex, claude-code, clio-agent\]\s+\(always-on, GMW\)/);
 
   assert.match(
     formatReviewerRoster(reviewerRoster({ mode: 'fallback' })),
@@ -288,7 +308,7 @@ test('GMW-02 reviewer-roster CLI prints the roster and resolved mode', () => {
   });
   assert.equal(rc, 0);
   assert.match(out, /reviewer\.gemini\.mode=/);
-  assert.match(out, /gemini\s+→ reviews: \[claude-code, codex, clio-agent\]/);
+  assert.match(out, /gemini\s+-> default: \[codex, claude-code, clio-agent\]; eligible: \[codex, claude-code, clio-agent\]/);
 });
 
 test('GMW-02 reviewer-roster CLI --json emits structured roster', () => {
@@ -301,7 +321,8 @@ test('GMW-02 reviewer-roster CLI --json emits structured roster', () => {
   const parsed = JSON.parse(out);
   assert.ok(['off', 'fallback', 'always-on'].includes(parsed.mode));
   const gemini = parsed.roster.find((r) => r.reviewerModel === 'gemini');
-  assert.deepEqual(gemini.reviews, ['claude-code', 'codex', 'clio-agent']);
+  assert.deepEqual(gemini.defaultBuilderClasses, ['codex', 'claude-code', 'clio-agent']);
+  assert.deepEqual(gemini.eligibleBuilderClasses, ['codex', 'claude-code', 'clio-agent']);
 });
 
 test('GMW-02 docs record the always-on routing contract and hard guard', () => {

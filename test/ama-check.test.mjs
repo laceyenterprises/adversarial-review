@@ -168,21 +168,30 @@ function runAmaCheck(tmp, {
   reviews,
   reviewer = 'codex',
   riskClass = 'low',
+  hamTerminalRemediation = null,
 }) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
+  if (hamTerminalRemediation) {
+    paths.hamTerminalRemediation = join(tmp, 'ham-terminal-remediation.json');
+    writeJson(paths.hamTerminalRemediation, hamTerminalRemediation);
+  }
   const configPath = writeConfig(tmp, { branchProtectionRequired });
+  const args = [
+    AMA_CHECK,
+    '--pr', paths.pr,
+    '--reviews', paths.reviews,
+    '--protection', paths.protection,
+    '--timeline', paths.timeline,
+    '--reviewed-sha', HEAD_SHA,
+    '--reviewer', reviewer,
+    '--risk-class', riskClass,
+  ];
+  if (paths.hamTerminalRemediation) {
+    args.push('--ham-terminal-remediation', paths.hamTerminalRemediation);
+  }
   return spawnSync(
     process.execPath,
-    [
-      AMA_CHECK,
-      '--pr', paths.pr,
-      '--reviews', paths.reviews,
-      '--protection', paths.protection,
-      '--timeline', paths.timeline,
-      '--reviewed-sha', HEAD_SHA,
-      '--reviewer', reviewer,
-      '--risk-class', riskClass,
-    ],
+    args,
     {
       encoding: 'utf8',
       env: {
@@ -191,6 +200,27 @@ function runAmaCheck(tmp, {
       },
     },
   );
+}
+
+function hamTerminalEvidence({ liveHeadSha = 'ham456ham456ham456ham456ham456ham456abcd' } = {}) {
+  return {
+    workerClass: 'hammer',
+    liveHeadSha,
+    reviewedParentSha: HEAD_SHA,
+    hamAuthored: true,
+    commitTrailers: [
+      'Worker-Class: hammer',
+      'Ticket: HAM-02',
+      `Reviewed-Head: ${HEAD_SHA}`,
+    ],
+    auditComment: {
+      posted: true,
+      findings: [
+        { id: 'blocking-auth-source', files: ['src/auth.mjs'] },
+        { id: 'nonblocking-test-coverage', files: ['test/auth.test.mjs'] },
+      ],
+    },
+  };
 }
 
 test('ama-check normalizes mergeable=MERGEABLE plus mergeStateStatus=CLEAN as mergeable', () => {
@@ -230,6 +260,73 @@ test('ama-check does not let mergeStateStatus=CLEAN override mergeable=CONFLICTI
     assert.equal(verdict.eligible, false);
     assert.equal(verdict.trace.mergeability.mergeableState, 'CONFLICTING');
     assert.ok(verdict.reasons.includes('pr-not-mergeable'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check accepts HAM terminal-remediation evidence for a live HAM child head', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-ham-terminal-'));
+  try {
+    const liveHeadSha = 'ham456ham456ham456ham456ham456ham456abcd';
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        labels: [],
+        headRefOid: liveHeadSha,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+      reviews: [
+        {
+          state: 'CHANGES_REQUESTED',
+          body: BLOCKING_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+      hamTerminalRemediation: hamTerminalEvidence({ liveHeadSha }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.headMatch.current, liveHeadSha);
+    assert.equal(verdict.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check rejects HAM terminal-remediation evidence for a later non-HAM head', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-ham-terminal-later-head-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        labels: [],
+        headRefOid: 'later789later789later789later789later789ab',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+      reviews: [
+        {
+          state: 'CHANGES_REQUESTED',
+          body: BLOCKING_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+      hamTerminalRemediation: hamTerminalEvidence(),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false);
+    assert.ok(verdict.reasons.includes('ham-terminal-remediation-invalid'));
+    assert.equal(verdict.trace.hamTerminalRemediation.marker, null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

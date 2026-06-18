@@ -1293,3 +1293,123 @@ test('final hammer: waives risk-class for medium not in allowlist with adversari
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.ok(result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
 });
+
+function hamTerminalEvidence({ liveHeadSha = 'ham456', reviewedParentSha = 'abc12345' } = {}) {
+  return {
+    workerClass: 'hammer',
+    liveHeadSha,
+    reviewedParentSha,
+    hamAuthored: true,
+    commitTrailers: [
+      'Worker-Class: hammer',
+      'Ticket: HAM-02',
+      'Reviewed-Head: abc12345',
+    ],
+    auditComment: {
+      posted: true,
+      findings: [
+        { id: 'blocking-auth-source', files: ['src/auth.mjs'] },
+        { id: 'nonblocking-test-coverage', files: ['test/auth.test.mjs'] },
+      ],
+    },
+  };
+}
+
+test('HAM terminal remediation: live HAM child of reviewed head is eligible through §1.1.1 trace path', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      remediationPending: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+    },
+    prMetadata: { headSha: 'ham456' },
+    cfg: { workerClass: 'hammer' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamTerminalEvidence(),
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.deepEqual(result.reasons, []);
+  assert.equal(result.trace.headMatch.ok, true);
+  assert.equal(result.trace.hamTerminalRemediation.valid, true);
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+});
+
+test('HAM terminal remediation: failed post-remediation checks refuse eligibility', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      remediationPending: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+    },
+    prMetadata: {
+      headSha: 'ham456',
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' },
+      ],
+    },
+    cfg: { workerClass: 'hammer' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamTerminalEvidence(),
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('ci-not-green'));
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+});
+
+test('HAM terminal remediation: later non-HAM live head fails even when reviewed parent was covered', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      remediationPending: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+    },
+    prMetadata: { headSha: 'later789' },
+    cfg: { workerClass: 'hammer' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamTerminalEvidence({ liveHeadSha: 'ham456' }),
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('stale-review-head'));
+  assert.ok(result.reasons.includes('ham-terminal-remediation-invalid'));
+  assert.equal(result.trace.hamTerminalRemediation.valid, false);
+  assert.equal(result.trace.hamTerminalRemediation.marker, null);
+});
+
+test('HAM terminal remediation: missing audit or provenance evidence fails', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      remediationPending: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+    },
+    prMetadata: { headSha: 'ham456' },
+    cfg: { workerClass: 'hammer' },
+  });
+  const missingAudit = hamTerminalEvidence();
+  missingAudit.auditComment = { posted: false, findings: [] };
+  const auditResult = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: missingAudit,
+  });
+  assert.equal(auditResult.eligible, false);
+  assert.ok(auditResult.reasons.includes('ham-terminal-remediation-invalid'));
+
+  const missingProvenance = hamTerminalEvidence();
+  missingProvenance.commitTrailers = ['Worker-Class: hammer'];
+  const provenanceResult = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: missingProvenance,
+  });
+  assert.equal(provenanceResult.eligible, false);
+  assert.ok(provenanceResult.reasons.includes('ham-terminal-remediation-invalid'));
+});

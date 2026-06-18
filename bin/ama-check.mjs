@@ -131,6 +131,10 @@ Inputs:
                   or the configured builder route. Unknown values fail closed.
   --risk-class    resolved risk class from the spec/plan/dispatch sidecar
                   (low | medium | high | critical | unknown)
+  --ham-terminal-remediation <json>
+                  Optional SPEC §1.1.1 HAM terminal-remediation evidence
+                  proving HAM-authored live-head remediation, provenance, and
+                  PR audit-comment finding mappings.
 
 Emits:
   JSON object on stdout: { eligible: bool, reasons: string[], trace: {...} }
@@ -153,6 +157,7 @@ function parseInputs(argv) {
       // audit context only. Exhaustion is recomputed from the durable ledger at
       // closer runtime before any waiver is applied.
       'review-cycle-exhausted': { type: 'string' },
+      'ham-terminal-remediation': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     strict: true,
@@ -352,11 +357,15 @@ function main(argv = process.argv.slice(2)) {
   }
   const cfg = loadConfigCached().getMergeAuthorityConfig();
   let prJson, reviewsJson, protectionJson, timelineJson;
+  let hamTerminalRemediation = null;
   try {
     prJson = loadJson(args.pr);
     reviewsJson = loadJson(args.reviews);
     protectionJson = loadProtectionJson(args.protection, cfg);
     timelineJson = loadJson(args.timeline);
+    if (args['ham-terminal-remediation']) {
+      hamTerminalRemediation = loadJson(args['ham-terminal-remediation']);
+    }
   } catch (err) {
     process.stderr.write(`error: failed to load input JSON: ${err.message}\n`);
     return 1;
@@ -388,7 +397,9 @@ function main(argv = process.argv.slice(2)) {
     reviewCycleExhausted,
   });
   const prMetadata = buildPrMetadata({ prJson, protectionJson });
-  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg);
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    hamTerminalRemediation,
+  });
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return 0;
 }

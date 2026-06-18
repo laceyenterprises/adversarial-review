@@ -145,6 +145,10 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {OperatorApprovalEvidence=} adversarialMergeRequested Optional current-head adversarial-merge-requested evidence. Same shape as operator-approved.
  * @property {MergeAgentRecoveryEvidence=} recoveryEvidence  Optional current-head recovery evidence for the `merge-agent-stuck` carve-out.
  * @property {Object=} fastMergeState                        Optional FML authorization/veto snapshot. AMA fails closed when the PR is in a fast-merge override state it does not import.
+ * @property {Object=} hamTerminalRemediation                 Optional SPEC §1.1.1 HAM terminal-remediation evidence. When valid,
+ * the live PR head may be the HAM-authored remediation child of the reviewed
+ * head instead of the reviewed head itself; all non-waived live-head gates
+ * still apply.
  * @property {AdversarialMergeBlockedEvidence=} adversarialMergeBlocked Optional current-head evidence for the AMA-05
  * `adversarial-merge-blocked` label. When a non-null evidence object is supplied:
  *   - `applied=true && observedRevisionRef === current head` → block (label respected).
@@ -435,6 +439,51 @@ function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
   };
 }
 
+function normalizeTrailerLine(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function hasTrailer(trailers, key, expectedValue) {
+  const needle = `${String(key || '').trim().toLowerCase()}: ${String(expectedValue || '').trim().toLowerCase()}`;
+  return (Array.isArray(trailers) ? trailers : [])
+    .map((line) => normalizeTrailerLine(line))
+    .includes(needle);
+}
+
+function auditFindingMappingsComplete(auditComment) {
+  if (auditComment?.posted !== true) return false;
+  const findings = Array.isArray(auditComment?.findings) ? auditComment.findings : [];
+  if (findings.length === 0) return false;
+  return findings.every((finding) => {
+    const files = Array.isArray(finding?.files) ? finding.files : [];
+    return String(finding?.id || finding?.summary || '').trim() !== ''
+      && files.some((file) => String(file || '').trim() !== '');
+  });
+}
+
+function validateHamTerminalRemediation(evidence, { reviewedHead, currentHead } = {}) {
+  const supplied = Boolean(evidence && typeof evidence === 'object');
+  const checks = {
+    supplied,
+    workerClass: String(evidence?.workerClass || '').trim().toLowerCase() === 'hammer',
+    liveHead: String(evidence?.liveHeadSha || '') === String(currentHead || ''),
+    reviewedParent: String(evidence?.reviewedParentSha || '') === String(reviewedHead || ''),
+    hamAuthored: evidence?.hamAuthored === true,
+    provenance: (
+      hasTrailer(evidence?.commitTrailers, 'Worker-Class', 'hammer')
+      && hasTrailer(evidence?.commitTrailers, 'Ticket', 'HAM-02')
+    ),
+    auditComment: auditFindingMappingsComplete(evidence?.auditComment),
+  };
+  const valid = Object.values(checks).every(Boolean);
+  return {
+    supplied,
+    valid,
+    marker: valid ? 'ham_terminal_remediation_validated' : null,
+    ...checks,
+  };
+}
+
 /**
  * Evaluate AMA eligibility per SPEC §4.2.
  *
@@ -455,6 +504,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const adversarialMergeRequestedEvidence = options?.adversarialMergeRequested || null;
   const recoveryEvidence = options?.recoveryEvidence || null;
   const fastMergeState = options?.fastMergeState || null;
+  const hamTerminalRemediation = options?.hamTerminalRemediation || null;
   // AMA-05 head-scoped evidence for `adversarial-merge-blocked`.
   // Missing or null evidence falls back to label-presence (fail-closed).
   // Only a non-null evidence object can prove the label is stale/unapplied
@@ -490,8 +540,17 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const operatorOverride = hasOperatorApprovedOverride(reviewState, prMetadata);
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
-  const headMatchOk = operatorOverride || (reviewedHead && reviewedHead === currentHead);
+  const hamTerminal = validateHamTerminalRemediation(hamTerminalRemediation, {
+    reviewedHead,
+    currentHead,
+  });
+  const headMatchOk = operatorOverride
+    || (reviewedHead && reviewedHead === currentHead)
+    || hamTerminal.valid;
   if (!headMatchOk) reasons.push('stale-review-head');
+  if (hamTerminal.supplied && !hamTerminal.valid) {
+    reasons.push('ham-terminal-remediation-invalid');
+  }
 
   const blockingFindings = classifyBlockingFindings(reviewState);
   const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
@@ -504,20 +563,20 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     remediationPending === false &&
     blockingFindings.known &&
     blockingFindings.count === 0;
-  if (!settledSuccess && !operatorOverride) {
+  if (!settledSuccess && !operatorOverride && !hamTerminal.valid) {
     reasons.push('verdict-not-settled-success');
   }
 
   // SPEC §4.2 #1 — current-head `operator-approved` preserves the
   // review/remediation escape hatch for stale or malformed remediation state.
-  if (!operatorOverride && !remediationStateKnown) {
+  if (!operatorOverride && !hamTerminal.valid && !remediationStateKnown) {
     reasons.push('remediation-state-unknown');
-  } else if (!operatorOverride && remediationPending) {
+  } else if (!operatorOverride && !hamTerminal.valid && remediationPending) {
     reasons.push('remediation-pending');
   }
-  if (!operatorOverride && !blockingFindings.known) {
+  if (!operatorOverride && !hamTerminal.valid && !blockingFindings.known) {
     reasons.push('blocking-findings-unknown');
-  } else if (!operatorOverride && blockingFindings.count > 0) {
+  } else if (!operatorOverride && !hamTerminal.valid && blockingFindings.count > 0) {
     reasons.push('blocking-findings-present');
   }
 
@@ -692,6 +751,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       current: currentHead,
       ok: headMatchOk,
     },
+    hamTerminalRemediation: hamTerminal,
     remediation: { pending: remediationPending, known: remediationStateKnown },
     config: { enabled: amaEnabled },
   };

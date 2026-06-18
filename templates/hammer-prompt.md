@@ -92,6 +92,36 @@ gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStat
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
 HAM_REBASE_ATTEMPTS=0
 HAM_REBASE_ATTEMPT_CAP="${HAM_REBASE_ATTEMPT_CAP:-3}"
+HAM_UPDATE_BRANCH_RETRY_CAP="${HAM_UPDATE_BRANCH_RETRY_CAP:-3}"
+
+ham_update_branch_conflict() {
+  grep -Eiq 'conflict|cannot be rebased|resolve conflicts' "$1"
+}
+
+ham_update_branch_transient() {
+  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+}
+
+ham_update_branch_with_retries() {
+  ham_update_attempt=1
+  while [ "$ham_update_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
+    if gh pr update-branch <<PR_URL>> --rebase > /tmp/ham-update-branch.stdout 2> /tmp/ham-update-branch.stderr; then
+      return 0
+    fi
+    if ham_update_branch_conflict /tmp/ham-update-branch.stderr; then
+      return 2
+    fi
+    if ! ham_update_branch_transient /tmp/ham-update-branch.stderr; then
+      return 1
+    fi
+    if [ "$ham_update_attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; then
+      return 1
+    fi
+    sleep $((ham_update_attempt * 5))
+    ham_update_attempt=$((ham_update_attempt + 1))
+  done
+  return 1
+}
 
 while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]; do
   if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ]; then
@@ -99,9 +129,15 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]
     exit 0
   fi
   HAM_REBASE_ATTEMPTS=$((HAM_REBASE_ATTEMPTS + 1))
-  if ! gh pr update-branch <<PR_URL>> --rebase; then
+  ham_update_branch_with_retries
+  HAM_UPDATE_BRANCH_EXIT=$?
+  if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 2 ]; then
     echo "HAM-03 hard-blocker: unresolvable rebase/update-branch conflict" >&2
     exit 0
+  fi
+  if [ "$HAM_UPDATE_BRANCH_EXIT" -ne 0 ]; then
+    cat /tmp/ham-update-branch.stderr >&2
+    exit 1
   fi
   gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
   POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)

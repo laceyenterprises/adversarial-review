@@ -559,6 +559,8 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt', async (t)
   assert.match(write.captured.body, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(write.captured.body, /failed, missing, stale, or\s+unchecked required checks/);
   assert.match(write.captured.body, /HAM-03 hard-blocker: rebase attempt cap exceeded/);
+  assert.match(write.captured.body, /HAM_UPDATE_BRANCH_RETRY_CAP="\$\{HAM_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
+  assert.match(write.captured.body, /HAM_UPDATE_BRANCH_EXIT=\$\?/);
   assert.match(write.captured.body, /Rebase-Attempts: \${HAM_REBASE_ATTEMPTS:-0}/);
 });
 
@@ -648,6 +650,11 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /cat "\$protection_err" >&2\n  rm -f "\$protection_err"\n  exit 1/);
   assert.match(prompt, /HAM-03 stale-head \/ behind recovery/);
   assert.match(prompt, /AMA_REBASE_ATTEMPT_CAP="\$\{AMA_REBASE_ATTEMPT_CAP:-3\}"/);
+  assert.match(prompt, /jq '\[\.attempts\[\]\?\.rebaseAttempts \/\/ 0\] \| max \/\/ 0'/);
+  assert.match(prompt, /REBASE_UPDATE_BRANCH_RETRY_CAP="\$\{REBASE_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
+  assert.match(prompt, /is_update_branch_conflict/);
+  assert.match(prompt, /is_update_branch_transient/);
+  assert.match(prompt, /HARD_BLOCKER_REASON=update-branch-failure/);
   assert.match(prompt, /content_equivalent_rebased_head/);
   assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
@@ -697,6 +704,8 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /Do not merge unless all of these are true/);
   assert.match(prompt, /HAM_REBASE_ATTEMPT_CAP="\$\{HAM_REBASE_ATTEMPT_CAP:-3\}"/);
+  assert.match(prompt, /ham_update_branch_conflict/);
+  assert.match(prompt, /ham_update_branch_transient/);
   assert.match(prompt, /No unbounded rebase\/update-branch retries/);
 });
 

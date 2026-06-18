@@ -121,10 +121,43 @@ Recommended live flow:
 
 ```bash
 AMA_REBASE_ATTEMPT_CAP="${AMA_REBASE_ATTEMPT_CAP:-3}"
-REBASE_ATTEMPTS=0
+REBASE_ATTEMPTS=$(
+  jq '[.attempts[]?.rebaseAttempts // 0] | max // 0' "/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json" 2>/dev/null \
+    || printf '0'
+)
+REBASE_UPDATE_BRANCH_RETRY_CAP="${REBASE_UPDATE_BRANCH_RETRY_CAP:-3}"
 VALIDATED_HEAD="abc12345abc12345abc12345abc12345abc12345"
 HEAD_MATCH_EVIDENCE="head_sha_matches_review"
 HARD_BLOCKER_REASON=""
+
+is_update_branch_conflict() {
+  grep -Eiq 'conflict|cannot be rebased|resolve conflicts' "$1"
+}
+
+is_update_branch_transient() {
+  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+}
+
+run_update_branch_with_retries() {
+  update_attempt=1
+  while [ "$update_attempt" -le "$REBASE_UPDATE_BRANCH_RETRY_CAP" ]; do
+    if gh pr update-branch https://github.com/acme/myrepo/pull/1234 --rebase > /tmp/ama-update-branch.stdout 2> /tmp/ama-update-branch.stderr; then
+      return 0
+    fi
+    if is_update_branch_conflict /tmp/ama-update-branch.stderr; then
+      return 2
+    fi
+    if ! is_update_branch_transient /tmp/ama-update-branch.stderr; then
+      return 1
+    fi
+    if [ "$update_attempt" -ge "$REBASE_UPDATE_BRANCH_RETRY_CAP" ]; then
+      return 1
+    fi
+    sleep $((update_attempt * 5))
+    update_attempt=$((update_attempt + 1))
+  done
+  return 1
+}
 
 needs_rebase_recovery() {
   jq -e '
@@ -152,14 +185,17 @@ while needs_rebase_recovery; do
 
   BEFORE_HEAD=$(jq -r '.headRefOid' /tmp/ama-pr.json)
 
-  if ! gh pr update-branch https://github.com/acme/myrepo/pull/1234 --rebase > /tmp/ama-update-branch.stdout 2> /tmp/ama-update-branch.stderr; then
-    if grep -Eiq 'conflict|cannot be rebased|resolve conflicts' /tmp/ama-update-branch.stderr; then
-      echo "HAM-03 hard-blocker: unresolvable rebase conflict" >&2
-      HARD_BLOCKER_REASON=unresolvable-rebase-conflict
-      break
-    fi
+  run_update_branch_with_retries
+  UPDATE_BRANCH_EXIT=$?
+  if [ "$UPDATE_BRANCH_EXIT" -eq 2 ]; then
+    echo "HAM-03 hard-blocker: unresolvable rebase conflict" >&2
+    HARD_BLOCKER_REASON=unresolvable-rebase-conflict
+    break
+  fi
+  if [ "$UPDATE_BRANCH_EXIT" -ne 0 ]; then
     cat /tmp/ama-update-branch.stderr >&2
-    exit 1
+    HARD_BLOCKER_REASON=update-branch-failure
+    break
   fi
 
   gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ama-pr.json

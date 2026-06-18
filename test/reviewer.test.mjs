@@ -515,6 +515,170 @@ test('shadow timeout or unavailable model records warning artifact without mutat
   }
 });
 
+test('shadow auth failure is terminal and does not persist LiteLLM response body', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-auth-failure-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 134,
+      headSha: 'auth-failure',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir, request: persisted.request });
+    let responseBodyRead = false;
+    const result = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/secret b/secret',
+      hostedReviewText: 'hosted review with sensitive body',
+      log: { warn() {} },
+      env: LOCAL_SHADOW_TEST_ENV,
+      fetchImpl: async () => ({
+        ok: false,
+        status: 401,
+        text: async () => {
+          responseBodyRead = true;
+          return 'upstream echoed prompt SECRET_TOKEN /Users/placey/.codex/auth.json';
+        },
+      }),
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.skipped, true);
+    assert.equal(result.retryable, false);
+    assert.equal(responseBodyRead, false);
+    const paths = __test__.localReviewShadowPaths(rootDir, marked.request);
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    assert.equal(state.status, 'skipped');
+    assert.equal(state.reason, 'local-shadow-auth-failed');
+    assert.equal(state.retryable, false);
+    assert.doesNotMatch(JSON.stringify(state), /SECRET_TOKEN|sensitive body|auth\.json/);
+    const artifact = readFileSync(paths.artifactPath, 'utf8');
+    assert.match(artifact, /Shadow status: skipped \(local-shadow-auth-failed\)/);
+    assert.doesNotMatch(artifact, /SECRET_TOKEN|sensitive body|auth\.json/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow remote LiteLLM base URL is terminal and never receives PR payload', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-remote-url-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 135,
+      headSha: 'remote-url',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir, request: persisted.request });
+    let fetchCalled = false;
+    const result = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/secret b/secret',
+      hostedReviewText: 'hosted review with sensitive body',
+      log: { warn() {} },
+      env: {
+        ...LOCAL_SHADOW_TEST_ENV,
+        ADVERSARIAL_REVIEW_LOCAL_SHADOW_BASE_URL: 'https://example.com',
+      },
+      fetchImpl: async () => {
+        fetchCalled = true;
+        throw new Error('fetch should not run');
+      },
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(result.completed, true);
+    assert.equal(result.skipped, true);
+    assert.equal(result.retryable, false);
+    const paths = __test__.localReviewShadowPaths(rootDir, marked.request);
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    assert.equal(state.status, 'skipped');
+    assert.equal(state.reason, 'local-shadow-url-not-loopback');
+    assert.equal(state.retryable, false);
+    assert.doesNotMatch(JSON.stringify(state), /sensitive body|diff --git/);
+    const artifact = readFileSync(paths.artifactPath, 'utf8');
+    assert.match(artifact, /Shadow status: skipped \(local-shadow-url-not-loopback\)/);
+    assert.doesNotMatch(artifact, /sensitive body|diff --git/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow transient HTTP failure remains retryable without storing response body', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-transient-http-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 136,
+      headSha: 'transient-http',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir, request: persisted.request });
+    let responseBodyRead = false;
+    const result = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/secret b/secret',
+      hostedReviewText: 'hosted review with sensitive body',
+      log: { warn() {} },
+      env: LOCAL_SHADOW_TEST_ENV,
+      fetchImpl: async () => ({
+        ok: false,
+        status: 503,
+        text: async () => {
+          responseBodyRead = true;
+          return 'upstream echoed prompt SECRET_TOKEN /Users/placey/.codex/auth.json';
+        },
+      }),
+    });
+
+    assert.equal(result.completed, false);
+    assert.equal(result.skipped, true);
+    assert.equal(result.retryable, true);
+    assert.equal(responseBodyRead, false);
+    const paths = __test__.localReviewShadowPaths(rootDir, marked.request);
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    assert.equal(state.status, 'warn-skip');
+    assert.equal(state.retryable, true);
+    assert.match(state.reason, /HTTP 503/);
+    assert.doesNotMatch(JSON.stringify(state), /SECRET_TOKEN|sensitive body|auth\.json/);
+    const artifact = readFileSync(paths.artifactPath, 'utf8');
+    assert.match(artifact, /WARNING: local OSS shadow review skipped/);
+    assert.doesNotMatch(artifact, /SECRET_TOKEN|sensitive body|auth\.json/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('retryable shadow warning artifacts do not suppress later successful retry', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-retry-'));
   try {

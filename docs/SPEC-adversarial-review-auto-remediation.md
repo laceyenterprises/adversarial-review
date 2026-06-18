@@ -607,6 +607,61 @@ scoped to explicit local-routing context such as `127.0.0.1:4000`,
 non-local API connectivity failures remain `unknown` unless another more
 specific classifier matches.
 
+## Local Review Shadow
+
+The `run-local-review-shadow` PR label enables an operator-requested,
+non-gating local model shadow review after the hosted adversarial review has
+posted. The label does not replace the hosted reviewer, does not change the
+merge-blocking verdict, and does not post a second GitHub review. It only
+records durable local artifacts under `data/local-review-shadow/`.
+
+The shadow worker is eligible only when all of these checks pass:
+
+- The PR still has the `run-local-review-shadow` label.
+- `ADVERSARIAL_LOCAL_REVIEW_SHADOW_MODEL` or `LOCAL_REVIEW_SHADOW_MODEL`
+  names a checked-in model in `src/local-review-shadow.mjs`.
+- The model metadata proves a family distinct from both the builder family and
+  the hosted reviewer family.
+- `ADVERSARIAL_LOCAL_REVIEW_SHADOW_URL` or `LOCAL_REVIEW_SHADOW_URL`, when
+  set, is an HTTP(S) LiteLLM chat-completions URL whose hostname is loopback
+  (`localhost`, `127/8`, or `::1`). The default is
+  `http://127.0.0.1:4000/v1/chat/completions`.
+
+The locality check is fail-closed and happens before the diff or hosted review
+body is serialized into the LiteLLM request body. Remote LiteLLM endpoints are
+not part of this contract; a remote or invalid URL records a retryable local
+configuration failure and must not receive PR contents. The artifact provenance
+therefore means a loopback LiteLLM transport to a checked-in local-model alias,
+not merely an arbitrary model string supplied by the environment.
+
+Durable files are keyed by repo, PR number, head SHA, and label:
+
+- `data/local-review-shadow/requests/*.json` records the request status,
+  eligibility, attempt count, `nextAttemptAt`, `lastError`, and artifact/input
+  paths.
+- `data/local-review-shadow/inputs/*.json` stores the PR diff and hosted review
+  body for eligible requests only, mode `0600`, so watcher crash recovery can
+  complete the artifact without reposting the hosted review.
+- `data/local-review-shadow/artifacts/*.md` stores the non-gating local model
+  output, mode `0600`, headed `Local Review Shadow (Non-Gating)`.
+
+Ineligible requests are recorded as `skipped` and do not persist the diff or
+hosted review body. Eligible requests are written as `pending` before any
+LiteLLM call. A successful call writes the artifact and marks the request
+`completed`. A timeout, unavailable LiteLLM proxy, invalid/remote URL, or other
+execution error marks the request `retryable`, increments `attemptCount`, and
+sets `nextAttemptAt` to a bounded 15-minute backoff. Posted-review
+reconciliation in the watcher imports only `src/local-review-shadow.mjs` and
+starts due retry work in the background; it defers while the backoff is active
+and never blocks merge-gate projection or hosted reviewer posting.
+
+Recovery is file-based. To inspect a failed shadow review, read the matching
+request JSON and its `lastError`. To retry, correct the local LiteLLM/model/env
+configuration and leave the label in place; the watcher will retry after
+`nextAttemptAt`. To stop retrying, remove the label or mark the request
+`skipped` only after preserving the request JSON for audit. Deleting the
+artifact for a `completed` request makes it due again for the same key.
+
 ## Infrastructure Failed-Row Auto-Recovery
 
 The watcher may boundedly recover `review_status='failed'` rows only through

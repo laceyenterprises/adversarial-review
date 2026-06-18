@@ -113,7 +113,7 @@ import {
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
-import { startLocalReviewShadowReconciliation } from './reviewer.mjs';
+import { startLocalReviewShadowReconciliation } from './local-review-shadow.mjs';
 // AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
 // (AMA-01 defaults to false). When the operator opts in AND the
 // canonical eligibility predicate from SPEC §4.2 returns

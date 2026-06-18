@@ -1137,6 +1137,42 @@ test('local-review-shadow timeout or unavailable LiteLLM records retryable warni
   }
 });
 
+test('local-review-shadow rejects non-loopback LiteLLM endpoints before sending review payload', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-remote-url-'));
+  try {
+    let fetchCalled = false;
+    const result = await reconcileLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 96,
+      headSha: 'badhost',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: 'codex',
+      hostedReviewerModel: 'claude',
+      diff: '+private source',
+      hostedReviewBody: 'hosted review body',
+      env: {
+        LOCAL_REVIEW_SHADOW_MODEL: 'local-oss-reviewer',
+        LOCAL_REVIEW_SHADOW_URL: 'https://example.com/v1/chat/completions',
+      },
+      log: { log() {}, warn() {} },
+      fetchImpl: async () => {
+        fetchCalled = true;
+        throw new Error('remote endpoint must not be called');
+      },
+    });
+
+    assert.equal(result.action, 'retryable');
+    assert.match(result.reason, /loopback host/);
+    assert.equal(fetchCalled, false);
+    const request = JSON.parse(readFileSync(result.requestPath, 'utf8'));
+    assert.equal(request.status, 'retryable');
+    assert.match(request.lastError, /loopback host/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('local-review-shadow watcher starter respects retry backoff and does not invoke LiteLLM inline', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-start-backoff-'));
   try {

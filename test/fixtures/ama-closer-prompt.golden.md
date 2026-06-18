@@ -129,6 +129,7 @@ REBASE_UPDATE_BRANCH_RETRY_CAP="${REBASE_UPDATE_BRANCH_RETRY_CAP:-3}"
 VALIDATED_HEAD="abc12345abc12345abc12345abc12345abc12345"
 HEAD_MATCH_EVIDENCE="head_sha_matches_review"
 HARD_BLOCKER_REASON=""
+AMA_REBASE_AUTHORITY_BIN="/Users/airlock/agent-os/tools/adversarial-review/bin/ama-rebase-authority.mjs"
 
 is_update_branch_conflict() {
   grep -Eiq 'conflict|cannot be rebased|resolve conflicts' "$1"
@@ -160,10 +161,25 @@ run_update_branch_with_retries() {
 }
 
 needs_rebase_recovery() {
-  jq -e '
-    (.eligible == false and ((.reasons // []) | length == 1) and ((.reasons // [])[0] == "stale-review-head"))
-    or ((input.mergeStateStatus // "" | ascii_upcase) == "BEHIND")
-  ' /tmp/ama-verdict.json /tmp/ama-pr.json >/dev/null
+  node "$AMA_REBASE_AUTHORITY_BIN" needs-recovery \
+    --pr /tmp/ama-pr.json \
+    --verdict /tmp/ama-verdict.json \
+    --reviewed-sha "$VALIDATED_HEAD" \
+    | jq -e '.needed == true' >/dev/null
+}
+
+assess_rebase_equivalence() {
+  node "$AMA_REBASE_AUTHORITY_BIN" assess \
+    --pr /tmp/ama-pr.json \
+    --verdict /tmp/ama-verdict.json \
+    --reviewed-sha "abc12345abc12345abc12345abc12345abc12345" \
+    --current-head "$VALIDATED_HEAD" \
+    --attempts "$REBASE_ATTEMPTS" \
+    --cap "$AMA_REBASE_ATTEMPT_CAP" \
+    --reviewed-patchids /tmp/ama-reviewed.patchids \
+    --rebased-patchids /tmp/ama-rebased.patchids \
+    --reverify-eligible true \
+    > /tmp/ama-rebase-assessment.json
 }
 
 if needs_rebase_recovery; then
@@ -203,7 +219,8 @@ while needs_rebase_recovery; do
   gh pr diff https://github.com/acme/myrepo/pull/1234 --patch > /tmp/ama-rebased.diff
   git patch-id --stable < /tmp/ama-rebased.diff | awk '{print $1}' | sort > /tmp/ama-rebased.patchids
 
-  if ! cmp -s /tmp/ama-reviewed.patchids /tmp/ama-rebased.patchids; then
+  assess_rebase_equivalence
+  if jq -e '.action == "exact-head-validation-required" and .reason == "rebased-content-not-review-equivalent"' /tmp/ama-rebase-assessment.json >/dev/null; then
     echo "HAM-03 hard-blocker: rebased diff is not review-equivalent; exact-head validation is required" >&2
     HARD_BLOCKER_REASON=rebased-content-not-review-equivalent
     break

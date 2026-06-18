@@ -652,6 +652,9 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /AMA_REBASE_ATTEMPT_CAP="\$\{AMA_REBASE_ATTEMPT_CAP:-3\}"/);
   assert.match(prompt, /jq '\[\.attempts\[\]\?\.rebaseAttempts \/\/ 0\] \| max \/\/ 0'/);
   assert.match(prompt, /REBASE_UPDATE_BRANCH_RETRY_CAP="\$\{REBASE_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
+  assert.match(prompt, /ama-rebase-authority\.mjs/);
+  assert.match(prompt, /assess_rebase_equivalence/);
+  assert.doesNotMatch(prompt, /@SECURITY\.md/);
   assert.match(prompt, /is_update_branch_conflict/);
   assert.match(prompt, /is_update_branch_transient/);
   assert.match(prompt, /HARD_BLOCKER_REASON=update-branch-failure/);

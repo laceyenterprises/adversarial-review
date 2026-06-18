@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   assessRebaseRecovery,
@@ -9,6 +14,26 @@ import {
 
 const REVIEWED_HEAD = '1111111111111111111111111111111111111111';
 const REBASED_HEAD = '2222222222222222222222222222222222222222';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(__dirname, '..');
+const CLI_PATH = join(REPO_ROOT, 'bin', 'ama-rebase-authority.mjs');
+
+function withTempDir(fn) {
+  const root = mkdtempSync(join(tmpdir(), 'ama-rebase-authority-'));
+  try {
+    return fn(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function writeJson(path, payload) {
+  writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function runCli(args) {
+  return JSON.parse(execFileSync(process.execPath, [CLI_PATH, ...args], { encoding: 'utf8' }));
+}
 
 test('clean stale-head fixture rebases, proves content equivalence, and can merge new head', () => {
   const decision = assessRebaseRecovery({
@@ -152,3 +177,50 @@ test('patch-id equivalence is a multiset and detects dropped or added changes', 
   assert.deepEqual(compareReviewedPatchIds(['a', 'b'], ['a']).dropped, ['b']);
   assert.deepEqual(compareReviewedPatchIds(['a'], ['a', 'c']).added, ['c']);
 });
+
+test('ama-rebase-authority CLI reports stale/behind recovery need', () => withTempDir((root) => {
+  const prPath = join(root, 'pr.json');
+  const verdictPath = join(root, 'verdict.json');
+  writeJson(prPath, { headRefOid: REBASED_HEAD, mergeStateStatus: 'CLEAN' });
+  writeJson(verdictPath, { eligible: false, reasons: ['stale-review-head'] });
+
+  const payload = runCli([
+    'needs-recovery',
+    '--pr', prPath,
+    '--verdict', verdictPath,
+    '--reviewed-sha', REVIEWED_HEAD,
+  ]);
+
+  assert.equal(payload.needed, true);
+  assert.equal(payload.staleOnly, true);
+  assert.equal(payload.currentHead, REBASED_HEAD);
+}));
+
+test('ama-rebase-authority CLI uses module patch-id equivalence decision', () => withTempDir((root) => {
+  const prPath = join(root, 'pr.json');
+  const verdictPath = join(root, 'verdict.json');
+  const reviewedPath = join(root, 'reviewed.patchids');
+  const rebasedPath = join(root, 'rebased.patchids');
+  writeJson(prPath, { headRefOid: REBASED_HEAD, mergeStateStatus: 'BEHIND' });
+  writeJson(verdictPath, { eligible: true, reasons: [] });
+  writeFileSync(reviewedPath, 'patch-a\npatch-b\n');
+  writeFileSync(rebasedPath, 'patch-a\npatch-c\n');
+
+  const payload = runCli([
+    'assess',
+    '--pr', prPath,
+    '--verdict', verdictPath,
+    '--reviewed-sha', REVIEWED_HEAD,
+    '--current-head', REBASED_HEAD,
+    '--attempts', '1',
+    '--cap', '3',
+    '--reviewed-patchids', reviewedPath,
+    '--rebased-patchids', rebasedPath,
+    '--reverify-eligible', 'true',
+  ]);
+
+  assert.equal(payload.action, 'exact-head-validation-required');
+  assert.equal(payload.reason, 'rebased-content-not-review-equivalent');
+  assert.deepEqual(payload.contentEquivalence.dropped, ['patch-b']);
+  assert.deepEqual(payload.contentEquivalence.added, ['patch-c']);
+}));

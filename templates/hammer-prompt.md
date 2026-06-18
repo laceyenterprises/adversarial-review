@@ -237,7 +237,8 @@ not call `gh pr merge`.
 - No "please re-review", no "request another review", no re-review label.
 - No follow-up PRs/issues for the final findings.
 - No merging the old `<<REVIEWED_SHA>>` merely because it passed.
-- No unbounded rebase/update-branch retries; cap them and emit one hard-blocker.
+- No unbounded rebase/update-branch retries; cap them and stop through the
+  single hard-blocker report path described above.
 - No `gh pr merge` without `--match-head-commit "$POST_REMEDIATION_SHA"`.
 - No merge when the live post-remediation head has failed, missing, stale, or
   unchecked required checks.

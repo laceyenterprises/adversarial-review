@@ -118,7 +118,7 @@ function extractBlockingFindingTitles(body) {
     }
     if (inBlocking && /^[ \t]*#{1,6}[ \t]+/.test(line)) break;
     if (!inBlocking) continue;
-    const bullet = line.match(/^[ \t]*[-*][ \t]+(.+)$/);
+    const bullet = line.match(/^[-*][ \t]+(.+)$/);
     if (!bullet) continue;
     const raw = bullet[1].trim();
     if (/^none\.?$/i.test(raw)) continue;
@@ -160,6 +160,7 @@ Inputs:
   --live-commit <json>
                   Test-only fixture for the GitHub commit object that
                   production resolves with gh api repos/{repo}/commits/{head}.
+                  Ignored unless AMA_CHECK_TEST_FIXTURES=1.
 
 Emits:
   JSON object on stdout: { eligible: bool, reasons: string[], trace: {...} }
@@ -193,6 +194,10 @@ function parseInputs(argv) {
 
 function loadJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function liveCommitFixtureEnabled(env = process.env) {
+  return String(env.AMA_CHECK_TEST_FIXTURES || '').trim() === '1';
 }
 
 function fetchLiveCommit({ repo, headSha }) {
@@ -437,7 +442,7 @@ function main(argv = process.argv.slice(2)) {
     if (hamTerminalRemediation) {
       hamTerminalRemediation = {
         ...hamTerminalRemediation,
-        liveCommit: args['live-commit']
+        liveCommit: args['live-commit'] && liveCommitFixtureEnabled()
           ? loadJson(args['live-commit'])
           : fetchLiveCommit({
               repo: args.repo,

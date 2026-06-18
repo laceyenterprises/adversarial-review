@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,8 +46,39 @@ const BLOCKING_COMMENT_BODY = [
   'Request changes',
 ].join('\n');
 
+const NESTED_BLOCKING_COMMENT_BODY = [
+  '## Summary',
+  'Needs work.',
+  '',
+  '## Blocking Issues',
+  '- **Auth path not threaded.**',
+  '  - **File:** `src/auth.mjs`',
+  '  - **Lines:** 10-20',
+  '  - **Problem:** Pass the effective auth source into the profile.',
+  '  - **Why it matters:** The merge gate can read stale auth state.',
+  '  - **Recommended fix:** Thread the resolved auth value.',
+  '- **Retry double-submit race**',
+  '  - **File:** `src/retry.mjs`',
+  '  - **Problem:** Retry can submit twice.',
+  '',
+  '## Verdict',
+  'Request changes',
+].join('\n');
+
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function writeFakeGh(tmp, liveCommit) {
+  const binDir = join(tmp, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  const ghPath = join(binDir, 'gh');
+  writeFileSync(ghPath, `#!/usr/bin/env node
+if (process.argv[2] !== 'api') process.exit(2);
+process.stdout.write(${JSON.stringify(JSON.stringify(liveCommit))});
+`);
+  chmodSync(ghPath, 0o755);
+  return binDir;
 }
 
 function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {}, reviews = null } = {}) {
@@ -181,6 +212,8 @@ function runAmaCheck(tmp, {
   riskClass = 'low',
   hamTerminalRemediation = null,
   liveCommit = null,
+  allowLiveCommitFixture = Boolean(liveCommit),
+  envPatch = {},
 }) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
   if (hamTerminalRemediation) {
@@ -201,6 +234,7 @@ function runAmaCheck(tmp, {
     '--reviewed-sha', HEAD_SHA,
     '--reviewer', reviewer,
     '--risk-class', riskClass,
+    '--repo', REPO,
   ];
   if (paths.hamTerminalRemediation) {
     args.push('--ham-terminal-remediation', paths.hamTerminalRemediation);
@@ -216,6 +250,8 @@ function runAmaCheck(tmp, {
       env: {
         ...process.env,
         AGENT_OS_CONFIG_PATH: configPath,
+        ...(allowLiveCommitFixture ? { AMA_CHECK_TEST_FIXTURES: '1' } : {}),
+        ...envPatch,
       },
     },
   );
@@ -330,6 +366,101 @@ test('ama-check accepts HAM terminal-remediation evidence for a live HAM child h
     const verdict = JSON.parse(result.stdout);
     assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
     assert.equal(verdict.trace.headMatch.current, liveHeadSha);
+    assert.equal(verdict.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check ignores --live-commit fixtures unless test fixtures are enabled', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-ham-live-fixture-guard-'));
+  try {
+    const liveHeadSha = 'ham456ham456ham456ham456ham456ham456abcd';
+    const fakeGhBin = writeFakeGh(tmp, {
+      sha: liveHeadSha,
+      parents: [{ sha: HEAD_SHA }],
+      commit: {
+        message: 'non-HAM commit without provenance trailers',
+      },
+    });
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        labels: [],
+        headRefOid: liveHeadSha,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+      reviews: [
+        {
+          state: 'CHANGES_REQUESTED',
+          body: BLOCKING_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+      hamTerminalRemediation: hamTerminalEvidence({ liveHeadSha }),
+      liveCommit: hamLiveCommit({ liveHeadSha }),
+      allowLiveCommitFixture: false,
+      envPatch: {
+        PATH: `${fakeGhBin}:${process.env.PATH || ''}`,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false);
+    assert.ok(verdict.reasons.includes('ham-terminal-remediation-invalid'));
+    assert.equal(verdict.trace.hamTerminalRemediation.provenance, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check extracts only top-level blocking titles from nested review cards', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-nested-blocking-cards-'));
+  try {
+    const liveHeadSha = 'ham456ham456ham456ham456ham456ham456abcd';
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        labels: [],
+        headRefOid: liveHeadSha,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+      reviews: [
+        {
+          state: 'CHANGES_REQUESTED',
+          body: NESTED_BLOCKING_COMMENT_BODY,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+      hamTerminalRemediation: {
+        ...hamTerminalEvidence({ liveHeadSha }),
+        auditComment: {
+          posted: true,
+          id: 'ham-audit-1',
+          findings: [
+            { id: 'Auth path not threaded.', files: ['src/auth.mjs'] },
+            { id: 'Retry double-submit race', files: ['src/retry.mjs'] },
+          ],
+        },
+      },
+      liveCommit: hamLiveCommit({ liveHeadSha }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.deepEqual(verdict.trace.verdict.blockingFindings, {
+      known: true,
+      count: 1,
+      state: 'known',
+    });
     assert.equal(verdict.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
   } finally {
     rmSync(tmp, { recursive: true, force: true });

@@ -38,11 +38,14 @@ Run these gh commands to assemble a fresh snapshot (do NOT rely on the
 watcher's snapshot — it could be stale by minutes):
 
 ```bash
+AMA_TMP_DIR=$(mktemp -d -t ama-closer.XXXXXX)
+trap 'rm -rf "$AMA_TMP_DIR"' EXIT
+
 # Live PR JSON
-gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ama-pr.json
+gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "$AMA_TMP_DIR/ama-pr.json"
 
 # Latest adversarial review record for the current head
-gh pr view <<PR_URL>> --json reviews > /tmp/ama-reviews.json
+gh pr view <<PR_URL>> --json reviews > "$AMA_TMP_DIR/ama-reviews.json"
 
 # Branch protection for the target branch. GitHub returns a known 403
 # upgrade/forbidden response on plans without branch protection; preserve
@@ -50,19 +53,19 @@ gh pr view <<PR_URL>> --json reviews > /tmp/ama-reviews.json
 # accepted shape) so ama-check can honor branch_protection.required=false.
 # Retry recognized transient gh/GitHub failures briefly; any non-transient
 # or exhausted failure is a hard stop.
-base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
-protection_err=$(mktemp)
+base_enc=$(printf '%s' "$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")" | jq -sRr @uri)
+protection_err="$AMA_TMP_DIR/ama-protection.stderr"
 protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)'
 protection_transient_re='timed? out|timeout|TLS handshake timeout|connection (reset|refused|aborted)|temporary failure|network is unreachable|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error'
 protection_attempt=1
 protection_max_attempts=3
 while true; do
   : > "$protection_err"
-  if gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ama-protection.json 2> "$protection_err"; then
+  if gh api "repos/<<REPO>>/branches/$base_enc/protection" > "$AMA_TMP_DIR/ama-protection.json" 2> "$protection_err"; then
     break
   fi
   if grep -Eiq "$protection_plan_unavailable_re" "$protection_err"; then
-    jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > /tmp/ama-protection.json
+    jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > "$AMA_TMP_DIR/ama-protection.json"
     break
   fi
   if [ "$protection_attempt" -lt "$protection_max_attempts" ] && grep -Eiq "$protection_transient_re" "$protection_err"; then
@@ -79,7 +82,7 @@ done
 rm -f "$protection_err"
 
 # Operator-approved + adversarial-merge-requested label events on the current head
-gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ama-timeline.json
+gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > "$AMA_TMP_DIR/ama-timeline.json"
 ```
 
 Then invoke the eligibility CLI shim. It loads the AMA config, normalizes
@@ -87,24 +90,24 @@ the inputs, and returns the SPEC §4.2 verdict:
 
 ```bash
 node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
-  --pr /tmp/ama-pr.json \
-  --reviews /tmp/ama-reviews.json \
-  --protection /tmp/ama-protection.json \
-  --timeline /tmp/ama-timeline.json \
+  --pr "$AMA_TMP_DIR/ama-pr.json" \
+  --reviews "$AMA_TMP_DIR/ama-reviews.json" \
+  --protection "$AMA_TMP_DIR/ama-protection.json" \
+  --timeline "$AMA_TMP_DIR/ama-timeline.json" \
   --repo <<REPO>> \
   --root-dir <<ROOT_DIR>> \
   --reviewed-sha <<REVIEWED_SHA>> \
   --reviewer <<REVIEWER>> \
   --risk-class <<RISK_CLASS>> \
   --review-cycle-exhausted <<REVIEW_CYCLE_EXHAUSTED>> \
-  > /tmp/ama-verdict.json
+  > "$AMA_TMP_DIR/ama-verdict.json"
 ```
 
 The CLI emits a JSON object: `{ eligible: bool, reasons: string[], trace: {...} }`.
 
 ## Step 2 — HAM-03 stale-head / behind recovery
 
-If `/tmp/ama-verdict.json` has `eligible:false` ONLY because of
+If `$AMA_TMP_DIR/ama-verdict.json` has `eligible:false` ONLY because of
 `stale-review-head`, or the live PR has `mergeStateStatus=BEHIND` / base-behind
 evidence, do not defer yet. Rebase/update the PR branch onto the current base,
 prove that the reviewed content is still covered, re-run `ama-check` on the
@@ -142,13 +145,13 @@ is_update_branch_transient() {
 run_update_branch_with_retries() {
   update_attempt=1
   while [ "$update_attempt" -le "$REBASE_UPDATE_BRANCH_RETRY_CAP" ]; do
-    if gh pr update-branch <<PR_URL>> --rebase > /tmp/ama-update-branch.stdout 2> /tmp/ama-update-branch.stderr; then
+    if gh pr update-branch <<PR_URL>> --rebase > "$AMA_TMP_DIR/ama-update-branch.stdout" 2> "$AMA_TMP_DIR/ama-update-branch.stderr"; then
       return 0
     fi
-    if is_update_branch_conflict /tmp/ama-update-branch.stderr; then
+    if is_update_branch_conflict "$AMA_TMP_DIR/ama-update-branch.stderr"; then
       return 2
     fi
-    if ! is_update_branch_transient /tmp/ama-update-branch.stderr; then
+    if ! is_update_branch_transient "$AMA_TMP_DIR/ama-update-branch.stderr"; then
       return 1
     fi
     if [ "$update_attempt" -ge "$REBASE_UPDATE_BRANCH_RETRY_CAP" ]; then
@@ -162,33 +165,33 @@ run_update_branch_with_retries() {
 
 needs_rebase_recovery() {
   node "$AMA_REBASE_AUTHORITY_BIN" needs-recovery \
-    --pr /tmp/ama-pr.json \
-    --verdict /tmp/ama-verdict.json \
+    --pr "$AMA_TMP_DIR/ama-pr.json" \
+    --verdict "$AMA_TMP_DIR/ama-verdict.json" \
     --reviewed-sha "$VALIDATED_HEAD" \
     | jq -e '.needed == true' >/dev/null
 }
 
 assess_rebase_equivalence() {
   node "$AMA_REBASE_AUTHORITY_BIN" assess \
-    --pr /tmp/ama-pr.json \
-    --verdict /tmp/ama-verdict.json \
+    --pr "$AMA_TMP_DIR/ama-pr.json" \
+    --verdict "$AMA_TMP_DIR/ama-verdict.json" \
     --reviewed-sha "<<REVIEWED_SHA>>" \
     --current-head "$VALIDATED_HEAD" \
     --attempts "$REBASE_ATTEMPTS" \
     --cap "$AMA_REBASE_ATTEMPT_CAP" \
-    --reviewed-patchids /tmp/ama-reviewed.patchids \
-    --rebased-patchids /tmp/ama-rebased.patchids \
+    --reviewed-patchids "$AMA_TMP_DIR/ama-reviewed.patchids" \
+    --rebased-patchids "$AMA_TMP_DIR/ama-rebased.patchids" \
     --reverify-eligible true \
-    > /tmp/ama-rebase-assessment.json
+    > "$AMA_TMP_DIR/ama-rebase-assessment.json"
 }
 
 if needs_rebase_recovery; then
-  reviewed_base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
+  reviewed_base_enc=$(printf '%s' "$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")" | jq -sRr @uri)
   gh api \
     -H 'Accept: application/vnd.github.v3.diff' \
     "repos/<<REPO>>/compare/$reviewed_base_enc...<<REVIEWED_SHA>>" \
-    > /tmp/ama-reviewed.diff
-  git patch-id --stable < /tmp/ama-reviewed.diff | awk '{print $1}' | sort > /tmp/ama-reviewed.patchids
+    > "$AMA_TMP_DIR/ama-reviewed.diff"
+  git patch-id --stable < "$AMA_TMP_DIR/ama-reviewed.diff" | awk '{print $1}' | sort > "$AMA_TMP_DIR/ama-reviewed.patchids"
 fi
 
 while needs_rebase_recovery; do
@@ -199,7 +202,7 @@ while needs_rebase_recovery; do
   fi
   REBASE_ATTEMPTS=$((REBASE_ATTEMPTS + 1))
 
-  BEFORE_HEAD=$(jq -r '.headRefOid' /tmp/ama-pr.json)
+  BEFORE_HEAD=$(jq -r '.headRefOid' "$AMA_TMP_DIR/ama-pr.json")
 
   run_update_branch_with_retries
   UPDATE_BRANCH_EXIT=$?
@@ -209,18 +212,18 @@ while needs_rebase_recovery; do
     break
   fi
   if [ "$UPDATE_BRANCH_EXIT" -ne 0 ]; then
-    cat /tmp/ama-update-branch.stderr >&2
+    cat "$AMA_TMP_DIR/ama-update-branch.stderr" >&2
     HARD_BLOCKER_REASON=update-branch-failure
     break
   fi
 
-  gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ama-pr.json
-  VALIDATED_HEAD=$(jq -r '.headRefOid' /tmp/ama-pr.json)
-  gh pr diff <<PR_URL>> --patch > /tmp/ama-rebased.diff
-  git patch-id --stable < /tmp/ama-rebased.diff | awk '{print $1}' | sort > /tmp/ama-rebased.patchids
+  gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "$AMA_TMP_DIR/ama-pr.json"
+  VALIDATED_HEAD=$(jq -r '.headRefOid' "$AMA_TMP_DIR/ama-pr.json")
+  gh pr diff <<PR_URL>> --patch > "$AMA_TMP_DIR/ama-rebased.diff"
+  git patch-id --stable < "$AMA_TMP_DIR/ama-rebased.diff" | awk '{print $1}' | sort > "$AMA_TMP_DIR/ama-rebased.patchids"
 
   assess_rebase_equivalence
-  if jq -e '.action == "exact-head-validation-required" and .reason == "rebased-content-not-review-equivalent"' /tmp/ama-rebase-assessment.json >/dev/null; then
+  if jq -e '.action == "exact-head-validation-required" and .reason == "rebased-content-not-review-equivalent"' "$AMA_TMP_DIR/ama-rebase-assessment.json" >/dev/null; then
     echo "HAM-03 hard-blocker: rebased diff is not review-equivalent; exact-head validation is required" >&2
     HARD_BLOCKER_REASON=rebased-content-not-review-equivalent
     break
@@ -231,26 +234,26 @@ while needs_rebase_recovery; do
     break
   fi
 
-  gh pr view <<PR_URL>> --json reviews > /tmp/ama-reviews.json
-  gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ama-timeline.json
+  gh pr view <<PR_URL>> --json reviews > "$AMA_TMP_DIR/ama-reviews.json"
+  gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > "$AMA_TMP_DIR/ama-timeline.json"
   node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
-    --pr /tmp/ama-pr.json \
-    --reviews /tmp/ama-reviews.json \
-    --protection /tmp/ama-protection.json \
-    --timeline /tmp/ama-timeline.json \
+    --pr "$AMA_TMP_DIR/ama-pr.json" \
+    --reviews "$AMA_TMP_DIR/ama-reviews.json" \
+    --protection "$AMA_TMP_DIR/ama-protection.json" \
+    --timeline "$AMA_TMP_DIR/ama-timeline.json" \
     --repo <<REPO>> \
     --root-dir <<ROOT_DIR>> \
     --reviewed-sha <<REVIEWED_SHA>> \
     --reviewer <<REVIEWER>> \
     --risk-class <<RISK_CLASS>> \
-    --rebase-assessment /tmp/ama-rebase-assessment.json \
+    --rebase-assessment "$AMA_TMP_DIR/ama-rebase-assessment.json" \
     --review-cycle-exhausted <<REVIEW_CYCLE_EXHAUSTED>> \
-    > /tmp/ama-verdict.json
+    > "$AMA_TMP_DIR/ama-verdict.json"
   HEAD_MATCH_EVIDENCE="content_equivalent_rebased_head"
 done
 
 if [ -n "$HARD_BLOCKER_REASON" ]; then
-  HARD_BLOCKER_ATTEMPT_JSON=$(mktemp)
+  HARD_BLOCKER_ATTEMPT_JSON="$AMA_TMP_DIR/ama-hard-blocker-attempt.json"
   jq -n \
     --arg reason "$HARD_BLOCKER_REASON" \
     --arg headMatchEvidence "${HEAD_MATCH_EVIDENCE:-head_sha_matches_review}" \
@@ -309,8 +312,8 @@ if [ "$(id -un)" != "<<HQ_OWNER>>" ]; then
 fi
 
 # Capture the fresh predicate's reasons in the attempt entry.
-ATTEMPT_JSON=$(mktemp)
-jq -n --argjson reasons "$(jq '.reasons' /tmp/ama-verdict.json)" \
+ATTEMPT_JSON="$AMA_TMP_DIR/ama-deferred-attempt.json"
+jq -n --argjson reasons "$(jq '.reasons' "$AMA_TMP_DIR/ama-verdict.json")" \
   '{ preMergeEligible: false, preMergeReasons: $reasons }' > "$ATTEMPT_JSON"
 
 node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
@@ -335,7 +338,7 @@ refuse if the head has advanced; treat that refusal as a normal defer
 or superseded outcome, not a force-merge opportunity.
 
 ```bash
-PRE_MERGE_ATTEMPT_JSON=$(mktemp)
+PRE_MERGE_ATTEMPT_JSON="$AMA_TMP_DIR/ama-pre-merge-attempt.json"
 jq -n \
   --arg headMatchEvidence "${HEAD_MATCH_EVIDENCE:-head_sha_matches_review}" \
   --argjson rebaseAttempts ${REBASE_ATTEMPTS:-0} \
@@ -360,7 +363,7 @@ if [ $PRE_APPEND_EXIT -ne 0 ]; then
   exit $PRE_APPEND_EXIT
 fi
 
-TRAILERS_FILE=$(mktemp)
+TRAILERS_FILE="$AMA_TMP_DIR/ama-merge-body.txt"
 cat <<EOF > "$TRAILERS_FILE"
 <<AMA_TRAILERS>>
 Rebase-Attempts: ${REBASE_ATTEMPTS:-0}
@@ -370,8 +373,8 @@ gh pr merge <<PR_URL>> \
   --<<MERGE_METHOD>> \
   --match-head-commit "$VALIDATED_HEAD" \
   --body-file "$TRAILERS_FILE" \
-  > /tmp/ama-merge.stdout \
-  2> /tmp/ama-merge.stderr
+  > "$AMA_TMP_DIR/ama-merge.stdout" \
+  2> "$AMA_TMP_DIR/ama-merge.stderr"
 MERGE_EXIT=$?
 rm -f "$TRAILERS_FILE"
 ```
@@ -383,11 +386,11 @@ non-zero on transport noise. Always re-read GitHub before terminalizing.
 
 ```bash
 sleep 2  # GitHub propagation
-gh pr view <<PR_URL>> --json state,mergedAt,mergeCommit,headRefOid > /tmp/ama-post-merge.json
-PR_STATE=$(jq -r '.state' /tmp/ama-post-merge.json)
-MERGED_AT=$(jq -r '.mergedAt' /tmp/ama-post-merge.json)
-MERGE_COMMIT=$(jq -r '.mergeCommit.oid // empty' /tmp/ama-post-merge.json)
-POST_HEAD=$(jq -r '.headRefOid' /tmp/ama-post-merge.json)
+gh pr view <<PR_URL>> --json state,mergedAt,mergeCommit,headRefOid > "$AMA_TMP_DIR/ama-post-merge.json"
+PR_STATE=$(jq -r '.state' "$AMA_TMP_DIR/ama-post-merge.json")
+MERGED_AT=$(jq -r '.mergedAt' "$AMA_TMP_DIR/ama-post-merge.json")
+MERGE_COMMIT=$(jq -r '.mergeCommit.oid // empty' "$AMA_TMP_DIR/ama-post-merge.json")
+POST_HEAD=$(jq -r '.headRefOid' "$AMA_TMP_DIR/ama-post-merge.json")
 ```
 
 ## Step 5 — Terminalize the audit JSON
@@ -424,7 +427,7 @@ else
   OUTCOME=in_progress
 fi
 
-ATTEMPT_JSON=$(mktemp)
+ATTEMPT_JSON="$AMA_TMP_DIR/ama-terminal-attempt.json"
 jq -n \
   --arg outcome "$OUTCOME" \
   --arg mergeCommit "${MERGE_COMMIT:-}" \

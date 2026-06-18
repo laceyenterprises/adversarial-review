@@ -6,8 +6,10 @@ The watcher already authorized this dispatch based on a fresh eligibility
 check at 2026-06-11T20:00:00Z. Your job is to re-run the EXACT same canonical
 eligibility predicate from
 `projects/adversarial-merge-authority/SPEC.md` §4.2 against the current
-live state, then either land the merge OR write a deferred audit JSON
-and exit.
+live state, then either land the merge OR write exactly one hard-blocker or
+deferred audit JSON and exit. A stale reviewed head or
+`mergeStateStatus=BEHIND` is not by itself a reason to surrender: first use the
+HAM-03 bounded rebase authority below.
 
 The predicate is the gate. Trust nothing else.
 
@@ -18,7 +20,7 @@ The predicate is the gate. Trust nothing else.
 - **PR number:** 1234
 - **Reviewed head SHA:** `abc12345abc12345abc12345abc12345abc12345`
 - **Risk class:** `low`
-- **Merge method:** `squash` (NEVER rebase; SPEC §4.4 requires one canonical landed commit for provenance)
+- **Merge method:** `squash` (squash/merge remains the canonical landed commit; HAM-03 may update/rebase the PR branch before the final merge)
 <!-- Do NOT print the raw agent-os/adversarial-gate value here as an inline
      token: it is a CI check-context name whose "<org-slash-name>" shape is
      misread by the WBH prompt-scope cross-repo path detector as an
@@ -100,12 +102,202 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
 
 The CLI emits a JSON object: `{ eligible: bool, reasons: string[], trace: {...} }`.
 
-## Step 2 — Branch on the verdict
+## Step 2 — HAM-03 stale-head / behind recovery
+
+If `/tmp/ama-verdict.json` has `eligible:false` ONLY because of
+`stale-review-head`, or the live PR has `mergeStateStatus=BEHIND` / base-behind
+evidence, do not defer yet. Rebase/update the PR branch onto the current base,
+prove that the reviewed content is still covered, re-run `ama-check` on the
+new head, and then merge with `--match-head-commit <new-head>`.
+
+Bound this recovery with `AMA_REBASE_ATTEMPT_CAP` (default `3`). Each pass must
+record the attempt count and the final merge body must include:
+
+```text
+Rebase-Attempts: <n>
+```
+
+Recommended live flow:
+
+```bash
+AMA_REBASE_ATTEMPT_CAP="${AMA_REBASE_ATTEMPT_CAP:-3}"
+REBASE_ATTEMPTS=$(
+  jq '[.attempts[]?.rebaseAttempts // 0] | max // 0' "/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json" 2>/dev/null \
+    || printf '0'
+)
+REBASE_UPDATE_BRANCH_RETRY_CAP="${REBASE_UPDATE_BRANCH_RETRY_CAP:-3}"
+VALIDATED_HEAD="abc12345abc12345abc12345abc12345abc12345"
+HEAD_MATCH_EVIDENCE="head_sha_matches_review"
+HARD_BLOCKER_REASON=""
+AMA_REBASE_AUTHORITY_BIN="/Users/airlock/agent-os/tools/adversarial-review/bin/ama-rebase-authority.mjs"
+
+is_update_branch_conflict() {
+  grep -Eiq 'conflict|cannot be rebased|resolve conflicts' "$1"
+}
+
+is_update_branch_transient() {
+  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+}
+
+run_update_branch_with_retries() {
+  update_attempt=1
+  while [ "$update_attempt" -le "$REBASE_UPDATE_BRANCH_RETRY_CAP" ]; do
+    if gh pr update-branch https://github.com/acme/myrepo/pull/1234 --rebase > /tmp/ama-update-branch.stdout 2> /tmp/ama-update-branch.stderr; then
+      return 0
+    fi
+    if is_update_branch_conflict /tmp/ama-update-branch.stderr; then
+      return 2
+    fi
+    if ! is_update_branch_transient /tmp/ama-update-branch.stderr; then
+      return 1
+    fi
+    if [ "$update_attempt" -ge "$REBASE_UPDATE_BRANCH_RETRY_CAP" ]; then
+      return 1
+    fi
+    sleep $((update_attempt * 5))
+    update_attempt=$((update_attempt + 1))
+  done
+  return 1
+}
+
+needs_rebase_recovery() {
+  node "$AMA_REBASE_AUTHORITY_BIN" needs-recovery \
+    --pr /tmp/ama-pr.json \
+    --verdict /tmp/ama-verdict.json \
+    --reviewed-sha "$VALIDATED_HEAD" \
+    | jq -e '.needed == true' >/dev/null
+}
+
+assess_rebase_equivalence() {
+  node "$AMA_REBASE_AUTHORITY_BIN" assess \
+    --pr /tmp/ama-pr.json \
+    --verdict /tmp/ama-verdict.json \
+    --reviewed-sha "abc12345abc12345abc12345abc12345abc12345" \
+    --current-head "$VALIDATED_HEAD" \
+    --attempts "$REBASE_ATTEMPTS" \
+    --cap "$AMA_REBASE_ATTEMPT_CAP" \
+    --reviewed-patchids /tmp/ama-reviewed.patchids \
+    --rebased-patchids /tmp/ama-rebased.patchids \
+    --reverify-eligible true \
+    > /tmp/ama-rebase-assessment.json
+}
+
+if needs_rebase_recovery; then
+  reviewed_base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
+  gh api \
+    -H 'Accept: application/vnd.github.v3.diff' \
+    "repos/acme/myrepo/compare/$reviewed_base_enc...abc12345abc12345abc12345abc12345abc12345" \
+    > /tmp/ama-reviewed.diff
+  git patch-id --stable < /tmp/ama-reviewed.diff | awk '{print $1}' | sort > /tmp/ama-reviewed.patchids
+fi
+
+while needs_rebase_recovery; do
+  if [ "$REBASE_ATTEMPTS" -ge "$AMA_REBASE_ATTEMPT_CAP" ]; then
+    echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($REBASE_ATTEMPTS/$AMA_REBASE_ATTEMPT_CAP)" >&2
+    HARD_BLOCKER_REASON=rebase-attempt-cap-exceeded
+    break
+  fi
+  REBASE_ATTEMPTS=$((REBASE_ATTEMPTS + 1))
+
+  BEFORE_HEAD=$(jq -r '.headRefOid' /tmp/ama-pr.json)
+
+  run_update_branch_with_retries
+  UPDATE_BRANCH_EXIT=$?
+  if [ "$UPDATE_BRANCH_EXIT" -eq 2 ]; then
+    echo "HAM-03 hard-blocker: unresolvable rebase conflict" >&2
+    HARD_BLOCKER_REASON=unresolvable-rebase-conflict
+    break
+  fi
+  if [ "$UPDATE_BRANCH_EXIT" -ne 0 ]; then
+    cat /tmp/ama-update-branch.stderr >&2
+    HARD_BLOCKER_REASON=update-branch-failure
+    break
+  fi
+
+  gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ama-pr.json
+  VALIDATED_HEAD=$(jq -r '.headRefOid' /tmp/ama-pr.json)
+  gh pr diff https://github.com/acme/myrepo/pull/1234 --patch > /tmp/ama-rebased.diff
+  git patch-id --stable < /tmp/ama-rebased.diff | awk '{print $1}' | sort > /tmp/ama-rebased.patchids
+
+  assess_rebase_equivalence
+  if jq -e '.action == "exact-head-validation-required" and .reason == "rebased-content-not-review-equivalent"' /tmp/ama-rebase-assessment.json >/dev/null; then
+    echo "HAM-03 hard-blocker: rebased diff is not review-equivalent; exact-head validation is required" >&2
+    HARD_BLOCKER_REASON=rebased-content-not-review-equivalent
+    break
+  fi
+  if [ "$VALIDATED_HEAD" = "$BEFORE_HEAD" ]; then
+    echo "HAM-03 hard-blocker: update-branch did not advance the stale/behind head" >&2
+    HARD_BLOCKER_REASON=rebase-did-not-advance-head
+    break
+  fi
+
+  gh pr view https://github.com/acme/myrepo/pull/1234 --json reviews > /tmp/ama-reviews.json
+  gh api "repos/acme/myrepo/issues/1234/timeline" --paginate > /tmp/ama-timeline.json
+  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
+    --pr /tmp/ama-pr.json \
+    --reviews /tmp/ama-reviews.json \
+    --protection /tmp/ama-protection.json \
+    --timeline /tmp/ama-timeline.json \
+    --repo acme/myrepo \
+    --root-dir /tmp/ama-test-root \
+    --reviewed-sha "$VALIDATED_HEAD" \
+    --reviewer claude \
+    --risk-class low \
+    --review-cycle-exhausted false \
+    > /tmp/ama-verdict.json
+  HEAD_MATCH_EVIDENCE="content_equivalent_rebased_head"
+done
+
+if [ -n "$HARD_BLOCKER_REASON" ]; then
+  HARD_BLOCKER_ATTEMPT_JSON=$(mktemp)
+  jq -n \
+    --arg reason "$HARD_BLOCKER_REASON" \
+    --arg headMatchEvidence "${HEAD_MATCH_EVIDENCE:-head_sha_matches_review}" \
+    --argjson rebaseAttempts ${REBASE_ATTEMPTS:-0} \
+    '{
+      preMergeEligible: false,
+      hardBlocker: true,
+      hardBlockerReason: $reason,
+      headMatchEvidence: $headMatchEvidence,
+      rebaseAttempts: $rebaseAttempts
+    }' > "$HARD_BLOCKER_ATTEMPT_JSON"
+  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+    --hq-root /tmp/ama-test-hqroot \
+    --repo acme/myrepo \
+    --pr 1234 \
+    --head "$VALIDATED_HEAD" \
+    --outcome failed-without-merge \
+    --attempt-json "$HARD_BLOCKER_ATTEMPT_JSON" \
+    --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  APPEND_EXIT=$?
+  rm -f "$HARD_BLOCKER_ATTEMPT_JSON"
+  if [ $APPEND_EXIT -eq 65 ]; then
+    echo "audit append refused by sticky-succeeded guard after HAM-03 hard-blocker; treating as no-op" >&2
+    exit 0
+  fi
+  exit $APPEND_EXIT
+fi
+```
+
+If the new head contains a HAM remediation commit, do not rewrite the stored
+reviewed SHA to pretend the old `reviewedSha === head` contract passed. Route
+through HAM terminal-remediation mode instead: prove the reviewed parent,
+HAM provenance trailers, PR audit comment, live-head checks, and non-waived
+gates; require `ham_terminal_remediation_validated`; then set
+`VALIDATED_HEAD` to that HAM commit SHA and merge with
+`--match-head-commit "$VALIDATED_HEAD"`.
+
+If `HARD_BLOCKER_REASON` is set, append one `failed-without-merge` audit
+attempt containing the reason, `rebaseAttempts`, and any content-equivalence
+diagnostics, then exit 0. Do not loop, force-merge, or ask for another review.
+
+## Step 3 — Branch on the verdict
 
 ### If `eligible === false`
 
-This is a **defer**, NOT a failure. The watcher will reconsider on its
-next tick. Append a `deferred` attempt to the watcher-owned audit
+This is a **defer** only after the HAM-03 recovery path above has either not
+applied or has produced exactly one hard-blocker report. Append a `deferred`
+attempt to the watcher-owned audit
 record via the AMA-04 audit shim — the writer handles atomic
 tmp+rename, mode 0640, and SPEC §4.4 state-machine derivation:
 
@@ -124,7 +316,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
   --hq-root /tmp/ama-test-hqroot \
   --repo acme/myrepo \
   --pr 1234 \
-  --head abc12345abc12345abc12345abc12345abc12345 \
+  --head "$VALIDATED_HEAD" \
   --outcome deferred \
   --attempt-json "$ATTEMPT_JSON" \
   --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -137,19 +329,23 @@ Exit 0 — deferral is a legitimate terminal-for-this-head outcome.
 ### If `eligible === true`
 
 Record the closer attempt BEFORE `gh pr merge`, then issue the merge
-with `--match-head-commit` against the reviewed SHA. GitHub will
-refuse if the head has advanced; treat that refusal as a normal defer,
-not a failure.
+with `--match-head-commit` against the validated head. GitHub will
+refuse if the head has advanced; treat that refusal as a normal defer
+or superseded outcome, not a force-merge opportunity.
 
 ```bash
 PRE_MERGE_ATTEMPT_JSON=$(mktemp)
-jq -n '{ preMergeEligible: true, attemptPhase: "before-gh-pr-merge" }' > "$PRE_MERGE_ATTEMPT_JSON"
+jq -n \
+  --arg headMatchEvidence "${HEAD_MATCH_EVIDENCE:-head_sha_matches_review}" \
+  --argjson rebaseAttempts ${REBASE_ATTEMPTS:-0} \
+  '{ preMergeEligible: true, attemptPhase: "before-gh-pr-merge", headMatchEvidence: $headMatchEvidence, rebaseAttempts: $rebaseAttempts }' \
+  > "$PRE_MERGE_ATTEMPT_JSON"
 
 node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
   --hq-root /tmp/ama-test-hqroot \
   --repo acme/myrepo \
   --pr 1234 \
-  --head abc12345abc12345abc12345abc12345abc12345 \
+  --head "$VALIDATED_HEAD" \
   --outcome in_progress \
   --attempt-json "$PRE_MERGE_ATTEMPT_JSON" \
   --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -164,17 +360,18 @@ if [ $PRE_APPEND_EXIT -ne 0 ]; then
 fi
 
 TRAILERS_FILE=$(mktemp)
-cat <<'EOF' > "$TRAILERS_FILE"
+cat <<EOF > "$TRAILERS_FILE"
 Closed-By: codex-closer (adversarial-pipe-mode)
 Reviewed-By: claude-reviewer-lacey
 Risk-Class: low
 Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required
 Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345
+Rebase-Attempts: ${REBASE_ATTEMPTS:-0}
 EOF
 
 gh pr merge https://github.com/acme/myrepo/pull/1234 \
   --squash \
-  --match-head-commit abc12345abc12345abc12345abc12345abc12345 \
+  --match-head-commit "$VALIDATED_HEAD" \
   --body-file "$TRAILERS_FILE" \
   > /tmp/ama-merge.stdout \
   2> /tmp/ama-merge.stderr
@@ -182,7 +379,7 @@ MERGE_EXIT=$?
 rm -f "$TRAILERS_FILE"
 ```
 
-## Step 3 — Re-read GitHub state (CLI exit code is NON-AUTHORITATIVE)
+## Step 4 — Re-read GitHub state (CLI exit code is NON-AUTHORITATIVE)
 
 SPEC §7 risk row 4: `gh pr merge` can succeed server-side and exit
 non-zero on transport noise. Always re-read GitHub before terminalizing.
@@ -196,17 +393,17 @@ MERGE_COMMIT=$(jq -r '.mergeCommit.oid // empty' /tmp/ama-post-merge.json)
 POST_HEAD=$(jq -r '.headRefOid' /tmp/ama-post-merge.json)
 ```
 
-## Step 4 — Terminalize the audit JSON
+## Step 5 — Terminalize the audit JSON
 
 Decision matrix:
 
 | Post-read state | Outcome |
 |---|---|
-| `PR_STATE == MERGED && POST_HEAD == REVIEWED_SHA` | `succeeded` |
-| `PR_STATE == MERGED && POST_HEAD != REVIEWED_SHA` | `superseded` (someone else landed a different head) |
-| `PR_STATE == OPEN && POST_HEAD != REVIEWED_SHA` | `superseded` (head advanced; defer) |
-| `PR_STATE == OPEN && POST_HEAD == REVIEWED_SHA && MERGE_EXIT != 0` | `failed-without-merge` |
-| `PR_STATE == OPEN && POST_HEAD == REVIEWED_SHA && MERGE_EXIT == 0` | `in_progress` + `reconciliation.needsRepair = true` (the next watcher tick reconciles) |
+| `PR_STATE == MERGED && POST_HEAD == VALIDATED_HEAD` | `succeeded` |
+| `PR_STATE == MERGED && POST_HEAD != VALIDATED_HEAD` | `superseded` (someone else landed a different head) |
+| `PR_STATE == OPEN && POST_HEAD != VALIDATED_HEAD` | `superseded` (head advanced; defer) |
+| `PR_STATE == OPEN && POST_HEAD == VALIDATED_HEAD && MERGE_EXIT != 0` | `failed-without-merge` |
+| `PR_STATE == OPEN && POST_HEAD == VALIDATED_HEAD && MERGE_EXIT == 0` | `in_progress` + `reconciliation.needsRepair = true` (the next watcher tick reconciles) |
 
 Compute the outcome, then append the post-merge reconciliation attempt
 via the AMA-04 audit shim. The pre-merge append above records that this
@@ -220,9 +417,9 @@ writer/data/filesystem failure exits non-zero and must not be treated
 as success:
 
 ```bash
-if [ "$PR_STATE" = "MERGED" ] && [ "$POST_HEAD" = "abc12345abc12345abc12345abc12345abc12345" ]; then
+if [ "$PR_STATE" = "MERGED" ] && [ "$POST_HEAD" = "$VALIDATED_HEAD" ]; then
   OUTCOME=succeeded
-elif [ "$PR_STATE" = "MERGED" ] || [ "$POST_HEAD" != "abc12345abc12345abc12345abc12345abc12345" ]; then
+elif [ "$PR_STATE" = "MERGED" ] || [ "$POST_HEAD" != "$VALIDATED_HEAD" ]; then
   OUTCOME=superseded
 elif [ "$MERGE_EXIT" != "0" ]; then
   OUTCOME=failed-without-merge
@@ -247,7 +444,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
   --hq-root /tmp/ama-test-hqroot \
   --repo acme/myrepo \
   --pr 1234 \
-  --head abc12345abc12345abc12345abc12345abc12345 \
+  --head "$VALIDATED_HEAD" \
   --outcome "$OUTCOME" \
   --attempt-json "$ATTEMPT_JSON" \
   --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -293,7 +490,9 @@ hand-roll the fields here):
 
 ## Don'ts
 
-- Don't `gh pr merge` without `--match-head-commit abc12345abc12345abc12345abc12345abc12345`. Head advance = defer, not merge.
+- Don't `gh pr merge` without `--match-head-commit "$VALIDATED_HEAD"`. Head advance = defer, not merge.
+- Don't defer solely for `stale-review-head` or `mergeStateStatus=BEHIND`; first run the bounded HAM-03 rebase/update-branch recovery.
+- Don't treat a rebased head as reviewed unless stable patch-id/tree-diff equivalence proves only base movement, or HAM terminal-remediation exact-head validation proves the replacement head.
 - Don't terminalize as `succeeded` or `failed-without-merge` on CLI exit code alone. Always re-read GitHub state.
 - Don't retry `gh pr merge` inside this prompt. The next watcher tick re-evaluates from `in_progress` + `needsRepair=true`.
 - Don't write the audit JSON anywhere other than `/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json`, and only do it when `id -un` matches `unknown`. The watcher reads it back from there.

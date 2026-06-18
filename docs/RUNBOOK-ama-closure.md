@@ -313,6 +313,14 @@ The surface `status` is one of five values (SPEC §4.4):
 | `succeeded` | Fresh post-CLI GitHub state proves the authorized head merged. **TERMINAL — STICKY.** The writer refuses to demote this to anything else. | None. Verify the trailers via `git show`. |
 | `failed-without-merge` | A merge attempt was made, GitHub still shows the PR open/unmerged after post-CLI reconciliation, and the failure is not a normal defer/supersede. | Inspect `attempts[].cliExitCode` and the closer worker's stderr via `hq dispatch logs <lrq>`. Common cause: branch protection mismatch — re-check §1 prerequisite. |
 
+HAM-03 stale-head / behind recovery stores its bounded rebase counter in this
+same audit history. The closer initializes the live `Rebase-Attempts` value
+from the maximum prior `attempts[].rebaseAttempts` for the PR/head instead of
+starting from zero on each dispatch, so a watcher retry cannot silently reset
+the cap. `gh pr update-branch --rebase` is retried only for clearly transient
+transport/service failures; stderr that looks like a rebase conflict is the
+only path classified as `unresolvable-rebase-conflict`.
+
 To find recent audit records for a PR:
 
 ```bash

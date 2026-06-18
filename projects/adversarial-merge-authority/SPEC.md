@@ -59,7 +59,7 @@ roles:
       # haven't been opted in.
       enabled: false
       # Which worker class does the closer dispatch use.
-      worker_class: codex  # enum: codex | claude-code | hammer | gemini
+      worker_class: hammer  # enum: codex | claude-code | hammer | gemini
       # Which merge method to use. `rebase` is not supported because
       # AMA requires one canonical landed closing commit for provenance
       # and audit reconciliation; GitHub's rebase path does not produce one.

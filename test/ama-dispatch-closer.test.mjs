@@ -238,13 +238,14 @@ test('cfg.enabled=true + ineligible returns reasons and never spawns hq dispatch
 });
 
 // ---------------------------------------------------------------------------
-// Test 3 — cfg.enabled=true + eligible dispatches with workerClass=codex.
+// Test 3 — cfg.enabled=true + eligible dispatches with default workerClass.
 // ---------------------------------------------------------------------------
 
-test('cfg.enabled=true + eligible dispatches with workerClass=codex by default', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-codex-'));
+test('cfg.enabled=true + eligible dispatches with workerClass=hammer by default', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-default-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: undefined },
     dispatchContext: { rootDir },
   });
   const exec = buildExecMock();
@@ -259,13 +260,13 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
     readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
   });
   assert.equal(result.dispatched, true);
-  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.workerClass, 'hammer');
   assert.equal(result.dispatchId, 'lrq_test_0001');
   assert.equal(exec.calls.length, 1);
   const args = exec.calls[0].args;
   assert.ok(args.includes('--worker-class'));
   const wcIdx = args.indexOf('--worker-class');
-  assert.equal(args[wcIdx + 1], 'codex');
+  assert.equal(args[wcIdx + 1], 'hammer');
   assert.ok(args.includes('--task-kind'));
   assert.equal(args[args.indexOf('--task-kind') + 1], 'merge');
   assert.ok(args.includes('--completion-shape'));
@@ -286,7 +287,7 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes(reviewState.headSha));
   assert.ok(write.captured.body.includes('--squash'));
   assert.ok(write.captured.body.includes('--body-file "$TRAILERS_FILE"'));
-  assert.ok(write.captured.body.includes('Closed-By: codex-closer (adversarial-pipe-mode)'));
+  assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
   assert.ok(write.captured.body.includes('Reviewed-By: claude-reviewer-lacey'));
   assert.ok(write.captured.body.includes('--reviewer claude'));
   assert.ok(write.captured.body.includes('Risk-Class: low'));
@@ -551,6 +552,8 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt', async (t)
   });
   assert.equal(result.dispatched, true);
   assert.equal(result.workerClass, 'hammer');
+  const args = exec.calls[0].args;
+  assert.equal(args[args.indexOf('--worker-class') + 1], 'hammer');
   assert.deepEqual(readPaths, [HAMMER_TEMPLATE_PATH]);
   assert.match(write.captured.body, /remediate, commit, comment, validate, merge/i);
   assert.match(write.captured.body, /Do not request another adversarial review round/);

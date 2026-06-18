@@ -1293,7 +1293,10 @@ export const ENV_ALIASES = {
   },
   'sentinel.codex_compaction.rate_alarm_per_hour': {
     canonical: 'AGENT_OS_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR',
-    aliases: [['HQ_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR', identity]],
+    aliases: [
+      ['HQ_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR', identity],
+      ['SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR', identity],
+    ],
   },
   'sentinel.codex_compaction.finding_dedupe_seconds': {
     canonical: 'AGENT_OS_SENTINEL_CODEX_COMPACTION_FINDING_DEDUPE_SECONDS',

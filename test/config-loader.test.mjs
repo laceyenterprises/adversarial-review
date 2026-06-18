@@ -944,6 +944,14 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
     },
   });
   assert.equal(envCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 6);
+
+  const legacyEnvCfg = loadConfig({
+    topPath: top,
+    env: {
+      SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR: '7',
+    },
+  });
+  assert.equal(legacyEnvCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 7);
 });
 
 test('retention surfaces reject unknown keys with structured path', () => {

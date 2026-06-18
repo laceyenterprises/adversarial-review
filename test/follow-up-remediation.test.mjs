@@ -36,6 +36,7 @@ import {
   resolveHqReplyPath,
   resolveHqRoot,
   resolveLocalRepliesRoot,
+  resolveRemediationDispatchPathForJob,
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,
   remediationWorkerGitIdentity,
@@ -208,6 +209,37 @@ async function withHqDispatchEnv(workDir, run) {
   process.env.HQ_ROOT = hqRoot;
   process.env.HQ_PARENT_SESSION = 'sess_parent_123';
   process.env.HQ_PROJECT = 'adversarial-review';
+
+  try {
+    return await run(hqRoot);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function withRemediationRouteEnv(workDir, envOverrides, run) {
+  const hqRoot = path.join(workDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+
+  const keys = [
+    'AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE',
+    'ADV_WITH_HQ_INTEGRATION',
+    'HQ_ROOT',
+    'HQ_PARENT_SESSION',
+    'HQ_PROJECT',
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+
+  process.env.HQ_ROOT = hqRoot;
+  process.env.HQ_PARENT_SESSION = 'sess_parent_123';
+  process.env.HQ_PROJECT = 'adversarial-review';
+  for (const [key, value] of Object.entries(envOverrides || {})) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 
   try {
     return await run(hqRoot);
@@ -1757,6 +1789,24 @@ test('validateStartupRemediationConfig accepts gemini as the default remediator 
       ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'gemini',
       AGENT_OS_CONFIG_PATH: '/dev/null',
     })
+  );
+});
+
+test('validateStartupRemediationConfig names orchestration_mode agentos in hq env diagnostics', () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-hq-'));
+  assert.throws(
+    () => validateStartupRemediationConfig({
+      AGENT_OS_CONFIG_PATH: '/dev/null',
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PROJECT: 'adversarial-review',
+    }),
+    (err) => {
+      assert.match(err.message, /HQ_PARENT_SESSION/);
+      assert.match(err.message, /orchestration_mode=agentos/);
+      assert.match(err.message, /--with-hq-integration/);
+      return true;
+    },
   );
 });
 
@@ -4735,6 +4785,266 @@ test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ disp
   }
 });
 
+test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push dispatch without legacy flag', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  await withOAuthTestEnv(rootDir, async () => {
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 76,
+      reviewerModel: 'claude',
+      linearTicketId: 'LAC-276',
+      reviewBody: '## Summary\nRoute this through agentos orchestration.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: false,
+    });
+
+    await withRemediationRouteEnv(rootDir, {
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      ADV_WITH_HQ_INTEGRATION: undefined,
+    }, async () => {
+      let spawnCalls = 0;
+      const commands = [];
+      const result = await consumeNextFollowUpJob({
+        rootDir,
+        promptTemplate: 'You are a remediation worker.',
+        now: () => '2026-04-21T10:00:00.000Z',
+        execFileImpl: async (command, args) => {
+          commands.push([command, ...args]);
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'codex/fix-pr-76', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
+          }
+          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            return {
+              stdout: JSON.stringify({
+                status: 'queued',
+                workspacePath: path.join(process.env.HQ_ROOT, 'workers', 'lrq_aom03_agentos'),
+              }),
+              stderr: '',
+            };
+          }
+          if (command === 'hq' && args[0] === 'dispatch') {
+            return {
+              stdout: JSON.stringify({
+                launchRequestId: 'lrq_aom03_agentos',
+                dispatchId: 'dispatch_aom03_agentos',
+              }),
+              stderr: '',
+            };
+          }
+          return { stdout: '', stderr: '' };
+        },
+        spawnImpl: () => {
+          spawnCalls += 1;
+          return { pid: 7600, unref() {} };
+        },
+      });
+
+      const dispatchCommand = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && !['status', 'cancel'].includes(entry[2]));
+      assert.equal(result.consumed, true);
+      assert.equal(spawnCalls, 0);
+      assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
+      assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
+      assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
+      assert.ok(dispatchCommand, 'expected hq dispatch command');
+      assert.equal(dispatchCommand.includes('--completion-shape'), true);
+      assert.equal(dispatchCommand[dispatchCommand.indexOf('--completion-shape') + 1], 'branch-push');
+    });
+  });
+});
+
+test('consumeNextFollowUpJob keeps native remediation on the bare spawner without legacy flag', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  await withOAuthTestEnv(rootDir, async () => {
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 77,
+      reviewerModel: 'claude',
+      linearTicketId: 'LAC-277',
+      reviewBody: '## Summary\nKeep this native remediation bare.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: false,
+    });
+
+    await withRemediationRouteEnv(rootDir, {
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native',
+      ADV_WITH_HQ_INTEGRATION: undefined,
+    }, async () => {
+      let spawnCalls = 0;
+      const commands = [];
+      const result = await consumeNextFollowUpJob({
+        rootDir,
+        promptTemplate: 'You are a remediation worker.',
+        now: () => '2026-04-21T10:00:00.000Z',
+        execFileImpl: async (command, args) => {
+          commands.push([command, ...args]);
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
+          }
+          if (command === 'git' && args[0] === 'clone') {
+            mkdirSync(path.join(args[2], '.git'), { recursive: true });
+            return { stdout: '', stderr: '' };
+          }
+          return { stdout: '', stderr: '' };
+        },
+        spawnImpl: () => {
+          spawnCalls += 1;
+          return { pid: 7700, unref() {} };
+        },
+      });
+
+      assert.equal(result.consumed, true);
+      assert.equal(spawnCalls, 1);
+      assert.equal(result.job.remediationPlan.dispatchPath, 'bare');
+      assert.equal(result.job.remediationWorker.dispatchMode, undefined);
+      assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch'), false);
+    });
+  });
+});
+
+test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration mode', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  await withOAuthTestEnv(rootDir, async () => {
+    createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 78,
+      reviewerModel: 'claude',
+      linearTicketId: 'LAC-278',
+      reviewBody: '## Summary\nNative mode with legacy HQ override.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T08:00:00.000Z',
+      critical: false,
+    });
+
+    await withRemediationRouteEnv(rootDir, {
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native',
+      ADV_WITH_HQ_INTEGRATION: '1',
+    }, async () => {
+      const commands = [];
+      const result = await consumeNextFollowUpJob({
+        rootDir,
+        promptTemplate: 'You are a remediation worker.',
+        now: () => '2026-04-21T10:00:00.000Z',
+        execFileImpl: async (command, args) => {
+          commands.push([command, ...args]);
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'codex/fix-pr-78', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
+          }
+          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            return {
+              stdout: JSON.stringify({
+                status: 'queued',
+                workspacePath: path.join(process.env.HQ_ROOT, 'workers', 'lrq_aom03_override'),
+              }),
+              stderr: '',
+            };
+          }
+          if (command === 'hq' && args[0] === 'dispatch') {
+            return {
+              stdout: JSON.stringify({
+                launchRequestId: 'lrq_aom03_override',
+                dispatchId: 'dispatch_aom03_override',
+              }),
+              stderr: '',
+            };
+          }
+          return { stdout: '', stderr: '' };
+        },
+        spawnImpl: () => {
+          throw new Error('legacy HQ override must not use the bare spawner');
+        },
+      });
+
+      const dispatchCommand = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && !['status', 'cancel'].includes(entry[2]));
+      assert.equal(result.consumed, true);
+      assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
+      assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
+      assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
+      assert.ok(dispatchCommand, 'expected hq dispatch command');
+      assert.equal(dispatchCommand[dispatchCommand.indexOf('--completion-shape') + 1], 'branch-push');
+    });
+  });
+});
+
+test('resolveRemediationDispatchPathForJob keeps in-progress jobs on their claimed path across mode flips', () => {
+  assert.equal(
+    resolveRemediationDispatchPathForJob(
+      { remediationPlan: { dispatchPath: 'bare' } },
+      { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos' },
+    ),
+    'bare',
+  );
+  assert.equal(
+    resolveRemediationDispatchPathForJob(
+      { remediationPlan: { dispatchPath: 'hq' } },
+      { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native' },
+    ),
+    'hq',
+  );
+});
+
+test('resolveRemediationDispatchPathForJob keeps legacy spawned bare jobs on bare path', () => {
+  assert.equal(
+    resolveRemediationDispatchPathForJob(
+      {
+        remediationPlan: {},
+        remediationWorker: {
+          state: 'spawned',
+          pid: 8123,
+          workspaceDir: '/tmp/follow-up-workspaces/job-legacy-bare',
+          promptPath: '/tmp/follow-up-workspaces/job-legacy-bare/prompt.md',
+        },
+      },
+      {
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      },
+    ),
+    'bare',
+  );
+});
+
+test('resolveRemediationDispatchPathForJob tags invalid orchestration mode as remediation config error', () => {
+  assert.throws(
+    () => resolveRemediationDispatchPathForJob(
+      { remediationPlan: {} },
+      {
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'bogus',
+      },
+    ),
+    (err) => {
+      assert.equal(err.name, 'AgentOSConfigError');
+      assert.equal(err.isRemediationConfigError, true);
+      assert.match(err.message, /AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE/);
+      assert.match(err.message, /bogus/);
+      return true;
+    },
+  );
+});
+
 test('reconcileFollowUpJob cancels an active HQ dispatch before stopping on PR lifecycle closure', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'hq');
@@ -5411,6 +5721,64 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
     if (prevDefaultRemediator === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
     else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = prevDefaultRemediator;
   }
+});
+
+test('consumeNextFollowUpJob requeues a claimed job when orchestration_mode is invalid', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 79,
+    reviewerModel: 'claude',
+    builderTag: 'codex',
+    linearTicketId: 'LAC-279',
+    reviewBody: '## Summary\nRoute with a config typo.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: false,
+  });
+
+  await withRemediationRouteEnv(rootDir, {
+    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'bogus',
+    ADV_WITH_HQ_INTEGRATION: undefined,
+  }, async () => {
+    await assert.rejects(
+      () => consumeNextFollowUpJob({
+        rootDir,
+        spawnImpl: () => { throw new Error('worker should not have spawned'); },
+        now: () => '2026-04-21T10:00:00.000Z',
+        promptTemplate: 'Remediation prompt template.',
+        resolvePRLifecycleImpl: async () => null,
+      }),
+      (err) => {
+        assert.match(err.message, /AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE/);
+        assert.match(err.message, /bogus/);
+        assert.equal(err.followUpJobRequeued, true);
+        return true;
+      }
+    );
+  });
+
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  const stranded = readdirSync(inProgressDir).filter((name) => name.endsWith('.json'));
+  assert.deepEqual(stranded, [], 'invalid orchestration mode must not leave a job stranded in in-progress/');
+
+  const failedDir = getFollowUpJobDir(rootDir, 'failed');
+  const failedFiles = readdirSync(failedDir).filter((name) => name.endsWith('.json'));
+  assert.equal(failedFiles.length, 0, 'invalid orchestration mode is recoverable and must not terminal-fail the job');
+
+  const pendingDir = getFollowUpJobDir(rootDir, 'pending');
+  const pendingFiles = readdirSync(pendingDir).filter((name) => name.endsWith('.json'));
+  assert.equal(pendingFiles.length, 1, 'pending/ should contain the requeued orchestration-mode-blocked job');
+
+  const pendingJob = JSON.parse(readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8'));
+  assert.equal(pendingJob.status, 'pending');
+  assert.equal(pendingJob.failure, null);
+  assert.equal(pendingJob.remediationPlan.currentRound, 0);
+  assert.deepEqual(pendingJob.remediationPlan.rounds, []);
+  assert.equal(pendingJob.lastConfigValidationFailure.code, 'config-validation-failure');
+  assert.match(pendingJob.lastConfigValidationFailure.message, /AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE/);
+  assert.match(pendingJob.lastConfigValidationFailure.message, /bogus/);
 });
 
 test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre-flight throws', async () => {

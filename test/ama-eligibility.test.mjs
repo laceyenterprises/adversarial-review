@@ -112,6 +112,37 @@ test('eligible: canonical rebase coverage clears stale-review-head', () => {
   );
 });
 
+test('not eligible: empty patch-id rebase coverage keeps stale-review-head', () => {
+  const reviewedHead = '11111111';
+  const currentHead = '22222222';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { headSha: reviewedHead },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    rebaseReviewCoverage: {
+      active: true,
+      reviewedHead,
+      currentHead,
+      evidence: 'content_equivalent_rebased_head',
+      contentEquivalence: {
+        equivalent: true,
+        reviewedCount: 0,
+        rebasedCount: 0,
+        dropped: [],
+        added: [],
+      },
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('stale-review-head'));
+  assert.equal(
+    result.trace.headMatch.rebaseReviewCoverage.checks.contentEquivalenceNonEmpty,
+    false,
+  );
+});
+
 test('not eligible: rebase coverage ignores legacy enabled and marker aliases', () => {
   const reviewedHead = '11111111';
   const currentHead = '22222222';

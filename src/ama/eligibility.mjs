@@ -497,6 +497,8 @@ function validateRebaseReviewCoverageEvidence(
   const coveredCurrentHead = String(evidence?.currentHead || '').trim();
   const marker = String(evidence?.evidence || '').trim();
   const contentEquivalence = evidence?.contentEquivalence || null;
+  const reviewedPatchIdCount = Number(contentEquivalence?.reviewedCount);
+  const rebasedPatchIdCount = Number(contentEquivalence?.rebasedCount);
   const checks = {
     active,
     reviewedHead:
@@ -507,6 +509,16 @@ function validateRebaseReviewCoverageEvidence(
       && coveredCurrentHead === String(currentHead || '').trim(),
     marker: marker === 'content_equivalent_rebased_head',
     contentEquivalent: contentEquivalence?.equivalent === true,
+    contentEquivalenceNonEmpty:
+      Number.isSafeInteger(reviewedPatchIdCount)
+      && Number.isSafeInteger(rebasedPatchIdCount)
+      && reviewedPatchIdCount > 0
+      && rebasedPatchIdCount > 0
+      && reviewedPatchIdCount === rebasedPatchIdCount
+      && Array.isArray(contentEquivalence?.dropped)
+      && contentEquivalence.dropped.length === 0
+      && Array.isArray(contentEquivalence?.added)
+      && contentEquivalence.added.length === 0,
   };
   const ok = Object.values(checks).every(Boolean);
   return {

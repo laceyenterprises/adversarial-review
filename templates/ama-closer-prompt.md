@@ -185,16 +185,35 @@ assess_rebase_equivalence() {
     > "$AMA_TMP_DIR/ama-rebase-assessment.json"
 }
 
+write_non_empty_patch_ids() {
+  patch_id_label="$1"
+  diff_path="$2"
+  out_path="$3"
+  if ! (set -o pipefail; git patch-id --stable < "$diff_path" | awk '{print $1}' | sort > "$out_path"); then
+    echo "HAM-03 hard-blocker: failed to derive $patch_id_label patch-id evidence" >&2
+    return 1
+  fi
+  if [ ! -s "$out_path" ]; then
+    echo "HAM-03 hard-blocker: empty $patch_id_label patch-id evidence; exact-head validation is required" >&2
+    return 1
+  fi
+  return 0
+}
+
 if needs_rebase_recovery; then
   reviewed_base_enc=$(printf '%s' "$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")" | jq -sRr @uri)
-  gh api \
+  if ! gh api \
     -H 'Accept: application/vnd.github.v3.diff' \
     "repos/<<REPO>>/compare/$reviewed_base_enc...<<REVIEWED_SHA>>" \
-    > "$AMA_TMP_DIR/ama-reviewed.diff"
-  git patch-id --stable < "$AMA_TMP_DIR/ama-reviewed.diff" | awk '{print $1}' | sort > "$AMA_TMP_DIR/ama-reviewed.patchids"
+    > "$AMA_TMP_DIR/ama-reviewed.diff"; then
+    HARD_BLOCKER_REASON=reviewed-diff-fetch-failure
+  fi
+  if [ -z "$HARD_BLOCKER_REASON" ] && ! write_non_empty_patch_ids reviewed "$AMA_TMP_DIR/ama-reviewed.diff" "$AMA_TMP_DIR/ama-reviewed.patchids"; then
+    HARD_BLOCKER_REASON=reviewed-patch-id-evidence-unavailable
+  fi
 fi
 
-while needs_rebase_recovery; do
+while [ -z "$HARD_BLOCKER_REASON" ] && needs_rebase_recovery; do
   if [ "$REBASE_ATTEMPTS" -ge "$AMA_REBASE_ATTEMPT_CAP" ]; then
     echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($REBASE_ATTEMPTS/$AMA_REBASE_ATTEMPT_CAP)" >&2
     HARD_BLOCKER_REASON=rebase-attempt-cap-exceeded
@@ -219,8 +238,14 @@ while needs_rebase_recovery; do
 
   gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "$AMA_TMP_DIR/ama-pr.json"
   VALIDATED_HEAD=$(jq -r '.headRefOid' "$AMA_TMP_DIR/ama-pr.json")
-  gh pr diff <<PR_URL>> --patch > "$AMA_TMP_DIR/ama-rebased.diff"
-  git patch-id --stable < "$AMA_TMP_DIR/ama-rebased.diff" | awk '{print $1}' | sort > "$AMA_TMP_DIR/ama-rebased.patchids"
+  if ! gh pr diff <<PR_URL>> --patch > "$AMA_TMP_DIR/ama-rebased.diff"; then
+    HARD_BLOCKER_REASON=rebased-diff-fetch-failure
+    break
+  fi
+  if ! write_non_empty_patch_ids rebased "$AMA_TMP_DIR/ama-rebased.diff" "$AMA_TMP_DIR/ama-rebased.patchids"; then
+    HARD_BLOCKER_REASON=rebased-patch-id-evidence-unavailable
+    break
+  fi
 
   assess_rebase_equivalence
   if jq -e '.action == "exact-head-validation-required" and .reason == "rebased-content-not-review-equivalent"' "$AMA_TMP_DIR/ama-rebase-assessment.json" >/dev/null; then

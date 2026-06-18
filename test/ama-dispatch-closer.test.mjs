@@ -654,6 +654,11 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /REBASE_UPDATE_BRANCH_RETRY_CAP="\$\{REBASE_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
   assert.match(prompt, /ama-rebase-authority\.mjs/);
   assert.match(prompt, /assess_rebase_equivalence/);
+  assert.match(prompt, /write_non_empty_patch_ids/);
+  assert.match(prompt, /set -o pipefail; git patch-id --stable/);
+  assert.match(prompt, /empty \$patch_id_label patch-id evidence/);
+  assert.match(prompt, /HARD_BLOCKER_REASON=reviewed-diff-fetch-failure/);
+  assert.match(prompt, /HARD_BLOCKER_REASON=rebased-diff-fetch-failure/);
   assert.doesNotMatch(prompt, /@SECURITY\.md/);
   assert.match(prompt, /is_update_branch_conflict/);
   assert.match(prompt, /is_update_branch_transient/);

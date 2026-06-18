@@ -253,6 +253,83 @@ function schemaV1() {
           acp_state_home: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
+      // OAuth broker watchdog tuning. Mirrors the Python authority
+      // (`oauth_broker.watchdog` in
+      // platform/agent-os-config/src/agent_os_config/__init__.py). The Node
+      // loader does not consume these values at runtime, but strict CFG parity
+      // (LOADER-CONTRACT §2) requires every checked-in config.yaml key to parse
+      // under every sibling loader. The first six knobs landed in PR-C1
+      // (e04c7d61); the port-forward-wedge tier (broker_container_name,
+      // docker_bin, broker_internal_healthz_url,
+      // portforward_wedge_restart_max_attempts) landed in #1958, both
+      // Python-only — this section heals the drift.
+      oauth_broker: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          watchdog: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              health_poll_interval_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 30.0,
+                __min: 1.0,
+                __max: 3600.0,
+              },
+              health_probe_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 4.0,
+                __min: 0.5,
+                __max: 600.0,
+              },
+              recovery_action_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 20.0,
+                __min: 1.0,
+                __max: 1800.0,
+              },
+              max_recovery_attempts_per_outage: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 1,
+                __max: 100,
+              },
+              recovery_backoff_initial_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 5.0,
+                __min: 0.0,
+                __max: 3600.0,
+              },
+              recovery_backoff_max_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 30.0,
+                __min: 0.0,
+                __max: 3600.0,
+              },
+              // Port-forward-wedge remediation tier (#1958).
+              broker_container_name: {
+                __type: TYPE_STRING,
+                __default: 'litellm-oauth-broker-1',
+              },
+              docker_bin: {
+                __type: TYPE_STRING,
+                __default: 'docker',
+              },
+              broker_internal_healthz_url: {
+                __type: TYPE_STRING,
+                __default: 'http://127.0.0.1:4002/healthz',
+              },
+              portforward_wedge_restart_max_attempts: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 1,
+                __max: 20,
+              },
+            },
+          },
+        },
+      },
       governance: {
         __type: TYPE_DICT,
         __strict: true,

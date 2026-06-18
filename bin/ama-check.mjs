@@ -138,6 +138,11 @@ Inputs:
   --ham-commit    JSON from \`gh api repos/<owner>/<repo>/commits/<head>\`;
                   required with --ham-terminal-remediation so commit parent
                   and trailers are verified from GitHub, not self-attested.
+  --rebase-assessment
+                  optional JSON from ama-rebase-authority.mjs assess. When it
+                  proves content_equivalent_rebased_head for the live head, it
+                  satisfies only the head-match gate while all other gates still
+                  run against fresh state.
 
 Emits:
   JSON object on stdout: { eligible: bool, reasons: string[], trace: {...} }
@@ -162,6 +167,7 @@ function parseInputs(argv) {
       'review-cycle-exhausted': { type: 'string' },
       'ham-terminal-remediation': { type: 'string' },
       'ham-commit': { type: 'string' },
+      'rebase-assessment': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     strict: true,
@@ -463,6 +469,7 @@ function main(argv = process.argv.slice(2)) {
   const prMetadata = buildPrMetadata({ prJson, protectionJson });
   let hamTerminalRemediation = null;
   let hamTerminalRemediationGroundTruth = null;
+  let rebaseReviewCoverage = null;
   if (args['ham-terminal-remediation']) {
     if (!args['ham-commit']) {
       process.stderr.write('error: --ham-commit is required with --ham-terminal-remediation\n');
@@ -479,9 +486,27 @@ function main(argv = process.argv.slice(2)) {
       return 1;
     }
   }
+  if (args['rebase-assessment']) {
+    try {
+      const assessment = loadJson(args['rebase-assessment']);
+      rebaseReviewCoverage = {
+        active:
+          assessment?.action === 'merge'
+          && assessment?.evidence === 'content_equivalent_rebased_head',
+        reviewedHead: assessment?.reviewedHead || args['reviewed-sha'],
+        currentHead: assessment?.currentHead || prJson?.headRefOid,
+        evidence: assessment?.evidence || null,
+        contentEquivalence: assessment?.contentEquivalence || null,
+      };
+    } catch (err) {
+      process.stderr.write(`error: failed to load rebase assessment input: ${err.message}\n`);
+      return 1;
+    }
+  }
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     hamTerminalRemediation,
     hamTerminalRemediationGroundTruth,
+    rebaseReviewCoverage,
   });
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return 0;

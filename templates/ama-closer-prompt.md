@@ -240,9 +240,10 @@ while needs_rebase_recovery; do
     --timeline /tmp/ama-timeline.json \
     --repo <<REPO>> \
     --root-dir <<ROOT_DIR>> \
-    --reviewed-sha "$VALIDATED_HEAD" \
+    --reviewed-sha <<REVIEWED_SHA>> \
     --reviewer <<REVIEWER>> \
     --risk-class <<RISK_CLASS>> \
+    --rebase-assessment /tmp/ama-rebase-assessment.json \
     --review-cycle-exhausted <<REVIEW_CYCLE_EXHAUSTED>> \
     > /tmp/ama-verdict.json
   HEAD_MATCH_EVIDENCE="content_equivalent_rebased_head"

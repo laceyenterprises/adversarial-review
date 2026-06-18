@@ -659,6 +659,11 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /is_update_branch_transient/);
   assert.match(prompt, /HARD_BLOCKER_REASON=update-branch-failure/);
   assert.match(prompt, /content_equivalent_rebased_head/);
+  assert.match(prompt, /--rebase-assessment \/tmp\/ama-rebase-assessment\.json/);
+  assert.match(
+    prompt,
+    /ama-check\.mjs[\s\S]*--reviewed-sha abc12345abc12345abc12345abc12345abc12345[\s\S]*--rebase-assessment \/tmp\/ama-rebase-assessment\.json/,
+  );
   assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
 });

@@ -144,6 +144,7 @@ const ROLE_FALLBACK_CLASSES = [
 // family. Operators can still pass
 // `--worker-class` at the call site to escape this constraint.
 const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'claude-code', 'merge-agent'];
+export const DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS = 'hammer';
 const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
 const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
 const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];
@@ -713,7 +714,7 @@ function schemaV1() {
                   enabled: { __type: TYPE_BOOL, __default: false },
                   worker_class: {
                     __type: TYPE_STRING,
-                    __default: 'hammer',
+                    __default: DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
                     __enum: ['codex', 'claude-code', 'hammer', 'gemini'],
                   },
                   merge_method: {
@@ -2152,7 +2153,7 @@ export class AgentOSConfig {
       enabled: this.get('roles.adversarial.merge_authority.enabled', false),
       workerClass: this.get(
         'roles.adversarial.merge_authority.worker_class',
-        'hammer',
+        DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
       ),
       mergeMethod: this.get(
         'roles.adversarial.merge_authority.merge_method',

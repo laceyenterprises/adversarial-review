@@ -12,7 +12,10 @@ import {
   maybeDispatchAmaCloser,
   substituteTemplate,
 } from '../src/ama/dispatch-closer.mjs';
-import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
+import {
+  DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
+  ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE,
+} from '../src/config-loader.mjs';
 import {
   amaAuditFilePath,
   amaAuditTraceRef,
@@ -238,15 +241,17 @@ test('cfg.enabled=true + ineligible returns reasons and never spawns hq dispatch
 });
 
 // ---------------------------------------------------------------------------
-// Test 3 — cfg.enabled=true + eligible dispatches with workerClass=codex.
+// Test 3 — cfg.enabled=true + eligible dispatches with the AMA default worker.
 // ---------------------------------------------------------------------------
 
-test('cfg.enabled=true + eligible dispatches with workerClass=codex by default', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-codex-'));
+test('cfg.enabled=true + eligible dispatches with workerClass=hammer by default', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-default-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
-    dispatchContext: { rootDir },
+    cfg: { workerClass: undefined },
+    dispatchContext: { rootDir, templatePath: null },
   });
+  const readPaths = [];
   const exec = buildExecMock();
   const write = buildWriteMock();
   const result = await maybeDispatchAmaCloser({
@@ -256,16 +261,20 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
     dispatchContext,
     execFileImpl: exec.impl,
     writeFileImpl: write.impl,
-    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+    readTemplateImpl: (path) => {
+      readPaths.push(path);
+      return readFileSync(path, 'utf8');
+    },
   });
   assert.equal(result.dispatched, true);
-  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.workerClass, DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS);
   assert.equal(result.dispatchId, 'lrq_test_0001');
   assert.equal(exec.calls.length, 1);
   const args = exec.calls[0].args;
   assert.ok(args.includes('--worker-class'));
   const wcIdx = args.indexOf('--worker-class');
-  assert.equal(args[wcIdx + 1], 'codex');
+  assert.equal(args[wcIdx + 1], DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS);
+  assert.deepEqual(readPaths, [HAMMER_TEMPLATE_PATH]);
   assert.ok(args.includes('--task-kind'));
   assert.equal(args[args.indexOf('--task-kind') + 1], 'merge');
   assert.ok(args.includes('--completion-shape'));
@@ -286,12 +295,13 @@ test('cfg.enabled=true + eligible dispatches with workerClass=codex by default',
   assert.ok(write.captured.body.includes(reviewState.headSha));
   assert.ok(write.captured.body.includes('--squash'));
   assert.ok(write.captured.body.includes('--body-file "$TRAILERS_FILE"'));
-  assert.ok(write.captured.body.includes('Closed-By: codex-closer (adversarial-pipe-mode)'));
+  assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
   assert.ok(write.captured.body.includes('Reviewed-By: claude-reviewer-lacey'));
   assert.ok(write.captured.body.includes('--reviewer claude'));
   assert.ok(write.captured.body.includes('Risk-Class: low'));
   assert.ok(write.captured.body.includes('Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345'));
-  assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
+  assert.match(write.captured.body, /Do not request another adversarial review round/);
+  assert.match(write.captured.body, /ham_terminal_remediation_validated/);
 });
 
 test('eligible agent-os dispatch does not add agent-os as a duplicate workspace repo', async (t) => {

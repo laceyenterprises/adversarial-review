@@ -4,7 +4,7 @@
  * The watcher's settled-success hook calls `maybeDispatchAmaCloser`
  * BEFORE the existing merge-agent dispatch. When AMA is enabled and the
  * canonical eligibility predicate from SPEC §4.2 returns `eligible:true`,
- * this module dispatches a closer worker (`codex` or
+ * this module dispatches a closer worker (`hammer` by default or
  * `cfg.workerClass`) via `hq dispatch` and returns
  * `{ dispatched: true, lrqId, dispatchId }`. The caller skips the
  * merge-agent dispatch on that tick.
@@ -32,7 +32,10 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
+import {
+  DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
+  ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE,
+} from '../config-loader.mjs';
 import {
   amaAuditFilePath,
   amaAuditTraceRef,
@@ -592,7 +595,9 @@ export async function maybeDispatchAmaCloser({
 
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
-  const workerClass = String(cfg.workerClass || 'codex');
+  const workerClass = String(
+    cfg.workerClass || DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
+  );
   const templatePath = dispatchContext.templatePath || (
     workerClass === 'hammer' ? HAMMER_TEMPLATE_PATH : TEMPLATE_PATH
   );

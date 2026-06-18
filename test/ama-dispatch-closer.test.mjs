@@ -551,6 +551,10 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt', async (t)
   });
   assert.equal(result.dispatched, true);
   assert.equal(result.workerClass, 'hammer');
+  const args = exec.calls[0].args;
+  assert.equal(args[args.indexOf('--worker-class') + 1], 'hammer');
+  assert.equal(args[args.indexOf('--task-kind') + 1], 'merge');
+  assert.equal(args[args.indexOf('--completion-shape') + 1], 'decision-only');
   assert.deepEqual(readPaths, [HAMMER_TEMPLATE_PATH]);
   assert.match(write.captured.body, /remediate, commit, comment, validate, merge/i);
   assert.match(write.captured.body, /Do not request another adversarial review round/);

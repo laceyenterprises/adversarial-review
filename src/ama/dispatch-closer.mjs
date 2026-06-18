@@ -888,7 +888,7 @@ export async function maybeDispatchAmaCloser({
   // `hq dispatch` args mirror the existing merge-agent dispatch (see
   // src/follow-up-merge-agent.mjs around line 3866). Differences:
   //
-  //   - `--worker-class` reads from cfg (default `codex`); merge-agent
+  //   - `--worker-class` reads from cfg (default `hammer`); merge-agent
   //     uses the `merge-agent` resolver.
   //   - `--task-kind merge` matches merge-agent.
   //   - `--completion-shape decision-only` because the closer worker

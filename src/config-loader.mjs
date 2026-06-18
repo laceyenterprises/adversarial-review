@@ -713,7 +713,7 @@ function schemaV1() {
                   enabled: { __type: TYPE_BOOL, __default: false },
                   worker_class: {
                     __type: TYPE_STRING,
-                    __default: 'codex',
+                    __default: 'hammer',
                     __enum: ['codex', 'claude-code', 'hammer', 'gemini'],
                   },
                   merge_method: {
@@ -2152,7 +2152,7 @@ export class AgentOSConfig {
       enabled: this.get('roles.adversarial.merge_authority.enabled', false),
       workerClass: this.get(
         'roles.adversarial.merge_authority.worker_class',
-        'codex',
+        'hammer',
       ),
       mergeMethod: this.get(
         'roles.adversarial.merge_authority.merge_method',

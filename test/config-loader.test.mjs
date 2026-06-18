@@ -2705,6 +2705,46 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
   }
 });
 
+test('AMA merge_authority worker_class defaults to hammer in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            enabled: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'hammer');
+    assert.equal(cfg.getMergeAuthorityConfig().workerClass, 'hammer');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+for (const workerClass of ['codex', 'claude-code']) {
+  test(`AMA merge_authority still accepts ${workerClass} as closer worker class in Node loader`, () => {
+    const tmp = freshTmp();
+    try {
+      const top = join(tmp, 'config.yaml');
+      writeFile(top, `
+        version: 1
+        roles:
+          adversarial:
+            merge_authority:
+              worker_class: ${workerClass}
+      `);
+      const cfg = loadConfig({ topPath: top, env: {} });
+      assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), workerClass);
+      assert.equal(cfg.getMergeAuthorityConfig().workerClass, workerClass);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
 test('AMA merge_authority accepts hammer as closer worker class in Node loader', () => {
   const tmp = freshTmp();
   try {
@@ -2857,7 +2897,7 @@ test('AMA getMergeAuthorityConfig returns the camelCased subtree with defaults i
     const cfg = loadConfig({ topPath: top, env: {} });
     const ma = cfg.getMergeAuthorityConfig();
     assert.equal(ma.enabled, false);
-    assert.equal(ma.workerClass, 'codex');
+    assert.equal(ma.workerClass, 'hammer');
     assert.equal(ma.mergeMethod, 'squash');
     assert.deepEqual(ma.eligibility.riskClasses, ['low']);
     assert.deepEqual(
@@ -2916,7 +2956,7 @@ test('AMA getMergeAuthorityConfig reflects the canonical env override', () => {
     const ma = cfg.getMergeAuthorityConfig();
     assert.equal(ma.enabled, true);
     // Defaults for everything else remain untouched.
-    assert.equal(ma.workerClass, 'codex');
+    assert.equal(ma.workerClass, 'hammer');
     assert.equal(ma.mergeMethod, 'squash');
   } finally {
     rmSync(tmp, { recursive: true, force: true });

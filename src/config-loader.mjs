@@ -849,6 +849,61 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          spec_drift: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              cycle_interval_seconds: { __type: TYPE_INT, __default: 86400, __min: 1 },
+            },
+          },
+          deploy_checkout: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              repo_path: { __type: TYPE_STRING, __default: '/Users/airlock/agent-os' },
+              scan_interval_seconds: { __type: TYPE_INT, __default: 60, __min: 1 },
+              page_dedupe_seconds: { __type: TYPE_INT, __default: 300, __min: 1 },
+              worker_identity_emails: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: [
+                  'claude-code@laceyenterprises.com',
+                  'clio-agent@laceyenterprises.com',
+                  'codex@laceyenterprises.com',
+                  'merge-agent@laceyenterprises.com',
+                ],
+              },
+            },
+          },
+          codex_compaction: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              rate_alarm_per_hour: { __type: TYPE_INT, __default: 3, __min: 1 },
+              finding_dedupe_seconds: { __type: TYPE_INT, __default: 86400, __min: 1 },
+            },
+          },
+          convergence_stall: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              observed_repos: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: ['laceyenterprises/agent-os', 'laceyenterprises/adversarial-review'],
+              },
+              commit_window_seconds: { __type: TYPE_INT, __default: 3600, __min: 1 },
+              min_commits: { __type: TYPE_INT, __default: 3, __min: 1 },
+              file_fetch_budget_per_cycle: { __type: TYPE_INT, __default: 20, __min: 1 },
+              finding_dedupe_seconds: { __type: TYPE_INT, __default: 900, __min: 1 },
+              repo_backoff_seconds: { __type: TYPE_INT, __default: 60, __min: 1 },
+              observed_worker_classes: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: ['codex', 'claude-code', 'clio-agent'],
+              },
+            },
+          },
           disk_headroom: {
             __type: TYPE_DICT,
             __strict: true,
@@ -1215,6 +1270,62 @@ export const ENV_ALIASES = {
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',
     aliases: [],
+  },
+  'sentinel.spec_drift.cycle_interval_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_SPEC_DRIFT_CYCLE_INTERVAL_SECONDS',
+    aliases: [['HQ_SENTINEL_SPEC_DRIFT_CYCLE_INTERVAL_SECONDS', identity]],
+  },
+  'sentinel.deploy_checkout.repo_path': {
+    canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_REPO_PATH',
+    aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_REPO_PATH', identity]],
+  },
+  'sentinel.deploy_checkout.scan_interval_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_SCAN_INTERVAL_SECONDS',
+    aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_SCAN_INTERVAL_SECONDS', identity]],
+  },
+  'sentinel.deploy_checkout.page_dedupe_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_PAGE_DEDUPE_SECONDS',
+    aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_PAGE_DEDUPE_SECONDS', identity]],
+  },
+  'sentinel.deploy_checkout.worker_identity_emails': {
+    canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_WORKER_IDENTITY_EMAILS',
+    aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_WORKER_IDENTITY_EMAILS', identity]],
+  },
+  'sentinel.codex_compaction.rate_alarm_per_hour': {
+    canonical: 'AGENT_OS_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR',
+    aliases: [['HQ_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR', identity]],
+  },
+  'sentinel.codex_compaction.finding_dedupe_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_CODEX_COMPACTION_FINDING_DEDUPE_SECONDS',
+    aliases: [['HQ_SENTINEL_CODEX_COMPACTION_FINDING_DEDUPE_SECONDS', identity]],
+  },
+  'sentinel.convergence_stall.observed_repos': {
+    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_OBSERVED_REPOS',
+    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_OBSERVED_REPOS', identity]],
+  },
+  'sentinel.convergence_stall.commit_window_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_COMMIT_WINDOW_SECONDS',
+    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_COMMIT_WINDOW_SECONDS', identity]],
+  },
+  'sentinel.convergence_stall.min_commits': {
+    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_MIN_COMMITS',
+    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_MIN_COMMITS', identity]],
+  },
+  'sentinel.convergence_stall.file_fetch_budget_per_cycle': {
+    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_FILE_FETCH_BUDGET_PER_CYCLE',
+    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_FILE_FETCH_BUDGET_PER_CYCLE', identity]],
+  },
+  'sentinel.convergence_stall.finding_dedupe_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_FINDING_DEDUPE_SECONDS',
+    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_FINDING_DEDUPE_SECONDS', identity]],
+  },
+  'sentinel.convergence_stall.repo_backoff_seconds': {
+    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_REPO_BACKOFF_SECONDS',
+    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_REPO_BACKOFF_SECONDS', identity]],
+  },
+  'sentinel.convergence_stall.observed_worker_classes': {
+    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_OBSERVED_WORKER_CLASSES',
+    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_OBSERVED_WORKER_CLASSES', identity]],
   },
   'sentinel.detectors.litellm_routing_tier_outage.enabled': {
     canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_ENABLED',

@@ -918,6 +918,34 @@ test('top-level sentinel disk headroom loads through strict Node schema', () => 
   }
 });
 
+test('checked-in top-level sentinel detector config loads through strict Node schema', () => {
+  const top = join(REPO_ROOT, '..', '..', 'config.yaml');
+  const cfg = loadConfig({ topPath: top, env: {} });
+
+  assert.equal(cfg.get('sentinel.spec_drift.cycle_interval_seconds'), 86400);
+  assert.equal(cfg.get('sentinel.deploy_checkout.repo_path'), '/Users/airlock/agent-os');
+  assert.deepEqual(cfg.get('sentinel.deploy_checkout.worker_identity_emails'), [
+    'claude-code@laceyenterprises.com',
+    'clio-agent@laceyenterprises.com',
+    'codex@laceyenterprises.com',
+    'merge-agent@laceyenterprises.com',
+  ]);
+  assert.equal(cfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 3);
+  assert.deepEqual(cfg.get('sentinel.convergence_stall.observed_worker_classes'), [
+    'codex',
+    'claude-code',
+    'clio-agent',
+  ]);
+
+  const envCfg = loadConfig({
+    topPath: top,
+    env: {
+      HQ_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR: '6',
+    },
+  });
+  assert.equal(envCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 6);
+});
+
 test('retention surfaces reject unknown keys with structured path', () => {
   const tmp = freshTmp();
   try {

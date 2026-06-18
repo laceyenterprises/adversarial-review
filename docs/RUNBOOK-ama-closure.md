@@ -88,7 +88,7 @@ dispatcher debugging), see
      adversarial:
        merge_authority:
          enabled: true
-         worker_class: codex     # or claude-code or gemini
+         worker_class: hammer    # default; operators may pin codex, claude-code, or gemini
          merge_method: squash    # or merge — never rebase (SPEC §4.4)
          eligibility:
            risk_classes: [low]   # widen later; start conservative

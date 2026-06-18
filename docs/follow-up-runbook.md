@@ -115,9 +115,13 @@ remediation claim should log `orchestration_mode = agentos` and
 `remediation_path = hq-dispatch`.
 
 Rollback is the same operation with the value set back to `native`, followed by
-the same watcher and follow-up daemon bounce. Jobs already in progress drain on
-the path recorded when they were claimed; the rollback affects newly claimed
-reviewer/remediation passes.
+the same watcher and follow-up daemon bounce. First-pass reviewer jobs and
+remediation jobs that have already spawned continue on the runtime they were
+spawned with, but a pending or retrying remediation job re-resolves
+`roles.adversarial.orchestration_mode` when the follow-up daemon consumes it
+again. A rollback therefore affects newly claimed reviewer/remediation passes
+and any remediation job that is restored to `pending/` and retried after the
+daemon reloads the changed config.
 
 `ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS` pins the worker class used for merge-orchestration dispatch. Allowlist: `merge-agent` (default), `codex`, `claude-code`. The default `merge-agent` routes through the stub adapter; pinning to a real model worker class substitutes that class for the duration of the env binding — useful when validating merge-agent surface against live models or when the merge-agent path is being debugged. The watcher validates this knob at startup alongside `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER`, and an unknown value crashes the watcher with a `FATAL config: ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS...` banner the same way a bad reviewer pin does — config errors fail at boot, not at first merge-agent dispatch hours later.
 

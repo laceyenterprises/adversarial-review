@@ -745,6 +745,7 @@ async function callLiteLLMLocalReviewShadow({
   const token = env.ADVERSARIAL_REVIEW_LOCAL_SHADOW_API_KEY || env.LITELLM_API_KEY || '';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('local-review-shadow-timeout')), timeoutMs);
+  timer.unref?.();
   try {
     const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
@@ -858,6 +859,86 @@ async function completeLocalReviewShadowRequest({
     log.warn?.(`[local-review-shadow] WARNING: ${request.repo}#${request.prNumber} skipped: ${reason}`);
     return { completed: false, skipped: true, retryable: true, reason, artifactPath: paths.artifactPath };
   }
+}
+
+function persistLocalReviewShadowRequestFailOpen({
+  log = console,
+  ...args
+} = {}) {
+  try {
+    return persistLocalReviewShadowRequest(args);
+  } catch (err) {
+    logStructuredEvent(log, {
+      event: 'local-review-shadow',
+      level: 'warning',
+      repo: args.repo,
+      prNumber: args.prNumber,
+      phase: 'request',
+      eligible: true,
+      reason: 'request-persist-failed',
+      error: err?.message || String(err),
+    });
+    return { persisted: false, reason: 'request-persist-failed', error: err?.message || String(err) };
+  }
+}
+
+function startLocalReviewShadowCompletion({
+  rootDir = ROOT,
+  request,
+  diff,
+  hostedReviewText,
+  extraContext = '',
+  fetchImpl = globalThis.fetch,
+  env = process.env,
+  log = console,
+  callLiteLLMImpl = callLiteLLMLocalReviewShadow,
+} = {}) {
+  if (!request) return { started: false, reason: 'missing-request' };
+  const shadowStartedAt = Date.now();
+  const completion = (async () => {
+    try {
+      const shadow = await completeLocalReviewShadowRequest({
+        rootDir,
+        request,
+        diff,
+        hostedReviewText,
+        extraContext,
+        fetchImpl,
+        env,
+        log,
+        callLiteLLMImpl,
+      });
+      logStructuredEvent(log, {
+        event: 'local-review-shadow',
+        level: shadow.completed ? 'info' : 'warning',
+        repo: request.repo,
+        prNumber: request.prNumber,
+        phase: 'artifact',
+        completed: Boolean(shadow.completed),
+        skipped: Boolean(shadow.skipped),
+        retryable: Boolean(shadow.retryable),
+        reason: shadow.reason || null,
+        artifactPath: shadow.artifactPath || null,
+        durationMs: Date.now() - shadowStartedAt,
+      });
+      return shadow;
+    } catch (err) {
+      logStructuredEvent(log, {
+        event: 'local-review-shadow',
+        level: 'warning',
+        repo: request.repo,
+        prNumber: request.prNumber,
+        phase: 'artifact',
+        completed: false,
+        retryable: true,
+        reason: err?.message || String(err),
+        durationMs: Date.now() - shadowStartedAt,
+      });
+      return { completed: false, retryable: true, reason: err?.message || String(err) };
+    }
+  })();
+  completion.catch(() => {});
+  return { started: true, completion };
 }
 
 async function reconcileLocalReviewShadow({
@@ -2402,7 +2483,8 @@ async function main() {
     reviewerModel: effectiveModel,
   });
   const localShadowRequest = localShadowEligibility.eligible
-    ? persistLocalReviewShadowRequest({
+    ? persistLocalReviewShadowRequestFailOpen({
+        log: console,
         rootDir: ROOT,
         repo,
         prNumber,
@@ -2513,44 +2595,16 @@ async function main() {
   }
 
   if (postedLocalShadowRequest) {
-    const shadowStartedAt = Date.now();
-    try {
-      const shadow = await completeLocalReviewShadowRequest({
-        rootDir: ROOT,
-        request: postedLocalShadowRequest,
-        diff,
-        hostedReviewText: fullComment,
-        extraContext,
-        fetchImpl: globalThis.fetch,
-        env: process.env,
-        log: console,
-      });
-      logStructuredEvent(console, {
-        event: 'local-review-shadow',
-        level: shadow.completed ? 'info' : 'warning',
-        repo,
-        prNumber,
-        phase: 'artifact',
-        completed: Boolean(shadow.completed),
-        skipped: Boolean(shadow.skipped),
-        retryable: Boolean(shadow.retryable),
-        reason: shadow.reason || null,
-        artifactPath: shadow.artifactPath || null,
-        durationMs: Date.now() - shadowStartedAt,
-      });
-    } catch (err) {
-      logStructuredEvent(console, {
-        event: 'local-review-shadow',
-        level: 'warning',
-        repo,
-        prNumber,
-        phase: 'artifact',
-        completed: false,
-        retryable: true,
-        reason: err?.message || String(err),
-        durationMs: Date.now() - shadowStartedAt,
-      });
-    }
+    startLocalReviewShadowCompletion({
+      rootDir: ROOT,
+      request: postedLocalShadowRequest,
+      diff,
+      hostedReviewText: fullComment,
+      extraContext,
+      fetchImpl: globalThis.fetch,
+      env: process.env,
+      log: console,
+    });
   }
 
   // 4. Update Linear (LAC-13)
@@ -2622,8 +2676,10 @@ const __test__ = {
   hasLocalReviewShadowLabel,
   evaluateLocalReviewShadowEligibility,
   persistLocalReviewShadowRequest,
+  persistLocalReviewShadowRequestFailOpen,
   markLocalReviewShadowHostedPosted,
   completeLocalReviewShadowRequest,
+  startLocalReviewShadowCompletion,
   reconcileLocalReviewShadow,
   formatLocalReviewShadowArtifact,
   localReviewShadowPaths,

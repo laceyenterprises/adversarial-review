@@ -34,8 +34,10 @@ const {
   hasLocalReviewShadowLabel,
   evaluateLocalReviewShadowEligibility,
   persistLocalReviewShadowRequest,
+  persistLocalReviewShadowRequestFailOpen,
   markLocalReviewShadowHostedPosted,
   completeLocalReviewShadowRequest,
+  startLocalReviewShadowCompletion,
   reconcileLocalReviewShadow,
   formatLocalReviewShadowArtifact,
 } = __test__;
@@ -220,6 +222,47 @@ test('durable request is written before hosted-review completion marker', () => 
   }
 });
 
+test('shadow request persistence fails open when existing state is corrupt', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-corrupt-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 129,
+      headSha: 'bad-json',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    writeFileSync(persisted.requestPath, '{not json\n');
+
+    const warnings = [];
+    const result = persistLocalReviewShadowRequestFailOpen({
+      log: { warn: (message) => warnings.push(message) },
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 129,
+      headSha: 'bad-json',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+
+    assert.equal(result.persisted, false);
+    assert.equal(result.reason, 'request-persist-failed');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /request-persist-failed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('family guard fails closed to hosted-only for codex, claude-code, and clio-agent when local family is missing or same-family', () => {
   const cases = [
     { builderTag: '[codex]', reviewerModel: 'claude', env: { ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL: 'unknown-local' }, reason: 'local-model-family-unproven' },
@@ -382,6 +425,57 @@ test('shadow timeout or unavailable model records warning artifact without mutat
     const artifact = readFileSync(result.artifactPath, 'utf8');
     assert.match(artifact, /WARNING: local OSS shadow review skipped/);
     assert.match(artifact, /not a merge gate verdict/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow completion is scheduled without awaiting the local model', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-async-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 130,
+      headSha: 'async',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir, request: persisted.request });
+    let resolveShadow;
+    const pendingShadow = new Promise((resolve) => {
+      resolveShadow = resolve;
+    });
+
+    const scheduled = startLocalReviewShadowCompletion({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { log() {}, warn() {} },
+      callLiteLLMImpl: async () => pendingShadow,
+    });
+
+    let settled = false;
+    scheduled.completion.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    assert.equal(scheduled.started, true);
+    assert.equal(settled, false);
+
+    resolveShadow('local async finding');
+    const result = await scheduled.completion;
+    assert.equal(result.completed, true);
+    assert.equal(settled, true);
+    assert.match(readFileSync(result.artifactPath, 'utf8'), /local async finding/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

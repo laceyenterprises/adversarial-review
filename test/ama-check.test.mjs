@@ -379,6 +379,46 @@ test('ama-check accepts content-equivalent rebase coverage without rewriting rev
   }
 });
 
+test('ama-check rejects incomplete content-equivalent rebase assessments', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-rebased-coverage-incomplete-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        headRefOid: REBASED_SHA,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+        ],
+      },
+      rebaseAssessment: {
+        action: 'merge',
+        evidence: 'content_equivalent_rebased_head',
+        contentEquivalence: {
+          equivalent: true,
+          reviewedCount: 2,
+          rebasedCount: 2,
+          dropped: [],
+          added: [],
+        },
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
+    assert.ok(verdict.reasons.includes('stale-review-head'));
+    assert.equal(verdict.trace.headMatch.rebaseReviewCoverage.reviewedHead, null);
+    assert.equal(verdict.trace.headMatch.rebaseReviewCoverage.currentHead, null);
+    assert.equal(verdict.trace.headMatch.rebaseReviewCoverage.checks.reviewedHead, false);
+    assert.equal(verdict.trace.headMatch.rebaseReviewCoverage.checks.currentHead, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('ama-check does not let mergeStateStatus=CLEAN override mergeable=CONFLICTING', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-conflicting-clean-'));
   try {

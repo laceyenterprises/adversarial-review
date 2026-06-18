@@ -492,10 +492,10 @@ function validateRebaseReviewCoverageEvidence(
     currentHead,
   } = {},
 ) {
-  const active = evidence?.active === true || evidence?.enabled === true;
+  const active = evidence?.active === true;
   const coveredReviewedHead = String(evidence?.reviewedHead || '').trim();
   const coveredCurrentHead = String(evidence?.currentHead || '').trim();
-  const marker = String(evidence?.evidence || evidence?.marker || '').trim();
+  const marker = String(evidence?.evidence || '').trim();
   const contentEquivalence = evidence?.contentEquivalence || null;
   const checks = {
     active,

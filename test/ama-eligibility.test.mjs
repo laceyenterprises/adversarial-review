@@ -81,6 +81,66 @@ test('eligible: Comment-only (clean) settled-success is eligible', () => {
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
+test('eligible: canonical rebase coverage clears stale-review-head', () => {
+  const reviewedHead = '11111111';
+  const currentHead = '22222222';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { headSha: reviewedHead },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    rebaseReviewCoverage: {
+      active: true,
+      reviewedHead,
+      currentHead,
+      evidence: 'content_equivalent_rebased_head',
+      contentEquivalence: {
+        equivalent: true,
+        reviewedCount: 1,
+        rebasedCount: 1,
+        dropped: [],
+        added: [],
+      },
+    },
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(!result.reasons.includes('stale-review-head'));
+  assert.equal(
+    result.trace.headMatch.rebaseReviewCoverage.marker,
+    'content_equivalent_rebased_head',
+  );
+});
+
+test('not eligible: rebase coverage ignores legacy enabled and marker aliases', () => {
+  const reviewedHead = '11111111';
+  const currentHead = '22222222';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { headSha: reviewedHead },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    rebaseReviewCoverage: {
+      enabled: true,
+      reviewedHead,
+      currentHead,
+      marker: 'content_equivalent_rebased_head',
+      contentEquivalence: {
+        equivalent: true,
+        reviewedCount: 1,
+        rebasedCount: 1,
+        dropped: [],
+        added: [],
+      },
+    },
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('stale-review-head'));
+  assert.equal(result.trace.headMatch.rebaseReviewCoverage.checks.active, false);
+  assert.equal(result.trace.headMatch.rebaseReviewCoverage.checks.marker, false);
+});
+
 // ---------------------------------------------------------------------------
 // Verdict gate (SPEC §4.2 #1)
 // ---------------------------------------------------------------------------

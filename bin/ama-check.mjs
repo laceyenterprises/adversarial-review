@@ -493,8 +493,8 @@ function main(argv = process.argv.slice(2)) {
         active:
           assessment?.action === 'merge'
           && assessment?.evidence === 'content_equivalent_rebased_head',
-        reviewedHead: assessment?.reviewedHead || args['reviewed-sha'],
-        currentHead: assessment?.currentHead || prJson?.headRefOid,
+        reviewedHead: assessment?.reviewedHead || null,
+        currentHead: assessment?.currentHead || null,
         evidence: assessment?.evidence || null,
         contentEquivalence: assessment?.contentEquivalence || null,
       };

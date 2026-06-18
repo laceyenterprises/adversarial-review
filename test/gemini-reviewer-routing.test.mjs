@@ -202,13 +202,16 @@ test('GMW-02 gemini pinned onto a non-gemini builder is allowed (cross-model)', 
 
 // ── mode normalization + config cascade ────────────────────────────────────
 
-test('GMW-02 mode normalization defaults invalid/empty to always-on', () => {
+test('GMW-02 mode normalization defaults only blank/unset to always-on', () => {
   assert.equal(normalizeGeminiReviewerMode('always-on'), 'always-on');
   assert.equal(normalizeGeminiReviewerMode('OFF'), 'off');
   assert.equal(normalizeGeminiReviewerMode(' fallback '), 'fallback');
   assert.equal(normalizeGeminiReviewerMode(''), 'always-on');
   assert.equal(normalizeGeminiReviewerMode(undefined), 'always-on');
-  assert.equal(normalizeGeminiReviewerMode('nonsense'), 'always-on');
+  assert.throws(
+    () => normalizeGeminiReviewerMode('nonsense'),
+    /reviewer\.gemini\.mode must be one of: off, fallback, always-on/i,
+  );
 });
 
 test('GMW-02 config: default mode is always-on; module file + env override resolve', () => {
@@ -230,6 +233,15 @@ test('GMW-02 config: default mode is always-on; module file + env override resol
       modulePaths: [modulePath],
     });
     assert.equal(envMode, 'off');
+
+    for (const envName of ['AGENT_OS_REVIEWER_GEMINI_MODE', 'ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE']) {
+      const blankEnvMode = resolveGeminiReviewerMode({
+        env: { [envName]: '   ' },
+        topPath: '/dev/null',
+        modulePaths: [modulePath],
+      });
+      assert.equal(blankEnvMode, 'fallback');
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

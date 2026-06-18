@@ -13,7 +13,7 @@ import {
   resolveDefaultReviewer as resolveDefaultReviewerFromConfig,
   resolveGeminiReviewerMode as resolveGeminiReviewerModeFromConfig,
 } from '../../../role-config.mjs';
-import { loadConfigCached } from '../../../config-loader.mjs';
+import { AgentOSConfigError, loadConfigCached } from '../../../config-loader.mjs';
 
 const ROUTE_BY_BUILDER_CLASS = {
   codex: {
@@ -176,7 +176,17 @@ function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = 
 
 function normalizeGeminiReviewerMode(modeInput) {
   const mode = String(modeInput ?? '').trim().toLowerCase();
-  return GEMINI_REVIEWER_MODES.includes(mode) ? mode : DEFAULT_GEMINI_REVIEWER_MODE;
+  if (mode === '') return DEFAULT_GEMINI_REVIEWER_MODE;
+  if (GEMINI_REVIEWER_MODES.includes(mode)) return mode;
+  throw new AgentOSConfigError(
+    `reviewer.gemini.mode must be one of: ${GEMINI_REVIEWER_MODES.join(', ')}; got ${JSON.stringify(modeInput)}`,
+    {
+      key: 'reviewer.gemini.mode',
+      expected: GEMINI_REVIEWER_MODES.join(', '),
+      got: modeInput,
+      allowed: GEMINI_REVIEWER_MODES,
+    },
+  );
 }
 
 function markOperatorPinnedRoute(route, operatorPinnedReviewer = false) {

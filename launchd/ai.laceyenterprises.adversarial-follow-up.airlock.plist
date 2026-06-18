@@ -61,12 +61,12 @@
         <!--
           BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30 → reverted
           2026-05-30 (PT) when codex OAuth came back online. Remediator
-          pinned to `codex`, reviewer pinned to `adversarial`
-          (cross-model adversarial-by-default) per operator directive.
+          pinned to `codex`, reviewer pinned to `codex`
+          (explicit launchd override) per operator directive.
           See watcher plist for full rationale.
         -->
         <key>ADVERSARIAL_REVIEW_DEFAULT_REVIEWER</key>
-        <string>adversarial</string>
+        <string>codex</string>
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
         <string>codex</string>
         <!--

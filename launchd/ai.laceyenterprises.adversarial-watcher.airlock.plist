@@ -79,15 +79,14 @@
           BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30 → reverted
           2026-05-30 (PT) when codex OAuth came back online. Per the
           operator directive: remediator pins to `codex`; reviewer
-          pins to `adversarial` (cross-model adversarial-by-default —
-          the value also lives in config.yaml, so this env entry is
-          really just a belt-and-suspenders explicit override).
+          pins to `codex` as an explicit launchd override. The module
+          config.yaml keeps its default for non-launchd/dev runs.
 
           See LAC-893 + the role-pin env knobs documented in
           `docs/follow-up-runbook.md`.
         -->
         <key>ADVERSARIAL_REVIEW_DEFAULT_REVIEWER</key>
-        <string>adversarial</string>
+        <string>codex</string>
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
         <string>codex</string>
         <!--

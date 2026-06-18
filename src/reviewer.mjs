@@ -25,6 +25,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { writeFileAtomic } from './atomic-write.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { getCachedDiff, putCachedDiff } from './diff-cache.mjs';
@@ -59,6 +60,22 @@ import { fetchPullRequestReviewContext } from './github-api.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
+const LOCAL_REVIEW_SHADOW_LABEL = 'run-local-review-shadow';
+const DEFAULT_LOCAL_REVIEW_SHADOW_MODEL = 'ollama/qwen2.5-coder:32b';
+const DEFAULT_LOCAL_REVIEW_SHADOW_TIMEOUT_MS = 120_000;
+
+const MODEL_FAMILY_BY_BUILDER_TAG = Object.freeze({
+  '[codex]': 'codex',
+  '[claude-code]': 'claude',
+  '[clio-agent]': 'codex',
+});
+
+const LOCAL_REVIEW_SHADOW_MODEL_METADATA = Object.freeze({
+  'ollama/qwen2.5-coder:32b': { family: 'qwen', displayName: 'Qwen2.5 Coder 32B (local OSS)' },
+  'ollama/deepseek-coder-v2:latest': { family: 'deepseek', displayName: 'DeepSeek Coder V2 (local OSS)' },
+  'ollama/codestral:22b': { family: 'mistral', displayName: 'Codestral 22B (local OSS)' },
+  'vllm/qwen2.5-coder-32b-instruct': { family: 'qwen', displayName: 'Qwen2.5 Coder 32B (local OSS)' },
+});
 
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
@@ -72,6 +89,513 @@ function resolveReviewerIdentityForBotTokenEnv(botTokenEnv, fallbackIdentity = n
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function logStructuredEvent(log, event) {
+  const sink = log || console;
+  sink.log?.(JSON.stringify(event));
+}
+
+function hasLabel(labels, labelName) {
+  const wanted = String(labelName || '').trim().toLowerCase();
+  return Array.isArray(labels) && labels.some((label) => {
+    const value = typeof label === 'string' ? label : label?.name;
+    return String(value || '').trim().toLowerCase() === wanted;
+  });
+}
+
+function safePathSegment(value, fallback = 'unknown') {
+  const safe = String(value || '')
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 120);
+  return safe || fallback;
+}
+
+function localReviewShadowDir(rootDir = ROOT) {
+  return join(rootDir, 'data', 'local-review-shadow');
+}
+
+function buildLocalReviewShadowKey({ repo, prNumber, headSha, label = LOCAL_REVIEW_SHADOW_LABEL }) {
+  return [
+    safePathSegment(repo),
+    `pr-${safePathSegment(prNumber)}`,
+    safePathSegment(headSha || 'unknown-head'),
+    safePathSegment(label),
+  ].join('__');
+}
+
+function localReviewShadowRequestPath(rootDir, requestKey) {
+  return join(localReviewShadowDir(rootDir), 'requests', `${requestKey}.json`);
+}
+
+function localReviewShadowArtifactPath(rootDir, requestKey) {
+  return join(localReviewShadowDir(rootDir), 'artifacts', `${requestKey}.md`);
+}
+
+function readJsonFileIfPresent(filePath) {
+  if (!existsSync(filePath)) return null;
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}
+
+function writeJsonFileAtomic(filePath, value) {
+  writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+}
+
+function resolveHostedReviewerFamily(reviewerModel) {
+  const key = String(reviewerModel || '').trim().toLowerCase();
+  if (key === 'claude') return 'claude';
+  if (key === 'codex') return 'codex';
+  if (key === 'gemini') return 'gemini';
+  return null;
+}
+
+function resolveBuilderFamily(builderTag) {
+  return MODEL_FAMILY_BY_BUILDER_TAG[String(builderTag || '').trim()] || null;
+}
+
+function resolveLocalReviewShadowModel(env = process.env) {
+  return String(env.ADVERSARIAL_LOCAL_REVIEW_SHADOW_MODEL || env.LOCAL_REVIEW_SHADOW_MODEL || DEFAULT_LOCAL_REVIEW_SHADOW_MODEL).trim();
+}
+
+function resolveLocalReviewShadowTimeoutMs(env = process.env) {
+  const parsed = Number.parseInt(env.ADVERSARIAL_LOCAL_REVIEW_SHADOW_TIMEOUT_MS || env.LOCAL_REVIEW_SHADOW_TIMEOUT_MS || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LOCAL_REVIEW_SHADOW_TIMEOUT_MS;
+}
+
+function resolveLocalReviewShadowBaseUrl(env = process.env) {
+  const raw = String(env.ADVERSARIAL_LOCAL_REVIEW_SHADOW_LITELLM_URL || env.LITELLM_BASE_URL || '').trim();
+  return raw ? raw.replace(/\/+$/, '') : null;
+}
+
+function resolveLocalReviewShadowModelMetadata(model, modelMetadataByModel = LOCAL_REVIEW_SHADOW_MODEL_METADATA) {
+  return modelMetadataByModel[String(model || '').trim()] || null;
+}
+
+function evaluateLocalReviewShadowEligibility({
+  labels = [],
+  builderTag,
+  hostedReviewerModel,
+  env = process.env,
+  modelMetadataByModel = LOCAL_REVIEW_SHADOW_MODEL_METADATA,
+} = {}) {
+  if (!hasLabel(labels, LOCAL_REVIEW_SHADOW_LABEL)) {
+    return { eligible: false, reason: 'label-absent' };
+  }
+
+  const localModel = resolveLocalReviewShadowModel(env);
+  const localMetadata = resolveLocalReviewShadowModelMetadata(localModel, modelMetadataByModel);
+  const localFamily = localMetadata?.family || null;
+  const builderFamily = resolveBuilderFamily(builderTag);
+  const hostedReviewerFamily = resolveHostedReviewerFamily(hostedReviewerModel);
+
+  if (!localFamily) {
+    return {
+      eligible: false,
+      reason: 'local-family-missing',
+      localModel,
+      builderFamily,
+      hostedReviewerFamily,
+    };
+  }
+  if (!builderFamily) {
+    return {
+      eligible: false,
+      reason: 'builder-family-unproven',
+      localModel,
+      localFamily,
+      builderFamily,
+      hostedReviewerFamily,
+    };
+  }
+  if (!hostedReviewerFamily) {
+    return {
+      eligible: false,
+      reason: 'hosted-reviewer-family-unproven',
+      localModel,
+      localFamily,
+      builderFamily,
+      hostedReviewerFamily,
+    };
+  }
+  if (localFamily === builderFamily || localFamily === hostedReviewerFamily) {
+    return {
+      eligible: false,
+      reason: 'same-family-comparison',
+      localModel,
+      localFamily,
+      builderFamily,
+      hostedReviewerFamily,
+    };
+  }
+
+  return {
+    eligible: true,
+    localModel,
+    localFamily,
+    localDisplayName: localMetadata.displayName,
+    builderFamily,
+    hostedReviewerFamily,
+  };
+}
+
+function createOrLoadLocalReviewShadowRequest({
+  rootDir = ROOT,
+  repo,
+  prNumber,
+  headSha,
+  labels = [],
+  builderTag,
+  hostedReviewerModel,
+  env = process.env,
+  now = () => new Date().toISOString(),
+  log = console,
+} = {}) {
+  const eligibility = evaluateLocalReviewShadowEligibility({
+    labels,
+    builderTag,
+    hostedReviewerModel,
+    env,
+  });
+
+  logStructuredEvent(log, {
+    type: 'local-review-shadow',
+    phase: 'eligibility',
+    repo,
+    prNumber,
+    headSha: headSha || null,
+    label: LOCAL_REVIEW_SHADOW_LABEL,
+    hostedReviewerModel,
+    builderTag: builderTag || null,
+    eligible: eligibility.eligible,
+    reason: eligibility.reason || null,
+    localModel: eligibility.localModel || null,
+    localFamily: eligibility.localFamily || null,
+    builderFamily: eligibility.builderFamily || null,
+    hostedReviewerFamily: eligibility.hostedReviewerFamily || null,
+  });
+
+  if (!eligibility.eligible) {
+    return { requested: false, eligibility };
+  }
+
+  const requestKey = buildLocalReviewShadowKey({
+    repo,
+    prNumber,
+    headSha,
+    label: LOCAL_REVIEW_SHADOW_LABEL,
+  });
+  const requestPath = localReviewShadowRequestPath(rootDir, requestKey);
+  const artifactPath = localReviewShadowArtifactPath(rootDir, requestKey);
+  const existing = readJsonFileIfPresent(requestPath);
+  if (existing) {
+    return {
+      requested: true,
+      request: existing,
+      requestPath,
+      artifactPath,
+      existing: true,
+      eligibility,
+    };
+  }
+
+  const request = {
+    kind: 'local-review-shadow-request',
+    version: 1,
+    requestKey,
+    repo,
+    prNumber: Number(prNumber),
+    headSha: headSha || null,
+    label: LOCAL_REVIEW_SHADOW_LABEL,
+    builderTag: builderTag || null,
+    builderFamily: eligibility.builderFamily,
+    hostedReviewerModel,
+    hostedReviewerFamily: eligibility.hostedReviewerFamily,
+    localModel: eligibility.localModel,
+    localDisplayName: eligibility.localDisplayName,
+    localFamily: eligibility.localFamily,
+    status: 'requested',
+    hostedReviewPosted: false,
+    createdAt: now(),
+    updatedAt: now(),
+    artifactPath,
+    nonGating: true,
+  };
+  writeJsonFileAtomic(requestPath, request);
+  logStructuredEvent(log, {
+    type: 'local-review-shadow',
+    phase: 'request-recorded',
+    repo,
+    prNumber,
+    headSha: headSha || null,
+    requestKey,
+    requestPath,
+  });
+  return { requested: true, request, requestPath, artifactPath, existing: false, eligibility };
+}
+
+function buildLocalReviewShadowPrompt({ diff, extraContext = '', hostedReviewerModel, repo, prNumber }) {
+  return [
+    'You are a local OSS model producing a non-gating shadow review artifact.',
+    'Do not claim to be Codex, Claude, Gemini, or the official adversarial reviewer.',
+    'Do not produce a merge-blocking verdict. Focus on independent observations that may help operators compare reviewer behavior.',
+    `Repository: ${repo}`,
+    `PR: #${prNumber}`,
+    `Hosted reviewer already posted: ${hostedReviewerModel}`,
+    '',
+    extraContext || '',
+    '',
+    'PR diff:',
+    '```diff',
+    diff,
+    '```',
+  ].join('\n');
+}
+
+async function runLocalReviewShadowViaLiteLLM({
+  request,
+  diff,
+  extraContext = '',
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const baseUrl = resolveLocalReviewShadowBaseUrl(env);
+  if (!baseUrl) {
+    return {
+      ok: false,
+      retryable: true,
+      reason: 'litellm-base-url-missing',
+      message: 'ADVERSARIAL_LOCAL_REVIEW_SHADOW_LITELLM_URL or LITELLM_BASE_URL is not set',
+      completedAt: now(),
+    };
+  }
+  if (typeof fetchImpl !== 'function') {
+    return {
+      ok: false,
+      retryable: true,
+      reason: 'fetch-unavailable',
+      message: 'global fetch is unavailable',
+      completedAt: now(),
+    };
+  }
+
+  const timeoutMs = resolveLocalReviewShadowTimeoutMs(env);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const prompt = buildLocalReviewShadowPrompt({
+    diff,
+    extraContext,
+    hostedReviewerModel: request.hostedReviewerModel,
+    repo: request.repo,
+    prNumber: request.prNumber,
+  });
+
+  try {
+    const token = String(env.ADVERSARIAL_LOCAL_REVIEW_SHADOW_LITELLM_TOKEN || env.LITELLM_API_KEY || '').trim();
+    const headers = { 'content-type': 'application/json' };
+    if (token) headers.authorization = `Bearer ${token}`;
+    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: request.localModel,
+        messages: [
+          { role: 'system', content: 'Produce a concise non-gating local OSS model shadow code review.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.1,
+      }),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        retryable: response.status >= 429 || response.status >= 500,
+        reason: 'litellm-http-error',
+        status: response.status,
+        message: text.slice(0, 1000),
+        completedAt: now(),
+      };
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      return {
+        ok: false,
+        retryable: true,
+        reason: 'litellm-invalid-json',
+        message: err.message,
+        completedAt: now(),
+      };
+    }
+    const content = String(parsed?.choices?.[0]?.message?.content || '').trim();
+    if (!content) {
+      return {
+        ok: false,
+        retryable: true,
+        reason: 'litellm-empty-output',
+        message: 'LiteLLM returned no message content',
+        completedAt: now(),
+      };
+    }
+    return {
+      ok: true,
+      reviewText: content,
+      usage: parsed?.usage || null,
+      completedAt: now(),
+      timeoutMs,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      retryable: true,
+      reason: err?.name === 'AbortError' ? 'local-shadow-timeout' : 'litellm-request-failed',
+      message: err?.message || String(err),
+      completedAt: now(),
+      timeoutMs,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function renderLocalReviewShadowArtifact({ request, reviewText, completedAt }) {
+  return [
+    '## Local Review Shadow (non-gating)',
+    '',
+    `Provenance: generated by local OSS model \`${request.localModel}\` via LiteLLM.`,
+    `Scope: shadow comparison artifact only; this is not the hosted adversarial reviewer verdict and does not affect the merge gate.`,
+    `Hosted reviewer already posted: \`${request.hostedReviewerModel}\`.`,
+    `Request key: \`${request.requestKey}\`.`,
+    `Completed at: ${completedAt}.`,
+    '',
+    reviewText.trim(),
+    '',
+  ].join('\n');
+}
+
+async function reconcileLocalReviewShadow({
+  rootDir = ROOT,
+  request,
+  requestPath,
+  artifactPath,
+  hostedReviewPosted = false,
+  hostedReviewPostedAt = null,
+  diff,
+  extraContext = '',
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  now = () => new Date().toISOString(),
+  log = console,
+} = {}) {
+  if (!request?.requestKey) {
+    return { completed: false, reason: 'request-missing' };
+  }
+
+  const effectiveRequestPath = requestPath || localReviewShadowRequestPath(rootDir, request.requestKey);
+  const effectiveArtifactPath = artifactPath || request.artifactPath || localReviewShadowArtifactPath(rootDir, request.requestKey);
+  const current = readJsonFileIfPresent(effectiveRequestPath) || request;
+
+  if (existsSync(effectiveArtifactPath)) {
+    const updated = {
+      ...current,
+      status: 'completed',
+      hostedReviewPosted: current.hostedReviewPosted || Boolean(hostedReviewPosted),
+      hostedReviewPostedAt: current.hostedReviewPostedAt || hostedReviewPostedAt || null,
+      artifactPath: effectiveArtifactPath,
+      updatedAt: now(),
+    };
+    writeJsonFileAtomic(effectiveRequestPath, updated);
+    return { completed: true, alreadyCompleted: true, artifactPath: effectiveArtifactPath, request: updated };
+  }
+
+  if (!hostedReviewPosted && !current.hostedReviewPosted) {
+    return { completed: false, reason: 'hosted-review-not-posted' };
+  }
+
+  const marked = {
+    ...current,
+    hostedReviewPosted: true,
+    hostedReviewPostedAt: current.hostedReviewPostedAt || hostedReviewPostedAt || now(),
+    status: 'running',
+    updatedAt: now(),
+  };
+  writeJsonFileAtomic(effectiveRequestPath, marked);
+  logStructuredEvent(log, {
+    type: 'local-review-shadow',
+    phase: 'run-started',
+    repo: marked.repo,
+    prNumber: marked.prNumber,
+    headSha: marked.headSha,
+    requestKey: marked.requestKey,
+    localModel: marked.localModel,
+  });
+
+  const result = await runLocalReviewShadowViaLiteLLM({
+    request: marked,
+    diff,
+    extraContext,
+    env,
+    fetchImpl,
+    now,
+  });
+
+  if (!result.ok) {
+    const failed = {
+      ...marked,
+      status: result.retryable ? 'retryable-skip' : 'skipped',
+      lastError: {
+        reason: result.reason,
+        message: result.message,
+        status: result.status || null,
+        retryable: Boolean(result.retryable),
+        at: result.completedAt,
+      },
+      updatedAt: now(),
+    };
+    writeJsonFileAtomic(effectiveRequestPath, failed);
+    log.warn?.(`[reviewer] WARNING local-review-shadow skipped for ${marked.repo}#${marked.prNumber}: ${result.reason} ${result.message || ''}`.trim());
+    logStructuredEvent(log, {
+      type: 'local-review-shadow',
+      phase: 'run-skipped',
+      repo: marked.repo,
+      prNumber: marked.prNumber,
+      headSha: marked.headSha,
+      requestKey: marked.requestKey,
+      reason: result.reason,
+      retryable: Boolean(result.retryable),
+    });
+    return { completed: false, reason: result.reason, retryable: Boolean(result.retryable), request: failed };
+  }
+
+  const artifact = renderLocalReviewShadowArtifact({
+    request: marked,
+    reviewText: result.reviewText,
+    completedAt: result.completedAt,
+  });
+  writeFileAtomic(effectiveArtifactPath, artifact, { mode: 0o600 });
+  const completed = {
+    ...marked,
+    status: 'completed',
+    artifactPath: effectiveArtifactPath,
+    completedAt: result.completedAt,
+    usage: result.usage,
+    updatedAt: now(),
+  };
+  writeJsonFileAtomic(effectiveRequestPath, completed);
+  logStructuredEvent(log, {
+    type: 'local-review-shadow',
+    phase: 'artifact-recorded',
+    repo: marked.repo,
+    prNumber: marked.prNumber,
+    headSha: marked.headSha,
+    requestKey: marked.requestKey,
+    artifactPath: effectiveArtifactPath,
+  });
+  return { completed: true, artifactPath: effectiveArtifactPath, request: completed };
 }
 
 async function spawnWithInput(command, args, {
@@ -1858,6 +2382,15 @@ async function main() {
   let tokenUsage = null;
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
+    logStructuredEvent(console, {
+      type: 'hosted-reviewer-selection',
+      repo,
+      prNumber,
+      headSha: reviewerHeadSha || null,
+      reviewerModel: effectiveModel,
+      builderTag: builderTag || null,
+      hostedReviewerFamily: resolveHostedReviewerFamily(effectiveModel),
+    });
     // Single selection site (GMW-01): claude / gemini / codex. gemini routes
     // to reviewWithGemini and never falls through to codex.
     const dispatch = await dispatchReviewerModel(effectiveModel, diff, extraContext, {
@@ -1918,6 +2451,22 @@ async function main() {
     ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
     : '';
   const fullComment = header + waiverAuditBlock + reviewText;
+  let localShadowRequestRecord = null;
+  try {
+    localShadowRequestRecord = createOrLoadLocalReviewShadowRequest({
+      rootDir: ROOT,
+      repo,
+      prNumber,
+      headSha: reviewerHeadSha || null,
+      labels,
+      builderTag,
+      hostedReviewerModel: effectiveModel,
+      env: process.env,
+      log: console,
+    });
+  } catch (err) {
+    console.error(`[reviewer] WARNING local-review-shadow request setup failed for ${repo}#${prNumber}; continuing hosted-only: ${err.message}`);
+  }
 
   try {
     console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);
@@ -1954,6 +2503,29 @@ async function main() {
 
   const critical = isCritical(reviewText);
   const reviewPostedAt = new Date().toISOString();
+  if (localShadowRequestRecord?.requested) {
+    try {
+      const shadowResult = await reconcileLocalReviewShadow({
+        rootDir: ROOT,
+        request: localShadowRequestRecord.request,
+        requestPath: localShadowRequestRecord.requestPath,
+        artifactPath: localShadowRequestRecord.artifactPath,
+        hostedReviewPosted: true,
+        hostedReviewPostedAt: reviewPostedAt,
+        diff,
+        extraContext,
+        env: process.env,
+        fetchImpl: globalThis.fetch,
+        log: console,
+      });
+      if (shadowResult.completed) {
+        console.log(`[reviewer] Local review shadow artifact recorded at ${shadowResult.artifactPath}`);
+      }
+    } catch (err) {
+      console.error(`[reviewer] WARNING local-review-shadow reconcile failed for ${repo}#${prNumber}; hosted gate remains unchanged: ${err.message}`);
+    }
+  }
+
   try {
     const baseBranch = typeof prContext?.baseRefName === 'string' ? prContext.baseRefName.trim() : '';
     const queued = queueFollowUpForPostedReview({
@@ -2042,6 +2614,19 @@ const __test__ = {
   isRetryableGhTransportError,
   isReviewerPostAuthFailure,
   resolveReviewerIdentityForBotTokenEnv,
+  LOCAL_REVIEW_SHADOW_LABEL,
+  LOCAL_REVIEW_SHADOW_MODEL_METADATA,
+  evaluateLocalReviewShadowEligibility,
+  createOrLoadLocalReviewShadowRequest,
+  reconcileLocalReviewShadow,
+  runLocalReviewShadowViaLiteLLM,
+  renderLocalReviewShadowArtifact,
+  localReviewShadowRequestPath,
+  localReviewShadowArtifactPath,
+  buildLocalReviewShadowKey,
+  resolveLocalReviewShadowModel,
+  resolveBuilderFamily,
+  resolveHostedReviewerFamily,
 };
 
 export {

@@ -637,6 +637,31 @@ test('checked-in config.yaml STILL rejects a nested unknown key (strict preserve
   }
 });
 
+test('OMB-08 does not promote reviewer.local_reviewer_model into shared CFG', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      reviewer:
+        gemini:
+          mode: always-on
+        local_reviewer_model: ollama/qwen2.5-coder:32b
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /reviewer\.local_reviewer_model/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('topPath deliberately pointed at config.local.yaml stays strict outside Layer 4', () => {
   const tmp = freshTmp();
   try {

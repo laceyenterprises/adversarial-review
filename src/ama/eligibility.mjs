@@ -27,6 +27,12 @@ import {
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
+const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
+  'hammer-worker',
+  'lacey-hammer-worker',
+  'lacey-hammer-reviewer',
+  'github-actions',
+]);
 
 /**
  * Hard-stop labels imported from the existing adversarial-review / merge-agent
@@ -435,6 +441,170 @@ function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
   };
 }
 
+function normalizeTrailerMap(value) {
+  if (!value || typeof value !== 'object') return {};
+  const out = {};
+  for (const [key, trailerValue] of Object.entries(value)) {
+    out[String(key || '').trim().toLowerCase()] = String(trailerValue || '').trim();
+  }
+  return out;
+}
+
+function shaClaimMatches(claimed, verified) {
+  const lhs = String(claimed || '').trim();
+  const rhs = String(verified || '').trim();
+  if (!lhs || !rhs) return false;
+  if (lhs === rhs) return true;
+  const minPrefixLength = 7;
+  return lhs.length >= minPrefixLength && rhs.startsWith(lhs);
+}
+
+function parseRemediatedFindingsTrailer(value) {
+  const match = /^\s*(\d+)\s+addressed\s+\((\d+)\s+blocking,\s+(\d+)\s+non-blocking\)\s*$/i
+    .exec(String(value || ''));
+  if (!match) return null;
+  const total = Number(match[1]);
+  const blocking = Number(match[2]);
+  const nonBlocking = Number(match[3]);
+  if (![total, blocking, nonBlocking].every(Number.isInteger)) return null;
+  return { total, blocking, nonBlocking };
+}
+
+function hamAuditCommentAuthorMatches(verifiedAuditComment, verifiedCommit) {
+  const commentAuthor = normalizeLogin(verifiedAuditComment?.author);
+  if (!commentAuthor) return false;
+  const commitAuthor = normalizeLogin(verifiedCommit?.author || verifiedCommit?.committer);
+  if (commitAuthor && commentAuthor === commitAuthor) return true;
+  return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
+}
+
+function verifiedCommitHasNonEmptyDiff(verifiedCommit) {
+  if (!verifiedCommit || !Object.prototype.hasOwnProperty.call(verifiedCommit, 'changedFiles')) {
+    return false;
+  }
+  return Array.isArray(verifiedCommit.changedFiles) && verifiedCommit.changedFiles.length > 0;
+}
+
+function validateHamFindingMap(findings) {
+  if (!Array.isArray(findings) || findings.length === 0) {
+    return { ok: false, count: 0, blocking: 0, nonBlocking: 0 };
+  }
+  let blocking = 0;
+  let nonBlocking = 0;
+  for (const finding of findings) {
+    const title = String(finding?.title || finding?.finding || '').trim();
+    const file = String(finding?.file || finding?.path || '').trim();
+    const addressed = finding?.addressed === true;
+    if (!title || !file || !addressed) {
+      return { ok: false, count: findings.length, blocking, nonBlocking };
+    }
+    if (finding?.blocking === true) blocking += 1;
+    else nonBlocking += 1;
+  }
+  return { ok: true, count: findings.length, blocking, nonBlocking };
+}
+
+function hamAuditBodyCoversFindings(body, findings) {
+  const text = String(body || '').toLowerCase();
+  if (!text) return false;
+  for (const finding of findings || []) {
+    const title = String(finding?.title || finding?.finding || '').trim().toLowerCase();
+    const file = String(finding?.file || finding?.path || '').trim().toLowerCase();
+    if (!title || !file || !text.includes(title) || !text.includes(file)) return false;
+  }
+  return true;
+}
+
+function validateHamTerminalRemediationEvidence(
+  evidence,
+  {
+    reviewedHead,
+    currentHead,
+    verifiedCommit = null,
+    verifiedAuditComment = null,
+    blockingFindings = { known: false, count: 0 },
+  } = {},
+) {
+  const verifiedTrailers = normalizeTrailerMap(verifiedCommit?.trailers);
+  const findingMap = validateHamFindingMap(
+    evidence?.auditComment?.findings || evidence?.addressedFindings,
+  );
+  const commitSha = String(evidence?.commit?.sha || evidence?.headSha || '').trim();
+  const parentSha = String(evidence?.commit?.parentSha || evidence?.parentSha || '').trim();
+  const verifiedCommitSha = String(verifiedCommit?.sha || '').trim();
+  const verifiedParentSha = String(verifiedCommit?.parentSha || '').trim();
+  const claimedAuditBody = String(evidence?.auditComment?.body || '').trim();
+  const verifiedAuditBody = String(verifiedAuditComment?.body || '').trim();
+  const ticket = String(verifiedTrailers.ticket || verifiedTrailers['worker-ticket'] || '').trim();
+  const closedBy = String(verifiedTrailers['closed-by'] || '').trim();
+  const remediatedFindings = String(verifiedTrailers['remediated-findings'] || '').trim();
+  const remediatedFindingCounts = parseRemediatedFindingsTrailer(remediatedFindings);
+  const expectedBlockingCount = Number(blockingFindings?.count);
+  const blockingCountMatches =
+    blockingFindings?.known === true
+      ? Number.isInteger(expectedBlockingCount) && findingMap.blocking === expectedBlockingCount
+      : false;
+  const remediatedFindingCountsMatch =
+    remediatedFindingCounts !== null
+    && remediatedFindingCounts.total === findingMap.count
+    && remediatedFindingCounts.total === findingMap.blocking + findingMap.nonBlocking
+    && remediatedFindingCounts.blocking === findingMap.blocking
+    && remediatedFindingCounts.nonBlocking === findingMap.nonBlocking
+    && (!blockingFindings?.known || remediatedFindingCounts.blocking === expectedBlockingCount);
+  const checks = {
+    workerClass: verifiedTrailers['worker-class'] === 'hammer',
+    ticket: /^HAM-\d+$/i.test(ticket),
+    head:
+      verifiedCommitSha !== ''
+      && verifiedCommitSha === String(currentHead || '')
+      && shaClaimMatches(commitSha, verifiedCommitSha),
+    parent:
+      verifiedParentSha !== ''
+      && verifiedParentSha === String(reviewedHead || '')
+      && shaClaimMatches(parentSha, verifiedParentSha),
+    nonEmptyCommit: verifiedCommitHasNonEmptyDiff(verifiedCommit),
+    auditComment:
+      claimedAuditBody !== ''
+      && verifiedAuditBody !== ''
+      && claimedAuditBody === verifiedAuditBody
+      && findingMap.ok
+      && hamAuditBodyCoversFindings(
+        verifiedAuditBody,
+        evidence?.auditComment?.findings || evidence?.addressedFindings,
+      ),
+    auditCommentAuthor: hamAuditCommentAuthorMatches(verifiedAuditComment, verifiedCommit),
+    closedBy: closedBy === 'hammer (adversarial-pipe-mode)',
+    remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    active: evidence?.enabled === true || evidence?.active === true,
+    ok,
+    checks,
+    reviewedParent: verifiedParentSha || parentSha || null,
+    remediationHead: verifiedCommitSha || commitSha || null,
+    addressedFindings: findingMap,
+    remediatedFindingCounts,
+    verifiedCommit: verifiedCommit
+      ? {
+          author: verifiedCommit.author || null,
+          committer: verifiedCommit.committer || null,
+          changedFiles: Array.isArray(verifiedCommit.changedFiles)
+            ? verifiedCommit.changedFiles
+            : [],
+        }
+      : null,
+    auditComment: verifiedAuditComment
+      ? {
+          author: verifiedAuditComment.author || null,
+          createdAt: verifiedAuditComment.createdAt || null,
+          id: verifiedAuditComment.id || null,
+        }
+      : null,
+    marker: ok ? 'ham_terminal_remediation_validated' : null,
+  };
+}
+
 /**
  * Evaluate AMA eligibility per SPEC §4.2.
  *
@@ -595,6 +765,17 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('fast-merge-state-unsupported');
   }
 
+  const hamTerminalRemediation = validateHamTerminalRemediationEvidence(
+    options?.hamTerminalRemediation || null,
+    {
+      reviewedHead,
+      currentHead,
+      verifiedCommit: options?.hamTerminalRemediationGroundTruth?.commit || null,
+      verifiedAuditComment: options?.hamTerminalRemediationGroundTruth?.auditComment || null,
+      blockingFindings,
+    },
+  );
+
   // AMA "final hammer" (operator directive 2026-06-14): once the review cycle is
   // EXHAUSTED — the remediation round budget is fully spent and the verdict still
   // has not converged — AMA may waive only the documented cycle-end soft gates.
@@ -637,9 +818,30 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     operatorOverride === true;
   const waivedByFinalHammer = [];
   let effectiveReasons = reasons;
-  if (reviewCycleExhausted) {
+  const waivedByHamTerminalRemediation = [];
+  const HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS = new Set([
+    'stale-review-head',
+    'verdict-not-settled-success',
+    'remediation-pending',
+    'remediation-state-unknown',
+    'blocking-findings-present',
+    'blocking-findings-unknown',
+  ]);
+  if (hamTerminalRemediation.active && hamTerminalRemediation.ok) {
+    const inputReasons = effectiveReasons;
     effectiveReasons = [];
-    for (const reason of reasons) {
+    for (const reason of inputReasons) {
+      if (HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS.has(reason)) {
+        waivedByHamTerminalRemediation.push(reason);
+      } else {
+        effectiveReasons.push(reason);
+      }
+    }
+  }
+  if (reviewCycleExhausted) {
+    const inputReasons = effectiveReasons;
+    effectiveReasons = [];
+    for (const reason of inputReasons) {
       let waivable = false;
       if (reason === 'risk-class-not-permitted' && riskClassFinalHammerWaivable) {
         waivable = true;
@@ -665,6 +867,10 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     finalHammer: {
       active: reviewCycleExhausted,
       waived: waivedByFinalHammer,
+    },
+    hamTerminalRemediation: {
+      ...hamTerminalRemediation,
+      waived: waivedByHamTerminalRemediation,
     },
     riskClass: {
       resolved: riskClass,

@@ -58,6 +58,7 @@ const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
+const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
@@ -591,7 +592,10 @@ export async function maybeDispatchAmaCloser({
 
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
-  const templatePath = dispatchContext.templatePath || TEMPLATE_PATH;
+  const workerClass = String(cfg.workerClass || 'codex');
+  const templatePath = dispatchContext.templatePath || (
+    workerClass === 'hammer' ? HAMMER_TEMPLATE_PATH : TEMPLATE_PATH
+  );
   const templateBody = readTemplateImpl
     ? readTemplateImpl(templatePath)
     : readFileSync(templatePath, 'utf8');
@@ -600,7 +604,6 @@ export async function maybeDispatchAmaCloser({
   const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
-  const workerClass = String(cfg.workerClass || 'codex');
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
 
   const leaseIdentity = { repo, prNumber, headSha: reviewedSha };

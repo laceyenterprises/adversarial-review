@@ -531,8 +531,12 @@ export function composeAmaTrailers({
       'not a filesystem path',
     );
   }
+  const sanitizedWorkerClass = sanitize(workerClass, 'workerClass');
+  const closedBy = sanitizedWorkerClass === 'hammer'
+    ? 'hammer'
+    : `${sanitizedWorkerClass}-closer`;
   const lines = [
-    `Closed-By: ${sanitize(workerClass, 'workerClass')}-closer (adversarial-pipe-mode)`,
+    `Closed-By: ${closedBy} (adversarial-pipe-mode)`,
     `Reviewed-By: ${sanitize(reviewerFamily, 'reviewerFamily')}`,
     `Risk-Class: ${sanitize(riskClass, 'riskClass')}`,
     `Eligibility-Reason: ${sanitize(eligibilityReason, 'eligibilityReason')}`,

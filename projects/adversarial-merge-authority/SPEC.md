@@ -5,6 +5,48 @@ The full project spec lives in the parent Agent OS repository at this same path;
 this local mirror records the config surface that the Node loader, closer
 dispatch, and operator runbooks in this repo must keep aligned.
 
+## 1.1.1 HAM terminal-remediation mode
+
+HAM terminal remediation is a bounded final-review closer path for the
+`hammer` worker class. It may be used only after the final adversarial review
+for a PR has blocking or non-blocking findings that the HAM worker remediates
+directly on top of the reviewed head. The mode does not request another review
+round; instead, `ama-check --ham-terminal-remediation <claim.json>` validates
+the post-remediation head immediately before merge.
+
+The evidence JSON is a claim, not authority. At closer runtime the predicate
+must verify that claim against durable GitHub state:
+
+- the live PR head SHA is the claimed HAM remediation commit;
+- the live commit's first parent is exactly the reviewed head;
+- the live commit has a non-empty verified GitHub diff;
+- the live commit message trailers include `Worker-Class: hammer`,
+  `Worker-Ticket: HAM-<n>`, `Closed-By: hammer (adversarial-pipe-mode)`, and a
+  `Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)` count;
+- the PR timeline contains the claimed audit comment body;
+- the matched audit comment author is the verified commit author or an
+  allowlisted hammer bot identity, and the eligibility trace records the
+  comment `author`, `createdAt`, and `id`;
+- the audit comment body names each claimed finding title and changed file;
+- each claimed finding has `addressed: true`; and
+- the claimed blocking-finding count matches the blocking-finding count from
+  the authoritative final review state.
+
+HAM attests that each mapped finding was resolved; the predicate verifies the
+commit, trailers, audit mapping, counts, and non-empty diff, but it does not
+semantically prove the code change fixes the reviewer's finding.
+
+Only after those checks pass may the predicate record
+`ham_terminal_remediation_validated`. That marker may waive
+`stale-review-head`, `verdict-not-settled-success`, `remediation-pending`,
+`remediation-state-unknown`, `blocking-findings-present`, and
+`blocking-findings-unknown`. It must not waive AMA disabled state, PR lifecycle
+or mergeability, CI, branch protection, hard-stop labels, unsupported
+fast-merge state, or risk-class policy. When final-hammer cycle exhaustion is
+also active, HAM and final-hammer waivers compose by filtering the remaining
+reason set in sequence; one waiver path must not discard the other path's
+accepted waivers.
+
 ## 4.7 CFG-01 schema
 
 New section under `roles.adversarial.merge_authority`:
@@ -57,4 +99,6 @@ Supported closer worker classes are `codex`, `claude-code`, `hammer`, and
 `gemini`. Closer dispatch must pass the configured value to HQ as
 `--worker-class <configured-worker-class>` with `--task-kind merge` and
 `--completion-shape decision-only`; provenance must attribute the actual closer
-class as `Closed-By: <configured-worker-class>-closer (adversarial-pipe-mode)`.
+class as `Closed-By: <configured-worker-class>-closer (adversarial-pipe-mode)`,
+except HAM terminal-remediation commits, which use the exact
+`Closed-By: hammer (adversarial-pipe-mode)` trailer from §1.1.1.

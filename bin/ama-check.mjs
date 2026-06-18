@@ -131,6 +131,13 @@ Inputs:
                   or the configured builder route. Unknown values fail closed.
   --risk-class    resolved risk class from the spec/plan/dispatch sidecar
                   (low | medium | high | critical | unknown)
+  --ham-terminal-remediation
+                  optional JSON evidence for SPEC §1.1.1 HAM terminal
+                  remediation validation. When present and valid, the
+                  predicate records ham_terminal_remediation_validated.
+  --ham-commit    JSON from \`gh api repos/<owner>/<repo>/commits/<head>\`;
+                  required with --ham-terminal-remediation so commit parent
+                  and trailers are verified from GitHub, not self-attested.
 
 Emits:
   JSON object on stdout: { eligible: bool, reasons: string[], trace: {...} }
@@ -153,6 +160,8 @@ function parseInputs(argv) {
       // audit context only. Exhaustion is recomputed from the durable ledger at
       // closer runtime before any waiver is applied.
       'review-cycle-exhausted': { type: 'string' },
+      'ham-terminal-remediation': { type: 'string' },
+      'ham-commit': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     strict: true,
@@ -338,6 +347,70 @@ function buildPrMetadata({ prJson, protectionJson }) {
   };
 }
 
+function parseCommitTrailers(message) {
+  const lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
+  const trailers = {};
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line) {
+      continue;
+    }
+    const match = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.+)$/.exec(line);
+    if (!match) break;
+    trailers[match[1]] = match[2].trim();
+  }
+  return trailers;
+}
+
+function buildVerifiedHamCommit(commitJson) {
+  if (!commitJson || typeof commitJson !== 'object') return null;
+  const sha = String(commitJson?.sha || commitJson?.oid || '').trim();
+  const parentSha = String(
+    commitJson?.parents?.[0]?.sha
+      || commitJson?.parents?.nodes?.[0]?.oid
+      || commitJson?.parentSha
+      || '',
+  ).trim();
+  const message = commitJson?.commit?.message || commitJson?.message || '';
+  const changedFiles = Array.isArray(commitJson?.files)
+    ? commitJson.files
+      .map((file) => String(file?.filename || file?.path || '').trim())
+      .filter(Boolean)
+    : [];
+  return {
+    sha,
+    parentSha,
+    trailers: parseCommitTrailers(message),
+    author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
+    committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
+    changedFiles,
+  };
+}
+
+function timelineCommentBody(event) {
+  if (!event || typeof event !== 'object') return '';
+  if (typeof event.body === 'string') return event.body;
+  if (typeof event.comment?.body === 'string') return event.comment.body;
+  return '';
+}
+
+function findVerifiedHamAuditComment(timelineJson, evidence) {
+  const claimedBody = String(evidence?.auditComment?.body || '').trim();
+  if (!claimedBody) return null;
+  const timeline = Array.isArray(timelineJson) ? timelineJson : [];
+  const match = timeline.find((event) => {
+    const body = timelineCommentBody(event).trim();
+    return body === claimedBody;
+  });
+  if (!match) return null;
+  return {
+    body: timelineCommentBody(match).trim(),
+    id: match?.id || match?.node_id || match?.comment?.id || match?.comment?.node_id || null,
+    createdAt: match?.created_at || match?.createdAt || match?.comment?.created_at || null,
+    author: match?.user?.login || match?.actor?.login || match?.comment?.user?.login || null,
+  };
+}
+
 function main(argv = process.argv.slice(2)) {
   const args = parseInputs(argv);
   if (args.help) {
@@ -388,7 +461,28 @@ function main(argv = process.argv.slice(2)) {
     reviewCycleExhausted,
   });
   const prMetadata = buildPrMetadata({ prJson, protectionJson });
-  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg);
+  let hamTerminalRemediation = null;
+  let hamTerminalRemediationGroundTruth = null;
+  if (args['ham-terminal-remediation']) {
+    if (!args['ham-commit']) {
+      process.stderr.write('error: --ham-commit is required with --ham-terminal-remediation\n');
+      return 1;
+    }
+    try {
+      hamTerminalRemediation = loadJson(args['ham-terminal-remediation']);
+      hamTerminalRemediationGroundTruth = {
+        commit: buildVerifiedHamCommit(loadJson(args['ham-commit'])),
+        auditComment: findVerifiedHamAuditComment(timelineJson, hamTerminalRemediation),
+      };
+    } catch (err) {
+      process.stderr.write(`error: failed to load HAM terminal remediation inputs: ${err.message}\n`);
+      return 1;
+    }
+  }
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    hamTerminalRemediation,
+    hamTerminalRemediationGroundTruth,
+  });
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return 0;
 }

@@ -21,6 +21,7 @@ import {
   SCHEMA_VERSION,
   getConfig,
   resetConfigCache,
+  DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
 } from '../src/config-loader.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -2708,6 +2709,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
 test('AMA merge_authority worker_class defaults to hammer in Node loader', () => {
   const tmp = freshTmp();
   try {
+    assert.equal(DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS, 'hammer');
     const top = join(tmp, 'config.yaml');
     writeFile(top, `
       version: 1
@@ -2717,8 +2719,14 @@ test('AMA merge_authority worker_class defaults to hammer in Node loader', () =>
             enabled: true
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'hammer');
-    assert.equal(cfg.getMergeAuthorityConfig().workerClass, 'hammer');
+    assert.equal(
+      cfg.get('roles.adversarial.merge_authority.worker_class'),
+      DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
+    );
+    assert.equal(
+      cfg.getMergeAuthorityConfig().workerClass,
+      DEFAULT_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS,
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

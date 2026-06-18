@@ -37,12 +37,7 @@ export function compareReviewedPatchIds(reviewedPatchIds, rebasedPatchIds) {
   }
 
   return {
-    equivalent:
-      reviewed.length > 0
-      && rebased.length > 0
-      && reviewed.length === rebased.length
-      && dropped.length === 0
-      && added.length === 0,
+    equivalent: dropped.length === 0 && added.length === 0,
     reviewedCount: reviewed.length,
     rebasedCount: rebased.length,
     dropped,

@@ -147,6 +147,7 @@ test('re-verification still blocks a non-settled-success verdict after rebase', 
 });
 
 test('patch-id equivalence is a multiset and detects dropped or added changes', () => {
+  assert.equal(compareReviewedPatchIds([], []).equivalent, true);
   assert.equal(compareReviewedPatchIds(['a', 'b', 'b'], ['b', 'a', 'b']).equivalent, true);
   assert.deepEqual(compareReviewedPatchIds(['a', 'b'], ['a']).dropped, ['b']);
   assert.deepEqual(compareReviewedPatchIds(['a'], ['a', 'c']).added, ['c']);

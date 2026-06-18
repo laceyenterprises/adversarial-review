@@ -133,6 +133,15 @@ needs_rebase_recovery() {
   ' /tmp/ama-verdict.json /tmp/ama-pr.json >/dev/null
 }
 
+if needs_rebase_recovery; then
+  reviewed_base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ama-pr.json)" | jq -sRr @uri)
+  gh api \
+    -H 'Accept: application/vnd.github.v3.diff' \
+    "repos/<<REPO>>/compare/$reviewed_base_enc...<<REVIEWED_SHA>>" \
+    > /tmp/ama-reviewed.diff
+  git patch-id --stable < /tmp/ama-reviewed.diff | awk '{print $1}' | sort > /tmp/ama-reviewed.patchids
+fi
+
 while needs_rebase_recovery; do
   if [ "$REBASE_ATTEMPTS" -ge "$AMA_REBASE_ATTEMPT_CAP" ]; then
     echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($REBASE_ATTEMPTS/$AMA_REBASE_ATTEMPT_CAP)" >&2
@@ -142,8 +151,6 @@ while needs_rebase_recovery; do
   REBASE_ATTEMPTS=$((REBASE_ATTEMPTS + 1))
 
   BEFORE_HEAD=$(jq -r '.headRefOid' /tmp/ama-pr.json)
-  gh pr diff <<PR_URL>> --patch > /tmp/ama-reviewed.diff
-  git patch-id --stable < /tmp/ama-reviewed.diff | awk '{print $1}' | sort > /tmp/ama-reviewed.patchids
 
   if ! gh pr update-branch <<PR_URL>> --rebase > /tmp/ama-update-branch.stdout 2> /tmp/ama-update-branch.stderr; then
     if grep -Eiq 'conflict|cannot be rebased|resolve conflicts' /tmp/ama-update-branch.stderr; then

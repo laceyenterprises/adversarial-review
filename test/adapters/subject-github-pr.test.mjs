@@ -239,6 +239,38 @@ test('github-pr routing allows operators to pin the Gemini reviewer', () => {
   });
 });
 
+test('github-pr routing refuses Gemini self-review under global Gemini reviewer pins', () => {
+  assert.deepEqual(routePR('[gemini] LAC-484: force gemini review', null, {
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'gemini',
+    },
+  }), {
+    builderClass: 'gemini',
+    tag: 'gemini',
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    geminiIntegrityGuard: {
+      blockedReviewerModel: 'gemini',
+      builderClass: 'gemini',
+      fellBackTo: 'codex',
+    },
+    linearTicketId: 'LAC-484',
+  });
+
+  assert.equal(isCrossModelReviewWaived('gemini', 'codex'), false);
+});
+
+test('code-pr builder-keyed reviewerRouting defaults are preserved', () => {
+  const domain = JSON.parse(readFileSync(path.join(REPO_ROOT, 'domains', 'code-pr.json'), 'utf8'));
+  assert.deepEqual(domain.reviewerRouting, {
+    codex: 'claude-reviewer-lacey',
+    'claude-code': 'codex-reviewer-lacey',
+    'clio-agent': 'codex-reviewer-lacey',
+  });
+  assert.equal(Object.hasOwn(domain.reviewerRouting, 'gemini'), false);
+});
+
 test('github-pr routing assigns supported MHX-09 builder tags to the expected cross-model reviewers', () => {
   assert.deepEqual(routePR('[gemini] LAC-484: route gemini', null, { env: HERMETIC_CONFIG_ENV }), {
     builderClass: 'gemini',

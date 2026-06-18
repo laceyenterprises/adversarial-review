@@ -276,6 +276,55 @@ test('agent-os-hq dispatches via hq with artifact completion and stripped fallba
   }
 });
 
+test('agent-os-hq maps explicit Gemini reviewer opt-in to gemini worker class', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  const calls = [];
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        calls.push(args);
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          const promptPath = args[args.indexOf('--prompt') + 1];
+          const prompt = readFileSync(promptPath, 'utf8');
+          const artifactPath = prompt.match(/^Artifact path: (.+)$/m)?.[1];
+          writeFileSync(artifactPath, validReviewBody('Comment only'));
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_gemini_reviewer' }), stderr: '' };
+        }
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+        }
+        throw new Error(`unexpected hq call: ${args.join(' ')}`);
+      },
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'gemini',
+      prompt: 'Review the PR.',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 42, linearTicketId: 'LAC-999' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-gemini-reviewer',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, true);
+    const dispatchArgs = calls[0];
+    assert.equal(dispatchArgs[dispatchArgs.indexOf('--worker-class') + 1], 'gemini');
+    assert.equal(dispatchArgs[dispatchArgs.indexOf('--completion-shape') + 1], 'artifact');
+    assert.equal(dispatchArgs[dispatchArgs.indexOf('--task-kind') + 1], 'analysis');
+    const record = readReviewerRunRecord(rootDir, 'agent-hq-gemini-reviewer');
+    assert.equal(record.runtime, 'agent-os-hq');
+    assert.equal(record.subjectContext.agentOsHq.workerClass, 'gemini');
+    assert.equal(record.subjectContext.agentOsHq.dispatchId, 'lrq_gemini_reviewer');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq reports owner mismatch as configuration error without invoking hq', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot('somebody-else');

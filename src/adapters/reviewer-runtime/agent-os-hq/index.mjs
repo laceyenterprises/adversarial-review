@@ -25,6 +25,7 @@ const DEFAULT_WORKER_CLASS_BY_MODEL = new Map([
   ['claude', 'claude-code'],
   ['claude-code', 'claude-code'],
   ['codex', 'codex'],
+  ['gemini', 'gemini'],
 ]);
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
 const SUCCESS_STATUSES = new Set(['succeeded']);

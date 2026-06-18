@@ -72,8 +72,13 @@ test('composite operator surface forwards controls and triage calls through the 
   assert.deepEqual(surface.routePR('[codex] LAC-486: tighten watcher'), {
     builderClass: 'codex',
     tag: 'codex',
-    reviewerModel: 'claude',
-    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    geminiReviewerSelection: {
+      mode: 'always-on',
+      replacedReviewerModel: 'claude',
+      reason: 'always-on-third-reviewer',
+    },
     linearTicketId: 'LAC-486',
   });
 });

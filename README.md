@@ -141,10 +141,15 @@ prefix (internal worker classes) for the GitHub-PR domain, and by
 `domains/<id>.json` wiring for other domains. The routing table is a flat enum,
 not a heuristic, because heuristic routing would re-introduce same-model review
 under load. Operators can deliberately pin the first-pass reviewer with
-`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|gemini`; when unset, Codex
-PRs route to Claude and Claude/Clio/Gemini-family PRs route to Codex. Invalid
-override values fail at watcher startup with a `FATAL config` log line, and
-same-family override pins
+`ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|gemini`; that pin overrides
+the Gemini default layer except for the Gemini-on-Gemini hard guard. When unset,
+the base opposite-agent route is Codex PRs to Claude, Claude Code PRs to Codex,
+Clio PRs to Claude because Clio dispatches Codex-family writers, and
+Gemini-family PRs to Codex. `reviewer.gemini.mode=always-on` then routes Codex,
+Claude Code, and Clio first-pass reviews to Gemini by default through the same
+effective route helper used by the watcher and operator surfaces. Gemini never reviews Gemini-built
+PRs; those stay on Codex even under a Gemini pin. Invalid override values fail
+at watcher startup with a `FATAL config` log line, and same-family override pins
 are stamped into the posted review body as an explicit waiver of the default
 cross-model guarantee. The waiver is audit-only: it does not change the merge
 gate or require an extra human approval by itself.

@@ -112,6 +112,10 @@ const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
 const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
 const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
+// GMW-02 — gemini always-on-third-reviewer selection mode. Module-scoped knob
+// (`reviewer.gemini.mode`); see the routing layer in
+// adapters/subject/github-pr/routing.mjs.
+const ENUM_REVIEWER_GEMINI_MODE = ['off', 'fallback', 'always-on'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // LOADER-CONTRACT §2 permits each reader to ignore only root sections
   // explicitly foreign to that reader in top-level config.local.yaml. The
@@ -866,6 +870,21 @@ function schemaV1() {
             __min: 1000,
           },
           fallback_threshold: { __type: TYPE_INT, __default: 2 },
+          // GMW-02 — gemini always-on third reviewer. `always-on` (operator
+          // default) selects gemini as the reviewer for the cross-model-eligible
+          // builder classes; `fallback` selects gemini only when the assigned
+          // primary reviewer is quota-capped; `off` preserves pre-GMW routing.
+          gemini: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              mode: {
+                __type: TYPE_STRING,
+                __default: 'always-on',
+                __enum: ENUM_REVIEWER_GEMINI_MODE,
+              },
+            },
+          },
         },
       },
       watcher: {
@@ -1050,6 +1069,10 @@ export const ENV_ALIASES = {
   'reviewer.no_progress_timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS',
     aliases: [['ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS', identity]],
+  },
+  'reviewer.gemini.mode': {
+    canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',
+    aliases: [['ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE', identity]],
   },
   'watcher.max_drain_wait_ms': {
     canonical: 'AGENT_OS_WATCHER_MAX_DRAIN_WAIT_MS',

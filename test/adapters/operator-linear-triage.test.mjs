@@ -55,15 +55,25 @@ test('routePR returns builder class and Linear ticket id for representative titl
   assert.deepEqual(routePR('[codex] LAC-181: tighten watcher'), {
     builderClass: 'codex',
     tag: 'codex',
-    reviewerModel: 'claude',
-    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    geminiReviewerSelection: {
+      mode: 'always-on',
+      replacedReviewerModel: 'claude',
+      reason: 'always-on-third-reviewer',
+    },
     linearTicketId: 'LAC-181',
   });
   assert.deepEqual(routePR('[claude-code] lac-486: carve operator adapter'), {
     builderClass: 'claude-code',
     tag: 'claude-code',
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    geminiReviewerSelection: {
+      mode: 'always-on',
+      replacedReviewerModel: 'codex',
+      reason: 'always-on-third-reviewer',
+    },
     linearTicketId: 'LAC-486',
   });
   assert.equal(routePR('LAC-181: missing builder tag'), null);

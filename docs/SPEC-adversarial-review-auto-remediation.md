@@ -191,15 +191,31 @@ the runtime-bound JSDoc consumers in sync.
 
 ## Default Agent Routing Overrides
 
-The GitHub-PR adapter preserves opposite-agent review routing when no override
-is configured:
+The GitHub-PR adapter first resolves the historical opposite-agent base route
+for every supported title prefix:
 
 - `[codex]` PRs route first-pass review to Claude and use
   `GH_CLAUDE_REVIEWER_TOKEN`.
-- `[claude-code]` and `[clio-agent]` PRs route first-pass review to Codex and
+- `[claude-code]` PRs route first-pass review to Codex and
   use `GH_CODEX_REVIEWER_TOKEN`.
+- `[clio-agent]` PRs route first-pass review to Claude and use
+  `GH_CLAUDE_REVIEWER_TOKEN` because Clio dispatches Codex-family writers.
 - `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs also route first-pass
   review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
+
+The exported GitHub-PR route helpers and watcher dispatch path then apply
+`reviewer.gemini.mode` through the same effective-route helper. The default mode is `always-on`, so the public default matrix is:
+
+- `[codex]`, `[claude-code]`, and `[clio-agent]` PRs route first-pass review to
+  Gemini and use `GH_GEMINI_REVIEWER_TOKEN`.
+- `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs keep the base Codex
+  route and use `GH_CODEX_REVIEWER_TOKEN`.
+
+`reviewer.gemini.mode: fallback` selects Gemini only when the base reviewer is
+inside the quota-exhausted hold window. `reviewer.gemini.mode: off` preserves
+the base route above. Gemini is never permitted to review a `[gemini]` PR: even
+an operator pin or default route that resolves to `reviewerModel: gemini` for a
+Gemini-built PR is stripped back to the Codex base route before dispatch.
 
 The canonical GitHub-PR title-prefix allowlist is therefore:
 `[codex]`, `[claude-code]`, `[clio-agent]`, `[gemini]`, `[pi]`, `[opencode]`,
@@ -209,8 +225,9 @@ back to same-model review or an unregistered worker class.
 
 Operators may deliberately pin the reviewer with
 `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=codex|claude|claude-code|gemini`.
-A non-empty override wins over the title-prefix route for every supported
-builder class and also selects the matching reviewer bot token:
+A non-empty override wins over the title-prefix route and the Gemini default
+layer for every supported builder class, except for the Gemini-on-Gemini hard
+guard. It also selects the matching reviewer bot token:
 `GH_CODEX_REVIEWER_TOKEN`, `GH_CLAUDE_REVIEWER_TOKEN`, or
 `GH_GEMINI_REVIEWER_TOKEN`. The aliases `claude` and `claude-code` both
 normalize to the Claude reviewer route.

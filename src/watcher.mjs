@@ -15,11 +15,16 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
   defaultReviewerRouteFromEnv,
+  applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
   isCrossModelReviewWaived,
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
-import { loadRoleConfig, resetRoleConfigCache } from './role-config.mjs';
+import {
+  loadRoleConfig,
+  resetRoleConfigCache,
+  resolveGeminiReviewerMode,
+} from './role-config.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -2934,6 +2939,70 @@ function resolveReviewerTimeoutFallbackModel(env = process.env) {
   return null;
 }
 
+function normalizeReviewerAttribution(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function rowReviewerMatches(row, expectedReviewerModel) {
+  const expected = normalizeReviewerAttribution(expectedReviewerModel);
+  if (!expected) return true;
+  const candidates = [
+    row?.reviewer,
+    row?.reviewer_model,
+    row?.reviewerModel,
+    row?.reviewer_class,
+  ].map(normalizeReviewerAttribution).filter(Boolean);
+  return candidates.some((candidate) => candidate === expected);
+}
+
+// GMW-02 fallback signal. `reviewer.gemini.mode=fallback` selects gemini only
+// when the assigned primary reviewer is quota-capped. We reuse the HRR
+// quota-exhaustion signal, but only when the failed row is attributed to the
+// primary reviewer Gemini would replace. If Gemini already handled a retry and
+// then hit quota, the row must remain on the normal quota hold instead of
+// recursively selecting Gemini again.
+function primaryReviewerQuotaCappedForRow(row, { nowMs = null, expectedReviewerModel = null } = {}) {
+  if (!row || row.review_status !== 'failed') return false;
+  if (!rowReviewerMatches(row, expectedReviewerModel)) return false;
+  if (infraRecoverableFailureClass(row) !== QUOTA_EXHAUSTED_FAILURE_CLASS) return false;
+  return quotaHoldDecision(row, {
+    nowMs,
+    fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,
+  }).hold;
+}
+
+function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
+  if (row && !rowReviewerMatches(row, route?.geminiReviewerSelection?.replacedReviewerModel)) {
+    return false;
+  }
+  const reason = route?.geminiReviewerSelection?.reason;
+  return (
+    route?.reviewerModel === 'gemini'
+    && route?.botTokenEnv === 'GH_GEMINI_REVIEWER_TOKEN'
+    && (
+      (
+        route?.geminiReviewerSelection?.mode === 'fallback'
+        && reason === 'primary-reviewer-quota-capped'
+      )
+      || (
+        route?.geminiReviewerSelection?.mode === 'always-on'
+        && reason === 'always-on-third-reviewer'
+      )
+    )
+  );
+}
+
+function resolveGeminiReviewerModeForWatcher({
+  env = process.env,
+  resolver = resolveGeminiReviewerMode,
+} = {}) {
+  try {
+    return { mode: resolver({ env }), error: null };
+  } catch (err) {
+    return { mode: 'off', error: err };
+  }
+}
+
 function selectReviewerRouteForAttempt({
   subject,
   baseRoute,
@@ -5241,7 +5310,7 @@ async function pollOnce(
       }
 
       let crossModelWaiverReason = null;
-      const baseRoute = routeSubject(subject);
+      const baseRoute = routeSubject(subject, { geminiReviewerMode: 'off' });
       // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject can now
       // return a tagged `configBroken: true` sentinel when a runtime
       // edit to config.yaml violates the strict schema (instead of
@@ -5297,9 +5366,49 @@ async function pollOnce(
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         continue;
       }
+      // GMW-02 — layer the gemini always-on / fallback third-reviewer selection
+      // on top of the resolved cross-model baseRoute using the same effective
+      // route helper exported to operator surfaces, then let the existing
+      // reviewer-timeout fallback apply on the (possibly gemini-pinned) result.
+      // The integrity hard guard inside the effective helper also strips any
+      // gemini-on-gemini route that an operator `roles.reviewer=gemini` pin
+      // could otherwise produce.
+      const geminiModeResolution = resolveGeminiReviewerModeForWatcher({ env: process.env });
+      const geminiReviewerMode = geminiModeResolution.mode;
+      if (geminiModeResolution.error) {
+        console.error(
+          `[watcher] gemini reviewer-mode resolve failed for ${repoPath}#${prNumber}: ` +
+            `${geminiModeResolution.error?.message || geminiModeResolution.error}; ` +
+            `fail-closed to reviewer.gemini.mode=off`
+        );
+      }
+      const geminiBaseRoute = applyEffectiveReviewerRoute({
+        builderClass: baseRoute.builderClass,
+        baseRoute,
+        mode: geminiReviewerMode,
+        primaryReviewerQuotaCapped:
+          geminiReviewerMode === 'fallback'
+            ? primaryReviewerQuotaCappedForRow(existing, {
+                expectedReviewerModel: baseRoute.reviewerModel,
+              })
+            : false,
+      });
+      if (geminiBaseRoute.geminiReviewerSelection) {
+        console.log(
+          `[watcher] reviewer-selection ${repoPath}#${prNumber} → gemini ` +
+            `(${geminiBaseRoute.geminiReviewerSelection.reason}; mode=${geminiReviewerMode}; ` +
+            `replaced reviewer=${geminiBaseRoute.geminiReviewerSelection.replacedReviewerModel})`
+        );
+      } else if (geminiBaseRoute.geminiIntegrityGuard) {
+        console.warn(
+          `[watcher] reviewer-integrity-guard ${repoPath}#${prNumber}: blocked gemini from ` +
+            `reviewing a ${geminiBaseRoute.geminiIntegrityGuard.builderClass}-built PR; ` +
+            `fell back to reviewer=${geminiBaseRoute.geminiIntegrityGuard.fellBackTo}`
+        );
+      }
       const route = selectReviewerRouteForAttempt({
         subject,
-        baseRoute,
+        baseRoute: geminiBaseRoute,
         rootDir: ROOT,
         repoPath,
         prNumber,
@@ -5330,6 +5439,7 @@ async function pollOnce(
 
       const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       let liveLabels = null;
+      const preRoutingUpdateRow = existing;
       if (!existing) {
         liveLabels = await fetchLivePRLabels(octokit, {
           owner,
@@ -5481,8 +5591,6 @@ async function pollOnce(
           'pending',
           JSON.stringify(Array.isArray(liveLabels) ? liveLabels : (Array.isArray(subject.labels) ? subject.labels : []))
         );
-      } else {
-        stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
       }
 
       const current = stmtGetReviewRow.get(repoPath, prNumber);
@@ -5550,13 +5658,21 @@ async function pollOnce(
           fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,
         });
         if (quotaHold.hold) {
-          console.log(
-            `[watcher] Holding quota-exhausted review ${repoPath}#${prNumber}: ` +
-              `provider usage cap not yet cleared (waiting until ` +
-              `${new Date(quotaHold.waitUntilMs).toISOString()} [${quotaHold.source}]); ` +
-              `not consuming infra auto-recover attempt`
-          );
-          continue;
+          if (shouldBypassPrimaryReviewerQuotaHold(route, preRoutingUpdateRow)) {
+            console.log(
+              `[watcher] Bypassing quota hold for ${repoPath}#${prNumber}: ` +
+                `reviewer.gemini.mode=${route.geminiReviewerSelection?.mode || geminiReviewerMode} ` +
+                `selected gemini while replaced reviewer is capped`
+            );
+          } else {
+            console.log(
+              `[watcher] Holding quota-exhausted review ${repoPath}#${prNumber}: ` +
+                `provider usage cap not yet cleared (waiting until ` +
+                `${new Date(quotaHold.waitUntilMs).toISOString()} [${quotaHold.source}]); ` +
+                `not consuming infra auto-recover attempt`
+            );
+            continue;
+          }
         }
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
@@ -5681,6 +5797,9 @@ async function pollOnce(
                 `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
               );
               return;
+            }
+            if (existing) {
+              stmtUpdateReviewRouting.run(route.reviewerModel, linearTicketId, repoPath, prNumber);
             }
             if (infraRecoveryClass) {
               console.log(
@@ -6158,6 +6277,9 @@ export {
   retryPendingMergeAgentLifecycleCleanups,
   retryPendingDagAutowalkOnMerge,
   retryPendingMergeCloseouts,
+  primaryReviewerQuotaCappedForRow,
+  shouldBypassPrimaryReviewerQuotaHold,
+  resolveGeminiReviewerModeForWatcher,
   selectReviewerRouteForAttempt,
   shouldDeferReviewForActiveFollowUp,
   shouldRetryMergeAgentLifecycleCleanup,

@@ -131,11 +131,11 @@ function allowedForLegacyMessage(canonicalKey, allowedRaw) {
   return tokens.join(', ');
 }
 
-// The role-pin env vars (both canonical and legacy aliases) treat empty
+// The role-pin / optional string env vars (both canonical and legacy aliases) treat empty
 // / whitespace-only values as "unset". This preserves the back-compat
 // behavior of the pre-CFG-02 resolvers — operators have long relied on
 // `ENV=` and `unset ENV` being equivalent for these knobs. This only
-// affects the string-typed role pins; the main config loader keeps its
+// affects these string-typed optional knobs; the main config loader keeps its
 // own bool/int coercion rules.
 const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'AGENT_OS_ROLES_REVIEWER',
@@ -144,6 +144,8 @@ const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR',
   'AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS',
   'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS',
+  'AGENT_OS_REVIEWER_GEMINI_MODE',
+  'ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE',
 ]);
 
 function pruneBlankRoleEnvVars(env) {
@@ -287,6 +289,26 @@ export function resolveDefaultReviewer({
     );
   }
   return route;
+}
+
+// resolveGeminiReviewerMode — returns the gemini always-on-third-reviewer
+// selection mode (`off` | `fallback` | `always-on`) through the same file→env
+// cascade as the role pins. Default is `always-on` (operator decision). The
+// loader enforces the enum allowlist before this function sees the value.
+export function resolveGeminiReviewerMode({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'reviewer.gemini.mode',
+  });
+  return cfg.get('reviewer.gemini.mode', 'always-on');
 }
 
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker

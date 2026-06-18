@@ -9,17 +9,17 @@ import {
 import { TAG_PREFIXES } from '../src/pr-title-tagging.mjs';
 import { signalMalformedTitleFailure } from '../src/watcher-fail-loud.mjs';
 
-test('routePR maps known title prefixes to opposite-model reviewers', () => {
+test('routePR maps known title prefixes to effective default reviewers', () => {
   assert.deepEqual(routePR('[codex] LAC-181: tighten watcher'), {
     tag: 'codex',
-    reviewerModel: 'claude',
-    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
   });
 
   assert.deepEqual(routePR('[claude-code] LAC-181: tighten watcher'), {
     tag: 'claude-code',
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
   });
 
   // Clio dispatches codex workers; cross-model review means a [clio-agent]
@@ -28,8 +28,8 @@ test('routePR maps known title prefixes to opposite-model reviewers', () => {
   // cross-model guarantee for Clio.
   assert.deepEqual(routePR('[clio-agent] LAC-181: tighten watcher'), {
     tag: 'clio-agent',
-    reviewerModel: 'claude',
-    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
   });
 });
 

@@ -20,6 +20,16 @@
 __aliases:
   merge_agent.worker_class: roles.merge_agent_worker_class
 
+# GMW-02 — Gemini always-on third reviewer. `always-on` (operator default)
+# selects gemini as the reviewer for [claude-code] / [codex] / [clio-agent]
+# PRs; `fallback` selects gemini only when the assigned primary reviewer is
+# quota-capped (reusing the HRR quota-exhaustion signal); `off` preserves the
+# pre-GMW claude↔codex routing. Gemini NEVER reviews a [gemini]-built PR.
+# Env override: ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE / AGENT_OS_REVIEWER_GEMINI_MODE.
+reviewer:
+  gemini:
+    mode: always-on                 # enum: off / fallback / always-on
+
 # Role pins. Canonical home is the top-level config.yaml; these are the
 # module-internal defaults when the operator hasn't pinned a value there.
 # CFG-02 wires resolvers for these three knobs to consult this file FIRST,

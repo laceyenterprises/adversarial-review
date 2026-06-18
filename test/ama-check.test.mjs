@@ -17,6 +17,7 @@ const REPO_ROOT = resolve(__dirname, '..');
 const AMA_CHECK = join(REPO_ROOT, 'bin', 'ama-check.mjs');
 const HEAD_SHA = 'abc12345abc12345abc12345abc12345abc12345';
 const HAM_SHA = 'def67890def67890def67890def67890def67890';
+const REBASED_SHA = 'fedcba98fedcba98fedcba98fedcba98fedcba98';
 const REPO = 'acme/myrepo';
 const CODEX_REVIEWER = { login: 'codex-reviewer-lacey' };
 const CLAUDE_REVIEWER = { login: 'claude-reviewer-lacey' };
@@ -246,6 +247,7 @@ function runAmaCheck(tmp, {
   reviewer = 'codex',
   riskClass = 'low',
   hamTerminalRemediation = null,
+  rebaseAssessment = null,
 }) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
   const configPath = writeConfig(tmp, { branchProtectionRequired });
@@ -283,6 +285,11 @@ function runAmaCheck(tmp, {
       '--ham-commit',
       paths.hamCommit,
     );
+  }
+  if (rebaseAssessment) {
+    paths.rebaseAssessment = join(tmp, 'rebase-assessment.json');
+    writeJson(paths.rebaseAssessment, rebaseAssessment);
+    extraArgs.push('--rebase-assessment', paths.rebaseAssessment);
   }
   return spawnSync(
     process.execPath,
@@ -323,6 +330,132 @@ test('ama-check normalizes mergeable=MERGEABLE plus mergeStateStatus=CLEAN as me
     assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
     assert.equal(verdict.trace.mergeability.mergeableState, 'MERGEABLE');
     assert.ok(!verdict.reasons.includes('pr-not-mergeable'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check accepts content-equivalent rebase coverage without rewriting reviewed SHA', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-rebased-coverage-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        headRefOid: REBASED_SHA,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+        ],
+      },
+      rebaseAssessment: {
+        action: 'merge',
+        evidence: 'content_equivalent_rebased_head',
+        reviewedHead: HEAD_SHA,
+        currentHead: REBASED_SHA,
+        contentEquivalence: {
+          equivalent: true,
+          reviewedCount: 2,
+          rebasedCount: 2,
+          dropped: [],
+          added: [],
+        },
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.headMatch.reviewed, HEAD_SHA);
+    assert.equal(verdict.trace.headMatch.current, REBASED_SHA);
+    assert.equal(
+      verdict.trace.headMatch.rebaseReviewCoverage.marker,
+      'content_equivalent_rebased_head',
+    );
+    assert.ok(!verdict.reasons.includes('stale-review-head'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check rejects incomplete content-equivalent rebase assessments', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-rebased-coverage-incomplete-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        headRefOid: REBASED_SHA,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+        ],
+      },
+      rebaseAssessment: {
+        action: 'merge',
+        evidence: 'content_equivalent_rebased_head',
+        contentEquivalence: {
+          equivalent: true,
+          reviewedCount: 2,
+          rebasedCount: 2,
+          dropped: [],
+          added: [],
+        },
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
+    assert.ok(verdict.reasons.includes('stale-review-head'));
+    assert.equal(verdict.trace.headMatch.rebaseReviewCoverage.reviewedHead, null);
+    assert.equal(verdict.trace.headMatch.rebaseReviewCoverage.currentHead, null);
+    assert.equal(verdict.trace.headMatch.rebaseReviewCoverage.checks.reviewedHead, false);
+    assert.equal(verdict.trace.headMatch.rebaseReviewCoverage.checks.currentHead, false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check rejects empty patch-id content-equivalent rebase assessments', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-rebased-coverage-empty-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: {
+        headRefOid: REBASED_SHA,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+        ],
+      },
+      rebaseAssessment: {
+        action: 'merge',
+        evidence: 'content_equivalent_rebased_head',
+        reviewedHead: HEAD_SHA,
+        currentHead: REBASED_SHA,
+        contentEquivalence: {
+          equivalent: true,
+          reviewedCount: 0,
+          rebasedCount: 0,
+          dropped: [],
+          added: [],
+        },
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
+    assert.ok(verdict.reasons.includes('stale-review-head'));
+    assert.equal(
+      verdict.trace.headMatch.rebaseReviewCoverage.checks.contentEquivalenceNonEmpty,
+      false,
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -654,11 +654,24 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /REBASE_UPDATE_BRANCH_RETRY_CAP="\$\{REBASE_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
   assert.match(prompt, /ama-rebase-authority\.mjs/);
   assert.match(prompt, /assess_rebase_equivalence/);
+  assert.match(prompt, /write_non_empty_patch_ids/);
+  assert.match(prompt, /set -o pipefail; git patch-id --stable/);
+  assert.match(prompt, /empty \$patch_id_label patch-id evidence/);
+  assert.match(prompt, /HARD_BLOCKER_REASON=reviewed-diff-fetch-failure/);
+  assert.match(prompt, /HARD_BLOCKER_REASON=rebased-diff-fetch-failure/);
   assert.doesNotMatch(prompt, /@SECURITY\.md/);
   assert.match(prompt, /is_update_branch_conflict/);
   assert.match(prompt, /is_update_branch_transient/);
   assert.match(prompt, /HARD_BLOCKER_REASON=update-branch-failure/);
   assert.match(prompt, /content_equivalent_rebased_head/);
+  assert.match(prompt, /AMA_TMP_DIR=\$\(mktemp -d -t ama-closer\.XXXXXX\)/);
+  assert.match(prompt, /trap 'rm -rf "\$AMA_TMP_DIR"' EXIT/);
+  assert.match(prompt, /--rebase-assessment "\$AMA_TMP_DIR\/ama-rebase-assessment\.json"/);
+  assert.doesNotMatch(prompt, /\/tmp\/ama-rebase-assessment\.json/);
+  assert.match(
+    prompt,
+    /ama-check\.mjs[\s\S]*--reviewed-sha abc12345abc12345abc12345abc12345abc12345[\s\S]*--rebase-assessment "\$AMA_TMP_DIR\/ama-rebase-assessment\.json"/,
+  );
   assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
 });

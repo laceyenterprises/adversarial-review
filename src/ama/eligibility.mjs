@@ -485,6 +485,53 @@ function verifiedCommitHasNonEmptyDiff(verifiedCommit) {
   return Array.isArray(verifiedCommit.changedFiles) && verifiedCommit.changedFiles.length > 0;
 }
 
+function validateRebaseReviewCoverageEvidence(
+  evidence,
+  {
+    reviewedHead,
+    currentHead,
+  } = {},
+) {
+  const active = evidence?.active === true;
+  const coveredReviewedHead = String(evidence?.reviewedHead || '').trim();
+  const coveredCurrentHead = String(evidence?.currentHead || '').trim();
+  const marker = String(evidence?.evidence || '').trim();
+  const contentEquivalence = evidence?.contentEquivalence || null;
+  const reviewedPatchIdCount = Number(contentEquivalence?.reviewedCount);
+  const rebasedPatchIdCount = Number(contentEquivalence?.rebasedCount);
+  const checks = {
+    active,
+    reviewedHead:
+      coveredReviewedHead !== ''
+      && coveredReviewedHead === String(reviewedHead || '').trim(),
+    currentHead:
+      coveredCurrentHead !== ''
+      && coveredCurrentHead === String(currentHead || '').trim(),
+    marker: marker === 'content_equivalent_rebased_head',
+    contentEquivalent: contentEquivalence?.equivalent === true,
+    contentEquivalenceNonEmpty:
+      Number.isSafeInteger(reviewedPatchIdCount)
+      && Number.isSafeInteger(rebasedPatchIdCount)
+      && reviewedPatchIdCount > 0
+      && rebasedPatchIdCount > 0
+      && reviewedPatchIdCount === rebasedPatchIdCount
+      && Array.isArray(contentEquivalence?.dropped)
+      && contentEquivalence.dropped.length === 0
+      && Array.isArray(contentEquivalence?.added)
+      && contentEquivalence.added.length === 0,
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    active,
+    ok,
+    checks,
+    reviewedHead: coveredReviewedHead || null,
+    currentHead: coveredCurrentHead || null,
+    marker: ok ? 'content_equivalent_rebased_head' : null,
+    contentEquivalence,
+  };
+}
+
 function validateHamFindingMap(findings) {
   if (!Array.isArray(findings) || findings.length === 0) {
     return { ok: false, count: 0, blocking: 0, nonBlocking: 0 };
@@ -660,7 +707,14 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const operatorOverride = hasOperatorApprovedOverride(reviewState, prMetadata);
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
-  const headMatchOk = operatorOverride || (reviewedHead && reviewedHead === currentHead);
+  const rebaseReviewCoverage = validateRebaseReviewCoverageEvidence(
+    options?.rebaseReviewCoverage || null,
+    { reviewedHead, currentHead },
+  );
+  const headMatchOk =
+    operatorOverride
+    || (reviewedHead && reviewedHead === currentHead)
+    || rebaseReviewCoverage.ok;
   if (!headMatchOk) reasons.push('stale-review-head');
 
   const blockingFindings = classifyBlockingFindings(reviewState);
@@ -897,6 +951,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       reviewed: reviewedHead,
       current: currentHead,
       ok: headMatchOk,
+      rebaseReviewCoverage,
     },
     remediation: { pending: remediationPending, known: remediationStateKnown },
     config: { enabled: amaEnabled },

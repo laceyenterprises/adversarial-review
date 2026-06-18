@@ -87,6 +87,8 @@ export function assessRebaseRecovery({
       action: 'no-rebase-needed',
       hardBlocker: false,
       rebaseNeeded: false,
+      reviewedHead: normalizeSha(reviewedHead),
+      currentHead: normalizeSha(currentHead),
       attempts,
       cap,
       evidence: 'head_sha_matches_review',
@@ -143,6 +145,8 @@ export function assessRebaseRecovery({
       rebaseNeeded: true,
       attempts,
       cap,
+      reviewedHead: normalizeSha(reviewedHead),
+      currentHead: normalizeSha(currentHead),
       evidence: 'ham_terminal_remediation_validated',
     };
   }
@@ -177,6 +181,8 @@ export function assessRebaseRecovery({
     action: 'merge',
     hardBlocker: false,
     rebaseNeeded: true,
+    reviewedHead: normalizeSha(reviewedHead),
+    currentHead: normalizeSha(currentHead),
     attempts,
     cap,
     evidence: 'content_equivalent_rebased_head',

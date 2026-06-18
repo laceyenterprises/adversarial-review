@@ -558,6 +558,8 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt', async (t)
   assert.match(write.captured.body, /ham_terminal_remediation_validated/);
   assert.match(write.captured.body, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(write.captured.body, /failed, missing, stale, or\s+unchecked required checks/);
+  assert.match(write.captured.body, /HAM-03 hard-blocker: rebase attempt cap exceeded/);
+  assert.match(write.captured.body, /Rebase-Attempts: \${HAM_REBASE_ATTEMPTS:-0}/);
 });
 
 test('eligible dispatch refuses watcher audit writes when runtime user is not the HQ owner', async (t) => {
@@ -644,6 +646,11 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /protection_max_attempts=3/);
   assert.match(prompt, /grep -Eiq "\$protection_transient_re" "\$protection_err"/);
   assert.match(prompt, /cat "\$protection_err" >&2\n  rm -f "\$protection_err"\n  exit 1/);
+  assert.match(prompt, /HAM-03 stale-head \/ behind recovery/);
+  assert.match(prompt, /AMA_REBASE_ATTEMPT_CAP="\$\{AMA_REBASE_ATTEMPT_CAP:-3\}"/);
+  assert.match(prompt, /content_equivalent_rebased_head/);
+  assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
+  assert.match(prompt, /ham_terminal_remediation_validated/);
 });
 
 test('composed hammer prompt body matches the checked-in golden snapshot', () => {
@@ -689,6 +696,8 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /No follow-up PRs\/issues for the final findings/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /Do not merge unless all of these are true/);
+  assert.match(prompt, /HAM_REBASE_ATTEMPT_CAP="\$\{HAM_REBASE_ATTEMPT_CAP:-3\}"/);
+  assert.match(prompt, /No unbounded rebase\/update-branch retries/);
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {

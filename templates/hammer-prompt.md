@@ -42,8 +42,10 @@ not replace the machine gate.
    non-blocking findings. The predicate accepts only a matched timeline comment
    whose author is the verified HAM commit author or an allowlisted hammer bot.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
-   your commit, run or verify the required checks for that exact SHA, then
-   re-run the closer eligibility predicate in SPEC §1.1.1 HAM
+   your commit. If the PR is stale or `mergeStateStatus=BEHIND`, update/rebase
+   it onto the current base with a small bounded cap (default 3 attempts), then
+   run or verify the required checks for that exact SHA and re-run the closer
+   eligibility predicate in SPEC §1.1.1 HAM
    terminal-remediation mode for that same live head. The predicate must prove
    the HAM-authored remediation commit, provenance trailers, PR audit comment,
    reviewed-parent coverage, non-empty verified diff, successful live-head
@@ -88,6 +90,22 @@ Refresh and validate the live head:
 ```bash
 gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
+HAM_REBASE_ATTEMPTS=0
+HAM_REBASE_ATTEMPT_CAP="${HAM_REBASE_ATTEMPT_CAP:-3}"
+
+while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]; do
+  if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ]; then
+    echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($HAM_REBASE_ATTEMPTS/$HAM_REBASE_ATTEMPT_CAP)" >&2
+    exit 0
+  fi
+  HAM_REBASE_ATTEMPTS=$((HAM_REBASE_ATTEMPTS + 1))
+  if ! gh pr update-branch <<PR_URL>> --rebase; then
+    echo "HAM-03 hard-blocker: unresolvable rebase/update-branch conflict" >&2
+    exit 0
+  fi
+  gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
+  POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
+done
 
 gh pr view <<PR_URL>> --json reviews > /tmp/ham-reviews.json
 
@@ -157,8 +175,9 @@ Merge:
 
 ```bash
 TRAILERS_FILE=$(mktemp)
-cat <<'EOF' > "$TRAILERS_FILE"
+cat <<EOF > "$TRAILERS_FILE"
 <<AMA_TRAILERS>>
+Rebase-Attempts: ${HAM_REBASE_ATTEMPTS:-0}
 Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)
 EOF
 
@@ -182,9 +201,10 @@ not call `gh pr merge`.
 - No "please re-review", no "request another review", no re-review label.
 - No follow-up PRs/issues for the final findings.
 - No merging the old `<<REVIEWED_SHA>>` merely because it passed.
+- No unbounded rebase/update-branch retries; cap them and emit one hard-blocker.
 - No `gh pr merge` without `--match-head-commit "$POST_REMEDIATION_SHA"`.
 - No merge when the live post-remediation head has failed, missing, stale, or
   unchecked required checks.
-- No rebase implementation here; HAM-03 owns rebase behavior.
+- No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`.
 
 <!-- hq:closeout:pr -->

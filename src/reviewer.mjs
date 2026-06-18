@@ -811,7 +811,13 @@ async function completeLocalReviewShadowRequest({
 } = {}) {
   if (!request) return { completed: false, reason: 'missing-request' };
   const paths = localReviewShadowPaths(rootDir, request);
-  if (existsSync(paths.artifactPath)) {
+  let existingState = null;
+  try {
+    existingState = readJsonFileIfExists(paths.statePath);
+  } catch (err) {
+    log.warn?.(`[local-review-shadow] WARNING: ${request.repo}#${request.prNumber} ignored unreadable shadow state before retry: ${err?.message || String(err)}`);
+  }
+  if (existingState?.status === 'completed' && existsSync(paths.artifactPath)) {
     return { completed: true, idempotent: true, artifactPath: paths.artifactPath };
   }
 

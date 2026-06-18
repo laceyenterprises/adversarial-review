@@ -515,6 +515,67 @@ test('shadow timeout or unavailable model records warning artifact without mutat
   }
 });
 
+test('retryable shadow warning artifacts do not suppress later successful retry', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-retry-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const persisted = persistLocalReviewShadowRequest({
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 133,
+      headSha: 'retryable',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir, request: persisted.request });
+    const calls = [];
+    const first = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { warn() {} },
+      callLiteLLMImpl: async () => {
+        calls.push('fail');
+        throw new Error('temporary model outage');
+      },
+    });
+    const warningArtifact = readFileSync(first.artifactPath, 'utf8');
+    assert.equal(first.retryable, true);
+    assert.match(warningArtifact, /WARNING: local OSS shadow review skipped/);
+
+    const second = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: marked.request,
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { warn() {} },
+      callLiteLLMImpl: async () => {
+        calls.push('success');
+        return 'retry succeeded with local finding';
+      },
+    });
+
+    assert.equal(second.completed, true);
+    assert.equal(second.idempotent, undefined);
+    assert.deepEqual(calls, ['fail', 'success']);
+    const completedArtifact = readFileSync(second.artifactPath, 'utf8');
+    assert.match(completedArtifact, /retry succeeded with local finding/);
+    assert.doesNotMatch(completedArtifact, /temporary model outage/);
+    const paths = __test__.localReviewShadowPaths(rootDir, marked.request);
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    assert.equal(state.status, 'completed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('shadow completion is scheduled without awaiting the local model', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-async-'));
   try {

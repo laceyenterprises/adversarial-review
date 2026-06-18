@@ -92,6 +92,17 @@ function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {}, reviews =
       node_id: 'LE_operator_approved',
       created_at: '2026-06-13T12:01:00Z',
     },
+    {
+      event: 'commented',
+      id: 'ham-audit-1',
+      body: [
+        'ham-terminal-remediation',
+        '',
+        '- Auth path not threaded. src/auth.mjs',
+      ].join('\n'),
+      actor: { login: 'hammer-bot' },
+      created_at: '2026-06-15T12:02:00Z',
+    },
   ]);
   return paths;
 }
@@ -169,11 +180,16 @@ function runAmaCheck(tmp, {
   reviewer = 'codex',
   riskClass = 'low',
   hamTerminalRemediation = null,
+  liveCommit = null,
 }) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
   if (hamTerminalRemediation) {
     paths.hamTerminalRemediation = join(tmp, 'ham-terminal-remediation.json');
     writeJson(paths.hamTerminalRemediation, hamTerminalRemediation);
+  }
+  if (liveCommit) {
+    paths.liveCommit = join(tmp, 'live-commit.json');
+    writeJson(paths.liveCommit, liveCommit);
   }
   const configPath = writeConfig(tmp, { branchProtectionRequired });
   const args = [
@@ -188,6 +204,9 @@ function runAmaCheck(tmp, {
   ];
   if (paths.hamTerminalRemediation) {
     args.push('--ham-terminal-remediation', paths.hamTerminalRemediation);
+  }
+  if (paths.liveCommit) {
+    args.push('--live-commit', paths.liveCommit);
   }
   return spawnSync(
     process.execPath,
@@ -215,10 +234,27 @@ function hamTerminalEvidence({ liveHeadSha = 'ham456ham456ham456ham456ham456ham4
     ],
     auditComment: {
       posted: true,
+      id: 'ham-audit-1',
       findings: [
-        { id: 'blocking-auth-source', files: ['src/auth.mjs'] },
+        { id: 'Auth path not threaded.', files: ['src/auth.mjs'] },
         { id: 'nonblocking-test-coverage', files: ['test/auth.test.mjs'] },
       ],
+    },
+  };
+}
+
+function hamLiveCommit({ liveHeadSha = 'ham456ham456ham456ham456ham456ham456abcd', parentSha = HEAD_SHA } = {}) {
+  return {
+    sha: liveHeadSha,
+    parents: [{ sha: parentSha }],
+    commit: {
+      message: [
+        'HAM terminal remediation',
+        '',
+        'Worker-Class: hammer',
+        'Ticket: HAM-02',
+        `Reviewed-Head: ${HEAD_SHA}`,
+      ].join('\n'),
     },
   };
 }
@@ -288,6 +324,7 @@ test('ama-check accepts HAM terminal-remediation evidence for a live HAM child h
         },
       ],
       hamTerminalRemediation: hamTerminalEvidence({ liveHeadSha }),
+      liveCommit: hamLiveCommit({ liveHeadSha }),
     });
     assert.equal(result.status, 0, result.stderr);
     const verdict = JSON.parse(result.stdout);
@@ -321,6 +358,7 @@ test('ama-check rejects HAM terminal-remediation evidence for a later non-HAM he
         },
       ],
       hamTerminalRemediation: hamTerminalEvidence(),
+      liveCommit: hamLiveCommit(),
     });
     assert.equal(result.status, 0, result.stderr);
     const verdict = JSON.parse(result.stdout);

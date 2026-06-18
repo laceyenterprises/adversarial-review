@@ -1305,12 +1305,30 @@ function hamTerminalEvidence({ liveHeadSha = 'ham456', reviewedParentSha = 'abc1
       'Ticket: HAM-02',
       'Reviewed-Head: abc12345',
     ],
+    liveCommit: {
+      sha: liveHeadSha,
+      parents: [{ sha: reviewedParentSha }],
+      commit: {
+        message: [
+          'HAM terminal remediation',
+          '',
+          'Worker-Class: hammer',
+          'Ticket: HAM-02',
+          'Reviewed-Head: abc12345',
+        ].join('\n'),
+      },
+    },
     auditComment: {
       posted: true,
+      id: 'ham-audit-1',
       findings: [
-        { id: 'blocking-auth-source', files: ['src/auth.mjs'] },
+        { id: 'blocking-auth-source', summary: 'Auth path not threaded.', files: ['src/auth.mjs'] },
         { id: 'nonblocking-test-coverage', files: ['test/auth.test.mjs'] },
       ],
+    },
+    authoritativeAuditComment: {
+      id: 'ham-audit-1',
+      body: 'ham-terminal-remediation\n\n- Auth path not threaded. src/auth.mjs',
     },
   };
 }
@@ -1322,6 +1340,7 @@ test('HAM terminal remediation: live HAM child of reviewed head is eligible thro
       remediationPending: true,
       blockingFindingState: 'known',
       blockingFindingCount: 1,
+      blockingFindings: [{ title: 'Auth path not threaded.' }],
     },
     prMetadata: { headSha: 'ham456' },
     cfg: { workerClass: 'hammer' },
@@ -1344,6 +1363,7 @@ test('HAM terminal remediation: failed post-remediation checks refuse eligibilit
       remediationPending: true,
       blockingFindingState: 'known',
       blockingFindingCount: 1,
+      blockingFindings: [{ title: 'Auth path not threaded.' }],
     },
     prMetadata: {
       headSha: 'ham456',
@@ -1369,6 +1389,7 @@ test('HAM terminal remediation: later non-HAM live head fails even when reviewed
       remediationPending: true,
       blockingFindingState: 'known',
       blockingFindingCount: 1,
+      blockingFindings: [{ title: 'Auth path not threaded.' }],
     },
     prMetadata: { headSha: 'later789' },
     cfg: { workerClass: 'hammer' },
@@ -1391,6 +1412,7 @@ test('HAM terminal remediation: missing audit or provenance evidence fails', () 
       remediationPending: true,
       blockingFindingState: 'known',
       blockingFindingCount: 1,
+      blockingFindings: [{ title: 'Auth path not threaded.' }],
     },
     prMetadata: { headSha: 'ham456' },
     cfg: { workerClass: 'hammer' },
@@ -1406,10 +1428,41 @@ test('HAM terminal remediation: missing audit or provenance evidence fails', () 
 
   const missingProvenance = hamTerminalEvidence();
   missingProvenance.commitTrailers = ['Worker-Class: hammer'];
+  missingProvenance.liveCommit.commit.message = [
+    'HAM terminal remediation',
+    '',
+    'Worker-Class: hammer',
+  ].join('\n');
   const provenanceResult = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
     hamTerminalRemediation: missingProvenance,
   });
   assert.equal(provenanceResult.eligible, false);
   assert.ok(provenanceResult.reasons.includes('ham-terminal-remediation-invalid'));
+});
+
+test('HAM terminal remediation: self-attested sidecar evidence without authoritative sources fails', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      remediationPending: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+      blockingFindings: [{ title: 'Auth path not threaded.' }],
+    },
+    prMetadata: { headSha: 'ham456' },
+    cfg: { workerClass: 'hammer' },
+  });
+  const forged = hamTerminalEvidence();
+  delete forged.liveCommit;
+  delete forged.authoritativeAuditComment;
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: forged,
+  });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('ham-terminal-remediation-invalid'));
+  assert.equal(result.trace.hamTerminalRemediation.reviewedParent, false);
+  assert.equal(result.trace.hamTerminalRemediation.provenance, false);
+  assert.equal(result.trace.hamTerminalRemediation.auditComment, false);
 });

@@ -18,6 +18,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -106,6 +107,27 @@ function classifyBlockersFromReviewBody(body, verdict) {
   return { blockingFindingState: state, blockingFindingCount: count };
 }
 
+function extractBlockingFindingTitles(body) {
+  const lines = String(body || '').split(/\r?\n/);
+  const findings = [];
+  let inBlocking = false;
+  for (const line of lines) {
+    if (/^[ \t]*#{1,6}[ \t]+Blocking[ \t]+Issues?[ \t]*$/i.test(line)) {
+      inBlocking = true;
+      continue;
+    }
+    if (inBlocking && /^[ \t]*#{1,6}[ \t]+/.test(line)) break;
+    if (!inBlocking) continue;
+    const bullet = line.match(/^[ \t]*[-*][ \t]+(.+)$/);
+    if (!bullet) continue;
+    const raw = bullet[1].trim();
+    if (/^none\.?$/i.test(raw)) continue;
+    const title = raw.match(/^\*\*([^*]+)\*\*/)?.[1] || raw.replace(/\s+-\s+.*$/, '');
+    if (title.trim()) findings.push({ title: title.trim() });
+  }
+  return findings;
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
 
@@ -135,6 +157,9 @@ Inputs:
                   Optional SPEC §1.1.1 HAM terminal-remediation evidence
                   proving HAM-authored live-head remediation, provenance, and
                   PR audit-comment finding mappings.
+  --live-commit <json>
+                  Test-only fixture for the GitHub commit object that
+                  production resolves with gh api repos/{repo}/commits/{head}.
 
 Emits:
   JSON object on stdout: { eligible: bool, reasons: string[], trace: {...} }
@@ -158,6 +183,7 @@ function parseInputs(argv) {
       // closer runtime before any waiver is applied.
       'review-cycle-exhausted': { type: 'string' },
       'ham-terminal-remediation': { type: 'string' },
+      'live-commit': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     strict: true,
@@ -167,6 +193,45 @@ function parseInputs(argv) {
 
 function loadJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function fetchLiveCommit({ repo, headSha }) {
+  const normalizedRepo = String(repo || '').trim();
+  const normalizedHead = String(headSha || '').trim();
+  if (!normalizedRepo) {
+    throw new Error('missing --repo for HAM live commit verification');
+  }
+  if (!normalizedHead) {
+    throw new Error('missing PR head SHA for HAM live commit verification');
+  }
+  const result = spawnSync('gh', ['api', `repos/${normalizedRepo}/commits/${normalizedHead}`], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024 * 4,
+  });
+  if (result.status !== 0) {
+    const stderr = String(result.stderr || '').trim();
+    throw new Error(`failed to fetch live commit ${normalizedHead}: ${stderr || `gh exited ${result.status}`}`);
+  }
+  return JSON.parse(result.stdout);
+}
+
+function findAuthoritativeAuditComment(timelineJson, auditComment) {
+  const timeline = Array.isArray(timelineJson) ? timelineJson : [];
+  const claimedId = String(auditComment?.id || auditComment?.node_id || '');
+  const marker = String(auditComment?.marker || 'ham-terminal-remediation').trim().toLowerCase();
+  const comments = timeline
+    .filter((event) => String(event?.event || '').toLowerCase() === 'commented')
+    .filter((event) => String(event?.body || '').trim() !== '');
+  if (claimedId) {
+    const byId = comments.find((event) => (
+      String(event?.id || '') === claimedId || String(event?.node_id || '') === claimedId
+    ));
+    if (byId) return byId;
+  }
+  return comments
+    .slice()
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    .find((event) => String(event?.body || '').toLowerCase().includes(marker)) || null;
 }
 
 function isBranchProtectionUnavailableSentinel(value) {
@@ -304,6 +369,9 @@ function buildReviewState({
     // `blockingFindingState === 'known'` AND `blockingFindingCount === 0`.
     blockingFindingState,
     blockingFindingCount,
+    blockingFindings: authoritativeReview
+      ? extractBlockingFindingTitles(authoritativeReview.review.body)
+      : [],
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,
@@ -365,6 +433,21 @@ function main(argv = process.argv.slice(2)) {
     timelineJson = loadJson(args.timeline);
     if (args['ham-terminal-remediation']) {
       hamTerminalRemediation = loadJson(args['ham-terminal-remediation']);
+    }
+    if (hamTerminalRemediation) {
+      hamTerminalRemediation = {
+        ...hamTerminalRemediation,
+        liveCommit: args['live-commit']
+          ? loadJson(args['live-commit'])
+          : fetchLiveCommit({
+              repo: args.repo,
+              headSha: prJson?.headRefOid,
+            }),
+        authoritativeAuditComment: findAuthoritativeAuditComment(
+          timelineJson,
+          hamTerminalRemediation.auditComment,
+        ),
+      };
     }
   } catch (err) {
     process.stderr.write(`error: failed to load input JSON: ${err.message}\n`);

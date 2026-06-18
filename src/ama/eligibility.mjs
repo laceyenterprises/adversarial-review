@@ -450,30 +450,85 @@ function hasTrailer(trailers, key, expectedValue) {
     .includes(needle);
 }
 
-function auditFindingMappingsComplete(auditComment) {
-  if (auditComment?.posted !== true) return false;
+function commitTrailerLines(liveCommit) {
+  const message = String(liveCommit?.commit?.message || liveCommit?.message || '');
+  return message
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[A-Za-z0-9-]+:\s+\S/.test(line));
+}
+
+function liveCommitParentShas(liveCommit) {
+  const parents = Array.isArray(liveCommit?.parents) ? liveCommit.parents : [];
+  return parents
+    .map((parent) => String(parent?.sha || parent || '').trim())
+    .filter(Boolean);
+}
+
+function normalizeFindingText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[`*_#[\]().:]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function auditFindingMappingsComplete(auditComment, authoritativeComment, reviewState) {
+  if (!authoritativeComment || typeof authoritativeComment !== 'object') return false;
+  const commentId = String(authoritativeComment?.id || authoritativeComment?.node_id || '');
+  const claimedCommentId = String(auditComment?.id || auditComment?.node_id || '');
+  if (claimedCommentId && commentId && claimedCommentId !== commentId) return false;
+  const body = String(authoritativeComment?.body || '');
+  if (!body.trim()) return false;
   const findings = Array.isArray(auditComment?.findings) ? auditComment.findings : [];
   if (findings.length === 0) return false;
-  return findings.every((finding) => {
+  const mappingsComplete = findings.every((finding) => {
     const files = Array.isArray(finding?.files) ? finding.files : [];
-    return String(finding?.id || finding?.summary || '').trim() !== ''
+    const idOrSummary = String(finding?.id || finding?.summary || '').trim();
+    return idOrSummary !== ''
       && files.some((file) => String(file || '').trim() !== '');
+  });
+  if (!mappingsComplete) return false;
+
+  const expectedCount = Number(reviewState?.blockingFindingCount);
+  if (Number.isInteger(expectedCount) && expectedCount > 0 && findings.length < expectedCount) {
+    return false;
+  }
+
+  const commentText = normalizeFindingText(body);
+  const expectedFindings = Array.isArray(reviewState?.blockingFindings)
+    ? reviewState.blockingFindings
+    : [];
+  return expectedFindings.every((expected) => {
+    const normalized = normalizeFindingText(expected?.title || expected?.summary || expected);
+    if (!normalized) return true;
+    const claimed = findings
+      .map((finding) => normalizeFindingText(`${finding?.id || ''} ${finding?.summary || ''}`))
+      .join(' ');
+    return claimed.includes(normalized) || commentText.includes(normalized);
   });
 }
 
-function validateHamTerminalRemediation(evidence, { reviewedHead, currentHead } = {}) {
+function validateHamTerminalRemediation(evidence, { reviewedHead, currentHead, reviewState } = {}) {
   const supplied = Boolean(evidence && typeof evidence === 'object');
+  const authoritativeTrailers = commitTrailerLines(evidence?.liveCommit);
+  const parentShas = liveCommitParentShas(evidence?.liveCommit);
   const checks = {
     supplied,
     workerClass: String(evidence?.workerClass || '').trim().toLowerCase() === 'hammer',
-    liveHead: String(evidence?.liveHeadSha || '') === String(currentHead || ''),
-    reviewedParent: String(evidence?.reviewedParentSha || '') === String(reviewedHead || ''),
-    hamAuthored: evidence?.hamAuthored === true,
+    liveHead: String(evidence?.liveHeadSha || '') === String(currentHead || '')
+      && String(evidence?.liveCommit?.sha || '') === String(currentHead || ''),
+    reviewedParent: parentShas.length === 1 && parentShas[0] === String(reviewedHead || ''),
+    hamAuthored: hasTrailer(authoritativeTrailers, 'Worker-Class', 'hammer'),
     provenance: (
-      hasTrailer(evidence?.commitTrailers, 'Worker-Class', 'hammer')
-      && hasTrailer(evidence?.commitTrailers, 'Ticket', 'HAM-02')
+      hasTrailer(authoritativeTrailers, 'Worker-Class', 'hammer')
+      && hasTrailer(authoritativeTrailers, 'Ticket', 'HAM-02')
     ),
-    auditComment: auditFindingMappingsComplete(evidence?.auditComment),
+    auditComment: auditFindingMappingsComplete(
+      evidence?.auditComment,
+      evidence?.authoritativeAuditComment,
+      reviewState,
+    ),
   };
   const valid = Object.values(checks).every(Boolean);
   return {
@@ -543,6 +598,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const hamTerminal = validateHamTerminalRemediation(hamTerminalRemediation, {
     reviewedHead,
     currentHead,
+    reviewState,
   });
   const headMatchOk = operatorOverride
     || (reviewedHead && reviewedHead === currentHead)

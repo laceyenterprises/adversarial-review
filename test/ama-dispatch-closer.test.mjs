@@ -556,7 +556,8 @@ test('cfg.workerClass=hammer routes to the terminal hammer prompt', async (t) =>
   assert.ok(write.captured.body.includes('Do not request another review round'));
   assert.ok(write.captured.body.includes('ham_terminal_remediation_validated'));
   assert.ok(write.captured.body.includes('--match-head-commit "$POST_REMEDIATION_SHA"'));
-  assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
+  assert.equal((write.captured.body.match(/^Closed-By: hammer-closer \(adversarial-pipe-mode\)$/gm) || []).length, 1);
+  assert.equal((write.captured.body.match(/^Closed-By: hammer \(adversarial-pipe-mode\)$/gm) || []).length, 0);
   assert.ok(write.captured.body.includes('Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)'));
 });
 

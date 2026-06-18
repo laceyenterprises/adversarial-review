@@ -117,8 +117,10 @@ trace must record `ham_terminal_remediation_validated` and must prove the HAM
 commit, trailers, reviewed parent, PR audit comment, live-head checks, and
 non-waived gates. A successful old reviewed SHA is not enough.
 
-Write `/tmp/ham-terminal-remediation.json` from the commit and PR audit-comment
-evidence you just produced, then invoke:
+Write `/tmp/ham-terminal-remediation.json` as a locator for the PR
+audit-comment evidence you just produced. `ama-check` fetches the live commit
+from GitHub and verifies the commit parent/trailers itself, so do not treat the
+sidecar as merge authority. Then invoke:
 
 ```bash
 node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
@@ -150,7 +152,6 @@ Reviewed-By: claude-reviewer-lacey
 Risk-Class: low
 Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required
 Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345
-Closed-By: hammer (adversarial-pipe-mode)
 Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)
 EOF
 

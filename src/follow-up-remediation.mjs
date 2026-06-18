@@ -441,8 +441,47 @@ function shouldUseHqIntegration(env = process.env) {
   return env.ADV_WITH_HQ_INTEGRATION === '1' || Boolean(env.HQ_ROOT);
 }
 
+function resolveRemediationOrchestrationMode(env = process.env) {
+  const cfg = loadRoleConfig({
+    env,
+    contextKey: 'roles.adversarial.orchestration_mode',
+  });
+  if (typeof cfg?.getOrchestrationMode === 'function') {
+    return cfg.getOrchestrationMode() || 'native';
+  }
+  return cfg?.get?.('roles.adversarial.orchestration_mode', 'native') || 'native';
+}
+
 function shouldDispatchRemediationViaHq(env = process.env) {
-  return env.ADV_WITH_HQ_INTEGRATION === '1';
+  if (env.ADV_WITH_HQ_INTEGRATION === '1') return true;
+  return resolveRemediationOrchestrationMode(env) === 'agentos';
+}
+
+function resolveRemediationDispatchPathForJob(job, env = process.env) {
+  const persisted = String(job?.remediationPlan?.dispatchPath || '').trim();
+  if (persisted === 'hq' || persisted === 'bare') {
+    return persisted;
+  }
+  return shouldDispatchRemediationViaHq(env) ? 'hq' : 'bare';
+}
+
+function persistRemediationDispatchPath({ job, jobPath, dispatchPath } = {}) {
+  const normalized = String(dispatchPath || '').trim();
+  if (normalized !== 'hq' && normalized !== 'bare') {
+    throw new Error(`unknown remediation dispatch path: ${JSON.stringify(dispatchPath)}`);
+  }
+  if (job?.remediationPlan?.dispatchPath === normalized) {
+    return job;
+  }
+  const updated = {
+    ...job,
+    remediationPlan: {
+      ...(job?.remediationPlan || {}),
+      dispatchPath: normalized,
+    },
+  };
+  writeFollowUpJob(jobPath, updated);
+  return updated;
 }
 
 function currentUsername(env = process.env) {
@@ -4919,7 +4958,13 @@ async function consumeNextFollowUpJob({
 
   try {
     workerClass = pickRemediationWorkerClass(claimed.job);
-    const hqDispatchEnabled = shouldDispatchRemediationViaHq(process.env);
+    const remediationDispatchPath = resolveRemediationDispatchPathForJob(claimed.job, process.env);
+    claimed.job = persistRemediationDispatchPath({
+      job: claimed.job,
+      jobPath: claimed.jobPath,
+      dispatchPath: remediationDispatchPath,
+    });
+    const hqDispatchEnabled = remediationDispatchPath === 'hq';
     const branchReadyJob = await ensureJobBranchMetadata({
       job: claimed.job,
       jobPath: claimed.jobPath,
@@ -5498,6 +5543,7 @@ export {
   resolveLocalRepliesRoot,
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,
+  resolveRemediationDispatchPathForJob,
   shouldDispatchRemediationViaHq,
   shouldUseHqIntegration,
   resolveJobRelativePath,
